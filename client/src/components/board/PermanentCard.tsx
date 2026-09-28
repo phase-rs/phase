@@ -3,7 +3,7 @@ import type React from "react";
 import { memo, useCallback, useMemo, useRef } from "react";
 import { useTranslation } from "react-i18next";
 
-import type { GameObject, Keyword } from "../../adapter/types.ts";
+import type { GameObject, Keyword, ObjectId } from "../../adapter/types.ts";
 import { cardImageLookup, tokenFiltersForObject } from "../../services/cardImageLookup.ts";
 import { useCanActForWaitingState, usePlayerId } from "../../hooks/usePlayerId.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
@@ -15,6 +15,7 @@ import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { useLongPress } from "../../hooks/useLongPress.ts";
 import { isUnbounded, pillsOf, useCounterDisplay } from "../../hooks/useCounterDisplay.ts";
+import { useAnimationStore } from "../../stores/animationStore.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { renderDescription } from "../../utils/description.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
@@ -76,6 +77,7 @@ const ATTACHMENT_STACK_STEP_PX = 22;
 const HOVERED_CARD_Z_INDEX = 60;
 const HOVERED_ATTACHMENT_HOST_Z_INDEX = 80;
 const EMPTY_KEYWORD_BADGES: Keyword[] = [];
+const EMPTY_LINKED_EXILE_IDS: ObjectId[] = [];
 
 // CR 602.5: display-only badge summarizing which of this permanent's activated
 // abilities are currently blocked, and why. Reads the engine-provided
@@ -294,6 +296,8 @@ export const PermanentCard = memo(function PermanentCard({
     (s.gameState?.derived?.copied_permanents ?? []).includes(objectId),
   );
   const counterDisplay = useCounterDisplay(objectId);
+  // An active animation (the meld forge) is presenting this card itself.
+  const isVeiledByAnimation = useAnimationStore((s) => s.veiledObjectIds.has(objectId));
   const isManaPaymentPreviewSource = useGameStore((s) =>
     s.manaPaymentPreviewSourceIds.includes(objectId),
   );
@@ -417,10 +421,8 @@ export const PermanentCard = memo(function PermanentCard({
   // ~18px while still clearly reading as rotated.
   const tapAngle = isCompactHeight ? 12 : tapRotation === "mtga" ? 17 : 90;
 
-  const allExileLinks = useGameStore((s) => s.gameState?.exile_links);
-  const exileLinks = useMemo(
-    () => allExileLinks?.filter((l) => l.source_id === objectId) ?? [],
-    [allExileLinks, objectId],
+  const exileLinks = useGameStore(
+    (s) => s.gameState?.derived?.linked_exile_ids?.[String(objectId)] ?? EMPTY_LINKED_EXILE_IDS,
   );
 
   const isUndoableTap = undoableTapObjectIds.has(objectId);
@@ -793,6 +795,7 @@ export const PermanentCard = memo(function PermanentCard({
       className="relative inline-flex w-fit cursor-pointer overflow-visible rounded-lg self-end select-none"
       style={{
         zIndex: attachmentsLifted ? HOVERED_ATTACHMENT_HOST_Z_INDEX : isHovered ? HOVERED_CARD_Z_INDEX : isAttacking ? 50 : undefined,
+        visibility: isVeiledByAnimation ? "hidden" : undefined,
         transformOrigin: "center center",
         // Reserve space below for exile ghost cards
         marginBottom:
@@ -865,10 +868,10 @@ export const PermanentCard = memo(function PermanentCard({
       )}
 
       {/* Exile ghosts — cards held in exile by this permanent, peeking from below */}
-      {visibleExileLinks.map((link, i) => (
+      {visibleExileLinks.map((exiledId, i) => (
         <ExileGhostCard
-          key={link.exiled_id}
-          objectId={link.exiled_id}
+          key={exiledId}
+          objectId={exiledId}
           offset={(i + 1) * EXILE_GHOST_OFFSET_PX}
         />
       ))}

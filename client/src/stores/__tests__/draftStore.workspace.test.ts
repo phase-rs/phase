@@ -1,10 +1,13 @@
+import "fake-indexeddb/auto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import ts from "typescript";
+import i18n from "i18next";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   DraftEngineOperationLease,
+  withDraftEngineOperation,
   type DraftCardInstance,
   type DraftPlayerView,
 } from "../../adapter/draft-adapter";
@@ -22,6 +25,19 @@ import {
   makeInteractiveVirtualBasicInstanceId,
 } from "../../components/draft/workspace/workspacePlacement";
 import {
+  createDefaultDraftWorkspacePreferences,
+  setArrivingCardBoardPreferences,
+} from "../../components/draft/workspace/workspacePreferences";
+import {
+  ACTIVE_QUICK_DRAFT_KEY,
+  DRAFT_WORKSPACE_PREFERENCES_KEY,
+  getDeckMeta,
+  listSavedDeckNames,
+  loadSavedDeck,
+  loadSavedDeckFormat,
+  STORAGE_KEY_PREFIX,
+} from "../../constants/storage";
+import {
   projectWorkspaceLandCounts,
   projectWorkspaceMainDeck,
 } from "../../components/draft/workspace/workspaceProjection";
@@ -32,7 +48,7 @@ const wasm = vi.hoisted(() => ({
   start_sealed_draft: vi.fn(),
   start_quick_cube_draft: vi.fn(),
   import_draft_session: vi.fn(),
-  load_card_database: vi.fn(() => 0),
+  load_card_database: vi.fn((_json: string) => 0),
   submit_pick: vi.fn(),
   submit_pick_with_draft_effect: vi.fn(),
   auto_pick: vi.fn(),
@@ -45,7 +61,7 @@ const wasm = vi.hoisted(() => ({
 }));
 
 const persistence = vi.hoisted(() => ({
-  cleanupQuickDraftLifecycle: vi.fn(async () => undefined),
+  cleanupQuickDraftLifecycle: vi.fn<(_id: string) => Promise<void>>(async () => undefined),
   drainQuickDraftPersistence: vi.fn(async () => undefined),
   inspectActiveQuickDraftLifecycle: vi.fn<() => Promise<unknown>>(async () => null),
   loadDraftRun: vi.fn<() => Promise<unknown>>(async () => null),
@@ -76,13 +92,32 @@ const persistence = vi.hoisted(() => ({
   )),
 }));
 
+const formatGate = vi.hoisted(() => ({
+  evaluate: vi.fn(async (_request: unknown) => ({ compatible: true, reasons: [] as string[] })),
+}));
+
 vi.mock("@wasm/draft", () => wasm);
-vi.mock("../../services/quickDraftPersistence", () => persistence);
+vi.mock("../../services/quickDraftPersistence", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../services/quickDraftPersistence")>(),
+  ...persistence,
+}));
+vi.mock("../../adapter/wasm-adapter", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../adapter/wasm-adapter")>(),
+  getSharedAdapter: () => ({ evaluateDeckFormatGate: formatGate.evaluate }),
+}));
 
 import {
   useDraftStore,
   type DraftPickOutcome,
 } from "../draftStore";
+import {
+  awaitSavedDeckLibraryIdle,
+  installFifoWebLocks,
+  resetSavedDeckLibraryForTests,
+  uninstallWebLocks,
+} from "../../test/helpers/webLocks";
+import { setSavedDeckTxnLockWaitForTests, withSavedDeckLibrary } from "../../services/savedDeckTransaction";
+import { useAppNotificationStore } from "../appToastStore";
 
 function card(instanceId: string, name = instanceId): DraftCardInstance {
   return {
@@ -94,6 +129,23 @@ function card(instanceId: string, name = instanceId): DraftCardInstance {
     colors: [],
     cmc: 1,
     type_line: "Card",
+  };
+}
+
+/** A card whose mana value decides its column under the default `cmc` board sort.
+ *  `manaValueColumn` truncates and clamps to `columnCount - 1`, and the deck board
+ *  defaults to 7 columns against the sideboard's 6 — so cmc 6 is the value that
+ *  distinguishes "sorted into the deck's last column" from "clamped into the
+ *  sideboard's last column", which is the confusion these tests exist to pin. */
+function cardWithCmc(instanceId: string, cmc: number): DraftCardInstance {
+  return { ...card(instanceId), cmc };
+}
+
+function botSeat(seat_index: number): DraftPlayerView["seats"][number] {
+  return {
+    seat_index, display_name: `Bot ${seat_index}`, is_bot: true,
+    connected: true, has_submitted_deck: true, pick_status: "NotDrafting",
+    active_pack_count: 0, drafted_card_count: 0, face_up_draft_cards: [],
   };
 }
 
@@ -114,7 +166,7 @@ function view(pool: DraftCardInstance[] = []): DraftPlayerView {
       workspace_capabilities: { rarity_group_order: null },
       workspace_row_classification: { creature_instance_ids: [], noncreature_instance_ids: [] },
     },
-    seats: [],
+    seats: [botSeat(1)],
     current_pack_number: 1,
     pick_number: 1,
     pass_direction: "Left",
@@ -151,6 +203,15 @@ async function start(pool: DraftCardInstance[] = []): Promise<void> {
   await useDraftStore.getState().startDraft("pool", "TST", "Test", 2);
 }
 
+async function startLaunchWithBotSeats(indices: number[]): Promise<void> {
+  await start([card("human", "Forest")]);
+  useDraftStore.setState((state) => ({
+    phase: "launching",
+    view: { ...state.view!, seats: indices.map(botSeat) },
+  }));
+  persistence.loadDraftRun.mockResolvedValue(null);
+}
+
 async function settleTimers(): Promise<void> {
   await vi.runAllTimersAsync();
   await Promise.resolve();
@@ -160,14 +221,242 @@ describe("draft store workspace authority", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.clearAllMocks();
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("typed database")));
+    formatGate.evaluate.mockResolvedValue({ compatible: true, reasons: [] });
     persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue(null);
+    // Module state, so it survives `reset()` and would otherwise leak the
+    // geometry one test publishes into the next.
+    setArrivingCardBoardPreferences(createDefaultDraftWorkspacePreferences().deck);
     useDraftStore.getState().reset();
+    // `reset()` deliberately keeps the player's chosen bot difficulty, so pin
+    // it here to keep tests independent of order.
+    useDraftStore.getState().setDifficulty(2);
   });
 
   afterEach(() => {
     vi.useRealTimers();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+  });
+
+  describe("localized draft failures", () => {
+    let previousLanguage: string;
+    let previousGermanDraft: Record<string, unknown> | undefined;
+    const messages = {
+      run: {
+        resumeUnavailable: "DE: Entwurf nicht verfügbar",
+        startUnavailable: "DE: Partie konnte nicht starten",
+        runComplete: "DE: Lauf abgeschlossen",
+      },
+      limitedDeck: {
+        compatibilityUnavailable: "DE: Prüfung nicht verfügbar",
+        validationTitle: "DE: Deck benötigt Aufmerksamkeit",
+      },
+    };
+    const validRun = (): DraftRunState => ({
+      format: "run", results: [], playerDeck: ["Player"], opponentDeck: ["Opponent"], usedBotSeats: [1],
+    });
+
+    beforeEach(async () => {
+      previousLanguage = i18n.language;
+      previousGermanDraft = i18n.hasResourceBundle("de", "draft")
+        ? structuredClone(i18n.getResourceBundle("de", "draft")) : undefined;
+      i18n.addResourceBundle("de", "draft", messages, true, true);
+      await i18n.changeLanguage("de");
+    });
+
+    afterEach(async () => {
+      i18n.removeResourceBundle("de", "draft");
+      if (previousGermanDraft) i18n.addResourceBundle("de", "draft", previousGermanDraft);
+      await i18n.changeLanguage(previousLanguage);
+    });
+
+    it.each(["missing run", "invalid run", "missing session", "storage error"])(
+      "localizes resume %s and retains raw storage errors", async (failure) => {
+        persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue({
+          id: "localized", setCode: "TST", difficulty: 2, kind: "Quick",
+          phase: failure === "missing session" ? "drafting" : "playing",
+        });
+        persistence.loadDraftRun.mockResolvedValue(failure === "invalid run"
+          ? { ...validRun(), draft_set_codes: null } : null);
+        persistence.loadQuickDraftSession.mockResolvedValue(null);
+        if (failure === "storage error") persistence.loadDraftRun.mockRejectedValueOnce(new Error("IDB original cause"));
+        expect(await useDraftStore.getState().resumeDraft()).toEqual({
+          status: "unavailable", draftId: "localized",
+          reason: failure === "storage error" ? "IDB original cause" : messages.run.resumeUnavailable,
+        });
+        expect(persistence.loadDraftRun).toHaveBeenCalledWith("localized");
+        if (failure === "missing session") expect(persistence.loadQuickDraftSession).toHaveBeenCalledWith("localized");
+        expect(persistence.publishStagedDraftMatch).not.toHaveBeenCalled();
+        expect(persistence.cleanupQuickDraftLifecycle).not.toHaveBeenCalled();
+        persistence.loadDraftRun.mockResolvedValue(validRun());
+        expect(await useDraftStore.getState().resumeDraft()).toEqual({ status: "resumed", draftId: "localized" });
+        await useDraftStore.getState().launchNextMatch(vi.fn());
+        expect(persistence.publishStagedDraftMatch).toHaveBeenCalledOnce();
+      },
+    );
+
+    it.each(["invalid", "missing", "ambiguous", "complete", "conflict"])(
+      "localizes %s next-match failure and permits the coherent sibling", async (failure) => {
+        const run = validRun();
+        useDraftStore.setState({ draftId: "localized", selectedSet: "TST", runState: run, runFormat: "run" });
+        const badRun = failure === "invalid" ? { ...run, draft_set_codes: null }
+          : failure === "ambiguous" ? { ...run, usedBotSeats: [1, 4] }
+          : failure === "complete" ? { ...run, format: "single", results: [{ gameId: "done", result: "win" }] }
+          : failure === "conflict" ? { ...run, format: "single" }
+          : null;
+        persistence.loadDraftRun.mockResolvedValue(badRun);
+        const navigate = vi.fn();
+        await expect(useDraftStore.getState().launchNextMatch(navigate)).rejects.toThrow(
+          failure === "complete" ? messages.run.runComplete
+            : failure === "conflict" ? messages.run.startUnavailable : messages.run.resumeUnavailable,
+        );
+        expect(persistence.loadDraftRun).toHaveBeenCalledWith("localized");
+        expect(formatGate.evaluate).not.toHaveBeenCalled();
+        expect(persistence.publishStagedDraftMatch).not.toHaveBeenCalled();
+        expect(navigate).not.toHaveBeenCalled();
+        persistence.loadDraftRun.mockResolvedValue(run);
+        await useDraftStore.getState().launchNextMatch(navigate);
+        expect(formatGate.evaluate).toHaveBeenCalledTimes(2);
+        expect(persistence.publishStagedDraftMatch).toHaveBeenCalledOnce();
+        expect(navigate).toHaveBeenCalledOnce();
+      },
+    );
+
+    it.each(["initial", "run-only"] as const)("localizes %s gate failures for both seats and preserves engine reasons", async (entry) => {
+      if (entry === "initial") {
+        await startLaunchWithBotSeats([1]);
+        wasm.get_bot_deck.mockReturnValue({ main_deck: ["Opponent"], lands: {} });
+      } else {
+        const run = validRun();
+        useDraftStore.setState({ draftId: "localized", selectedSet: "TST", runState: run, runFormat: "run" });
+        persistence.loadDraftRun.mockResolvedValue(run);
+      }
+      const navigate = vi.fn();
+      const launch = () => entry === "initial"
+        ? useDraftStore.getState().launchMatch(navigate) : useDraftStore.getState().launchNextMatch(navigate);
+      for (const opponent of [false, true]) {
+        for (const failure of ["malformed", "empty rejection", "empty reason", "engine reason"]) {
+          formatGate.evaluate.mockClear();
+          formatGate.evaluate.mockImplementation(async (request) => {
+            if (((request as { main_deck: string[] }).main_deck[0] === "Opponent") !== opponent) {
+              return { compatible: true, reasons: [] };
+            }
+            if (failure === "malformed") return {} as { compatible: boolean; reasons: string[] };
+            if (failure === "empty rejection") throw new Error("");
+            return { compatible: false, reasons: failure === "empty reason" ? [""] : ["engine original cause"] };
+          });
+          await expect(launch()).rejects.toThrow(failure === "engine reason" ? "engine original cause"
+            : failure === "empty reason" ? messages.limitedDeck.validationTitle : messages.limitedDeck.compatibilityUnavailable);
+          expect(formatGate.evaluate).toHaveBeenCalledTimes(2);
+          expect(persistence.publishInitialDraftMatch).not.toHaveBeenCalled();
+          expect(persistence.publishStagedDraftMatch).not.toHaveBeenCalled();
+          expect(navigate).not.toHaveBeenCalled();
+        }
+      }
+      formatGate.evaluate.mockResolvedValue({ compatible: true, reasons: [] });
+      await launch();
+      expect(entry === "initial" ? persistence.publishInitialDraftMatch : persistence.publishStagedDraftMatch).toHaveBeenCalledOnce();
+      expect(navigate).toHaveBeenCalledOnce();
+    });
+
+    it("preserves both raw launch and save causes under another locale", async () => {
+      await startLaunchWithBotSeats([1]);
+      wasm.get_bot_deck.mockReturnValue({ main_deck: ["Opponent"], lands: {} });
+      formatGate.evaluate.mockResolvedValueOnce({ compatible: false, reasons: ["engine original cause"] });
+      persistence.persistQuickDraftSnapshot.mockRejectedValueOnce(new Error("storage original cause"));
+      await expect(useDraftStore.getState().launchMatch(vi.fn())).rejects.toEqual(
+        new Error("engine original cause\nstorage original cause"),
+      );
+      expect(formatGate.evaluate).toHaveBeenCalledTimes(2);
+      expect(persistence.persistQuickDraftSnapshot).toHaveBeenCalledOnce();
+      expect(persistence.publishInitialDraftMatch).not.toHaveBeenCalled();
+      await useDraftStore.getState().launchMatch(vi.fn());
+      expect(persistence.publishInitialDraftMatch).toHaveBeenCalledOnce();
+    });
+  });
+
+  it("keeps_the_chosen_bot_difficulty_through_start_and_reset", async () => {
+    // The setup screen stays mounted while a start loads, so the lifecycle
+    // reset must not snap the selector back to the Medium default.
+    useDraftStore.getState().setDifficulty(4);
+    wasm.start_quick_draft.mockReturnValue(view([]));
+    wasm.load_card_database.mockReturnValue(0);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("{}")));
+
+    const starting = useDraftStore.getState().startDraft("pool", "TST", "Test", 4);
+    expect(useDraftStore.getState().difficulty).toBe(4);
+    await starting;
+    expect(useDraftStore.getState().difficulty).toBe(4);
+    expect(wasm.start_quick_draft).toHaveBeenCalledWith("pool", 4, expect.any(Number));
+
+    useDraftStore.getState().reset();
+    expect(useDraftStore.getState().difficulty).toBe(4);
+  });
+
+  it("loads the typed database before a fresh difficulty-2 Quick match requests a bot deck", async () => {
+    let databaseLoaded = false;
+    wasm.load_card_database.mockImplementationOnce((database: string) => {
+      expect(database).toBe("typed database");
+      databaseLoaded = true;
+      return 0;
+    });
+    wasm.get_bot_deck.mockImplementationOnce(() => {
+      if (!databaseLoaded) throw new Error("card database unavailable");
+      return { main_deck: ["Opponent"], lands: {} };
+    });
+    wasm.start_quick_draft.mockReturnValue(view([card("human", "Forest")]));
+
+    await useDraftStore.getState().startDraft("pool", "TST", "Test", 2);
+    useDraftStore.setState({ phase: "launching" });
+    const navigate = vi.fn();
+    await useDraftStore.getState().launchMatch(navigate);
+
+    expect(fetch).toHaveBeenCalledWith("/card-data.json");
+    expect(wasm.load_card_database).toHaveBeenCalledOnce();
+    expect(wasm.get_bot_deck).toHaveBeenCalledOnce();
+    expect(wasm.load_card_database.mock.invocationCallOrder[0])
+      .toBeLessThan(wasm.get_bot_deck.mock.invocationCallOrder[0]!);
+    expect(persistence.publishInitialDraftMatch).toHaveBeenCalledOnce();
+    expect(navigate).toHaveBeenCalledOnce();
+  });
+
+  it("loads the typed database before a resumed difficulty-2 Quick match requests a bot deck", async () => {
+    let databaseLoaded = false;
+    wasm.load_card_database.mockImplementationOnce((database: string) => {
+      expect(database).toBe("typed database");
+      databaseLoaded = true;
+      return 0;
+    });
+    wasm.get_bot_deck.mockImplementationOnce(() => {
+      if (!databaseLoaded) throw new Error("card database unavailable");
+      return { main_deck: ["Opponent"], lands: {} };
+    });
+    persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue({
+      id: "saved-quick", setCode: "TST", setName: "Test", difficulty: 2,
+      kind: "Quick", phase: "launching", runFormat: "run",
+    });
+    persistence.loadQuickDraftSession.mockResolvedValue({
+      sessionJson: "saved session", mainDeck: ["Forest"], landCounts: {},
+      poolSortMode: "color", poolPanelOpen: true, workspace: null,
+    });
+    wasm.import_draft_session.mockReturnValue({
+      ...view([card("human", "Forest")]), status: "Pairing",
+    });
+
+    expect(await useDraftStore.getState().resumeDraft())
+      .toEqual({ status: "resumed", draftId: "saved-quick" });
+    const navigate = vi.fn();
+    await useDraftStore.getState().launchMatch(navigate);
+
+    expect(fetch).toHaveBeenCalledWith("/card-data.json");
+    expect(wasm.load_card_database).toHaveBeenCalledOnce();
+    expect(wasm.import_draft_session).toHaveBeenCalledWith("saved session", 2);
+    expect(wasm.get_bot_deck).toHaveBeenCalledOnce();
+    expect(wasm.load_card_database.mock.invocationCallOrder[0])
+      .toBeLessThan(wasm.get_bot_deck.mock.invocationCallOrder[0]!);
+    expect(persistence.publishInitialDraftMatch).toHaveBeenCalledOnce();
+    expect(navigate).toHaveBeenCalledOnce();
   });
 
   it("applies_pending_destination_only_after_pool_acknowledgement", async () => {
@@ -189,6 +478,128 @@ describe("draft store workspace authority", () => {
       useDraftStore.getState().workspaceState!,
       useDraftStore.getState().view!.pool,
     )).toEqual([]);
+  });
+
+  it("sorts_a_pool_arriving_on_a_state_install_into_the_boards_columns", async () => {
+    // `startDraft` installs the whole pool through a `kind: "state"` operation,
+    // which resolves no placement hint for any card — the path a restored Sealed
+    // pool and a resumed Quick draft both take. Before `placeArrivingPoolCards`
+    // was wired into this store every one of these landed in column 0.
+    await start([cardWithCmc("cheap", 1), cardWithCmc("costly", 6)]);
+
+    const placements = useDraftStore.getState().workspaceState!.placements;
+    expect(placements.cheap.column).toBe(1);
+    expect(placements.costly.column).toBe(6);
+  });
+
+  it("sorts_a_hint_less_deck_pick_into_the_column_its_mana_value_means", async () => {
+    // `PackDisplay.request` dispatches `pickCard` with no placement hint, so
+    // `applyDestination` has only reconcile's column-0 default to fall back on.
+    await start();
+    wasm.submit_pick.mockReturnValue(view([cardWithCmc("picked", 6)]));
+
+    await useDraftStore.getState().pickCard("picked", "deck");
+
+    expect(useDraftStore.getState().workspaceState!.placements.picked.column).toBe(6);
+  });
+
+  it("keeps_the_hint_column_on_a_deck_pick_that_resolved_one", async () => {
+    // The arriving pass must not overrule a column someone chose — this is the
+    // drag-and-drop target as well as `DraftPage.handleConfirmPick`'s resolution.
+    await start();
+    wasm.submit_pick.mockReturnValue(view([cardWithCmc("picked", 6)]));
+
+    await useDraftStore.getState().pickCard("picked", "deck", { column: 2 });
+
+    expect(useDraftStore.getState().workspaceState!.placements.picked.column).toBe(2);
+  });
+
+  it("places_a_pick_against_the_columns_the_page_published_not_the_module_default", async () => {
+    // The seam the whole feature rests on: `installWorkspace` reads the board
+    // geometry through `getArrivingCardBoardPreferences`, so a page that has
+    // published three columns must get three-column placement. Three is chosen
+    // because `manaValueColumn` clamps to `columnCount - 1`: a six-drop lands in
+    // column 2 here and column 6 under the seven-column default, so no default
+    // can produce this result.
+    setArrivingCardBoardPreferences({
+      sort: "cmc", columnCount: 3, rows: "one", showHeaders: true,
+    });
+    await start();
+    wasm.submit_pick.mockReturnValue(view([cardWithCmc("picked", 6)]));
+
+    await useDraftStore.getState().pickCard("picked", "deck");
+
+    expect(useDraftStore.getState().workspaceState!.placements.picked.column).toBe(2);
+  });
+
+  it("places_an_install_before_any_publish_against_the_stored_preferences", async () => {
+    // The OTHER end of that seam: `arrivingCardBoardPreferences` is seeded at
+    // module init from `loadDraftWorkspacePreferences()`, and this install
+    // reaches it with no `setArrivingCardBoardPreferences` call on the module
+    // instance it reads — the `beforeEach` one lands on this file's static
+    // instance, not the one imported below. Three stored columns against the
+    // seven-column module default: `manaValueColumn` clamps a six-drop to 2
+    // here and to 6 under the defaults, so only the stored value produces this,
+    // and replacing that initializer with `{ ...DECK_DEFAULTS }` reds this test
+    // with `expected 6 to be 2`.
+    localStorage.setItem(DRAFT_WORKSPACE_PREFERENCES_KEY, JSON.stringify({
+      ...createDefaultDraftWorkspacePreferences(),
+      deck: { sort: "cmc", columnCount: 3, rows: "one", showHeaders: true },
+    }));
+    // A fresh module registry: the initializer runs once per module instance,
+    // and the instance this file imported statically is not it — drop
+    // `vi.resetModules()` and this install places against the seven-column
+    // default instead, `expected 6 to be 2`. `vi.mock` registrations survive
+    // `resetModules`: the pool asserted on below is the one
+    // `wasm.start_quick_draft` returns, so the re-imported store is still
+    // running against the mocked engine.
+    vi.resetModules();
+    const { useDraftStore: freshStore } = await import("../draftStore");
+    wasm.start_quick_draft.mockReturnValue(view([cardWithCmc("costly", 6)]));
+
+    await freshStore.getState().startDraft("pool", "TST", "Test", 2);
+
+    expect(freshStore.getState().workspaceState!.placements.costly.column).toBe(2);
+    localStorage.removeItem(DRAFT_WORKSPACE_PREFERENCES_KEY);
+  });
+
+  it("leaves_a_hint_less_sideboard_pick_in_the_first_column", async () => {
+    // The arriving pass is deck-only. Were it allowed to run for a sideboard
+    // pick it would stamp this card with a column from the DECK's geometry —
+    // 6, asserted above as the stored value on the deck-pick case — which the
+    // sideboard's narrower six columns cannot hold, so
+    // `normalizeWorkspaceForBoardGeometry` would clamp it at render to 5, the
+    // sideboard's last column, rather than leaving it in the first. A cheaper
+    // card would land mid-board instead; the clamp is the overflow case, not
+    // the general one.
+    await start();
+    wasm.submit_pick.mockReturnValue(view([cardWithCmc("picked", 6)]));
+
+    await useDraftStore.getState().pickCard("picked", "sideboard");
+
+    const placement = useDraftStore.getState().workspaceState!.placements.picked;
+    expect(placement.zone).toBe("sideboard");
+    expect(placement.column).toBe(0);
+  });
+
+  it("leaves_a_row_less_hint_on_a_two_row_board_in_the_reconcile_default_row", async () => {
+    // `applyDestination` falls back per FIELD, so a hint naming only a column
+    // leaves `row` to whatever placement is in the workspace. A drag that hits a
+    // column but no row band sends exactly that shape. The arriving pass must
+    // therefore skip hinted ids: were it to run, it would resolve this card's
+    // row through the engine classification and change where a drag lands on a
+    // two-row board, which is not this change's business.
+    setArrivingCardBoardPreferences({
+      sort: "cmc", columnCount: 7, rows: "two", showHeaders: true,
+    });
+    await start();
+    wasm.submit_pick.mockReturnValue(view([cardWithCmc("picked", 6)]));
+
+    await useDraftStore.getState().pickCard("picked", "deck", { column: 2 });
+
+    const placement = useDraftStore.getState().workspaceState!.placements.picked;
+    expect(placement.column).toBe(2);
+    expect(placement.row).toBe(0);
   });
 
   it("has_exactly_one_reconciliation_call_inside_install_workspace", () => {
@@ -396,6 +807,31 @@ describe("draft store workspace authority", () => {
     expect(adapterIds).not.toBe(tuple);
   });
 
+  it("appends_a_hint_less_deck_draft_effect_pick_in_request_order", async () => {
+    // `appends_acknowledged_draft_effect_cards_in_request_order`, below, sends
+    // `"sideboard"` with a `{ column: 4 }` hint, so `operationResolvesOwnPlacement`
+    // excludes both ids from the arriving pass and that test stays green whichever
+    // side of the switch the pass runs on. THIS case — deck, no hint — is what
+    // `PackDisplay.request` dispatches, and it is the one that makes the pass's
+    // position relative to the switch observable: run the pass after
+    // `applyDestination` instead and these two land in POOL order (`first` then
+    // `second`) rather than the requested order.
+    await start([card("effect")]);
+    wasm.submit_pick_with_draft_effect.mockReturnValue(view([
+      { ...cardWithCmc("effect", 3) },
+      { ...cardWithCmc("first", 3) },
+      { ...cardWithCmc("second", 3) },
+    ]));
+
+    await expect(useDraftStore.getState().pickCardWithDraftEffect(
+      "effect", ["second", "first"], "deck",
+    )).resolves.toEqual({ status: "acknowledged" });
+
+    const placements = useDraftStore.getState().workspaceState!.placements;
+    expect(placements.second.order).toBe(0);
+    expect(placements.first.order).toBe(1);
+  });
+
   it("appends_acknowledged_draft_effect_cards_in_request_order", async () => {
     await start([card("effect")]);
     wasm.submit_pick_with_draft_effect.mockReturnValue(view([
@@ -421,6 +857,45 @@ describe("draft store workspace authority", () => {
     await expect(useDraftStore.getState().pickCardWithDraftEffect("effect", ["first", "second"]))
       .resolves.toEqual({ status: "rejected", reason: "unacknowledged" });
     expect(useDraftStore.getState().workspaceState).toBe(original);
+  });
+
+  it("sorts_an_auto_picked_card_that_carries_no_hint_of_its_own", async () => {
+    // The other direction of the `acknowledged-auto-pick` arm, and the solo twin
+    // of the pod store's `sorts an auto-picked card that carries no hint of its
+    // own`. `performPick` builds this card's hint as
+    // `request.placementHints?.[addedInstanceId]`, so an id the page's
+    // pack-keyed map does not cover — or any bare `autoPickCard("deck")` —
+    // arrives with no decision of its own and must be sorted, not parked in
+    // column 0.
+    await start();
+    wasm.auto_pick.mockReturnValue(view([cardWithCmc("added", 6)]));
+
+    await expect(useDraftStore.getState().autoPickCard("deck"))
+      .resolves.toEqual({ status: "acknowledged" });
+
+    expect(useDraftStore.getState().workspaceState!.placements.added.column).toBe(6);
+  });
+
+  it("leaves_a_row_less_auto_pick_hint_on_a_two_row_board_in_the_reconcile_default_row", async () => {
+    // The `acknowledged-auto-pick` arm of the same exclusion. `validPlacementHint`
+    // admits a hint with no `row`, and `DraftPage.handleAutoPick` builds its hints
+    // from `resolveWorkspacePickPlacement`, which omits `row` on a one-row board —
+    // a persisted or restored intent can therefore carry that shape into a
+    // two-row board. Without the arm the arriving pass decides the row instead.
+    setArrivingCardBoardPreferences({
+      sort: "cmc", columnCount: 7, rows: "two", showHeaders: true,
+    });
+    await start();
+    wasm.auto_pick.mockReturnValue(view([
+      { ...cardWithCmc("added", 6), type_line: "Creature — Bear" },
+    ]));
+
+    await expect(useDraftStore.getState().autoPickCard("deck", { added: { column: 2 } }))
+      .resolves.toEqual({ status: "acknowledged" });
+
+    const placement = useDraftStore.getState().workspaceState!.placements.added;
+    expect(placement.column).toBe(2);
+    expect(placement.row).toBe(0);
   });
 
   it("appends_the_acknowledged_auto_pick_to_its_resolved_target_stack", async () => {
@@ -604,7 +1079,519 @@ describe("draft store workspace authority", () => {
     await expect(useDraftStore.getState().autoSuggestDeck()).rejects.toThrow("live suggestion");
   });
 
+  it("recovers a submitted Cube run without its separate session and launches its exact stage at Hard", async () => {
+    const run: DraftRunState = {
+      format: "run", results: [], playerDeck: ["Player"], opponentDeck: ["Opponent"],
+      usedBotSeats: [2], booster_pack_pool: [],
+      activeMatch: { draftId: "durable", gameId: "same-game", format: "run",
+        resultCountAtLaunch: 0, botSeat: 2, opponentDeck: ["Opponent"] },
+    };
+    const actualPersistence = await vi.importActual<typeof import("../../services/quickDraftPersistence")>(
+      "../../services/quickDraftPersistence",
+    );
+    localStorage.setItem(ACTIVE_QUICK_DRAFT_KEY, JSON.stringify({
+      id: "durable", setCode: "custom-cube", difficulty: 3, kind: "Quick",
+      phase: "playing", pickCount: 40, updatedAt: Date.now(),
+    }));
+    persistence.inspectActiveQuickDraftLifecycle.mockImplementationOnce(() =>
+      actualPersistence.inspectActiveQuickDraftLifecycle("inspect"));
+    persistence.loadDraftRun.mockResolvedValue(run);
+    persistence.loadQuickDraftSession.mockResolvedValue(null);
+    const outcome = await useDraftStore.getState().resumeDraft();
+    expect(outcome).toEqual({ status: "resumed", draftId: "durable" });
+    expect(useDraftStore.getState()).toMatchObject({ draftId: "durable", phase: "playing",
+      difficulty: 3, runFormat: "run", runState: run, adapter: null, view: null, workspaceState: null });
+    expect(persistence.cleanupQuickDraftLifecycle).not.toHaveBeenCalled();
+
+    const navigate = vi.fn();
+    await useDraftStore.getState().launchNextMatch(navigate);
+    expect(formatGate.evaluate).toHaveBeenCalledTimes(2);
+    expect(formatGate.evaluate.mock.calls.map(([request]) => (request as { main_deck: string[] }).main_deck))
+      .toEqual([["Player"], ["Opponent"]]);
+    expect(persistence.publishStagedDraftMatch).toHaveBeenCalledWith(expect.objectContaining({
+      draftId: "durable", gameId: "same-game", payload: expect.objectContaining({ booster_pack_pool: [] }),
+    }));
+    expect(navigate).toHaveBeenCalledWith(expect.stringContaining("difficulty=Hard"));
+    expect(navigate).toHaveBeenCalledWith(expect.stringContaining("/game/same-game?"));
+    localStorage.removeItem(ACTIVE_QUICK_DRAFT_KEY);
+  });
+
+  it("uses stored Bo3 format for run-only preflight and refuses unsupported empty sideboards", async () => {
+    const run: DraftRunState = { format: "bo3", results: [], playerDeck: ["Player"],
+      opponentDeck: ["Opponent"], usedBotSeats: [1], booster_pack_pool: [],
+      activeMatch: { draftId: "bo3-run", gameId: "bo3-game", format: "bo3",
+        resultCountAtLaunch: 0, botSeat: 1, opponentDeck: ["Opponent"] } };
+    persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue({
+      id: "bo3-run", setCode: "custom-cube", difficulty: 2, kind: "Quick", phase: "playing",
+    });
+    persistence.loadDraftRun.mockResolvedValue(run);
+    persistence.loadQuickDraftSession.mockResolvedValue(null);
+    expect(await useDraftStore.getState().resumeDraft()).toEqual({ status: "resumed", draftId: "bo3-run" });
+    formatGate.evaluate.mockImplementation(async (request: unknown) => ({
+      compatible: (request as { selected_match_type: string }).selected_match_type !== "Bo3",
+      reasons: ["BO3 requires a sideboard"],
+    }));
+    const navigate = vi.fn();
+    await expect(useDraftStore.getState().launchNextMatch(navigate)).rejects.toThrow("BO3 requires a sideboard");
+    expect(formatGate.evaluate).toHaveBeenCalledTimes(2);
+    for (const [request] of formatGate.evaluate.mock.calls) {
+      expect(request).toMatchObject({ selected_format: "Limited", selected_match_type: "Bo3", sideboard: [] });
+    }
+    expect(persistence.publishStagedDraftMatch).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+    expect(useDraftStore.getState()).toMatchObject({ phase: "playing", runState: run });
+    expect(persistence.cleanupQuickDraftLifecycle).not.toHaveBeenCalled();
+  });
+
+  it.each([5, 2.5])("refuses persisted finite invalid difficulty %s while retaining the run ID", async (difficulty) => {
+    const run: DraftRunState = { format: "run", results: [], playerDeck: ["Player"],
+      opponentDeck: ["Opponent"], usedBotSeats: [1], booster_pack_pool: [] };
+    const actualPersistence = await vi.importActual<typeof import("../../services/quickDraftPersistence")>(
+      "../../services/quickDraftPersistence",
+    );
+    localStorage.setItem(ACTIVE_QUICK_DRAFT_KEY, JSON.stringify({
+      id: "invalid-difficulty", setCode: "custom-cube", difficulty, kind: "Quick",
+      phase: "playing", pickCount: 40, updatedAt: Date.now(),
+    }));
+    expect((await actualPersistence.inspectActiveQuickDraftLifecycle("inspect"))?.id).toBe("invalid-difficulty");
+    persistence.inspectActiveQuickDraftLifecycle.mockImplementationOnce(() =>
+      actualPersistence.inspectActiveQuickDraftLifecycle("inspect"));
+    persistence.loadDraftRun.mockResolvedValue(run);
+    persistence.loadQuickDraftSession.mockResolvedValue(null);
+    const outcome = await useDraftStore.getState().resumeDraft();
+    expect(outcome).toEqual({ status: "unavailable", draftId: "invalid-difficulty",
+      reason: "This draft run is unavailable. End Run to draft again." });
+    expect(useDraftStore.getState().draftId).toBe("invalid-difficulty");
+    expect(persistence.cleanupQuickDraftLifecycle).not.toHaveBeenCalled();
+    expect(formatGate.evaluate).not.toHaveBeenCalled();
+    expect(persistence.publishStagedDraftMatch).not.toHaveBeenCalled();
+    expect(localStorage.getItem(ACTIVE_QUICK_DRAFT_KEY)).not.toBeNull();
+    localStorage.removeItem(ACTIVE_QUICK_DRAFT_KEY);
+  });
+
+  it("keeps an unreadable run available for Retry Resume and succeeds after the read recovers", async () => {
+    persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue({
+      id: "read-retry", setCode: "TST", difficulty: 2, kind: "Quick", phase: "playing",
+    });
+    const run: DraftRunState = { format: "run", results: [], playerDeck: ["Player"],
+      opponentDeck: ["Opponent"], usedBotSeats: [1] };
+    persistence.loadDraftRun.mockRejectedValueOnce(new Error("IndexedDB read failed")).mockResolvedValue(run);
+    persistence.loadQuickDraftSession.mockResolvedValue(null);
+    expect(await useDraftStore.getState().resumeDraft()).toEqual({
+      status: "unavailable", draftId: "read-retry", reason: "IndexedDB read failed",
+    });
+    expect(persistence.cleanupQuickDraftLifecycle).not.toHaveBeenCalled();
+    expect(await useDraftStore.getState().resumeDraft()).toEqual({ status: "resumed", draftId: "read-retry" });
+    expect(useDraftStore.getState().runState).toEqual(run);
+    await useDraftStore.getState().launchNextMatch(vi.fn());
+    expect(formatGate.evaluate.mock.calls.map(([request]) => (request as { draft_set_codes: string[] }).draft_set_codes))
+      .toEqual([[], []]);
+  });
+
+  it.each(["session read", "adapter import"])("recovers a complete run when the separate %s fails", async (failure) => {
+    const run: DraftRunState = { format: "single", results: [{ gameId: "finished", result: "win" }],
+      playerDeck: ["Player"], opponentDeck: ["Opponent"], usedBotSeats: [1], booster_pack_pool: [] };
+    persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue({
+      id: "complete-run", setCode: "custom-cube", difficulty: 2, kind: "Quick", phase: "complete",
+    });
+    persistence.loadDraftRun.mockResolvedValue(run);
+    if (failure === "session read") {
+      persistence.loadQuickDraftSession.mockRejectedValueOnce(new Error("session read failed"));
+    } else {
+      persistence.loadQuickDraftSession.mockResolvedValueOnce({ sessionJson: "broken session",
+        mainDeck: [], landCounts: {}, poolSortMode: "color", poolPanelOpen: true, workspace: null });
+      wasm.import_draft_session.mockImplementationOnce(() => { throw new Error("import failed"); });
+    }
+    expect(await useDraftStore.getState().resumeDraft()).toEqual({ status: "resumed", draftId: "complete-run" });
+    expect(useDraftStore.getState()).toMatchObject({ phase: "complete", draftId: "complete-run",
+      runState: run, runFormat: "single", adapter: null, view: null, workspaceState: null });
+    expect(persistence.cleanupQuickDraftLifecycle).not.toHaveBeenCalled();
+  });
+
+  it("mints one run-only stage from the stored opponent and refuses a rejecting engine gate", async () => {
+    const run: DraftRunState = { format: "run", results: [{ gameId: "prior", result: "draw" }],
+      playerDeck: ["Player"], opponentDeck: ["Opponent"], usedBotSeats: [4], booster_pack_pool: [] };
+    persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue({
+      id: "new-stage", setCode: "custom-cube", difficulty: 1, kind: "Quick", phase: "playing",
+    });
+    persistence.loadDraftRun.mockResolvedValue(run);
+    persistence.loadQuickDraftSession.mockResolvedValue(null);
+    expect((await useDraftStore.getState().resumeDraft()).status).toBe("resumed");
+    formatGate.evaluate.mockImplementation(async (request: unknown) => ({
+      compatible: !(request as { main_deck: string[] }).main_deck.includes("Opponent"),
+      reasons: ["Opponent deck is not legal"],
+    }));
+    const navigate = vi.fn();
+    await expect(useDraftStore.getState().launchNextMatch(navigate)).rejects.toThrow("Opponent deck is not legal");
+    expect(formatGate.evaluate).toHaveBeenCalledTimes(2);
+    expect(persistence.publishStagedDraftMatch).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+    expect(wasm.get_bot_deck).not.toHaveBeenCalled();
+    expect(useDraftStore.getState().runState).toEqual(run);
+    formatGate.evaluate.mockResolvedValue({ compatible: true, reasons: [] });
+    await useDraftStore.getState().launchNextMatch(navigate);
+    expect(persistence.publishStagedDraftMatch).toHaveBeenCalledWith(expect.objectContaining({
+      run: expect.objectContaining({ opponentDeck: ["Opponent"],
+        activeMatch: expect.objectContaining({ draftId: "new-stage", botSeat: 4, opponentDeck: ["Opponent"] }) }),
+    }));
+    expect(wasm.get_bot_deck).not.toHaveBeenCalled();
+    expect(navigate).toHaveBeenCalledOnce();
+  });
+
+  it.each([null, false])("refuses persisted malformed activeMatch %s before run-only resume and launch", async (activeMatch) => {
+    vi.useRealTimers();
+    const draftId = `malformed-stage-${String(activeMatch)}`;
+    const run: DraftRunState = { format: "run", results: [], playerDeck: ["Player"],
+      opponentDeck: ["Opponent"], usedBotSeats: [1], booster_pack_pool: [] };
+    const malformedRun = { ...run, activeMatch } as unknown as DraftRunState;
+    const actualPersistence = await vi.importActual<typeof import("../../services/quickDraftPersistence")>(
+      "../../services/quickDraftPersistence",
+    );
+    localStorage.setItem(ACTIVE_QUICK_DRAFT_KEY, JSON.stringify({
+      id: draftId, setCode: "custom-cube", difficulty: 2, kind: "Quick",
+      phase: "playing", pickCount: 40, updatedAt: Date.now(),
+    }));
+    await actualPersistence.saveDraftRun(draftId, malformedRun);
+    persistence.inspectActiveQuickDraftLifecycle.mockImplementation(() =>
+      actualPersistence.inspectActiveQuickDraftLifecycle("inspect"));
+    persistence.loadDraftRun.mockImplementation(() => actualPersistence.loadDraftRun(draftId));
+    persistence.loadQuickDraftSession.mockResolvedValue(null);
+
+    expect(await useDraftStore.getState().resumeDraft()).toEqual({
+      status: "unavailable", draftId, reason: "This draft run is unavailable. End Run to draft again.",
+    });
+    expect(persistence.loadDraftRun).toHaveBeenCalledWith(draftId);
+    expect(useDraftStore.getState()).toMatchObject({ draftId, runState: null });
+    expect(await actualPersistence.loadDraftRun(draftId)).toEqual(malformedRun);
+    expect(localStorage.getItem(ACTIVE_QUICK_DRAFT_KEY)).not.toBeNull();
+    expect(persistence.cleanupQuickDraftLifecycle).not.toHaveBeenCalled();
+
+    // An actually absent stage may resume and mint a new game from this run.
+    await actualPersistence.saveDraftRun(draftId, run);
+    expect(await useDraftStore.getState().resumeDraft()).toEqual({ status: "resumed", draftId });
+    expect(useDraftStore.getState().runState).toEqual(run);
+    await actualPersistence.saveDraftRun(draftId, malformedRun);
+    const navigate = vi.fn();
+    await expect(useDraftStore.getState().launchNextMatch(navigate)).rejects.toThrow("This draft run is unavailable. End Run to draft again.");
+    expect(await actualPersistence.loadDraftRun(draftId)).toEqual(malformedRun);
+    expect(formatGate.evaluate).not.toHaveBeenCalled();
+    expect(persistence.publishStagedDraftMatch).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+    expect(persistence.cleanupQuickDraftLifecycle).not.toHaveBeenCalled();
+
+    await actualPersistence.saveDraftRun(draftId, run);
+    await useDraftStore.getState().launchNextMatch(navigate);
+    expect(formatGate.evaluate).toHaveBeenCalledTimes(2);
+    expect(persistence.publishStagedDraftMatch).toHaveBeenCalledWith(expect.objectContaining({
+      draftId, run: expect.objectContaining({ activeMatch: expect.objectContaining({ draftId }) }),
+    }));
+    expect(navigate).toHaveBeenCalledOnce();
+    await actualPersistence.clearDraftRun(draftId);
+    localStorage.removeItem(ACTIVE_QUICK_DRAFT_KEY);
+  });
+
+  it.each([null, false])("refuses persisted malformed activeMatch %s with a restored full session", async (activeMatch) => {
+    vi.useRealTimers();
+    const draftId = `full-malformed-stage-${String(activeMatch)}`;
+    const run: DraftRunState = { format: "run", results: [], playerDeck: ["Player"],
+      opponentDeck: ["Opponent"], usedBotSeats: [1] };
+    const malformedRun = { ...run, activeMatch } as unknown as DraftRunState;
+    const actualPersistence = await vi.importActual<typeof import("../../services/quickDraftPersistence")>(
+      "../../services/quickDraftPersistence",
+    );
+    localStorage.setItem(ACTIVE_QUICK_DRAFT_KEY, JSON.stringify({
+      id: draftId, setCode: "TST", difficulty: 2, kind: "Quick",
+      phase: "playing", pickCount: 40, updatedAt: Date.now(),
+    }));
+    await actualPersistence.saveDraftRun(draftId, malformedRun);
+    persistence.inspectActiveQuickDraftLifecycle.mockImplementation(() =>
+      actualPersistence.inspectActiveQuickDraftLifecycle("inspect"));
+    persistence.loadDraftRun.mockImplementation(() => actualPersistence.loadDraftRun(draftId));
+    persistence.loadQuickDraftSession.mockResolvedValue({
+      sessionJson: "saved session", mainDeck: ["Player"], landCounts: {},
+      poolSortMode: "color", poolPanelOpen: true, workspace: null,
+    });
+    wasm.import_draft_session.mockReturnValue(view([card("player", "Player")]));
+
+    expect(await useDraftStore.getState().resumeDraft()).toEqual({
+      status: "unavailable", draftId, reason: "This draft run is unavailable. End Run to draft again.",
+    });
+    expect(useDraftStore.getState()).toMatchObject({ draftId, runState: null, adapter: null });
+    expect(await actualPersistence.loadDraftRun(draftId)).toEqual(malformedRun);
+    expect(persistence.saveDraftRun).not.toHaveBeenCalled();
+    expect(persistence.cleanupQuickDraftLifecycle).not.toHaveBeenCalled();
+
+    // A genuinely absent stage in the same full-session path may launch.
+    await actualPersistence.saveDraftRun(draftId, run);
+    expect(await useDraftStore.getState().resumeDraft()).toEqual({ status: "resumed", draftId });
+    expect(wasm.import_draft_session).toHaveBeenCalledWith("saved session", 2);
+    expect(useDraftStore.getState()).toMatchObject({ draftId, runState: run, phase: "playing" });
+    expect(useDraftStore.getState().adapter).not.toBeNull();
+    expect(useDraftStore.getState().workspaceState).not.toBeNull();
+
+    await actualPersistence.saveDraftRun(draftId, malformedRun);
+    const navigate = vi.fn();
+    await expect(useDraftStore.getState().launchNextMatch(navigate)).rejects.toThrow("This draft run is unavailable. End Run to draft again.");
+    expect(await actualPersistence.loadDraftRun(draftId)).toEqual(malformedRun);
+    expect(wasm.get_bot_deck).not.toHaveBeenCalled();
+    expect(formatGate.evaluate).not.toHaveBeenCalled();
+    expect(persistence.publishStagedDraftMatch).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+
+    await actualPersistence.saveDraftRun(draftId, run);
+    wasm.get_bot_deck.mockReturnValue({ main_deck: ["Opponent"], lands: {} });
+    await useDraftStore.getState().launchNextMatch(navigate);
+    expect(wasm.get_bot_deck).toHaveBeenCalled();
+    expect(formatGate.evaluate).toHaveBeenCalledTimes(2);
+    expect(persistence.publishStagedDraftMatch).toHaveBeenCalledWith(expect.objectContaining({
+      draftId, run: expect.objectContaining({ activeMatch: expect.objectContaining({ draftId }) }),
+    }));
+    expect(navigate).toHaveBeenCalledOnce();
+    await actualPersistence.clearDraftRun(draftId);
+    localStorage.removeItem(ACTIVE_QUICK_DRAFT_KEY);
+  });
+
+  it("refuses an empty durable player deck in a full session and validates the published deck on retry", async () => {
+    vi.useRealTimers();
+    const draftId = "full-empty-player";
+    const run: DraftRunState = { format: "run", results: [], playerDeck: ["Stored"],
+      opponentDeck: ["Opponent"], usedBotSeats: [1] };
+    const emptyRun = { ...run, playerDeck: [] };
+    const actualPersistence = await vi.importActual<typeof import("../../services/quickDraftPersistence")>(
+      "../../services/quickDraftPersistence",
+    );
+    localStorage.setItem(ACTIVE_QUICK_DRAFT_KEY, JSON.stringify({
+      id: draftId, setCode: "custom-cube", difficulty: 2, kind: "Quick",
+      phase: "playing", pickCount: 40, updatedAt: Date.now(),
+    }));
+    await actualPersistence.saveDraftRun(draftId, emptyRun);
+    persistence.inspectActiveQuickDraftLifecycle.mockImplementation(() =>
+      actualPersistence.inspectActiveQuickDraftLifecycle("inspect"));
+    persistence.loadDraftRun.mockImplementation(() => actualPersistence.loadDraftRun(draftId));
+    persistence.loadQuickDraftSession.mockResolvedValue({
+      sessionJson: "saved session", mainDeck: ["Projected"], landCounts: {},
+      poolSortMode: "color", poolPanelOpen: true, workspace: null,
+    });
+    wasm.import_draft_session.mockReturnValue(view([card("projected", "Projected")]));
+    wasm.booster_pack_pool_for_game.mockReturnValue([]);
+
+    expect(await useDraftStore.getState().resumeDraft()).toEqual({
+      status: "unavailable", draftId, reason: "This draft run is unavailable. End Run to draft again.",
+    });
+    expect(useDraftStore.getState()).toMatchObject({ draftId, runState: null, adapter: null });
+    expect(wasm.import_draft_session).not.toHaveBeenCalled();
+    expect(await actualPersistence.loadDraftRun(draftId)).toEqual(emptyRun);
+    expect(localStorage.getItem(ACTIVE_QUICK_DRAFT_KEY)).not.toBeNull();
+    expect(persistence.cleanupQuickDraftLifecycle).not.toHaveBeenCalled();
+
+    // A complete run without a stage can restore its historical Cube source.
+    await actualPersistence.saveDraftRun(draftId, run);
+    expect(await useDraftStore.getState().resumeDraft()).toEqual({ status: "resumed", draftId });
+    expect(useDraftStore.getState()).toMatchObject({ phase: "playing", runState: {
+      playerDeck: ["Stored"], booster_pack_pool: [],
+    } });
+    expect(useDraftStore.getState().adapter).not.toBeNull();
+    wasm.get_bot_deck.mockReturnValue({ main_deck: ["Opponent"], lands: {} });
+    const navigate = vi.fn();
+
+    await actualPersistence.saveDraftRun(draftId, emptyRun);
+    await expect(useDraftStore.getState().launchNextMatch(navigate)).rejects.toThrow("This draft run is unavailable. End Run to draft again.");
+    expect(formatGate.evaluate).not.toHaveBeenCalled();
+    expect(persistence.publishStagedDraftMatch).not.toHaveBeenCalled();
+
+    await actualPersistence.saveDraftRun(draftId, run);
+    formatGate.evaluate.mockImplementation(async (request: unknown) => {
+      const deck = request as { main_deck: string[] };
+      return {
+        compatible: deck.main_deck[0] !== "Stored",
+        reasons: deck.main_deck[0] === "Stored" ? ["Stored deck is invalid"] : [],
+      };
+    });
+    await expect(useDraftStore.getState().launchNextMatch(navigate)).rejects.toThrow("Stored deck is invalid");
+    expect(formatGate.evaluate).toHaveBeenCalledWith(expect.objectContaining({ main_deck: ["Stored"] }));
+    expect(persistence.publishStagedDraftMatch).not.toHaveBeenCalled();
+
+    formatGate.evaluate.mockResolvedValue({ compatible: true, reasons: [] });
+    await useDraftStore.getState().launchNextMatch(navigate);
+    expect(persistence.publishStagedDraftMatch).toHaveBeenCalledWith(expect.objectContaining({
+      draftId, run: expect.objectContaining({ playerDeck: ["Stored"], activeMatch: expect.objectContaining({ draftId }) }),
+      payload: expect.objectContaining({ player: expect.objectContaining({ main_deck: ["Stored"] }), booster_pack_pool: [] }),
+    }));
+    expect(navigate).toHaveBeenCalledOnce();
+    expect(persistence.cleanupQuickDraftLifecycle).not.toHaveBeenCalled();
+    await actualPersistence.clearDraftRun(draftId);
+    localStorage.removeItem(ACTIVE_QUICK_DRAFT_KEY);
+  });
+
+  it("refuses an empty persisted stage game ID, then retries a valid stage", async () => {
+    vi.useRealTimers();
+    const draftId = "empty-stage-game";
+    const run: DraftRunState = {
+      format: "run", results: [], playerDeck: ["Player"], opponentDeck: ["Opponent"],
+      usedBotSeats: [1], booster_pack_pool: [],
+      activeMatch: { draftId, gameId: "same-stage", format: "run",
+        resultCountAtLaunch: 0, botSeat: 1, opponentDeck: ["Opponent"] },
+    };
+    const emptyGameRun: DraftRunState = {
+      ...run, activeMatch: { ...run.activeMatch!, gameId: "" },
+    };
+    const actualPersistence = await vi.importActual<typeof import("../../services/quickDraftPersistence")>(
+      "../../services/quickDraftPersistence",
+    );
+    localStorage.setItem(ACTIVE_QUICK_DRAFT_KEY, JSON.stringify({
+      id: draftId, setCode: "custom-cube", difficulty: 2, kind: "Quick",
+      phase: "playing", pickCount: 40, updatedAt: Date.now(),
+    }));
+    await actualPersistence.saveDraftRun(draftId, emptyGameRun);
+    persistence.inspectActiveQuickDraftLifecycle.mockImplementation(() =>
+      actualPersistence.inspectActiveQuickDraftLifecycle("inspect"));
+    persistence.loadDraftRun.mockImplementation(() => actualPersistence.loadDraftRun(draftId));
+    persistence.loadQuickDraftSession.mockResolvedValue(null);
+
+    expect(await useDraftStore.getState().resumeDraft()).toEqual({
+      status: "unavailable", draftId, reason: "This draft run is unavailable. End Run to draft again.",
+    });
+    expect(useDraftStore.getState()).toMatchObject({ draftId, runState: null });
+    expect(await actualPersistence.loadDraftRun(draftId)).toEqual(emptyGameRun);
+    expect(localStorage.getItem(ACTIVE_QUICK_DRAFT_KEY)).not.toBeNull();
+    expect(persistence.cleanupQuickDraftLifecycle).not.toHaveBeenCalled();
+
+    await actualPersistence.saveDraftRun(draftId, run);
+    expect(await useDraftStore.getState().resumeDraft()).toEqual({ status: "resumed", draftId });
+    expect(useDraftStore.getState()).toMatchObject({ phase: "playing", runState: run });
+    await actualPersistence.saveDraftRun(draftId, emptyGameRun);
+    const navigate = vi.fn();
+    await expect(useDraftStore.getState().launchNextMatch(navigate)).rejects.toThrow("This draft run is unavailable. End Run to draft again.");
+    expect(await actualPersistence.loadDraftRun(draftId)).toEqual(emptyGameRun);
+    expect(formatGate.evaluate).not.toHaveBeenCalled();
+    expect(persistence.publishStagedDraftMatch).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+    expect(persistence.cleanupQuickDraftLifecycle).not.toHaveBeenCalled();
+
+    await actualPersistence.saveDraftRun(draftId, run);
+    await useDraftStore.getState().launchNextMatch(navigate);
+    expect(formatGate.evaluate).toHaveBeenCalledTimes(2);
+    expect(persistence.publishStagedDraftMatch).toHaveBeenCalledWith(expect.objectContaining({
+      draftId, gameId: "same-stage",
+    }));
+    expect(navigate).toHaveBeenCalledWith(expect.stringContaining("/game/same-stage?"));
+    await actualPersistence.clearDraftRun(draftId);
+    localStorage.removeItem(ACTIVE_QUICK_DRAFT_KEY);
+  });
+
+  it("refuses a persisted stage owned by another draft on resume and launch", async () => {
+    vi.useRealTimers();
+    const draftId = "stage-owner";
+    const run: DraftRunState = {
+      format: "run", results: [], playerDeck: ["Player"], opponentDeck: ["Opponent"],
+      usedBotSeats: [1], booster_pack_pool: [],
+      activeMatch: { draftId, gameId: "same-stage", format: "run",
+        resultCountAtLaunch: 0, botSeat: 1, opponentDeck: ["Opponent"] },
+    };
+    const wrongOwnerRun: DraftRunState = {
+      ...run, activeMatch: { ...run.activeMatch!, draftId: "another-draft" },
+    };
+    const actualPersistence = await vi.importActual<typeof import("../../services/quickDraftPersistence")>(
+      "../../services/quickDraftPersistence",
+    );
+    localStorage.setItem(ACTIVE_QUICK_DRAFT_KEY, JSON.stringify({
+      id: draftId, setCode: "custom-cube", difficulty: 2, kind: "Quick",
+      phase: "playing", pickCount: 40, updatedAt: Date.now(),
+    }));
+    await actualPersistence.saveDraftRun(draftId, wrongOwnerRun);
+    persistence.inspectActiveQuickDraftLifecycle.mockImplementation(() =>
+      actualPersistence.inspectActiveQuickDraftLifecycle("inspect"));
+    persistence.loadDraftRun.mockImplementation(() => actualPersistence.loadDraftRun(draftId));
+    persistence.loadQuickDraftSession.mockResolvedValue(null);
+
+    expect(await useDraftStore.getState().resumeDraft()).toEqual({
+      status: "unavailable", draftId, reason: "This draft run is unavailable. End Run to draft again.",
+    });
+    expect(useDraftStore.getState()).toMatchObject({ draftId, runState: null });
+    expect(await actualPersistence.loadDraftRun(draftId)).toEqual(wrongOwnerRun);
+    expect(localStorage.getItem(ACTIVE_QUICK_DRAFT_KEY)).not.toBeNull();
+    expect(persistence.cleanupQuickDraftLifecycle).not.toHaveBeenCalled();
+
+    await actualPersistence.saveDraftRun(draftId, run);
+    expect(await useDraftStore.getState().resumeDraft()).toEqual({ status: "resumed", draftId });
+    expect(useDraftStore.getState()).toMatchObject({ phase: "playing", runState: run });
+    await actualPersistence.saveDraftRun(draftId, wrongOwnerRun);
+    const navigate = vi.fn();
+    await expect(useDraftStore.getState().launchNextMatch(navigate)).rejects.toThrow("This draft run is unavailable. End Run to draft again.");
+    expect(await actualPersistence.loadDraftRun(draftId)).toEqual(wrongOwnerRun);
+    expect(formatGate.evaluate).not.toHaveBeenCalled();
+    expect(persistence.publishStagedDraftMatch).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+    expect(persistence.cleanupQuickDraftLifecycle).not.toHaveBeenCalled();
+
+    await actualPersistence.saveDraftRun(draftId, run);
+    await useDraftStore.getState().launchNextMatch(navigate);
+    expect(formatGate.evaluate).toHaveBeenCalledTimes(2);
+    expect(persistence.publishStagedDraftMatch).toHaveBeenCalledWith(expect.objectContaining({
+      draftId, gameId: "same-stage",
+    }));
+    expect(navigate).toHaveBeenCalledOnce();
+    await actualPersistence.clearDraftRun(draftId);
+    localStorage.removeItem(ACTIVE_QUICK_DRAFT_KEY);
+  });
+
+  it("refuses a nonfinite in-memory difficulty changed through the store after a valid resume", async () => {
+    const run: DraftRunState = { format: "run", results: [], playerDeck: ["Player"],
+      opponentDeck: ["Opponent"], usedBotSeats: [1] };
+    persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue({
+      id: "difficulty-change", setCode: "TST", difficulty: 3, kind: "Quick", phase: "playing",
+    });
+    persistence.loadDraftRun.mockResolvedValue(run);
+    persistence.loadQuickDraftSession.mockResolvedValue(null);
+    expect((await useDraftStore.getState().resumeDraft()).status).toBe("resumed");
+    useDraftStore.getState().setDifficulty(Number.NaN);
+    const navigate = vi.fn();
+    await expect(useDraftStore.getState().launchNextMatch(navigate)).rejects.toThrow("This draft run is unavailable. End Run to draft again.");
+    expect(formatGate.evaluate).not.toHaveBeenCalled();
+    expect(persistence.publishStagedDraftMatch).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it("keeps the same unresolved run-only stage after publisher rejection and retries it", async () => {
+    const run: DraftRunState = { format: "run", results: [], playerDeck: ["Player"],
+      opponentDeck: ["Opponent"], usedBotSeats: [1],
+      activeMatch: { draftId: "publish-retry", gameId: "same-stage", format: "run",
+        resultCountAtLaunch: 0, botSeat: 1, opponentDeck: ["Opponent"] } };
+    persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue({
+      id: "publish-retry", setCode: "TST", difficulty: 2, kind: "Quick", phase: "playing",
+    });
+    persistence.loadDraftRun.mockResolvedValue(run);
+    persistence.loadQuickDraftSession.mockResolvedValue(null);
+    expect((await useDraftStore.getState().resumeDraft()).status).toBe("resumed");
+    persistence.publishStagedDraftMatch.mockRejectedValueOnce(new Error("handoff write failed"));
+    const navigate = vi.fn();
+    await expect(useDraftStore.getState().launchNextMatch(navigate)).rejects.toThrow("handoff write failed");
+    expect(formatGate.evaluate).toHaveBeenCalledTimes(2);
+    expect(useDraftStore.getState()).toMatchObject({ phase: "playing", runState: run });
+    expect(navigate).not.toHaveBeenCalled();
+    await useDraftStore.getState().launchNextMatch(navigate);
+    const publishedCalls = persistence.publishStagedDraftMatch.mock.calls as unknown as Array<[{ gameId: string }]>;
+    expect(publishedCalls.map(([input]) => input.gameId)).toEqual(["same-stage", "same-stage"]);
+    expect(navigate).toHaveBeenCalledOnce();
+  });
+
+  it.each(["serialized", "literal"])("keeps nonfinite %s metadata at the parser boundary", async (encoding) => {
+    const actualPersistence = await vi.importActual<typeof import("../../services/quickDraftPersistence")>(
+      "../../services/quickDraftPersistence",
+    );
+    const raw = encoding === "serialized"
+      ? JSON.stringify({ id: "nonfinite", setCode: "TST", difficulty: Number.NaN,
+        phase: "playing", pickCount: 40, updatedAt: Date.now() })
+      : `{ "id": "nonfinite", "setCode": "TST", "difficulty": NaN, "phase": "playing", "pickCount": 40, "updatedAt": ${Date.now()} }`;
+    localStorage.setItem(ACTIVE_QUICK_DRAFT_KEY, raw);
+    expect(await actualPersistence.inspectActiveQuickDraftLifecycle("inspect")).toBeNull();
+    expect(localStorage.getItem(ACTIVE_QUICK_DRAFT_KEY)).toBeNull();
+    expect(persistence.loadDraftRun).not.toHaveBeenCalled();
+  });
+
   it("routes_resume_suggestions_and_submit_through_workspace_installation", async () => {
+    // This drafting-session case has no durable run, regardless of earlier launch fixtures.
+    persistence.loadDraftRun.mockReset().mockResolvedValue(null);
     const savedWorkspace = {
       ...createDraftWorkspaceState(),
       placements: {
@@ -666,7 +1653,6 @@ describe("draft store workspace authority", () => {
       persistedPhase: "playing",
       sessionStatus: "Pairing",
       expectedPhase: "playing",
-      fetchDatabase: true,
     },
     {
       label: "Sealed run finished (session Pairing, run complete)",
@@ -674,7 +1660,6 @@ describe("draft store workspace authority", () => {
       persistedPhase: "complete",
       sessionStatus: "Pairing",
       expectedPhase: "complete",
-      fetchDatabase: true,
     },
     {
       label: "Quick run between games (session Complete, run in progress)",
@@ -682,7 +1667,6 @@ describe("draft store workspace authority", () => {
       persistedPhase: "playing",
       sessionStatus: "Complete",
       expectedPhase: "playing",
-      fetchDatabase: false,
     },
     {
       label: "Quick run finished (session Complete, run complete)",
@@ -690,18 +1674,13 @@ describe("draft store workspace authority", () => {
       persistedPhase: "complete",
       sessionStatus: "Complete",
       expectedPhase: "complete",
-      fetchDatabase: false,
     },
   ])("resume keeps the run phase: $label", async ({
     kind,
     persistedPhase,
     sessionStatus,
     expectedPhase,
-    fetchDatabase,
   }) => {
-    if (fetchDatabase) {
-      vi.stubGlobal("fetch", vi.fn(async () => ({ text: async () => "database" })));
-    }
     persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue({
       id: "run-id",
       setCode: "TST",
@@ -1397,8 +2376,8 @@ describe("draft store workspace authority", () => {
   it.each([
     { durable: undefined, projected: [], expected: [], saves: 1 },
     { durable: undefined, projected: undefined, expected: undefined, saves: 0 },
-    { durable: ["Original", "Original"], projected: ["Other"], expected: ["Original", "Original"], saves: 0 },
-    { durable: [], projected: ["Other"], expected: [], saves: 0 },
+    { durable: ["Original", "Original"], projected: ["Other"], expected: ["Original", "Original"], saves: 1 },
+    { durable: [], projected: ["Other"], expected: [], saves: 1 },
     { durable: null, projected: ["Other"], expected: null, saves: 0 },
   ])("resumes legacy source metadata only from the host accessor: $durable / $projected", async ({ durable, projected, expected, saves }) => {
     persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue({
@@ -1410,18 +2389,24 @@ describe("draft store workspace authority", () => {
       poolSortMode: "color", poolPanelOpen: true, workspace: null,
     });
     persistence.loadDraftRun.mockResolvedValueOnce({
-      format: "run", results: [], playerDeck: [], opponentDeck: ["Opponent"],
+      format: "run", results: [], playerDeck: ["Player"], opponentDeck: ["Opponent"],
       usedBotSeats: [1], booster_pack_pool: durable,
     });
     const imported = view([card("picked")]);
     wasm.import_draft_session.mockReturnValue(imported);
     wasm.booster_pack_pool_for_game.mockReturnValue(projected);
-    await useDraftStore.getState().resumeDraft();
+    const outcome = await useDraftStore.getState().resumeDraft();
     expect(wasm.import_draft_session).toHaveBeenCalledWith("legacy session", 2);
-    expect(useDraftStore.getState().view).toEqual(imported);
-    expect(useDraftStore.getState().runState?.booster_pack_pool).toEqual(expected);
+    if (Array.isArray(expected)) {
+      expect(outcome).toEqual({ status: "resumed", draftId: "legacy" });
+      expect(useDraftStore.getState().view).toEqual(imported);
+      expect(useDraftStore.getState().runState?.booster_pack_pool).toEqual(expected);
+    } else {
+      expect(outcome).toEqual({ status: "unavailable", draftId: "legacy", reason: "This draft run is unavailable. End Run to draft again." });
+      expect(useDraftStore.getState().runState).toBeNull();
+    }
     expect(persistence.saveDraftRun).toHaveBeenCalledTimes(saves);
-    if (saves) expect(persistence.saveDraftRun).toHaveBeenCalledWith("legacy", expect.objectContaining({ booster_pack_pool: [] }));
+    if (saves) expect(persistence.saveDraftRun).toHaveBeenCalledWith("legacy", expect.objectContaining({ booster_pack_pool: expected, lastOpponentSeat: 1, draft_set_codes: [] }));
   });
 
   it.each([false, true])("durably upgrades a legacy staged launch from the engine view (next=%s)", async (next) => {
@@ -1477,8 +2462,11 @@ describe("draft store workspace authority", () => {
     const randomUuid = vi.spyOn(crypto, "randomUUID")
       .mockReturnValue("00000000-0000-4000-8000-000000000123");
     let stagedRun: unknown;
+    persistence.loadDraftRun.mockResolvedValueOnce(null);
     persistence.publishInitialDraftMatch.mockImplementationOnce(async (input: { run: unknown }) => {
       stagedRun = input.run;
+      // The publication reached the durable run write before metadata failed.
+      persistence.loadDraftRun.mockResolvedValue(stagedRun);
       throw new Error("metadata failed");
     });
     const navigate = vi.fn();
@@ -1489,7 +2477,7 @@ describe("draft store workspace authority", () => {
       run: expect.objectContaining({ booster_pack_pool: pool }),
       payload: expect.objectContaining({ booster_pack_pool: pool }),
     }));
-    persistence.loadDraftRun.mockResolvedValueOnce(stagedRun);
+    expect(persistence.persistQuickDraftSnapshot).not.toHaveBeenCalled();
     // A later same-labelled cube must never replace an already bound source.
     if (pool !== undefined) wasm.booster_pack_pool_for_game.mockReturnValue(["Other cube"]);
     await useDraftStore.getState().launchMatch(navigate);
@@ -1512,4 +2500,1209 @@ describe("draft store workspace authority", () => {
       payload: expect.objectContaining({ booster_pack_pool: pool }),
     }));
   });
+
+  describe("draft deck autosave", () => {
+    beforeEach(async () => {
+      // Real timers for this block: fake-indexeddb schedules through setImmediate, which the
+      // outer `beforeEach`'s vi.useFakeTimers() would otherwise stall, including inside the
+      // saved-deck transaction the autosave runs under during the test body.
+      vi.useRealTimers();
+      installFifoWebLocks();
+      await resetSavedDeckLibraryForTests();
+      useAppNotificationStore.setState({ notification: null, expiresAt: 0 });
+    });
+    afterEach(() => {
+      uninstallWebLocks();
+      localStorage.clear();
+    });
+
+    it("saves a quick draft submission as the Quick Draft autosave", async () => {
+      await start([card("bolt", "Bolt")]);
+      useDraftStore.getState().setWorkspacePlacement("bolt", { zone: "deck", row: 0, column: 0, order: 0 });
+      wasm.submit_deck.mockReturnValue({ ...view([card("bolt", "Bolt")]), status: "Pairing" });
+
+      await useDraftStore.getState().submitDeck();
+      await awaitSavedDeckLibraryIdle();
+
+      expect(loadSavedDeck("[Autosave] Quick Draft")?.main).toEqual([{ name: "Bolt", count: 1 }]);
+      expect(loadSavedDeckFormat("[Autosave] Quick Draft")).toBe("Limited");
+      expect(getDeckMeta("[Autosave] Quick Draft")?.autosaveSlot).toBe("Quick");
+    });
+
+    it("keeps a drafted sideboard card in the autosave when a virtual card of the same name is in the main deck", async () => {
+      await start([card("bolt", "Bolt"), card("dplains", "Plains")]);
+      useDraftStore.getState().setWorkspacePlacement("bolt", { zone: "deck", row: 0, column: 0, order: 0 });
+      useDraftStore.getState().setWorkspacePlacement("dplains", { zone: "sideboard", row: 0, column: 0, order: 0 });
+      useDraftStore.getState().addBasicLand("Plains");
+      wasm.submit_deck.mockReturnValue({
+        ...view([card("bolt", "Bolt"), card("dplains", "Plains")]),
+        status: "Pairing",
+      });
+
+      await useDraftStore.getState().submitDeck();
+      await awaitSavedDeckLibraryIdle();
+
+      expect(formatGate.evaluate).toHaveBeenCalledWith(expect.objectContaining({
+        main_deck: ["Bolt", "Plains"], sideboard: [], commander: [],
+      }));
+      expect(wasm.submit_deck).toHaveBeenLastCalledWith(JSON.stringify(["Bolt", "Plains"]), JSON.stringify([]));
+      const saved = loadSavedDeck("[Autosave] Quick Draft");
+      expect(saved?.main).toEqual(expect.arrayContaining([
+        { name: "Bolt", count: 1 }, { name: "Plains", count: 1 },
+      ]));
+      expect(saved?.sideboard).toEqual([{ name: "Plains", count: 1 }]);
+    });
+
+    it("saves a solo sealed submission as the Sealed autosave", async () => {
+      vi.stubGlobal("fetch", vi.fn(async () => ({ text: async () => "database" })));
+      const sealedView = { ...view([card("bolt", "Bolt")]), kind: "Sealed" as const, status: "Deckbuilding" as const };
+      wasm.start_sealed_draft.mockReturnValue(sealedView);
+      await useDraftStore.getState().startSealedDraft("pool", "TST", "Test", 2);
+      useDraftStore.getState().setWorkspacePlacement("bolt", { zone: "deck", row: 0, column: 0, order: 0 });
+      wasm.submit_deck.mockReturnValue({ ...sealedView, status: "Pairing" });
+
+      await useDraftStore.getState().submitDeck();
+      await awaitSavedDeckLibraryIdle();
+
+      expect(getDeckMeta("[Autosave] Sealed")?.autosaveSlot).toBe("Sealed");
+    });
+
+    it("saves a solo cube submission as the Cube Draft autosave, not the Quick Draft one", async () => {
+      vi.stubGlobal("fetch", vi.fn(async () => ({ text: async () => "database" })));
+      const cubeView = view([card("bolt", "Bolt")]);
+      wasm.start_quick_cube_draft.mockReturnValue(cubeView);
+      await useDraftStore.getState().startCubeDraft("cube", "Cube", {
+        pod_size: 8, pack_count: 3, cards_per_pack: 15, min_deck_size: 40,
+        addable_cards: { policy: "StandardBasics", custom: [] },
+      }, 2);
+      useDraftStore.getState().setWorkspacePlacement("bolt", { zone: "deck", row: 0, column: 0, order: 0 });
+      wasm.submit_deck.mockReturnValue({ ...cubeView, status: "Pairing" });
+
+      await useDraftStore.getState().submitDeck();
+      await awaitSavedDeckLibraryIdle();
+
+      expect(getDeckMeta("[Autosave] Cube Draft")?.autosaveSlot).toBe("Cube");
+      expect(localStorage.getItem(STORAGE_KEY_PREFIX + "[Autosave] Quick Draft")).toBeNull();
+    });
+
+    it("still resolves the submission when the autosave write throws", async () => {
+      await start([card("bolt", "Bolt")]);
+      useDraftStore.getState().setWorkspacePlacement("bolt", { zone: "deck", row: 0, column: 0, order: 0 });
+      wasm.submit_deck.mockReturnValue({ ...view([card("bolt", "Bolt")]), status: "Pairing" });
+      // A stub object (rather than spying `Storage.prototype.setItem`) is used
+      // deliberately.
+      const backing = new Map<string, string>();
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i)!;
+        backing.set(key, localStorage.getItem(key)!);
+      }
+      let setItemCalls = 0;
+      vi.stubGlobal("localStorage", {
+        get length() { return backing.size; },
+        key: (index: number) => [...backing.keys()][index] ?? null,
+        getItem: (key: string) => backing.get(key) ?? null,
+        removeItem: (key: string) => { backing.delete(key); },
+        setItem: (key: string, value: string) => {
+          setItemCalls += 1;
+          if (key.startsWith(STORAGE_KEY_PREFIX)) {
+            throw new DOMException("Quota exceeded", "QuotaExceededError");
+          }
+          backing.set(key, value);
+        },
+        clear: () => { backing.clear(); },
+      });
+
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      await expect(useDraftStore.getState().submitDeck()).resolves.toBeUndefined();
+      await awaitSavedDeckLibraryIdle();
+      await vi.waitFor(() =>
+        expect(warnSpy).toHaveBeenCalledWith("[draftDeckAutosave] autosave failed:", expect.anything()),
+      );
+
+      expect(useDraftStore.getState().phase).toBe("launching");
+      expect(listSavedDeckNames()).toEqual([]);
+      expect(setItemCalls).toBeGreaterThan(0);
+      vi.unstubAllGlobals();
+    });
+
+    it("writes no autosave when the submission is rejected", async () => {
+      await start([card("bolt", "Bolt")]);
+      wasm.submit_deck.mockImplementationOnce(() => { throw new Error("engine rejected submission"); });
+
+      await expect(useDraftStore.getState().submitDeck()).rejects.toThrow("engine rejected submission");
+
+      expect(listSavedDeckNames()).toEqual([]);
+    });
+
+    it("the submission resolves while the autosave waits for the library", async () => {
+      await start([card("bolt", "Bolt")]);
+      useDraftStore.getState().setWorkspacePlacement("bolt", { zone: "deck", row: 0, column: 0, order: 0 });
+      wasm.submit_deck.mockReturnValue({ ...view([card("bolt", "Bolt")]), status: "Pairing" });
+
+      let releaseHolder!: () => void;
+      const held = new Promise<void>((resolve) => {
+        releaseHolder = resolve;
+      });
+      const holder = withSavedDeckLibrary(() => held);
+      await vi.waitFor(async () => {
+        expect((await navigator.locks.query()).held).toHaveLength(1);
+      });
+
+      let settled = false;
+      void useDraftStore.getState().submitDeck().then(() => {
+        settled = true;
+      });
+      await vi.waitFor(() => expect(settled).toBe(true));
+      expect((await navigator.locks.query()).pending).toHaveLength(1);
+
+      releaseHolder();
+      await holder;
+      await awaitSavedDeckLibraryIdle();
+      expect(loadSavedDeck("[Autosave] Quick Draft")).not.toBeNull();
+    });
+
+    it("shows a busy toast when the autosave is skipped by a lock-wait timeout, and the submission still resolves", async () => {
+      await start([card("bolt", "Bolt")]);
+      useDraftStore.getState().setWorkspacePlacement("bolt", { zone: "deck", row: 0, column: 0, order: 0 });
+      wasm.submit_deck.mockReturnValue({ ...view([card("bolt", "Bolt")]), status: "Pairing" });
+
+      let releaseHolder!: () => void;
+      const held = new Promise<void>((resolve) => {
+        releaseHolder = resolve;
+      });
+      const holder = withSavedDeckLibrary(() => held);
+      await vi.waitFor(async () => {
+        expect((await navigator.locks.query()).held).toHaveLength(1);
+      });
+      setSavedDeckTxnLockWaitForTests(50);
+
+      await expect(useDraftStore.getState().submitDeck()).resolves.toBeUndefined();
+
+      await vi.waitFor(() => {
+        expect(useAppNotificationStore.getState().notification).toEqual({
+          title: "Couldn't autosave your draft deck",
+          description: "Another Phase tab is busy. Close other Phase tabs and try again.",
+        });
+      });
+
+      setSavedDeckTxnLockWaitForTests(Number.POSITIVE_INFINITY);
+      releaseHolder();
+      await holder;
+    });
+
+    it("shows no toast when the autosave commits", async () => {
+      await start([card("bolt", "Bolt")]);
+      useDraftStore.getState().setWorkspacePlacement("bolt", { zone: "deck", row: 0, column: 0, order: 0 });
+      wasm.submit_deck.mockReturnValue({ ...view([card("bolt", "Bolt")]), status: "Pairing" });
+
+      await useDraftStore.getState().submitDeck();
+      await awaitSavedDeckLibraryIdle();
+
+      expect(loadSavedDeck("[Autosave] Quick Draft")).not.toBeNull();
+      expect(useAppNotificationStore.getState().notification).toBeNull();
+    });
+  });
+  it("rejects an ante human deck before SubmitDeck while admitting its legal sibling", async () => {
+    const pool = [card("ante", "Contract from Below"), card("legal", "Forest")];
+    await start(pool);
+    const reason = "Can't be in a deck or sideboard unless the game is played for ante: Contract from Below";
+    formatGate.evaluate.mockResolvedValueOnce({ compatible: false, reasons: [reason] });
+    await expect(useDraftStore.getState().submitDeck()).rejects.toThrow(reason);
+    expect(formatGate.evaluate).toHaveBeenCalledWith(expect.objectContaining({
+      main_deck: ["Contract from Below", "Forest"], sideboard: [], commander: [],
+      draft_set_codes: [], selected_format: "Limited", selected_match_type: "Bo1", player_count: 2,
+    }));
+    expect(wasm.submit_deck).not.toHaveBeenCalled();
+    expect(useDraftStore.getState().phase).toBe("drafting");
+
+    useDraftStore.getState().setWorkspacePlacement("ante", { zone: "sideboard", row: 0, column: 0, order: 0 });
+    wasm.submit_deck.mockReturnValue({ ...view(pool), status: "Pairing" });
+    await useDraftStore.getState().submitDeck();
+    expect(formatGate.evaluate).toHaveBeenLastCalledWith(expect.objectContaining({ main_deck: ["Forest"] }));
+    expect(wasm.submit_deck).toHaveBeenCalledOnce();
+    expect(useDraftStore.getState().phase).toBe("launching");
+  });
+
+  it("fails closed on unavailable submission gates and invalidates an edited pending deck", async () => {
+    await start([card("first", "Forest")]);
+    formatGate.evaluate.mockRejectedValueOnce(new Error("gate transport failed"));
+    await expect(useDraftStore.getState().submitDeck()).rejects.toThrow("gate transport failed");
+    expect(wasm.submit_deck).not.toHaveBeenCalled();
+
+    const delayed = deferred<{ compatible: boolean; reasons: string[] }>();
+    formatGate.evaluate.mockReturnValueOnce(delayed.promise);
+    const submission = useDraftStore.getState().submitDeck();
+    await vi.waitFor(() => expect(formatGate.evaluate).toHaveBeenCalledTimes(2));
+    useDraftStore.setState({ workspaceState: { ...useDraftStore.getState().workspaceState! } });
+    delayed.resolve({ compatible: true, reasons: [] });
+    await expect(submission).rejects.toThrow("Stale draft deck submission");
+    expect(wasm.submit_deck).not.toHaveBeenCalled();
+  });
+
+  it("preflights both exact Bo1 seats before initial publication and rejects an invalid opponent", async () => {
+    await start([card("human", "Forest")]);
+    useDraftStore.setState({ phase: "launching" });
+    wasm.get_bot_deck.mockReturnValue({ main_deck: ["Opponent"], lands: {} });
+    persistence.loadDraftRun.mockResolvedValue(null);
+    const navigate = vi.fn();
+    await useDraftStore.getState().launchMatch(navigate);
+    expect(formatGate.evaluate).toHaveBeenCalledTimes(2);
+    const published = persistence.publishInitialDraftMatch.mock.calls[0][0] as {
+      payload: { player: { main_deck: string[]; sideboard: string[]; commander: string[] }; opponent: { main_deck: string[]; sideboard: string[]; commander: string[] } };
+      run: DraftRunState; meta: { runFormat: string };
+    };
+    expect(published.payload.player.main_deck).toEqual(["Forest"]);
+    expect(published.payload.opponent.main_deck).toEqual(["Opponent"]);
+    for (const deck of [published.payload.player, published.payload.opponent]) {
+      expect(formatGate.evaluate).toHaveBeenCalledWith(expect.objectContaining({
+        main_deck: deck.main_deck, sideboard: deck.sideboard, commander: deck.commander,
+        selected_format: "Limited", selected_match_type: "Bo1", player_count: 2,
+      }));
+      expect(deck.sideboard).toEqual([]);
+    }
+    expect(published.run.format).toBe("run");
+    expect(published.run.activeMatch?.format).toBe("run");
+    expect(published.meta.runFormat).toBe("run");
+    expect(navigate).toHaveBeenCalledWith(expect.stringContaining("match=bo1"));
+
+    useDraftStore.getState().reset();
+    await start([card("human", "Forest")]);
+    useDraftStore.setState({ phase: "launching" });
+    wasm.get_bot_deck.mockReturnValue({ main_deck: ["Opponent"], lands: {} });
+    persistence.loadDraftRun.mockResolvedValue(null);
+    persistence.publishInitialDraftMatch.mockClear();
+    navigate.mockClear();
+    formatGate.evaluate.mockClear();
+    formatGate.evaluate.mockImplementation(async (request: unknown) => ({
+      compatible: (request as { main_deck: string[] }).main_deck[0] !== "Opponent",
+      reasons: (request as { main_deck: string[] }).main_deck[0] === "Opponent" ? ["opponent rejected"] : [],
+    }));
+    await expect(useDraftStore.getState().launchMatch(navigate)).rejects.toThrow("opponent rejected");
+    expect(formatGate.evaluate).toHaveBeenCalledTimes(2);
+    expect(persistence.publishInitialDraftMatch).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+    expect(useDraftStore.getState().phase).toBe("launching");
+  });
+
+  it("tries a second bot after an exact opponent refusal and publishes only that seat", async () => {
+    await startLaunchWithBotSeats([1, 2]);
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    vi.spyOn(crypto, "randomUUID").mockReturnValue("00000000-0000-4000-8000-000000000222");
+    wasm.get_bot_deck.mockImplementation((seat: number) => ({
+      main_deck: [seat === 1 ? "Rejected Bot" : "Legal Bot"], lands: { Forest: 39 },
+    }));
+    formatGate.evaluate.mockImplementation(async (request: unknown) => ({
+      compatible: (request as { main_deck: string[] }).main_deck[0] !== "Rejected Bot",
+      reasons: (request as { main_deck: string[] }).main_deck[0] === "Rejected Bot"
+        ? ["opponent rejected"] : [],
+    }));
+    const navigate = vi.fn();
+    await useDraftStore.getState().launchMatch(navigate);
+
+    expect(wasm.get_bot_deck.mock.calls.map(([seat]) => seat)).toEqual([1, 2]);
+    expect(formatGate.evaluate).toHaveBeenCalledTimes(3);
+    expect(formatGate.evaluate).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      main_deck: ["Forest"], sideboard: [], selected_format: "Limited", selected_match_type: "Bo1",
+    }));
+    expect(formatGate.evaluate).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      main_deck: ["Rejected Bot", ...Array<string>(39).fill("Forest")], sideboard: [],
+    }));
+    expect(formatGate.evaluate).toHaveBeenNthCalledWith(3, expect.objectContaining({
+      main_deck: ["Legal Bot", ...Array<string>(39).fill("Forest")], sideboard: [],
+    }));
+    expect(persistence.publishInitialDraftMatch).toHaveBeenCalledOnce();
+    const published = persistence.publishInitialDraftMatch.mock.calls[0][0] as {
+      run: DraftRunState; payload: { opponent: { main_deck: string[] } }; gameId: string;
+    };
+    expect(published.run.usedBotSeats).toEqual([2]);
+    expect(published.run.activeMatch).toMatchObject({ botSeat: 2, gameId: published.gameId });
+    expect(published.run.opponentDeck).toEqual(published.payload.opponent.main_deck);
+    expect(published.payload.opponent.main_deck[0]).toBe("Legal Bot");
+    expect(navigate).toHaveBeenCalledOnce();
+  });
+
+  it("keeps first-valid selection finite and leaves an all-invalid run unpublished", async () => {
+    await startLaunchWithBotSeats([1, 2]);
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    wasm.get_bot_deck.mockImplementation((seat: number) => ({ main_deck: [`Bot ${seat}`], lands: {} }));
+    const navigate = vi.fn();
+    await useDraftStore.getState().launchMatch(navigate);
+    expect(wasm.get_bot_deck.mock.calls.map(([seat]) => seat)).toEqual([1]);
+    expect(persistence.publishInitialDraftMatch).toHaveBeenCalledOnce();
+    expect(navigate).toHaveBeenCalledOnce();
+
+    useDraftStore.getState().reset();
+    await startLaunchWithBotSeats([1, 2]);
+    wasm.get_bot_deck.mockClear();
+    persistence.publishInitialDraftMatch.mockClear();
+    navigate.mockClear();
+    formatGate.evaluate.mockClear();
+    formatGate.evaluate.mockImplementation(async (request: unknown) => ({
+      compatible: (request as { main_deck: string[] }).main_deck[0] === "Forest",
+      reasons: (request as { main_deck: string[] }).main_deck[0] === "Forest" ? [] : ["opponent rejected"],
+    }));
+    await expect(useDraftStore.getState().launchMatch(navigate)).rejects.toThrow("opponent rejected");
+    expect(wasm.get_bot_deck.mock.calls.map(([seat]) => seat)).toEqual([1, 2]);
+    expect(formatGate.evaluate).toHaveBeenCalledTimes(3);
+    expect(persistence.publishInitialDraftMatch).not.toHaveBeenCalled();
+    expect(useDraftStore.getState().runState).toBeNull();
+    expect(useDraftStore.getState().phase).toBe("launching");
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it("tries the next bot after generation failure but aborts on gate transport or player refusal", async () => {
+    await startLaunchWithBotSeats([]);
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    wasm.get_bot_deck.mockImplementation((seat: number) => {
+      if (seat === 1) throw new Error("card database unavailable");
+      return { main_deck: ["Legal Bot"], lands: {} };
+    });
+    await useDraftStore.getState().launchMatch(vi.fn());
+    expect(wasm.get_bot_deck.mock.calls.map(([seat]) => seat)).toEqual([1, 2]);
+    expect(persistence.publishInitialDraftMatch).toHaveBeenCalledOnce();
+
+    for (const failure of ["transport", "malformed", "player"] as const) {
+      useDraftStore.getState().reset();
+      await startLaunchWithBotSeats([1, 2]);
+      wasm.get_bot_deck.mockReset();
+      wasm.get_bot_deck.mockReturnValue({ main_deck: ["Legal Bot"], lands: {} });
+      formatGate.evaluate.mockReset();
+      formatGate.evaluate.mockImplementation(async (request: unknown) => {
+        if (failure === "transport") throw new Error("gate transport failed");
+        if (failure === "malformed") return {} as { compatible: boolean; reasons: string[] };
+        return (request as { main_deck: string[] }).main_deck[0] === "Forest"
+          ? { compatible: false, reasons: ["player rejected"] }
+          : { compatible: true, reasons: [] };
+      });
+      persistence.publishInitialDraftMatch.mockClear();
+      await expect(useDraftStore.getState().launchMatch(vi.fn())).rejects.toThrow(
+        failure === "transport" ? "gate transport failed"
+          : failure === "malformed" ? "Deck compatibility is unavailable right now — try again before submitting." : "player rejected",
+      );
+      expect(wasm.get_bot_deck).toHaveBeenCalledOnce();
+      expect(persistence.publishInitialDraftMatch).not.toHaveBeenCalled();
+    }
+  });
+
+  it("rematches a previously used legal seat after the unused seat fails", async () => {
+    await startLaunchWithBotSeats([1, 2]);
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    useDraftStore.getState().setRunFormat("run");
+    const draftId = useDraftStore.getState().draftId!;
+    const prior: DraftRunState = {
+      format: "run", results: [{ gameId: "finished", result: "win" }],
+      playerDeck: ["Forest"], opponentDeck: ["Old Bot"], usedBotSeats: [1],
+    };
+    useDraftStore.setState({ phase: "playing", runState: prior });
+    persistence.loadDraftRun.mockResolvedValue(prior);
+    wasm.get_bot_deck.mockImplementation((seat: number) => ({
+      main_deck: [seat === 2 ? "Bad Bot" : "Returning Bot"], lands: {},
+    }));
+    formatGate.evaluate.mockImplementation(async (request: unknown) => ({
+      compatible: (request as { main_deck: string[] }).main_deck[0] !== "Bad Bot",
+      reasons: (request as { main_deck: string[] }).main_deck[0] === "Bad Bot" ? ["bad bot deck"] : [],
+    }));
+    const navigate = vi.fn();
+    await useDraftStore.getState().launchNextMatch(navigate);
+    expect(wasm.get_bot_deck.mock.calls.map(([seat]) => seat)).toEqual([2, 1]);
+    expect(formatGate.evaluate).toHaveBeenCalledTimes(3);
+    const published = (persistence.publishStagedDraftMatch.mock.calls as unknown as Array<[unknown]>)[0][0] as {
+      run: DraftRunState; payload: { opponent: { main_deck: string[] } };
+    };
+    expect(published.run.activeMatch).toMatchObject({ draftId, botSeat: 1, resultCountAtLaunch: 1 });
+    expect(published.run.usedBotSeats).toEqual([1]);
+    expect(published.run.results).toEqual(prior.results);
+    expect(published.payload.opponent.main_deck).toEqual(["Returning Bot"]);
+    expect(navigate).toHaveBeenCalledOnce();
+  });
+
+  it("leaves a next-match run unchanged when every distinct bot seat is refused", async () => {
+    await startLaunchWithBotSeats([1, 2, 2]);
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    useDraftStore.getState().setRunFormat("run");
+    const prior: DraftRunState = {
+      format: "run", results: [{ gameId: "finished", result: "win" }],
+      playerDeck: ["Forest"], opponentDeck: ["Old Bot"], usedBotSeats: [1],
+    };
+    useDraftStore.setState({ phase: "playing", runState: prior });
+    persistence.loadDraftRun.mockResolvedValue(prior);
+    wasm.get_bot_deck.mockImplementation((seat: number) => ({ main_deck: [`Bad Bot ${seat}`], lands: {} }));
+    formatGate.evaluate.mockImplementation(async (request: unknown) => ({
+      compatible: (request as { main_deck: string[] }).main_deck[0] === "Forest",
+      reasons: (request as { main_deck: string[] }).main_deck[0] === "Forest" ? [] : ["no legal bot deck"],
+    }));
+    const navigate = vi.fn();
+    await expect(useDraftStore.getState().launchNextMatch(navigate)).rejects.toThrow("no legal bot deck");
+    expect(wasm.get_bot_deck.mock.calls.map(([seat]) => seat)).toEqual([2, 1]);
+    expect(formatGate.evaluate).toHaveBeenCalledTimes(3);
+    expect(persistence.publishStagedDraftMatch).not.toHaveBeenCalled();
+    expect(useDraftStore.getState().runState).toBe(prior);
+    expect(useDraftStore.getState().runState?.usedBotSeats).toEqual([1]);
+    expect(useDraftStore.getState().runState?.results).toEqual(prior.results);
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it("keeps Bo3 unpublished on the player's exact sideboard refusal even with another bot", async () => {
+    await startLaunchWithBotSeats([1, 2]);
+    useDraftStore.setState((state) => ({
+      view: { ...state.view!, match_config: { match_type: "Bo3" } },
+    }));
+    useDraftStore.getState().setRunFormat("bo3");
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    wasm.get_bot_deck.mockReturnValue({ main_deck: ["Legal Bot"], lands: {} });
+    formatGate.evaluate.mockResolvedValue({ compatible: false, reasons: ["BO3 requires a sideboard"] });
+    await expect(useDraftStore.getState().launchMatch(vi.fn())).rejects.toThrow("BO3 requires a sideboard");
+    expect(wasm.get_bot_deck).toHaveBeenCalledOnce();
+    expect(formatGate.evaluate).toHaveBeenCalledTimes(2);
+    for (const [request] of formatGate.evaluate.mock.calls) {
+      expect(request).toMatchObject({ selected_format: "Limited", selected_match_type: "Bo3", sideboard: [] });
+    }
+    expect(persistence.publishInitialDraftMatch).not.toHaveBeenCalled();
+    expect(useDraftStore.getState().runFormat).toBe("bo3");
+  });
+
+  it("keeps a selected Bo3 first match unpublished and saves the choice before immediate resume", async () => {
+    const pool = [card("human", "Forest")];
+    wasm.start_quick_draft.mockReturnValue({ ...view(pool), match_config: { match_type: "Bo3" } });
+    await useDraftStore.getState().startDraft("pool", "TST", "Test", 2);
+    useDraftStore.setState({ phase: "launching" });
+    wasm.get_bot_deck.mockReturnValue({ main_deck: ["Opponent"], lands: {} });
+    persistence.loadDraftRun.mockResolvedValue(null);
+    useDraftStore.getState().setRunFormat("bo3");
+    formatGate.evaluate.mockImplementation(async (request: unknown) => ({
+      compatible: (request as { selected_match_type: string }).selected_match_type !== "Bo3",
+      reasons: (request as { selected_match_type: string }).selected_match_type === "Bo3"
+        ? ["BO3 requires a sideboard"] : [],
+    }));
+    const navigate = vi.fn();
+    await expect(useDraftStore.getState().launchMatch(navigate)).rejects.toThrow("BO3 requires a sideboard");
+    expect(formatGate.evaluate).toHaveBeenCalledTimes(2);
+    for (const [request] of formatGate.evaluate.mock.calls) {
+      expect(request).toMatchObject({ selected_format: "Limited", selected_match_type: "Bo3", sideboard: [] });
+    }
+    expect(persistence.publishInitialDraftMatch).not.toHaveBeenCalled();
+    expect(persistence.publishStagedDraftMatch).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+    expect(useDraftStore.getState().runFormat).toBe("bo3");
+    expect(vi.getTimerCount()).toBe(0);
+    expect(persistence.persistQuickDraftSnapshot).toHaveBeenCalledOnce();
+    const snapshot = persistence.persistQuickDraftSnapshot.mock.calls[0];
+    expect(snapshot[3].runFormat).toBe("bo3");
+    expect(snapshot[2]).toMatchObject({ workspace: useDraftStore.getState().workspaceState });
+
+    persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue(snapshot[3]);
+    persistence.loadQuickDraftSession.mockResolvedValue({
+      sessionJson: snapshot[1], mainDeck: ["Forest"], landCounts: {}, poolSortMode: "color",
+      poolPanelOpen: true, workspace: (snapshot[2] as { workspace: unknown }).workspace,
+    });
+    wasm.import_draft_session.mockReturnValue({ ...view(pool), status: "Pairing", match_config: { match_type: "Bo3" } });
+    await useDraftStore.getState().resumeDraft();
+    expect(useDraftStore.getState().phase).toBe("launching");
+    expect(useDraftStore.getState().runFormat).toBe("bo3");
+  });
+
+  it("saves an immediate Bo3 choice when initial publication fails before the durable run write", async () => {
+    const pool = [card("human", "Forest")];
+    wasm.start_quick_draft.mockReturnValue({ ...view(pool), match_config: { match_type: "Bo3" } });
+    await useDraftStore.getState().startDraft("pool", "TST", "Test", 2);
+    useDraftStore.setState({ phase: "launching" });
+    wasm.get_bot_deck.mockReturnValue({ main_deck: ["Opponent"], lands: {} });
+    persistence.loadDraftRun.mockResolvedValue(null);
+    useDraftStore.getState().setRunFormat("bo3");
+    persistence.publishInitialDraftMatch.mockRejectedValueOnce(new Error("session write failed"));
+    const snapshotWrite = deferred<void>();
+    persistence.persistQuickDraftSnapshot.mockReturnValueOnce(snapshotWrite.promise);
+    const navigate = vi.fn();
+    let settled = false;
+    const launch = useDraftStore.getState().launchMatch(navigate).finally(() => { settled = true; });
+
+    await vi.waitFor(() => expect(persistence.persistQuickDraftSnapshot).toHaveBeenCalledOnce());
+    expect(formatGate.evaluate).toHaveBeenCalledTimes(2);
+    expect(persistence.publishInitialDraftMatch).toHaveBeenCalledOnce();
+    expect(persistence.loadDraftRun).toHaveBeenCalledTimes(2);
+    expect(settled).toBe(false);
+    expect(vi.getTimerCount()).toBe(0);
+    const snapshot = persistence.persistQuickDraftSnapshot.mock.calls[0];
+    expect(snapshot[2]).toMatchObject({ phase: "launching", workspace: useDraftStore.getState().workspaceState });
+    expect(snapshot[3]).toMatchObject({ phase: "launching", runFormat: "bo3" });
+    snapshotWrite.resolve();
+    await expect(launch).rejects.toThrow("session write failed");
+    expect(navigate).not.toHaveBeenCalled();
+    expect(useDraftStore.getState().phase).toBe("launching");
+    expect(useDraftStore.getState().runState).toBeNull();
+
+    persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue(snapshot[3]);
+    persistence.loadQuickDraftSession.mockResolvedValue({
+      sessionJson: snapshot[1], mainDeck: ["Forest"], landCounts: {}, poolSortMode: "color",
+      poolPanelOpen: true, workspace: (snapshot[2] as { workspace: unknown }).workspace,
+    });
+    wasm.import_draft_session.mockReturnValue({ ...view(pool), status: "Pairing", match_config: { match_type: "Bo3" } });
+    await useDraftStore.getState().resumeDraft();
+    expect(useDraftStore.getState().phase).toBe("launching");
+    expect(useDraftStore.getState().runFormat).toBe("bo3");
+    expect(useDraftStore.getState().runState).toBeNull();
+  });
+
+  it("publishes an immediate nondefault Sealed Full Run choice and reloads it from the durable run", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({ text: async () => "database" })));
+    const sealedView = { ...view([card("human", "Forest")]), kind: "Sealed" as const, status: "Deckbuilding" as const };
+    wasm.start_sealed_draft.mockReturnValue(sealedView);
+    await useDraftStore.getState().startSealedDraft("pool", "TST", "Test", 2);
+    useDraftStore.getState().completeSealedOpening();
+    wasm.submit_deck.mockReturnValue({ ...sealedView, status: "Pairing" });
+    await useDraftStore.getState().submitDeck();
+    expect(useDraftStore.getState().runFormat).toBe("single");
+    wasm.get_bot_deck.mockReturnValue({ main_deck: ["Opponent"], lands: {} });
+    persistence.loadDraftRun.mockResolvedValue(null);
+    formatGate.evaluate.mockClear();
+    useDraftStore.getState().setRunFormat("run");
+    const navigate = vi.fn();
+    await useDraftStore.getState().launchMatch(navigate);
+    expect(formatGate.evaluate).toHaveBeenCalledTimes(2);
+    for (const [request] of formatGate.evaluate.mock.calls) {
+      expect(request).toMatchObject({ selected_format: "Limited", selected_match_type: "Bo1", sideboard: [] });
+    }
+    expect(persistence.persistQuickDraftSnapshot).not.toHaveBeenCalled();
+    expect(persistence.publishInitialDraftMatch).toHaveBeenCalledOnce();
+    const published = persistence.publishInitialDraftMatch.mock.calls[0][0] as unknown as {
+      run: DraftRunState; meta: ActiveQuickDraftMeta; sessionJson: string;
+      snapshot: { mainDeck: string[]; landCounts: Record<string, number>; poolSortMode: string;
+        poolPanelOpen: boolean; workspace: unknown };
+    };
+    expect(published.run.format).toBe("run");
+    expect(published.run.activeMatch?.format).toBe("run");
+    expect(published.meta.runFormat).toBe("run");
+    expect(navigate).toHaveBeenCalledWith(expect.stringContaining("match=bo1"));
+
+    useDraftStore.getState().reset();
+    persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue(published.meta);
+    persistence.loadQuickDraftSession.mockResolvedValue({ sessionJson: published.sessionJson, ...published.snapshot });
+    persistence.loadDraftRun.mockResolvedValue(published.run);
+    wasm.import_draft_session.mockReturnValue({ ...sealedView, status: "Pairing" });
+    await useDraftStore.getState().resumeDraft();
+    expect(useDraftStore.getState().runFormat).toBe("run");
+    expect(useDraftStore.getState().runState?.format).toBe("run");
+  });
+
+  it("freezes the first-match choice across a pending gate and permits a new choice after rejection", async () => {
+    wasm.start_quick_draft.mockReturnValue({ ...view([card("human", "Forest")]), match_config: { match_type: "Bo3" } });
+    await useDraftStore.getState().startDraft("pool", "TST", "Test", 2);
+    useDraftStore.setState({ phase: "launching" });
+    wasm.get_bot_deck.mockReturnValue({ main_deck: ["Opponent"], lands: {} });
+    persistence.loadDraftRun.mockResolvedValue(null);
+    const pending = deferred<{ compatible: boolean; reasons: string[] }>();
+    formatGate.evaluate.mockReturnValueOnce(pending.promise);
+    const navigate = vi.fn();
+    const launch = useDraftStore.getState().launchMatch(navigate);
+    await vi.waitFor(() => expect(formatGate.evaluate).toHaveBeenCalledTimes(2));
+    const timerCount = vi.getTimerCount();
+    useDraftStore.getState().setRunFormat("bo3");
+    expect(useDraftStore.getState().runFormat).toBe("run");
+    expect(vi.getTimerCount()).toBe(timerCount);
+    expect(persistence.publishInitialDraftMatch).not.toHaveBeenCalled();
+    pending.resolve({ compatible: true, reasons: [] });
+    await launch;
+    expect(formatGate.evaluate.mock.calls.map(([request]) => (request as { selected_match_type: string }).selected_match_type)).toEqual(["Bo1", "Bo1"]);
+    expect(persistence.publishInitialDraftMatch).toHaveBeenCalledOnce();
+    const published = persistence.publishInitialDraftMatch.mock.calls[0][0] as unknown as {
+      run: DraftRunState; meta: { runFormat: string };
+    };
+    expect(published.run.format).toBe("run");
+    expect(published.run.activeMatch?.format).toBe("run");
+    expect(published.meta.runFormat).toBe("run");
+    expect(navigate).toHaveBeenCalledWith(expect.stringContaining("match=bo1"));
+
+    useDraftStore.setState({ phase: "launching", runState: null });
+    persistence.loadDraftRun.mockResolvedValue(null);
+    formatGate.evaluate.mockImplementation(async (request: unknown) => ({
+      compatible: (request as { selected_match_type: string }).selected_match_type !== "Bo3",
+      reasons: (request as { selected_match_type: string }).selected_match_type === "Bo3" ? ["BO3 requires a sideboard"] : [],
+    }));
+    useDraftStore.getState().setRunFormat("bo3");
+    expect(useDraftStore.getState().runFormat).toBe("bo3");
+    await expect(useDraftStore.getState().launchMatch(navigate)).rejects.toThrow("BO3 requires a sideboard");
+    expect(formatGate.evaluate).toHaveBeenLastCalledWith(expect.objectContaining({ selected_match_type: "Bo3", sideboard: [] }));
+    expect(persistence.publishInitialDraftMatch).toHaveBeenCalledOnce();
+  });
+
+  it.each(["staged-retry", "next-match"] as const)("freezes %s through both exact Bo1 seat gates", async (branch) => {
+    wasm.start_quick_draft.mockReturnValue({ ...view([card("human", "Forest")]), match_config: { match_type: "Bo3" } });
+    await useDraftStore.getState().startDraft("pool", "TST", "Test", 2);
+    const draftId = useDraftStore.getState().draftId!;
+    const staged: DraftRunState = {
+      format: "run", results: [], playerDeck: ["Forest"], opponentDeck: ["Opponent"], usedBotSeats: [1],
+      activeMatch: { draftId, gameId: "staged", format: "run", resultCountAtLaunch: 0, botSeat: 1, opponentDeck: ["Opponent"] },
+    };
+    if (branch === "staged-retry") useDraftStore.setState({ phase: "launching" });
+    else {
+      staged.results = [{ gameId: "finished", result: "win" }];
+      staged.activeMatch = undefined;
+      useDraftStore.setState({ phase: "playing", runState: staged });
+      wasm.get_bot_deck.mockReturnValue({ main_deck: ["New Opponent"], lands: {} });
+    }
+    persistence.loadDraftRun.mockResolvedValue(staged);
+    const pending = deferred<{ compatible: boolean; reasons: string[] }>();
+    formatGate.evaluate.mockReturnValueOnce(pending.promise);
+    const navigate = vi.fn();
+    const launch = branch === "staged-retry"
+      ? useDraftStore.getState().launchMatch(navigate)
+      : useDraftStore.getState().launchNextMatch(navigate);
+    await vi.waitFor(() => expect(formatGate.evaluate).toHaveBeenCalledTimes(2));
+    if (branch === "next-match") {
+      await useDraftStore.getState().launchNextMatch(navigate);
+      expect(formatGate.evaluate).toHaveBeenCalledTimes(2);
+    }
+    useDraftStore.getState().setRunFormat("bo3");
+    expect(useDraftStore.getState().runFormat).toBe("run");
+    expect(persistence.publishStagedDraftMatch).not.toHaveBeenCalled();
+    pending.resolve({ compatible: true, reasons: [] });
+    await launch;
+    expect(formatGate.evaluate.mock.calls.map(([request]) => (request as { selected_match_type: string }).selected_match_type)).toEqual(["Bo1", "Bo1"]);
+    const published = (persistence.publishStagedDraftMatch.mock.calls as unknown as Array<[unknown]>)[0][0] as {
+      payload: { player: { main_deck: string[] }; opponent: { main_deck: string[] } };
+      meta: { runFormat: string }; run?: DraftRunState;
+    };
+    expect(published.payload.player.main_deck).toEqual(["Forest"]);
+    expect(published.payload.opponent.main_deck).toEqual(branch === "staged-retry" ? ["Opponent"] : ["New Opponent"]);
+    expect(published.meta.runFormat).toBe("run");
+    expect(published.run?.activeMatch?.format ?? staged.activeMatch?.format).toBe("run");
+    expect(navigate).toHaveBeenCalledWith(expect.stringContaining("match=bo1"));
+    expect(persistence.publishStagedDraftMatch).toHaveBeenCalledOnce();
+  });
+
+  it.each(["staged-retry", "next-match"] as const)("refuses empty-sideboard Bo3 %s before stage publication", async (branch) => {
+    wasm.start_quick_draft.mockReturnValue({ ...view([card("human", "Forest")]), match_config: { match_type: "Bo3" } });
+    await useDraftStore.getState().startDraft("pool", "TST", "Test", 2);
+    const draftId = useDraftStore.getState().draftId!;
+    const run: DraftRunState = {
+      format: "bo3", results: [], playerDeck: ["Forest"], opponentDeck: ["Opponent"], usedBotSeats: [1],
+      activeMatch: { draftId, gameId: "staged", format: "bo3", resultCountAtLaunch: 0, botSeat: 1, opponentDeck: ["Opponent"] },
+    };
+    useDraftStore.getState().setRunFormat("bo3");
+    if (branch === "staged-retry") useDraftStore.setState({ phase: "launching" });
+    else {
+      run.results = [{ gameId: "finished", result: "draw" }];
+      run.activeMatch = undefined;
+      useDraftStore.setState({ phase: "playing", runState: run });
+      wasm.get_bot_deck.mockReturnValue({ main_deck: ["New Opponent"], lands: {} });
+    }
+    persistence.loadDraftRun.mockResolvedValue(run);
+    formatGate.evaluate.mockImplementation(async () => ({ compatible: false, reasons: ["BO3 requires a sideboard"] }));
+    const navigate = vi.fn();
+    const launch = branch === "staged-retry"
+      ? useDraftStore.getState().launchMatch(navigate)
+      : useDraftStore.getState().launchNextMatch(navigate);
+    await expect(launch).rejects.toThrow("BO3 requires a sideboard");
+    expect(formatGate.evaluate).toHaveBeenCalledTimes(2);
+    for (const [request] of formatGate.evaluate.mock.calls) {
+      expect(request).toMatchObject({ selected_format: "Limited", selected_match_type: "Bo3", sideboard: [] });
+    }
+    expect(persistence.publishStagedDraftMatch).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+    expect(useDraftStore.getState().runFormat).toBe("bo3");
+  });
+
+  it("rejects a non-action choice mutation after a positive gate without publishing", async () => {
+    wasm.start_quick_draft.mockReturnValue({ ...view([card("human", "Forest")]), match_config: { match_type: "Bo3" } });
+    await useDraftStore.getState().startDraft("pool", "TST", "Test", 2);
+    useDraftStore.setState({ phase: "launching" });
+    wasm.get_bot_deck.mockReturnValue({ main_deck: ["Opponent"], lands: {} });
+    persistence.loadDraftRun.mockResolvedValue(null);
+    const pending = deferred<{ compatible: boolean; reasons: string[] }>();
+    formatGate.evaluate.mockReturnValueOnce(pending.promise);
+    const navigate = vi.fn();
+    const launch = useDraftStore.getState().launchMatch(navigate);
+    await vi.waitFor(() => expect(formatGate.evaluate).toHaveBeenCalledTimes(2));
+    useDraftStore.setState({ runFormat: "bo3" });
+    pending.resolve({ compatible: true, reasons: [] });
+    await expect(launch).rejects.toThrow("Stale draft match launch");
+    expect(persistence.publishInitialDraftMatch).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+    expect(useDraftStore.getState().runFormat).toBe("bo3");
+  });
+
+  it("saves the current workspace on first-launch rejection and reports a failed choice save", async () => {
+    await start([card("human", "Forest")]);
+    useDraftStore.setState({ phase: "launching" });
+    wasm.get_bot_deck.mockReturnValue({ main_deck: ["Opponent"], lands: {} });
+    persistence.loadDraftRun.mockResolvedValue(null);
+    const pending = deferred<{ compatible: boolean; reasons: string[] }>();
+    formatGate.evaluate.mockReturnValueOnce(pending.promise);
+    const launch = useDraftStore.getState().launchMatch(vi.fn());
+    await vi.waitFor(() => expect(formatGate.evaluate).toHaveBeenCalledTimes(2));
+    const currentWorkspace = { ...useDraftStore.getState().workspaceState! };
+    useDraftStore.setState({ workspaceState: currentWorkspace });
+    pending.resolve({ compatible: false, reasons: ["engine rejected"] });
+    await expect(launch).rejects.toThrow("engine rejected");
+    expect(persistence.persistQuickDraftSnapshot).toHaveBeenCalledOnce();
+    expect(persistence.persistQuickDraftSnapshot).toHaveBeenCalledWith(
+      expect.any(String), expect.any(String), expect.objectContaining({ workspace: currentWorkspace }), expect.any(Object),
+    );
+
+    persistence.persistQuickDraftSnapshot.mockClear();
+    persistence.persistQuickDraftSnapshot.mockRejectedValueOnce(new Error("disk unavailable"));
+    formatGate.evaluate.mockResolvedValueOnce({ compatible: false, reasons: ["engine rejected"] });
+    await expect(useDraftStore.getState().launchMatch(vi.fn())).rejects.toThrow(
+      "engine rejected\ndisk unavailable",
+    );
+    expect(persistence.publishInitialDraftMatch).not.toHaveBeenCalled();
+  });
+
+  it("does not write an abandoned first-launch failure snapshot after session replacement", async () => {
+    await start([card("human", "Forest")]);
+    useDraftStore.setState({ phase: "launching" });
+    wasm.get_bot_deck.mockReturnValue({ main_deck: ["Opponent"], lands: {} });
+    persistence.loadDraftRun.mockResolvedValue(null);
+    const pending = deferred<{ compatible: boolean; reasons: string[] }>();
+    formatGate.evaluate.mockReturnValueOnce(pending.promise);
+    const launch = useDraftStore.getState().launchMatch(vi.fn());
+    await vi.waitFor(() => expect(formatGate.evaluate).toHaveBeenCalledTimes(2));
+    useDraftStore.getState().reset();
+    pending.resolve({ compatible: false, reasons: ["engine rejected"] });
+    await expect(launch).rejects.toThrow("Stale draft match launch");
+    expect(persistence.persistQuickDraftSnapshot).not.toHaveBeenCalled();
+    expect(persistence.publishInitialDraftMatch).not.toHaveBeenCalled();
+  });
+
+  it.each(["success", "failure"] as const)("coalesces a subscriber-reentrant End Run through %s", async (outcome) => {
+    await start([card("human", "Forest")]);
+    useDraftStore.setState({ phase: "launching" });
+    const before = useDraftStore.getState();
+    const gate = deferred<void>();
+    persistence.cleanupQuickDraftLifecycle.mockReturnValueOnce(gate.promise);
+    let nested: Promise<void> | undefined;
+    let callbacks = 0;
+    const unsubscribe = useDraftStore.subscribe((state) => {
+      if (state.interactionGeneration === before.interactionGeneration + 1 && !nested) {
+        callbacks += 1;
+        nested = useDraftStore.getState().endRun(before.draftId!);
+      }
+    });
+
+    const outer = useDraftStore.getState().endRun(before.draftId!);
+    const duplicate = useDraftStore.getState().endRun(before.draftId!);
+    expect(callbacks).toBe(1);
+    expect(nested).toBe(outer);
+    expect(duplicate).toBe(outer);
+    expect(useDraftStore.getState()).toMatchObject({
+      draftId: before.draftId, phase: before.phase,
+      runState: before.runState, workspaceState: before.workspaceState,
+      interactionGeneration: before.interactionGeneration + 1,
+    });
+    await Promise.resolve();
+    expect(persistence.cleanupQuickDraftLifecycle).toHaveBeenCalledExactlyOnceWith(before.draftId);
+    let settled = false;
+    void outer.then(() => { settled = true; }, () => { settled = true; });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    unsubscribe();
+
+    if (outcome === "failure") {
+      const error = new Error("cleanup unavailable");
+      gate.reject(error);
+      await expect(outer).rejects.toBe(error);
+      await expect(nested).rejects.toBe(error);
+      expect(useDraftStore.getState()).toMatchObject({
+        draftId: before.draftId, phase: before.phase,
+        workspaceState: before.workspaceState,
+        interactionGeneration: before.interactionGeneration + 1,
+      });
+      const retry = useDraftStore.getState().endRun(before.draftId!);
+      await retry;
+      expect(persistence.cleanupQuickDraftLifecycle).toHaveBeenCalledTimes(2);
+      expect(useDraftStore.getState().interactionGeneration).toBe(before.interactionGeneration + 2);
+      expect(useDraftStore.getState().draftId).toBeNull();
+    } else {
+      gate.resolve();
+      await expect(outer).resolves.toBeUndefined();
+      await expect(nested).resolves.toBeUndefined();
+      expect(useDraftStore.getState().draftId).toBeNull();
+      expect(useDraftStore.getState().interactionGeneration).toBe(before.interactionGeneration + 1);
+      await start();
+      wasm.submit_pick.mockReturnValue(view([card("new")]));
+      await expect(useDraftStore.getState().pickCard("new"))
+        .resolves.toEqual({ status: "acknowledged" });
+      expect(wasm.submit_pick).toHaveBeenCalledOnce();
+    }
+    expect(settled).toBe(true);
+  });
+
+  it.each(["success", "failure"] as const)("fences a pending format snapshot through cleanup %s", async (outcome) => {
+    await start([card("human", "Forest")]);
+    useDraftStore.setState({ phase: "launching" });
+    await settleTimers();
+    persistence.persistQuickDraftSnapshot.mockClear();
+    const id = useDraftStore.getState().draftId!;
+    const gate = deferred<void>();
+    persistence.cleanupQuickDraftLifecycle.mockReturnValueOnce(gate.promise);
+    useDraftStore.getState().setRunFormat("bo3");
+    expect(vi.getTimerCount()).toBeGreaterThan(0);
+    const ending = useDraftStore.getState().endRun(id);
+    useDraftStore.getState().setRunFormat("single");
+    expect(useDraftStore.getState().runFormat).toBe("bo3");
+    expect(vi.getTimerCount()).toBe(0);
+    await settleTimers();
+    expect(persistence.persistQuickDraftSnapshot).not.toHaveBeenCalled();
+    if (outcome === "success") {
+      gate.resolve();
+      await expect(ending).resolves.toBeUndefined();
+      await settleTimers();
+      expect(persistence.persistQuickDraftSnapshot).not.toHaveBeenCalled();
+      return;
+    }
+    const error = new Error("cleanup failed");
+    gate.reject(error);
+    await expect(ending).rejects.toBe(error);
+    expect(persistence.persistQuickDraftSnapshot).not.toHaveBeenCalled();
+    useDraftStore.getState().setRunFormat("run");
+    expect(useDraftStore.getState().runFormat).toBe("run");
+    expect(vi.getTimerCount()).toBeGreaterThan(0);
+    await settleTimers();
+    expect(persistence.persistQuickDraftSnapshot).toHaveBeenCalledWith(
+      id, expect.any(String), expect.any(Object), expect.objectContaining({ runFormat: "run" }),
+    );
+  });
+
+  it.each([false, true])("fences an engine-queued format export (end=%s)", async (end) => {
+    await start([card("human", "Forest")]);
+    useDraftStore.setState({ phase: "launching" });
+    await settleTimers();
+    persistence.persistQuickDraftSnapshot.mockClear();
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    const holding = withDraftEngineOperation(async () => {
+      entered.resolve();
+      await release.promise;
+    });
+    await entered.promise;
+    useDraftStore.getState().setRunFormat("bo3");
+    await vi.advanceTimersByTimeAsync(500);
+    const cleanup = deferred<void>();
+    if (end) persistence.cleanupQuickDraftLifecycle.mockReturnValueOnce(cleanup.promise);
+    const ending = end ? useDraftStore.getState().endRun() : null;
+    release.resolve();
+    await holding;
+    await Promise.resolve();
+    await Promise.resolve();
+    if (end) {
+      cleanup.resolve();
+      await ending;
+      expect(persistence.cleanupQuickDraftLifecycle).toHaveBeenCalledOnce();
+      expect(persistence.persistQuickDraftSnapshot).not.toHaveBeenCalled();
+    } else {
+      await vi.waitFor(() => expect(persistence.persistQuickDraftSnapshot).toHaveBeenCalledOnce());
+    }
+  });
+
+  it("blocks initial launch publication and a second launch during End Run", async () => {
+    await start([card("human", "Forest")]);
+    useDraftStore.setState({ phase: "launching" });
+    await settleTimers();
+    persistence.persistQuickDraftSnapshot.mockClear();
+    wasm.get_bot_deck.mockReturnValue({ main_deck: ["Opponent"], lands: {} });
+    const load = deferred<DraftRunState | null>();
+    persistence.loadDraftRun.mockReturnValueOnce(load.promise).mockResolvedValue(null);
+    const navigate = vi.fn();
+    const launch = useDraftStore.getState().launchMatch(navigate);
+    expect(persistence.loadDraftRun).toHaveBeenCalledOnce();
+    const cleanup = deferred<void>();
+    persistence.cleanupQuickDraftLifecycle.mockReturnValueOnce(cleanup.promise);
+    const ending = useDraftStore.getState().endRun();
+    await useDraftStore.getState().launchMatch(navigate);
+    expect(persistence.loadDraftRun).toHaveBeenCalledOnce();
+    load.resolve(null);
+    await expect(launch).rejects.toThrow("Stale draft match launch");
+    expect(persistence.publishInitialDraftMatch).not.toHaveBeenCalled();
+    expect(persistence.publishStagedDraftMatch).not.toHaveBeenCalled();
+    expect(persistence.persistQuickDraftSnapshot).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+    cleanup.reject(new Error("retry"));
+    await expect(ending).rejects.toThrow("retry");
+    await useDraftStore.getState().launchMatch(navigate);
+    expect(persistence.publishInitialDraftMatch).toHaveBeenCalledOnce();
+    expect(navigate).toHaveBeenCalledOnce();
+  });
+
+  it.each([false, true])("blocks next-match publication during End Run (run-only=%s)", async (runOnly) => {
+    let id: string;
+    if (runOnly) {
+      id = "resumed-run";
+      persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue({
+        id, setCode: "TST", difficulty: 2, kind: "Quick", phase: "playing",
+      });
+      persistence.loadQuickDraftSession.mockResolvedValue(null);
+    } else {
+      await start([card("human", "Forest")]);
+      id = useDraftStore.getState().draftId!;
+    }
+    const run: DraftRunState = {
+      format: "run", results: [], playerDeck: ["Forest"], opponentDeck: ["Opponent"],
+      usedBotSeats: [1], booster_pack_pool: [],
+      activeMatch: { draftId: id, gameId: "staged", format: "run", resultCountAtLaunch: 0,
+        botSeat: 1, opponentDeck: ["Opponent"] },
+    };
+    if (runOnly) {
+      persistence.loadDraftRun.mockResolvedValue(run);
+      expect(await useDraftStore.getState().resumeDraft()).toEqual({ status: "resumed", draftId: id });
+      expect(useDraftStore.getState().workspaceState).toBeNull();
+    } else {
+      useDraftStore.setState({ phase: "playing", runState: run });
+      await settleTimers();
+    }
+    const load = deferred<DraftRunState>();
+    persistence.loadDraftRun.mockReturnValueOnce(load.promise).mockResolvedValue(run);
+    const navigate = vi.fn();
+    const launch = useDraftStore.getState().launchNextMatch(navigate);
+    expect(persistence.loadDraftRun).toHaveBeenCalledWith(id);
+    const cleanup = deferred<void>();
+    persistence.cleanupQuickDraftLifecycle.mockReturnValueOnce(cleanup.promise);
+    const ending = useDraftStore.getState().endRun(id);
+    await useDraftStore.getState().launchNextMatch(navigate);
+    expect(persistence.loadDraftRun).toHaveBeenCalledTimes(runOnly ? 2 : 1);
+    load.resolve(run);
+    await launch;
+    expect(persistence.publishStagedDraftMatch).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+    cleanup.reject(new Error("retry"));
+    await expect(ending).rejects.toThrow("retry");
+    await useDraftStore.getState().launchNextMatch(navigate);
+    expect(persistence.publishStagedDraftMatch).toHaveBeenCalledOnce();
+    expect(navigate).toHaveBeenCalledOnce();
+  });
+
+  it.each(["success", "failure"] as const)("keeps a newer run and its launch after old cleanup %s", async (outcome) => {
+    await start([card("A", "Forest")]);
+    useDraftStore.setState({ phase: "launching" });
+    const idA = useDraftStore.getState().draftId!;
+    const cleanup = deferred<void>();
+    persistence.cleanupQuickDraftLifecycle.mockReturnValueOnce(cleanup.promise);
+    const endingA = useDraftStore.getState().endRun(idA);
+    await Promise.resolve();
+    expect(persistence.cleanupQuickDraftLifecycle).toHaveBeenCalledExactlyOnceWith(idA);
+    useDraftStore.getState().reset();
+    await start([card("B", "Forest")]);
+    useDraftStore.setState({ phase: "launching" });
+    const stateB = useDraftStore.getState();
+    expect(stateB.draftId).not.toBe(idA);
+    const loadB = deferred<DraftRunState | null>();
+    persistence.loadDraftRun.mockReturnValueOnce(loadB.promise);
+    wasm.get_bot_deck.mockReturnValue({ main_deck: ["Opponent"], lands: {} });
+    const navigate = vi.fn();
+    const launchB = useDraftStore.getState().launchMatch(navigate);
+    expect(persistence.loadDraftRun).toHaveBeenCalledOnce();
+    await expect(useDraftStore.getState().endRun(stateB.draftId!))
+      .rejects.toThrow("Another draft run is ending");
+    expect(persistence.cleanupQuickDraftLifecycle).toHaveBeenCalledOnce();
+    expect(useDraftStore.getState().interactionGeneration).toBe(stateB.interactionGeneration);
+    if (outcome === "failure") {
+      const error = new Error("A cleanup failed");
+      cleanup.reject(error);
+      await expect(endingA).rejects.toBe(error);
+    } else {
+      cleanup.resolve();
+      await expect(endingA).resolves.toBeUndefined();
+    }
+    expect(useDraftStore.getState()).toMatchObject({
+      draftId: stateB.draftId, phase: stateB.phase, runState: stateB.runState,
+      workspaceState: stateB.workspaceState,
+      interactionGeneration: stateB.interactionGeneration,
+    });
+    await useDraftStore.getState().launchMatch(navigate);
+    expect(persistence.loadDraftRun).toHaveBeenCalledOnce();
+    loadB.resolve(null);
+    await launchB;
+    expect(persistence.publishInitialDraftMatch).toHaveBeenCalledOnce();
+    expect(navigate).toHaveBeenCalledOnce();
+  });
+
+  it.each(["seat", "codes"])("preserves retained %s authority after a rejected run-only gate and retry", async (assertion) => {
+    const codes = ["opaque+token", "CaseToken", "opaque+token"];
+    const run: DraftRunState = { format: "run", results: [{ gameId: "prior", result: "draw" }],
+      playerDeck: ["Player"], opponentDeck: ["Bot 4"], usedBotSeats: [1, 4],
+      lastOpponentSeat: 4, draft_set_codes: codes };
+    persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue({ id: "retained", setCode: "DISPLAY+ONLY",
+      difficulty: 2, phase: "playing" });
+    persistence.loadDraftRun.mockResolvedValue(run);
+    persistence.loadQuickDraftSession.mockResolvedValue(null);
+    expect((await useDraftStore.getState().resumeDraft()).status).toBe("resumed");
+    formatGate.evaluate.mockResolvedValueOnce({ compatible: true, reasons: [] })
+      .mockResolvedValueOnce({ compatible: false, reasons: ["opponent rejected"] });
+    const navigate = vi.fn();
+    await expect(useDraftStore.getState().launchNextMatch(navigate)).rejects.toThrow("opponent rejected");
+    expect(persistence.publishStagedDraftMatch).not.toHaveBeenCalled();
+    expect(useDraftStore.getState().runState).toEqual(run);
+    expect(navigate).not.toHaveBeenCalled();
+    await useDraftStore.getState().launchNextMatch(navigate);
+    expect(formatGate.evaluate).toHaveBeenCalledTimes(4);
+    expect(persistence.publishStagedDraftMatch).toHaveBeenCalledOnce();
+    expect(navigate).toHaveBeenCalledOnce();
+    if (assertion === "seat") {
+      expect(useDraftStore.getState().runState?.activeMatch).toMatchObject({ botSeat: 4, opponentDeck: ["Bot 4"] });
+    } else {
+      for (const [request] of formatGate.evaluate.mock.calls) expect(request).toMatchObject({ draft_set_codes: codes });
+    }
+  });
+
+  it.each([4, 1])("retains the exact seat/deck pair and opaque tokens through launch, retry, result, and run-only recovery (seat=%s)", async (finalSeat) => {
+    const codes = ["opaque+token", "CaseToken", "opaque+token"];
+    await startLaunchWithBotSeats([1, 4]);
+    const draftId = useDraftStore.getState().draftId!;
+    useDraftStore.setState((state) => ({ selectedSet: "DISPLAY+ONLY",
+      view: { ...state.view!, draft_set_codes: codes } }));
+    wasm.submit_deck.mockReturnValue({ ...useDraftStore.getState().view!, status: "Pairing" });
+    await useDraftStore.getState().submitDeck();
+    expect(wasm.submit_deck).toHaveBeenCalledOnce();
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    wasm.get_bot_deck.mockImplementation((seat) => ({ main_deck: [`Bot ${seat}`], lands: {} }));
+    let durable: DraftRunState | null = null;
+    persistence.loadDraftRun.mockImplementation(async () => durable);
+    persistence.publishInitialDraftMatch.mockImplementationOnce(async (input) => {
+      durable = input.run as DraftRunState;
+      throw new Error("metadata failed");
+    });
+    persistence.publishStagedDraftMatch.mockImplementation(async (...args: unknown[]) => {
+      const input = args[0] as { run?: DraftRunState };
+      if (input.run) durable = input.run;
+    });
+    const meta: ActiveQuickDraftMeta = { id: draftId, setCode: "DISPLAY+ONLY", difficulty: 2,
+      phase: "playing", pickCount: 0, updatedAt: Date.now() };
+    persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue(meta);
+    persistence.recordDraftMatchResult.mockImplementation(async (input) => {
+      const { activeMatch: _stage, ...run } = durable!;
+      durable = { ...run, results: [...run.results, { gameId: input.gameId, result: input.result }] };
+      return { run: durable, meta: input.makeMeta(durable) };
+    });
+    const navigate = vi.fn();
+    await expect(useDraftStore.getState().launchMatch(navigate)).rejects.toThrow("metadata failed");
+    expect(durable).toMatchObject({ lastOpponentSeat: 1, draft_set_codes: codes,
+      activeMatch: { botSeat: 1, opponentDeck: ["Bot 1"] } });
+    // Durable publication wins over both the display label and a newer view.
+    useDraftStore.setState((state) => ({ view: { ...state.view!, draft_set_codes: ["OTHER"] } }));
+    await useDraftStore.getState().launchMatch(navigate);
+    expect(wasm.get_bot_deck).toHaveBeenCalledTimes(1);
+    await useDraftStore.getState().recordMatchResult(useDraftStore.getState().runState!.activeMatch!.gameId, "draw");
+    await useDraftStore.getState().launchNextMatch(navigate);
+    expect(useDraftStore.getState().runState).toMatchObject({ usedBotSeats: [1, 4],
+      lastOpponentSeat: 4, opponentDeck: ["Bot 4"], activeMatch: { botSeat: 4 } });
+    if (finalSeat === 1) {
+      await useDraftStore.getState().recordMatchResult(useDraftStore.getState().runState!.activeMatch!.gameId, "draw");
+      await useDraftStore.getState().launchNextMatch(navigate);
+    }
+    expect(useDraftStore.getState().runState).toMatchObject({ usedBotSeats: [1, 4],
+      lastOpponentSeat: finalSeat, opponentDeck: [`Bot ${finalSeat}`], draft_set_codes: codes });
+    await useDraftStore.getState().recordMatchResult(useDraftStore.getState().runState!.activeMatch!.gameId, "draw");
+    persistence.loadQuickDraftSession.mockResolvedValue(null);
+    expect(await useDraftStore.getState().resumeDraft()).toEqual({ status: "resumed", draftId });
+    expect(useDraftStore.getState().adapter).toBeNull();
+    await useDraftStore.getState().launchNextMatch(navigate);
+    const rounds = finalSeat === 1 ? 3 : 2;
+    expect(wasm.get_bot_deck).toHaveBeenCalledTimes(rounds);
+    expect(persistence.recordDraftMatchResult).toHaveBeenCalledTimes(rounds);
+    expect(navigate).toHaveBeenCalledTimes(rounds + 1);
+    expect(formatGate.evaluate).toHaveBeenCalledTimes(1 + 2 * (rounds + 2));
+    for (const [request] of formatGate.evaluate.mock.calls) expect(request).toMatchObject({ draft_set_codes: codes });
+    expect(useDraftStore.getState().runState).toMatchObject({ lastOpponentSeat: finalSeat,
+      draft_set_codes: codes, opponentDeck: [`Bot ${finalSeat}`],
+      activeMatch: { botSeat: finalSeat, opponentDeck: [`Bot ${finalSeat}`] } });
+  });
+
+  it.each([undefined, [] as string[], ["Stored+Token"]])("latches only absent run codes from a restored view (%j)", async (stored) => {
+    const codes = ["View+Token", "CaseToken", "View+Token"];
+    const run: DraftRunState = { format: "run", results: [], playerDeck: ["Forest"],
+      opponentDeck: ["Bot 4"], usedBotSeats: [1, 4], lastOpponentSeat: 4,
+      ...(stored === undefined ? {} : { draft_set_codes: stored }) };
+    persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue({ id: "codes", setCode: "DISPLAY+ONLY",
+      difficulty: 2, phase: "playing" });
+    persistence.loadDraftRun.mockResolvedValue(run);
+    persistence.loadQuickDraftSession.mockResolvedValue({ sessionJson: "session", mainDeck: ["Forest"],
+      landCounts: {}, poolSortMode: "color", poolPanelOpen: true, workspace: null });
+    wasm.import_draft_session.mockReturnValue({ ...view([card("human", "Forest")]), draft_set_codes: codes });
+    wasm.booster_pack_pool_for_game.mockReturnValue(undefined);
+    expect(await useDraftStore.getState().resumeDraft()).toEqual({ status: "resumed", draftId: "codes" });
+    const expected = stored ?? codes;
+    expect(useDraftStore.getState().runState?.draft_set_codes).toEqual(expected);
+    if (stored === undefined) expect(persistence.saveDraftRun).toHaveBeenCalledWith("codes", expect.objectContaining({ draft_set_codes: codes }));
+    else expect(persistence.saveDraftRun).not.toHaveBeenCalled();
+    wasm.submit_deck.mockReturnValue({ ...useDraftStore.getState().view!, status: "Pairing" });
+    await useDraftStore.getState().submitDeck();
+    wasm.get_bot_deck.mockReturnValue({ main_deck: ["Bot 1"], lands: {} });
+    const navigate = vi.fn();
+    await useDraftStore.getState().launchNextMatch(navigate);
+    expect(navigate).toHaveBeenCalledOnce();
+    expect(formatGate.evaluate).toHaveBeenCalledTimes(3);
+    for (const [request] of formatGate.evaluate.mock.calls) expect(request).toMatchObject({ draft_set_codes: expected });
+  });
+
+  it("replays a matching legacy active stage from multi-seat history without choosing a new opponent", async () => {
+    const run: DraftRunState = { format: "run", results: [], playerDeck: ["Player"],
+      opponentDeck: ["Bot 4"], usedBotSeats: [1, 4],
+      activeMatch: { draftId: "legacy-active", gameId: "same-game", format: "run", resultCountAtLaunch: 0,
+        botSeat: 4, opponentDeck: ["Bot 4"] } };
+    persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue({ id: "legacy-active", setCode: "DISPLAY+ONLY",
+      difficulty: 2, phase: "playing" });
+    persistence.loadDraftRun.mockResolvedValue(run);
+    persistence.loadQuickDraftSession.mockResolvedValue(null);
+    expect((await useDraftStore.getState().resumeDraft()).status).toBe("resumed");
+    expect(persistence.saveDraftRun).not.toHaveBeenCalled();
+    const navigate = vi.fn();
+    await useDraftStore.getState().launchNextMatch(navigate);
+    expect(formatGate.evaluate).toHaveBeenCalledTimes(2);
+    expect(wasm.get_bot_deck).not.toHaveBeenCalled();
+    expect(persistence.publishStagedDraftMatch).toHaveBeenCalledWith(expect.objectContaining({
+      gameId: "same-game", run: expect.objectContaining({ lastOpponentSeat: 4, draft_set_codes: [] }) }));
+    expect(navigate).toHaveBeenCalledWith(expect.stringContaining("same-game"));
+  });
+
+  it("keeps ambiguous legacy history readable but refuses a new run-only stage until an adapter selects a pair", async () => {
+    const run: DraftRunState = { format: "run", results: [], playerDeck: ["Forest"],
+      opponentDeck: ["Unknown Bot"], usedBotSeats: [1, 4] };
+    persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue({ id: "ambiguous", setCode: "DISPLAY+ONLY", difficulty: 2, phase: "playing" });
+    persistence.loadDraftRun.mockResolvedValue(run);
+    persistence.loadQuickDraftSession.mockResolvedValue(null);
+    expect(await useDraftStore.getState().resumeDraft()).toEqual({ status: "resumed", draftId: "ambiguous" });
+    const navigate = vi.fn();
+    await expect(useDraftStore.getState().launchNextMatch(navigate)).rejects.toThrow("This draft run is unavailable. End Run to draft again.");
+    expect(formatGate.evaluate).not.toHaveBeenCalled();
+    expect(persistence.publishStagedDraftMatch).not.toHaveBeenCalled();
+    expect(persistence.saveDraftRun).not.toHaveBeenCalled();
+    expect(persistence.cleanupQuickDraftLifecycle).not.toHaveBeenCalled();
+    expect(useDraftStore.getState().runState).toEqual(run);
+    expect(navigate).not.toHaveBeenCalled();
+    persistence.loadQuickDraftSession.mockResolvedValue({ sessionJson: "session", mainDeck: ["Forest"],
+      landCounts: {}, poolSortMode: "color", poolPanelOpen: true, workspace: null });
+    wasm.import_draft_session.mockReturnValue(view([card("human", "Forest")]));
+    wasm.get_bot_deck.mockReturnValue({ main_deck: ["Selected Bot"], lands: {} });
+    expect((await useDraftStore.getState().resumeDraft()).status).toBe("resumed");
+    await useDraftStore.getState().launchNextMatch(navigate);
+    expect(formatGate.evaluate).toHaveBeenCalledTimes(2);
+    expect(persistence.publishStagedDraftMatch).toHaveBeenCalledOnce();
+    expect(navigate).toHaveBeenCalledOnce();
+    expect(useDraftStore.getState().runState).toMatchObject({ lastOpponentSeat: 1,
+      opponentDeck: ["Selected Bot"], activeMatch: { botSeat: 1 } });
+  });
+
+  it.each([null, "TST", [7]])("rejects malformed persisted codes %j before gates and accepts stored empty authority", async (codes) => {
+    const run: DraftRunState = { format: "run", results: [], playerDeck: ["Player"],
+      opponentDeck: ["Bot 4"], usedBotSeats: [1, 4], lastOpponentSeat: 4 };
+    persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue({ id: "invalid-codes", setCode: "DISPLAY+ONLY", difficulty: 2, phase: "playing" });
+    persistence.loadQuickDraftSession.mockResolvedValue(null);
+    persistence.loadDraftRun.mockResolvedValue({ ...run, draft_set_codes: codes });
+    expect((await useDraftStore.getState().resumeDraft()).status).toBe("unavailable");
+    expect(formatGate.evaluate).not.toHaveBeenCalled();
+    expect(persistence.publishStagedDraftMatch).not.toHaveBeenCalled();
+    persistence.loadDraftRun.mockResolvedValue({ ...run, draft_set_codes: [] });
+    expect((await useDraftStore.getState().resumeDraft()).status).toBe("resumed");
+    const navigate = vi.fn();
+    persistence.loadDraftRun.mockResolvedValue({ ...run, draft_set_codes: codes });
+    await expect(useDraftStore.getState().launchNextMatch(navigate)).rejects.toThrow("This draft run is unavailable. End Run to draft again.");
+    expect(formatGate.evaluate).not.toHaveBeenCalled();
+    expect(persistence.publishStagedDraftMatch).not.toHaveBeenCalled();
+    persistence.loadDraftRun.mockResolvedValue({ ...run, draft_set_codes: [] });
+    await useDraftStore.getState().launchNextMatch(navigate);
+    expect(formatGate.evaluate).toHaveBeenCalledTimes(2);
+    for (const [request] of formatGate.evaluate.mock.calls) expect(request).toMatchObject({ draft_set_codes: [] });
+    expect(navigate).toHaveBeenCalledOnce();
+  });
+
 });

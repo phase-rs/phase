@@ -66,6 +66,13 @@
     "discard": "Descartar",
     "saveAndContinue": "Salvar e continuar"
   },
+  "saveConflict": {
+    "title": "Deck alterado em outro lugar",
+    "bodyChanged": "\"{{name}}\" foi alterado em outro lugar desde que este editor o abriu ou salvou pela última vez, então nada foi salvo. Carregue a versão salva para vê-la (suas alterações não salvas serão descartadas) ou salve sua versão mesmo assim.",
+    "bodyDeleted": "\"{{name}}\" foi excluído em outro lugar desde que este editor o abriu ou salvou pela última vez, então nada foi salvo. Salve sua versão mesmo assim.",
+    "loadSaved": "Carregar versão salva",
+    "saveMine": "Salvar minha versão"
+  },
   "card": {
     "moveToSideboard": "Mover um {{name}} para o sideboard",
     "moveToMain": "Mover um {{name}} para o deck principal",
@@ -222,6 +229,10 @@
     "identity": "Identidade:",
     "setAsCommander": "Definir como comandante:",
     "cardCount": "{{count}}/{{expected}} cartas",
+    "cardCountNoMinimum_one": "{{count}} carta",
+    "cardCountNoMinimum_few": "{{count}} cartas",
+    "cardCountNoMinimum_many": "{{count}} cartas",
+    "cardCountNoMinimum_other": "{{count}} cartas",
     "singletonViolations": "Violações de singleton: {{cards}}",
     "colorViolations": "Violações de identidade de cor: {{cards}}",
     "signatureSpell": {

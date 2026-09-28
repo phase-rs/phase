@@ -4,6 +4,7 @@
 use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
+use crate::types::ability::PlayerScope;
 use nom::character::complete::multispace0;
 
 /// CR 113.6 + CR 201.2: Recognize the "sources with the chosen name" / "cards with
@@ -852,6 +853,16 @@ pub(crate) fn try_parse_cost_modification(
         amount,
         spell_filter: spell_filter.clone(),
         dynamic_count: dynamic_count.clone(),
+        // CR 118.7b/c/d: "This effect reduces only the amount of colored mana you
+        // pay" overrides the default spillover of an unmatched colored reduction
+        // unit into generic mana (Morophon's {4}{R}{W}{W} → {4}{W} ruling). The
+        // rider is its own sentence appended after the reduction sentence, so it
+        // is scanned across the whole line rather than anchored.
+        reach: if line_reduces_colored_mana_only(lower) {
+            CostReductionReach::ColoredManaOnly
+        } else {
+            CostReductionReach::SpillsToGeneric
+        },
     };
 
     // Build the affected filter for the static definition.
@@ -1638,6 +1649,117 @@ pub(crate) fn attach_parsed_static_gate(
     }
 }
 
+/// CR 502.3 + CR 303.4m + CR 109.5: identify the named untap step and the
+/// antecedent for a later "that player" anaphor. `None` means the step is
+/// recognized but the parser declines to rebind its anaphor.
+fn parse_untap_step_antecedent(input: &str) -> OracleResult<'_, Option<PlayerScope>> {
+    alt((
+        value(
+            Some(PlayerScope::RecipientController),
+            (
+                tag("its controller"),
+                nom_condition::parse_apostrophe_s,
+                tag(" untap step"),
+            ),
+        ),
+        value(
+            Some(PlayerScope::RecipientController),
+            (
+                tag("their controllers"),
+                nom_condition::parse_apostrophe,
+                tag(" untap steps"),
+            ),
+        ),
+        // CR 109.5: "your" has an antecedent, but no printed card pairs this
+        // untap-step phrase with "that player". Keep that shape unsupported.
+        value(None, tag("your untap step")),
+    ))
+    .parse(input)
+}
+
+/// CR 502.3 + CR 303.4m: the named untap step supplies the controller of the
+/// enchanted creature as an antecedent. Rebinding is a parser act: the inner
+/// condition parser sees only `ScopedPlayer`, not the owning clause. This is
+/// the static-side sibling of `oracle_trigger::rebind_attack_anaphor_to_defending_player`.
+/// `QuantityComparison` operands and nested filter scopes are deliberately
+/// outside this rewrite; no printed untap-step gate needs them.
+fn rebind_scoped_designation_anaphor(condition: &mut StaticCondition, antecedent: &PlayerScope) {
+    match condition {
+        StaticCondition::And { conditions } | StaticCondition::Or { conditions } => {
+            for condition in conditions {
+                rebind_scoped_designation_anaphor(condition, antecedent);
+            }
+        }
+        StaticCondition::Not { condition } => {
+            rebind_scoped_designation_anaphor(condition, antecedent)
+        }
+        StaticCondition::IsMonarch { player } => {
+            if matches!(player, PlayerScope::ScopedPlayer) {
+                *player = antecedent.clone();
+            }
+        }
+        // Only boolean structure carries nested static conditions. Quantities
+        // and filters are separate scopes, so this clause does not rebind them.
+        StaticCondition::DevotionGE { .. }
+        | StaticCondition::IsPresent { .. }
+        | StaticCondition::ChosenColorIs { .. }
+        | StaticCondition::ChosenLabelIs { .. }
+        | StaticCondition::QuantityComparison { .. }
+        | StaticCondition::HasMaxSpeed
+        | StaticCondition::SpeedGE { .. }
+        | StaticCondition::DayNightIs { .. }
+        | StaticCondition::HasCounters { .. }
+        | StaticCondition::CastVariantPaid { .. }
+        | StaticCondition::RecipientHasCounters { .. }
+        | StaticCondition::ClassLevelGE { .. }
+        | StaticCondition::DefendingPlayerControls { .. }
+        | StaticCondition::SourceAttackingAlone
+        | StaticCondition::SourceIsAttacking
+        | StaticCondition::SourceIsBlocking
+        | StaticCondition::SourceIsBlocked
+        | StaticCondition::IsInitiative
+        | StaticCondition::NoMonarch
+        | StaticCondition::HasCityBlessing
+        | StaticCondition::HasEnduringStory
+        | StaticCondition::CompletedADungeon
+        | StaticCondition::WasStartingPlayer { .. }
+        | StaticCondition::SpellCastWithVariantThisTurn { .. }
+        | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
+        | StaticCondition::OpponentPoisonAtLeast { .. }
+        | StaticCondition::UnlessPay { .. }
+        | StaticCondition::Unrecognized { .. }
+        | StaticCondition::DuringYourTurn
+        | StaticCondition::DuringOpponentsTurn
+        | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
+        | StaticCondition::SourceEnteredThisTurn
+        | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::WasCast { .. }
+        | StaticCondition::IsRingBearer
+        | StaticCondition::RingLevelAtLeast { .. }
+        | StaticCondition::ControlsCommander { .. }
+        | StaticCondition::SourceIsTapped
+        | StaticCondition::IsTapped { .. }
+        | StaticCondition::SourceIsFaceUp
+        | StaticCondition::SourceIsSaddled
+        | StaticCondition::SourceControllerEquals { .. }
+        | StaticCondition::SourceIsEquipped
+        | StaticCondition::SourceIsEnchanted
+        | StaticCondition::SourceIsMonstrous
+        | StaticCondition::SourceIsHarnessed
+        | StaticCondition::SourceAttachedToCreature
+        | StaticCondition::SourceMatchesFilter { .. }
+        | StaticCondition::TopOfLibraryMatches { .. }
+        | StaticCondition::RecipientMatchesFilter { .. }
+        | StaticCondition::RecipientAttackingOwnerTarget { .. }
+        | StaticCondition::SourceIsPaired
+        | StaticCondition::SourceInZone { .. }
+        | StaticCondition::EnchantedIsFaceDown
+        | StaticCondition::AdditionalCostPaid
+        | StaticCondition::CastingAsVariant { .. }
+        | StaticCondition::None => {}
+    }
+}
+
 /// CR 502.3: Extract a trailing condition from a "doesn't untap during [untap step]" clause.
 /// Handles patterns like:
 /// - "doesn't untap during your untap step as long as [condition]"
@@ -1651,23 +1773,9 @@ pub(crate) fn attach_parsed_static_gate(
 ///   the condition is re-evaluated dynamically at every untap step rather than
 ///   fixed once at parse time).
 pub(crate) fn extract_cant_untap_condition(lower: &str) -> Option<StaticCondition> {
-    // Find the end of the "untap step" phrase
-    let untap_phrases = [
-        "its controller's untap step",
-        "its controller\u{2019}s untap step",
-        "their controllers' untap steps",
-        "their controllers\u{2019} untap steps",
-        "your untap step",
-    ];
-    let mut after_untap = None;
-    for phrase in &untap_phrases {
-        if let Some(pos) = lower.find(phrase) {
-            let end = pos + phrase.len();
-            after_untap = Some(lower[end..].trim().trim_end_matches('.'));
-            break;
-        }
-    }
-    let remaining = after_untap?;
+    let (_before, antecedent, after_untap) =
+        nom_primitives::scan_preceded(lower, parse_untap_step_antecedent)?;
+    let remaining = after_untap.trim().trim_end_matches('.');
     if remaining.is_empty() {
         return None;
     }
@@ -1679,7 +1787,10 @@ pub(crate) fn extract_cant_untap_condition(lower: &str) -> Option<StaticConditio
     // exactly like the positive "as long as …"/"if …" tail.
     if let Some(unless_text) = nom_tag_lower(remaining, remaining, "unless ") {
         return Some(match nom_condition::parse_unless_condition(unless_text) {
-            Ok((rest, condition)) if rest.trim().is_empty() => {
+            Ok((rest, mut condition)) if rest.trim().is_empty() => {
+                if let Some(antecedent) = &antecedent {
+                    rebind_scoped_designation_anaphor(&mut condition, antecedent);
+                }
                 gate_cant_untap_condition(condition, unless_text)
             }
             _ => unparsed_gate_condition(unless_text, ConditionGatePolarity::Negative),
@@ -1689,7 +1800,12 @@ pub(crate) fn extract_cant_untap_condition(lower: &str) -> Option<StaticConditio
     let condition_text = nom_tag_lower(remaining, remaining, "as long as ")
         .or_else(|| nom_tag_lower(remaining, remaining, "if "))?;
     Some(match parse_static_condition(condition_text) {
-        Some(condition) => gate_cant_untap_condition(condition, condition_text),
+        Some(mut condition) => {
+            if let Some(antecedent) = &antecedent {
+                rebind_scoped_designation_anaphor(&mut condition, antecedent);
+            }
+            gate_cant_untap_condition(condition, condition_text)
+        }
         None => unparsed_gate_condition(condition_text, ConditionGatePolarity::Positive),
     })
 }
@@ -1857,12 +1973,11 @@ pub(crate) fn unparsed_gate_condition(
 ///    that THIS mode's enforcement point never runs
 ///    ([`StaticMode::provides_continuation`]). The layer pipeline just returns
 ///    the hard-coded `false`, so no player can ever satisfy the gate.
-/// 2. [`StaticCondition::has_unbindable_designation_anchor`] — a scoped-player
-///    designation ("that player is the monarch") on a mode whose enforcement
-///    point cannot bind the scope ([`StaticMode::binds_scoped_player_anchor`]).
-///    CR 502.3's untap step is the audited such point: a turn-based action with
-///    no triggering event or combat context, so
-///    `game::layers::evaluate_condition` rejects the whole condition outright.
+/// 2. [`StaticCondition::has_unanswerable_designation_anchor`] — a designation
+///    subject the mode cannot bind ([`StaticMode::binds_designation_scope`]).
+///    CR 502.3's untap step supplies a recipient anchor, so the controller of
+///    the affected permanent can be answered there; other unsupported scopes
+///    retain the honest gap marker.
 ///
 /// Everything else — including the combat-scoped leaves, which are computed
 /// correctly and are legitimately `false` outside combat — is enforceable and

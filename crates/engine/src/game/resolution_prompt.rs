@@ -507,6 +507,9 @@ fn effect_offers_choice(e: &Effect) -> bool {
         | Effect::RuntimeHandled { .. }
         | Effect::Incubate { .. }
         | Effect::Amass { .. }
+        // CR 701.71a + CR 608.2d: empower may prompt (EmpowerJaceChoice with 2+
+        // Jace tokens) — fail-closed MayPrompt.
+        | Effect::EmpowerJace { .. }
         | Effect::Monstrosity { .. }
         | Effect::Specialize
         | Effect::Renown { .. }
@@ -611,7 +614,7 @@ pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
         forward_result: _,               // bool
         chosen_x: _, // concrete cast-time X (chosen at announcement, not resolution)
         cost_paid_object: _, // concrete captured-object snapshot
-        cost_paid_object_ids: _, // concrete captured-object ids (issue #4948)
+        cost_paid_objects: _, // concrete cost-paid membership records (issue #4948)
         effect_context_object: _, // concrete captured-object snapshot
         amassed_army_object: _, // concrete captured-object snapshot
         ability_index: _, // usize provenance
@@ -622,6 +625,8 @@ pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
         sub_link: _, // SubAbilityLink kind tag
         sibling_condition: _, // SiblingCondition replication marker, no resolution-time choice
         parent_target_missing_reason: _, // seam flag
+        activation_cost_reduction: _,
+        activation_record: _,
     } = a;
 
     // CR 603.5 + CR 608.2d: an optional effect / optional targeting /

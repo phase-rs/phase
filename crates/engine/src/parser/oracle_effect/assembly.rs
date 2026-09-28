@@ -23,6 +23,7 @@ use crate::parser::oracle_ir::effect_chain::{
 };
 use crate::parser::oracle_nom::bridge::nom_on_lower;
 use crate::parser::oracle_nom::error::OracleError;
+use crate::parser::oracle_nom::target::chain_text_mentions_chosen_object;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction,
     CastFromZoneDriver, CastingPermission, ChoiceType, Comparator, ControllerRef, DamageChannel,
@@ -36,13 +37,14 @@ use super::conditions::ability_condition_to_static_condition;
 use super::lower::{
     append_remember_card_to_standalone_exiled_choice, apply_where_x_ability_expression,
     apply_where_x_to_latest_def, attach_alt_ability_cost_to_previous_play_from_exile,
-    attach_any_color_mana_rider_to_previous_play_from_exile,
-    attach_cast_cost_raise_to_previous_play_from_exile,
+    attach_cast_cost_modifier_to_previous_play_from_exile,
+    attach_cast_cost_modifier_to_prior_cast_from_zone,
     attach_graveyard_redirect_rider_to_prior_cast_from_zone,
     attach_graveyard_redirect_rider_to_prior_free_cast_from_zones,
-    attach_land_enters_tapped_to_previous_play_from_exile, cast_cost_raise_rider,
-    clone_would_transplant_gated_referent, consolidate_die_and_coin_defs,
-    definition_targets_self_source, effect_publishes_revealed_subject,
+    attach_land_enters_tapped_to_previous_play_from_exile, cast_cost_modifier_rider,
+    chain_references_chosen_card, clone_would_transplant_gated_referent,
+    consolidate_die_and_coin_defs, definition_targets_self_source,
+    effect_publishes_revealed_subject, ensure_remember_card_after_object_choice,
     extract_bounded_target_multi_target, extract_exact_target_multi_target,
     extract_optional_target_multi_target, extract_verb_up_to_multi_target,
     fold_copy_spell_gains_haste_and_quoted_grant,
@@ -50,8 +52,7 @@ use super::lower::{
     fold_exile_resolving_rider, fold_search_choose_type_conditional_destination,
     fold_token_it_has_grants_into_token_statics, gate_other_revealed_card_on_multiplayer_reveal,
     gate_reflexive_rider_on_declined_optional_target, is_exile_until_cast_bottom_cleanup,
-    is_land_enters_tapped_rider, is_linked_exile_cast_bottom_cleanup,
-    is_spend_mana_as_any_color_rider, is_stable_branch_amount,
+    is_land_enters_tapped_rider, is_linked_exile_cast_bottom_cleanup, is_stable_branch_amount,
     nest_whenever_this_turn_token_cleanup_delayed_trigger,
     normalize_exile_until_cast_bottom_cleanup, normalize_linked_exile_cast_bottom_cleanup,
     parse_controlled_by_different_players_target_constraint,
@@ -70,7 +71,8 @@ use super::sequence::{apply_clause_continuation, def_bears_retargetable_copy};
 use super::{
     append_to_deepest_sub_ability, apply_player_scope_rewrites,
     attach_alt_cost_to_prior_cast_from_zone, attach_mana_retention_to_prior_mana,
-    attach_perpetual_keyword_grants, attach_repeat_process_keywords, attach_same_is_true_keywords,
+    attach_mana_spend_permission_to_prior_cast_grant, attach_perpetual_keyword_grants,
+    attach_repeat_process_keywords, attach_same_is_true_keywords,
     bind_anaphoric_damage_subject_keep_recipient, collapse_ephemeral_color_choice_mana,
     contains_explicit_tracked_set_pronoun, contains_implicit_tracked_set_pronoun,
     def_is_damage_dealer, def_is_dig_look, def_is_dig_or_mill, def_is_generic_effect_head,
@@ -79,11 +81,12 @@ use super::{
     has_explicit_player_target, inject_chosen_color_choice_grant,
     inject_printed_color_choice_filter, mark_uses_tracked_set, nearest_publisher_is_self_move,
     parse_spell_graveyard_replacement_rider,
-    parse_spells_cast_this_way_graveyard_replacement_rider,
+    parse_spells_cast_this_way_graveyard_replacement_rider, plural_library_shuffle_recall,
     publishes_aggregate_set_from_resolution, publishes_exiled_cause_at_resolution,
     publishes_tracked_set_from_resolution, rebind_tracked_aggregate_to_chain_set,
     resolve_difference_anaphor_in_ability, retarget_counter_additional_cost_to_target,
-    rewrite_grant_parent_to_filter, rewrite_parent_targets_to_tracked_set, rewrite_rounding_mode,
+    rewrite_grant_parent_to_filter, rewrite_parent_targets_to_tracked_set,
+    rewrite_plural_library_recall_to_tracked_set, rewrite_rounding_mode,
     rewrite_singular_battlefield_recall_to_self, rewrite_that_type_mana_instead,
     singular_battlefield_recall, stamp_delayed_returns, try_fold_token_repeat_into_count,
     wire_optional_cast_decline_fallback, PrintedColorCarrier, PrintedColorCarrierScope,
@@ -1083,7 +1086,6 @@ impl AssemblyEnv {
                 &*def.effect,
                 Effect::ChangeZone {
                     origin: Some(Zone::Library),
-                    destination: Zone::Hand,
                     ..
                 }
             ) && provenance.role == NodeRole::ContinuationProduct
@@ -1639,37 +1641,295 @@ fn bind_chosen_number_anaphor(def: &mut AbilityDefinition, prior: &[AbilityDefin
     }
 }
 
-/// CR 608.2d + CR 603.7d: Which player announces a delayed-trigger payload's
-/// "may", when the clause names that player instead of leaving the choice with
-/// the ability's controller.
+/// CR 608.2d + CR 603.7b/d/e: WHEN a stamped announcer anaphor will be resolved.
+///
+/// CR 608.2c binds the clause's anaphor by the rules of English; CR 608.2d then
+/// has the player so named announce the choice *while the effect is being
+/// applied*. Which anaphors are still bound at that moment depends on which
+/// resolution that is. This is the only axis on which the two stamp sites
+/// differ, so it is spelled as a type rather than carried as a flag.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ActorBindingWindow {
+    /// Announced during THIS resolution. Every event-context anaphor
+    /// (`state.current_trigger_event`) and resolution-scoped anaphor is live.
+    ThisResolution,
+    /// CR 603.7d + CR 603.7e: announced when a delayed triggered ability later
+    /// resolves, whose controller is the creating SPELL'S OR ABILITY'S controller
+    /// (603.7d is the spell case — Arcane Denial, an instant, is the one printed
+    /// card reaching the ADMIT arm; 603.7e the activated/triggered-ability case,
+    /// which is what every printed card reaching the REFUSAL arm today is).
+    /// Only anaphors carried on the ability's own target list survive the delay:
+    /// per CR 603.7b the delayed ability triggers on its OWN event, so an
+    /// event-context ref would read that firing event — a different event — and
+    /// is refused rather than silently mis-bound.
+    DeferredDelayedTrigger,
+}
+
+/// CR 608.2c + CR 608.2d (+ CR 603.7b/d/e for the deferred window): Which player
+/// announces a clause-local "may", when the clause NAMES that player instead of
+/// leaving the choice with the ability's controller.
 ///
 /// The subject grammar (`oracle_effect::subject`) lowers a subject-anchored
-/// modal — "its controller may …", "its owner may …", "that creature's
-/// controller may …" — to `optional: true` plus a parent-target player anaphor
-/// in the effect's own player slot. That anaphor IS the actor: CR 608.2d has the
-/// announcing player make the choice while the effect is applied, and CR 603.7d
-/// fixes the delayed ability's *controller* as the creating spell's controller,
-/// so the two differ exactly when the clause names someone else.
+/// modal — "that player may …", "its controller may …", "they may …" — to
+/// `optional: true` plus a player anaphor in the effect's own player slot.
+///
+/// CAVEAT, and it is load-bearing: the effect's player slot is NOT in general
+/// the announcer. `Dig { player }` holds the LIBRARY'S OWNER (Psychic Surgery:
+/// "you may look at the top two cards of that library" — the LOOKER is the
+/// controller); `Token { owner }`, `GainLife { player }`, `Mana { recipient }`
+/// and `SearchLibrary { target_player }` are likewise patient slots, not actor
+/// slots. What makes the stamp correct is the CONJUNCTION at the call site: an
+/// admitted anaphor in the slot AND subject-provenance, the latter supplied by
+/// `clause_shell::is_specialized_you_may_phrase` head-blocking "have " and
+/// "look ". See the call site's PROVENANCE comment; the blocklist is pinned by
+/// the test
+/// `you_may_have_and_you_may_look_stay_head_blocked_so_the_announcer_stamp_cannot_leak`.
 ///
 /// Returns the anaphor to stamp as `AbilityDefinition::optional_player` (the
 /// engine's single authority for "who receives this may", consumed by
 /// `game::effects::optional_prompt_player`), or `None` for a controller-held
 /// "may" — including a payload that is not optional at all.
-///
-/// Deliberately narrow: only the two parent-target PLAYER anaphors qualify.
-/// `TargetFilter::Player` is an announced target and `Controller` is the
-/// wrapper's own controller; neither shifts the announcing player away from the
-/// existing lift.
-fn delayed_payload_optional_actor(def: &AbilityDefinition) -> Option<TargetFilter> {
-    if !def.optional || def.optional_player.is_some() {
+fn subject_anchored_optional_actor(
+    def: &AbilityDefinition,
+    window: ActorBindingWindow,
+) -> Option<TargetFilter> {
+    // CR 608.2d + CR 101.4: an any-opponent permission (`optional_for`) already
+    // names its own announcing seats and fans them out in APNAP order. That
+    // fan-out is gated on `ability.optional` (`effects::resolve_chain_body`), so
+    // a subject stamp here would be a SECOND announcer authority on the same
+    // node AND would hold `optional` down on the payload, silently skipping the
+    // cascade. Refuse, so the may and its scope lift together to the wrapper and
+    // the fan-out still fires. The clause-level call site carries this guard
+    // explicitly; asking it here too makes BOTH sites inherit it — the same
+    // call-site symmetry whose absence produced the Arcane Denial regression.
+    // Measured: zero corpus nodes reach the deferred window with `optional_for`
+    // set, so this is a forward guard, not a fix for a live card.
+    if !def.optional || def.optional_for.is_some() {
         return None;
     }
-    match def.effect.target_filter()? {
-        actor @ (TargetFilter::ParentTargetController | TargetFilter::ParentTargetOwner) => {
-            Some(actor.clone())
-        }
-        _ => None,
+    // CR 608.2c: the clause's anaphor, read from wherever this node already
+    // records it. Both call sites live in ONE iteration of
+    // `assemble_effect_chain`'s clause loop and the clause-level site runs
+    // FIRST on the same node, so by the time the `CreateDelayedTrigger` wrap
+    // asks, the announcer may already have moved out of the effect's player
+    // slot and into `optional_player`. Both spellings denote the SAME clause
+    // anaphor, so admission is asked of the VALUE, never of which field held
+    // it. That makes this function idempotent — `f(stamp(x)) == f(x)` — and
+    // therefore independent of call order, which is the property whose absence
+    // regressed #8439's Arcane Denial when the second call site was added.
+    // It is also what keeps this correct for an announcer recorded in a slot
+    // `Effect::target_filter()` does not surface (`PayCost { payer }` and the
+    // rest of the named residue).
+    let actor = match def.optional_player.as_ref() {
+        Some(actor) => actor,
+        None => def.effect.target_filter()?,
+    };
+    match window {
+        // CR 603.7b: the delayed ability triggers on its OWN event, so only
+        // anaphors bound from the ability's own target list survive the delay;
+        // an event-context ref would read that firing event, a different event.
+        // (CR 603.7d/e fix only the delayed ability's source and controller —
+        // they are what make the lift land on the right seat, not what makes an
+        // event-context ref unsafe.)
+        ActorBindingWindow::DeferredDelayedTrigger => match actor {
+            TargetFilter::ParentTargetController | TargetFilter::ParentTargetOwner => {
+                Some(actor.clone())
+            }
+            // CR 603.7b: event-context and resolution-scoped anaphors do not
+            // survive the delay — they would resolve against the delayed
+            // ability's own firing event.
+            TargetFilter::TriggeringPlayer
+            | TargetFilter::DefendingPlayer
+            | TargetFilter::TriggeringSourceController
+            | TargetFilter::EventTargetController
+            | TargetFilter::ScopedPlayer => None,
+            // Every remaining variant is refused for the SAME reason it is
+            // refused in `ThisResolution` below (CR 109.5 controller-relative,
+            // CR 601.2c announced targets, populations, dead admissions, and
+            // object filters). Enumerated so a new variant is a compile error
+            // in BOTH windows.
+            TargetFilter::None
+            | TargetFilter::Any
+            | TargetFilter::Player
+            | TargetFilter::Controller
+            | TargetFilter::SourceController
+            | TargetFilter::ControllerAndControlledPermanents { .. }
+            | TargetFilter::Opponent
+            | TargetFilter::SelfRef
+            | TargetFilter::GrantingObject
+            | TargetFilter::SourceOrPaired
+            | TargetFilter::Typed(_)
+            | TargetFilter::Not { .. }
+            | TargetFilter::Or { .. }
+            | TargetFilter::And { .. }
+            | TargetFilter::StackAbility { .. }
+            | TargetFilter::StackSpell
+            | TargetFilter::SpecificObject { .. }
+            | TargetFilter::SpecificPlayer { .. }
+            | TargetFilter::PlayerWhoChoseLabel { .. }
+            | TargetFilter::PlayerMatching { .. }
+            | TargetFilter::Neighbor { .. }
+            | TargetFilter::AttachedTo
+            | TargetFilter::LastCreated
+            | TargetFilter::LastRevealed
+            | TargetFilter::LastZoneChanged
+            | TargetFilter::CostPaidObject
+            | TargetFilter::AmassedArmy
+            | TargetFilter::ChosenCard
+            | TargetFilter::TrackedSet { .. }
+            | TargetFilter::TrackedSetFiltered { .. }
+            | TargetFilter::ExiledBySource
+            | TargetFilter::ExiledCardByIndex { .. }
+            | TargetFilter::TriggeringSpellController
+            | TargetFilter::TriggeringSpellOwner
+            | TargetFilter::TriggeringSource
+            | TargetFilter::EventTarget
+            | TargetFilter::ParentTarget
+            | TargetFilter::ParentTargetSlot { .. }
+            | TargetFilter::SourceChosenPlayer
+            | TargetFilter::OriginalController
+            | TargetFilter::OriginalSource
+            | TargetFilter::PostReplacementSourceController
+            | TargetFilter::PostReplacementDamageSource
+            | TargetFilter::PostReplacementDamageTarget
+            | TargetFilter::PostReplacementDamageTargetOwner
+            | TargetFilter::HasChosenName
+            | TargetFilter::ChosenDamageSource { .. }
+            | TargetFilter::Named { .. }
+            | TargetFilter::Owner
+            | TargetFilter::AllPlayers => None,
+        },
+        // CR 608.2c + CR 608.2d: during THIS resolution every event-context and
+        // resolution-scoped anaphor the clause named is still live.
+        ActorBindingWindow::ThisResolution => match actor {
+            TargetFilter::ParentTargetController
+            | TargetFilter::ParentTargetOwner
+            | TargetFilter::TriggeringPlayer
+            | TargetFilter::DefendingPlayer
+            | TargetFilter::TriggeringSourceController
+            | TargetFilter::EventTargetController
+            | TargetFilter::ScopedPlayer => Some(actor.clone()),
+
+            // CR 109.5 + CR 608.2h: controller-relative refs. `Controller` IS
+            // the fallback and is the value `inject_subject_target` replaces, so
+            // its presence means "no player subject was named"; `SourceController`
+            // ("~'s controller") is the same family one indirection out and names
+            // the ability's own controller for every printed subject-anchored may.
+            // Corpus: 499 optional `Controller` nodes, ZERO `SourceController`.
+            TargetFilter::Controller | TargetFilter::SourceController => None,
+
+            // CR 601.2c: an announced target chosen by the controller at cast
+            // time, not an anaphor ("you may have target player mill a card" —
+            // Jace's Erasure). 76 corpus nodes.
+            TargetFilter::Player => None,
+
+            // CR 102.2 + CR 102.3 + CR 601.2c: the announcing player for a TARGET
+            // SLOT ("of an opponent's choice"), a `target_chooser` role — a
+            // different provenance. Its resolver arm falls back to the FIRST
+            // OPPONENT IN SEAT ORDER, which is not a seat a "may" may land on.
+            TargetFilter::Opponent => None,
+
+            // The announcer is NOT in this slot: "target opponent may have YOU
+            // draw a card" puts the DRAWER here (Bane, Shakedown Heavy). Known
+            // no-change; see the plan's Deferral 6. 5 corpus nodes.
+            TargetFilter::OriginalController => None,
+
+            // Populations and sets, never one announcer (CR 608.2d names ONE
+            // player). `AllPlayers` is additionally valid only as an
+            // `UnlessPayModifier.payer` per its own doc.
+            TargetFilter::AllPlayers
+            | TargetFilter::PlayerWhoChoseLabel { .. }
+            | TargetFilter::PlayerMatching { .. }
+            | TargetFilter::ControllerAndControlledPermanents { .. }
+            | TargetFilter::Or { .. }
+            | TargetFilter::And { .. }
+            | TargetFilter::Not { .. } => None,
+
+            // An already-resolved `PlayerId`, not a reference to one. CR 109.5
+            // makes the "you"/named-player distinction one that is re-resolved at
+            // announcement time, and `optional_player` stores the REFERENCE that
+            // resolution reads; admitting a snapshotted seat would break this
+            // design's own provenance contract (parse time binds the reference,
+            // resolution time binds the seat). The reference-vs-seat distinction
+            // is a data-model fact about this variant's `PlayerId` payload, not a
+            // CR one, so only CR 109.5 is cited.
+            TargetFilter::SpecificPlayer { .. } => None,
+
+            // DEAD ADMISSIONS: player-denoting, but NO arm in
+            // `targeting::resolve_effect_player_ref` NOR in
+            // `resolve_event_context_target_for_event_or_state`, so each resolves
+            // to `None` on every board and silently falls back to the controller.
+            // `SourceChosenPlayer`'s authority is `effects::
+            // resolve_player_for_context_ref`, `Neighbor`'s is `players::neighbor`,
+            // `Owner`'s is the object's owner — none of which
+            // `optional_prompt_player` calls. See the plan's Deferral 7.
+            TargetFilter::SourceChosenPlayer
+            | TargetFilter::Neighbor { .. }
+            | TargetFilter::Owner => None,
+
+            // CR 113.7a + CR 108.3: the triggering SPELL's controller/owner. Both
+            // resolve, so this is a decision: the subject grammar never emits them
+            // for a subject-anchored may, and the referent they would name is
+            // already spelled `ParentTargetController`/`ParentTargetOwner` (Vex).
+            // A second spelling for one referent is the sibling cluster this
+            // design exists to avoid. Corpus-silent.
+            TargetFilter::TriggeringSpellController | TargetFilter::TriggeringSpellOwner => None,
+
+            // CR 615 replacement-time continuations, carried only inside
+            // `Effect::ApplyPostReplacementDamage`, whose `target_filter()` is
+            // `None` by an explicit arm — unreachable here by construction.
+            TargetFilter::PostReplacementSourceController
+            | TargetFilter::PostReplacementDamageSource
+            | TargetFilter::PostReplacementDamageTarget
+            | TargetFilter::PostReplacementDamageTargetOwner => None,
+
+            // Object filters cannot denote an announcing player. The player
+            // spellings of the anaphoric ones are admitted above
+            // (`TriggeringSource` -> `TriggeringSourceController`, `EventTarget`
+            // -> `EventTargetController`, `ParentTarget` ->
+            // `ParentTargetController`/`ParentTargetOwner`).
+            TargetFilter::None
+            | TargetFilter::Any
+            | TargetFilter::SelfRef
+            | TargetFilter::GrantingObject
+            | TargetFilter::SourceOrPaired
+            | TargetFilter::Typed(_)
+            | TargetFilter::StackAbility { .. }
+            | TargetFilter::StackSpell
+            | TargetFilter::SpecificObject { .. }
+            | TargetFilter::AttachedTo
+            | TargetFilter::LastCreated
+            | TargetFilter::LastRevealed
+            | TargetFilter::LastZoneChanged
+            | TargetFilter::CostPaidObject
+            | TargetFilter::AmassedArmy
+            | TargetFilter::ChosenCard
+            | TargetFilter::TrackedSet { .. }
+            | TargetFilter::TrackedSetFiltered { .. }
+            | TargetFilter::ExiledBySource
+            | TargetFilter::ExiledCardByIndex { .. }
+            | TargetFilter::TriggeringSource
+            | TargetFilter::EventTarget
+            | TargetFilter::ParentTarget
+            | TargetFilter::ParentTargetSlot { .. }
+            | TargetFilter::OriginalSource
+            | TargetFilter::HasChosenName
+            | TargetFilter::ChosenDamageSource { .. }
+            | TargetFilter::Named { .. } => None,
+        },
     }
+}
+
+/// CR 601.2c: a `Pump` whose target is its own declared target instance
+/// ("[up to one] [other] target creature gets +N/+M"), not an inherited anaphor.
+fn declares_pump_target(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::Pump {
+            target: TargetFilter::Typed(_),
+            ..
+        }
+    )
 }
 
 pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
@@ -1961,6 +2221,22 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                     }
                     PriorModifier::ManaRetention(expiry) => {
                         attach_mana_retention_to_prior_mana(&mut defs, *expiry);
+                    }
+                    PriorModifier::ManaSpendPermission(permission) => {
+                        // CR 609.4b: the rider was admitted only because the
+                        // clause it follows grants a cast without a concession
+                        // (`prior_clause_grants_a_cast_without_mana_spend_permission`),
+                        // so the stamp lands on that grant — the last def.
+                        let stamped = attach_mana_spend_permission_to_prior_cast_grant(
+                            &mut defs,
+                            *permission,
+                        );
+                        debug_assert!(
+                            stamped,
+                            "CR 609.4b: a mana rider admitted for the prior cast grant found \
+                             no grant to stamp on the last def: {:?}",
+                            defs.last()
+                        );
                     }
                     PriorModifier::EntersTappedAttacking => {
                         // CR 508.4 / CR 614.1: Conditional enters-tapped-attacking modifier.
@@ -2328,18 +2604,6 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
             continue;
         }
 
-        // CR 609.4b + CR 608.2c: Brainstealer/Daxos-class any-color mana
-        // riders may be split into their own sentence or comma sibling after a
-        // `PlayFromExile` grant. They scope the existing exile-play
-        // permission, so fold the rider into the prior grant instead of
-        // emitting a broad standalone `SpendManaAsAnyColor` effect.
-        if is_spend_mana_as_any_color_rider(clause_ir)
-            && attach_any_color_mana_rider_to_previous_play_from_exile(&mut defs)
-        {
-            prev_boundary = clause_ir.boundary;
-            continue;
-        }
-
         // CR 614.1a + CR 608.2g: An exact "if a spell cast this way would be
         // put into a graveyard" rider scopes each cast in the immediately prior
         // free-cast window. Absorb it before the legacy singular-spell route;
@@ -2390,18 +2654,40 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
             }
         }
 
-        // CR 601.2f + CR 614.1c: Lightstall Inquisitor's "Each spell cast this
-        // way costs {1} more to cast." / "Each land played this way enters
-        // tapped." rider sentences scope to the preceding `PlayFromExile`
-        // grant. Fold each into the grant (`cast_cost_raise` /
-        // `land_enter_tapped`) instead of emitting a standalone cost-modify
-        // static or board-wide ETB-tapped replacement — "this way" binds them
-        // to the exile-play permission, not to all spells/lands.
-        if let Some(cost) = cast_cost_raise_rider(clause_ir) {
-            if attach_cast_cost_raise_to_previous_play_from_exile(&mut defs, cost) {
+        // CR 601.2f + CR 608.2c + CR 614.1c: "Each spell cast this way costs {1}
+        // more to cast." (Lightstall Inquisitor), "Spells you cast this way cost
+        // {2} less to cast." (Urianger Augurelt), and "Each land played this way
+        // enters tapped." are rider sentences scoped by "this way" to the
+        // immediately-preceding grant. Fold each into that grant
+        // (`cast_cost_modifier` / `land_enter_tapped`) instead of emitting a
+        // standalone cost-modify static or board-wide ETB-tapped replacement.
+        //
+        // The cost rider has two hosts. A prior `Effect::CastFromZone` is tried
+        // first: it is the instruction that states the rider, and its resolver
+        // decides which of the permissions it builds may carry it (CR 305.1 —
+        // never the land-play companion). A prior `PlayFromExile` grant is the
+        // fallback for the class whose permission is built by the parser.
+        //
+        // When NEITHER host can carry it — no grant precedes the rider, or the
+        // one that does is on a `CastFromZone` driver with no cost-modifier slot
+        // — the rider must not lower as a clause of its own. Its own grammar
+        // ("[each/a] spell cast this way costs …") reads to the generic head
+        // dispatch as a cast instruction, so the fall-through produced a bare
+        // `Effect::CastFromZone` over every card, and at the line-classification
+        // layer a board-wide `StaticMode::ModifyCost` that prices EVERY spell
+        // its controller casts — both counted as supported by `cargo coverage`.
+        // Refuse instead: one honest gap, priced at nothing, counted as red.
+        let mut unabsorbed_rider_gap = None;
+        if let Some(modifier) = cast_cost_modifier_rider(clause_ir) {
+            if attach_cast_cost_modifier_to_prior_cast_from_zone(&mut defs, modifier.clone()) {
                 prev_boundary = clause_ir.boundary;
                 continue;
             }
+            if attach_cast_cost_modifier_to_previous_play_from_exile(&mut defs, modifier.clone()) {
+                prev_boundary = clause_ir.boundary;
+                continue;
+            }
+            unabsorbed_rider_gap = Some(cast_cost_modifier_without_host_gap(&modifier));
         }
         if is_land_enters_tapped_rider(clause_ir)
             && attach_land_enters_tapped_to_previous_play_from_exile(&mut defs)
@@ -2419,8 +2705,12 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         }
 
         // ── Build AbilityDefinition from ClauseIr ──
-        let is_target_only = matches!(clause_ir.parsed.effect, Effect::TargetOnly { .. });
-        let mut def = AbilityDefinition::new(kind, clause_ir.parsed.effect.clone());
+        // The refused rider above substitutes its gap for this clause's lowered
+        // effect, so it travels the ordinary def-construction path (boundary
+        // link, condition, provenance) rather than a bespoke emit.
+        let clause_effect = unabsorbed_rider_gap.unwrap_or_else(|| clause_ir.parsed.effect.clone());
+        let is_target_only = matches!(clause_effect, Effect::TargetOnly { .. });
+        let mut def = AbilityDefinition::new(kind, clause_effect);
         // CR 702.26a: Preserve clause provenance on parent-target tap riders so
         // host-bound phase-in rewrites can match the exact printed phrase without
         // falling back to whole-trigger text.
@@ -2681,7 +2971,54 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
             def.optional = true;
             def.optional_for = clause_ir.opponent_may_scope;
         }
-        // CR 117.3a + CR 608.2c: Propagate subject-phrase "may" modal.
+        // CR 608.2c + CR 608.2d: Propagate a clause-local "may" modal, and the player
+        // it NAMES.
+        //
+        // CR 608.2c ("read the whole text and apply the rules of English") binds the
+        // clause's anaphor — "that player", "its controller", "they" — to someone the
+        // clause names; CR 608.2d then has the player so named announce the choice
+        // while the effect is applied (608.2d says "the player announces these
+        // choices" — it is 608.2c that supplies WHICH player). CR 109.5 makes "you"
+        // the controller, so the two differ exactly when the clause names someone
+        // else. CR 608.2e covers the multi-step, multi-player chains this produces.
+        //
+        // (The previous `CR 117.3a` citation on this block was WRONG — 117.3a is the
+        // active-player-priority rule, not a rule about optional effects.)
+        //
+        // PROVENANCE — read this before changing the guard. `clause_ir.parsed.optional`
+        // is a UNION of two writers: the subject grammar
+        // (`lower_subject_predicate_ast`) and the clause shell's `"you may "` /
+        // opponent-may peel (`clause_shell::peel_clause` -> `apply_optional`). It does
+        // NOT by itself mean "the subject named an actor". What separates them here is
+        // the CONJUNCTION with an admitted player anaphor in the effect's own player
+        // slot.
+        //
+        // The slot is NOT an announcer slot in general — `Dig { player }` holds the
+        // LIBRARY'S OWNER (Psychic Surgery), `Token { owner }` the token's creator,
+        // `GainLife { player }` the life-gainer, `Mana { recipient }` the pool's owner,
+        // `SearchLibrary { target_player }` the searcher. The conjunction works because
+        // a controller-held "you may" leaves `Controller` in that slot (refused), and
+        // the only English constructions that put a DIFFERENT player there under a
+        // controller-held may are the causative "you may have ..." and the perception
+        // "you may look at ...", both head-blocked by
+        // `clause_shell::is_specialized_you_may_phrase`. That dependency is load-bearing
+        // and is pinned by the test
+        // `you_may_have_and_you_may_look_stay_head_blocked_so_the_announcer_stamp_cannot_leak`.
+        // Decisive evidence, stated at the level where it actually holds. "That
+        // attacking player may discard a card" (Curse of Chaos) and "you may have that
+        // player discard a card" (Slavering Nulls) lower to BYTE-IDENTICAL EFFECT NODES
+        // — `{"count":{"type":"Fixed","value":1},"target":{"type":"TriggeringPlayer"},
+        // "type":"Discard"}` — under `optional: true`, and need OPPOSITE announcers. So
+        // no predicate over the effect node plus `optional` can tell them apart, and
+        // that pair is the whole input an `optional_prompt_player` arm would get.
+        //
+        // Their enclosing definitions are NOT byte-identical (Curse of Chaos carries the
+        // "if the player does, they draw a card" rider as a `sub_ability`), and no two
+        // definitions in the 36,047-card corpus are byte-identical modulo
+        // `optional_player` with opposite announcers. That is not a hole in the argument:
+        // a rider's presence is not a provenance signal any sane predicate could key on —
+        // it says what happens NEXT, not who announced. Only the clause's own grammar,
+        // which exists solely here, records who was named.
         if clause_ir.parsed.optional
             && !matches!(
                 &clause_ir.parsed.effect,
@@ -2693,10 +3030,42 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
             && !is_pay_to_end_effect_termination
         {
             def.optional = true;
+            // CR 608.2d: an any-opponent permission (`optional_for`) already names its
+            // own announcing seats in APNAP order and suppresses this gate entirely
+            // (`effects::upfront_optional_gate`), so never stamp a second authority.
+            //
+            // `optional_for` is populated by the CHUNK channel (`def.optional_for =
+            // clause_ir.opponent_may_scope`, the block just above at `:2682`).
+            // `peel_clause`'s own opponent-may peel DROPS its scope, so that path
+            // arrives here with `optional_for: None` — it is covered instead by the
+            // admitted set, which refuses `OriginalController` (the slot that path
+            // leaves the DRAWER in: "target opponent may have you draw a card" — Bane,
+            // Shakedown Heavy).
+            //
+            // The `optional_player.is_none()` conjunct is the PRECEDENCE guard:
+            // never overwrite an announcer another producer already recorded.
+            // Vacuous today — the only writers of this field are this block, the
+            // `SearchOutsideGame` clear below, the delayed wrap, and
+            // `oracle_trigger::optional_player_from_effect_body`, which runs
+            // AFTER assembly and is itself `is_none()`-guarded — so `def`
+            // provably arrives here unstamped. Stated explicitly because the
+            // helper no longer refuses a stamped node (it now READS the stamp),
+            // so precedence belongs at the writer, not at the classifier.
+            if def.optional_for.is_none() && def.optional_player.is_none() {
+                if let Some(actor) =
+                    subject_anchored_optional_actor(&def, ActorBindingWindow::ThisResolution)
+                {
+                    def.optional_player = Some(actor);
+                }
+            }
         }
         if matches!(&clause_ir.parsed.effect, Effect::SearchOutsideGame { .. }) {
             def.optional = false;
             def.optional_for = None;
+            // CR 608.2d: no gate opens, so no announcer exists. Inert at runtime
+            // (`upfront_optional_gate` requires `ability.optional`) but a stray key
+            // here would land in `card-data.json` and break V7's acceptance diff.
+            def.optional_player = None;
         }
         if let Some(ref qty) = clause_ir.repeat_for {
             if matches!(*def.effect, Effect::TargetOnly { .. }) {
@@ -2980,14 +3349,70 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 // and the announcing player is the named one, not the wrapper's
                 // controller. Keep the flag on the payload and stamp the actor so
                 // `effects::optional_prompt_player` routes the prompt there.
-                let lifted_optional = match delayed_payload_optional_actor(&inner) {
-                    Some(actor) => {
-                        inner.optional_player = Some(actor);
-                        false
+                //
+                // CR 608.2d + CR 101.4: a delayed "any opponent/player may"
+                // permission is a THIRD case, and it keeps BOTH halves on the
+                // payload. Its APNAP fan-out (`effects::resolve_chain_body`) is
+                // gated on `ability.optional`, so the two are one unit: lifting
+                // `optional` to the wrapper would fire the cascade when the
+                // CREATING clause resolves — the wrong moment, since CR 603.7
+                // ("do something at a later time") plus CR 608.2d (choices are
+                // announced WHILE APPLYING the effect) put the permission at the
+                // delayed ability's own resolution —
+                // and lifting `optional_for` without it would strand a scope on a
+                // node whose gate never opens. The "harmlessly earlier moment"
+                // rationale above is specific to a CONTROLLER-held may; it does
+                // not extend to a permission whose eligible seats and timing are
+                // both determined at the delayed resolution. Subject-actor routing
+                // therefore applies only to the non-fan-out path.
+                // Measured: zero corpus payloads carry `optional_for`, so this is
+                // a forward guard rather than a fix for a live card.
+                let carries_delayed_fanout = inner.optional_for.is_some();
+                let lifted_optional = if carries_delayed_fanout {
+                    false
+                } else {
+                    match subject_anchored_optional_actor(
+                        &inner,
+                        ActorBindingWindow::DeferredDelayedTrigger,
+                    ) {
+                        Some(actor) => {
+                            inner.optional_player = Some(actor);
+                            false
+                        }
+                        None => {
+                            // CR 603.7d + CR 603.7e: the may belongs to the delayed
+                            // ability's own controller — the player who controlled the
+                            // creating spell or ability as it resolved — so it lifts to
+                            // the wrapper. Any announcer the CLAUSE-LEVEL stamp wrote on
+                            // this payload named a player the deferred window refuses (an
+                            // event-context anaphor resolves against
+                            // `state.current_trigger_event`, which at that later
+                            // resolution is the DELAYED ability's own trigger event per
+                            // CR 603.7b — a different event, and a referent CR 608.2c
+                            // never licensed), and it must not outlive the gate it
+                            // belonged to. Not merely a stray `card-data.json` key:
+                            // `stack.rs`'s three batch-collapse proofs read
+                            // `!*optional && optional_player.is_none()`, and a payload
+                            // whose `optional` was just lifted to `false` now REACHES
+                            // that conjunct, so a residue would silently defeat a
+                            // collapse base performed. Clearing restores the base node
+                            // byte for byte. Safe unconditionally: the only writer that
+                            // can have run before this point is the clause-level stamp,
+                            // on this same node, in this same clause iteration.
+                            inner.optional_player = None;
+                            std::mem::replace(&mut inner.optional, false)
+                        }
                     }
-                    None => std::mem::replace(&mut inner.optional, false),
                 };
-                let lifted_optional_for = std::mem::take(&mut inner.optional_for);
+                // The wrapper never carries a fan-out scope: a permission keeps
+                // `optional_for` on its payload (above), and every other payload
+                // has none to lift. Kept as a named binding so the wrapper's
+                // field assignment below still reads uniformly with its siblings.
+                let lifted_optional_for = if carries_delayed_fanout {
+                    None
+                } else {
+                    std::mem::take(&mut inner.optional_for)
+                };
                 let lifted_repeat_for = std::mem::take(&mut inner.repeat_for);
                 let lifted_player_scope = std::mem::take(&mut inner.player_scope);
                 // CR 608.2c: The `CreateDelayedTrigger` wrapper — not its payload —
@@ -3051,6 +3476,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                     // and mass-publisher recalls keep the chain tracked set.
                     let singular_self_recall = singular_battlefield_recall(&source_text_lower)
                         && nearest_publisher_is_self_move(&defs);
+                    let plural_library_recall = plural_library_shuffle_recall(&source_text_lower);
                     for current in &mut current_defs {
                         mark_uses_tracked_set(current);
                         // Per-def branch: only a battlefield-recall-shaped leg
@@ -3068,6 +3494,9 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                         {
                             rewrite_singular_battlefield_recall_to_self(&mut current.effect);
                         } else {
+                            if plural_library_recall {
+                                rewrite_plural_library_recall_to_tracked_set(&mut current.effect);
+                            }
                             rewrite_parent_targets_to_tracked_set(
                                 &mut current.effect,
                                 cast_anaphor_is_exiled,
@@ -3076,6 +3505,29 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                     }
                 }
             } else if contains_explicit_tracked_set_pronoun(&source_text_lower) {
+                // CR 608.2c + CR 601.2c + CR 115.6: a plural anaphor ("those
+                // creatures") after two or more targeted P/T instructions of this
+                // ability names every object those target instances declared, and a
+                // declined "up to one" instance contributes none. No single parent's
+                // targets carry that union, so the grant or pump binds the chain
+                // tracked set the targeted `Pump`s publish
+                // (`affected_objects_from_events`). A damage or fight consumer keeps
+                // its `ParentTarget` binding.
+                if defs
+                    .iter()
+                    .filter(|def| declares_pump_target(&def.effect))
+                    .count()
+                    >= 2
+                {
+                    for current in &mut current_defs {
+                        if matches!(
+                            &*current.effect,
+                            Effect::GenericEffect { .. } | Effect::Pump { .. }
+                        ) {
+                            rewrite_parent_targets_to_tracked_set(&mut current.effect, false);
+                        }
+                    }
+                }
                 // CR 603.7 + issue #6065: "those creatures gain <keyword>" after a
                 // "draw a card for each <creature filter>" clause (Inspiring Call).
                 // Draw publishes no tracked set (its target is the drawing player),
@@ -3681,6 +4133,11 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     // CR 601.2c + CR 608.2c: suppress a reflexive-target rider when the optional
     // "up to one" antecedent target is declined (no object target chosen).
     gate_reflexive_rider_on_declined_optional_target(&mut result);
+    // CR 607.2d + CR 608.2c: a standalone battlefield-object choice whose chain
+    // reads the pick persists it (`RememberCard`) — or, when the reader text
+    // belongs to a non-object axis (Gideon's Sacrifice), is restored to its
+    // pre-phase-2 `TargetOnly` shape. See `reconcile_object_choice_durability`.
+    reconcile_object_choice_durability(&mut result, ir);
     // CR 608.2c + CR 613.1f: persist a standalone "choose a [type] card exiled
     // with ~" pick as the host's last chosen card (Koh, the Face Stealer).
     append_remember_card_to_standalone_exiled_choice(&mut result);
@@ -3698,6 +4155,15 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     // structure regardless of when `multi_target` was attached), so the presence
     // check is robustly correct.
     gate_other_revealed_card_on_multiplayer_reveal(&mut result);
+
+    // CR 608.2c + CR 611.2f: a lingering cast grant's "If you do" rider is
+    // followed in printed order during the grant's own resolution (CR 608.2c),
+    // before any spell exists to receive it; an effect that modifies a spell cast
+    // LATER applies only once that spell is put on the stack (CR 611.2f), which
+    // this grant cannot carry. Applied on the FINAL tree for the
+    // same reason as the gate above: only here are the grant and its rider both
+    // linked. See `refuse_cast_rider_on_lingering_grant`.
+    super::lower::refuse_cast_rider_on_lingering_grant(&mut result);
 
     // CR 608.2c + CR 107.1c: A trailing "repeat this process" directive sets a
     // chain-level loop predicate; apply it to the assembled root ability so the
@@ -3816,6 +4282,71 @@ fn same_revealed_card_type_condition(
         && positive_subtype == negated_subtype
 }
 
+/// CR 607.2d + CR 608.2c: The durability transaction for a standalone,
+/// non-target battlefield-object choice head.
+///
+/// Gate A (in `imperative.rs`) only fires when the choose chunk leads the chain,
+/// so a Gate-A-produced head is always `result.effect` — but assembly must be
+/// able to recognize that provenance from the IR alone (the frozen scope rule
+/// forbids adding a marker field to `ParsedEffectClause`). It reconstructs the
+/// Gate-A consideration set from two facts:
+///
+/// * the HEAD-shape fact — the head clause fragment passes the same shared core
+///   Gate A used (`is_standalone_object_choice_clause`, chain context absent);
+/// * the READER-TEXT fact — some clause fragment mentions a "the chosen
+///   ‹battlefield object›" reader (`chain_text_mentions_chosen_object`).
+///
+/// The reader-text conjunct is MANDATORY, not belt-and-braces: the base corpus
+/// has nine root `ChooseObjectsIntoTrackedSet` cards, and without it the
+/// choose-up-to family (Duneblast, Mount Doom, The Day of the Doctor — all
+/// `supported: true`) would be downgraded by the restore arm below even though
+/// their chains contain no ChosenCard reader. Measured: with the conjunct the
+/// only candidates are Zenos yae Galvus and Gideon's Sacrifice.
+///
+/// The SEMANTIC authority is the explicit tree walk
+/// (`chain_references_chosen_card`), never the text scan: a present reader
+/// splices the `RememberCard` writer; a text-only reader (Gideon's
+/// "the chosen permanent" belongs to a damage-redirect axis, not the
+/// remembered-object reader) restores the pre-phase-2 `TargetOnly` shape so the
+/// card's parse is byte-identical to base.
+fn reconcile_object_choice_durability(result: &mut AbilityDefinition, ir: &EffectChainIr) {
+    if !matches!(&*result.effect, Effect::ChooseObjectsIntoTrackedSet { .. }) {
+        return;
+    }
+    let Some(head_fragment) = ir
+        .clauses
+        .first()
+        .and_then(|clause| clause.source.fragment())
+    else {
+        return;
+    };
+    if !super::imperative::is_standalone_object_choice_clause(head_fragment) {
+        return;
+    }
+    let chain_has_reader_text = ir
+        .clauses
+        .iter()
+        .filter_map(|clause| clause.source.fragment())
+        .any(|fragment| chain_text_mentions_chosen_object(&fragment.to_lowercase()));
+    if !chain_has_reader_text {
+        return;
+    }
+    if chain_references_chosen_card(result) {
+        // CR 607.2d + CR 608.2c: the chain reads the pick — make it durable.
+        ensure_remember_card_after_object_choice(result);
+    } else {
+        // CR 115.1 + CR 608.2d: reader TEXT but no remembered-object reader in
+        // the tree (Gideon's Sacrifice: "the chosen permanent" is a redirect
+        // axis). Restore the pre-phase-2 standalone non-targeting shape.
+        let Effect::ChooseObjectsIntoTrackedSet { filter, .. } = &*result.effect else {
+            return;
+        };
+        *result.effect = Effect::TargetOnly {
+            target: filter.clone(),
+        };
+    }
+}
+
 /// R2 — CR 608.2c + CR 401.4: linked-exile-cast bottom cleanup.
 ///
 /// After an optional `CastFromZone` from a linked exile, the trailing "put it on the
@@ -3921,6 +4452,87 @@ mod arena_tests {
                 target: TargetFilter::Controller,
             },
         )
+    }
+
+    /// The anaphoric grant of a two-targeted-`Pump` chain, as the stamp leaves it.
+    fn p6_anaphor_grant_affected(text: &str) -> Vec<Option<TargetFilter>> {
+        let parsed = crate::parser::parse_oracle_text(
+            text,
+            "P6 Anaphor Probe",
+            &[],
+            &["Sorcery".to_string()],
+            &[],
+        );
+        let root = parsed
+            .abilities
+            .first()
+            .unwrap_or_else(|| panic!("one spell chain expected: {text}"));
+        let mut node = Some(root);
+        let mut pumps = 0usize;
+        while let Some(def) = node {
+            match &*def.effect {
+                Effect::Pump {
+                    target: TargetFilter::Typed(_),
+                    ..
+                } => pumps += 1,
+                Effect::GenericEffect {
+                    static_abilities, ..
+                } => {
+                    assert_eq!(
+                        pumps, 2,
+                        "REACH GUARD: the chain must reach the grant with TWO declared \
+                         targeted pumps before it, or the stamp's gate is not the thing \
+                         under test: {text}"
+                    );
+                    return static_abilities
+                        .iter()
+                        .map(|static_def| static_def.affected.clone())
+                        .collect();
+                }
+                _ => {}
+            }
+            node = def.sub_ability.as_deref();
+        }
+        panic!("no anaphoric grant in the chain: {text}");
+    }
+
+    /// CR 608.2c + CR 601.2c + CR 115.6 — H-3b.1. U6b's DISCRIMINATING
+    /// building-block row, and the one no U6a row can supply: both conjuncts
+    /// already split at PHASE_BASE through the pre-existing verb-only arm, so
+    /// this row moves on the STAMP alone.
+    ///
+    /// A PLURAL anaphor after two or more targeted P/T instructions names every
+    /// object those instances declared. No single parent's targets carry that
+    /// union, so the grant binds the chain tracked set.
+    ///
+    /// PAIR: M-3 (revert the stamp).
+    #[test]
+    fn plural_anaphor_after_two_targeted_pumps_binds_tracked_set() {
+        assert_eq!(
+            p6_anaphor_grant_affected(
+                "Target creature you control gets +1/+1 and target creature an opponent controls gets +1/+1. Those creatures gain trample until end of turn."
+            ),
+            vec![Some(TargetFilter::TrackedSet {
+                id: crate::types::identifiers::TrackedSetId(0)
+            })],
+        );
+    }
+
+    /// CR 608.2c — H-3b.2, HOSTILE NEIGHBOUR. GREEN AT BASE. A SINGULAR
+    /// anaphor over the same two-pump chain names one object, so it keeps its
+    /// `ParentTarget` binding and must not be swept into the tracked set.
+    ///
+    /// PAIR: `plural_anaphor_after_two_targeted_pumps_binds_tracked_set`
+    /// (H-3b.1, red at base on the same stamp) + M-9 (hoist the stamp above
+    /// the pronoun branch so it also fires on the singular path).
+    #[test]
+    fn singular_anaphor_after_two_targeted_pumps_keeps_parent_target() {
+        assert_eq!(
+            p6_anaphor_grant_affected(
+                "Target creature you control gets +1/+1 and target creature an opponent controls gets +1/+1. It gains trample until end of turn."
+            ),
+            vec![Some(TargetFilter::ParentTarget)],
+        );
     }
 
     /// The mirror assert's IDENTITY check (`order[i]` names the def actually at
@@ -4274,6 +4886,78 @@ mod arena_tests {
 
     fn chain_len(def: &AbilityDefinition) -> usize {
         1 + def.sub_ability.as_deref().map_or(0, chain_len)
+    }
+
+    /// CR 608.2d + CR 101.4 + CR 603.7: a delayed "any opponent may" permission
+    /// keeps `optional` AND `optional_for` TOGETHER on the payload.
+    ///
+    /// This drives `assemble_effect_chain` directly, which is the only way to
+    /// reach the branch: `clause_shell`'s opponent-may peel drops its scope
+    /// before assembly on the delayed path, so no Oracle text produces the shape
+    /// (measured: zero corpus delayed payloads carry `optional_for`). The
+    /// runtime half — that the payload's shape then fans out in APNAP order at
+    /// the delayed trigger — is pinned by
+    /// `a_delayed_any_opponent_permission_fans_out_in_apnap_order_at_the_delayed_trigger`
+    /// in `tests/integration/subject_anchored_optional_announcer.rs`.
+    ///
+    /// Reverting the `carries_delayed_fanout` guard flips `optional` onto the
+    /// wrapper and empties the payload's scope, failing both halves below.
+    #[test]
+    fn a_delayed_fanout_permission_keeps_optional_and_optional_for_on_the_payload() {
+        use crate::types::ability::OpponentMayScope;
+        let mut builder = ClauseIrBuilder::new("any opponent may shuffle at the next end step");
+        builder
+            .clause(
+                "any opponent may shuffle at the next end step",
+                parsed_clause(shuffle_effect()),
+                Some(ClauseBoundary::Sentence),
+                ClauseDisposition::Emit {
+                    followup: None,
+                    intrinsic: None,
+                },
+            )
+            .is_optional(true)
+            .opponent_may_scope(Some(OpponentMayScope::AnyOpponent))
+            .delayed_condition(Some(DelayedTriggerCondition::AtNextPhase {
+                phase: Phase::End,
+            }))
+            .push();
+        let assembled = assemble_effect_chain(&chain_ir(builder.finish(), AbilityKind::Spell));
+
+        // Reach-guard: we really are looking at the delayed wrapper.
+        let Effect::CreateDelayedTrigger {
+            effect: payload, ..
+        } = &*assembled.effect
+        else {
+            panic!(
+                "reach-guard: the clause must assemble to a CreateDelayedTrigger, got {:?}",
+                assembled.effect
+            );
+        };
+
+        assert!(
+            payload.optional,
+            "CR 608.2d + CR 101.4: the permission's gate stays on the payload — lifting it \
+             to the wrapper fires the APNAP cascade when the CREATING clause resolves, not \
+             at the delayed trigger (CR 603.7 + CR 608.2d)"
+        );
+        assert_eq!(
+            payload.optional_for,
+            Some(OpponentMayScope::AnyOpponent),
+            "CR 101.4: the scope stays with the gate it belongs to"
+        );
+        assert!(
+            !assembled.optional,
+            "the wrapper must NOT carry the permission's gate"
+        );
+        assert_eq!(
+            assembled.optional_for, None,
+            "the wrapper must NOT carry the permission's scope"
+        );
+        assert_eq!(
+            payload.optional_player, None,
+            "CR 608.2d: a fan-out permission names its own seats; no subject stamp is added"
+        );
     }
 
     fn first_delayed_after(def: &AbilityDefinition) -> &AbilityDefinition {

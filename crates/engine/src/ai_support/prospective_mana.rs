@@ -1341,6 +1341,7 @@ mod tests {
             token: DelayedTriggerToken(7),
             instance: DelayedTriggerInstanceId(11),
             source_id: source,
+            offer_id: None,
         };
         let mut state = GameState::new_two_player(42);
         let plan = CertifiedPactPlan {

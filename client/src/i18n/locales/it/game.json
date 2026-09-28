@@ -112,6 +112,10 @@
     "tokenToughnessPlaceholder": "Toughness",
     "sourceDefinedPtRequired": "Enter power and toughness for this source-defined token."
   },
+  "debugMove": {
+    "runEtbEffects": "Esegui effetti ETB",
+    "simulate": "Simula (effetti ETB, innescate + SBA)"
+  },
   "debugLibrary": {
     "openActions": "Apri le azioni di debug per {{name}}"
   },
@@ -307,6 +311,10 @@
     "eligibleCount": "{{count}} legali",
     "attackingCount": "att {{count}}",
     "selectedCount": "sel {{count}}",
+    "directBlockTargetCount": "bersagli di blocco {{count}}",
+    "blockingWith": "Blocca con {{name}}",
+    "blockedBy": "Bloccato da {{names}}",
+    "unblocked": "Non bloccato",
     "pickAll": "Tutti",
     "pickNone": "Nessuno",
     "underAttack_one": "Attaccato da {{count}} creatura",
@@ -764,6 +772,8 @@
     "mustAttackSatisfiedBadge": "Attacking ✓",
     "mustBlockBadge": "Must block",
     "mustBlockExactBadge": "Deve bloccare {{attacker}}",
+    "mustBeBlockedBadge": "Deve essere bloccato",
+    "bandBadge": "Banda {{n}}",
     "mustBlockSatisfiedBadge": "Blocking ✓",
     "cantAttackBadge": "Can't attack",
     "cantBlockBadge": "Can't block",
@@ -1422,7 +1432,16 @@
       "subtitleUpTo_other": "Seleziona fino a {{count}} carte da mettere {{destination}}",
       "destinationTop": "in cima al tuo grimorio",
       "destinationBattlefield": "sul campo di battaglia",
-      "destinationHand": "nella tua mano"
+      "destinationHand": "nella tua mano",
+      "titleSplit": "Dividi le carte rimanenti",
+      "subtitleSplit_one": "Disponi le carte: {{count}} va in cima al tuo grimorio, le altre {{remaining}} vanno in fondo",
+      "subtitleSplit_other": "Disponi le carte: {{count}} vanno in cima al tuo grimorio, le altre {{remaining}} vanno in fondo",
+      "badgeTop": "Cima {{order}}",
+      "badgeBottom": "Fondo",
+      "hintSplit": "Trascina per riordinare · le verdi vanno in cima (la prima è la più alta), le grigie in fondo",
+      "moveEarlier": "Sposta {{card}} prima",
+      "moveLater": "Sposta {{card}} dopo",
+      "hintSplitOrderOnly": "Trascina o usa le frecce per riordinare all’interno di ogni pila · un altro giocatore ha scelto quali carte vanno in cima"
     },
     "surveil": {
       "title": "Sorvegliare",
@@ -1671,6 +1690,10 @@
       "labelExile": "Esilia",
       "labelBehold": "Contempla"
     },
+    "empowerJace": {
+      "title": "Potenziare Jace",
+      "subtitle": "Scegli una pedina Jace che controlli perché ottenga +{{count}} fedeltà"
+    },
     "collectEvidence": {
       "title": "Raccogli prove",
       "subtitle": "Esilia carte dal tuo cimitero con valore di mana totale {{minimum}} o superiore"
@@ -1789,6 +1812,14 @@
       "subtitle_one": "Put {{count}} revealed card on the bottom of your library",
       "subtitle_other": "Put {{count}} revealed cards on the bottom of your library, in any order",
       "hint": "Drag to reorder · position 1 ends up on top of this pile"
+    },
+    "revealUntilBottom": {
+      "title": "Metti il resto in fondo",
+      "subtitle_one": "Metti {{count}} carta rivelata in fondo al tuo grimorio",
+      "subtitle_other": "Metti {{count}} carte rivelate in fondo al tuo grimorio in qualsiasi ordine",
+      "hint": "Trascina per riordinare · la posizione 1 va in cima a questa pila",
+      "moveLeft": "Sposta a sinistra",
+      "moveRight": "Sposta a destra"
     }
   },
   "specializeColor": {
@@ -1900,6 +1931,10 @@
     "prowlNormalLabel": "Lancia normalmente",
     "prowlAltLabel": "Lancia con Prowl",
     "prowlSubtitle": "Lancia {{name}} normalmente, o paga il suo costo di Prowl (disponibile perché una creatura corrispondente ha inflitto danno da combattimento a un giocatore in questo turno).",
+    "surgeEyebrow": "Surge",
+    "surgeNormalLabel": "Lancia normalmente",
+    "surgeAltLabel": "Lancia con Surge",
+    "surgeSubtitle": "Lancia {{name}} normalmente, o paga il suo costo di Surge (disponibile perché tu o un compagno di squadra avete lanciato un'altra magia in questo turno).",
     "overloadEyebrow": "Sovraccarico",
     "overloadNormalLabel": "Lancia normalmente",
     "overloadAltLabel": "Lancia con Sovraccarico",
@@ -1923,6 +1958,8 @@
     "additionalExile": "+ Esilia una carta",
     "additionalSacrifice": "+ Sacrifica un permanente",
     "additionalPayLife": "+ Paga punti vita",
+    "additionalPayLifeAmount": "+ Paga {{amount}} punti vita",
+    "additionalCollectEvidence": "+ Raccogli prove {{amount}}",
     "additionalDiscard": "+ Scarta una carta",
     "additionalTapCreatures": "+ TAPpa creature",
     "additionalGeneric": "+ {{type}}"
@@ -2050,6 +2087,7 @@
     "variantForetell": "Lancia da Predire",
     "variantOverload": "Lancia con Sovraccarico",
     "variantBestow": "Lancia con Conferire",
+    "variantBlitz": "Lancia con Blitz",
     "variantFreerunning": "Lancia con Freerunning",
     "variantFuse": "Lancia con Fusione",
     "variantMutate": "Lancia con Mutate",
@@ -2059,7 +2097,14 @@
     "variantMoreThanMeetsTheEye": "Cast Converted",
     "variantPrototype": "Lancia con Prototipo",
     "variantFaceDown": "Lancia a faccia in giù",
-    "variantFallback": "Lancia con {{type}}"
+    "variantFallback": "Lancia con {{type}}",
+    "viaSource": "tramite {{name}}",
+    "extraCostAdditional": "+ {{cost}}",
+    "extraCostAlternative": "invece del suo costo di mana: {{cost}}",
+    "entersWithCounter": "entra con un segnalino {{counter}}",
+    "slotPerType": "usa il suo spazio {{type}}",
+    "slotChooseType": "scegli un tipo di permanente",
+    "slotOncePerTurn": "una volta in questo turno"
   },
   "categoryChoice": {
     "title": "Scegli i permanenti da tenere",
@@ -2359,6 +2404,25 @@
     "moveDown": "Sposta giù",
     "triggerFallback": "Innesco {{number}}"
   },
+  "costReductionOrder": {
+    "eyebrow": "Ordine delle riduzioni di costo",
+    "title": "Ordina le tue riduzioni di costo",
+    "subtitle": "Queste riduzioni fissano un costo totale diverso a seconda dell'ordine in cui le applichi (CR 601.2f). La cima di questo elenco viene applicata per prima.",
+    "appliedFirst": "Applicata per prima",
+    "appliedLast": "Applicata per ultima",
+    "lockedCost": "Costo totale fissato",
+    "lockedCostUnknown": "Uguale a uno dei totali qui sotto",
+    "outcomesHeading": "Totali che puoi fissare",
+    "reachColoredOnly": "Riduce solo il mana colorato",
+    "reachSpills": "Può ridurre il mana generico",
+    "multiplier": "×{{count}}",
+    "confirmOrder": "Conferma ordine",
+    "cancel": "Annulla",
+    "moveUp": "Sposta su",
+    "moveDown": "Sposta giù",
+    "reductionFallback": "Riduzione {{number}}",
+    "floor": "Non può ridurre il costo sotto {{count}} mana"
+  },
   "unhandledWaitingFor": {
     "title": "Azione richiesta, ma manca l'interfaccia",
     "body": "La partita è in attesa di un'azione da parte tua, ma questa versione di phase.rs non ha ancora un'interfaccia per essa. Questo è un bug — per favore segnalalo così possiamo correggerlo. Usa il pulsante qui sotto per uscire dalla partita.",
@@ -2527,6 +2591,7 @@
       "mulligan": "mulligan decision",
       "discarding": "discarding",
       "orderingTriggers": "ordering triggers",
+      "orderingCostReductions": "ordering cost reductions",
       "respondingToStack": "responding to the stack",
       "priorityCombat": "combat",
       "priorityMain": "main phase",
@@ -2542,6 +2607,7 @@
       "mulligan": "Mulligan",
       "discarding": "Discarding",
       "orderingTriggers": "Ordering triggers",
+      "orderingCostReductions": "Ordering cost reductions",
       "respondingToStack": "Responding",
       "priorityCombat": "Combat",
       "priorityMain": "Main phase",

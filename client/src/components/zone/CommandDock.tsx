@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 
 import type { GameObject, PlayerId } from "../../adapter/types.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
+import { useLocalizedCardName } from "../../hooks/useEngineCardData.ts";
 import { useResolvedCommandZoneDisplay } from "../../hooks/useResolvedCommandZoneDisplay.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { objectImageProps } from "../../services/cardImageLookup.ts";
@@ -143,6 +144,7 @@ function CompactCommandDock({
   const closeTimerRef = useRef<number | null>(null);
   const [popoverPos, setPopoverPos] = useState<{ left: number; top: number } | null>(null);
   const firstCommander = commanders[0];
+  const displayName = useLocalizedCardName(firstCommander?.name ?? null) ?? firstCommander?.name ?? "";
   const imageProps = firstCommander ? objectImageProps(firstCommander) : null;
   const { src, isLoading, rungs, advanceFailedSource } = useCardImage(
     imageProps?.cardName ?? "",
@@ -249,7 +251,7 @@ function CompactCommandDock({
             <img
               src={src}
               {...getCardImageSrcSetProps(src, rungs)}
-              alt={firstCommander.name}
+              alt={displayName}
               className="h-full w-full object-contain"
               draggable={false}
               onError={() => advanceFailedSource?.(src)}
@@ -257,7 +259,7 @@ function CompactCommandDock({
           </span>
         ) : firstCommander ? (
           <CardArtFallback
-            name={firstCommander.name}
+            name={displayName}
             variant="artCrop"
             className="h-full w-full rounded-lg"
           />

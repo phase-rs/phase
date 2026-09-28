@@ -62,8 +62,10 @@ import {
   CoinFlipKeepModal,
   DieKeepModal,
   DigModal,
+  DigRestSplitModal,
   RevealModal,
   RippleBottomOrderModal,
+  RevealUntilBottomOrderModal,
   ScryModal,
   ArrangePlanarDeckTopModal,
   SurveilModal,
@@ -120,8 +122,9 @@ type ManifestDreadChoice = Extract<WaitingFor, { type: "ManifestDreadChoice" }>;
 type DamageSourceChoice = Extract<WaitingFor, { type: "DamageSourceChoice" }>;
 type LearnChoice = Extract<WaitingFor, { type: "LearnChoice" }>;
 type BeholdChoice = Extract<WaitingFor, { type: "BeholdChoice" }>;
+type EmpowerJaceChoice = Extract<WaitingFor, { type: "EmpowerJaceChoice" }>;
 
-function effectZoneChoiceInteractionId(
+function selectionInteractionId(
   interaction: ViewerInteraction | null,
 ): InteractionId | null {
   for (const opportunity of interaction?.opportunities ?? []) {
@@ -156,8 +159,8 @@ export function CardChoiceModal() {
   const canActForWaitingState = useCanActForWaitingState();
   const waitingFor = useGameStore((s) => s.waitingFor);
   const objects = useGameStore((s) => s.gameState?.objects);
-  const effectZoneInteractionId = useGameStore((s) =>
-    effectZoneChoiceInteractionId(s.viewerInteraction),
+  const activeSelectInteractionId = useGameStore((s) =>
+    selectionInteractionId(s.viewerInteraction),
   );
 
   if (!waitingFor) return null;
@@ -177,6 +180,17 @@ export function CardChoiceModal() {
           data={waitingFor.data}
         />
       );
+    case "RevealUntilBottomOrder":
+      if (!canActForWaitingState) return null;
+      return (
+        <RevealUntilBottomOrderModal
+          key={
+            activeSelectInteractionId ??
+            `${waitingFor.data.player}:${waitingFor.data.source_id}:${waitingFor.data.cards.join(",")}`
+          }
+          data={waitingFor.data}
+        />
+      );
     case "CoinFlipKeepChoice":
       if (!canActForWaitingState) return null;
       return <CoinFlipKeepModal data={waitingFor.data} />;
@@ -186,6 +200,18 @@ export function CardChoiceModal() {
     case "DigChoice":
       if (!canActForWaitingState) return null;
       return <DigModal data={waitingFor.data} />;
+    case "DigRestSplitChoice":
+      if (!canActForWaitingState) return null;
+      // Prompt-identity key, same as `RippleBottomOrder` above: the modal
+      // seeds its drag order from `data.cards` at mount, so two consecutive
+      // split prompts must REMOUNT it rather than re-render it with the first
+      // prompt's stale ids still selected.
+      return (
+        <DigRestSplitModal
+          key={waitingFor.data.cards.join("-")}
+          data={waitingFor.data}
+        />
+      );
     case "SurveilChoice":
       if (!canActForWaitingState) return null;
       return <SurveilModal data={waitingFor.data} />;
@@ -236,12 +262,15 @@ export function CardChoiceModal() {
     case "BeholdChoice":
       if (!canActForWaitingState) return null;
       return <BeholdChoiceModal data={waitingFor.data} />;
+    case "EmpowerJaceChoice":
+      if (!canActForWaitingState) return null;
+      return <EmpowerJaceChoiceModal data={waitingFor.data} />;
     case "EffectZoneChoice":
       if (!canActForWaitingState) return null;
       if (getBoardChoiceView(waitingFor, objects)) return null;
       return (
         <EffectZoneModal
-          key={effectZoneInteractionId ?? effectZoneChoiceFallbackKey(waitingFor.data)}
+          key={activeSelectInteractionId ?? effectZoneChoiceFallbackKey(waitingFor.data)}
           data={waitingFor.data}
         />
       );
@@ -1075,6 +1104,58 @@ function BeholdChoiceModal({ data }: { data: BeholdChoice["data"] }) {
     <ChoiceOverlay
       title={t("cardChoice.behold.title")}
       subtitle={t("cardChoice.behold.subtitleChoose")}
+    >
+      <ScrollableCardStrip>
+        {data.choices.map((id, index) => {
+          const obj = objects[id];
+          if (!obj) return null;
+          return (
+            <motion.button
+              key={id}
+              className="relative shrink-0 rounded-lg transition hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
+              initial={{ opacity: 0, y: 60, scale: 0.85 }}
+              animate={{ opacity: 0.85, y: 0, scale: 1 }}
+              transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
+              whileHover={{ scale: 1.05, y: -6, opacity: 1 }}
+              onClick={() => handleChoose(id)}
+              {...hoverProps(id)}
+            >
+              <CardImage
+                {...objectImageProps(obj)}
+                size="normal"
+                className={CHOICE_CARD_IMAGE_CLASS}
+              />
+            </motion.button>
+          );
+        })}
+      </ScrollableCardStrip>
+    </ChoiceOverlay>
+  );
+}
+
+// CR 701.71a: Empower Jace N — the controller picks exactly ONE Jace
+// planeswalker token they control to receive N loyalty counters. Display-only:
+// the engine supplies `choices` and `count` and enforces legality; clicking a
+// token dispatches a single-object SelectCards.
+function EmpowerJaceChoiceModal({ data }: { data: EmpowerJaceChoice["data"] }) {
+  const { t } = useTranslation("game");
+  const dispatch = useGameDispatch();
+  const objects = useGameStore((s) => s.gameState?.objects);
+  const hoverProps = useInspectHoverProps();
+
+  const handleChoose = useCallback(
+    (id: ObjectId) => {
+      dispatch({ type: "SelectCards", data: { cards: [id] } });
+    },
+    [dispatch],
+  );
+
+  if (!objects) return null;
+
+  return (
+    <ChoiceOverlay
+      title={t("cardChoice.empowerJace.title")}
+      subtitle={t("cardChoice.empowerJace.subtitle", { count: data.count })}
     >
       <ScrollableCardStrip>
         {data.choices.map((id, index) => {

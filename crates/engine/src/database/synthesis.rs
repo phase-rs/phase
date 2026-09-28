@@ -10,17 +10,17 @@ use crate::parser::oracle_util::{apply_bracket_mode, strip_reminder_text, Bracke
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
     ActivationRestriction, AdditionalCost, AdditionalCostOrigin, AdditionalCostPaymentSource,
-    AggregateFunction, AttackScope, AttackSubject, CardPlayMode, CastFromZoneDriver,
-    CastManaObjectScope, CastManaSpentMetric, CastVariantPaid, ChoiceType, Comparator,
-    ContinuousModification, ControllerRef, CopyRetargetPermission, CounterTriggerFilter,
-    DamageChannel, DamageKindFilter, DamageModification, DelayedTriggerCondition, Duration, Effect,
-    EffectScope, FilterProp, KickerVariant, ManaContribution, ManaProduction,
-    ModalSelectionCondition, ModalSelectionConstraint, NinjutsuVariant, ObjectScope,
-    ParsedCondition, PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr,
-    QuantityRef, RenownSubject, ReplacementCondition, ReplacementDefinition, RuntimeHandler,
-    SacrificeCost, SearchSelectionConstraint, StaticCondition, StaticDefinition, TapStateChange,
-    TargetChoiceTiming, TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
-    UnlessPayModifier,
+    AggregateFunction, AttachCardinality, AttachSelection, AttackSubject, CardPlayMode,
+    CastFromZoneDriver, CastManaObjectScope, CastManaSpentMetric, CastVariantPaid, ChoiceType,
+    CombatHistoryScope, Comparator, ContinuousModification, ControllerRef, CopyRetargetPermission,
+    CounterTriggerFilter, DamageChannel, DamageKindFilter, DamageModification,
+    DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp, KickerVariant,
+    ManaContribution, ManaProduction, ModalSelectionCondition, ModalSelectionConstraint,
+    NinjutsuVariant, ObjectScope, ParsedCondition, PlayerFilter, PlayerScope, PtStat, PtValue,
+    PtValueScope, QuantityExpr, QuantityRef, RenownSubject, ReplacementCondition,
+    ReplacementDefinition, RuntimeHandler, SacrificeCost, SearchSelectionConstraint,
+    StaticCondition, StaticDefinition, TapStateChange, TargetChoiceTiming, TargetFilter,
+    TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
 };
 use crate::types::card::{CardFace, CardLayout, CleaveVariant};
 use crate::types::card_type::{CardType, CoreType, Supertype};
@@ -575,6 +575,11 @@ pub(crate) fn equip_ability_for_keyword(keyword: &Keyword) -> Option<AbilityDefi
         Effect::Attach {
             attachment: TargetFilter::SelfRef,
             target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            // CR 702.6a: the keyword's "target" names the HOST (the equipped
+            // creature); the attachment ("this permanent") is determined.
+            selection: AttachSelection::AtResolution {
+                count: AttachCardinality::One,
+            },
         },
     )
     .cost(AbilityCost::Mana { cost: cost.clone() })
@@ -615,6 +620,11 @@ pub fn synthesize_fortify(face: &mut CardFace) {
                             target: TargetFilter::Typed(
                                 TypedFilter::land().controller(ControllerRef::You),
                             ),
+                            // CR 702.67a: fortify — the keyword's "target" names the host (the
+                            // fortified land); the attachment ("this Fortification") is determined.
+                            selection: AttachSelection::AtResolution {
+                                count: AttachCardinality::One,
+                            },
                         },
                     )
                     .cost(AbilityCost::Mana { cost: cost.clone() })
@@ -660,6 +670,11 @@ pub fn synthesize_reconfigure(face: &mut CardFace) {
                             .controller(ControllerRef::You)
                             .properties(vec![FilterProp::Another]),
                     ),
+                    // CR 702.151a: reconfigure — the keyword's "target" names
+                    // the HOST; the attachment ("this permanent") is determined.
+                    selection: AttachSelection::AtResolution {
+                        count: AttachCardinality::One,
+                    },
                 },
             )
             .cost(AbilityCost::Mana { cost: cost.clone() })
@@ -1015,6 +1030,10 @@ fn synthesize_etb_token_attach_keyword(
         Effect::Attach {
             attachment: TargetFilter::SelfRef,
             target: TargetFilter::LastCreated,
+            // The created token is the host; the attachment is the source.
+            selection: AttachSelection::AtResolution {
+                count: AttachCardinality::One,
+            },
         },
     );
 
@@ -3091,6 +3110,24 @@ pub fn synthesize_dredge(face: &mut CardFace) {
         return;
     }
 
+    face.replacements.push(dredge_replacement_definition(n));
+}
+
+/// CR 702.52a + CR 121.6b + CR 113.6b: the single per-value Dredge Draw
+/// replacement definition — "if you would draw a card, you may instead mill N
+/// cards and return this card from your graveyard to your hand."
+///
+/// The single authority for building a Dredge replacement, shared by:
+/// - build-time synthesis (`synthesize_dredge`) for PRINTED Dredge, and
+/// - the runtime granted-keyword replacement path (`granted_dredge_value` →
+///   `find_applicable_replacements` in `game/replacement.rs`), which surfaces
+///   one virtual candidate for a graveyard card whose Dredge is granted at
+///   runtime (e.g. The Necrobloom's "Land cards in your graveyard have dredge
+///   2") rather than printed.
+///
+/// Because both callers build identical definitions, printed + granted
+/// instances each apply through the same shape.
+pub(crate) fn dredge_replacement_definition(n: u32) -> ReplacementDefinition {
     // CR 702.52a: "return this card from your graveyard to your hand."
     let return_to_hand = AbilityDefinition::new(
         AbilityKind::Spell,
@@ -3133,13 +3170,16 @@ pub fn synthesize_dredge(face: &mut CardFace) {
         .draw_scope(crate::types::ability::DrawReplacementScope::IndividualDraw)
         .active_zones(vec![Zone::Graveyard]);
     replacement.mode = crate::types::ability::ReplacementMode::Optional { decline: None };
-    replacement.description = Some(
-        "CR 702.52a: Dredge — instead of drawing, you may mill N cards and return this \
-         card from your graveyard to your hand."
-            .to_string(),
-    );
+    // CR 616.1: a printed and a differently-valued GRANTED dredge candidate can
+    // co-occur on one card in a single ordering prompt, so this label must show
+    // its own N (the granted label interpolates its own value the same way).
+    let cards = if n == 1 { "card" } else { "cards" };
+    replacement.description = Some(format!(
+        "CR 702.52a: Dredge — instead of drawing, you may mill {n} {cards} and return \
+         this card from your graveyard to your hand."
+    ));
     replacement.execute = Some(Box::new(mill));
-    face.replacements.push(replacement);
+    replacement
 }
 
 /// Idempotency-shape predicate for the synthesized Dredge draw-replacement — a
@@ -5701,7 +5741,7 @@ fn melee_attacked_opponents_expr() -> QuantityExpr {
         qty: QuantityRef::PlayerCount {
             filter: PlayerFilter::OpponentAttacked {
                 subject: AttackSubject::You,
-                scope: AttackScope::ThisCombat,
+                scope: CombatHistoryScope::ThisCombat,
             },
         },
     }
@@ -6018,6 +6058,7 @@ fn build_ingest_trigger() -> TriggerDefinition {
         count: QuantityExpr::Fixed { value: 1 },
         position: crate::types::ability::LibraryPosition::Top,
         face_down: false,
+        actor: crate::types::ability::LibraryInstructionActor::LibraryPlayer,
     };
     let execute = AbilityDefinition::new(AbilityKind::Spell, exile).description(
         "CR 702.115a: Ingest — that player exiles the top card of their library".to_string(),
@@ -6050,6 +6091,7 @@ fn is_ingest_trigger(t: &TriggerDefinition) -> bool {
                 count: QuantityExpr::Fixed { value: 1 },
                 position: crate::types::ability::LibraryPosition::Top,
                 face_down: false,
+                actor: crate::types::ability::LibraryInstructionActor::LibraryPlayer,
             })
         )
 }
@@ -6714,6 +6756,7 @@ fn build_suspend_last_counter_cast_trigger() -> TriggerDefinition {
             driver: CastFromZoneDriver::DuringResolution,
             mana_spend_permission: None,
             additional_cost: None,
+            cast_cost_modifier: None,
         },
     )
     .optional();
@@ -9978,6 +10021,7 @@ pub fn synthesize_siege_intrinsics(face: &mut CardFace) {
                 driver: CastFromZoneDriver::DuringResolution,
                 mana_spend_permission: None,
                 additional_cost: None,
+                cast_cost_modifier: None,
             },
         )
         .optional();
@@ -11701,7 +11745,8 @@ mod job_select_synthesis_tests {
                 sub.effect.as_ref(),
                 Effect::Attach {
                     attachment: TargetFilter::SelfRef,
-                    target: TargetFilter::LastCreated
+                    target: TargetFilter::LastCreated,
+                    ..
                 }
             ),
             "sub_ability should be Attach targeting LastCreated"
@@ -11889,6 +11934,26 @@ mod madness_synthesis_tests {
         face.keywords.push(Keyword::Flying);
         synthesize_dredge(&mut face);
         assert!(face.replacements.is_empty());
+    }
+
+    /// F1 — the printed label pluralizes its own count: Dredge 1 (Shenanigans,
+    /// Grave-Shell Scarab) reads "mill 1 card", never "mill 1 cards".
+    #[test]
+    fn dredge_description_pluralizes_its_own_count() {
+        assert_eq!(
+            dredge_replacement_definition(1).description.as_deref(),
+            Some(
+                "CR 702.52a: Dredge — instead of drawing, you may mill 1 card and return \
+                 this card from your graveyard to your hand."
+            )
+        );
+        assert_eq!(
+            dredge_replacement_definition(3).description.as_deref(),
+            Some(
+                "CR 702.52a: Dredge — instead of drawing, you may mill 3 cards and return \
+                 this card from your graveyard to your hand."
+            )
+        );
     }
 }
 
@@ -15206,7 +15271,7 @@ mod melee_synthesis_tests {
                 qty: QuantityRef::PlayerCount {
                     filter: PlayerFilter::OpponentAttacked {
                         subject: AttackSubject::You,
-                        scope: AttackScope::ThisCombat,
+                        scope: CombatHistoryScope::ThisCombat,
                     },
                 },
             }
@@ -18840,6 +18905,7 @@ mod sorcery_speed_invariant_tests {
             Effect::Attach {
                 attachment: TargetFilter::SelfRef,
                 target: TargetFilter::Typed(tf),
+                ..
             } => {
                 assert_eq!(
                     *tf,
@@ -23679,6 +23745,7 @@ mod living_weapon_synthesis_tests {
                 Effect::Attach {
                     attachment: TargetFilter::SelfRef,
                     target: TargetFilter::LastCreated,
+                    ..
                 }
             ),
             "sub_ability should be Attach(SelfRef, LastCreated), got {:?}",
@@ -23793,6 +23860,7 @@ mod for_mirrodin_synthesis_tests {
                 Effect::Attach {
                     attachment: TargetFilter::SelfRef,
                     target: TargetFilter::LastCreated,
+                    ..
                 }
             ),
             "sub_ability should be Attach(SelfRef, LastCreated), got {:?}",
@@ -25249,6 +25317,7 @@ mod ingest_gravestorm_synthesis_tests {
             count,
             position: _,
             face_down,
+            actor: _,
         } = effect
         else {
             panic!("Ingest must exile the top card, got {effect:?}");
@@ -26139,6 +26208,163 @@ mod absorb_synthesis_tests {
             marked_damage_after_absorb_damage(vec![Keyword::Absorb(1), Keyword::Absorb(1)], 3),
             1,
             "CR 702.64c: two Absorb 1 instances each prevent 1 damage"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tiered_synthesis_tests {
+    //! CR 702.183a: Tiered's runtime structure lives in the spell's
+    //! `ModalChoice` (choose exactly one) plus the per-mode additional costs
+    //! (CR 700.2h), not in an independent keyword handler. These tests drive the
+    //! production MTGJSON→face path (`build_oracle_face`) to prove the
+    //! `"tiered"` keyword maps to the typed variant and the modal carries the
+    //! per-mode costs.
+    use super::*;
+    use crate::database::mtgjson::AtomicIdentifiers;
+
+    /// Fire Magic's verbatim Oracle text (U+2022 bullets, U+2014 em-dashes).
+    const FIRE_MAGIC_ORACLE: &str = "Tiered (Choose one additional cost.)\n\
+        \u{2022} Fire \u{2014} {0} \u{2014} Fire Magic deals 1 damage to each creature.\n\
+        \u{2022} Fira \u{2014} {2} \u{2014} Fire Magic deals 2 damage to each creature.\n\
+        \u{2022} Firaga \u{2014} {5} \u{2014} Fire Magic deals 3 damage to each creature.";
+
+    fn tiered_atomic_card(name: &str, oracle: &str, keywords: Option<Vec<String>>) -> AtomicCard {
+        AtomicCard {
+            name: name.to_string(),
+            mana_cost: Some("{1}{R}".to_string()),
+            colors: vec!["R".to_string()],
+            color_identity: vec!["R".to_string()],
+            power: None,
+            toughness: None,
+            loyalty: None,
+            defense: None,
+            text: Some(oracle.to_string()),
+            layout: "normal".to_string(),
+            type_line: Some("Instant".to_string()),
+            types: vec!["Instant".to_string()],
+            subtypes: vec![],
+            supertypes: vec![],
+            keywords,
+            side: None,
+            face_name: None,
+            mana_value: 2.0,
+            legalities: Default::default(),
+            leadership_skills: None,
+            printings: Vec::new(),
+            rulings: Vec::new(),
+            is_game_changer: false,
+            identifiers: AtomicIdentifiers {
+                scryfall_oracle_id: Some(format!("{}-oracle", name.to_lowercase())),
+                scryfall_id: Some(format!("{}-face", name.to_lowercase())),
+            },
+            foreign_data: Vec::new(),
+            related_cards: crate::database::mtgjson::SetRelatedCards::default(),
+        }
+    }
+
+    /// Production `build_oracle_face`: MTGJSON's real Fire Magic keyword array
+    /// (`["Fira","Firaga","Fire","Tiered"]`) maps its one real keyword to
+    /// `Keyword::Tiered` — the three mode-name entries stay `Unknown` and are
+    /// filtered — and the Tiered header lowers to a `ModalChoice` whose per-mode
+    /// additional costs (CR 700.2h) are `{0}` / `{2}` / `{5}`.
+    ///
+    /// Revert-red: deleting the `"tiered"` `FromStr` arm leaves `face.keywords`
+    /// empty, failing the first assertion.
+    #[test]
+    fn tiered_fire_magic_face_carries_keyword_and_modal_mode_costs() {
+        let card = tiered_atomic_card(
+            "Fire Magic",
+            FIRE_MAGIC_ORACLE,
+            Some(vec![
+                "Fira".to_string(),
+                "Firaga".to_string(),
+                "Fire".to_string(),
+                "Tiered".to_string(),
+            ]),
+        );
+        let face = build_oracle_face(&card, None);
+
+        assert_eq!(
+            face.keywords,
+            vec![Keyword::Tiered],
+            "the MTGJSON \"Tiered\" keyword must map; the mode names stay Unknown"
+        );
+
+        let modal = face
+            .modal
+            .as_ref()
+            .expect("Tiered lowers to a modal choice");
+        assert_eq!(modal.min_choices, 1, "CR 702.183a: choose exactly one");
+        assert_eq!(modal.max_choices, 1, "CR 702.183a: choose exactly one");
+        assert_eq!(modal.mode_count, 3);
+        assert_eq!(
+            modal.mode_costs,
+            vec![ManaCost::zero(), ManaCost::generic(2), ManaCost::generic(5)],
+            "CR 700.2h: each mode's listed cost is an additional cost"
+        );
+
+        // Positive reach-guard: the three modes lowered to real abilities, not
+        // Unimplemented placeholders.
+        assert_eq!(face.abilities.len(), 3);
+        assert!(
+            !face
+                .abilities
+                .iter()
+                .any(|ability| matches!(&*ability.effect, Effect::Unimplemented { .. })),
+            "no Tiered mode may be an Unimplemented placeholder"
+        );
+
+        // Hostile rows — the mapping is not case-sensitive, and the Spree
+        // sibling arm is unaffected by the Tiered addition.
+        let lower = build_oracle_face(
+            &tiered_atomic_card(
+                "Fire Magic",
+                FIRE_MAGIC_ORACLE,
+                Some(vec!["tiered".to_string()]),
+            ),
+            None,
+        );
+        assert_eq!(
+            lower.keywords,
+            vec![Keyword::Tiered],
+            "\"tiered\" must map as well"
+        );
+        let upper = build_oracle_face(
+            &tiered_atomic_card(
+                "Fire Magic",
+                FIRE_MAGIC_ORACLE,
+                Some(vec!["Tiered".to_string()]),
+            ),
+            None,
+        );
+        assert_eq!(
+            upper.keywords,
+            vec![Keyword::Tiered],
+            "\"Tiered\" must map as well"
+        );
+
+        let spree = build_oracle_face(
+            &tiered_atomic_card(
+                "Modal Spree Test",
+                "Spree\n+ {1} \u{2014} Draw a card.",
+                Some(vec!["Spree".to_string()]),
+            ),
+            None,
+        );
+        assert_eq!(
+            spree.keywords,
+            vec![Keyword::Spree],
+            "the Spree arm must still map after the Tiered sibling lands"
+        );
+
+        let absent = build_oracle_face(
+            &tiered_atomic_card("Fire Magic", FIRE_MAGIC_ORACLE, None),
+            None,
+        );
+        assert!(
+            absent.keywords.is_empty(),
+            "no MTGJSON keyword array means no Tiered keyword on the face"
         );
     }
 }

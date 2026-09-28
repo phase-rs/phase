@@ -326,6 +326,34 @@ pub fn card_ref(id: DungeonId) -> DungeonCardRef {
     }
 }
 
+/// The printed dungeon card, as the client looks it up on Scryfall.
+///
+/// Identity plumbing, not a rule — deliberately unannotated.
+///
+/// Both ids ride along because the five dungeons are not indexed uniformly by
+/// the client's Scryfall sidecars — Undercity is a `double_faced_token` that
+/// only `scryfall-token-images.json` carries. See `DungeonCardRef`.
+///
+/// Canonical home of the wire shape: `derived_views` re-exports this rather
+/// than carrying its own copy, so the venture-marker panel and the
+/// dungeon-choice preview can never disagree on what a card looks like.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DungeonCardView {
+    pub oracle_id: String,
+    pub scryfall_id: String,
+    pub face_name: String,
+}
+
+/// Project the printed dungeon card's Scryfall identity.
+pub fn card_view(id: DungeonId) -> DungeonCardView {
+    let card = card_ref(id);
+    DungeonCardView {
+        oracle_id: card.oracle_id.to_string(),
+        scryfall_id: card.scryfall_id.to_string(),
+        face_name: card.face_name.to_string(),
+    }
+}
+
 /// CR 309: Look up a dungeon's static definition.
 pub fn get_definition(id: DungeonId) -> &'static DungeonDefinition {
     match id {
@@ -395,17 +423,78 @@ pub fn room_preview(id: DungeonId, room: u8) -> RoomPreview {
     }
 }
 
+/// CR 309.4: One room as the client draws it — its preview, its outgoing
+/// edges, and its position on the printed card face.
+///
+/// Canonical home of the wire shape: `derived_views` re-exports this rather
+/// than carrying its own copy, so the venture-marker panel and the
+/// dungeon-choice preview can never disagree on what a room looks like.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DungeonRoomNodeView {
+    #[serde(flatten)]
+    pub room: RoomPreview,
+    /// CR 309.5a: the rooms the venture marker may move to from here. Empty
+    /// for the bottommost room (CR 309.5).
+    pub next_rooms: Vec<u8>,
+    /// Where this room is drawn on the card. Permille of the image — see
+    /// `RoomMarkerPoint`, which documents why it is not a fraction.
+    pub marker: RoomMarkerPoint,
+}
+
+/// CR 309.4 + CR 309.5a: Project the whole dungeon graph — every room, its
+/// outgoing edges, and where it is drawn on the card.
+///
+/// The client needs all of it at once: the venture-marker panel places the
+/// marker on the current room and marks the rooms reachable from it
+/// (CR 309.5a), and the dungeon-choice preview shows the whole card before
+/// the marker exists at all. Neither is derivable from one room alone.
+pub fn room_nodes(id: DungeonId) -> Vec<DungeonRoomNodeView> {
+    let markers = marker_points(id);
+    (0..room_count(id))
+        .filter_map(|index| {
+            // `dungeon_marker_points_cover_every_room` pins these lists to the
+            // same length, so a miss is unreachable. Skipping rather than
+            // indexing keeps a future table edit from panicking the whole state
+            // projection on a purely cosmetic field.
+            let marker = *markers.get(index as usize)?;
+            Some(DungeonRoomNodeView {
+                room: room_preview(id, index),
+                next_rooms: next_rooms(id, index).to_vec(),
+                marker,
+            })
+        })
+        .collect()
+}
+
 /// CR 309.2a + CR 309.4a: A dungeon as the UI presents it at the point of
 /// choosing one — its name plus the topmost room, which the venturing player
 /// enters immediately and unavoidably on making this choice. Without
 /// `entry_room` the choice is between five bare names with no visible
-/// consequence.
+/// consequence. `card` + `rooms` carry the whole dungeon behind the choice so
+/// the prompt can preview each card instead of describing only its entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DungeonPreview {
     pub dungeon: DungeonId,
     pub name: String,
     /// CR 309.4a: The topmost room — where the venture marker lands.
     pub entry_room: RoomPreview,
+    /// The printed dungeon card's Scryfall identity, so the choice can show
+    /// the card the venture marker is about to land on.
+    ///
+    /// CR 309.2b: a dungeon card brought into the game is put into the command
+    /// zone, so it is never a battlefield object and no `printed_ref`-carrying
+    /// object exists for the client to resolve art from. (Matches the citation
+    /// on `derived_views::dungeon_rooms`.) The ids themselves implement no rule.
+    pub card: DungeonCardView,
+    /// CR 309.4 + CR 309.5a: every room on the card, in printed order, each
+    /// with the rooms it leads to and where it sits on the card face. This is
+    /// what lets the choice preview the whole dungeon rather than its entry
+    /// room alone; without it the frontend would need its own copy of the
+    /// dungeon tables, which the display-layer rule forbids.
+    pub rooms: Vec<DungeonRoomNodeView>,
+    /// CR 309.4: total rooms on the dungeon card, so the preview can place the
+    /// entry room within the whole dungeon ("room 1 of 7").
+    pub room_count: u8,
 }
 
 /// CR 309.2a + CR 309.4a: Build the preview for a choosable dungeon.
@@ -414,6 +503,9 @@ pub fn dungeon_preview(id: DungeonId) -> DungeonPreview {
         dungeon: id,
         name: get_definition(id).name.to_string(),
         entry_room: room_preview(id, 0),
+        card: card_view(id),
+        rooms: room_nodes(id),
+        room_count: room_count(id),
     }
 }
 
@@ -637,6 +729,7 @@ pub fn room_effects(
                     count: fixed(2),
                     position: crate::types::ability::LibraryPosition::Top,
                     face_down: false,
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                 },
                 source_id,
                 controller,
@@ -658,7 +751,7 @@ pub fn room_effects(
                         card_filter: None,
                         single_use_group: None,
                         single_use: false,
-                        cast_cost_raise: None,
+                        cast_cost_modifier: None,
                         alt_ability_cost: None,
                         land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     },
@@ -1311,6 +1404,7 @@ fn mad_wizards_lair(source_id: ObjectId, controller: PlayerId) -> ResolvedAbilit
             driver: CastFromZoneDriver::DuringResolution,
             mana_spend_permission: None,
             additional_cost: None,
+            cast_cost_modifier: None,
         },
         source_id,
         controller,
@@ -1880,6 +1974,20 @@ mod tests {
             assert_eq!(dungeon.name, def.name);
             // CR 309.4a: the entry room is always the topmost room.
             assert_eq!(dungeon.entry_room, room_preview(id, 0));
+            // The choice preview carries the whole dungeon behind the entry:
+            // the card identity, every room with its edges and card geometry,
+            // and the room count placing the entry within the whole.
+            let card = card_ref(id);
+            assert_eq!(dungeon.card.oracle_id, card.oracle_id);
+            assert_eq!(dungeon.card.scryfall_id, card.scryfall_id);
+            assert_eq!(dungeon.card.face_name, card.face_name);
+            assert_eq!(dungeon.room_count, def.rooms.len() as u8);
+            assert_eq!(dungeon.rooms.len(), def.rooms.len());
+            for (index, node) in dungeon.rooms.iter().enumerate() {
+                assert_eq!(node.room, room_preview(id, index as u8));
+                assert_eq!(node.next_rooms, next_rooms(id, index as u8));
+                assert_eq!(node.marker, marker_points(id)[index]);
+            }
 
             for index in 0..def.rooms.len() as u8 {
                 let preview = room_preview(id, index);

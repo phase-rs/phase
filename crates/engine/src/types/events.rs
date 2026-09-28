@@ -752,6 +752,36 @@ impl EventObjectSnapshot {
     }
 }
 
+/// A life total reported alongside the change that produced it, for display.
+///
+/// Its `PartialEq` is deliberately always true, which is what makes it safe to carry
+/// inside a [`GameEvent`]. The event can be retained as resolution context, and a life
+/// total moves every iteration of a drain loop. A derived `PartialEq` would therefore make
+/// two otherwise-equivalent cycle points differ by this display reading alone. Being
+/// equality-transparent, the reading cannot perturb any comparison of game state, present
+/// or future, while the change itself (`amount`) stays fully compared.
+///
+/// `None` means no total was reported: an event from a peer or a recording older than this
+/// field, where a consumer falls back to the accompanying state snapshot.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct LifeTotalReading(pub Option<i32>);
+
+impl LifeTotalReading {
+    /// Whether no total was reported, so serialization can leave the key out entirely.
+    pub fn is_unreported(&self) -> bool {
+        self.0.is_none()
+    }
+}
+
+impl PartialEq for LifeTotalReading {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for LifeTotalReading {}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum GameEvent {
@@ -817,6 +847,22 @@ pub enum GameEvent {
         augmenting_id: ObjectId,
         controller: PlayerId,
     },
+    /// CR 701.42a + CR 712.4a: The two cards of a meld pair were put onto the
+    /// battlefield back faces up and combined, as a single permanent represented
+    /// by both cards. Emitted only once the melded permanent has entered the
+    /// battlefield — never for a meld that fails (CR 701.42c). `object_id` is the
+    /// melded permanent, which keeps the instigating card's `ObjectId`;
+    /// `partner_id` is the other card of the pair, now its second component.
+    ///
+    /// Distinct from `Mutated`: melding enters a new object onto the battlefield
+    /// (CR 701.42a), whereas a CR 730.2b merge is not a battlefield entry. No
+    /// printed card triggers on melding, so this event dispatches no trigger key;
+    /// it drives the game log and the frontend's meld animation.
+    Melded {
+        object_id: ObjectId,
+        partner_id: ObjectId,
+        controller: PlayerId,
+    },
     /// CR 707.10: A spell was copied onto the stack. A copy of a spell isn't
     /// cast, so this is a distinct event from `SpellCast` — copy-sensitive
     /// triggers (Magecraft, "whenever you copy a spell") fire on this, while
@@ -879,6 +925,13 @@ pub enum GameEvent {
     LifeChanged {
         player_id: PlayerId,
         amount: i32,
+        /// CR 119.1 + CR 119.3: the player's own life total once this change has
+        /// been applied. Emitted so a presentation layer animating a run of life
+        /// changes can show each intermediate total without re-deriving it by
+        /// summing `amount`s — summing cannot reproduce the real sequence once a
+        /// replacement effect alters an amount mid-run.
+        #[serde(default, skip_serializing_if = "LifeTotalReading::is_unreported")]
+        new_total: LifeTotalReading,
     },
     ManaAdded {
         player_id: PlayerId,
@@ -1519,6 +1572,17 @@ pub enum GameEvent {
         player_id: PlayerId,
         sides: u8,
         result: Option<u8>,
+    },
+    /// CR 706.6: A die roll ignored by a replacement (Barbarian Class, Pixie
+    /// Guide, Wyll) — the NATURAL value, before any modifier (modifiers never
+    /// touch an ignored roll). Display mirror ONLY: it must never be read as
+    /// a roll by triggers, results tables, aggregates, snapshots, or AI —
+    /// an ignored roll "is considered to have never happened". Emitted
+    /// alongside the survivors so the UI can show what the lowest roll was.
+    DieRollIgnored {
+        player_id: PlayerId,
+        sides: u8,
+        result: u8,
     },
     /// CR 103.1 / CR 706: The game-1 starting-player roll-off, emitted as one
     /// authoritative structured event so the contest can be rendered round by

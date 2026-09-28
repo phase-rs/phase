@@ -1641,6 +1641,7 @@ fn stamp_effect_printed_slot(effect: &mut Effect, slot: usize, kind: PrintedItem
         Effect::RuntimeHandled { .. } => {}
         Effect::Incubate { .. } => {}
         Effect::Amass { .. } => {}
+        Effect::EmpowerJace { .. } => {}
         Effect::Monstrosity { .. } => {}
         Effect::Specialize => {}
         Effect::Renown { .. } => {}

@@ -1,0 +1,526 @@
+{
+  "modal": {
+    "title": "設定",
+    "subtitle": "ゲームプレイ、表示、音声、マルチプレイヤーの既定値を調整します。"
+  },
+  "tabs": {
+    "gameplay": "ゲームプレイ",
+    "ai": "AI対戦相手",
+    "experimental": "実験的",
+    "visual": "表示",
+    "combat": "ペース",
+    "audio": "音声",
+    "multiplayer": "マルチプレイヤー",
+    "data": "データ"
+  },
+  "experimental": {
+    "title": "実験的",
+    "tournaments": "トーナメント",
+    "showTournaments": "ナビゲーションにトーナメントを表示",
+    "showTournamentsDescription": "トーナメントは開発中で、予告なく変更される場合があります。"
+  },
+  "gameplay": {
+    "collapseLands": "土地を折りたたむ",
+    "collapseSupport": "サポートを折りたたむ",
+    "collapseZoneOptions": {
+      "auto": "自動",
+      "on": "常にオン",
+      "off": "常にオフ"
+    },
+    "title": "ゲームプレイ",
+    "language": "言語",
+    "cardSize": "カードサイズ",
+    "commandZone": "統率領域",
+    "autoPass": "自動パス",
+    "skipLowUsePriorityWindows": "使用頻度の低い優先権ウィンドウをスキップ（実験的）",
+    "skipLowUsePriorityWindowsDescription": "スタックが空のとき、自分のアップキープ・ドロー・終了ステップの優先権を自動でパスします。フェイズ停止とフルコントロールの設定は優先されます。",
+    "logDockSide": "ゲームログの位置",
+    "spellPayment": "呪文の支払い",
+    "manualManaPayment": "呪文のマナを手動で支払う",
+    "spellPaymentOptions": {
+      "auto": "自動",
+      "autoExceptSacrificialMana": "生け贄にする前に確認",
+      "manual": "手動"
+    },
+    "nativeEngine": "ローカルゲームとホストしたマルチプレイヤーでネイティブエンジンを使用",
+    "nativeEngineDescription": "ローカルAIゲームとロビー経由でホストするゲームに、ダウンロード済みエンジンを使用します。ゲストは引き続きロビーのP2P接続を使います。利用できない場合は内蔵エンジンに戻ります。",
+    "boardBackground": "盤面の背景",
+    "boardBackgroundGroups": {
+      "automatic": "自動",
+      "battlefields": "戦場",
+      "plain": "無地",
+      "custom": "カスタム",
+      "off": "オフ"
+    },
+    "boardBackgroundOptions": {
+      "autoMatchDeck": "自動（デッキに合わせる）",
+      "random": "ランダム",
+      "customUrl": "カスタムURL",
+      "none": "なし"
+    },
+    "commandZoneOptions": {
+      "compact": "コンパクト",
+      "inline": "インライン",
+      "auto": "自動"
+    },
+    "cardSizeOptions": {
+      "small": "小",
+      "medium": "中",
+      "large": "大"
+    },
+    "logDockSideOptions": {
+      "left": "左",
+      "right": "右"
+    }
+  },
+  "visual": {
+    "title": "表示",
+    "vfxQuality": "視覚効果の品質",
+    "keywordStrip": "キーワード帯",
+    "showKeywords": "戦場のカードにキーワードを表示",
+    "opponentHoverPreview": "対戦相手のホバープレビュー",
+    "showOpponentBoard": "HUDホバー時に対戦相手の盤面を表示",
+    "multiplayerBoardLayout": "マルチプレイヤー盤面レイアウト",
+    "multiplayerBoardLayoutOptions": {
+      "auto": "自動",
+      "focused": "対戦相手にフォーカス",
+      "split": "分割テーブル"
+    },
+    "cardPreviewDelay": "ホバー遅延",
+    "cardPreviewDelayInstant": "即時",
+    "cardPreviewDelayValue": "{{ms}}ミリ秒",
+    "cardPreviewDelayHint": "カードにホバーしてからプレビューを表示するまでの時間です。",
+    "cardPreview": "カードホバープレビュー",
+    "cardPreviewOptions": {
+      "follow": "カーソルに追従",
+      "side": "横に固定",
+      "shift": "Shiftを押している間"
+    },
+    "cardPreviewHint": {
+      "follow": "カードにホバーすると拡大プレビューがカーソルに追従します。",
+      "side": "盤面を覆わないよう、プレビューを画面端に固定します。",
+      "shift": "Tabletop Simulatorのように、Shiftを押している間だけプレビューを表示します。"
+    },
+    "draftCardPreview": "ドラフトカードのホバープレビュー",
+    "draftCardPreviewOff": "オフ",
+    "draftCardPreviewHint": "ドラフト中とドラフトデッキ構築中だけ適用されます。",
+    "draftDoubleClickConfirmPick": "ドラフトのダブルクリックで選択を確定",
+    "draftDoubleClickConfirmPickOptions": {
+      "disabled": "無効",
+      "enabled": "有効"
+    },
+    "cardPreviewFooter": "プレビュー情報",
+    "showCardPreviewFooter": "カードプレビューの下に情報を表示",
+    "cardPreviewFooterHint": "カード名、使用可能な起動型能力、キーボードヒントを表示します。非表示でもAltで解析詳細を開けます。",
+    "cardArtPreferences": "カードアートの設定",
+    "clearArtOverrides_one": "すべてのアート上書きを解除（{{count}}）",
+    "clearArtOverrides_other": "すべてのアート上書きを解除（{{count}}）",
+    "clearArtOverridesConfirm_one": "{{count}}件のアート上書きをすべて解除しますか？",
+    "clearArtOverridesConfirm_other": "{{count}}件のアート上書きをすべて解除しますか？",
+    "clearArtOverridesAction": "解除",
+    "vfxQualityOptions": {
+      "full": "完全",
+      "reduced": "低減",
+      "minimal": "最小"
+    }
+  },
+  "flexLayout": {
+    "title": "フレックスレイアウト",
+    "description": "パネルとHUDを好きな場所へドラッグし、盤面の領域をサイズ変更します。",
+    "edit": "レイアウトをカスタマイズ…",
+    "done": "完了",
+    "reset": "レイアウトをリセット",
+    "preset": "プリセット",
+    "hint": "パネルをドラッグして移動します。光るバーをドラッグして領域のサイズを変更します。",
+    "align": {
+      "left": "左揃え",
+      "center": "中央揃え",
+      "right": "右揃え"
+    },
+    "presets": {
+      "default": {
+        "label": "レイアウト1",
+        "description": "標準的なバランスのレイアウト。"
+      },
+      "layout2": {
+        "label": "レイアウト2",
+        "description": "手札をしまい、戦場を広くしたレイアウト。"
+      },
+      "layout3": {
+        "label": "レイアウト3",
+        "description": "下部3分の1を高くしたレイアウト。"
+      }
+    },
+    "zones": {
+      "playerHud": "自分のHUD",
+      "opponentHud": "対戦相手のHUD",
+      "stackPanel": "スタック",
+      "logPanel": "ゲームログ",
+      "actionRail": "アクション",
+      "playerPiles": "自分の領域",
+      "opponentPiles": "対戦相手の領域"
+    }
+  },
+  "audio": {
+    "title": "音声",
+    "muteAll": "すべてミュート",
+    "muteAllAudio": "すべての音声をミュート",
+    "globalVolume": "全体音量",
+    "sfxVolume": "効果音量",
+    "musicVolume": "音楽音量"
+  },
+  "audioTheme": {
+    "title": "音声テーマ",
+    "theme": "テーマ",
+    "importTheme": "テーマをインポート",
+    "loading": "読み込み中…",
+    "import": "インポート",
+    "importFailed": "テーマのインポートに失敗しました",
+    "customThemes": "カスタムテーマ",
+    "remove": "削除"
+  },
+  "multiplayer": {
+    "title": "マルチプレイヤー",
+    "displayName": "表示名",
+    "displayNamePlaceholder": "名前を入力",
+    "serverSelectionNote": "サーバー選択はロビーに移動しました — マルチプレイヤーを開き、サーバーチップ（またはP2Pモードの「サーバーを選択」）から地域の切り替え、自前ホストの設定、接続テストを行ってください。"
+  },
+  "sync": {
+    "title": "クラウド同期",
+    "description": "サインインしてデッキ、設定、フィード購読を端末間で同期します。データはアカウントに保存され、変更時に自動更新されます。",
+    "signInWith": "{{provider}}でサインイン",
+    "signOut": "サインアウト",
+    "signedInAs": "{{name}}としてサインイン中",
+    "syncNow": "今すぐ同期",
+    "statusSyncing": "同期中…",
+    "statusPaused": "オフライン中はクラウド同期を一時停止します。",
+    "statusError": "同期に失敗しました",
+    "lastSynced": "最終同期 {{time}}",
+    "never": "未同期",
+    "conflictTitle": "両方のコピーに変更があります",
+    "conflictBody": "この端末とクラウドアカウントの両方にデータがあり、どちらが最新か判定できません。片方を選ぶか、両方のデッキコレクションを残してください。",
+    "keepCloud": "クラウドを使用",
+    "keepLocal": "この端末を保持",
+    "keepBothDecks": "両方のデッキコレクションを保持",
+    "savesNote": "ゲームの保存データとキャッシュはこの端末に残ります。",
+    "diffDecks": "デッキ: {{added}}件追加、{{modified}}件変更、{{removed}}件削除",
+    "diffPrefs": "設定が異なります",
+    "diffFeeds": "フィード購読が異なります",
+    "diffOther": "その他の設定が異なります",
+    "providerDiscord": "Discord",
+    "providerGoogle": "Google"
+  },
+  "data": {
+    "title": "バックアップと復元",
+    "description": "設定、インポートしたデッキ、フィード購読を1つのJSONファイルにエクスポートします。インポートすると別の端末で復元できます。IndexedDBキャッシュ（フィード、音声、保存ゲーム）は含まれず、自動的に再構築されます。",
+    "exportBackup": "バックアップをエクスポート…",
+    "importBackup": "バックアップをインポート…",
+    "importModeTitle": "バックアップをインポート",
+    "importModeMessage": "バックアップですべて置き換える（破壊的）か、既存のデッキを残してバックアップから新しいものを追加するマージを選択します。",
+    "importOverwrite": "すべて置換",
+    "importMerge": "マージ",
+    "importConfirm": "既存の設定とデッキを上書きしますか？\n\nOK: バックアップですべて置換（破壊的）。\nキャンセル: マージ — 既存のデッキを残し、バックアップから追加。",
+    "backupDownloaded": "バックアップをダウンロードしました。",
+    "imported_one": "{{count}}個のデッキをインポートしました。",
+    "imported_other": "{{count}}個のデッキをインポートしました。",
+    "importedWithPreferences_one": "{{count}}個のデッキと設定をインポートしました。",
+    "importedWithPreferences_other": "{{count}}個のデッキと設定をインポートしました。",
+    "skippedMalformed_one": "形式不正のエントリ{{count}}件をスキップしました。",
+    "skippedMalformed_other": "形式不正のエントリ{{count}}件をスキップしました。",
+    "telemetry": "匿名のクラッシュ・利用状況レポートを送信",
+    "telemetryDescription": "クラッシュ修正とカード対応の優先順位付けに役立ちます。アカウントや個人データは含まず、エラーとゲーム概要の件数だけを送信します。"
+  },
+  "visualPacks": {
+    "title": "オフラインカード画像",
+    "description": "この端末に保持する画像を選択します。カードカタログはScryfallからキャッシュされ、各画像はScryfallから直接ダウンロードされます。",
+    "offlineUnavailable": "オフライン中はネットワークダウンロードを利用できません。再接続してカタログを更新するか、画像のインストール、同期、修復、再開を行ってください。",
+    "availability": {
+      "loading": "オフライン表示カタログの対応を確認中…",
+      "browser": "このブラウザはオフライン画像ダウンロードに必要なローカルストレージ機能を提供していません。",
+      "browserFuture": "Cache Storage、IndexedDB、gzip展開に対応した最新のデスクトップブラウザを使用してください。",
+      "unsupported": "このデスクトップアプリは古すぎてオフライン表示カタログを管理できません。更新してください。",
+      "empty": "現在のScryfallカードスナップショットを読み込み、オフライン画像を選択してください。",
+      "invalid": "ローカルカードスナップショットを読み取れませんでした。続行前に更新してください。"
+    },
+    "selector": {
+      "title": "ダウンロード選択",
+      "core": "カード裏面とマナシンボル",
+      "printing": "セットの印刷版",
+      "complete": "現在の英語カード画像すべて",
+      "curated": "カードごとに1画像",
+      "deck_library": "デッキライブラリー",
+      "curatedNote": "カードごとに1画像。表示タブのカードアート設定で選んだものを使用します。そこで変更すると選択にも反映されます。",
+      "curatedDefaultNote": "カードごとに1画像。カードアートのルールがないため、各カードの既定アートをダウンロードします。別の印刷版を選ぶには表示タブのカードアート設定でルールを追加してください。",
+      "deckLibraryNote": "共有デッキライブラリーで使われるカードごとに1画像（AI統率者構築済みを含む）をダウンロードします。カードアート設定に従います。インストール後は実行中に追加分を更新し、不要になった画像を削除します。このパックを削除すると同期も停止します。",
+      "driftNone": "インストール済み画像はすでにこの設定と一致しています。",
+      "driftSummary": "インストール済み画像が古くなっています: 追加{{add}}、削除{{remove}}、更新{{refresh}}。",
+      "setCode": "セットコード",
+      "setPlaceholder": "例: fin",
+      "language": "画像の言語",
+      "currentRoot": "固定済みScryfallスナップショット: {{root}}",
+      "invalidSet": "3〜6文字の有効なセットコードを入力してください。"
+    },
+    "actions": {
+      "estimate": "カタログをスキャンして見積もる",
+      "estimating": "Scryfallカタログをスキャン中…",
+      "estimateCurated": "サイズを再計算",
+      "estimatingCurated": "サイズを計算中…",
+      "install": "選択をインストール",
+      "sync": "画像を同期",
+      "cancel": "操作をキャンセル",
+      "resume": "操作を再開",
+      "retry": "再試行",
+      "refresh": "Scryfallカタログを確認",
+      "refreshing": "Scryfallカタログを確認中…",
+      "verifyMetadata": "メタデータを検証",
+      "verifyFull": "すべてのファイルを検証",
+      "repair": "選択項目を修復",
+      "removeSelected": "選択項目を削除",
+      "removeComplete": "完全なカタログを削除",
+      "removeAll": "すべてのオフライン表示を削除"
+    },
+    "estimate": {
+      "title": "Scryfallスナップショットのスキャン",
+      "progressTitle": "カタログスキャンの進行状況",
+      "curatedTitle": "ダウンロード見積もり",
+      "headroomWarning": "ブラウザが報告した空き容量を超えています。それでもインストールできます。容量が尽きてもダウンロードを再開でき、保存済みのものは保持されます。",
+      "evictionWarning": "このブラウザでは永続ストレージが許可されていないため、空き容量が少なくなると画像が削除される場合があります。",
+      "progress": "{{total}}MB中{{downloaded}}MBを読み込み · {{records}}枚をスキャン · {{images}}枚の画像を検出"
+    },
+    "metrics": {
+      "assetRecords": "画像レコード",
+      "estimatedImageBytes": "推定ダウンロードサイズ",
+      "availableBytes": "利用可能な空き容量",
+      "uniqueObjects": "ダウンロードする画像",
+      "logicalImageBytes": "画像バイト数（ダウンロード後に確定）",
+      "uniqueImageBytes": "一意な画像バイト数（ダウンロード後に確定）",
+      "shardCount": "メタデータファイル",
+      "shardBytes": "圧縮Scryfallカタログ"
+    },
+    "operation": {
+      "title": "現在の操作",
+      "states": {
+        "downloading": "Scryfallをダウンロード・スキャン中",
+        "cancel_requested": "キャンセルを要求しました",
+        "finalizing": "仕上げ中",
+        "failed": "失敗 — 再開できます",
+        "terminated": "停止 — この操作は再開できません",
+        "completed": "完了",
+        "cancelled": "キャンセル済み"
+      },
+      "id": "操作",
+      "root": "Scryfallスナップショット",
+      "packs": "パック: {{current}} / {{total}}",
+      "objects": "画像: {{current}} / {{total}}",
+      "objectsUnknown": "ダウンロード済み画像: {{current}}",
+      "scanNote": "Scryfallスナップショットのスキャンに伴い合計が増えます。完了した画像はローカルに保存され、再開時はスキップされます。",
+      "estimateNote": "合計はダウンロード開始時に確定しました。完了した画像はローカルに保存され、再開時はスキップされます。",
+      "finalizing": "オフライン画像のインストールを仕上げ中"
+    },
+    "status": {
+      "title": "オフライン画像の状態",
+      "root": "Scryfallスナップショット",
+      "epoch": "エポック",
+      "revision": "インストール済みリビジョン",
+      "selectorCount": "セレクター",
+      "shardCount": "シャード",
+      "installed": "インストール済みパック",
+      "noneInstalled": "表示パックはインストールされていません。",
+      "upgradeAvailable": "アップグレード可能",
+      "receiptRoot": "スナップショットからインストール: {{root}}",
+      "membershipDigest": "メンバーシップフィンガープリント: {{digest}}",
+      "storageUsage": "このサイトが使用するストレージ",
+      "persistence": "削除防止",
+      "persistenceState": {
+        "persisted": "許可済み — このブラウザは画像を保持します",
+        "best_effort": "未許可 — 空き容量が少なくなるとこのブラウザは画像を削除する場合があります",
+        "unsupported": "このブラウザは回答しません"
+      }
+    },
+    "verification": {
+      "revision": "インストール済みリビジョン{{revision}}を検証しました。",
+      "healthy": "検証上の問題は見つかりませんでした。",
+      "issues": {
+        "missing_root_witness": "カタログルート証跡がありません",
+        "invalid_root_witness": "カタログルート証跡が無効です",
+        "receipt_metadata": "レシートのメタデータが信頼済みカタログと異なります",
+        "missing_shard": "カタログシャードがありません",
+        "invalid_shard": "カタログシャードが無効です",
+        "missing_object": "画像オブジェクトがありません",
+        "invalid_object_metadata": "画像オブジェクトのメタデータが無効です",
+        "corrupt_object": "画像オブジェクトが破損しています",
+        "dependency_drift": "インストール済み依存レコードが信頼済みカタログと異なります",
+        "projection_drift": "インストール済み検索レコードが信頼済みカタログと異なります"
+      }
+    },
+    "removal": {
+      "committed": "リビジョン{{revision}}で削除を確定しました。",
+      "inProgress": "オフライン表示を削除中…"
+    },
+    "cleanup": {
+      "malformed_entry": "形式不正のキャッシュエントリを回収できませんでした",
+      "unsafe_entry": "安全でないキャッシュエントリは変更せず残しました",
+      "remove_failed": "キャッシュファイルを削除できませんでした",
+      "catalog_state": "過去のカタログ状態を回収できませんでした"
+    },
+    "packs": {
+      "core": "カード裏面とマナシンボル",
+      "complete": "現在の英語カード画像すべて",
+      "curated": "カードごとに1画像",
+      "deckLibrary": "デッキライブラリー",
+      "printing": "{{set}}の印刷版",
+      "locale": "{{set}}の印刷版（{{language}}）"
+    },
+    "errors": {
+      "unsupported_shell": "このアプリのバージョンはオフライン表示カタログに対応していません。",
+      "unauthorized": "このウィンドウにはオフライン表示カタログを管理する権限がありません。",
+      "unavailable": "このブラウザではオフライン画像ダウンロードを利用できません。",
+      "invalid_input": "要求されたカタログ選択は無効です。",
+      "conflict": "この選択は古くなっています。作成後にカタログまたはアート設定が変更されました。もう一度見積もってから再試行してください。",
+      "cancelled": "操作はキャンセルされました。",
+      "network": "Scryfallカタログまたは画像のダウンロードに失敗しました。",
+      "storage": "カタログを端末ストレージに書き込めませんでした。",
+      "insufficient_storage": "空き容量が不足しています。このダウンロードには少なくとも{{required}}が必要ですが、空きは{{available}}です。",
+      "trust": "ダウンロードした画像をローカルで検証できませんでした。",
+      "emit": "アプリからカタログの進行状況を報告できませんでした。",
+      "internal": "カタログ操作を完了できませんでした。"
+    },
+    "confirm": {
+      "cascadeTitle": "依存パックを削除しますか？",
+      "cascadeMessage": "インストール済みの他のパックが{{selection}}に依存しています。固定された選択項目と依存項目を削除しますか？",
+      "cascadeAction": "依存項目を削除",
+      "completeTitle": "この完全なカタログを削除しますか？",
+      "completeMessage": "カタログルート{{selection}}からインストール済みパックをすべて削除しますか？",
+      "allTitle": "オフライン表示をすべて削除しますか？",
+      "allMessage": "この端末からインストール済み表示パックをすべて削除しますか？",
+      "removeAction": "削除"
+    }
+  },
+  "resetAll": {
+    "confirm": "すべての設定を既定値に戻しますか？このダイアログの全設定が消去されます。",
+    "button": "すべての設定をリセット",
+    "confirmAction": "リセット"
+  },
+  "pacing": {
+    "title": "ペース",
+    "resetSection": "セクションをリセット",
+    "animationSpeed": "アニメーション速度",
+    "animationSpeedDescription": "全体速度です — 高いほど速くなります。右端ではアニメーションを完全にスキップします。",
+    "hint": "カテゴリ別スライダーはアニメーション速度に乗算されます。スライダーをダブルクリックするか、横の<glyph>↺</glyph>をタップしてリセットします。",
+    "instant": "即時",
+    "slowest": "最遅",
+    "resetSliderLabel": "{{label}}を既定値にリセット",
+    "atDefault": "既定値",
+    "resetToDefault": "既定値にリセット",
+    "labels": {
+      "effects": "効果のペース",
+      "combat": "戦闘のペース",
+      "banners": "バナーのペース"
+    },
+    "descriptions": {
+      "effects": "呪文を唱える、領域移動、死亡、ライフ変更、カウンター、タップ・アンタップ。",
+      "combat": "戦闘ダメージのタイミング — ダメージ解決前にブロッカーと攻撃クリーチャーを表示する時間。",
+      "banners": "ターン開始バナーの表示。"
+    }
+  },
+  "offlinePreparation": {
+    "title": "オフライン準備",
+    "description": "オフライン作業を有効にする前に、この端末をコールド起動のローカルプレイ用に準備します。",
+    "prepare": "オフライン用に準備",
+    "preparing": "準備中…",
+    "workOffline": "オフラインで作業",
+    "checklistLabel": "オフライン準備チェックリスト",
+    "visualWarning": "インストール済み表示パックに対応が必要です。表示パックを開いて修復してください。ローカルプレイは引き続き利用できます。",
+    "cardArtMissing": "カード画像がインストールされていません。オフラインではアートなしで表示されます — 下の表示パックからパックをインストールしてください。",
+    "cardArtInstalled": "キャッシュ済みカード画像: {{packs}}",
+    "incompleteTitle": "オフライン準備が未完了です",
+    "incompleteMessage": "不足: {{capabilities}}。それでもオフライン作業を有効にしますか？",
+    "confirmOffline": "オフライン作業を有効化",
+    "states": {
+      "needs-preparation": "オフラインで作業する前に端末を準備してください。",
+      "preparing": "ローカルプレイ機能を準備中…",
+      "ready": "この端末はオフラインのローカルプレイに対応しています。",
+      "failed": "必要なローカルプレイ機能の一部が準備できていません。",
+      "reconnect-required": "オフラインのローカルプレイを準備する前に再接続してください。",
+      "reload-or-relaunch-required": "アプリを再読み込みするかデスクトップシェルを再起動してから、もう一度準備してください。"
+    },
+    "capabilities": {
+      "appShell": "アプリシェル",
+      "browserEngine": "ブラウザエンジンとカードデータベース",
+      "scryfallSearch": "カード検索データ",
+      "preconCatalog": "生成済み構築済みデッキ",
+      "bundledAiCatalog": "同梱AIデッキカタログ",
+      "deckLibrary": "インストール済みデッキライブラリー",
+      "coreVisuals": "カード裏面とマナシンボル",
+      "nativeEngine": "ネイティブエンジン"
+    },
+    "capabilityStates": {
+      "ready": "準備完了",
+      "not-ready": "未準備",
+      "reload-required": "再読み込みが必要",
+      "not-applicable": "該当なし",
+      "not-installed": "未インストール"
+    }
+  },
+  "artChain": {
+    "emptyState": "既定のScryfallアートを使用中です。下にルールを追加してカスタマイズできます。",
+    "moveUp": "上へ移動",
+    "moveDown": "下へ移動",
+    "remove": "削除",
+    "unreachable": "「{{rule}}」より下のルールには到達できません — 常に一致します。",
+    "addRule": "ルールを追加",
+    "setInputPlaceholder": "セットコードまたは名前…",
+    "addSet": "セットを追加",
+    "rulesPriorityNote": "ルールは上から順に試し、最初に一致したものが適用されます。「ソース印刷版」は利用可能ならドラフトパックまたはデッキインポートのセットを使用します。カードごとの上書き（デッキ構築で右クリック）が常に優先されます。",
+    "setEntry": "セット: {{name}}（{{code}}）",
+    "rules": {
+      "sourcePrinting": "ソース印刷版",
+      "newest": "最新の印刷版",
+      "oldest": "最古の印刷版",
+      "preferBorderless": "ボーダーレスを優先",
+      "preferExtended": "拡張アートを優先"
+    }
+  },
+  "llm": {
+    "title": "LLM対戦相手",
+    "intro": "任意の機能です。PhaseにLLMプロバイダーを設定すると、AIの席やドラフト・ポッドのボットを、内蔵エンジンAIの代わりにそのモデルに任せられます。プロバイダーを有効にして席に割り当てるまで、この機能は使われません。対戦中に問題が起きた場合はエンジンAIに切り替わります。",
+    "empty": "プロバイダーが設定されていません。すべての席で内蔵エンジンAIが動作します。",
+    "addProvider": "プロバイダーを追加",
+    "unnamed": "名前のないプロバイダー",
+    "name": "名前",
+    "namePlaceholder": "プロバイダーの名前（例：Claude）",
+    "enable": "このプロバイダーを有効にする",
+    "remove": "このプロバイダーを削除",
+    "provider": "プロバイダー",
+    "model": "モデル",
+    "modelId": "モデルID",
+    "customModel": "カスタム…",
+    "modelPlaceholder": "モデルID（例：gpt-5、claude-sonnet-5）",
+    "endpoint": "エンドポイント",
+    "endpointPlaceholder": "https://your-server/v1",
+    "apiKey": "APIキー",
+    "apiKeyPlaceholder": "APIキーを貼り付け",
+    "apiKeyOptional": "ローカルサーバーでは任意",
+    "apiKeyStorage": "APIキーは、このブラウザーのセッション中のみメモリに保持されます。ディスクには保存されず、バックアップのエクスポートやクラウド同期にも含まれないため、再読み込み後は再入力が必要です。また、サーバーがlocalhostで動作している場合を除き、APIキーを使うにはhttps://のエンドポイントが必要です。",
+    "apiKeyGet": "キーを取得",
+    "test": "接続をテスト",
+    "testing": "テスト中…",
+    "testOk": "接続しました。",
+    "draftToggle": {
+      "label": "ドラフトのボットに使用",
+      "hint": "ドラフト・ポッドのボットが、フォーマットのセット情報を参照してモデルでピックします。",
+      "profile": "ドラフト用プロバイダー"
+    },
+    "testHint": "実際に1件のリクエストを送信し、対戦中と同じ方法で応答を確認します。",
+    "errors": {
+      "engineUnavailable": "エンジンを読み込めませんでした。",
+      "requestNotBuilt": "このプロバイダーの設定が完了していません。",
+      "undecodable": "エンドポイントから応答がありましたが、ゲームで使用できる内容ではありません。",
+      "emptyBody": "エンドポイントから空の応答が返されました。",
+      "cancelled": "テストがキャンセルされました。",
+      "timedOut": "エンドポイントから時間内に応答がありませんでした。",
+      "unreachable": "エンドポイントに接続できませんでした。URLと、プロバイダーがブラウザーからのリクエストを許可しているかを確認してください。",
+      "oversized": "エンドポイントから、チャット応答としては大きすぎるデータが返されました。"
+    }
+  }
+}

@@ -576,7 +576,8 @@ fn bound_root_ability(state: &GameState, root: RootBinding) -> Option<&ResolvedA
                 StackEntryKind::Spell { ability: None, .. }
                 | StackEntryKind::ActivatedAbility { .. }
                 | StackEntryKind::TriggeredAbility { .. }
-                | StackEntryKind::KeywordAction { .. } => None,
+                | StackEntryKind::KeywordAction { .. }
+                | StackEntryKind::CombatDamage { .. } => None,
             })
     })
 }

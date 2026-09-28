@@ -12,12 +12,16 @@ The shell under test is `scripts/wait-for-preview-data.sh` itself, driven
 against a local HTTP server that answers HEAD the way the data endpoint does.
 The wiring tests decode the workflows with `yaml.safe_load`, the way GitHub
 reads them, and assert over the decoded structure -- not over workflow text.
+The publish step's own `run` is one such decoded value, which `publish` below
+runs against a stubbed checkout, so the platform check inside it is measured
+rather than read.
 """
 
 from __future__ import annotations
 
 import functools
 import http.server
+import os
 import re
 import subprocess
 import tempfile
@@ -50,6 +54,34 @@ MANIFEST_DATA_PUTS = (
     "phase-rs-data/staging/$CARD_DATA_FILENAME",
     "phase-rs-data/staging/$DRAFT_POOLS_FILENAME",
 )
+CONTRACT = ROOT / "packaging/desktop-platforms.txt"
+# Every command the publish step shells out to, as one stub dispatching on the
+# name it was invoked by: minisign writes a signature, npx records the upload
+# and fills a bucket, curl answers out of it. None of this is under test -- it
+# is the least that lets the shipped step run somewhere it cannot publish.
+COMMAND_STUB = """#!/usr/bin/env python3
+import os, shutil, sys
+from pathlib import Path
+
+me, argv, bucket = Path(sys.argv[0]).name, sys.argv[1:], Path(os.environ["BUCKET"])
+if me == "minisign":
+    Path(argv[argv.index("-x") + 1]).write_text("untrusted signature\\n")
+elif me == "npx":  # npx wrangler r2 object <verb> <key> [--file <path>]
+    with open(os.environ["UPLOAD_LOG"], "a") as log:
+        log.write(f"{argv[3]} {argv[4]}\\n")
+    if argv[3] == "put":
+        (bucket / argv[4]).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(argv[argv.index("--file") + 1], bucket / argv[4])
+elif me == "curl" and "-w" in argv:  # the manifest this run would supersede
+    print("404", end="")
+elif me == "curl" and "--get" in argv:  # the object listing retention walks
+    print('{"success":true,"result":[],"result_info":{"is_truncated":false}}')
+elif me == "curl":  # a just-published object, read back for verification
+    published = bucket / "phase-rs-data" / argv[-1].split(".dev/")[1]
+    if not published.is_file():
+        sys.exit(22)
+    shutil.copy(published, argv[argv.index("-o") + 1])
+"""
 
 
 class _QuietHandler(http.server.SimpleHTTPRequestHandler):
@@ -216,6 +248,18 @@ class PublishWiringTests(unittest.TestCase):
         self.assertEqual(len(signs), 1, "publish must sign manifest data URLs in exactly one step")
         return steps, waits[0], signs[0]
 
+    def test_publish_checks_out_the_commit_it_publishes(self) -> None:
+        # The scripts and the platform contract this job reads have to come from
+        # the commit whose binaries it signs, not from whichever ref is running
+        # the workflow. `commit` is a required input, so there is no fallback.
+        checkouts = [
+            step.get("with") or {}
+            for step in self.preview["jobs"]["publish"]["steps"]
+            if "actions/checkout@" in str(step.get("uses", ""))
+        ]
+        self.assertEqual(len(checkouts), 1, "publish must check out exactly once")
+        self.assertEqual(checkouts[0].get("ref"), "${{ inputs.commit }}")
+
     def test_the_wait_step_carries_nothing_but_its_run(self) -> None:
         steps, wait_index, _ = self.wait_and_sign()
         wait = steps[wait_index]
@@ -277,6 +321,78 @@ class PublishWiringTests(unittest.TestCase):
         self.assertEqual(set(gate.get("outputs") or {}), {"already_published"})
         for run in _run_strings(self.preview):
             self.assertNotRegex(run, r"data_deadline_epoch")
+
+    def publish(self, contract: str) -> tuple[subprocess.CompletedProcess, list[str]]:
+        """Runs the shipped publish step over a checkout holding `contract`, and
+        returns it with every upload the step managed to make."""
+        runs = [run for run in _run_strings(self.preview) if "binaries=(" in run]
+        self.assertEqual(len(runs), 1, "one step must list the binaries to publish")
+        with tempfile.TemporaryDirectory() as tmp:
+            work, stubs, log = Path(tmp, "work"), Path(tmp, "bin"), Path(tmp, "uploads")
+            (work / "packaging").mkdir(parents=True)
+            (work / CONTRACT.relative_to(ROOT)).write_text(contract, encoding="utf-8")
+            stubs.mkdir()
+            for command in ("sudo", "apt-get", "minisign", "npx", "curl"):
+                # sudo and apt-get fall off the end of the stub and exit 0.
+                (stubs / command).write_text(COMMAND_STUB, encoding="utf-8")
+                (stubs / command).chmod(0o755)
+            for entry in self.preview["jobs"]["build"]["strategy"]["matrix"]["include"]:
+                artifact = work / "artifacts" / entry["triple"]
+                artifact.mkdir(parents=True)
+                binary = f"phase-server-{entry['triple']}{entry['extension']}"
+                (artifact / binary).write_text(entry["triple"], encoding="utf-8")
+            env = {name: name.lower() for name in self.preview["jobs"]["publish"]["env"]}
+            result = subprocess.run(
+                ["bash", "-c", runs[0]],
+                cwd=work,
+                env={**env, "PATH": f"{stubs}:{os.environ['PATH']}", "TMPDIR": tmp,
+                     "BUCKET": str(Path(tmp, "bucket")), "UPLOAD_LOG": str(log)},
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+            # Read inside the sandbox: an upload log collected after cleanup is
+            # empty whether the step published or not.
+            uploads = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+        return result, uploads
+
+    def printed_set(self, stdout: str, label: str) -> list[str]:
+        lines = [line for line in stdout.splitlines() if line.startswith(label)]
+        self.assertEqual(len(lines), 1, f"the publish step must print {label!r} once")
+        return sorted(lines[0].split(":", 1)[1].split())
+
+    def test_publish_holds_the_contract_against_what_it_uploads(self) -> None:
+        # Both sets are printed, so a pass here cannot be a check that never ran.
+        result, uploads = self.publish(CONTRACT.read_text(encoding="utf-8"))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        built = sorted(
+            entry["triple"]
+            for entry in self.preview["jobs"]["build"]["strategy"]["matrix"]["include"]
+        )
+        self.assertEqual(self.printed_set(result.stdout, "desktop-platforms.txt"), built)
+        self.assertEqual(self.printed_set(result.stdout, "this job publishes"), built)
+        self.assertIn("put phase-rs-data/desktop/preview-server.json", uploads)
+
+    def test_a_listed_triple_publish_does_not_carry_stops_before_publication(self) -> None:
+        # A triple this job builds and the contract lists, absent from the step's
+        # own `binaries`, would leave that desktop with no preview URL at all.
+        # Publication is the only authority that can see both, so it must refuse.
+        unpublished = "linux   riscv64 riscv64gc-unknown-linux-musl\n"
+        result, uploads = self.publish(CONTRACT.read_text(encoding="utf-8") + unpublished)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("riscv64gc-unknown-linux-musl", result.stdout)
+        self.assertIn("::error::packaging/desktop-platforms.txt", result.stdout)
+        self.assertEqual(uploads, [], "a mismatch must publish nothing at all")
+
+    def test_a_published_triple_with_no_contract_row_stops_before_publication(self) -> None:
+        # The other direction the same error promises: a binary this job uploads
+        # that the contract does not list is a preview no desktop ever asks for.
+        dropped = "aarch64-apple-darwin"
+        rows = CONTRACT.read_text(encoding="utf-8").splitlines(True)
+        result, uploads = self.publish("".join(r for r in rows if dropped not in r))
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn(f"> {dropped}", result.stdout)
+        self.assertEqual(uploads, [], "a mismatch must publish nothing at all")
 
     def test_the_deploy_caller_needs_the_job_that_uploads_the_data(self) -> None:
         def needs(job: str) -> set[str]:

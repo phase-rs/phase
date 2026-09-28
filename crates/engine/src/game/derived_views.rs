@@ -31,7 +31,7 @@ use crate::types::counter::{positive_counter_entries, CounterType};
 use crate::types::events::GameEvent;
 use crate::types::format::GameFormat;
 use crate::types::game_state::{
-    CastingVariant, GameState, StackEntry, StackEntryKind, StackPaidSnapshot,
+    CastingVariant, CombatDamageSubStep, GameState, StackEntry, StackEntryKind, StackPaidSnapshot,
     SyntheticTriggerProvenance, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
@@ -604,33 +604,11 @@ pub struct DungeonRoomView {
     pub rooms: Vec<DungeonRoomNodeView>,
 }
 
-/// The printed dungeon card, as the client looks it up on Scryfall.
-///
-/// Identity plumbing, not a rule — deliberately unannotated.
-///
-/// Both ids ride along because the five dungeons are not indexed uniformly by
-/// the client's Scryfall sidecars — Undercity is a `double_faced_token` that
-/// only `scryfall-token-images.json` carries. See `dungeon::DungeonCardRef`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DungeonCardView {
-    pub oracle_id: String,
-    pub scryfall_id: String,
-    pub face_name: String,
-}
-
-/// CR 309.4: One room as the client draws it — its preview, its outgoing
-/// edges, and its position on the printed card face.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DungeonRoomNodeView {
-    #[serde(flatten)]
-    pub room: crate::game::dungeon::RoomPreview,
-    /// CR 309.5a: the rooms the venture marker may move to from here. Empty
-    /// for the bottommost room (CR 309.5).
-    pub next_rooms: Vec<u8>,
-    /// Where this room is drawn on the card. Permille of the image — see
-    /// `RoomMarkerPoint`, which documents why it is not a fraction.
-    pub marker: crate::game::dungeon::RoomMarkerPoint,
-}
+/// Re-exported from `dungeon`, the canonical home of the wire shapes: the
+/// venture-marker panel (`DungeonRoomView`) and the dungeon-choice preview
+/// (`dungeon::DungeonPreview`) describe the same cards and rooms, so the types
+/// live once, beside the static tables, rather than once per surface.
+pub use crate::game::dungeon::{DungeonCardView, DungeonRoomNodeView};
 
 /// Engine-authored projections used by the display layer. Keep this struct
 /// small — every field becomes mandatory payload on every state snapshot
@@ -678,6 +656,9 @@ pub struct DerivedViews {
     /// next one belongs too.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub battlefield_keyword_badges: HashMap<ObjectId, Vec<Keyword>>,
+    /// CR 400.7 + CR 607.2a: the cards currently exiled with each battlefield permanent.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub linked_exile_ids: BTreeMap<ObjectId, Vec<ObjectId>>,
 
     /// CR 509.1b + CR 611.2c: creatures with a live, temporary
     /// `CantBeBlocked` grant. The optional value is the granting source only
@@ -993,6 +974,8 @@ pub struct ClientGameStateRef<'a> {
     pub state: &'a GameState,
     pub derived: DerivedViews,
     display_visible_object_ids: Option<BTreeSet<ObjectId>>,
+    viewer: Option<PlayerId>,
+    already_filtered: bool,
 }
 
 impl Serialize for ClientGameStateRef<'_> {
@@ -1006,8 +989,13 @@ impl Serialize for ClientGameStateRef<'_> {
             derived: &'a DerivedViews,
         }
 
-        let state = client_state_wire_value(self.state, self.display_visible_object_ids.as_ref())
-            .map_err(serde::ser::Error::custom)?;
+        let state = client_state_wire_value(
+            self.state,
+            self.display_visible_object_ids.as_ref(),
+            self.viewer,
+            self.already_filtered,
+        )
+        .map_err(serde::ser::Error::custom)?;
         ClientGameStateEnvelope {
             state: &state,
             derived: &self.derived,
@@ -1023,11 +1011,33 @@ impl Serialize for ClientGameStateRef<'_> {
 fn client_state_wire_value(
     state: &GameState,
     display_visible_object_ids: Option<&BTreeSet<ObjectId>>,
+    viewer: Option<PlayerId>,
+    already_filtered: bool,
 ) -> serde_json::Result<serde_json::Value> {
-    let mut value = serde_json::to_value(state)?;
+    // CR 601.2h + CR 608.2c: direct client snapshots must pass through the
+    // same identity/knowledge redaction as the filtered-viewer path. An
+    // unscoped wire has no authenticated actor, so it must keep the canonical
+    // base and never materialize a staged shadow; wrap_filtered has already
+    // performed the viewer projection.
+    let payment_projected = match (viewer, already_filtered) {
+        (Some(viewer), false) => crate::game::visibility::filter_state_for_viewer(state, viewer),
+        (Some(_), true) => state.clone(),
+        (None, false) => crate::game::visibility::filter_state_for_unseated_viewer(state),
+        (None, true) => state.clone(),
+    };
+    let projected_state =
+        crate::game::visibility::project_paid_cast_cleanup_authority(&payment_projected);
+    let mut value = serde_json::to_value(&projected_state)?;
     let Some(root) = value.as_object_mut() else {
         return Ok(value);
     };
+
+    // This JSON-only marker records provenance for persistence ingress. It is
+    // intentionally not a `GameState` field: client projections remain
+    // transportable, but a projection must never be accepted as a trusted
+    // restore authority. A positive marker avoids inferring provenance from
+    // mutable redaction lists or from private execution carriers.
+    root.insert("wire_projection".to_string(), serde_json::Value::Bool(true));
 
     if let Some(display_visible_object_ids) = display_visible_object_ids {
         if let Some(objects) = root
@@ -1055,6 +1065,7 @@ fn client_state_wire_value(
 
     root.remove("next_delayed_trigger_token");
     root.remove("next_delayed_trigger_instance");
+    root.remove("next_resolution_cast_offer_id");
     root.remove("pending_trigger_firing");
     root.remove("stack_trigger_firings");
     root.remove("resolving_trigger_firing");
@@ -1108,23 +1119,24 @@ impl<'a> ClientGameStateRef<'a> {
     /// Viewer-filtered paths must use [`Self::wrap_filtered`] so redaction cannot
     /// erase an authoritative decision projection.
     pub fn wrap(state: &'a GameState, viewer: Option<PlayerId>) -> Self {
-        let filtered_state =
-            viewer.map(|viewer| crate::game::visibility::filter_state_for_viewer(state, viewer));
-        let display_visible_object_ids = filtered_state.as_ref().map(|filtered| {
-            filtered
+        let filtered_state = match viewer {
+            Some(viewer) => crate::game::visibility::filter_state_for_viewer(state, viewer),
+            None => crate::game::visibility::filter_state_for_unseated_viewer(state),
+        };
+        let display_visible_object_ids = Some(
+            filtered_state
                 .objects
                 .iter()
                 .filter_map(|(id, object)| object.display_visible_to_viewer.then_some(*id))
-                .collect()
-        });
-        let mut derived = derive_views(state, viewer);
-        if let Some(filtered) = filtered_state.as_ref() {
-            derived.visible_exile_object_ids = visible_exile_object_ids(filtered);
-        }
+                .collect(),
+        );
+        let derived = derive_filtered_views(state, &filtered_state, viewer);
         Self {
             state,
             derived,
             display_visible_object_ids,
+            viewer,
+            already_filtered: false,
         }
     }
 
@@ -1140,6 +1152,8 @@ impl<'a> ClientGameStateRef<'a> {
             state: filtered_state,
             derived: derive_filtered_views(authoritative_state, filtered_state, viewer),
             display_visible_object_ids: None,
+            viewer,
+            already_filtered: true,
         }
     }
 }
@@ -1175,15 +1189,9 @@ pub struct ClientGameState {
 /// cast — activated-ability mana payment keeps its full-cost display, and
 /// convoke/improvise/delve pay via board taps tracked by their own staged UI.
 ///
-/// KNOWN LIMITATION: reduces with `any_color = false` and no life-for-color
-/// permissions, so under an any-color spend permission (Chromatic Orrery) or a
-/// K'rrik-style life-as-colored-mana grant the displayed residual can over-state
-/// the cost (a colorless unit pinned toward `{R}` reads as not covering it).
-/// This is deliberately consistent with the pin-eligibility gate
-/// (`mana_unit_eligible_for_cost`), which is also `any_color`-blind and would
-/// reject such a pin — both layers agree on the stricter behavior, and the
-/// common cases (generic + plain colored costs) are exact. Threading the real
-/// permission bundle through both sites is the follow-up to lift this.
+/// Uses the current spell's typed mana-spend permission when matching pinned
+/// units to colored or colorless requirements. This projection subtracts only
+/// pinned mana units; it does not subtract life payments.
 fn pending_payment_remaining(state: &GameState, viewer: PlayerId) -> Option<ManaCost> {
     use crate::types::game_state::WaitingFor;
     use crate::types::mana::{ManaPool, PaymentContext};
@@ -1225,43 +1233,14 @@ fn pending_payment_remaining(state: &GameState, viewer: PlayerId) -> Option<Mana
         &selected,
         &cost,
         ctx.as_ref(),
-        false,
+        crate::game::casting::player_mana_spend_permission_for_payment(
+            state,
+            viewer,
+            Some(pending.object_id),
+            ctx.as_ref(),
+        ),
         None,
     ))
-}
-
-/// Project the printed dungeon card's Scryfall identity.
-fn dungeon_card_view(dungeon: crate::game::dungeon::DungeonId) -> DungeonCardView {
-    let card = crate::game::dungeon::card_ref(dungeon);
-    DungeonCardView {
-        oracle_id: card.oracle_id.to_string(),
-        scryfall_id: card.scryfall_id.to_string(),
-        face_name: card.face_name.to_string(),
-    }
-}
-
-/// CR 309.4 + CR 309.5a: Project the whole dungeon graph — every room, its
-/// outgoing edges, and where it is drawn on the card.
-///
-/// The client needs all of it at once: it places the marker on the current room
-/// and marks the rooms reachable from it (CR 309.5a), and neither is derivable
-/// from the current room alone.
-fn dungeon_room_nodes(dungeon: crate::game::dungeon::DungeonId) -> Vec<DungeonRoomNodeView> {
-    let markers = crate::game::dungeon::marker_points(dungeon);
-    (0..crate::game::dungeon::room_count(dungeon))
-        .filter_map(|index| {
-            // `dungeon_marker_points_cover_every_room` pins these lists to the
-            // same length, so a miss is unreachable. Skipping rather than
-            // indexing keeps a future table edit from panicking the whole state
-            // projection on a purely cosmetic field.
-            let marker = *markers.get(index as usize)?;
-            Some(DungeonRoomNodeView {
-                room: crate::game::dungeon::room_preview(dungeon, index),
-                next_rooms: crate::game::dungeon::next_rooms(dungeon, index).to_vec(),
-                marker,
-            })
-        })
-        .collect()
 }
 
 /// CR 309.4a-c: name the room each venturing player's marker currently sits on.
@@ -1285,8 +1264,8 @@ fn dungeon_rooms(state: &GameState) -> BTreeMap<PlayerId, DungeonRoomView> {
                         .to_string(),
                     room: crate::game::dungeon::room_preview(dungeon, progress.current_room),
                     room_count: crate::game::dungeon::room_count(dungeon),
-                    card: dungeon_card_view(dungeon),
-                    rooms: dungeon_room_nodes(dungeon),
+                    card: crate::game::dungeon::card_view(dungeon),
+                    rooms: crate::game::dungeon::room_nodes(dungeon),
                 },
             ))
         })
@@ -1579,6 +1558,12 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
             .collect();
         if !badges.is_empty() {
             views.battlefield_keyword_badges.insert(obj_id, badges);
+        }
+        let linked: Vec<ObjectId> = crate::game::exile_links::live_links_for_source(state, obj_id)
+            .map(|link| link.exiled_id)
+            .collect();
+        if !linked.is_empty() {
+            views.linked_exile_ids.insert(obj_id, linked);
         }
         if let Some(source_id) = temporary_cant_be_blocked_source(state, obj_id) {
             views.temporary_cant_be_blocked.insert(obj_id, source_id);
@@ -2194,7 +2179,8 @@ fn storm_count(state: &GameState) -> u32 {
             StackEntryKind::Spell { .. }
             | StackEntryKind::ActivatedAbility { .. }
             | StackEntryKind::TriggeredAbility { .. }
-            | StackEntryKind::KeywordAction { .. } => None,
+            | StackEntryKind::KeywordAction { .. }
+            | StackEntryKind::CombatDamage { .. } => None,
         })
         .unwrap_or_else(|| spells_cast_this_turn(state))
 }
@@ -2829,6 +2815,7 @@ fn stack_entry_detail(state: &GameState, entry: &StackEntry) -> StackEntryDispla
             description.clone().or_else(|| ability.description.clone()),
         ),
         StackEntryKind::KeywordAction { action } => (keyword_action_label(action), None),
+        StackEntryKind::CombatDamage { sub_step, .. } => (combat_damage_label(*sub_step), None),
     };
 
     StackEntryDisplay {
@@ -2848,7 +2835,8 @@ fn stack_entry_detail(state: &GameState, entry: &StackEntry) -> StackEntryDispla
             StackEntryKind::TriggeredAbility { provenance, .. } => provenance.clone(),
             StackEntryKind::Spell { .. }
             | StackEntryKind::ActivatedAbility { .. }
-            | StackEntryKind::KeywordAction { .. } => None,
+            | StackEntryKind::KeywordAction { .. }
+            | StackEntryKind::CombatDamage { .. } => None,
         },
         // CR 109.4 + CR 601.2a: the live controller, EXCEPT during the
         // announcement window. Between `announce_spell_on_stack` and cast
@@ -2907,6 +2895,16 @@ fn keyword_action_label(action: &KeywordAction) -> String {
         KeywordAction::Crew { .. } => "Crew".to_string(),
         KeywordAction::Saddle { .. } => "Saddle".to_string(),
         KeywordAction::Station { .. } => "Station".to_string(),
+    }
+}
+
+/// CR 510.4: the two combat damage steps are distinct steps, so the label names
+/// which one this object belongs to. Engine-owned, like every other stack label
+/// — the client renders `kind_label` and derives nothing.
+fn combat_damage_label(sub_step: CombatDamageSubStep) -> String {
+    match sub_step {
+        CombatDamageSubStep::FirstStrike => "Combat damage — first strike".to_string(),
+        CombatDamageSubStep::Regular => "Combat damage".to_string(),
     }
 }
 
@@ -5342,7 +5340,7 @@ mod tests {
                 source_id: trigger_source,
                 ability: Box::new(ability),
                 condition: None,
-                trigger_event: Some(trigger_event),
+                trigger_event: Some(trigger_event.clone()),
                 description: Some("hidden-zone trigger".to_string()),
                 source_name: "Watcher".to_string(),
                 subject_match_count: None,
@@ -5368,6 +5366,29 @@ mod tests {
             "trigger context must not bypass multiplayer hidden-card filtering"
         );
         assert!(label.contains("Hidden Card"));
+
+        // CR 400.2 + CR 402.3: each serialized event carrier and its derived
+        // display must honor the same hidden-object decision for seated and
+        // unseated observers.
+        state
+            .stack_trigger_event_batches
+            .insert(ObjectId(900), vec![trigger_event.clone()]);
+        state.resolving_stack_entry = state.stack.front().cloned();
+        state.current_trigger_event = Some(trigger_event.clone());
+        state.current_trigger_events.push(trigger_event);
+        for viewer in [None, Some(PlayerId(0))] {
+            let wire = serde_json::to_value(ClientGameStateRef::wrap(&state, viewer))
+                .expect("serialize client envelope");
+            assert!(
+                !wire.to_string().contains("Secret Card"),
+                "client envelope must not reveal the library card to {viewer:?}"
+            );
+            let wire_label = wire["derived"]["stack_entry_details"]["900"]["trigger_context"][0]
+                ["label"]
+                .as_str()
+                .expect("serialized trigger context label");
+            assert!(wire_label.contains("Hidden Card"));
+        }
     }
 
     /// Wire-format round-trip: the JSON produced from `ClientGameStateRef`
@@ -5416,6 +5437,7 @@ mod tests {
             token: DelayedTriggerToken(17),
             instance: DelayedTriggerInstanceId(23),
             source_id: source,
+            offer_id: None,
         };
         state.next_delayed_trigger_token = 18;
         state.next_delayed_trigger_instance = 24;
@@ -5578,6 +5600,305 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// A paid cast during resolution is a public prompt, but its cleanup owner
+    /// and delayed-trigger receipts are server-only capabilities. Both the
+    /// direct WASM wire and the server viewer projection must drop them without
+    /// changing the authoritative offer.
+    #[test]
+    fn paid_cast_cleanup_authority_never_reaches_direct_or_viewer_wires() {
+        use crate::types::ability::{
+            ResolutionCastCleanup, ResolutionCastDelayedTriggerReceipt, ResolutionCastFacePolicy,
+            ResolutionCastSuccessAction, ResolutionMvRejectAction,
+        };
+        use crate::types::game_state::CastOfferKind;
+        use crate::types::identifiers::ResolutionCastOfferId;
+
+        let owner = PlayerId(0);
+        let observer = PlayerId(1);
+        let offer_id = ResolutionCastOfferId(73);
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(3_003),
+            owner,
+            "Paid-cast source".into(),
+            Zone::Battlefield,
+        );
+        let hit_card = create_object(
+            &mut state,
+            CardId(3_004),
+            owner,
+            "Paid-cast hit".into(),
+            Zone::Graveyard,
+        );
+        state.next_resolution_cast_offer_id = 74;
+        state.waiting_for = WaitingFor::CastOffer {
+            player: owner,
+            kind: CastOfferKind::GraveyardPaidCast {
+                hit_card,
+                mana_spend_permission: None,
+                graveyard_replacement: None,
+                cast_transformed: false,
+                additional_cost: None,
+                cleanup: ResolutionCastCleanup {
+                    source_id: source,
+                    offer_id: Some(offer_id),
+                    face_policy: ResolutionCastFacePolicy::new(
+                        TargetFilter::Any,
+                        source,
+                        owner,
+                        None,
+                    ),
+                    exiled_misses: Vec::new(),
+                    reject_action: ResolutionMvRejectAction::RemainExiled,
+                    success_action: ResolutionCastSuccessAction::BottomMisses,
+                    delayed_trigger_receipts: vec![ResolutionCastDelayedTriggerReceipt {
+                        offer_id,
+                        token: DelayedTriggerToken(37),
+                        instance: DelayedTriggerInstanceId(41),
+                        source_id: source,
+                    }],
+                },
+            },
+        };
+
+        let trusted = serde_json::to_value(&state).expect("trusted state serializes");
+        let trusted_cleanup = &trusted["waiting_for"]["data"]["kind"]["cleanup"];
+        assert_eq!(trusted["next_resolution_cast_offer_id"], 74);
+        assert_eq!(trusted_cleanup["offer_id"], 73);
+        assert_eq!(
+            trusted_cleanup["delayed_trigger_receipts"][0]["offer_id"], 73,
+            "test precondition: trusted state retains both cleanup authorities"
+        );
+
+        let owner_view = crate::game::visibility::filter_state_for_viewer(&state, owner);
+        let observer_view = crate::game::visibility::filter_state_for_viewer(&state, observer);
+        for (label, view) in [("owner", &owner_view), ("observer", &observer_view)] {
+            assert_eq!(view.next_resolution_cast_offer_id, 0);
+            let WaitingFor::CastOffer {
+                player,
+                kind:
+                    CastOfferKind::GraveyardPaidCast {
+                        hit_card: projected_hit,
+                        cleanup,
+                        ..
+                    },
+            } = &view.waiting_for
+            else {
+                panic!("{label} projection must retain the paid cast prompt");
+            };
+            assert_eq!(*player, owner);
+            assert_eq!(*projected_hit, hit_card);
+            assert_eq!(cleanup.offer_id, None);
+            assert!(cleanup.delayed_trigger_receipts.is_empty());
+        }
+
+        let projections = [
+            (
+                "direct",
+                serde_json::to_value(ClientGameStateRef::wrap(&state, None))
+                    .expect("direct client wire serializes"),
+            ),
+            (
+                "viewer owner",
+                serde_json::to_value(ClientGameStateRef::wrap_filtered(
+                    &state,
+                    &owner_view,
+                    Some(owner),
+                ))
+                .expect("owner viewer wire serializes"),
+            ),
+            (
+                "viewer observer",
+                serde_json::to_value(ClientGameStateRef::wrap_filtered(
+                    &state,
+                    &observer_view,
+                    Some(observer),
+                ))
+                .expect("observer viewer wire serializes"),
+            ),
+        ];
+        for (label, projection) in projections {
+            let client_state = &projection["state"];
+            let cleanup = &client_state["waiting_for"]["data"]["kind"]["cleanup"];
+            assert_eq!(client_state["waiting_for"]["type"], "CastOffer");
+            assert_eq!(client_state["waiting_for"]["data"]["player"], owner.0);
+            assert_eq!(
+                client_state["waiting_for"]["data"]["kind"]["hit_card"],
+                hit_card.0
+            );
+            assert!(
+                cleanup.get("offer_id").is_none()
+                    && cleanup.get("delayed_trigger_receipts").is_none(),
+                "{label} wire must not carry paid-offer cleanup authority: {cleanup}"
+            );
+            assert!(
+                client_state.get("next_resolution_cast_offer_id").is_none(),
+                "{label} client wire must not carry the paid-offer allocator"
+            );
+        }
+
+        let WaitingFor::CastOffer {
+            kind: CastOfferKind::GraveyardPaidCast { cleanup, .. },
+            ..
+        } = &state.waiting_for
+        else {
+            panic!("projection must not alter the authoritative offer");
+        };
+        assert_eq!(state.next_resolution_cast_offer_id, 74);
+        assert_eq!(cleanup.offer_id, Some(offer_id));
+        assert_eq!(cleanup.delayed_trigger_receipts.len(), 1);
+    }
+
+    /// Once a paid resolution offer is accepted, its cleanup moves onto the
+    /// card's temporary permission. It stays private through both the modal
+    /// face election and the manual mana-payment continuation.
+    #[test]
+    fn paid_cast_cleanup_authority_never_reaches_continuation_wires() {
+        use crate::types::ability::{
+            CastingPermission, ExileGrantCostProvenance, ResolutionCastCleanup,
+            ResolutionCastDelayedTriggerReceipt, ResolutionCastFacePolicy,
+            ResolutionCastSuccessAction, ResolutionMvRejectAction,
+        };
+        use crate::types::game_state::{CastPaymentMode, CastingPermissionIndex};
+        use crate::types::identifiers::ResolutionCastOfferId;
+
+        let owner = PlayerId(0);
+        let offer_id = ResolutionCastOfferId(74);
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(3_013),
+            owner,
+            "Paid-cast source".into(),
+            Zone::Battlefield,
+        );
+        let hit_card = create_object(
+            &mut state,
+            CardId(3_014),
+            owner,
+            "Paid-cast hit".into(),
+            Zone::Graveyard,
+        );
+        state
+            .objects
+            .get_mut(&hit_card)
+            .unwrap()
+            .casting_permissions = vec![CastingPermission::ExileWithAltCost {
+            cost: ManaCost::SelfManaCost,
+            cost_provenance: ExileGrantCostProvenance::NormalCost,
+            cast_transformed: false,
+            constraint: None,
+            granted_to: Some(owner),
+            resolution_cleanup: Some(ResolutionCastCleanup {
+                source_id: source,
+                offer_id: Some(offer_id),
+                face_policy: ResolutionCastFacePolicy::new(TargetFilter::Any, source, owner, None),
+                exiled_misses: Vec::new(),
+                reject_action: ResolutionMvRejectAction::RemainExiled,
+                success_action: ResolutionCastSuccessAction::BottomMisses,
+                delayed_trigger_receipts: vec![ResolutionCastDelayedTriggerReceipt {
+                    offer_id,
+                    token: DelayedTriggerToken(38),
+                    instance: DelayedTriggerInstanceId(42),
+                    source_id: source,
+                }],
+            }),
+            duration: None,
+            source_id: None,
+            graveyard_replacement: None,
+            enters_with_counter: None,
+            enters_with_modifications: Vec::new(),
+            mana_spend_permission: None,
+            cast_cost_modifier: None,
+        }];
+
+        let mut modal_state = state.clone();
+        modal_state.waiting_for = WaitingFor::ModalFaceChoice {
+            player: owner,
+            object_id: hit_card,
+            card_id: CardId(3_014),
+            payment_mode: CastPaymentMode::Manual,
+            resolution_additional_cost: None,
+        };
+        let mut mana_payment_state = state;
+        mana_payment_state.waiting_for = WaitingFor::ManaPayment {
+            player: owner,
+            convoke_mode: None,
+        };
+        let mut pending = PendingCast::new(
+            hit_card,
+            CardId(3_014),
+            ResolvedAbility::new(Effect::NoOp, Vec::new(), hit_card, owner),
+            ManaCost::SelfManaCost,
+        )
+        .with_payment_mode(CastPaymentMode::Manual);
+        pending.origin_zone = Zone::Graveyard;
+        pending.casting_permission_index = Some(CastingPermissionIndex(0));
+        mana_payment_state.pending_cast = Some(Box::new(pending));
+
+        for (stage, stage_state) in [
+            ("modal face choice", modal_state),
+            ("manual mana payment", mana_payment_state),
+        ] {
+            let authoritative =
+                serde_json::to_value(&stage_state).expect("trusted continuation state serializes");
+            let trusted_cleanup = &authoritative["objects"][hit_card.0.to_string()]
+                ["casting_permissions"][0]["resolution_cleanup"];
+            assert_eq!(trusted_cleanup["offer_id"], offer_id.0);
+            assert_eq!(
+                trusted_cleanup["delayed_trigger_receipts"][0]["offer_id"], offer_id.0,
+                "{stage} precondition: authoritative permission retains cleanup authority"
+            );
+
+            let viewer_state =
+                crate::game::visibility::filter_state_for_viewer(&stage_state, owner);
+            let Some(CastingPermission::ExileWithAltCost {
+                resolution_cleanup: Some(cleanup),
+                ..
+            }) = viewer_state.objects[&hit_card].casting_permissions.first()
+            else {
+                panic!("{stage} viewer projection must retain the continuation permission");
+            };
+            assert_eq!(cleanup.offer_id, None);
+            assert!(cleanup.delayed_trigger_receipts.is_empty());
+
+            for (wire, projection) in [
+                (
+                    "direct",
+                    serde_json::to_value(ClientGameStateRef::wrap(&stage_state, None))
+                        .expect("direct continuation wire serializes"),
+                ),
+                (
+                    "viewer",
+                    serde_json::to_value(ClientGameStateRef::wrap_filtered(
+                        &stage_state,
+                        &viewer_state,
+                        Some(owner),
+                    ))
+                    .expect("viewer continuation wire serializes"),
+                ),
+            ] {
+                let client_state = &projection["state"];
+                let object = client_state["objects"]
+                    .get(hit_card.0.to_string())
+                    .expect("cast card remains projected");
+                let cleanup = &object["casting_permissions"][0]["resolution_cleanup"];
+                assert!(
+                    cleanup.get("offer_id").is_none()
+                        && cleanup.get("delayed_trigger_receipts").is_none(),
+                    "{stage} {wire} wire must omit permission cleanup authority: {cleanup}"
+                );
+            }
+
+            assert_eq!(
+                serde_json::to_value(&stage_state).expect("authoritative state serializes"),
+                authoritative,
+                "{stage} projections must not alter authoritative state"
+            );
         }
     }
 
@@ -6030,7 +6351,7 @@ mod tests {
                     card_filter: None,
                     single_use_group: None,
                     single_use: false,
-                    cast_cost_raise: None,
+                    cast_cost_modifier: None,
                     alt_ability_cost: None,
                     land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 });
@@ -7741,6 +8062,7 @@ mod tests {
             is_activated: false,
             ability_index: None,
             ability_cost: None,
+            activation_cost_snapshot: None,
             unavailable_modes: Vec::new(),
         };
 

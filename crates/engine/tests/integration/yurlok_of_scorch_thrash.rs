@@ -113,7 +113,9 @@ fn phase_boundary_loses_actual_unspent_mana_once_per_player() {
     let life_changes: Vec<_> = events
         .iter()
         .filter_map(|event| match event {
-            GameEvent::LifeChanged { player_id, amount } => Some((*player_id, *amount)),
+            GameEvent::LifeChanged {
+                player_id, amount, ..
+            } => Some((*player_id, *amount)),
             _ => None,
         })
         .collect();
@@ -252,7 +254,7 @@ fn life_loss_replacement_choice_resumes_phase_drain_exactly_once() {
     assert_eq!(
         events
             .iter()
-            .filter(|event| matches!(event, GameEvent::LifeChanged { player_id, amount: -3 } if *player_id == P1))
+            .filter(|event| matches!(event, GameEvent::LifeChanged { player_id, amount: -3, .. } if *player_id == P1))
             .count(),
         1
     );
@@ -379,7 +381,7 @@ fn cross_event_life_loss_substitution_resumes_phase_drain_after_substitute() {
     assert_eq!(
         events
             .iter()
-            .filter(|event| matches!(event, GameEvent::LifeChanged { player_id, amount: 1 } if *player_id == P0))
+            .filter(|event| matches!(event, GameEvent::LifeChanged { player_id, amount: 1, .. } if *player_id == P0))
             .count(),
         1
     );
@@ -509,7 +511,7 @@ fn interactive_cross_event_substitution_resumes_remaining_apnap_drain_once() {
     assert_eq!(
         events
             .iter()
-            .filter(|event| matches!(event, GameEvent::LifeChanged { player_id, amount: 2 } if *player_id == P0))
+            .filter(|event| matches!(event, GameEvent::LifeChanged { player_id, amount: 2, .. } if *player_id == P0))
             .count(),
         1
     );
@@ -717,7 +719,9 @@ fn nested_life_loss_choice_cannot_bypass_outer_substitute_phase_owner() {
     let life_changes: Vec<_> = events
         .iter()
         .filter_map(|event| match event {
-            GameEvent::LifeChanged { player_id, amount } => Some((*player_id, *amount)),
+            GameEvent::LifeChanged {
+                player_id, amount, ..
+            } => Some((*player_id, *amount)),
             _ => None,
         })
         .collect();
@@ -880,7 +884,8 @@ fn nested_nonpreventing_life_loss_execute_terminally_resumes_phase_owner() {
                 event,
                 GameEvent::LifeChanged {
                     player_id: P1,
-                    amount: -5
+                    amount: -5,
+                    ..
                 }
             ))
             .count(),
@@ -894,7 +899,8 @@ fn nested_nonpreventing_life_loss_execute_terminally_resumes_phase_owner() {
                 event,
                 GameEvent::LifeChanged {
                     player_id: P0,
-                    amount: 5
+                    amount: 5,
+                    ..
                 }
             ))
             .count(),
@@ -938,7 +944,7 @@ fn end_of_combat_retention_expiry_counts_as_actual_mana_loss() {
     assert_eq!(
         events
             .iter()
-            .filter(|event| matches!(event, GameEvent::LifeChanged { player_id, amount: -2 } if *player_id == P1))
+            .filter(|event| matches!(event, GameEvent::LifeChanged { player_id, amount: -2, .. } if *player_id == P1))
             .count(),
         1
     );
@@ -970,7 +976,7 @@ fn end_of_turn_retention_survives_cleanup_entry_then_counts_loss_at_cleanup_exit
         .all(|unit| unit.expiry == Some(ManaExpiry::EndOfTurn)));
     assert!(!entry_events
         .iter()
-        .any(|event| matches!(event, GameEvent::LifeChanged { player_id, amount: -2 } if *player_id == P1)));
+        .any(|event| matches!(event, GameEvent::LifeChanged { player_id, amount: -2, .. } if *player_id == P1)));
 
     let mut cleanup_events = Vec::new();
     assert!(
@@ -989,7 +995,7 @@ fn end_of_turn_retention_survives_cleanup_entry_then_counts_loss_at_cleanup_exit
     assert_eq!(
         cleanup_events
             .iter()
-            .filter(|event| matches!(event, GameEvent::LifeChanged { player_id, amount: -2 } if *player_id == P1))
+            .filter(|event| matches!(event, GameEvent::LifeChanged { player_id, amount: -2, .. } if *player_id == P1))
             .count(),
         1
     );

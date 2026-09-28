@@ -29,7 +29,7 @@ use engine::game::engine::{apply, EngineError};
 use engine::game::scenario::{GameRunner, GameScenario};
 use engine::types::ability::{Effect, TargetRef};
 use engine::types::actions::GameAction;
-use engine::types::events::GameEvent;
+use engine::types::events::{GameEvent, LifeTotalReading};
 use engine::types::game_state::{
     AutoPassRequest, CastPaymentMode, GameState, LoopDetectionMode, StackEntryKind, WaitingFor,
     YieldTarget,
@@ -471,16 +471,18 @@ fn on_shortcut_byte_identical_to_pre_pr7_golden() {
     let (rest, wf) = drive_collect(&mut runner, 500);
     all.extend(rest);
 
-    // The golden covers event ordering and effect payloads from before
-    // SpellCast gained its optional cast-time snapshot. That orthogonal field
-    // is asserted by the Thor quantity tests, so omit it from this legacy
-    // byte-for-byte stream comparison.
+    // The golden covers event ordering and effect payloads from before SpellCast
+    // gained its optional cast-time snapshot, and before LifeChanged began
+    // reporting the life total it left the player on. Both are orthogonal fields
+    // asserted by their own tests (the Thor quantity tests; `effects::life` and
+    // `combat_damage`), so omit them from this legacy byte-for-byte comparison.
     for event in &mut all {
-        if let GameEvent::SpellCast {
-            cast_mana_value, ..
-        } = event
-        {
-            *cast_mana_value = None;
+        match event {
+            GameEvent::SpellCast {
+                cast_mana_value, ..
+            } => *cast_mana_value = None,
+            GameEvent::LifeChanged { new_total, .. } => *new_total = LifeTotalReading::default(),
+            _ => {}
         }
     }
 
@@ -493,7 +495,9 @@ fn on_shortcut_byte_identical_to_pre_pr7_golden() {
         life(&runner, P1) > 0,
         "ON: the shortcut fired early (P1 positive)"
     );
-    let event_stream = format!("{all:?}").replace(", cast_mana_value: None", "");
+    let event_stream = format!("{all:?}")
+        .replace(", cast_mana_value: None", "")
+        .replace(", new_total: LifeTotalReading(None)", "");
     assert_eq!(
         event_stream, GOLDEN_ON,
         "ON: the accumulated event stream must be byte-identical to the pre-PR-7 golden — \
@@ -4691,7 +4695,7 @@ fn loop_shortcut_schema_redacts_hidden_targets_for_non_controller() {
 /// asserted for the QUEUED responder P2 as well as the current one P1, which is what makes the
 /// guard's keying on `proposal.proposer` (not on the prompted `player`) observable.
 ///
-/// REVERT-PROBE: delete the `WaitingFor::RespondToShortcut` arm in `filter_state_for_viewer` ⇒
+/// REVERT-PROBE: delete the `WaitingFor::RespondToShortcut` arm in `filter_state_for_scope` ⇒
 /// P1/P2 see the hidden-hand pin ⇒ the two `is_none()` assertions FAIL while all positives stay
 /// green. Flipping the shared `pins_name_hidden_source`'s inner `any` to `all` fails this row AND
 /// the pre-existing `LoopShortcut` row D5-h — which is the proof that the extraction left ONE
@@ -4908,7 +4912,7 @@ fn enum_variants(src: &str, enum_name: &str) -> Vec<(String, Vec<Type>)> {
 /// new dependency. `PLANT 5` below is the arm that holds the four recovered forms.
 ///
 /// Computed ONCE per corpus rather than re-scanned per candidate identifier: the walk is 500+
-/// files and the enum is 128 variants, so the per-identifier form is quadratic in the corpus
+/// files and the enum is 138 variants, so the per-identifier form is quadratic in the corpus
 /// for no extra signal.
 fn types_carrying(corpus: &[(String, String)], marker: &str) -> std::collections::BTreeSet<String> {
     let mut out = std::collections::BTreeSet::new();
@@ -4982,16 +4986,25 @@ fn carriers_in_source(
     out
 }
 
-/// Does `filter_state_for_viewer`'s body carry an `if let WaitingFor::<name>` dispatch arm?
+/// Does the shared privacy authority's body carry an `if let WaitingFor::<name>` dispatch arm?
 fn redaction_arm_present(visibility_src: &str, name: &str) -> bool {
     let needle = format!("if let {}::{name}", "WaitingFor");
-    let mut inside = false;
+    let mut depth = 0usize;
     for line in visibility_src.lines() {
-        if !inside {
-            inside = line.starts_with("pub fn filter_state_for_viewer(");
+        if depth == 0 {
+            if !line.starts_with("fn filter_state_for_scope(") {
+                continue;
+            }
+            depth = line
+                .matches('{')
+                .count()
+                .saturating_sub(line.matches('}').count());
             continue;
         }
-        if line == "}" {
+        depth = depth
+            .saturating_add(line.matches('{').count())
+            .saturating_sub(line.matches('}').count());
+        if depth == 0 {
             break;
         }
         if line.contains(&needle) {
@@ -5027,15 +5040,15 @@ fn plant_into_enum(src: &str, enum_name: &str, injected: &str) -> String {
 }
 
 /// **R3-c** — exactly TWO `WaitingFor` variants carry a `DecisionTemplate`, and both have a
-/// redaction arm inside `filter_state_for_viewer`.
+/// redaction arm inside the shared `filter_state_for_scope` authority.
 ///
 /// MEASURED at this tip: `{(LoopShortcut, Direct), (RespondToShortcut, Via(ShortcutProposal))}`
-/// out of 128 variants; the VIA target is `analysis::loop_check::ShortcutProposal`'s
+/// out of 138 variants; the VIA target is `analysis::loop_check::ShortcutProposal`'s
 /// `pub template: Option<DecisionTemplate>`.
 ///
 /// # Why a census exists here at all
 ///
-/// The REDACTION DISPATCH in `filter_state_for_viewer` is two `if let`s, not a `match`, so a
+/// The REDACTION DISPATCH in `filter_state_for_scope` is two `if let`s, not a `match`, so a
 /// THIRD carrier gets no compile error THERE — that is the gap this row closes. It is not true
 /// elsewhere: **at least 9** exhaustive `match`es on `WaitingFor` would fail E0004, spread over
 /// two crates (`engine`, `phase-ai`) — measured by whole-workspace AST enumeration over
@@ -5111,8 +5124,8 @@ fn exactly_two_waiting_for_variants_carry_a_decision_template_and_both_are_redac
     // ── the classifier's own reach-guard: the enum was actually found ──
     let total = enum_variants(&enum_src, "WaitingFor").len();
     assert_eq!(
-        total, 136,
-        "`WaitingFor` has 136 variants at this tip, read off the `syn` parse. This number is \
+        total, 140,
+        "`WaitingFor` has 140 variants at this tip, read off the `syn` parse. This number is \
          pinned so a variant REMOVED is as visible as one added; if you added a variant and it \
          carries no `DecisionTemplate`, update this number. A wildly different count means the \
          reader lost its anchor, and every assertion below would then be measuring an empty enum"
@@ -5142,15 +5155,33 @@ fn exactly_two_waiting_for_variants_carry_a_decision_template_and_both_are_redac
     // `RippleBottomOrder { player, source_id, cards, final_cast }` (the "in any order" bottom
     // placement). Measured, not inferred: neither body holds a `DecisionTemplate` — both are
     // resolution-choice prompts handled in `engine_resolution_choices`, not shortcut-style
-    // templates — so the carrier vec and the `filter_state_for_viewer` redaction loop below are
+    // templates — so the carrier vec and the `filter_state_for_scope` redaction loop below are
     // unchanged.
     // 135 ⇒ 136 is ADJUDICATED: the CR 706.6 die-roll ignore model (Barbarian Class, Pixie
     // Guide, Wyll) added `DieKeepChoice { player, results, ignorable_indices, ignore_count }`.
     // Measured, not inferred from the diff: that body holds NO `DecisionTemplate` (zero matches),
     // so it is not a third carrier and the carrier assertion below is unchanged by it. It is
-    // also deliberately absent from the `filter_state_for_viewer` redaction loop. That omission is
+    // also deliberately absent from the `filter_state_for_scope` redaction loop. That omission is
     // engine convention carrying no CR annotation — no Comprehensive Rule states that die results
     // are public information — and mirrors `CoinFlipKeepChoice`, which is likewise unredacted.
+    // 136 ⇒ 137 is ADJUDICATED: CR 601.2f's caster-elected cost-reduction ordering added
+    // `OrderCostReductions { player, reductions, outcomes, pending_cast }`. Measured, not inferred
+    // from the diff: that body holds NO `DecisionTemplate` (zero matches), so it is not a third
+    // carrier and the carrier assertion below is unchanged by it. It is also deliberately absent
+    // from the `filter_state_for_scope` redaction loop: the spell is already announced and every
+    // snapshotted reduction comes from a face-up battlefield permanent, so the prompt carries no
+    // private information — the same reasoning that leaves `OrderTriggers` unredacted.
+    // 137 ⇒ 138 is ADJUDICATED: CR 401.4's library-order choice added
+    // `RevealUntilBottomOrder { player, source_id, cards, clear_markers, emit_reveal_until_resolved, reveal_until_hit_snapshot }`.
+    // Measured, not inferred: holds no `DecisionTemplate` (resolution-choice prompt handled in
+    // `engine_resolution_choices`), so the carrier assertion is unchanged. It is also explicitly
+    // included in `accepts_freeform_card_order` and carries public card identifiers.
+    // 138 ⇒ 139 is ADJUDICATED: CR 701.71a's Empower Jace choice (CR 608.2d) added
+    // `EmpowerJaceChoice { player, source_id, valid_targets }`. Measured, not inferred from the
+    // diff: that body holds NO `DecisionTemplate` (zero matches), so it is not a third carrier and
+    // the carrier assertion below is unchanged by it.
+    // 139 ⇒ 140 is ADJUDICATED: DigRestSplitChoice carries no DecisionTemplate;
+    // its hidden card identities are filtered by the Dig visibility path.
 
     let carriers = carriers_in_source(&enum_src, "WaitingFor", &corpus, &marker, true);
     assert_eq!(
@@ -5166,7 +5197,7 @@ fn exactly_two_waiting_for_variants_carry_a_decision_template_and_both_are_redac
          `LoopShortcut` directly and `RespondToShortcut` through `ShortcutProposal` — and both \
          are named rather than counted, because a census asserting `>= 1 carrier` is vacuous. A \
          THIRD carrier is a new per-viewer redaction obligation: the dispatch in \
-         `filter_state_for_viewer` is `if let`s, so nothing will fail to compile. got {carriers:?}"
+         `filter_state_for_scope` is `if let`s, so nothing will fail to compile. got {carriers:?}"
     );
 
     // ── the redaction half, read from the production source ──
@@ -5174,7 +5205,7 @@ fn exactly_two_waiting_for_variants_carry_a_decision_template_and_both_are_redac
         assert!(
             redaction_arm_present(&visibility_src, name),
             "CR 723.4: every `DecisionTemplate` carrier needs its own dispatch arm inside \
-             `filter_state_for_viewer`; `{name}` ({kind:?}) has none"
+             `filter_state_for_scope`; `{name}` ({kind:?}) has none"
         );
     }
 

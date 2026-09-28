@@ -26,7 +26,8 @@ use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     ActionResult, CastOfferKind, CastPaymentMode, CastingVariant, CastingVariantChoiceOption,
-    ConvokeMode, GameState, ManaChoice, ManaChoicePrompt, PendingCast, WaitingFor,
+    CastingVariantFace, ConvokeMode, GameState, ManaChoice, ManaChoicePrompt, PendingCast,
+    WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
@@ -607,6 +608,27 @@ impl GameScenario {
         obj.toughness = Some(toughness);
         obj.base_power = Some(power);
         obj.base_toughness = Some(toughness);
+
+        CardBuilder {
+            state: &mut self.state,
+            id,
+        }
+    }
+
+    /// Add a land card to a player's exile. Returns a `CardBuilder` for fluent
+    /// chaining. Used to stage land-play permissions from exile.
+    pub fn add_land_to_exile(&mut self, player: PlayerId, name: &str) -> CardBuilder<'_> {
+        let card_id = CardId(self.state.next_object_id);
+        let id = create_object(
+            &mut self.state,
+            card_id,
+            player,
+            name.to_string(),
+            Zone::Exile,
+        );
+        let obj = self.state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        obj.base_card_types = obj.card_types.clone();
 
         CardBuilder {
             state: &mut self.state,
@@ -1316,6 +1338,17 @@ impl<'a> CardBuilder<'a> {
         self
     }
 
+    /// Add the Snow supertype (CR 205.4a: supertypes are printed before card types;
+    /// CR 205.4g: any permanent with the supertype "snow" is a snow permanent).
+    pub fn as_snow(&mut self) -> &mut Self {
+        let obj = self.obj();
+        if !obj.card_types.supertypes.contains(&Supertype::Snow) {
+            obj.card_types.supertypes.push(Supertype::Snow);
+        }
+        self.sync_base_card_types();
+        self
+    }
+
     // --- Special modifiers ---
 
     /// CR 903.3: Mark this object as its owner's commander IN PLACE, without
@@ -1386,6 +1419,14 @@ impl<'a> CardBuilder<'a> {
         let color = crate::game::printed_cards::derive_colors_from_mana_cost(&cost);
         obj.color = color.clone();
         obj.base_color = color;
+        self
+    }
+
+    /// Set the color and base color of this card (CR 105.1).
+    pub fn with_color(&mut self, colors: Vec<crate::types::mana::ManaColor>) -> &mut Self {
+        let obj = self.obj();
+        obj.color = colors.clone();
+        obj.base_color = colors;
         self
     }
 
@@ -1981,11 +2022,13 @@ impl GameRunner {
             WaitingFor::ScryChoice { .. } => "ScryChoice",
             WaitingFor::RippleRevealChoice { .. } => "RippleRevealChoice",
             WaitingFor::RippleBottomOrder { .. } => "RippleBottomOrder",
+            WaitingFor::RevealUntilBottomOrder { .. } => "RevealUntilBottomOrder",
             WaitingFor::ArrangePlanarDeckTopChoice { .. } => "ArrangePlanarDeckTopChoice",
             WaitingFor::RedistributeLifeTotals { .. } => "RedistributeLifeTotals",
             WaitingFor::CoinFlipKeepChoice { .. } => "CoinFlipKeepChoice",
             WaitingFor::DieKeepChoice { .. } => "DieKeepChoice",
             WaitingFor::DigChoice { .. } => "DigChoice",
+            WaitingFor::DigRestSplitChoice { .. } => "DigRestSplitChoice",
             WaitingFor::SurveilChoice { .. } => "SurveilChoice",
             WaitingFor::RevealChoice { .. } => "RevealChoice",
             WaitingFor::SearchChoice { .. } => "SearchChoice",
@@ -1993,6 +2036,7 @@ impl GameRunner {
             WaitingFor::OutsideGameChoice { .. } => "OutsideGameChoice",
             WaitingFor::ChooseFromZoneChoice { .. } => "ChooseFromZoneChoice",
             WaitingFor::BeholdChoice { .. } => "BeholdChoice",
+            WaitingFor::EmpowerJaceChoice { .. } => "EmpowerJaceChoice",
             WaitingFor::ChooseOneOfBranch { .. } => "ChooseOneOfBranch",
             WaitingFor::ConniveDiscard { .. } => "ConniveDiscard",
             WaitingFor::DiscardChoice { .. } => "DiscardChoice",
@@ -2013,6 +2057,7 @@ impl GameRunner {
             WaitingFor::CostTypeChoice { .. } => "CostTypeChoice",
             WaitingFor::SpliceOffer { .. } => "SpliceOffer",
             WaitingFor::DefilerPayment { .. } => "DefilerPayment",
+            WaitingFor::OrderCostReductions { .. } => "OrderCostReductions",
             WaitingFor::CastOffer {
                 kind: CastOfferKind::Adventure { .. },
                 ..
@@ -2066,6 +2111,9 @@ impl GameRunner {
                 }
                 crate::types::game_state::AlternativeCastKeyword::FaceDown => {
                     "AlternativeCastChoice(FaceDown)"
+                }
+                crate::types::game_state::AlternativeCastKeyword::Surge => {
+                    "AlternativeCastChoice(Surge)"
                 }
             },
             WaitingFor::MutateMergeChoice { .. } => "MutateMergeChoice",
@@ -2234,6 +2282,7 @@ pub struct SpellCast<'a> {
     alternative_cast: Option<AlternativeCastDecision>,
     adventure_creature: Option<bool>,
     casting_variant: Option<CastingVariant>,
+    casting_variant_face: Option<CastingVariantFace>,
     free_cast: bool,
     modes: Option<Vec<usize>>,
     x: Option<u32>,
@@ -2262,6 +2311,7 @@ impl<'a> SpellCast<'a> {
             alternative_cast: None,
             adventure_creature: None,
             casting_variant: None,
+            casting_variant_face: None,
             free_cast: false,
             modes: None,
             x: None,
@@ -2328,6 +2378,18 @@ impl<'a> SpellCast<'a> {
     /// surfaces a variant choice without an explicit test intent.
     pub fn casting_variant(mut self, variant: CastingVariant) -> Self {
         self.casting_variant = Some(variant);
+        self
+    }
+
+    /// Choose an exact `(variant, face)` casting tuple. Required for a Fuse
+    /// pair's two independently castable normal halves.
+    pub fn casting_variant_face(
+        mut self,
+        variant: CastingVariant,
+        face: CastingVariantFace,
+    ) -> Self {
+        self.casting_variant = Some(variant);
+        self.casting_variant_face = Some(face);
         self
     }
 
@@ -2481,6 +2543,7 @@ impl<'a> SpellCast<'a> {
             alternative_cast,
             adventure_creature,
             casting_variant,
+            casting_variant_face,
             free_cast,
             modes,
             x,
@@ -2525,18 +2588,20 @@ impl<'a> SpellCast<'a> {
         )?;
 
         // Intent the driver matches as it walks slots. Object targets are
-        // always consumed one per slot. Player declarations are consumed only
-        // by a multi-target run so `.target_players(&[a, b])` can express two
-        // distinct targets while a single declaration remains reusable across
-        // independent modal slots.
+        // always consumed one per slot. Player declarations are consumed in
+        // order per prompt sequence so `.target_players(&[a, b])` can express
+        // two distinct targets; a single declaration remains reusable across
+        // independent modal slots via the `declared_players` fallback in
+        // `pick_slot_target`.
         let mut remaining_objects: Vec<ObjectId> = target_objects;
         // CR 603.3d: triggered-ability targets are chosen after the trigger is
         // put on the stack, independently of the spell's own target slots.
-        // Keep a separate object-intent pool so the same declared object can
+        // Keep separate intent pools so the same declared object or player can
         // satisfy a trigger target and a later resolution target.
         let mut remaining_trigger_objects = remaining_objects.clone();
         let declared_players: Vec<PlayerId> = target_players;
-        let mut remaining_multi_target_players = declared_players.clone();
+        let mut remaining_spell_players = declared_players.clone();
+        let mut remaining_trigger_players = declared_players.clone();
         let mut remaining_cost_objects: Vec<ObjectId> = cost_objects;
 
         // CR 601.2a: the spell leaves hand only at stack commit. Captured when
@@ -2611,15 +2676,22 @@ impl<'a> SpellCast<'a> {
                                  .casting_variant(..) was declared — declare the intended cast variant"
                             )
                         });
-                        options
+                        let matching: Vec<_> = options
                             .iter()
-                            .position(|option| option.variant == variant)
-                            .unwrap_or_else(|| {
-                                panic!(
-                                    "SpellCast could not find requested cast variant {:?} in options {:?}",
-                                    variant, options
-                                )
+                            .enumerate()
+                            .filter_map(|(index, option)| {
+                                (option.variant == variant
+                                    && casting_variant_face.is_none_or(|face| option.face == face))
+                                .then_some(index)
                             })
+                            .collect();
+                        if matching.len() != 1 {
+                            panic!(
+                                "SpellCast .casting_variant({variant:?}) is ambiguous in options {:?}; use .casting_variant_face(variant, face)",
+                                options
+                            );
+                        }
+                        matching[0]
                     };
                     selected_casting_variant = Some(options[index].clone());
                     act_collect(
@@ -2756,7 +2828,6 @@ impl<'a> SpellCast<'a> {
                 }
                 // CR 601.2c: declare one target per slot, in written order.
                 WaitingFor::TargetSelection {
-                    pending_cast,
                     target_slots,
                     selection,
                     ..
@@ -2765,11 +2836,7 @@ impl<'a> SpellCast<'a> {
                     let choice = pick_slot_target(
                         slot,
                         &mut remaining_objects,
-                        pending_cast
-                            .ability
-                            .multi_target
-                            .as_ref()
-                            .map(|_| &mut remaining_multi_target_players),
+                        &mut remaining_spell_players,
                         &declared_players,
                         selection.current_slot,
                     );
@@ -2780,9 +2847,9 @@ impl<'a> SpellCast<'a> {
                     )?;
                 }
                 // CR 603.3d: triggered abilities choose targets after they are
-                // put on the stack. Their object intents are independent of
-                // the spell's target slots, while player intents remain
-                // reusable across both prompts.
+                // put on the stack. Their intents are independent of the
+                // spell's target slots, while a single declared player remains
+                // reusable across both prompts via the fallback.
                 WaitingFor::TriggerTargetSelection {
                     target_slots,
                     selection,
@@ -2792,7 +2859,7 @@ impl<'a> SpellCast<'a> {
                     let choice = pick_slot_target(
                         slot,
                         &mut remaining_trigger_objects,
-                        None,
+                        &mut remaining_trigger_players,
                         &declared_players,
                         selection.current_slot,
                     );
@@ -3002,17 +3069,18 @@ impl<'a> CastCommit<'a> {
 /// matching CR 601.2c (targets declared one per slot, in written order).
 ///
 /// Object intent is *consumed* (each declared object satisfies at most one
-/// slot, so distinct exile/destroy targets never alias). A multi-target run
-/// consumes player declarations in order when available; otherwise, player
-/// intent is reusable, letting the same declared player satisfy independent
-/// modal slots (e.g. Kozilek's Command mode 1 scries *and* draws for the same
-/// target player).
+/// slot, so distinct exile/destroy targets never alias). Player declarations
+/// are likewise consumed in order, so `.target_players(&[a, b])` fills two
+/// same-type slots with `a` then `b`. When no remaining declaration is legal
+/// for the slot, player intent is reusable, letting the same declared player
+/// satisfy independent modal slots (e.g. Kozilek's Command mode 1 scries
+/// *and* draws for the same target player).
 /// Falls back to `None` for optional slots; panics for an unsatisfiable
 /// required slot.
 fn pick_slot_target(
     slot: &crate::types::game_state::TargetSelectionSlot,
     remaining_objects: &mut Vec<ObjectId>,
-    remaining_multi_target_players: Option<&mut Vec<PlayerId>>,
+    remaining_players: &mut Vec<PlayerId>,
     declared_players: &[PlayerId],
     slot_index: usize,
 ) -> Option<TargetRef> {
@@ -3022,13 +3090,11 @@ fn pick_slot_target(
     {
         return Some(TargetRef::Object(remaining_objects.remove(pos)));
     }
-    if let Some(remaining_players) = remaining_multi_target_players {
-        if let Some(pos) = remaining_players
-            .iter()
-            .position(|&player| slot.legal_targets.contains(&TargetRef::Player(player)))
-        {
-            return Some(TargetRef::Player(remaining_players.remove(pos)));
-        }
+    if let Some(pos) = remaining_players
+        .iter()
+        .position(|&player| slot.legal_targets.contains(&TargetRef::Player(player)))
+    {
+        return Some(TargetRef::Player(remaining_players.remove(pos)));
     }
     if let Some(&player) = declared_players
         .iter()
@@ -3322,6 +3388,7 @@ impl<'a> AbilityActivation<'a> {
 
         let mut remaining_objects: Vec<ObjectId> = target_objects;
         let declared_players: Vec<PlayerId> = target_players;
+        let mut remaining_players = declared_players.clone();
 
         // CR 602.2b: the ability is on the stack at the post-announcement
         // Priority window — capture the hand baseline there (mirrors SpellCast).
@@ -3361,7 +3428,7 @@ impl<'a> AbilityActivation<'a> {
                     let choice = pick_slot_target(
                         slot,
                         &mut remaining_objects,
-                        None,
+                        &mut remaining_players,
                         &declared_players,
                         selection.current_slot,
                     );
@@ -3534,10 +3601,11 @@ fn drive_resolution(
     runner: &mut GameRunner,
     policy: &ResolutionPolicy,
 ) -> Result<Vec<GameEvent>, EngineError> {
-    // Object intent is consumed per slot; player intent is reusable. Mirrors
-    // the SpellCast cast-time loop.
+    // Object intent is consumed per slot; player intent is consumed in
+    // order with a reusable fallback. Mirrors the SpellCast cast-time loop.
     let mut remaining_objects: Vec<ObjectId> = policy.targets_objects.clone();
     let declared_players: &[PlayerId] = &policy.targets_players;
+    let mut remaining_players: Vec<PlayerId> = policy.targets_players.clone();
     let mut discard_cards = policy.discard_cards.clone();
     let mut effect_zone_cards = policy.effect_zone_cards.clone();
     let mut events = Vec::new();
@@ -3558,6 +3626,11 @@ fn drive_resolution(
             } => {
                 let keep: Vec<_> = cards.iter().take(*keep_on_top).copied().collect();
                 act_collect(runner, GameAction::SelectCards { cards: keep }, &mut events)?;
+            }
+            WaitingFor::RippleBottomOrder { cards, .. }
+            | WaitingFor::RevealUntilBottomOrder { cards, .. } => {
+                let cards = cards.clone();
+                act_collect(runner, GameAction::SelectCards { cards }, &mut events)?;
             }
             // CR 701.25a: default surveil policy keeps all looked-at cards on
             // top, mirroring the scry default.
@@ -3606,7 +3679,7 @@ fn drive_resolution(
                 let choice = pick_slot_target(
                     slot,
                     &mut remaining_objects,
-                    None,
+                    &mut remaining_players,
                     declared_players,
                     selection.current_slot,
                 );
@@ -3628,7 +3701,7 @@ fn drive_resolution(
                 let choice = pick_slot_target(
                     slot,
                     &mut remaining_objects,
-                    None,
+                    &mut remaining_players,
                     declared_players,
                     selection.current_slot,
                 );

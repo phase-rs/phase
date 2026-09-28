@@ -4,6 +4,8 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { DRAFT_WORKSPACE_PREFERENCES_KEY } from "../../constants/storage";
+import { createDefaultDraftWorkspacePreferences } from "../../components/draft/workspace/workspacePreferences";
 
 import type { SharedStackView } from "../../adapter/draft-adapter";
 import { ShellProvider } from "../../components/chrome/ShellContext";
@@ -148,10 +150,26 @@ vi.mock("../../stores/multiplayerDraftStore", async (importOriginal) => {
   return {
     ...actual,
     useMultiplayerDraftStore: hook,
-    setArrivingCardBoardPreferences: arrivingPreferences,
     draftPodScreen: (state: typeof store.state) => state.phase,
     intergamePromptKey: () => null,
   };
+});
+
+// `setArrivingCardBoardPreferences` lives in `workspacePreferences` rather than
+// in either store: both draft stores read the published value, so a copy per
+// store would be two same-named exports. Spying here, on the module the page
+// actually imports from, is what makes the call observable.
+vi.mock("../../components/draft/workspace/workspacePreferences", async (importOriginal) => {
+  const actual = await importOriginal<
+    typeof import("../../components/draft/workspace/workspacePreferences")
+  >();
+  // Forwards, matching `DraftPage.workspace.test.tsx`. Inert while this file
+  // mocks `useMultiplayerDraftStore` wholesale, but a bare `vi.fn()` is the same
+  // latent trap: the stores read the published value back through
+  // `getArrivingCardBoardPreferences` in this module, so any later test here
+  // that stops mocking the store would silently measure the seeded default.
+  arrivingPreferences.mockImplementation(actual.setArrivingCardBoardPreferences);
+  return { ...actual, setArrivingCardBoardPreferences: arrivingPreferences };
 });
 
 vi.mock("../../stores/draftPodStore", () => ({
@@ -307,6 +325,25 @@ describe("DraftPodPage drafting-phase surface dispatch", () => {
    * assertion below, while a publish that lives in the handler has. Restore
    * `useEffect(..., [workspacePreferences.deck])` and this reds with zero calls.
    */
+  // The pod twin of `DraftPage.workspace.test.tsx`'s
+  // `publishes_the_stored_board_columns_on_mount`. The drafting screen's mount
+  // effect is what gives the arriving-card placement the player's own columns
+  // before anything has changed — a rejoin's first `viewUpdated` reaches
+  // `installEventView` with the whole restored pool unplaced.
+  it("publishes the stored board columns on mount", () => {
+    localStorage.setItem(DRAFT_WORKSPACE_PREFERENCES_KEY, JSON.stringify({
+      ...createDefaultDraftWorkspacePreferences(),
+      deck: { sort: "color", columnCount: 5, rows: "one", showHeaders: true },
+    }));
+    arrivingPreferences.mockClear();
+
+    renderDrafting();
+
+    expect(arrivingPreferences).toHaveBeenCalledWith(
+      expect.objectContaining({ sort: "color", columnCount: 5 }),
+    );
+  });
+
   it("publishes board columns during the preference change, not after a commit", () => {
     renderDrafting();
     expect(workspaceProps.onPreferencesChange).not.toBeNull();

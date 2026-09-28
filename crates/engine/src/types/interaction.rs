@@ -528,6 +528,7 @@ pub enum InteractionActionCode {
     ChooseReplacement,
     ChooseEntryController,
     OrderTriggers,
+    OrderCostReductions,
     CancelCast,
     Equip,
     CrewVehicle,

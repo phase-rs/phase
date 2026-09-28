@@ -27,6 +27,7 @@ import type {
   LobbySource,
 } from "../../stores/multiplayerStore";
 import { refreshServerDirectory, type DirectorySource } from "../../services/serverDirectory";
+import type { HostSeed } from "../../pages/multiplayerPageState";
 import { DEFAULT_MULTIPLAYER_SERVER_URL } from "../../config/multiplayerServer";
 import { useAiDeckCatalog } from "../../services/aiDeckCatalog";
 import {
@@ -65,6 +66,9 @@ interface HostSetupProps {
    * chip above the form, so this only needs to gate the submit itself. */
   hostDisabled?: boolean;
   hostDisabledReason?: string;
+  /** Discord-link prefill, applied once at mount. Fixes the connection mode,
+   *  the server and the privacy settings; format and count are used when valid. */
+  seed?: HostSeed;
 }
 
 // Format options derive from the engine-authored FORMAT_REGISTRY so new
@@ -292,6 +296,7 @@ export function HostSetup({
   onConnectionModeChange,
   hostDisabled = false,
   hostDisabledReason,
+  seed,
 }: HostSetupProps) {
   const { t } = useTranslation(["multiplayer", "menu"]);
   // Player name is edited in `PlayerIdentityBanner` above this form (see
@@ -335,7 +340,10 @@ export function HostSetup({
       && isServerCompatible(status.serverInfo);
   });
   const dedicatedAvailable = selectableCandidates.length > 0;
-  const isP2P = connectionMode === "p2p" || !dedicatedAvailable;
+  // A Discord link fixes the mode: a `server` param means a dedicated game.
+  const isP2P = seed
+    ? seed.serverUrl === null
+    : connectionMode === "p2p" || !dedicatedAvailable;
 
   // Host setup is also a direct entry point. Discover and connect here as
   // well as in LobbyView, using the store's shared sockets and directory TTL.
@@ -378,27 +386,48 @@ export function HostSetup({
   // Guard with `isKnownFormat` (the same predicate `normalizeRememberedHostConfig`
   // uses) and fall back to the format's OWN already-resolved `FormatConfig`,
   // which for a custom format is the only source of truth for these fields.
+  // A Discord seed's format and count apply only when this mode can host them;
+  // otherwise they fall back to the defaults and the form says so.
+  const seedFormat: FormatConfig | null =
+    seed?.format != null
+    && isKnownFormat(seed.format)
+    && (!isP2P || FORMAT_DEFAULTS[seed.format].min_players <= P2P_MAX_PEERS)
+      ? FORMAT_DEFAULTS[seed.format]
+      : null;
+  const seedPlayers: number | null =
+    seedFormat !== null
+    && seed?.playerCount != null
+    && seed.playerCount >= seedFormat.min_players
+    && seed.playerCount <= (isP2P ? Math.min(seedFormat.max_players, P2P_MAX_PEERS) : seedFormat.max_players)
+      ? seed.playerCount
+      : null;
+  const seedIgnored =
+    seed !== undefined
+    && ((seed.format !== null && seedFormat === null) || (seed.playerCount !== null && seedPlayers === null));
+
   const rememberedMinPlayers =
     lastHostConfig == null
       ? null
       : isKnownFormat(lastHostConfig.format)
         ? FORMAT_DEFAULTS[lastHostConfig.format].min_players
         : lastHostConfig.formatConfig.min_players;
+  // A Discord game must not inherit remembered AI seats, visibility or count.
   const remembered =
-    lastHostConfig != null
+    seed === undefined
+    && lastHostConfig != null
     && rememberedMinPlayers != null
     && (!isP2P || rememberedMinPlayers <= P2P_MAX_PEERS)
       ? lastHostConfig
       : null;
   const initialFormatConfig =
-    remembered?.formatConfig ?? storeFormatConfig ?? FORMAT_DEFAULTS.Commander;
+    seedFormat ?? remembered?.formatConfig ?? storeFormatConfig ?? FORMAT_DEFAULTS.Commander;
   // Clamp a remembered player count to what this mode/format can actually seat.
   const seatCeiling = isP2P
     ? Math.min(initialFormatConfig.max_players, P2P_MAX_PEERS)
     : initialFormatConfig.max_players;
 
-  const [roomName, setRoomName] = useState("");
-  const [isPublic, setIsPublic] = useState(remembered?.isPublic ?? true);
+  const [roomName, setRoomName] = useState(seed?.roomName?.slice(0, 40) ?? "");
+  const [isPublic, setIsPublic] = useState(seed ? false : (remembered?.isPublic ?? true));
   const [showPassword, setShowPassword] = useState(false);
   const [password, setPassword] = useState("");
   const [selectedFormat, setSelectedFormat] = useState<GameFormat>(
@@ -407,7 +436,7 @@ export function HostSetup({
   const [formatConfig, setLocalFormatConfig] =
     useState<FormatConfig>(initialFormatConfig);
   const [playerCount, setPlayerCount] = useState(
-    Math.min(remembered?.playerCount ?? initialFormatConfig.min_players, seatCeiling),
+    seedPlayers ?? Math.min(remembered?.playerCount ?? initialFormatConfig.min_players, seatCeiling),
   );
   const [matchType, setMatchType] = useState<MatchType>(remembered?.matchType ?? "Bo1");
   // CR 732.2a: combo (infinite-loop) detector opt-in, chosen at match creation and
@@ -447,7 +476,10 @@ export function HostSetup({
   const defaultAiDeck = aiDeckCatalog.candidates[0]
     ? { type: "DeckList" as const, data: expandParsedDeck(aiDeckCatalog.candidates[0].deck) }
     : null;
-  const aiSeatsSupported = !formatConfig.team_based && formatConfig.format !== "Planechase";
+  // No AI seats in a Discord game: its seats are promised to the Discord
+  // players, and an all-AI table would never register the requested code.
+  const aiSeatsSupported =
+    seed === undefined && !formatConfig.team_based && formatConfig.format !== "Planechase";
   const effectiveAiSeats = aiSeatsSupported ? aiSeats : [];
 
   // Mirror the in-flight format to the store on every change so sibling
@@ -681,23 +713,26 @@ export function HostSetup({
     // instead of resetting to defaults. Persist the format's own config (with
     // its true `max_players` ceiling), not `finalConfig` — the latter's
     // `max_players` is the chosen player count and would cap the slider on
-    // restore. Room name and password are intentionally not persisted.
-    rememberHostConfig({
-      format: selectedFormat,
-      formatConfig,
-      // Persisted so rehydration can resolve WHICH saved definition this was —
-      // `selectedFormat` is "Custom:0" for every Axis-A save and cannot.
-      savedCustomFormatId,
-      playerCount,
-      matchType: effectiveMatchType,
-      loopDetection,
-      isPublic,
-      startWhenFull,
-      // Ranked rating updates aren't implemented in the engine — the room is
-      // always casual. The transport field is retained for protocol parity.
-      ranked: false,
-      aiSeats: effectiveAiSeats,
-    });
+    // restore. Room name and password are intentionally not persisted. A
+    // Discord game's pinned, private settings must not become the defaults.
+    if (!seed) {
+      rememberHostConfig({
+        format: selectedFormat,
+        formatConfig,
+        // Persisted so rehydration can resolve WHICH saved definition this was —
+        // `selectedFormat` is "Custom:0" for every Axis-A save and cannot.
+        savedCustomFormatId,
+        playerCount,
+        matchType: effectiveMatchType,
+        loopDetection,
+        isPublic,
+        startWhenFull,
+        // Ranked rating updates aren't implemented in the engine — the room is
+        // always casual. The transport field is retained for protocol parity.
+        ranked: false,
+        aiSeats: effectiveAiSeats,
+      });
+    }
     try {
       const ok = await onHost(
         {
@@ -715,6 +750,7 @@ export function HostSetup({
           startWhenFull,
           ranked: false,
           roomName: resolvedRoomName,
+          ...(seed ? { requestedCode: seed.code } : {}),
         },
         // `null` in P2P — this submit chose no server, and the parent then
         // makes the same live `hostingServer` read it makes today. Passing the
@@ -762,9 +798,10 @@ export function HostSetup({
   /** Retain an explicit pick while connected, otherwise use the best available
    * server. With no candidates, the form uses P2P and submits a null URL. */
   const selected =
-    selectableCandidates.some((candidate) => candidate.source.url === hostServerUrl)
+    seed?.serverUrl
+    ?? (selectableCandidates.some((candidate) => candidate.source.url === hostServerUrl)
       ? hostServerUrl
-      : (selectableCandidates[0]?.source.url ?? DEFAULT_MULTIPLAYER_SERVER_URL);
+      : (selectableCandidates[0]?.source.url ?? DEFAULT_MULTIPLAYER_SERVER_URL));
 
   // Shared field-input grammar (mockup Host-setup inputs).
   const inp =
@@ -839,28 +876,43 @@ export function HostSetup({
     >
       {/* Mode first: it changes what every control below it means, so it sits
           above format and seats rather than among the option rows. */}
-      <Field label={t("connectionMode.label")}>
-        <div className="max-w-sm">
-          <ConnectionModeSwitch
-            value={isP2P ? "p2p" : "server"}
-            onChange={onConnectionModeChange}
-            dedicatedAvailable={dedicatedAvailable}
-          />
+      {seed ? (
+        // A Discord game's connection and privacy come from the post.
+        <div className="flex max-w-2xl flex-col gap-1 text-sm leading-6">
+          <p className="text-slate-200">{t("hostSetup.botGameNotice", { code: seed.code })}</p>
+          {seedIgnored && (
+            <p role="status" className="text-amber-200">{t("hostSetup.botSeedIgnored")}</p>
+          )}
         </div>
-        {!dedicatedAvailable && (
-          <div className="flex flex-wrap items-center gap-x-3 text-sm text-slate-400">
-            <p role="status">{t("hostSetup.dedicatedUnavailable")}</p>
-            <button type="button" onClick={checkConnections} className="min-h-11 px-2 text-slate-200 underline underline-offset-4 hover:text-white">
-              {t("connectionToast.retry")}
-            </button>
-          </div>
-        )}
-      </Field>
+      ) : (
+        <>
+          <Field label={t("connectionMode.label")}>
+            <div className="max-w-sm">
+              <ConnectionModeSwitch
+                value={isP2P ? "p2p" : "server"}
+                onChange={onConnectionModeChange}
+                dedicatedAvailable={dedicatedAvailable}
+              />
+            </div>
+            {!dedicatedAvailable && (
+              <div className="flex flex-wrap items-center gap-x-3 text-sm text-slate-400">
+                <p role="status">{t("hostSetup.dedicatedUnavailable")}</p>
+                <button type="button" onClick={checkConnections} className="min-h-11 px-2 text-slate-200 underline underline-offset-4 hover:text-white">
+                  {t("connectionToast.retry")}
+                </button>
+              </div>
+            )}
+          </Field>
 
-      <LanServers />
+          <LanServers />
+        </>
+      )}
 
       <p className="max-w-2xl text-sm leading-6 text-slate-400">
-        {t(isP2P ? "hostSetup.p2pNotice" : "hostSetup.hostServerHelp")}
+        {/* A Discord game is listed by its post, so its copy drops the lobby sentence. */}
+        {t(seed
+          ? (isP2P ? "hostSetup.botP2PNotice" : "hostSetup.botServerNotice")
+          : (isP2P ? "hostSetup.p2pNotice" : "hostSetup.hostServerHelp"))}
       </p>
 
       {/* Two-column table-setup grammar (design mockup HostScreen): form panel
@@ -1116,7 +1168,7 @@ export function HostSetup({
           {/* Host target — which server runs this match. Server mode only:
               P2P has no server to place the game on, so there is no selection
               to make and none is reported. */}
-          {!isP2P && (
+          {!isP2P && !seed && (
             <Field
               label={t("hostSetup.hostServer")}
             >
@@ -1160,12 +1212,14 @@ export function HostSetup({
           )}
 
           {/* Visibility is independent of who runs the game. */}
-          <OptionRow
-            label={t("hostSetup.listInLobby")}
-            on={isPublic}
-            onChange={setIsPublic}
-            accent={accentTone}
-          />
+          {!seed && (
+            <OptionRow
+              label={t("hostSetup.listInLobby")}
+              on={isPublic}
+              onChange={setIsPublic}
+              accent={accentTone}
+            />
+          )}
           <OptionRow label={t("hostSetup.startWhenFull")} on={startWhenFull} onChange={setStartWhenFull} accent={accentTone} />
           {/* Sandbox mode — capability flag, orthogonal to format; lets the host
               submit debug actions. Off by default; immutable for the session. */}
@@ -1176,27 +1230,30 @@ export function HostSetup({
             onChange={(v) => setLocalFormatConfig((prev) => ({ ...prev, allow_debug_actions: v }))}
             accent={accentTone}
           />
-          <div className="flex flex-col gap-2.5">
-            <OptionRow
-              label={t("hostSetup.setPassword")}
-              on={showPassword}
-              onChange={(v) => {
-                setShowPassword(v);
-                if (!v) setPassword("");
-              }}
-              accent={accentTone}
-            />
-            {showPassword && (
-              <input
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder={t("hostSetup.passwordPlaceholder")}
-                maxLength={32}
-                className={inp}
+          {!seed && (
+            <div className="flex flex-col gap-2.5">
+              <OptionRow
+                label={t("hostSetup.setPassword")}
+                on={showPassword}
+                onChange={(v) => {
+                  setShowPassword(v);
+                  if (!v) setPassword("");
+                }}
+                accent={accentTone}
               />
-            )}
-          </div>
+              {showPassword && (
+                <input
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder={t("hostSetup.passwordPlaceholder")}
+                  aria-label={t("hostSetup.passwordPlaceholder")}
+                  maxLength={32}
+                  className={inp}
+                />
+              )}
+            </div>
+          )}
         </div>
 
         {/* ----- right: seat panel + primary CTA (sticky on lg) ----- */}
@@ -1228,7 +1285,7 @@ export function HostSetup({
                         <button
                           type="button"
                           onClick={() => toggleAiSeat(seatIndex)}
-                          className={`rounded-badge px-2 py-0.5 text-[11px] font-semibold transition-colors ${
+                          className={`shrink-0 whitespace-nowrap rounded-badge px-2 py-0.5 text-[11px] font-semibold transition-colors ${
                             aiSeat ? "bg-amber-500/20 text-amber-300" : "bg-cyan-500/20 text-cyan-300"
                           }`}
                         >

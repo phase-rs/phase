@@ -16,14 +16,14 @@
 use engine::game::effects::resolve_ability_chain;
 use engine::game::zones::create_object;
 use engine::types::ability::{
-    ContinuousModification, Duration, Effect, EffectScope, ResolvedAbility, StaticDefinition,
-    TapStateChange, TargetFilter, TypeFilter, TypedFilter,
+    ContinuousModification, Duration, Effect, EffectScope, ExtraPhaseAnchor, ResolvedAbility,
+    StaticDefinition, TapStateChange, TargetFilter, TypeFilter, TypedFilter,
 };
 use engine::types::card_type::CoreType;
 use engine::types::game_state::ExtraPhase;
-use engine::types::identifiers::{CardId, ObjectId};
+use engine::types::identifiers::{CardId, ExtraPhaseId, ObjectId};
 use engine::types::keywords::Keyword;
-use engine::types::phase::Phase;
+use engine::types::phase::{Phase, PhaseGroup, TurnSegment};
 use engine::types::player::PlayerId;
 use engine::types::statics::StaticMode;
 use engine::types::zones::Zone;
@@ -45,7 +45,7 @@ fn najeela_chain(source: ObjectId, controller: PlayerId) -> ResolvedAbility {
         Effect::AdditionalPhase {
             target: TargetFilter::Controller,
             phase: Phase::BeginCombat,
-            after: Phase::EndCombat,
+            after: ExtraPhaseAnchor::Step(Phase::EndCombat),
             followed_by: vec![],
             count: engine::types::ability::QuantityExpr::Fixed { value: 1 },
             attacker_restriction: None,
@@ -193,9 +193,10 @@ fn najeela_applies_untap_grant_and_extra_combat() {
     assert!(
         state.extra_phases.contains(&ExtraPhase {
             anchor: Phase::EndCombat,
-            phase: Phase::BeginCombat,
+            segment: TurnSegment::Phase(PhaseGroup::Combat),
             attacker_restriction: None,
             attacker_restriction_source: None,
+            id: ExtraPhaseId(1),
         }),
         "extra combat phase must be scheduled; got {:?}",
         state.extra_phases

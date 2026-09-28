@@ -131,7 +131,9 @@
       "feed": "Feed",
       "user": "Benutzer",
       "precon": "Precon"
-    }
+    },
+    "brain": "Gesteuert von",
+    "brainEngine": "Engine-KI"
   },
   "feedManager": {
     "title": "Feeds verwalten",

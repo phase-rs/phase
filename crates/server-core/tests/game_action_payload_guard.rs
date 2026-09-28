@@ -321,6 +321,7 @@ fn rejects_oversized_debug_token_keyword_ast_payload() {
                 display_name: "Test Token".to_string(),
                 power: Some(1),
                 toughness: Some(1),
+                loyalty: None,
                 core_types: Vec::new(),
                 subtypes: Vec::new(),
                 supertypes: Vec::new(),

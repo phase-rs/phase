@@ -25,6 +25,7 @@ import {
   MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL,
   PROTOCOL_VERSION,
 } from "../../adapter/ws-adapter";
+import { encodeJsonEnvelope } from "../../network/wireEnvelope";
 
 class MockWebSocket extends EventTarget {
   static OPEN = 1;
@@ -150,6 +151,130 @@ describe("openPhaseSocket", () => {
 
     await vi.waitFor(() => expect(onerror).toHaveBeenCalledOnce());
     expect(raw.close).toHaveBeenCalled();
+  });
+
+  it("reports a receive decode failure before closing", async () => {
+    const promise = openPhaseSocket("ws://test");
+    const raw = MockWebSocket.instances[0];
+    raw.deliverMessage(helloFrame({ wire_formats: ["GzipEnvelopeV1"] }));
+
+    const socket = await promise;
+    const onerror = vi.fn();
+    const received = vi.fn();
+    socket.ws.onerror = onerror;
+    socket.ws.onmessage = received;
+
+    const pong = new TextEncoder().encode('{"type":"Pong"}');
+    raw.deliverMessage(new Uint8Array([0x00, ...pong]).buffer);
+    await vi.waitFor(() => expect(received).toHaveBeenCalledOnce());
+    expect(onerror).not.toHaveBeenCalled();
+    expect(raw.close).not.toHaveBeenCalled();
+
+    const corrupt = await encodeJsonEnvelope(
+      JSON.stringify({ type: "Pong", data: "x".repeat(512) }),
+    );
+    corrupt[0] = 0x02;
+    raw.deliverMessage(corrupt.buffer);
+    await vi.waitFor(() => expect(onerror).toHaveBeenCalledOnce());
+    expect(raw.close).toHaveBeenCalled();
+    expect(received).toHaveBeenCalledOnce();
+
+    raw.deliverMessage(42);
+    await vi.waitFor(() => expect(onerror).toHaveBeenCalledTimes(2));
+    expect(received).toHaveBeenCalledOnce();
+  });
+
+  // Guards the rejected wholesale-catch design: a throwing message listener must
+  // not close the socket, because the unwrapped plain-text transport never does.
+  it("does not close the socket when a message listener throws", async () => {
+    const promise = openPhaseSocket("ws://test");
+    const raw = MockWebSocket.instances[0];
+    raw.deliverMessage(helloFrame({ wire_formats: ["GzipEnvelopeV1"] }));
+
+    const socket = await promise;
+    const seen = vi.fn(() => {
+      throw new Error("listener blew up");
+    });
+    socket.ws.addEventListener("message", seen);
+
+    const pong = new TextEncoder().encode('{"type":"Pong"}');
+    raw.deliverMessage(new Uint8Array([0x00, ...pong]).buffer);
+    raw.deliverMessage(new Uint8Array([0x00, ...pong]).buffer);
+
+    await vi.waitFor(() => expect(seen).toHaveBeenCalledTimes(2));
+    expect(raw.close).not.toHaveBeenCalled();
+  });
+
+  it("closes after a receive decode failure when the error handler throws", async () => {
+    const promise = openPhaseSocket("ws://test");
+    const raw = MockWebSocket.instances[0];
+    raw.deliverMessage(helloFrame({ wire_formats: ["GzipEnvelopeV1"] }));
+
+    const socket = await promise;
+    const onerror = vi.fn(() => {
+      throw new Error("error handler blew up");
+    });
+    socket.ws.onerror = onerror;
+
+    const corrupt = await encodeJsonEnvelope(
+      JSON.stringify({ type: "Pong", data: "x".repeat(512) }),
+    );
+    corrupt[0] = 0x02;
+    raw.deliverMessage(corrupt.buffer);
+
+    await vi.waitFor(() => expect(onerror).toHaveBeenCalledOnce());
+    expect(raw.close).toHaveBeenCalled();
+  });
+
+  it("closes after a queued send failure when the error handler throws", async () => {
+    const promise = openPhaseSocket("ws://test");
+    const raw = MockWebSocket.instances[0];
+    raw.deliverMessage(helloFrame({ wire_formats: ["GzipEnvelopeV1"] }));
+
+    const socket = await promise;
+    const onerror = vi.fn(() => {
+      throw new Error("error handler blew up");
+    });
+    socket.ws.onerror = onerror;
+    raw.send.mockImplementationOnce(() => {
+      throw new Error("socket closed before queued send");
+    });
+    socket.ws.send('{"type":"Ping"}');
+
+    await vi.waitFor(() => expect(onerror).toHaveBeenCalledOnce());
+    expect(raw.close).toHaveBeenCalled();
+
+    socket.ws.send('{"type":"Ping"}');
+    await vi.waitFor(() =>
+      expect(
+        raw.send.mock.calls.filter(([value]) => value instanceof Uint8Array),
+      ).toHaveLength(2),
+    );
+    expect(onerror).toHaveBeenCalledOnce();
+  });
+
+  it("notifies close listeners after the close handler throws", async () => {
+    const promise = openPhaseSocket("ws://test");
+    const raw = MockWebSocket.instances[0];
+    raw.deliverMessage(helloFrame({ wire_formats: ["GzipEnvelopeV1"] }));
+
+    const socket = await promise;
+    const onclose = vi.fn(() => {
+      throw new Error("close handler blew up");
+    });
+    const dropped = vi.fn();
+    const received = vi.fn();
+    socket.ws.onclose = onclose;
+    socket.ws.onmessage = received;
+    socket.ws.addEventListener("close", dropped);
+
+    raw.close();
+    await vi.waitFor(() => expect(onclose).toHaveBeenCalledOnce());
+    expect(dropped).toHaveBeenCalledOnce();
+
+    const pong = new TextEncoder().encode('{"type":"Pong"}');
+    raw.deliverMessage(new Uint8Array([0x00, ...pong]).buffer);
+    await vi.waitFor(() => expect(received).toHaveBeenCalledOnce());
   });
 
   it("rejects with protocol_mismatch when versions diverge and closes the socket", async () => {

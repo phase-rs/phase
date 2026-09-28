@@ -154,6 +154,7 @@ fn dig_rest_pile_library_redirect_pauses_before_tracked_set_publish() {
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: Some(Zone::Library),
+            rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
             reveal: true,
             enter_tapped: false,
@@ -279,6 +280,7 @@ fn dig_zero_kept_deferred_rest_pile_publishes_an_empty_tracked_set() {
             up_to: true,
             filter: TargetFilter::Any,
             rest_destination: Some(Zone::Library),
+            rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
             reveal: true,
             enter_tapped: false,
@@ -403,6 +405,7 @@ fn dig_mass_put_all_nonbattlefield_redirect_publishes_only_delivered_set() {
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: Some(Zone::Library),
+            rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
             reveal: true,
             enter_tapped: false,
@@ -563,6 +566,7 @@ fn uninterrupted_dig_rest_and_mass_put_all_complete_synchronously() {
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: Some(Zone::Library),
+            rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
             reveal: false,
             enter_tapped: false,
@@ -621,6 +625,7 @@ fn uninterrupted_dig_rest_and_mass_put_all_complete_synchronously() {
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: Some(Zone::Library),
+            rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
             reveal: false,
             enter_tapped: false,
@@ -708,6 +713,7 @@ fn dig_deferred_reveal_rest_pile_repauses_and_completes_once() {
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: Some(Zone::Library),
+            rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
             reveal: true,
             enter_tapped: false,
@@ -2190,6 +2196,174 @@ fn self_sacrifice_mana_cost_waits_for_replacement_before_producing_mana() {
             .count(),
         1,
         "the resumed self-sacrifice cost produces mana exactly once"
+    );
+}
+
+/// Give `player` a creature whose only ability sacrifices itself for {G}. With
+/// `competing_redirects`, two replacements race for the sacrifice, so auto-tapping
+/// it pauses mid-payment for a replacement choice.
+fn add_self_sacrifice_mana_source(
+    scenario: &mut GameScenario,
+    player: engine::types::player::PlayerId,
+    competing_redirects: bool,
+) -> ObjectId {
+    let mut source = scenario.add_creature(player, "Self-Sacrifice Mana Source", 0, 1);
+    source.with_ability_definition(
+        AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::Fixed {
+                    colors: vec![ManaColor::Green],
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::Sacrifice(SacrificeCost::count(
+            TargetFilter::SelfRef,
+            1,
+        ))),
+    );
+    if competing_redirects {
+        source
+            .with_replacement_definition(redirect_self_moved_to(Zone::Graveyard, Zone::Exile))
+            .with_replacement_definition(redirect_self_moved_to(Zone::Graveyard, Zone::Hand));
+    }
+    source.id()
+}
+
+/// P0's only mana source is the self-sacrificing creature; P1 has an untapped
+/// Archangel of Tithes-style {1} attack tax (verified Oracle text,
+/// client/public/card-data.json 2026-05-10).
+fn self_sacrifice_mana_vs_attack_tax(competing_redirects: bool) -> (GameState, ObjectId) {
+    use engine::parser::oracle_static::parse_static_line;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    add_self_sacrifice_mana_source(&mut scenario, P0, competing_redirects);
+    let attacker = scenario.add_creature(P0, "Bear", 2, 2).id();
+    let attack_tax = parse_static_line(
+        "As long as this creature is untapped, creatures can't attack you or planeswalkers you \
+         control unless their controller pays {1} for each of those creatures.",
+    )
+    .expect("the attack-tax static should parse");
+    scenario
+        .add_creature(P1, "Tithe Collector", 3, 5)
+        .with_static_definition(attack_tax);
+    let runner = scenario.build();
+    (runner.state().clone(), attacker)
+}
+
+/// CR 508.1j + CR 605.3b + CR 616.1: a combat tax pays through a payment with no
+/// resumable root, so a mana source whose own cost would pause for a replacement
+/// choice cannot fund it. The AI's affordability probe must say so, or it
+/// completes a taxed attack whose accepted prompt the reducer then rejects.
+#[test]
+fn paused_mana_source_cannot_fund_a_combat_tax() {
+    use engine::game::combat::{
+        attack_tax_is_affordable, complete_attacker_proposal, AttackTarget, CombatTaxPosture,
+    };
+
+    // Reach-guard: with no competing replacement the sacrifice never pauses,
+    // and auto-tap does fund the {1} tax from this very source.
+    let (unpaused, attacker) = self_sacrifice_mana_vs_attack_tax(false);
+    let attacks = vec![(attacker, AttackTarget::Player(P1))];
+    assert!(
+        attack_tax_is_affordable(&unpaused, &attacks),
+        "premise: auto-tap reaches the self-sacrificing source when nothing pauses"
+    );
+    let GameAction::DeclareAttackers {
+        attacks: funded, ..
+    } = complete_attacker_proposal(&unpaused, &attacks, &[], CombatTaxPosture::Accept)
+    else {
+        panic!("expected DeclareAttackers");
+    };
+    assert_eq!(
+        funded, attacks,
+        "premise: the taxed proposal is legal and survives Accept when it can be funded"
+    );
+
+    let (paused, attacker) = self_sacrifice_mana_vs_attack_tax(true);
+    let attacks = vec![(attacker, AttackTarget::Player(P1))];
+    assert!(
+        !attack_tax_is_affordable(&paused, &attacks),
+        "a payment that would pause for a replacement choice cannot fund a combat tax"
+    );
+    let GameAction::DeclareAttackers {
+        attacks: completed, ..
+    } = complete_attacker_proposal(&paused, &attacks, &[], CombatTaxPosture::Accept)
+    else {
+        panic!("expected DeclareAttackers");
+    };
+    assert!(
+        completed.is_empty(),
+        "Accept must fall back to the tax-free witness, got {completed:?}"
+    );
+}
+
+/// Well of Lost Dreams ("Whenever you gain life, you may pay {X}, where X is less
+/// than or equal to the amount of life you gained. If you do, draw X cards.")
+/// with the self-sacrificing mana source as P0's only mana. Returns the
+/// `PayAmountChoice` maximum the engine offers after P0 gains 3 life and accepts.
+fn well_of_lost_dreams_x_max(competing_redirects: bool) -> u32 {
+    use engine::game::scenario_db::GameScenarioDbExt;
+
+    let db = crate::support::shared_card_db().expect("the committed card fixture loads");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_real_card(P0, "Well of Lost Dreams", Zone::Battlefield, db);
+    for _ in 0..5 {
+        scenario.add_real_card(P0, "Plains", Zone::Library, db);
+        scenario.add_real_card(P1, "Plains", Zone::Library, db);
+    }
+    add_self_sacrifice_mana_source(&mut scenario, P0, competing_redirects);
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+
+    let mut events = Vec::new();
+    engine::game::effects::life::apply_life_gain(runner.state_mut(), P0, 3, &mut events)
+        .expect("life gain must resolve without deferring");
+    engine::game::triggers::process_triggers(runner.state_mut(), &events);
+
+    for _ in 0..16 {
+        match &runner.state().waiting_for {
+            WaitingFor::PayAmountChoice { max, .. } => return *max,
+            WaitingFor::OptionalEffectChoice { .. } => {
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .expect("accepting 'you may pay {X}' must succeed");
+            }
+            _ => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("passing toward the trigger's choice must succeed");
+            }
+        }
+    }
+    panic!(
+        "never reached PayAmountChoice; final waiting_for = {:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// CR 107.3a + CR 605.3b + CR 616.1: a resolution-time "pay {X}" is paid through
+/// `pay_unless_cost`, which has no resume root, so its offered range must not
+/// count a mana source whose own cost would pause for a replacement choice.
+/// Offering X=1 there would accept an amount the payment then cannot make.
+#[test]
+fn paused_mana_source_does_not_widen_a_resolution_x_range() {
+    assert_eq!(
+        well_of_lost_dreams_x_max(false),
+        1,
+        "premise: with nothing pausing, the self-sacrificing source funds X=1"
+    );
+    assert_eq!(
+        well_of_lost_dreams_x_max(true),
+        0,
+        "a source that would pause mid-payment cannot fund any X"
     );
 }
 
@@ -4169,7 +4343,7 @@ fn effect_pay_cost_rider_waits_for_scry_post_effect_before_typed_root_settles() 
     let rider_life = resumed
         .events
         .iter()
-        .position(|event| matches!(event, GameEvent::LifeChanged { player_id, amount } if *player_id == P0 && *amount == 1))
+        .position(|event| matches!(event, GameEvent::LifeChanged { player_id, amount, .. } if *player_id == P0 && *amount == 1))
         .expect("the trailing PayCost rider resolves once");
     assert!(
         mana_added < rider_life,
@@ -4629,8 +4803,18 @@ fn effect_pay_cost_composite_mana_life_suffix_serializes_and_rides_once() {
         life_before,
         "neither the later life cost nor the rider may run before the typed mana root settles"
     );
+    assert!(
+        runner.state().payment_transaction.is_some(),
+        "the canonical state keeps the staged payment descriptor"
+    );
+    assert!(
+        runner.state().pending_cost_move_resume.is_none(),
+        "the canonical state remains pre-payment while the composite is paused"
+    );
+    let shadow = engine::game::staged_payment_shadow_for_test(runner.state());
+    assert!(shadow.payment_transaction.is_none());
     assert!(matches!(
-        runner.state().pending_cost_move_resume.as_ref(),
+        shadow.pending_cost_move_resume.as_ref(),
         Some(PendingCostMoveResume::ManaAbilityPayment { pending, .. }) if matches!(
             &pending.resume,
             ManaAbilityResume::EffectPayCost { cost: paused_cost, .. }
@@ -4661,6 +4845,15 @@ fn effect_pay_cost_composite_mana_life_suffix_serializes_and_rides_once() {
             .count(),
         1,
         "the source's paid tap prefix is never replayed"
+    );
+    assert_eq!(
+        resumed
+            .events
+            .iter()
+            .filter(|event| matches!(event, GameEvent::LifeChanged { amount: 1, .. }))
+            .count(),
+        1,
+        "the rider resumes exactly once after the unpaid suffix"
     );
     assert!(runner.state().pending_cost_move_resume.is_none());
 }
@@ -8625,12 +8818,16 @@ fn nested_composite_effect_cost_serializes_all_suffixes_and_rider_once() {
     let mut initial_events = Vec::new();
     resolve_ability_chain(runner.state_mut(), &ability, &mut initial_events, 0)
         .expect("the nested cost reaches the source's replacement pause");
+    assert!(runner.state().payment_transaction.is_some());
+    assert!(runner.state().pending_cost_move_resume.is_none());
     assert!(matches!(
         runner.state().waiting_for,
         WaitingFor::ReplacementChoice { .. }
     ));
     assert!(matches!(
-        runner.state().pending_cost_move_resume.as_ref(),
+        engine::game::staged_payment_shadow_for_test(runner.state())
+            .pending_cost_move_resume
+            .as_ref(),
         Some(PendingCostMoveResume::ManaAbilityPayment { pending, .. }) if matches!(
             &pending.resume,
             ManaAbilityResume::EffectPayCost { cost: paused_cost, .. }
@@ -10729,6 +10926,7 @@ fn cast_from_zone_exile_redirect_pauses_before_lingering_permission_tail() {
             driver: CastFromZoneDriver::LingeringPermission,
             mana_spend_permission: None,
             additional_cost: None,
+            cast_cost_modifier: None,
         },
         vec![TargetRef::Object(card)],
         source,
@@ -10816,6 +11014,7 @@ fn cast_from_zone_exile_delivery_stays_synchronous_and_grants_permission() {
             driver: CastFromZoneDriver::LingeringPermission,
             mana_spend_permission: None,
             additional_cost: None,
+            cast_cost_modifier: None,
         },
         vec![TargetRef::Object(card), TargetRef::Object(second_card)],
         source,
@@ -11897,6 +12096,7 @@ fn dig_kept_nonbattlefield_redirect_pauses_before_tail() {
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: Some(Zone::Graveyard),
+            rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
             reveal: true,
             enter_tapped: false,
@@ -12046,6 +12246,7 @@ fn r2_effect_zone_moves_stay_synchronous_without_redirects() {
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: Some(Zone::Graveyard),
+            rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
             reveal: true,
             enter_tapped: false,
@@ -12873,6 +13074,7 @@ fn choose_and_sacrifice_rest_replacement_preserves_terminal_sweep() {
             sacrifice_filter: TargetFilter::Typed(TypedFilter::creature()),
             total_power_cap: None,
             keeper_constraint: None,
+            keeper_counter: None,
         },
         vec![],
         source,
@@ -13203,6 +13405,7 @@ fn effect_zone_put_at_library_position_mixed_sources_preserves_legacy_library_or
             enters_attacking: false,
             owner_library: false,
             track_exiled_by_source: false,
+            face_down_in_exile: engine::types::ability::ExileConcealment::Public,
             face_down_profile: None,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],

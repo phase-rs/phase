@@ -59,6 +59,7 @@ fn build_eminence_static() -> StaticDefinition {
         amount: ManaCost::generic(1),
         spell_filter: Some(dragon_filter),
         dynamic_count: None,
+        reach: engine::types::statics::CostReductionReach::SpillsToGeneric,
     })
     .affected(TargetFilter::Typed(
         TypedFilter::card().controller(ControllerRef::You),

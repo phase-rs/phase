@@ -79,6 +79,22 @@ export const DAMAGE_FLURRY_TRAIL_PARTICLE_MAX = 96;
 export const GROUPED_EVENT_RUN_THRESHOLD = 8;
 export const GROUPED_TOKEN_CREATION_THRESHOLD = GROUPED_EVENT_RUN_THRESHOLD;
 
+/** Base duration of the meld forge-and-flip animation, before pacing. */
+export const MELD_FORGE_DURATION_MS = 3200;
+
+/**
+ * Phase boundaries of the meld animation, as fractions of its duration: the
+ * two cards gather over the anvil, take three hammer blows, fuse into one
+ * white-hot blank, and the blank turns over to the combined oversized face.
+ * The tail after `flipped` holds the revealed card while it cools.
+ */
+export const MELD_FORGE_PHASES = {
+  gathered: 0.2,
+  strikes: [0.3, 0.4, 0.5],
+  fused: 0.58,
+  flipped: 0.8,
+} as const;
+
 export const EVENT_DURATIONS: Record<string, number> = {
   ZoneChanged: 400,
   DamageDealt: COMBAT_ENGAGEMENT_DURATION_MS,
@@ -90,9 +106,11 @@ export const EVENT_DURATIONS: Record<string, number> = {
   CounterRemoved: 200,
   PermanentTapped: 200,
   PermanentUntapped: 200,
+  Melded: MELD_FORGE_DURATION_MS,
 };
 
 export const DEFAULT_DURATION = 200;
+
 
 /** How long the card slam flight phase takes before impact (ms, before speed multiplier). */
 export const CARD_SLAM_FLIGHT_MS = 200;
@@ -108,6 +126,32 @@ export function impactDelayMsForAnimationEvent(event: AnimationEvent): number {
   if (event.type === "GroupedDamageFlurry") return GROUPED_DAMAGE_FLURRY_IMPACT_DELAY_MS;
   if (event.type === "DamageDealt" && "Player" in event.data.target) return CARD_SLAM_FLIGHT_MS;
   return 0;
+}
+
+/**
+ * How long after its step begins a life change for `playerId` visually lands,
+ * before the speed multiplier.
+ *
+ * A life change is presented by whatever hit caused it — a card slam for direct
+ * player damage, the flurry for a collapsed swarm — so the delay comes from that
+ * impact event, and is zero when the change has no hit behind it (a drain, a
+ * paid cost). The displayed total, its flash, and the impact VFX must land
+ * together, so every one of them resolves the delay here rather than each
+ * picking its own impact event out of the step.
+ */
+export function lifeChangeImpactDelayMs(
+  lifeEffect: StepEffect,
+  effects: readonly StepEffect[],
+  playerId: number,
+): number {
+  const playerDamageEffect = effects.find(
+    (effect) => isPlayerDamageAnimationEvent(effect.event, playerId),
+  );
+  const groupedDamageEffect = lifeEffect.displayOnly
+    ? effects.find((effect) => effect.event.type === "GroupedDamageFlurry")
+    : undefined;
+  const impactEvent = playerDamageEffect?.event ?? groupedDamageEffect?.event;
+  return impactEvent ? impactDelayMsForAnimationEvent(impactEvent) : 0;
 }
 
 /** Base "your turn / opponent's turn" banner display duration, before any

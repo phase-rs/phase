@@ -11,9 +11,10 @@ use nom::Parser;
 use crate::types::ability::{
     AggregateFunction, AttachmentKind, CardTypeSetSource, ChoiceType, CombatRelation,
     CombatRelationSubject, Comparator, ControllerRef, CountScope, DamageKindFilter, FilterProp,
-    ObjectProperty, ObjectScope, ParitySource, PlayerFilter, PropertyAggregate, PtStat,
-    PtValueScope, QuantityExpr, QuantityRef, SeatDirection, SharedQuality, SharedQualityRelation,
-    TargetFilter, TargetSelectionMode, ThisWayCause, TypeFilter, TypedFilter,
+    ObjectProperty, ObjectScope, ParitySource, PlayerFilter, PlayerRelation, PropertyAggregate,
+    PtStat, PtValueScope, QuantityExpr, QuantityRef, SeatDirection, SharedQuality,
+    SharedQualityRelation, TargetFilter, TargetSelectionMode, ThisWayCause, TypeFilter,
+    TypedFilter,
 };
 use crate::types::card_type::{noncreature_subtype_set, SubtypeSet, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -1334,11 +1335,37 @@ pub fn parse_target_with_syntax<'a>(
             let after_noun = tag::<_, _, OracleError<'_>>(" ")
                 .parse(after_noun_orig)
                 .map_or(after_noun_orig, |(after, _)| after);
+            // CR 102.1 + CR 102.3: the superlative arm of the relative clause
+            // ("with/who has the most <property>") must measure "most" against
+            // the population the HEAD NOUN itself named — "target opponent …"
+            // measures among the caster's opponents, "target player …" measures
+            // among every player. The `alt` above binds exactly these two head
+            // nouns (`TargetFilter::Player` bare, or `Typed` with an `Opponent`
+            // controller), so the mapping is exhaustive over what can reach here.
+            // Both reachable head nouns are matched explicitly rather than one
+            // of them falling out of a wildcard, so a third one added to that
+            // `alt` cannot silently inherit the opponent population. The arm
+            // stays total (the relation is consumed only by the superlative
+            // arm; declining here would also disable the pre-existing
+            // "who controls more X than Y" anchor arm), and the debug assert
+            // makes the unreachable case loud under test.
+            let head_relation = match &player_filter {
+                TargetFilter::Player => PlayerRelation::All,
+                TargetFilter::Typed(_) => PlayerRelation::Opponent,
+                other => {
+                    debug_assert!(
+                        false,
+                        "unexpected player head noun for the superlative arm: {other:?}"
+                    );
+                    PlayerRelation::Opponent
+                }
+            };
             let mut tentative_ctx = ctx.clone();
             if let Ok((clause_rest, predicates)) =
                 super::oracle_effect::parse_target_player_relative_clause(
                     after_noun,
                     &mut tentative_ctx,
+                    head_relation,
                 )
             {
                 let clause_rest_lower = clause_rest.to_lowercase();
@@ -6712,9 +6739,15 @@ pub(crate) fn parse_mana_value_suffix(
     }
 
     let (rest, _) = parse_suffix_subject_head(trimmed).ok()?;
-    let (rest, _) = tag::<_, _, OracleError<'_>>("mana value ")
-        .parse(rest)
-        .ok()?;
+    // CR 202.3: "converted mana cost" is mana value under its former name, still
+    // printed in unmodernized Oracle text (M'Odo, the Gnarled Oracle; Underdark
+    // Beholder). Accepting it here keeps their bound instead of dropping it.
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("mana value "),
+        tag("converted mana cost "),
+    ))
+    .parse(rest)
+    .ok()?;
 
     // CR 202.3 + CR 120.3: Dynamic comparisons referencing the triggering event.
     // "that damage" → `EventContextAmount` (damage amount captured at trigger).
@@ -8181,12 +8214,33 @@ fn parse_shared_quality_reference<'a>(
         }
     }
 
-    let (filter, rest) = parse_target(input);
+    let (filter, rest) = parse_target_disjunction(input);
     if matches!(filter, TargetFilter::Any) {
         return Err(nom::Err::Error(nom::error::Error::new(
             input,
             nom::error::ErrorKind::Fail,
         )));
+    }
+    Ok((rest, filter))
+}
+
+/// CR 109.2 + CR 109.2a: parse a reference noun phrase that may be a two-leg
+/// disjunction — "a creature you control **or** a creature card in your
+/// graveyard" (Guardian Project, Volo) — into `TargetFilter::Or`.
+///
+/// Each leg is parsed by `parse_target`, so the per-leg zone semantics are the
+/// ordinary ones: a zone-less type description means a permanent on the
+/// battlefield (CR 109.2) while a leg naming a zone keeps it (CR 109.2a). The
+/// single-leg path returns exactly what `parse_target` returned, so callers that
+/// never see a disjunction are unaffected.
+///
+/// Extracted from `parse_shared_quality_reference` so the name-relation
+/// combinator in `oracle_effect::search` shares one authority for the reference
+/// axis instead of duplicating the disjunction handling.
+pub(crate) fn parse_target_disjunction(input: &str) -> (TargetFilter, &str) {
+    let (filter, rest) = parse_target(input);
+    if matches!(filter, TargetFilter::Any) {
+        return (filter, rest);
     }
     let rest_trimmed = rest.trim_start();
     if let Ok((after_or, sep)) =
@@ -8194,17 +8248,17 @@ fn parse_shared_quality_reference<'a>(
     {
         let (filter2, rest2) = parse_target(after_or);
         if !matches!(filter2, TargetFilter::Any) {
-            return Ok((
-                rest2,
+            return (
                 TargetFilter::Or {
                     filters: vec![filter, filter2],
                 },
-            ));
+                rest2,
+            );
         }
         // Fall through: only accept the first leg if the disjunction tail didn't parse.
         let _ = sep;
     }
-    Ok((rest, filter))
+    (filter, rest)
 }
 
 /// CR 608.2k: "the sacrificed/exiled <noun>" — an untargeted reference to the
@@ -8239,9 +8293,112 @@ fn parse_cost_paid_object_reference<'a>(
     Ok((rest, TargetFilter::CostPaidObject))
 }
 
-pub(crate) fn parse_zone_changed_this_turn_suffix(
+/// CR 400.7: The origin zone named by a "put there from <zone>" provenance
+/// clause. Factored out of [`parse_zone_changed_this_turn_suffix`] so the
+/// affirmative form and the "anywhere other than" negated form below read the
+/// same zone vocabulary through one production instead of two lists that can
+/// drift apart.
+fn parse_zone_change_origin_zone(input: &str) -> nom::IResult<&str, Zone, OracleError<'_>> {
+    alt((
+        value(Zone::Battlefield, tag("the battlefield")),
+        value(Zone::Graveyard, tag("a graveyard")),
+        value(Zone::Graveyard, tag("your graveyard")),
+        value(Zone::Graveyard, tag("graveyard")),
+        value(Zone::Exile, tag("exile")),
+        value(Zone::Hand, tag("a hand")),
+        value(Zone::Hand, tag("your hand")),
+        value(Zone::Hand, tag("hand")),
+        value(Zone::Library, tag("a library")),
+        value(Zone::Library, tag("your library")),
+        value(Zone::Library, tag("library")),
+    ))
+    .parse(input)
+}
+
+/// CR 400.7: The "that (were|was) put there from …" provenance
+/// clause shared by the affirmative form ("… from your library this turn" —
+/// Kagha, Shadow Archdruid; The Fourteenth Doctor) and the negated form
+/// ("… from anywhere other than the battlefield this turn" — Banon, the
+/// Returners' Leader).
+///
+/// Returns the AND-combined properties the clause states, plus the number of
+/// bytes consumed. The negated form yields TWO properties rather than a lone
+/// `Not`, and both are load-bearing:
+///
+///   * `ZoneChangedThisTurn { from: None, to }` — the card must have arrived in
+///     `to` THIS TURN at all. Without it a card that has sat in the graveyard
+///     since an earlier turn satisfies the `Not` vacuously (it has no
+///     battlefield→graveyard record either), which would widen the printed
+///     "this turn" pool to the whole graveyard.
+///   * `Not(ZoneChangedThisTurn { from: Some(excluded), to })` — the origin
+///     exclusion itself, expressed through the existing general
+///     [`FilterProp::Not`] combinator rather than a negated-origin sibling.
+///
+/// `FilterProp::ZoneChangedThisTurn` reads the object's most recent zone-change
+/// record, so an earlier graveyard visit cannot qualify its current residency.
+pub(crate) fn parse_graveyard_pool_provenance_suffix(
     input: &str,
     to: Option<Zone>,
+) -> Option<(Vec<FilterProp>, usize)> {
+    let trimmed = input.trim_start();
+    let offset = input.len() - trimmed.len();
+
+    // The negated form is tried first — its "from anywhere other
+    // than " head strictly extends the affirmative "from " head, so the
+    // affirmative production would otherwise match the shorter prefix and leave
+    // "anywhere other than …" as an unconsumed residual.
+    let negated = (
+        tag::<_, _, OracleError<'_>>("that "),
+        alt((tag("were "), tag("was "))),
+        alt((tag("put "), tag("placed "), tag("moved "))),
+        tag("there from anywhere other than "),
+        parse_zone_change_origin_zone,
+        // REQUIRED here, unlike the affirmative production below, which keeps
+        // `opt` for compatibility with the shapes already shipping. Without a
+        // time limiter this production would narrow an unlimited exclusion
+        // ("put there from anywhere other than the battlefield", no "this
+        // turn") to a this-turn pool — under-permissive, and silently so. No
+        // printed card prints the unlimited form; requiring the limiter costs
+        // nothing today and refuses rather than guesses if one appears.
+        tag(" this turn"),
+    )
+        .map(|(_, _, _, _, excluded, _)| excluded)
+        .parse(trimmed);
+
+    if let Ok((rest, excluded)) = negated {
+        return Some((
+            vec![
+                FilterProp::ZoneChangedThisTurn { from: None, to },
+                FilterProp::Not {
+                    prop: Box::new(FilterProp::ZoneChangedThisTurn {
+                        from: Some(excluded),
+                        to,
+                    }),
+                },
+            ],
+            offset + trimmed.len() - rest.len(),
+        ));
+    }
+
+    // CR 400.7: the affirmative form, with the time phrase REQUIRED. The shared
+    // helper keeps `opt` for its existing callers, whose own grammars already
+    // bound the clause; here an omitted "this turn" would be silently narrowed
+    // to a this-turn pool by a `ZoneChangedThisTurn` result, so the pool path
+    // refuses instead and the shape stays an honest gap.
+    parse_zone_change_provenance(input, to, true).map(|(prop, consumed)| (vec![prop], consumed))
+}
+
+/// CR 400.7: the shared "that (were|was) put there from <zone> [this turn]"
+/// production.
+///
+/// `require_this_turn` is the one axis the two callers differ on, so the grammar
+/// is parameterized rather than duplicated: `parse_zone_changed_this_turn_suffix`
+/// passes `false` (preserving every shape already shipping), and the graveyard
+/// pool path passes `true`.
+fn parse_zone_change_provenance(
+    input: &str,
+    to: Option<Zone>,
+    require_this_turn: bool,
 ) -> Option<(FilterProp, usize)> {
     let trimmed = input.trim_start();
     let offset = input.len() - trimmed.len();
@@ -8250,24 +8407,16 @@ pub(crate) fn parse_zone_changed_this_turn_suffix(
         alt((tag("were "), tag("was "))),
         alt((tag("put "), tag("placed "), tag("moved "))),
         tag("there from "),
-        alt((
-            value(Zone::Battlefield, tag("the battlefield")),
-            value(Zone::Graveyard, tag("a graveyard")),
-            value(Zone::Graveyard, tag("your graveyard")),
-            value(Zone::Graveyard, tag("graveyard")),
-            value(Zone::Exile, tag("exile")),
-            value(Zone::Hand, tag("a hand")),
-            value(Zone::Hand, tag("your hand")),
-            value(Zone::Hand, tag("hand")),
-            value(Zone::Library, tag("a library")),
-            value(Zone::Library, tag("your library")),
-            value(Zone::Library, tag("library")),
-        )),
-        opt(tag(" this turn")),
+        parse_zone_change_origin_zone,
     )
-        .map(|(_, _, _, _, from, _)| from)
+        .map(|(_, _, _, _, from)| from)
         .parse(trimmed)
         .ok()?;
+    let rest = match tag::<_, _, OracleError<'_>>(" this turn").parse(rest) {
+        Ok((after, _)) => after,
+        Err(_) if require_this_turn => return None,
+        Err(_) => rest,
+    };
     Some((
         FilterProp::ZoneChangedThisTurn {
             from: Some(from),
@@ -8275,6 +8424,13 @@ pub(crate) fn parse_zone_changed_this_turn_suffix(
         },
         offset + trimmed.len() - rest.len(),
     ))
+}
+
+pub(crate) fn parse_zone_changed_this_turn_suffix(
+    input: &str,
+    to: Option<Zone>,
+) -> Option<(FilterProp, usize)> {
+    parse_zone_change_provenance(input, to, false)
 }
 
 fn zone_for_scope(props: &[FilterProp]) -> Option<Zone> {
@@ -10008,14 +10164,27 @@ enum ZoneQual {
 pub(crate) fn scan_zone_phrase(
     text: &str,
 ) -> Option<(Zone, Option<ControllerRef>, Vec<FilterProp>)> {
+    scan_zone_phrase_span(text).map(|(_span, zone, ctrl, props)| (zone, ctrl, props))
+}
+
+/// `scan_zone_phrase`, plus the matched phrase itself as a slice of `text` —
+/// for callers that must read the qualifier the phrase was parsed from rather
+/// than rescan the whole text for it.
+pub(crate) fn scan_zone_phrase_span(
+    text: &str,
+) -> Option<(&str, Zone, Option<ControllerRef>, Vec<FilterProp>)> {
     let mut offset = 0;
     while offset <= text.len() {
-        if let Some((props, ctrl, _consumed)) = parse_zone_suffix(&text[offset..]) {
+        if let Some((props, ctrl, consumed)) = parse_zone_suffix(&text[offset..]) {
             let zone = props.iter().find_map(|p| match p {
                 FilterProp::InZone { zone } => Some(*zone),
                 _ => None,
             })?;
-            return Some((zone, ctrl, props));
+            // `consumed` counts bytes of the lowercased phrase, so the span is exact
+            // only for text whose lowercase keeps its byte length (callers pass
+            // lowercased text); otherwise it may be empty.
+            let span = text[offset..].get(..consumed).unwrap_or_default();
+            return Some((span, zone, ctrl, props));
         }
         match text[offset..].find(' ') {
             Some(i) => offset += i + 1,
@@ -10245,6 +10414,9 @@ fn parse_zone_qual(i: &str) -> super::oracle_nom::error::OracleResult<'_, ZoneQu
                 tag("that player's "),
                 tag("defending player's "),
                 tag("each player's "),
+                // CR 404.1: "a player's graveyard" names a zone without binding an
+                // owner (Lodestone Bauble), so it contributes `InZone` alone.
+                tag("a player's "),
             )),
         ),
         // CR 400.7: Adjective- and quantity-qualified zone references — "all
@@ -20323,6 +20495,26 @@ mod tests {
         // The OtherPoss split must not regress non-"their" possessives:
         // "that player's graveyard" emits InZone with no Owned prop.
         let (f, _) = parse_target("a card from that player's graveyard");
+        let tf = typed_leg(&f).expect("typed filter");
+        assert_eq!(tf.controller, None);
+        assert!(has_prop(
+            tf,
+            FilterProp::InZone {
+                zone: Zone::Graveyard,
+            }
+        ));
+        assert!(!tf
+            .properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::Owned { .. })));
+    }
+
+    #[test]
+    fn parse_target_a_players_graveyard_binds_the_zone() {
+        // "a player's graveyard" must reach the OtherPoss arm, not the bare "a "
+        // article, so the zone is extracted with no owner binding.
+        let (f, rest) = parse_target("basic land cards from a player's graveyard");
+        assert_eq!(rest, "");
         let tf = typed_leg(&f).expect("typed filter");
         assert_eq!(tf.controller, None);
         assert!(has_prop(

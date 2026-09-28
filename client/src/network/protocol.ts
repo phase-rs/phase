@@ -106,8 +106,91 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
+ *  71 — game_setup and state_update carry GameState, whose graveyard cast
+ *       permissions can now require a casting method (required_cast_keyword),
+ *       and casting-menu options carry the non-mana part of their cost
+ *       (additional_cost) and the graveyard permission they announce
+ *       (authority; the slot prompt's permission; the cast's latched terms).
+ *       Bumped in lockstep with full-game protocol 89.
+ *  70 — game_setup and state_update carry GameState, whose DeclareBlockers
+ *       prompt can now carry block_capacities (CR 509.1a + CR 101.1). Both
+ *       peers are browsers and neither validates the shape, so a v69 peer
+ *       would take the new field with no decode error; first contact rejects
+ *       the skew instead. Bumped in lockstep with full-game protocol 88.
+ *  69 — game_setup and state_update can carry WaitingFor.DigRestSplitChoice
+ *       and Effect.Dig.rest_split_top_count. First contact refuses a peer
+ *       that cannot represent the split. Bumped with full-game protocol 87.
+ *  68 — game_setup and state_update can carry GameEvent::Melded. An older
+ *       guest cannot present the meld sequence, so first contact refuses the
+ *       skew. Bumped in lockstep with full-game protocol 86.
+ *  67 — game_setup and state_update carry GameEvent[] and can now carry
+ *       DieRollIgnored { player_id, sides, result }. Older peers omit ignored
+ *       dice from the roll overlay; the exact-match first-contact gate rejects
+ *       the skew. Bumped in lockstep with full-game protocol 85.
+ *  66 — WaitingFor.ChooseDungeon options gained required `card`, `rooms`, and
+ *       `room_count`: the whole dungeon behind each choice, so the prompt
+ *       previews each card instead of describing only its entry room. A PARSE
+ *       bump like 50: none of the fields carries a serde default, so a v65
+ *       peer cannot parse a snapshot paused at the dungeon choice, and the
+ *       reverse skew throws in render — this client reads `card`
+ *       unconditionally when resolving the preview art. Since game_setup and
+ *       reconnect_ack carry GameState, first contact rejects the skew instead
+ *       of allowing either failure. Bumped in lockstep with full-game
+ *       protocol 84.
+ *  65 — game_setup and state_update carry GameState, whose reduce-ability-cost
+ *       statics can now carry a target restriction and a once-per-turn
+ *       frequency, whose per-turn activation journal records each turn's
+ *       activations, and whose activation cost carrier holds the
+ *       target-settlement lock. Bumped in lockstep with full-game protocol 83.
+ *  64 — game_setup and state_update carry GameState, whose additional-phase
+ *       abilities now hold an ExtraPhaseAnchor, whose delayed triggers can hold
+ *       AtBeginningOfAddedPhase, whose scheduled extra phases and resume
+ *       records carry a TurnSegment and a minted id, and whose per-turn step
+ *       counters are one steps_started_this_turn tally. Both peers are
+ *       browsers and neither validates the shape, so a v63 peer would take the
+ *       new shapes with no decode error; first contact rejects the skew
+ *       instead. Bumped in lockstep with full-game protocol 82.
+ *  63 — game_setup and state_update carry GameState, whose
+ *       AlternativeCastChoice prompt can now carry keyword { type: "Surge" }.
+ *       Bumped in lockstep with full-game protocol 81.
+ *  62 — game_setup and state_update carry GameState, whose exile look links
+ *       now carry { grant, lookers, source_incarnation }, and DerivedViews
+ *       gains linked_exile_ids, which the board renders directly. Bumped in
+ *       lockstep with full-game protocol 80.
+ *  61 — game_setup and state_update carry GameState, whose pending
+ *       activations can now hold the CR 601.2f activated-ability cost election
+ *       (ReductionProvenance::AbilityCostRider / TransientEffect, the
+ *       activation_cost_snapshot carrier). Bumped in lockstep with full-game
+ *       protocol 79.
+ *  60 — game_setup and state_update carry GameState, whose ability
+ *       definitions and transient continuous effects can now hold the
+ *       event-deadline `Duration::UntilEvent`, and whose transient effects
+ *       carry duration_event_source. Both peers are browsers and neither
+ *       validates the shape, so a v59 peer would take the new duration with
+ *       no decode error; first contact rejects the skew instead. Bumped in
+ *       lockstep with full-game protocol 78.
+ *  59 — Prospective: no GameState shape change lands in this bump. Moved
+ *       ahead of new GameFormat variants — the same precedent as 32's CommanderDraft variant: the
+ *       break, when it lands, will be conditional on a new variant actually
+ *       being serialized in a game_setup/state_update payload, not
+ *       unconditional like FormatConfig.deck_size's 32 retype. First
+ *       contact stays exact-match on both roles (guest `hostVersion !==
+ *       WIRE_PROTOCOL_VERSION`, host `guestVersion !== WIRE_PROTOCOL_VERSION`),
+ *       so no older peer ever completes a pairing that could carry a v59
+ *       payload.
+ *  57 — game_setup and state_update carry GameState, whose paid resolution
+ *       cleanup, receipt, and delayed-install origin now carry a
+ *       producer-issued offer owner. A v56 peer cannot preserve cross-offer
+ *       isolation across a paused offer, so first contact rejects the skew.
+ *       Bumped in lockstep with full-game protocol 75.
+ *  56 — game_setup and state_update carry GameState, whose
+ *       ResolutionCastCleanup can now carry exact delayed-trigger receipts.
+ *       A v55 peer cannot preserve the cancellation authority across a paused
+ *       paid offer, so first contact rejects the skew. Bumped in lockstep with
+ *       full-game protocol 74.
  *  54 — game_setup and state_update carry GameState, whose
- *       WaitingFor.CastOffer { kind: GraveyardPaidCast } now carries
+ *       FreeCastWindow requires `ResolutionCastFacePolicy` instead of the
+ *       legacy `filter`; WaitingFor.CastOffer { kind: GraveyardPaidCast } carries
  *       additional_cost and installed_triggers (both serde-additive) and opens
  *       for seven more printed cards that a v53 peer handled as a lingering
  *       permission. A v53 guest parses the offer and pays the wrong cost, so
@@ -384,7 +467,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 54 as const;
+export const WIRE_PROTOCOL_VERSION = 71 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

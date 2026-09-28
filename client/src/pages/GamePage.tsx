@@ -107,6 +107,7 @@ import {
 import { ReplacementModal } from "../components/modal/ReplacementModal.tsx";
 import { ResolveAllConsentModal } from "../components/modal/ResolveAllConsentModal.tsx";
 import { TriggerOrderModal } from "../components/modal/TriggerOrderModal.tsx";
+import { CostReductionOrderModal } from "../components/modal/CostReductionOrderModal.tsx";
 import { PeekTab } from "../components/modal/DialogShell.tsx";
 import { PeekRestoreTab } from "../components/modal/DialogHost.tsx";
 import { useModalPeek } from "../components/modal/useModalPeek.ts";
@@ -735,6 +736,12 @@ export function GamePage() {
   }, []);
 
   const handleNoDeck = useCallback((reason?: string, bracketViolation?: boolean) => {
+    if (sourceParam === "draft" && draftIdParam) {
+      navigate("/draft/quick?resume=1", {
+        state: { draftStartError: reason ?? null, draftId: draftIdParam },
+      });
+      return;
+    }
     if (reason) {
       // cEDH bracket lock: surface as a blocking modal rather than navigating
       // away, so the user can read the explanation before going back to setup.
@@ -748,7 +755,7 @@ export function GamePage() {
       return;
     }
     navigate("/");
-  }, [navigate]);
+  }, [navigate, sourceParam, draftIdParam]);
 
   const handleCardDataMissing = useCallback(() => {
     setShowCardDataMissing(true);
@@ -2016,6 +2023,8 @@ function GamePageContent({
         {canActForWaitingState && <ResolveAllConsentModal playerId={playerId} />}
         {waitingFor?.type === "OrderTriggers" &&
           canActForWaitingState && <TriggerOrderModal />}
+        {waitingFor?.type === "OrderCostReductions" &&
+          canActForWaitingState && <CostReductionOrderModal />}
         <BattleProtectorModal />
         <MeldChoiceModal />
         <AssistChoosePlayerModal />

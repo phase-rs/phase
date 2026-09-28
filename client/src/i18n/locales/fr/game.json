@@ -112,6 +112,10 @@
     "tokenToughnessPlaceholder": "Toughness",
     "sourceDefinedPtRequired": "Enter power and toughness for this source-defined token."
   },
+  "debugMove": {
+    "runEtbEffects": "Exécuter les effets ETB",
+    "simulate": "Simuler (effets ETB, déclenchements + SBA)"
+  },
   "debugLibrary": {
     "openActions": "Ouvrir les actions de débogage pour {{name}}"
   },
@@ -307,6 +311,10 @@
     "eligibleCount": "{{count}} légal(es)",
     "attackingCount": "att {{count}}",
     "selectedCount": "sél {{count}}",
+    "directBlockTargetCount": "cibles de blocage {{count}}",
+    "blockingWith": "Bloque avec {{name}}",
+    "blockedBy": "Bloqué par {{names}}",
+    "unblocked": "Non bloqué",
     "pickAll": "Tous",
     "pickNone": "Aucun",
     "underAttack_one": "Attaqué par {{count}} créature",
@@ -764,6 +772,8 @@
     "mustAttackSatisfiedBadge": "Attacking ✓",
     "mustBlockBadge": "Must block",
     "mustBlockExactBadge": "Doit bloquer {{attacker}}",
+    "mustBeBlockedBadge": "Doit être bloqué",
+    "bandBadge": "Bande {{n}}",
     "mustBlockSatisfiedBadge": "Blocking ✓",
     "cantAttackBadge": "Can't attack",
     "cantBlockBadge": "Can't block",
@@ -1422,7 +1432,16 @@
       "subtitleUpTo_other": "Sélectionnez jusqu'à {{count}} cartes à placer {{destination}}",
       "destinationTop": "au-dessus de votre bibliothèque",
       "destinationBattlefield": "sur le champ de bataille",
-      "destinationHand": "dans votre main"
+      "destinationHand": "dans votre main",
+      "titleSplit": "Répartir les cartes restantes",
+      "subtitleSplit_one": "Organisez les cartes : {{count}} ira sur le dessus de votre bibliothèque, les {{remaining}} autres iront dessous",
+      "subtitleSplit_other": "Organisez les cartes : {{count}} iront sur le dessus de votre bibliothèque, les {{remaining}} autres iront dessous",
+      "badgeTop": "Dessus {{order}}",
+      "badgeBottom": "Dessous",
+      "hintSplit": "Glissez pour réorganiser · les vertes vont dessus (la première tout en haut), les grises dessous",
+      "moveEarlier": "Déplacer {{card}} vers l’avant",
+      "moveLater": "Déplacer {{card}} vers l’arrière",
+      "hintSplitOrderOnly": "Glissez ou utilisez les flèches pour réorganiser dans chaque pile · un autre joueur a choisi les cartes qui vont dessus"
     },
     "surveil": {
       "title": "Surveillance",
@@ -1671,6 +1690,10 @@
       "labelExile": "Exiler",
       "labelBehold": "Contempler"
     },
+    "empowerJace": {
+      "title": "Renforcer Jace",
+      "subtitle": "Choisissez un jeton Jace que vous contrôlez pour qu'il gagne +{{count}} de loyauté"
+    },
     "collectEvidence": {
       "title": "Collecter des preuves",
       "subtitle": "Exilez des cartes de votre cimetière dont la valeur de mana totale est {{minimum}} ou plus"
@@ -1789,6 +1812,14 @@
       "subtitle_one": "Put {{count}} revealed card on the bottom of your library",
       "subtitle_other": "Put {{count}} revealed cards on the bottom of your library, in any order",
       "hint": "Drag to reorder · position 1 ends up on top of this pile"
+    },
+    "revealUntilBottom": {
+      "title": "Mettez le reste en dessous",
+      "subtitle_one": "Mettez {{count}} carte révélée au-dessous de votre bibliothèque",
+      "subtitle_other": "Mettez {{count}} cartes révélées au-dessous de votre bibliothèque, dans l'ordre de votre choix",
+      "hint": "Faites glisser pour réorganiser · la position 1 se retrouve au-dessus de ce tas",
+      "moveLeft": "Déplacer vers la gauche",
+      "moveRight": "Déplacer vers la droite"
     }
   },
   "specializeColor": {
@@ -1900,6 +1931,10 @@
     "prowlNormalLabel": "Lancer normalement",
     "prowlAltLabel": "Lancer avec Prowl",
     "prowlSubtitle": "Lancez {{name}} normalement, ou payez son coût de Prowl (disponible parce qu'une créature correspondante a infligé des blessures de combat à un joueur ce tour-ci).",
+    "surgeEyebrow": "Surge",
+    "surgeNormalLabel": "Lancer normalement",
+    "surgeAltLabel": "Lancer avec Surge",
+    "surgeSubtitle": "Lancez {{name}} normalement, ou payez son coût de Surge (disponible parce que vous ou un coéquipier avez lancé un autre sort ce tour-ci).",
     "overloadEyebrow": "Surcharge",
     "overloadNormalLabel": "Lancer normalement",
     "overloadAltLabel": "Lancer avec Surcharge",
@@ -1923,6 +1958,8 @@
     "additionalExile": "+ Exiler une carte",
     "additionalSacrifice": "+ Sacrifier un permanent",
     "additionalPayLife": "+ Payer des points de vie",
+    "additionalPayLifeAmount": "+ Payer {{amount}} points de vie",
+    "additionalCollectEvidence": "+ Rassembler des preuves {{amount}}",
     "additionalDiscard": "+ Se défausser d'une carte",
     "additionalTapCreatures": "+ Engager des créatures",
     "additionalGeneric": "+ {{type}}"
@@ -2050,6 +2087,7 @@
     "variantForetell": "Lancer depuis la Prédiction",
     "variantOverload": "Lancer avec Surcharge",
     "variantBestow": "Lancer avec Don",
+    "variantBlitz": "Lancer avec Blitz",
     "variantFreerunning": "Lancer avec Freerunning",
     "variantFuse": "Lancer avec Fusion",
     "variantMutate": "Lancer avec Mutate",
@@ -2059,7 +2097,14 @@
     "variantMoreThanMeetsTheEye": "Cast Converted",
     "variantPrototype": "Lancer avec Prototype",
     "variantFaceDown": "Lancer face cachée",
-    "variantFallback": "Lancer avec {{type}}"
+    "variantFallback": "Lancer avec {{type}}",
+    "viaSource": "via {{name}}",
+    "extraCostAdditional": "+ {{cost}}",
+    "extraCostAlternative": "au lieu de son coût de mana : {{cost}}",
+    "entersWithCounter": "arrive avec un marqueur {{counter}}",
+    "slotPerType": "utilise son emplacement {{type}}",
+    "slotChooseType": "choisissez un type de permanent",
+    "slotOncePerTurn": "une fois ce tour"
   },
   "categoryChoice": {
     "title": "Choisir les permanents à garder",
@@ -2359,6 +2404,25 @@
     "moveDown": "Descendre",
     "triggerFallback": "Déclencheur {{number}}"
   },
+  "costReductionOrder": {
+    "eyebrow": "Ordre des réductions de coût",
+    "title": "Ordonnez vos réductions de coût",
+    "subtitle": "Ces réductions fixent un coût total différent selon l'ordre dans lequel vous les appliquez (CR 601.2f). Le haut de cette liste est appliqué en premier.",
+    "appliedFirst": "Appliquée en premier",
+    "appliedLast": "Appliquée en dernier",
+    "lockedCost": "Coût total fixé",
+    "lockedCostUnknown": "Identique à l'un des totaux ci-dessous",
+    "outcomesHeading": "Totaux que vous pouvez fixer",
+    "reachColoredOnly": "Ne réduit que le mana coloré",
+    "reachSpills": "Peut réduire le mana générique",
+    "multiplier": "×{{count}}",
+    "confirmOrder": "Confirmer l'ordre",
+    "cancel": "Annuler",
+    "moveUp": "Monter",
+    "moveDown": "Descendre",
+    "reductionFallback": "Réduction {{number}}",
+    "floor": "Ne peut pas réduire le coût en dessous de {{count}} mana"
+  },
   "unhandledWaitingFor": {
     "title": "Action requise, mais l'interface est absente",
     "body": "La partie attend une action de votre part, mais cette version de phase.rs ne dispose pas encore d'une interface pour cela. C'est un bug — veuillez le signaler afin que nous puissions le corriger. Utilisez le bouton ci-dessous pour quitter la partie.",
@@ -2527,6 +2591,7 @@
       "mulligan": "mulligan decision",
       "discarding": "discarding",
       "orderingTriggers": "ordering triggers",
+      "orderingCostReductions": "ordering cost reductions",
       "respondingToStack": "responding to the stack",
       "priorityCombat": "combat",
       "priorityMain": "main phase",
@@ -2542,6 +2607,7 @@
       "mulligan": "Mulligan",
       "discarding": "Discarding",
       "orderingTriggers": "Ordering triggers",
+      "orderingCostReductions": "Ordering cost reductions",
       "respondingToStack": "Responding",
       "priorityCombat": "Combat",
       "priorityMain": "Main phase",

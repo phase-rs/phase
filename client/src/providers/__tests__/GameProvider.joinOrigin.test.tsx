@@ -126,7 +126,8 @@ vi.mock("../../stores/gameStore", () => ({
   useGameStore,
 }));
 
-vi.mock("../../constants/storage", () => ({
+vi.mock("../../constants/storage", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../constants/storage")>(),
   ACTIVE_DECK_KEY: "active-deck",
   isRandomDeckSelection: () => false,
   loadActiveDeck: () => ({ main: ["Island"], sideboard: [] }),

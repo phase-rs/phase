@@ -42,8 +42,10 @@ export type DiceRollPayload =
       /** d-sides (e.g. 20 for the first-player contest, dN for card rolls). */
       sides: number;
       /** One entry per physical die shown. For the contest this is the FINAL
-       *  (decisive) round — kept for the no-rounds fallback and overlay keying. */
-      rolls: { playerId: PlayerId; value: number }[];
+       *  (decisive) round — kept for the no-rounds fallback and overlay keying.
+       *  `ignored` marks a CR 706.6-ignored die (engine `DieRollIgnored` event):
+       *  shown so players see what the lowest roll was, never a rules roll. */
+      rolls: { playerId: PlayerId; value: number; sides?: number; ignored?: boolean }[];
       context: "startingPlayer" | "ability";
       /** Starting-player contest: the high roller who takes the first turn. */
       winner?: PlayerId;
@@ -214,6 +216,11 @@ interface UiStoreState {
   autoPass: boolean;
   combatMode: "attackers" | "blockers" | null;
   selectedAttackers: ObjectId[];
+  /** The blocker awaiting its next assignment (two-click assignment flow).
+   *  Lifted out of `ActionButton`'s local state so the collapsed-pile picker
+   *  can also read it (`GroupedPermanent.tsx::pickerContext`), which local
+   *  state cannot reach. Reset by `clearCombatSelection`. */
+  pendingBlocker: ObjectId | null;
   /** CR 702.22c: attacking bands declared this combat (each inner array is one
    *  band of attacker ids). Empty when no bands are declared. */
   attackerBands: ObjectId[][];
@@ -344,8 +351,14 @@ interface UiStoreActions {
   setGroupSelectedAttackers: (groupIds: ObjectId[], selectedIds: ObjectId[]) => void;
   selectAllAttackers: (ids: ObjectId[]) => void;
   setAttackerBands: (bands: ObjectId[][]) => void;
+  setPendingBlocker: (id: ObjectId | null) => void;
   assignBlocker: (blockerId: ObjectId, attackerId: ObjectId) => void;
   removeBlockerAssignment: (blockerId: ObjectId, attackerId?: ObjectId) => void;
+  /** Replace one blocker's assignments that lie within `groupIds` with
+   *  `attackerIds`, keeping its assignments outside the group untouched, and
+   *  dropping the blocker's key entirely when the result is empty. Mirrors
+   *  `setGroupSelectedAttackers`'s group-scoped replace. */
+  setGroupBlockerAssignments: (blockerId: ObjectId, groupIds: ObjectId[], attackerIds: ObjectId[]) => void;
   clearCombatSelection: () => void;
   setCombatClickHandler: (handler: ((id: ObjectId) => void) | null) => void;
   setPreviewSticky: (sticky: boolean) => void;
@@ -424,6 +437,7 @@ export const useUiStore = create<UiStore>()((set, get) => ({
   autoPass: false,
   combatMode: null,
   selectedAttackers: [],
+  pendingBlocker: null,
   attackerBands: [],
   blockerAssignments: new Map(),
   combatClickHandler: null,
@@ -680,6 +694,8 @@ export const useUiStore = create<UiStore>()((set, get) => ({
 
   setAttackerBands: (bands) => set({ attackerBands: bands }),
 
+  setPendingBlocker: (id) => set({ pendingBlocker: id }),
+
   assignBlocker: (blockerId, attackerId) =>
     set((state) => {
       const next = new Map(state.blockerAssignments);
@@ -706,10 +722,29 @@ export const useUiStore = create<UiStore>()((set, get) => ({
       return { blockerAssignments: next };
     }),
 
+  setGroupBlockerAssignments: (blockerId, groupIds, attackerIds) =>
+    set((state) => {
+      const groupIdSet = new Set(groupIds);
+      const outsideGroup = new Set(
+        Array.from(state.blockerAssignments.get(blockerId) ?? []).filter(
+          (id) => !groupIdSet.has(id),
+        ),
+      );
+      const next = new Map(state.blockerAssignments);
+      const merged = new Set([...outsideGroup, ...attackerIds]);
+      if (merged.size === 0) {
+        next.delete(blockerId);
+      } else {
+        next.set(blockerId, merged);
+      }
+      return { blockerAssignments: next };
+    }),
+
   clearCombatSelection: () =>
     set({
       combatMode: null,
       selectedAttackers: [],
+      pendingBlocker: null,
       attackerBands: [],
       blockerAssignments: new Map(),
       combatClickHandler: null,

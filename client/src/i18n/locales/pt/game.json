@@ -112,6 +112,10 @@
     "tokenToughnessPlaceholder": "Toughness",
     "sourceDefinedPtRequired": "Enter power and toughness for this source-defined token."
   },
+  "debugMove": {
+    "runEtbEffects": "Executar efeitos ETB",
+    "simulate": "Simular (efeitos ETB, gatilhos + SBA)"
+  },
   "debugLibrary": {
     "openActions": "Abrir ações de depuração para {{name}}"
   },
@@ -307,6 +311,10 @@
     "eligibleCount": "{{count}} válidas",
     "attackingCount": "atq {{count}}",
     "selectedCount": "sel {{count}}",
+    "directBlockTargetCount": "alvos de bloqueio {{count}}",
+    "blockingWith": "Bloqueando com {{name}}",
+    "blockedBy": "Bloqueado por {{names}}",
+    "unblocked": "Não bloqueado",
     "pickAll": "Todas",
     "pickNone": "Nenhuma",
     "underAttack_one": "Atacado por {{count}} criatura",
@@ -764,6 +772,8 @@
     "mustAttackSatisfiedBadge": "Attacking ✓",
     "mustBlockBadge": "Must block",
     "mustBlockExactBadge": "Deve bloquear {{attacker}}",
+    "mustBeBlockedBadge": "Deve ser bloqueado",
+    "bandBadge": "Bando {{n}}",
     "mustBlockSatisfiedBadge": "Blocking ✓",
     "cantAttackBadge": "Can't attack",
     "cantBlockBadge": "Can't block",
@@ -1422,7 +1432,16 @@
       "subtitleUpTo_other": "Selecione até {{count}} cartas para colocar {{destination}}",
       "destinationTop": "no topo de seu grimório",
       "destinationBattlefield": "no campo de batalha",
-      "destinationHand": "em sua mão"
+      "destinationHand": "em sua mão",
+      "titleSplit": "Dividir as Cartas Restantes",
+      "subtitleSplit_one": "Organize as cartas: {{count}} vai para o topo de seu grimório; as outras {{remaining}} vão para o fundo",
+      "subtitleSplit_other": "Organize as cartas: {{count}} vão para o topo de seu grimório; as outras {{remaining}} vão para o fundo",
+      "badgeTop": "Topo {{order}}",
+      "badgeBottom": "Fundo",
+      "hintSplit": "Arraste para reordenar · as verdes vão para o topo (a primeira no topo), as cinzas para o fundo",
+      "moveEarlier": "Mover {{card}} para antes",
+      "moveLater": "Mover {{card}} para depois",
+      "hintSplitOrderOnly": "Arraste ou use as setas para reordenar dentro de cada pilha · outro jogador escolheu quais cartas vão para o topo"
     },
     "surveil": {
       "title": "Vigiar",
@@ -1671,6 +1690,10 @@
       "labelExile": "Exilar",
       "labelBehold": "Contemplar"
     },
+    "empowerJace": {
+      "title": "Fortalecer Jace",
+      "subtitle": "Escolha uma ficha de Jace que você controla para receber +{{count}} de lealdade"
+    },
     "collectEvidence": {
       "title": "Coletar Evidências",
       "subtitle": "Exile cartas de seu cemitério com valor de mana total {{minimum}} ou maior"
@@ -1789,6 +1812,14 @@
       "subtitle_one": "Put {{count}} revealed card on the bottom of your library",
       "subtitle_other": "Put {{count}} revealed cards on the bottom of your library, in any order",
       "hint": "Drag to reorder · position 1 ends up on top of this pile"
+    },
+    "revealUntilBottom": {
+      "title": "Coloque o resto no fundo",
+      "subtitle_one": "Coloque {{count}} card revelado no fundo do seu grimório",
+      "subtitle_other": "Coloque {{count}} cards revelados no fundo do seu grimório em qualquer ordem",
+      "hint": "Arraste para reordenar · a posição 1 fica no topo desta pilha",
+      "moveLeft": "Mover para a esquerda",
+      "moveRight": "Mover para a direita"
     }
   },
   "specializeColor": {
@@ -1900,6 +1931,10 @@
     "prowlNormalLabel": "Conjurar Normalmente",
     "prowlAltLabel": "Conjurar com Prowl",
     "prowlSubtitle": "Conjure {{name}} normalmente, ou pague seu custo de Prowl (disponível porque uma criatura correspondente causou dano de combate a um jogador neste turno).",
+    "surgeEyebrow": "Surge",
+    "surgeNormalLabel": "Conjurar Normalmente",
+    "surgeAltLabel": "Conjurar com Surge",
+    "surgeSubtitle": "Conjure {{name}} normalmente, ou pague seu custo de Surge (disponível porque você ou um companheiro de equipe conjurou outra mágica neste turno).",
     "overloadEyebrow": "Sobrecarregar",
     "overloadNormalLabel": "Conjurar Normalmente",
     "overloadAltLabel": "Conjurar com Sobrecarregar",
@@ -1923,6 +1958,8 @@
     "additionalExile": "+ Exile uma carta",
     "additionalSacrifice": "+ Sacrifique um permanente",
     "additionalPayLife": "+ Pague vida",
+    "additionalPayLifeAmount": "+ Pague {{amount}} de vida",
+    "additionalCollectEvidence": "+ Coletar evidências {{amount}}",
     "additionalDiscard": "+ Descarte uma carta",
     "additionalTapCreatures": "+ Vire criaturas",
     "additionalGeneric": "+ {{type}}"
@@ -2050,6 +2087,7 @@
     "variantForetell": "Conjurar de Prever",
     "variantOverload": "Conjurar com Sobrecarregar",
     "variantBestow": "Conjurar com Conceder",
+    "variantBlitz": "Conjurar com Blitz",
     "variantFreerunning": "Conjurar com Freerunning",
     "variantFuse": "Conjurar com Fusão",
     "variantMutate": "Conjurar com Mutate",
@@ -2059,7 +2097,14 @@
     "variantMoreThanMeetsTheEye": "Cast Converted",
     "variantPrototype": "Conjurar com Protótipo",
     "variantFaceDown": "Conjurar Virada para Baixo",
-    "variantFallback": "Conjurar com {{type}}"
+    "variantFallback": "Conjurar com {{type}}",
+    "viaSource": "via {{name}}",
+    "extraCostAdditional": "+ {{cost}}",
+    "extraCostAlternative": "em vez de seu custo de mana: {{cost}}",
+    "entersWithCounter": "entra com um marcador de {{counter}}",
+    "slotPerType": "usa o espaço de {{type}}",
+    "slotChooseType": "escolha um tipo de permanente",
+    "slotOncePerTurn": "uma vez neste turno"
   },
   "categoryChoice": {
     "title": "Escolher Permanentes para Manter",
@@ -2359,6 +2404,25 @@
     "moveDown": "Mover para baixo",
     "triggerFallback": "Gatilho {{number}}"
   },
+  "costReductionOrder": {
+    "eyebrow": "Ordem das Reduções de Custo",
+    "title": "Ordene Suas Reduções de Custo",
+    "subtitle": "Estas reduções fixam um custo total diferente conforme a ordem em que você as aplica (CR 601.2f). O topo desta lista é aplicado primeiro.",
+    "appliedFirst": "Aplicada primeiro",
+    "appliedLast": "Aplicada por último",
+    "lockedCost": "Custo total fixado",
+    "lockedCostUnknown": "Igual a um dos totais abaixo",
+    "outcomesHeading": "Totais que você pode fixar",
+    "reachColoredOnly": "Reduz apenas mana colorido",
+    "reachSpills": "Pode reduzir mana genérico",
+    "multiplier": "×{{count}}",
+    "confirmOrder": "Confirmar Ordem",
+    "cancel": "Cancelar",
+    "moveUp": "Mover para cima",
+    "moveDown": "Mover para baixo",
+    "reductionFallback": "Redução {{number}}",
+    "floor": "Não pode reduzir o custo abaixo de {{count}} de mana"
+  },
   "unhandledWaitingFor": {
     "title": "Ação necessária, mas a interface está ausente",
     "body": "O jogo está aguardando uma ação sua, mas esta versão do phase.rs ainda não tem uma interface para isso. Isso é um bug — por favor, reporte para que possamos corrigir. Use o botão abaixo para sair do jogo.",
@@ -2527,6 +2591,7 @@
       "mulligan": "mulligan decision",
       "discarding": "discarding",
       "orderingTriggers": "ordering triggers",
+      "orderingCostReductions": "ordering cost reductions",
       "respondingToStack": "responding to the stack",
       "priorityCombat": "combat",
       "priorityMain": "main phase",
@@ -2542,6 +2607,7 @@
       "mulligan": "Mulligan",
       "discarding": "Discarding",
       "orderingTriggers": "Ordering triggers",
+      "orderingCostReductions": "Ordering cost reductions",
       "respondingToStack": "Responding",
       "priorityCombat": "Combat",
       "priorityMain": "Main phase",

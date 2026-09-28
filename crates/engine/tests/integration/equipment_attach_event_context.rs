@@ -71,6 +71,7 @@ fn paid_instead_attach_definition() -> AbilityDefinition {
                         .controller(ControllerRef::You),
                 ),
                 target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+                selection: engine::types::ability::AttachSelection::Targeted,
             },
         )
         .condition(AbilityCondition::AdditionalCostPaidInstead),
@@ -260,6 +261,7 @@ fn attached_replacement_between_bound_attachments_preserves_remaining_attachment
                 Effect::Attach {
                     attachment: TargetFilter::Any,
                     target: TargetFilter::Any,
+                    selection: engine::types::ability::AttachSelection::Targeted,
                 },
             )
             .multi_target(MultiTargetSpec::fixed(2, 2))
@@ -384,6 +386,7 @@ fn bound_attachments_with_a_synchronous_prefix_do_not_replay_the_final_attachmen
                 Effect::Attach {
                     attachment: TargetFilter::Any,
                     target: TargetFilter::Any,
+                    selection: engine::types::ability::AttachSelection::Targeted,
                 },
             )
             .multi_target(MultiTargetSpec::fixed(2, 2))
@@ -500,6 +503,7 @@ fn singleton_bound_attachment_replacement_preserves_trailing_effect_once() {
                 Effect::Attach {
                     attachment: TargetFilter::Any,
                     target: TargetFilter::Any,
+                    selection: engine::types::ability::AttachSelection::Targeted,
                 },
             )
             .sub_ability(AbilityDefinition::new(

@@ -4,6 +4,7 @@ import { getDiagnosticHistory, getDiagnosticSources } from "../../services/troub
 import { trackEvent } from "../../services/telemetry";
 import { buildGameState } from "../../test/factories/gameStateFactory";
 import { createPeerSession } from "../peer";
+import type { PeerSessionOptions } from "../peer";
 import { validateMessage } from "../protocol";
 import type { P2PMessage } from "../protocol";
 import { FakeDataConnection } from "./fakeDataConnection";
@@ -11,11 +12,29 @@ import { FakeDataConnection } from "./fakeDataConnection";
 vi.mock("../../services/telemetry", () => ({ trackEvent: vi.fn() }));
 beforeEach(() => { vi.mocked(trackEvent).mockClear(); });
 
-function createTestSession(opts?: { onSessionEnd?: () => void }) {
+function createTestSession(opts?: PeerSessionOptions) {
   const conn = new FakeDataConnection();
   // Cast to satisfy DataConnection type — we only use the subset FakeDataConnection implements.
   const session = createPeerSession(conn as never, opts);
   return { conn, session };
+}
+
+/**
+ * `simulateData` encodes plain objects, so it can only ever produce a DECODE
+ * failure. The other drop site takes a frame that never was binary — what an
+ * old-bundle peer sending plain JSON objects puts on the wire — so capture the
+ * transport's own data handler and deliver one verbatim.
+ */
+class RawFrameConnection extends FakeDataConnection {
+  private readonly rawHandlers = new Set<(data: unknown) => void>();
+  override on(event: string, handler: (...args: unknown[]) => void): this {
+    if (event === "data") this.rawHandlers.add(handler as (data: unknown) => void);
+    return super.on(event, handler);
+  }
+
+  async deliverRaw(data: unknown): Promise<void> {
+    await Promise.allSettled([...this.rawHandlers].map((h) => h(data)));
+  }
 }
 
 // Drain all pending microtasks/timers so the recvQueue-chained pending-message
@@ -291,6 +310,38 @@ describe("PeerSession", () => {
       expect.objectContaining({ type: "game_setup", wireProtocolVersion: 25 }),
     );
     session.close();
+  });
+
+  // The frames that CANNOT traverse the transport — an unknown envelope version
+  // byte from a newer peer, a plain object from an older bundle — used to die
+  // here with a `console.warn` and nothing downstream told. Only the adapter
+  // holds the state to decide what a lost frame costs, so the transport has to
+  // say it lost one.
+  it("reports both undeliverable inbound frames instead of swallowing them", async () => {
+    const onUndeliverableFrame = vi.fn();
+    const conn = new RawFrameConnection();
+    const session = createPeerSession(conn as never, { onUndeliverableFrame });
+    const handler = vi.fn();
+    session.onMessage(handler);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    await conn.simulateData(new Uint8Array([0x99, 0x01, 0x02]));
+    await conn.deliverRaw({ type: "concede" });
+
+    expect(onUndeliverableFrame.mock.calls).toEqual([["decode-failed"], ["non-binary"]]);
+    // Neither frame reached a handler; the neighbour above proves a frame that
+    // decodes does, so this is the drop and not a dead session.
+    expect(handler).not.toHaveBeenCalled();
+
+    // A frame arriving after `close()` reports nothing: both sites sit below
+    // `if (closed) return`, and a closed session has no adapter left to tell.
+    session.close();
+    onUndeliverableFrame.mockClear();
+    await conn.simulateData(new Uint8Array([0x99, 0x01, 0x02]));
+    await conn.deliverRaw({ type: "concede" });
+
+    expect(onUndeliverableFrame).not.toHaveBeenCalled();
+    warn.mockRestore();
   });
 });
 

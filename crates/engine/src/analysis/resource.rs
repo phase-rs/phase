@@ -32,7 +32,7 @@ use crate::types::counter::CounterType;
 use crate::types::game_state::{loop_states_equal, GameState, StackEntry, StackEntryKind};
 use crate::types::identifiers::{CardId, ObjectId, TriggerFiring};
 use crate::types::mana::ManaType;
-use crate::types::phase::Phase;
+use crate::types::phase::{Phase, PhaseGroup, TurnSegment};
 use crate::types::player::{Player, PlayerId};
 use crate::types::replacements::ReplacementEvent;
 use crate::types::zones::Zone;
@@ -1372,22 +1372,26 @@ impl ResourceVector {
 
         // CR 500.8 + CR 506.1 + CR 500.1: extra COMBAT phases created this turn.
         // A turn has exactly one natural combat phase, so
-        // `combat_phases_started_this_turn` (every begin-combat ENTERED this turn,
-        // natural + extra) minus that one yields extra combats already entered; the
-        // `Phase::BeginCombat` entries still queued in `state.extra_phases` (CR 500.8)
-        // add extra combats created but not yet entered. The two terms are disjoint —
+        // `steps_started_this_turn.count(Phase::BeginCombat)` (every begin-combat
+        // ENTERED this turn, natural + extra) minus that one yields extra combats
+        // already entered; the whole combat phases still queued in
+        // `state.extra_phases` (CR 500.8) add extra combats created but not yet
+        // entered. The two terms are disjoint —
         // `advance_phase` removes an extra phase from `state.extra_phases` before
         // entering it. This is "extra combats created", monotone within the turn and
         // independent of consumption timing, so a self-sustaining extra-combat loop
-        // does not net to zero. `combat_phases_started_this_turn` resets each turn (in
+        // does not net to zero. `steps_started_this_turn` resets each turn (in
         // `start_next_turn`), so across a turn boundary this axis can read negative
         // under `delta`; that is a benign false-NEGATIVE for a `Gained` axis
         // (CR 732.2a `is_net_progress` only vetoes on negative `Consumed` axes).
-        let entered_extra_combats = state.combat_phases_started_this_turn.saturating_sub(1) as i64;
+        let entered_extra_combats = state
+            .steps_started_this_turn
+            .count(Phase::BeginCombat)
+            .saturating_sub(1) as i64;
         let queued_extra_combats = state
             .extra_phases
             .iter()
-            .filter(|extra_phase| extra_phase.phase == Phase::BeginCombat)
+            .filter(|extra_phase| extra_phase.segment == TurnSegment::Phase(PhaseGroup::Combat))
             .count() as i64;
         v.combat_phases = entered_extra_combats + queued_extra_combats;
 
@@ -2280,9 +2284,10 @@ pub(crate) fn ring_delta_signature(state: &GameState) -> Option<(u32, ResourceVe
         // `active_player` and `phase`. This is NOT a claim that shortcuts may not cross
         // turns — CR 732.2a says a shortcut "may even cross multiple turns"; what is refused
         // is a cross-turn certification by the BOARD-BLIND basis. KNOWINGLY ACCEPTED FALSE
-        // NEGATIVE: `window_scope_from_cover_frames` requires `extra_phases.is_empty()` on
-        // BOTH frames (CR 500.8), so a legitimate WITHIN-turn loop running while an extra
-        // phase is queued mints no basis-B offer. Widen that authority, not a local test.
+        // NEGATIVE: `window_scope_from_cover_frames` requires `extra_phases` and
+        // `extra_phase_resume` empty on BOTH frames (CR 500.8 + CR 500.10), so a legitimate
+        // WITHIN-turn loop running while an extra phase is queued or an inserted unit is in
+        // progress mints no basis-B offer. Widen that authority, not a local test.
         let window: Vec<&GameState> = state
             .loop_detect_ring
             .iter()
@@ -2293,10 +2298,10 @@ pub(crate) fn ring_delta_signature(state: &GameState) -> Option<(u32, ResourceVe
             // `identity_unstable: None` — a CR 104.4b ring SIGNATURE is a resource-delta
             // fact about a period, not a window proof about any object's CR 400.7 identity.
             // This function reads exactly two things: `ResourceVector::snapshot` of each
-            // frame, and `.phase_invariant` (turn number + phase + `extra_phases.is_empty()`)
-            // off this call. The sampler gate also makes the frames homogeneous in
-            // `waiting_for`/`priority_player`, but nothing here looks at those — basis A does,
-            // via `loop_states_equal_modulo_resources`.
+            // frame, and `.phase_invariant` (turn number + phase + no queued extra phase + no
+            // inserted unit in progress) off this call. The sampler gate also makes the frames
+            // homogeneous in `waiting_for`/`priority_player`, but nothing here looks at those —
+            // basis A does, via `loop_states_equal_modulo_resources`.
             window_scope_from_cover_frames(w[0], w[1], None, None, None)
                 .phase_invariant
                 .is_some()
@@ -2802,14 +2807,16 @@ impl LoopWindowScope<'static> {
 /// frame pair that proves nothing gets the [`LoopWindowScope::unproven`] values.
 ///
 /// `phase_invariant`: `Some(phase)` only when the frames agree on turn number AND
-/// step-granular phase AND neither carries a pending extra phase (CR 500.8 can insert a
-/// duplicate of the SAME phase inside one turn). Derived LOCALLY, so it is independent of gate
-/// ORDER; `extra_turns` is not a conjunct because an extra TURN is taken after the current one
-/// and `turn_number` is monotone. `sole_driver`: `Some(p)` only when BOTH frames' driving
-/// sequences are non-empty and every entry in BOTH names controller `p` (CR 117.1b) — reading
-/// only `prior` would mint `Some(p)` for a window another player drove. `identity_unstable`
-/// (CR 400.7) is NOT derived here: [`identity_unstable_ids`] must be computed from the same
-/// PROJECTED pair the caller hands the firewall, so it is threaded in as `pinned` and `period`.
+/// step-granular phase AND neither carries a pending extra phase nor an inserted unit in
+/// progress (CR 500.8 + CR 500.10: an insert can repeat the SAME step label inside one turn,
+/// and once its entry is taken only the unit record shows it). Derived LOCALLY, so it is
+/// independent of gate ORDER; `extra_turns` is not a conjunct because an extra TURN is taken
+/// after the current one and `turn_number` is monotone. `sole_driver`: `Some(p)` only when
+/// BOTH frames' driving sequences are non-empty and every entry in BOTH names controller `p`
+/// (CR 117.1b) — reading only `prior` would mint `Some(p)` for a window another player
+/// drove. `identity_unstable` (CR 400.7) is NOT derived here: [`identity_unstable_ids`] must
+/// be computed from the same PROJECTED pair the caller hands the firewall, so it is threaded
+/// in as `pinned` and `period`.
 fn window_scope_from_cover_frames<'a>(
     pa: &GameState,
     pb: &GameState,
@@ -2817,12 +2824,14 @@ fn window_scope_from_cover_frames<'a>(
     period: Option<&'a PeriodTouch<'a>>,
     identity_unstable: Option<&'a HashSet<ObjectId>>,
 ) -> LoopWindowScope<'a> {
-    // (p1) same turn, (p2) same step-granular phase, (p3) no pending extra phase in
-    // either frame (CR 500.8).
+    // (p1) same turn, (p2) same step-granular phase, (p3) no pending extra phase and
+    // (p4) no inserted unit in progress in either frame (CR 500.8 + CR 500.10).
     let phase_invariant = (pa.turn_number == pb.turn_number
         && pa.phase == pb.phase
         && pa.extra_phases.is_empty()
-        && pb.extra_phases.is_empty())
+        && pb.extra_phases.is_empty()
+        && pa.extra_phase_resume.is_empty()
+        && pb.extra_phase_resume.is_empty())
     .then_some(pa.phase);
 
     // (s1) BOTH sequences non-empty; (s2) one controller across BOTH sequences. Both conjuncts
@@ -7024,6 +7033,14 @@ fn normalized_stack_entries(state: &GameState) -> Vec<(StackEntry, Option<Trigge
                 } => crate::game::triggers::normalize_ability_identity(ability),
                 StackEntryKind::Spell { ability: None, .. }
                 | StackEntryKind::KeywordAction { .. } => {}
+                // The payload keeps its `ObjectIncarnationRef`s: `norm.id` /
+                // `norm.source_id` zeroing does not reach inside it, so two
+                // otherwise-identical entries normalize unequal. That is
+                // fail-safe here — retained content differences only SUPPRESS a
+                // coverability match, never manufacture one (see this
+                // function's own contract). Re-audit when these entries carry
+                // live assignments.
+                StackEntryKind::CombatDamage { .. } => {}
             }
             (norm, firing)
         })
@@ -7244,7 +7261,11 @@ fn stack_entry_resolution_choice_freedom(
         }
         StackEntryKind::Spell { .. }
         | StackEntryKind::ActivatedAbility { .. }
-        | StackEntryKind::KeywordAction { .. } => ResolutionChoiceFreedom::MayPrompt,
+        | StackEntryKind::KeywordAction { .. }
+        // Fail-closed, per the classifier's contract: a choice-free verdict is
+        // a soundness claim requiring a resolver trace, and this kind has no
+        // resolver until combat-damage timing lands.
+        | StackEntryKind::CombatDamage { .. } => ResolutionChoiceFreedom::MayPrompt,
     }
 }
 
@@ -8083,6 +8104,9 @@ pub(crate) fn project_object_for_loop(object: &mut crate::game::game_object::Gam
 
 fn project_out_resources(state: &GameState) -> GameState {
     bump_loop_detect_cost(|cost| cost.projected_clones += 1);
+    // Read from the unprojected state: the cost gates judge recorded facts
+    // against the live statics, before any object is projected below.
+    let observable_journal = crate::game::casting::cost_observable_activation_journal(state);
     let mut s = state.normalize_for_loop();
 
     for player in &mut s.players {
@@ -8179,6 +8203,14 @@ fn project_out_resources(state: &GameState) -> GameState {
     s.spells_cast_this_turn_by_player.clear();
     s.spells_cast_this_game.clear();
     s.spells_cast_this_game_by_player.clear();
+    // CR 602.2 + CR 611.3a: the per-turn activation journal is the activation
+    // analog of the cast journal above, and every row of it is pumped history
+    // EXCEPT the one fact a "first activated ability … each turn" cost reads:
+    // each such modifier's first qualifying row. That is kept (see
+    // `cost_observable_activation_journal`), so a period that spends a one-time
+    // discount compares UNEQUAL and can never be certified as repeatable, while
+    // periods after it keep the same row and still compare equal.
+    *s.abilities_activated_this_turn_by_player = observable_journal;
     // CR 400 (zones) / CR 603.6a (ETB) / CR 701.21 (sacrifice) / CR 111 (tokens):
     // append-only event journals a loop pumps.
     s.zone_changes_this_turn.clear();
@@ -8189,9 +8221,8 @@ fn project_out_resources(state: &GameState) -> GameState {
     s.players_who_sacrificed_artifact_this_turn.clear();
     s.counter_added_this_turn.clear();
     s.player_actions_this_turn.clear();
-    // CR 506 / CR 500.8: combat/phase tallies an extra-combat loop pumps.
-    s.combat_phases_started_this_turn = 0;
-    s.end_steps_started_this_turn = 0;
+    // CR 500.1 + CR 500.8: the per-step tally an extra-phase loop pumps.
+    s.steps_started_this_turn.clear();
 
     // CR 104.4b / CR 732.2a — MODULO LAYER ONLY. The strict `loop_states_equal` /
     // `normalize_for_loop` are deliberately NOT changed; they never call this fn.
@@ -8583,7 +8614,7 @@ mod tests {
     use crate::game::game_object::GameObject;
     use crate::types::ability::TriggerDefinitionRef;
     use crate::types::identifiers::{
-        CardId, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken,
+        CardId, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken, ExtraPhaseId,
     };
     use crate::types::zones::Zone;
 
@@ -9353,10 +9384,9 @@ mod tests {
         );
     }
 
-    /// `snapshot` reads extra combat phases from `combat_phases_started_this_turn`
-    /// (entered, minus the one natural combat) plus the `BeginCombat` entries
-    /// queued in `state.extra_phases`. A queued `Upkeep` extra phase must not
-    /// change it.
+    /// `snapshot` reads extra combat phases from the step tally's `BeginCombat`
+    /// count (entered, minus the one natural combat) plus the whole combat phases
+    /// queued in `state.extra_phases`. A queued upkeep step must not change it.
     ///
     /// REVERT-PROBE: leaving `combat_phases` at its `Default` 0 flips the positive
     /// assertions.
@@ -9366,20 +9396,24 @@ mod tests {
 
         let mut state = GameState::new_two_player(7);
         // CR 506.1: one natural combat + two extra combats already ENTERED.
-        state.combat_phases_started_this_turn = 3;
+        for _ in 0..3 {
+            state.steps_started_this_turn.record(Phase::BeginCombat);
+        }
         // CR 500.8: one extra combat still QUEUED, plus a non-combat extra phase
         // that must be filtered out.
         state.extra_phases.push(ExtraPhase {
             anchor: Phase::EndCombat,
-            phase: Phase::BeginCombat,
+            segment: TurnSegment::Phase(PhaseGroup::Combat),
             attacker_restriction: None,
             attacker_restriction_source: None,
+            id: ExtraPhaseId::default(),
         });
         state.extra_phases.push(ExtraPhase {
             anchor: Phase::Upkeep,
-            phase: Phase::Upkeep,
+            segment: TurnSegment::Step(Phase::Upkeep),
             attacker_restriction: None,
             attacker_restriction_source: None,
+            id: ExtraPhaseId::default(),
         });
 
         let v = ResourceVector::snapshot(&state);
@@ -9391,11 +9425,82 @@ mod tests {
 
         // Removing the queued BeginCombat drops the axis to the entered term only.
         let mut consumed = GameState::new_two_player(7);
-        consumed.combat_phases_started_this_turn = 3;
+        for _ in 0..3 {
+            consumed.steps_started_this_turn.record(Phase::BeginCombat);
+        }
         let v2 = ResourceVector::snapshot(&consumed);
         assert_eq!(
             v2.combat_phases, 2,
             "with no queued extras, only the entered term (started - 1) remains"
+        );
+    }
+
+    /// `snapshot` counts only the whole combat phases queued in
+    /// `state.extra_phases`, not every queued whole phase: an added main phase
+    /// and an added beginning phase are not combats.
+    #[test]
+    fn snapshot_counts_queued_whole_combat_phases_only() {
+        let mut state = GameState::new_two_player(7);
+        // CR 506.1: the natural combat was entered, so no extra combat yet.
+        state.steps_started_this_turn.record(Phase::BeginCombat);
+        // CR 500.8: in the postcombat main phase, Relentless Assault queues its
+        // follow-up main phase and then its combat phase, and Temple of
+        // Atropos queues a whole beginning phase (CR 501.1).
+        for segment in [
+            TurnSegment::Phase(PhaseGroup::PostcombatMain),
+            TurnSegment::Phase(PhaseGroup::Combat),
+            TurnSegment::Phase(PhaseGroup::Beginning),
+        ] {
+            let id = state.mint_extra_phase_id();
+            state
+                .extra_phases
+                .push(crate::types::game_state::ExtraPhase {
+                    anchor: Phase::PostCombatMain,
+                    segment,
+                    attacker_restriction: None,
+                    attacker_restriction_source: None,
+                    id,
+                });
+        }
+
+        assert_eq!(
+            ResourceVector::snapshot(&state).combat_phases,
+            1,
+            "one queued whole combat phase is one extra combat; a queued whole main or beginning phase is none"
+        );
+    }
+
+    /// CR 732.2a: the modulo projection clears the step tally, so two positions
+    /// that differ only in steps begun this turn compare equal there (the strict
+    /// CR 104.4b comparator keeps them apart:
+    /// `types::game_state::tests::strict_loop_equality_compares_the_step_tally`).
+    /// The resource snapshot, taken on `normalize_for_loop` outputs, still reads
+    /// the extra-combat axis from the tally, so the tally is not normalized away.
+    #[test]
+    fn modulo_projection_clears_the_step_tally() {
+        let mut base = GameState::new_two_player(7);
+        base.steps_started_this_turn.record(Phase::Upkeep);
+        let same = base.clone();
+        let mut extra_upkeep = base.clone();
+        extra_upkeep.steps_started_this_turn.record(Phase::Upkeep);
+
+        assert!(
+            loop_states_equal_modulo_resources(&base, &same),
+            "reach guard: the unmodified clone is equal modulo resources"
+        );
+        assert!(
+            loop_states_equal_modulo_resources(&base, &extra_upkeep),
+            "the modulo projection clears the tally"
+        );
+
+        let mut combats = GameState::new_two_player(7);
+        for _ in 0..3 {
+            combats.steps_started_this_turn.record(Phase::BeginCombat);
+        }
+        assert_eq!(
+            ResourceVector::snapshot(&combats.normalize_for_loop()).combat_phases,
+            2,
+            "one natural combat and two extra combats entered"
         );
     }
 
@@ -9453,6 +9558,362 @@ mod tests {
             loop_states_equal_modulo_resources(&c, &d),
             "an unrestricted ability's tally is pure history and must be projected out (EQUAL)"
         );
+    }
+
+    /// CR 611.3a + CR 732.2a: a "first activated ability … each turn" discount
+    /// (Professor Hojo) is one-time within the turn, so a period that SPENDS it
+    /// must not compare modulo-equal to one that hasn't: a certificate over that
+    /// period would repeat the one-time discount. The journal is projected to
+    /// the modifier's first qualifying row. PAIRED CONTROLS: without the
+    /// once-per-turn modifier the same pair is pure history (EQUAL), and two
+    /// positions after the discount was spent share that row (EQUAL).
+    #[test]
+    fn a_spent_first_activation_discount_breaks_modulo_equality() {
+        use crate::game::scenario::GameScenario;
+        use crate::types::ability::TargetRef;
+        const HOJO: &str = "The first activated ability you activate during your turn that targets a creature you control costs {2} less to activate.";
+
+        let board = |with_hojo: bool| {
+            let mut s = GameScenario::new_n_player(2, 7);
+            s.at_phase(Phase::PreCombatMain);
+            let own = s.add_creature(PlayerId(0), "Own", 1, 1).id();
+            let src = s
+                .add_artifact_from_oracle(PlayerId(0), "Tapper", "{2}: Tap target creature.")
+                .id();
+            if with_hojo {
+                s.add_creature_from_oracle(PlayerId(0), "Professor Hojo", 2, 2, HOJO);
+            }
+            (s.build().state().clone(), own, src)
+        };
+        let row = |state: &GameState, own: ObjectId, src: ObjectId| {
+            crate::game::casting::capture_activation_record_from(
+                state,
+                PlayerId(0),
+                src,
+                None,
+                &[TargetRef::Object(own)],
+            )
+            .expect("the source exists")
+        };
+        let journaled = |state: &GameState, rows: Vec<_>| {
+            let mut next = state.clone();
+            next.abilities_activated_this_turn_by_player
+                .insert(PlayerId(0), im::Vector::from(rows));
+            next.players[1].life -= 1; // the projected-out resource gain
+            next
+        };
+
+        // Negative: before vs after the discount is spent => UNEQUAL.
+        let (a, own, src) = board(true);
+        let first = row(&a, own, src);
+        let spent = journaled(&a, vec![first.clone()]);
+        assert!(
+            !loop_states_equal_modulo_resources(&a, &spent),
+            "a period that spends the one-time discount must compare UNEQUAL"
+        );
+        // Control: two positions after it was spent keep the same first row.
+        let later = journaled(&spent, vec![first.clone(), first.clone()]);
+        assert!(
+            loop_states_equal_modulo_resources(&spent, &later),
+            "after the discount is spent, later rows are pure history (EQUAL)"
+        );
+
+        // Control: no once-per-turn modifier reads the journal => EQUAL.
+        let (c, own, src) = board(false);
+        let d = journaled(&c, vec![row(&c, own, src)]);
+        assert!(
+            loop_states_equal_modulo_resources(&c, &d),
+            "without a reader the journal is pure history (EQUAL)"
+        );
+    }
+
+    /// CR 611.3a + CR 732.2a: a DORMANT first-activation modifier (Professor
+    /// Hojo in hand) reads the whole turn's journal the moment it takes effect,
+    /// so the journal is cost-relevant before it does. A (no earlier qualifying
+    /// activation) and B (one) must compare UNEQUAL: once Hojo is cast, the
+    /// same activation costs {0} in A and {2} in B. The pair is measured through
+    /// the production pipeline as the reach guard.
+    #[test]
+    fn a_dormant_first_activation_modifier_keeps_the_journal_in_the_loop_key() {
+        use crate::game::scenario::{GameRunner, GameScenario};
+        use crate::types::ability::TargetRef;
+        use crate::types::actions::GameAction;
+        use crate::types::mana::{ManaColor, ManaCost, ManaUnit};
+        const HOJO: &str = "The first activated ability you activate during your turn that targets a creature you control costs {2} less to activate.";
+
+        let build = || {
+            let mut s = GameScenario::new_n_player(2, 7);
+            s.at_phase(Phase::PreCombatMain);
+            let own = s.add_creature(PlayerId(0), "Own", 1, 1).id();
+            let src = s
+                .add_artifact_from_oracle(PlayerId(0), "Tapper", "{2}: Tap target creature.")
+                .id();
+            let hojo = s
+                .add_creature_to_hand_from_oracle(PlayerId(0), "Professor Hojo", 2, 2, HOJO)
+                .with_mana_cost(ManaCost::generic(1))
+                .id();
+            s.with_mana_pool(
+                PlayerId(0),
+                (0..10)
+                    .map(|_| ManaUnit::new(ManaColor::Blue.into(), ObjectId(0), false, Vec::new()))
+                    .collect(),
+            );
+            (s.build(), own, src, hojo)
+        };
+        let (a_runner, own, src, hojo) = build();
+        let a = a_runner.state().clone();
+        let mut b = a.clone();
+        b.abilities_activated_this_turn_by_player.insert(
+            PlayerId(0),
+            im::Vector::from(vec![crate::game::casting::capture_activation_record_from(
+                &a,
+                PlayerId(0),
+                src,
+                None,
+                &[TargetRef::Object(own)],
+            )
+            .expect("the source exists")]),
+        );
+        assert!(
+            !loop_states_equal_modulo_resources(&a, &b),
+            "a dormant Hojo makes the earlier qualifying activation cost-relevant (UNEQUAL)"
+        );
+
+        // Reach guard: after Hojo enters, the same activation is priced apart.
+        let paid_after_hojo = |state: GameState| {
+            let mut r = GameRunner::from_state(state);
+            r.cast(hojo).resolve();
+            let before = r.state().players[0].mana_pool.total();
+            r.act(GameAction::ActivateAbility {
+                source_id: src,
+                ability_index: 0,
+            })
+            .expect("activation");
+            r.act(GameAction::SelectTargets {
+                targets: vec![TargetRef::Object(own)],
+            })
+            .expect("target");
+            while matches!(
+                r.state().waiting_for,
+                crate::types::game_state::WaitingFor::ManaPayment { .. }
+            ) {
+                r.act(GameAction::PassPriority).expect("pay");
+            }
+            before - r.state().players[0].mana_pool.total()
+        };
+        assert_eq!((paid_after_hojo(a), paid_after_hojo(b)), (0, 2));
+    }
+
+    /// CR 611.3a + CR 701.27a: two first-activation definitions on ONE object
+    /// never mask each other. The object's front face carries active modifier A
+    /// (keyed to boast abilities), its back face dormant modifier B (Hojo's,
+    /// keyed to any activated ability). A tap activation targeting P0's creature
+    /// qualifies for B, not A: state B (which has that row) and state A (which
+    /// doesn't) must compare UNEQUAL, because once the object transforms the same
+    /// activation costs {0} in A and {2} in B (the production reach guard).
+    #[test]
+    fn two_first_activation_definitions_on_one_object_are_projected_separately() {
+        use crate::game::game_object::BackFaceData;
+        use crate::game::scenario::{GameRunner, GameScenario};
+        use crate::types::ability::TargetRef;
+        use crate::types::actions::GameAction;
+        use crate::types::card_type::{CardType, CoreType};
+        use crate::types::mana::{ManaColor, ManaUnit};
+        use crate::types::statics::StaticMode;
+        const HOJO: &str = "The first activated ability you activate during your turn that targets a creature you control costs {2} less to activate.";
+
+        let modifier_b =
+            crate::parser::oracle_static::parse_static_line(HOJO).expect("Hojo's line parses");
+        let mut modifier_a = modifier_b.clone();
+        let StaticMode::ReduceAbilityCost { keyword, .. } = &mut modifier_a.mode else {
+            panic!("reach guard: {:?}", modifier_a.mode);
+        };
+        *keyword = "boast".to_string();
+
+        let mut s = GameScenario::new_n_player(2, 7);
+        s.at_phase(Phase::PreCombatMain);
+        let own = s.add_creature(PlayerId(0), "Own", 1, 1).id();
+        let src = s
+            .add_artifact_from_oracle(PlayerId(0), "Tapper", "{2}: Tap target creature.")
+            .id();
+        let janus = s
+            .add_creature(PlayerId(0), "Janus Front", 2, 2)
+            .with_static_definition(modifier_a)
+            .id();
+        s.with_mana_pool(
+            PlayerId(0),
+            (0..10)
+                .map(|_| ManaUnit::new(ManaColor::Blue.into(), ObjectId(0), false, Vec::new()))
+                .collect(),
+        );
+        let mut runner = s.build();
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&janus)
+            .unwrap()
+            .back_face = Some(BackFaceData {
+            name: "Janus Back".to_string(),
+            power: Some(2),
+            toughness: Some(2),
+            card_types: CardType {
+                core_types: vec![CoreType::Creature],
+                ..Default::default()
+            },
+            static_definitions: vec![modifier_b].into(),
+            ..Default::default()
+        });
+        let a = runner.state().clone();
+        let mut b = a.clone();
+        b.abilities_activated_this_turn_by_player.insert(
+            PlayerId(0),
+            im::Vector::from(vec![crate::game::casting::capture_activation_record_from(
+                &a,
+                PlayerId(0),
+                src,
+                None,
+                &[TargetRef::Object(own)],
+            )
+            .expect("the source exists")]),
+        );
+        assert!(
+            !loop_states_equal_modulo_resources(&a, &b),
+            "the back face's modifier reads the row the front face's ignores (UNEQUAL)"
+        );
+
+        // Reach guard: transformed, the back face's modifier prices them apart.
+        let paid_after_transform = |state: GameState| {
+            let mut r = GameRunner::from_state(state);
+            crate::game::transform::transform_permanent(r.state_mut(), janus, &mut Vec::new())
+                .expect("the object transforms");
+            crate::game::layers::flush_layers(r.state_mut());
+            assert_eq!(r.state().objects[&janus].name, "Janus Back", "reach guard");
+            let before = r.state().players[0].mana_pool.total();
+            r.act(GameAction::ActivateAbility {
+                source_id: src,
+                ability_index: 0,
+            })
+            .expect("activation");
+            r.act(GameAction::SelectTargets {
+                targets: vec![TargetRef::Object(own)],
+            })
+            .expect("target");
+            while matches!(
+                r.state().waiting_for,
+                crate::types::game_state::WaitingFor::ManaPayment { .. }
+            ) {
+                r.act(GameAction::PassPriority).expect("pay");
+            }
+            before - r.state().players[0].mana_pool.total()
+        };
+        assert_eq!((paid_after_transform(a), paid_after_transform(b)), (0, 2));
+    }
+
+    /// CR 109.5 + CR 611.3a: "you" is the modifier's CURRENT controller, and
+    /// control can later pass to any player, not just its owner. It's P2's
+    /// turn in a three-player game; P0 owns and controls Hojo; P2 has a creature
+    /// and a tapper. State B has an earlier P2 activation targeting P2's own
+    /// creature, A doesn't. They must compare UNEQUAL: once P2 gains control of
+    /// Hojo (Control Magic), the same P2 activation costs {0} in A and {2} in B
+    /// (the production reach guard).
+    #[test]
+    fn a_first_activation_row_is_kept_for_every_possible_controller() {
+        use crate::game::scenario::{GameRunner, GameScenario};
+        use crate::types::ability::TargetRef;
+        use crate::types::actions::GameAction;
+        use crate::types::game_state::WaitingFor;
+        use crate::types::mana::{ManaColor, ManaUnit};
+        const HOJO: &str = "The first activated ability you activate during your turn that targets a creature you control costs {2} less to activate.";
+        let (p0, p2) = (PlayerId(0), PlayerId(2));
+
+        let mut s = GameScenario::new_n_player(3, 7);
+        s.at_phase(Phase::PreCombatMain);
+        let hojo = s
+            .add_creature_from_oracle(p0, "Professor Hojo", 2, 2, HOJO)
+            .id();
+        let theirs = s.add_creature(p2, "P2 Creature", 1, 1).id();
+        let src = s
+            .add_artifact_from_oracle(p2, "P2 Tapper", "{2}: Tap target creature.")
+            .id();
+        let magic = s
+            .add_enchantment_from_oracle(
+                p2,
+                "Control Magic",
+                "Enchant creature\nYou control enchanted creature.",
+            )
+            .with_subtypes(vec!["Aura"])
+            .id();
+        s.with_mana_pool(
+            p2,
+            (0..10)
+                .map(|_| ManaUnit::new(ManaColor::Blue.into(), ObjectId(0), false, Vec::new()))
+                .collect(),
+        );
+        let mut runner = s.build();
+        {
+            let state = runner.state_mut();
+            state.active_player = p2;
+            state.priority_player = p2;
+            state.waiting_for = WaitingFor::Priority { player: p2 };
+        }
+        let a = runner.state().clone();
+        assert_eq!(
+            a.objects[&hojo].controller, p0,
+            "reach guard: P0 controls Hojo"
+        );
+        let mut b = a.clone();
+        b.abilities_activated_this_turn_by_player.insert(
+            p2,
+            im::Vector::from(vec![crate::game::casting::capture_activation_record_from(
+                &a,
+                p2,
+                src,
+                None,
+                &[TargetRef::Object(theirs)],
+            )
+            .expect("the source exists")]),
+        );
+        assert!(
+            !loop_states_equal_modulo_resources(&a, &b),
+            "P2's qualifying row is cost-relevant should P2 gain Hojo (UNEQUAL)"
+        );
+
+        // Reach guard: P2 gains control of Hojo, then activates.
+        let paid_after_transfer = |state: GameState| {
+            let mut r = GameRunner::from_state(state);
+            {
+                let state = r.state_mut();
+                state.objects.get_mut(&magic).unwrap().attached_to = Some(hojo.into());
+                state
+                    .objects
+                    .get_mut(&hojo)
+                    .unwrap()
+                    .attachments
+                    .push(magic);
+                state.layers_dirty.mark_full();
+            }
+            crate::game::layers::flush_layers(r.state_mut());
+            assert_eq!(
+                r.state().objects[&hojo].controller,
+                p2,
+                "reach guard: P2 has Hojo"
+            );
+            let before = r.state().players[2].mana_pool.total();
+            r.act(GameAction::ActivateAbility {
+                source_id: src,
+                ability_index: 0,
+            })
+            .expect("activation");
+            r.act(GameAction::SelectTargets {
+                targets: vec![TargetRef::Object(theirs)],
+            })
+            .expect("target");
+            while matches!(r.state().waiting_for, WaitingFor::ManaPayment { .. }) {
+                r.act(GameAction::PassPriority).expect("pay");
+            }
+            before - r.state().players[2].mana_pool.total()
+        };
+        assert_eq!((paid_after_transfer(a), paid_after_transfer(b)), (0, 2));
     }
 
     /// CR 602.5b: per-GAME ("Activate only once") gate preserved; sibling
@@ -9681,6 +10142,48 @@ mod tests {
         }
     }
 
+    /// CR 119.1 + CR 732.2a: two drain-cycle points whose stacks hold the same life-gain
+    /// trigger, differing only in the life TOTAL that trigger's firing event reports
+    /// (CR 603.7c), must compare modulo-EQUAL. The reported total is the projected
+    /// resource itself, so leaving it in compared content makes every drain cycle look
+    /// distinct and the loop is never certified. The control pair — a different life-change
+    /// AMOUNT — must still compare UNEQUAL: the projection drops the reading, never the
+    /// change.
+    ///
+    /// Revert proof: giving `LifeTotalReading` a derived `PartialEq` flips the first
+    /// assertion to `false`.
+    #[test]
+    fn modulo_equal_ignores_a_carried_life_total_reading() {
+        use crate::types::events::GameEvent;
+        use crate::types::game_state::StackEntryKind;
+
+        fn cycle_point(amount: i32, reported_total: i32) -> GameState {
+            let mut state = GameState::new_two_player(7);
+            state.players[1].life = reported_total;
+            let mut entry = trigger_entry(1, 500, 0);
+            if let StackEntryKind::TriggeredAbility { trigger_event, .. } = &mut entry.kind {
+                *trigger_event = Some(GameEvent::LifeChanged {
+                    player_id: PlayerId(1),
+                    amount,
+                    new_total: crate::types::events::LifeTotalReading(Some(reported_total)),
+                });
+            }
+            state.stack.push_back(entry);
+            state
+        }
+
+        assert!(
+            loop_states_equal_modulo_resources(&cycle_point(-1, 199), &cycle_point(-1, 198)),
+            "two drain cycles differing only in the life total their firing event reports \
+             must stay modulo-equal (CR 732.2a), or the loop is never certified"
+        );
+        assert!(
+            !loop_states_equal_modulo_resources(&cycle_point(-1, 199), &cycle_point(-2, 198)),
+            "a different life-change amount is a real difference in the period and must \
+             still compare UNEQUAL"
+        );
+    }
+
     /// The modulo comparator must treat two cascade cycle points whose stacks hold
     /// the SAME triggered ability from the SAME source but a DIFFERENT (fresh) entry
     /// id as equal — otherwise a mandatory trigger cascade is invisible to the modulo
@@ -9699,6 +10202,7 @@ mod tests {
                 token: DelayedTriggerToken(1),
                 instance: DelayedTriggerInstanceId(1),
                 source_id: ObjectId(500),
+                offer_id: None,
             }),
         );
         let mut b = a.clone();
@@ -9711,6 +10215,7 @@ mod tests {
                 token: DelayedTriggerToken(2),
                 instance: DelayedTriggerInstanceId(2),
                 source_id: ObjectId(500),
+                offer_id: None,
             }),
         );
         assert!(
@@ -13138,6 +13643,7 @@ mod tests {
             amount: ManaCost::default(),
             spell_filter: None,
             dynamic_count,
+            reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
         };
         assert!(
             !cover_with_static_on_stable(modify(Some(object_count_ref()))),
@@ -13187,6 +13693,9 @@ mod tests {
             dynamic_count,
             exemption: Default::default(),
             activator: None,
+
+            targets: None,
+            frequency: None,
         };
         assert!(
             !cover_with_static_on_stable(reduce(Some(object_count_ref()))),
@@ -15678,6 +16187,7 @@ mod tests {
                 "OptionalEffectChoice (CR 603.5 + CR 608.2d)",
                 WaitingFor::OptionalEffectChoice {
                     player: PlayerId(0),
+                    decision_subject_id: None,
                     source_id: on_board[0],
                     description: None,
                     may_trigger_key: None,
@@ -15801,6 +16311,8 @@ mod tests {
                         .collect(),
                     block_requirements: Default::default(),
                     blocker_constraints: Default::default(),
+                    must_be_blocked_targets: Default::default(),
+                    block_capacities: Default::default(),
                 },
                 true,
             ),
@@ -17851,6 +18363,7 @@ mod tests {
             amount: ManaCost::NoCost,
             spell_filter: None,
             dynamic_count: None,
+            reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
         })
         .affected(TargetFilter::SelfRef)
         .condition(StaticCondition::QuantityComparison {
@@ -18054,6 +18567,7 @@ mod tests {
                 amount: ManaCost::NoCost,
                 spell_filter: None,
                 dynamic_count: None,
+                reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
             })
             .affected(TargetFilter::SelfRef)
             .condition(StaticCondition::QuantityComparison {
@@ -20729,6 +21243,9 @@ mod tests {
     ///   `sole_driver == None` assertion FAILS.
     /// * drop the `extra_phases` conjunct (CR 500.8) ⇒ the `phase_invariant == None`
     ///   assertion FAILS while the turn/phase ones still pass.
+    /// * drop either `extra_phase_resume` conjunct (CR 500.8 + CR 500.10) ⇒ the matching (p4)
+    ///   `phase_invariant == None` assertion FAILS while the paired `Some(BeginCombat)` still
+    ///   passes.
     /// * drop the turn-number conjunct ⇒ the differing-turn assertion FAILS.
     #[test]
     fn window_scope_is_fail_closed_on_a_heterogeneous_window() {
@@ -20807,14 +21324,69 @@ mod tests {
             .extra_phases
             .push(crate::types::game_state::ExtraPhase {
                 anchor: Phase::PreCombatMain,
-                phase: Phase::PreCombatMain,
+                segment: TurnSegment::Phase(PhaseGroup::PrecombatMain),
                 attacker_restriction: None,
                 attacker_restriction_source: None,
+                id: crate::types::identifiers::ExtraPhaseId::default(),
             });
         assert_eq!(
             window_scope_from_cover_frames(&pa, &pb_extra, None, None, None).phase_invariant,
             None,
             "(p3) CR 500.8: a pending extra phase breaks `equal phase ⇒ never left it`"
+        );
+
+        // (p4) CR 500.8 + CR 500.10: a combat added after the precombat main phase
+        // and the natural combat share the turn and the step label with no entry
+        // queued; only the frame inside the added combat has a unit in progress.
+        let at_begin_combat = || {
+            let mut s = base();
+            s.phase = Phase::BeginCombat;
+            s
+        };
+        let in_added_combat = || {
+            let mut s = at_begin_combat();
+            s.extra_phase_resume = vec![crate::types::game_state::InsertedPhaseResume {
+                anchor: Phase::PreCombatMain,
+                segment: TurnSegment::Phase(PhaseGroup::Combat),
+                entry: crate::types::identifiers::ExtraPhaseId::default(),
+            }];
+            s
+        };
+        assert_eq!(
+            window_scope_from_cover_frames(
+                &at_begin_combat(),
+                &at_begin_combat(),
+                None,
+                None,
+                None
+            )
+            .phase_invariant,
+            Some(Phase::BeginCombat),
+            "PAIRED POSITIVE: no unit in progress in either frame"
+        );
+        assert_eq!(
+            window_scope_from_cover_frames(
+                &in_added_combat(),
+                &at_begin_combat(),
+                None,
+                None,
+                None
+            )
+            .phase_invariant,
+            None,
+            "(p4) an inserted unit in progress in the first frame"
+        );
+        assert_eq!(
+            window_scope_from_cover_frames(
+                &at_begin_combat(),
+                &in_added_combat(),
+                None,
+                None,
+                None
+            )
+            .phase_invariant,
+            None,
+            "(p4) an inserted unit in progress in the second frame"
         );
 
         // (p1) different turns.
@@ -21023,7 +21595,7 @@ mod tests {
     ///   non-refusing value on drawgo's own data, so the `None`s above are a measured refusal
     ///   rather than an inert instrument.
     /// * ATTRIBUTION — `ResourceVector::snapshot` reads life / library / poison / energy /
-    ///   mana / battlefield counters / `combat_phases_started_this_turn` / `extra_phases`, and
+    ///   mana / battlefield counters / `steps_started_this_turn` / `extra_phases`, and
     ///   never `turn_number` or `phase`, so δ and the derived `k` are unchanged by the
     ///   flattening and the `None` → `Some` flip is attributable to the turn-position
     ///   conjunct alone.

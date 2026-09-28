@@ -1,8 +1,8 @@
 use crate::types::ability::{
-    AbilityKind, ContinuousModification, CopyCountStatus, DetachedRemainder, Duration, Effect,
-    EffectKind, KeywordAction, PlayerFilter, QuantityExpr, ResolvedAbility, SiblingCondition,
-    SpellContext, SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetRef, TargetSelectionMode,
-    TriggerCondition,
+    cost_paid_object_snapshot_ids_eq, AbilityKind, ContinuousModification, CopyCountStatus,
+    DetachedRemainder, Duration, Effect, EffectKind, KeywordAction, PlayerFilter, QuantityExpr,
+    ResolvedAbility, SiblingCondition, SpellContext, SubAbilityLink, TargetChoiceTiming,
+    TargetFilter, TargetRef, TargetSelectionMode, TriggerCondition,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -877,7 +877,10 @@ fn spell_in_zone(state: &GameState, id: ObjectId, zone: Zone) -> bool {
     state.objects.get(&id).is_some_and(|obj| obj.zone == zone)
 }
 
-fn has_missing_required_stack_targets(state: &GameState, ability: &ResolvedAbility) -> bool {
+pub(crate) fn has_missing_required_stack_targets(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> bool {
     if !flatten_targets_in_chain(ability).is_empty() {
         return false;
     }
@@ -1300,6 +1303,85 @@ fn resolving_saga_chapter(entry: &StackEntry) -> Option<ResolvingSagaChapter> {
     })
 }
 
+/// The rewrites [`resolve_top`] applies to the ability it pops,
+/// after [`bind_resolution_scope`] has bound `state` and before it checks the
+/// ability's targets: `scoped_player` from the trigger event or from a lone
+/// player target, and a `ParentTarget` seeded from the trigger event.
+///
+/// A rewrite of the popped ability that a node's binding reads belongs here,
+/// not inline in [`resolve_top`]: `effects::stack_reach` answers a pending
+/// entry's nodes through this function.
+pub(crate) fn bind_resolving_ability_referents(
+    state: &GameState,
+    entry: &StackEntry,
+    ability: &mut ResolvedAbility,
+) {
+    // CR 120.3 + CR 506.2: A "deals [combat] damage to a player" /
+    // "attacks a player" trigger introduces the damaged/attacked player as the
+    // event referent. Stamp it onto the resolving ability's `scoped_player`
+    // (when not already bound) so `PlayerScope::ScopedPlayer` quantities such as
+    // "they lose half their life, rounded up" (Unstoppable Slasher) resolve
+    // against that player rather than falling back to the source's controller.
+    // Mirrors the Phase-trigger stamping in `triggers::build_triggered_ability`;
+    // the parser rebinds these possessives to `ScopedPlayer` in
+    // `lower_trigger_ir`.
+    if ability.scoped_player.is_none() {
+        if let Some(pid) = state.current_trigger_event.as_ref().and_then(|event| {
+            matches!(
+                event,
+                GameEvent::DamageDealt {
+                    target: TargetRef::Player(_),
+                    ..
+                } | GameEvent::AttackersDeclared { .. }
+            )
+            .then(|| targeting::extract_player_from_event(event, state))
+            .flatten()
+        }) {
+            ability.set_scoped_player_recursive(pid);
+        }
+    }
+
+    // CR 109.4 + CR 115.10a/b (issue #6505): "Target opponent exiles a creature
+    // they control and their graveyard" (Strategic Betrayal). The spell targets
+    // ONLY the opponent (CR 115.1a); that opponent then CHOOSES a creature they
+    // control and exiles their graveyard — so a `ScopedPlayer`-scoped move-object
+    // filter must resolve its acting/choosing player against the resolved single
+    // player target, not the caster. Sibling of the DamageDealt/AttackersDeclared
+    // scoped-player stamp above: bind `scoped_player` from the ability's lone
+    // `TargetRef::Player` before the change_zone choosers run at resolution.
+    if ability.scoped_player.is_none() {
+        let single_player_target = ability
+            .targets
+            .iter()
+            .filter(|target| matches!(target, TargetRef::Player(_)))
+            .count()
+            == 1;
+        if single_player_target
+            && crate::game::effects::ability_uses_relative_controller_scoped(ability)
+        {
+            let actor = ability.target_player();
+            ability.set_scoped_player_recursive(actor);
+        }
+    }
+
+    // CR 608.2c: Re-stamp ParentTarget anaphora from the stack entry's trigger
+    // event at resolution time (Stationed/VehicleCrewed/Saddled/attack batches).
+    // Push-time seeding in `push_pending_trigger_to_stack_with_event_batch` can
+    // be skipped on alternate dispatch paths; this guarantees the referent is
+    // bound before `execute_effect` when `trigger_event` is present on the entry.
+    if let StackEntryKind::TriggeredAbility { trigger_event, .. } = &entry.kind {
+        let event_ref = trigger_event
+            .as_ref()
+            .or(state.current_trigger_event.as_ref());
+        super::triggers::seed_batched_attack_parent_targets(ability, event_ref);
+        super::triggers::seed_event_context_parent_targets(
+            ability,
+            event_ref,
+            super::triggers::EventContextSeedTiming::ResolutionFallback,
+        );
+    }
+}
+
 /// CR 608.2: Resolve the top object on the stack.
 pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // CR 603.3c + CR 603.3d: The top of the stack may be a trigger entry that
@@ -1424,6 +1506,19 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         StackEntryKind::KeywordAction { .. } => unreachable!(
             "KeywordAction stack entries are resolved via the early-return branch above"
         ),
+        // Nothing constructs a `CombatDamage` entry in production yet: it has no
+        // push authority until combat-damage-on-the-stack timing lands, and at
+        // that point it gains its own early-return resolver ahead of this match,
+        // exactly as `KeywordAction` has. Until then no state can reach here.
+        // Unreachable on two independent grounds, and the second is what an
+        // earlier revision of this arm was missing: no phase before the pushing
+        // one constructs this kind, AND `PersistedGameState::prepare_for_restore`
+        // refuses to admit a decoded state that carries one. Without that second
+        // guard a deserialized entry could reach here, which is why "nothing
+        // constructs one" was not sufficient on its own.
+        StackEntryKind::CombatDamage { .. } => unreachable!(
+            "CombatDamage stack entries are refused at persisted admission and never pushed in this phase"
+        ),
     };
 
     // CR 608.2c + CR 400.7a + CR 613.1b: "The controller of the spell or ability follows
@@ -1480,75 +1575,8 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         }
     }
 
-    // CR 603.7c + CR 120.3 + CR 506.2: A "deals [combat] damage to a player" /
-    // "attacks a player" trigger introduces the damaged/attacked player as the
-    // event referent. Stamp it onto the resolving ability's `scoped_player`
-    // (when not already bound) so `PlayerScope::ScopedPlayer` quantities such as
-    // "they lose half their life, rounded up" (Unstoppable Slasher) resolve
-    // against that player rather than falling back to the source's controller.
-    // Mirrors the Phase-trigger stamping in `triggers::build_triggered_ability`;
-    // the parser rebinds these possessives to `ScopedPlayer` in
-    // `lower_trigger_ir`.
     if let Some(ability) = ability.as_mut() {
-        if ability.scoped_player.is_none() {
-            if let Some(pid) = state.current_trigger_event.as_ref().and_then(|event| {
-                matches!(
-                    event,
-                    GameEvent::DamageDealt {
-                        target: TargetRef::Player(_),
-                        ..
-                    } | GameEvent::AttackersDeclared { .. }
-                )
-                .then(|| targeting::extract_player_from_event(event, state))
-                .flatten()
-            }) {
-                ability.set_scoped_player_recursive(pid);
-            }
-        }
-    }
-
-    // CR 109.4 + CR 115.10a/b (issue #6505): "Target opponent exiles a creature
-    // they control and their graveyard" (Strategic Betrayal). The spell targets
-    // ONLY the opponent (CR 115.1a); that opponent then CHOOSES a creature they
-    // control and exiles their graveyard — so a `ScopedPlayer`-scoped move-object
-    // filter must resolve its acting/choosing player against the resolved single
-    // player target, not the caster. Sibling of the DamageDealt/AttackersDeclared
-    // scoped-player stamp above: bind `scoped_player` from the ability's lone
-    // `TargetRef::Player` before the change_zone choosers run at resolution.
-    if let Some(ability) = ability.as_mut() {
-        if ability.scoped_player.is_none() {
-            let single_player_target = ability
-                .targets
-                .iter()
-                .filter(|target| matches!(target, TargetRef::Player(_)))
-                .count()
-                == 1;
-            if single_player_target
-                && crate::game::effects::ability_uses_relative_controller_scoped(ability)
-            {
-                let actor = ability.target_player();
-                ability.set_scoped_player_recursive(actor);
-            }
-        }
-    }
-
-    // CR 608.2c: Re-stamp ParentTarget anaphora from the stack entry's trigger
-    // event at resolution time (Stationed/VehicleCrewed/Saddled/attack batches).
-    // Push-time seeding in `push_pending_trigger_to_stack_with_event_batch` can
-    // be skipped on alternate dispatch paths; this guarantees the referent is
-    // bound before `execute_effect` when `trigger_event` is present on the entry.
-    if let (Some(ability), StackEntryKind::TriggeredAbility { trigger_event, .. }) =
-        (ability.as_mut(), &entry.kind)
-    {
-        let event_ref = trigger_event
-            .as_ref()
-            .or(state.current_trigger_event.as_ref());
-        super::triggers::seed_batched_attack_parent_targets(ability, event_ref);
-        super::triggers::seed_event_context_parent_targets(
-            ability,
-            event_ref,
-            super::triggers::EventContextSeedTiming::ResolutionFallback,
-        );
+        bind_resolving_ability_referents(state, &entry, ability);
     }
 
     if ability
@@ -3621,12 +3649,17 @@ pub(crate) fn priority_checkpoint_is_settled(state: &GameState) -> bool {
         && state.current_trigger_match_count.is_none()
         && state.die_result_this_resolution.is_none()
         && state.resolution_stack.is_empty()
+        && state.resolving_stack_entry.is_none()
+        && state.resolving_trigger_firing.is_none()
+        && state.pending_resolution_completion.is_none()
         && state.pending_miracle_offers.is_empty()
         && state.pending_paradigm_remaining_offers.is_none()
         && state.pending_damage_replacements.is_empty()
         && state.pending_step_end_mana_handlers.is_empty()
         && state.pending_phase_transition_progress.is_none()
         && state.deferred_step_trigger_resume.is_none()
+        && state.pending_liminal_entry_resume.is_none()
+        && state.pending_token_battlefield_entry.is_none()
         && state.pending_team_draw_step.is_empty()
         && state.pending_untap_declines.is_empty()
 }
@@ -3707,6 +3740,8 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         force_block_attacker: _,
         target_incarnations: _, // CR 400.7 referent pins; batch candidacy is shape-only
         selected_target_incarnations: _, // CR 400.7 selected-target pins; batch candidacy is shape-only
+        activation_cost_reduction: _,
+        activation_record: _,
         illegal_target_slots: _, // CR 608.2b resolution legality stamp; batch candidacy is shape-only
         controller: _,
         original_controller,
@@ -3742,7 +3777,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         chosen_x,
         cost_paid_object,
         noted_mana_payment,
-        cost_paid_object_ids,
+        cost_paid_objects,
         effect_context_object,
         amassed_army_object,
         ability_index,
@@ -3828,7 +3863,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         // abilities today (only cost-payment handlers populate it), kept
         // here so this exhaustive-field check stays correct if that ever
         // changes.
-        && cost_paid_object_ids.is_empty()
+        && cost_paid_objects.is_empty()
         && effect_context_object.is_none()
         && amassed_army_object.is_none()
         && ability_index.is_none()
@@ -3938,6 +3973,8 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         force_block_attacker: _,
         target_incarnations: _, // CR 400.7 referent pins; batch candidacy is shape-only
         selected_target_incarnations: _, // CR 400.7 selected-target pins; batch candidacy is shape-only
+        activation_cost_reduction: _,
+        activation_record: _,
         illegal_target_slots: _, // CR 608.2b resolution legality stamp; batch candidacy is shape-only
         controller: _,
         original_controller: _,
@@ -3973,7 +4010,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         chosen_x,
         cost_paid_object,
         noted_mana_payment,
-        cost_paid_object_ids,
+        cost_paid_objects,
         effect_context_object,
         amassed_army_object,
         ability_index: _,
@@ -4039,7 +4076,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         && chosen_x.is_none()
         && cost_paid_object.is_none()
         && noted_mana_payment.is_none()
-        && cost_paid_object_ids.is_empty()
+        && cost_paid_objects.is_empty()
         && effect_context_object.is_none()
         && amassed_army_object.is_none()
         && *target_selection_mode == TargetSelectionMode::Chosen
@@ -4149,6 +4186,8 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
         force_block_attacker: _,
         target_incarnations: _, // CR 400.7 referent pins; batch candidacy is shape-only
         selected_target_incarnations: _, // CR 400.7 selected-target pins; batch candidacy is shape-only
+        activation_cost_reduction: _,
+        activation_record: _,
         illegal_target_slots: _, // CR 608.2b resolution legality stamp; batch candidacy is shape-only
         controller: _,
         original_controller: _,
@@ -4184,7 +4223,7 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
         chosen_x,
         cost_paid_object,
         noted_mana_payment,
-        cost_paid_object_ids,
+        cost_paid_objects,
         effect_context_object,
         amassed_army_object,
         ability_index: _,
@@ -4254,7 +4293,7 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
         && chosen_x.is_none()
         && cost_paid_object.is_none()
         && noted_mana_payment.is_none()
-        && cost_paid_object_ids.is_empty()
+        && cost_paid_objects.is_empty()
         && effect_context_object.is_none()
         && amassed_army_object.is_none()
         && *target_selection_mode == TargetSelectionMode::Chosen
@@ -4666,7 +4705,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         chosen_x: a_chosen_x,
         cost_paid_object: a_cost_paid_object,
         noted_mana_payment: a_noted_mana_payment,
-        cost_paid_object_ids: a_cost_paid_object_ids,
+        cost_paid_objects: a_cost_paid_objects,
         effect_context_object: a_effect_context_object,
         amassed_army_object: a_amassed_army_object,
         ability_index: _,
@@ -4682,6 +4721,8 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         mode_abilities: a_mode_abilities,
         parent_target_missing_reason: a_parent_target_missing_reason,
         selected_target_incarnations: a_selected_target_incarnations,
+        activation_cost_reduction: a_activation_cost_reduction,
+        activation_record: a_activation_record,
         illegal_target_slots: a_illegal_target_slots,
     } = a;
     let ResolvedAbility {
@@ -4740,7 +4781,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         chosen_x: b_chosen_x,
         cost_paid_object: b_cost_paid_object,
         noted_mana_payment: b_noted_mana_payment,
-        cost_paid_object_ids: b_cost_paid_object_ids,
+        cost_paid_objects: b_cost_paid_objects,
         effect_context_object: b_effect_context_object,
         amassed_army_object: b_amassed_army_object,
         ability_index: _,
@@ -4756,6 +4797,8 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         mode_abilities: b_mode_abilities,
         parent_target_missing_reason: b_parent_target_missing_reason,
         selected_target_incarnations: b_selected_target_incarnations,
+        activation_cost_reduction: b_activation_cost_reduction,
+        activation_record: b_activation_record,
         illegal_target_slots: b_illegal_target_slots,
     } = b;
 
@@ -4770,6 +4813,8 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         && a_selected_target_incarnations == b_selected_target_incarnations
         // CR 608.2b: the resolution legality stamp participates for the same
         // reason — agreement with the derived `PartialEq`.
+        && a_activation_cost_reduction == b_activation_cost_reduction
+        && a_activation_record == b_activation_record
         && a_illegal_target_slots == b_illegal_target_slots
         && a_controller == b_controller
         && a_scoped_player == b_scoped_player
@@ -4813,7 +4858,15 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         && a_chosen_x == b_chosen_x
         && a_cost_paid_object == b_cost_paid_object
         && a_noted_mana_payment == b_noted_mana_payment
-        && a_cost_paid_object_ids == b_cost_paid_object_ids
+        // CR 601.2h + CR 400.7: compare the plural cost-paid authority by its
+        // OBJECT-ID SEQUENCE only, never by vector equality. This field used to
+        // be a raw `Vec<ObjectId>`, and run identity must not silently narrow
+        // just because each entry now also carries `lki` and `incarnation`:
+        // two runs whose costs consumed the same objects in the same order ARE
+        // the same run, even if one side's pins were refreshed. Routed through
+        // the shared helper so this comparator and `ResolvedAbility`'s manual
+        // `PartialEq` cannot drift apart.
+        && cost_paid_object_snapshot_ids_eq(a_cost_paid_objects, b_cost_paid_objects)
         && a_effect_context_object == b_effect_context_object
         && a_amassed_army_object == b_amassed_army_object
         && a_target_selection_mode == b_target_selection_mode
@@ -5029,7 +5082,13 @@ pub fn stack_display_groups(state: &GameState) -> Vec<StackDisplayGroup> {
         // keyword activations (a vanishingly rare scenario), we opt them
         // out of coalescing: always push a fresh group and clear
         // `last_key` so a following non-keyword entry also starts fresh.
-        if matches!(entry.kind, StackEntryKind::KeywordAction { .. }) {
+        // Combat-damage entries opt out for the same reason keyword actions do,
+        // plus one of their own: each combat damage step puts its own distinct
+        // object on the stack, so two of them are never "the same thing twice".
+        if matches!(
+            entry.kind,
+            StackEntryKind::KeywordAction { .. } | StackEntryKind::CombatDamage { .. }
+        ) {
             out.push(StackDisplayGroup {
                 representative: entry.id,
                 count: 1,
@@ -5085,6 +5144,7 @@ fn group_key(state: &GameState, entry: &StackEntry) -> StackGroupKey {
             ("triggered", description.as_deref())
         }
         StackEntryKind::KeywordAction { .. } => ("keyword", None),
+        StackEntryKind::CombatDamage { .. } => ("combat-damage", None),
     };
     let effective_ability = effective_stack_ability(state, entry);
     let targets = effective_ability
@@ -5100,7 +5160,8 @@ fn group_key(state: &GameState, entry: &StackEntry) -> StackGroupKey {
         StackEntryKind::TriggeredAbility { provenance, .. } => provenance.clone(),
         StackEntryKind::Spell { .. }
         | StackEntryKind::ActivatedAbility { .. }
-        | StackEntryKind::KeywordAction { .. } => None,
+        | StackEntryKind::KeywordAction { .. }
+        | StackEntryKind::CombatDamage { .. } => None,
     };
     StackGroupKey {
         source_name,
@@ -5230,7 +5291,7 @@ mod tests {
         AutoMayChoice, MayTriggerAutoChoiceKey, MayTriggerOrigin, PendingCast, StackPaidSnapshot,
         WaitingFor,
     };
-    use crate::types::identifiers::CardId;
+    use crate::types::identifiers::{CardId, ObjectId, TriggerFiring};
     use crate::types::keywords::Keyword;
     use crate::types::mana::ManaCost;
     use crate::types::phase::Phase;
@@ -7042,6 +7103,7 @@ mod tests {
                     enters_with_counter: None,
                     enters_with_modifications: Vec::new(),
                     mana_spend_permission: None,
+                    cast_cost_modifier: None,
                 });
         }
 
@@ -7411,10 +7473,12 @@ mod tests {
             GameEvent::LifeChanged {
                 player_id: PlayerId(0),
                 amount: 1,
+                new_total: crate::types::events::LifeTotalReading::default(),
             },
             GameEvent::LifeChanged {
                 player_id: PlayerId(1),
                 amount: 1,
+                new_total: crate::types::events::LifeTotalReading::default(),
             },
         ]
         .into_iter()
@@ -8130,7 +8194,7 @@ mod tests {
             resolve_proven_inert_trigger_batch_with_proof_hook, resolve_top, self_counter_run_len,
         };
         // Test fixtures from the parent `tests` module.
-        use super::setup;
+        use super::{pending_spell_entry, setup};
         use crate::game::triggers;
         use crate::game::zones::create_object;
         use crate::types::ability::{
@@ -8142,8 +8206,9 @@ mod tests {
         use crate::types::counter::CounterType;
         use crate::types::events::GameEvent;
         use crate::types::game_state::{
-            AutoMayChoice, GameState, MayTriggerAutoChoiceKey, MayTriggerOrigin, StackEntry,
-            StackEntryKind, StackPaidSnapshot, StackResolutionAutoPassOverlay,
+            AutoMayChoice, GameState, MayTriggerAutoChoiceKey, MayTriggerOrigin, MeldSelection,
+            PendingLiminalEntryResume, PendingResolutionCompletion, PendingTokenBattlefieldEntry,
+            StackEntry, StackEntryKind, StackPaidSnapshot, StackResolutionAutoPassOverlay,
             StackResolutionBudget, StackResolutionEntryFence, StackResolutionPolicy,
             StackResolutionSession,
         };
@@ -8727,7 +8792,11 @@ mod tests {
         }
 
         fn life_event(player_id: PlayerId, amount: i32) -> GameEvent {
-            GameEvent::LifeChanged { player_id, amount }
+            GameEvent::LifeChanged {
+                player_id,
+                amount,
+                new_total: crate::types::events::LifeTotalReading::default(),
+            }
         }
 
         /// Drive resolution to empty via the BATCH path (`resolve_next`), running
@@ -9061,6 +9130,55 @@ mod tests {
                 priority_checkpoint_is_settled(&state),
                 "once the batch is drained the checkpoint settles again"
             );
+        }
+
+        #[test]
+        fn resolution_identity_fields_are_each_required_for_a_settled_checkpoint() {
+            let mut state = setup();
+            assert!(priority_checkpoint_is_settled(&state));
+
+            state.resolving_stack_entry = Some(pending_spell_entry(ObjectId(90)));
+            assert!(!priority_checkpoint_is_settled(&state));
+            state.resolving_stack_entry = None;
+
+            state.resolving_trigger_firing = Some(TriggerFiring::Ordinary);
+            assert!(!priority_checkpoint_is_settled(&state));
+            state.resolving_trigger_firing = None;
+
+            state.pending_resolution_completion = Some(PendingResolutionCompletion {
+                player: PlayerId(0),
+                source_id: ObjectId(91),
+                final_cast: None,
+            });
+            assert!(!priority_checkpoint_is_settled(&state));
+            state.pending_resolution_completion = None;
+
+            state.pending_liminal_entry_resume = Some(PendingLiminalEntryResume::Meld {
+                source_id: ObjectId(92),
+                player: PlayerId(0),
+                context: MeldSelection {
+                    source_id: ObjectId(92),
+                    partner_id: ObjectId(93),
+                    controller: PlayerId(0),
+                    expected_source: "Meld source".to_string(),
+                    expected_partner: "Meld partner".to_string(),
+                    result: "Meld result".to_string(),
+                    entry: crate::types::ability::PermanentEntryMode::default(),
+                },
+                attack_target: None,
+            });
+            assert!(!priority_checkpoint_is_settled(&state));
+            state.pending_liminal_entry_resume = None;
+
+            state.pending_token_battlefield_entry = Some(PendingTokenBattlefieldEntry {
+                object_id: ObjectId(94),
+                name: "checkpoint token".to_string(),
+                source_id: ObjectId(95),
+            });
+            assert!(!priority_checkpoint_is_settled(&state));
+            state.pending_token_battlefield_entry = None;
+
+            assert!(priority_checkpoint_is_settled(&state));
         }
 
         #[test]
@@ -9783,6 +9901,7 @@ mod tests {
                     display_name: "Insect".to_string(),
                     power: Some(1),
                     toughness: Some(1),
+                    loyalty: None,
                     core_types: vec![CoreType::Creature],
                     subtypes: vec!["Insect".to_string()],
                     supertypes: vec![],

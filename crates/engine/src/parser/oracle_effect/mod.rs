@@ -19,7 +19,8 @@ pub(crate) use lower::{
     capitalize, lower_effect_chain_ir, parse_controls_permanent_object,
     parse_counter_suffix_body_combinator, parse_countless_counter_element,
     parse_with_counters_suffix, parse_with_counters_suffix_spanned,
-    player_lookback_relative_clause_owns_suffix, strip_trailing_duration, strip_trailing_where_x,
+    player_lookback_relative_clause_owns_suffix, publishes_chain_created_referent,
+    strip_trailing_duration, strip_trailing_where_x,
 };
 // pub(super) re-exports used by sibling submodules via `super::fn_name()`.
 pub(super) use lower::{
@@ -46,16 +47,16 @@ use lower::{
     extract_remove_counter_multi_target, extract_switch_pt_multi_target,
     instruction_spine_is_continuation, is_token_creating_effect,
     parse_contextual_bare_card_aggregate, parse_damage_player_scope,
-    parse_for_each_opponent_target_fanout_clause, publishes_chain_created_referent,
-    rebind_clause_recipients_with, rebind_decline_body_recipient,
-    rebind_subject_only_body_recipient, scan_until_next_same_source_exile_invalidation,
-    split_difference_repeat_suffix, strip_any_number_quantifier, strip_each_player_subject,
-    strip_each_scope_who_cant_subject, strip_each_scope_who_didnt_verb_filter_this_way_subject,
-    strip_each_scope_who_does_subject, strip_each_scope_who_doesnt_subject,
-    strip_for_each_opponent_who_doesnt, strip_for_each_prefix, strip_for_each_repeat_suffix,
-    strip_leading_duration, strip_leading_quantifier, strip_leading_return_destination_ext,
-    strip_leading_sequence_connector, strip_optional_effect_prefix, strip_player_scope_subject,
-    strip_redundant_flip_win_quantifier, strip_repeat_count_suffix, strip_return_destination_ext,
+    parse_for_each_opponent_target_fanout_clause, rebind_clause_recipients_with,
+    rebind_decline_body_recipient, rebind_subject_only_body_recipient,
+    scan_until_next_same_source_exile_invalidation, split_difference_repeat_suffix,
+    strip_any_number_quantifier, strip_each_player_subject, strip_each_scope_who_cant_subject,
+    strip_each_scope_who_didnt_verb_filter_this_way_subject, strip_each_scope_who_does_subject,
+    strip_each_scope_who_doesnt_subject, strip_for_each_opponent_who_doesnt, strip_for_each_prefix,
+    strip_for_each_repeat_suffix, strip_leading_duration, strip_leading_quantifier,
+    strip_leading_return_destination_ext, strip_leading_sequence_connector,
+    strip_optional_effect_prefix, strip_player_scope_subject, strip_redundant_flip_win_quantifier,
+    strip_repeat_count_suffix, strip_return_destination_ext,
     strip_return_destination_ext_with_remainder, strip_temporal_prefix, strip_temporal_suffix,
     trim_dangling_target_word, try_parse_damage, try_parse_damage_with_remainder,
     try_parse_distribute_counters, try_parse_distribute_damage,
@@ -100,40 +101,41 @@ use super::oracle_target::{
     resolve_singular_exiled_card_target, TargetSyntax,
 };
 use super::oracle_util::{
-    contains_possessive, has_unconsumed_conditional, parse_count_expr, parse_creature_subtype,
-    parse_mana_symbols, parse_number, split_around, starts_with_possessive, strip_after, TextPair,
+    contains_possessive, first_sentence, has_unconsumed_conditional, parse_count_expr,
+    parse_creature_subtype, parse_mana_symbols, parse_number, split_around, starts_with_possessive,
+    strip_after, TextPair,
 };
 use crate::game::triggers;
 use crate::parser::oracle_effect::subject::parse_subject_application;
 use crate::parser::oracle_ir::diagnostic::{ClauseGapKind, OracleDiagnostic};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AggregateFunction,
-    BounceSelection, CardPlayMode, CardTypeSetSource, CastFromZoneDriver, CastMechanism,
-    CastPermissionConstraint, CastingPermission, ChoiceType, ChooseFromZoneConstraint, Chooser,
-    CombatDamageScope, Comparator, ConjureCard, ConjureSource, ContinuousModification,
-    ControlWindow, ControllerRef, CopyChooseScope, CopyRetargetPermission, CopyScale,
-    DamageModification, DamageSource, DelayedTriggerCondition, DelayedTriggerLifetime,
-    DieResultBranch, Duration, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
+    AttachCardinality, AttachSelection, BounceSelection, CardPlayMode, CardTypeSetSource,
+    CastFromZoneDriver, CastMechanism, CastPermissionConstraint, CastingPermission, ChoiceType,
+    ChooseFromZoneConstraint, Chooser, CombatDamageScope, Comparator, ConjureCard, ConjureSource,
+    ContinuousModification, ControlWindow, ControllerRef, CopyChooseScope, CopyRetargetPermission,
+    CopyScale, DamageModification, DamageSource, DelayedTriggerCondition, DelayedTriggerLifetime,
+    DieResultBranch, DigRestOrder, Duration, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
     GameRestriction, GuardReading, GuessSubject, IntensityScope, IterationKindBinding,
-    KeeperConstraint, LibraryPosition, ManaProduction, ManaSpendPermission, ManaTargetRole,
-    MassLibraryShuffleMode, MultiTargetSpec, NumberDistinctness, ObjectProperty, ObjectScope,
-    OriginConstraint, PerPlayerScope, PerpetualModification, PlayPermissionInvalidation,
-    PlayerChoiceDistinctness, PlayerFilter, PlayerRelation, PlayerScope, PreventionAmount,
-    PreventionScope, ProhibitedActivity, PropertyAggregate, PtValue, QuantityExpr, QuantityRef,
-    ReciprocalZoneChoiceRole, ReplacementCondition, ReplacementDefinition, ResolutionCastWindow,
-    RestrictionExpiry, RestrictionPlayerScope, RevealUntilDisposition, RoundingMode, SharedQuality,
-    SharedQualityRelation, SiblingCondition, SkipScope, SpellStackToGraveyardReplacement,
-    StaticCondition, StaticDefinition, StepSkipTarget, SubAbilityLink, TapStateChange,
-    TargetFilter, TargetSelectionMode, ThisWayCause, TrackedAnaphorSource, TriggerCondition,
-    TriggerDefinition, TurnGate, TypeFilter, TypedFilter, UnlessPayModifier, UnloweredGuard,
-    UntilCondition, VoteSubject, WheneverEventExpiry, ZoneChoiceCandidateSource, ZoneChoiceChooser,
-    ZoneOwner,
+    KeeperConstraint, KeeperCounterMark, LibraryPosition, ManaProduction, ManaSpendPermission,
+    ManaTargetRole, MassLibraryShuffleMode, MultiTargetSpec, NumberDistinctness, ObjectProperty,
+    ObjectScope, OriginConstraint, PerPlayerScope, PerpetualModification,
+    PlayPermissionInvalidation, PlayerChoiceDistinctness, PlayerFilter, PlayerRelation,
+    PlayerScope, PreventionAmount, PreventionScope, ProhibitedActivity, PropertyAggregate, PtValue,
+    QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole, ReplacementCondition,
+    ReplacementDefinition, ResolutionCastWindow, RestrictionExpiry, RestrictionPlayerScope,
+    RevealUntilDisposition, RoundingMode, SharedQuality, SharedQualityRelation, SiblingCondition,
+    SkipScope, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, StepSkipTarget,
+    SubAbilityLink, TapStateChange, TargetFilter, TargetSelectionMode, ThisWayCause,
+    TrackedAnaphorSource, TriggerCondition, TriggerDefinition, TurnGate, TypeFilter, TypedFilter,
+    UnlessPayModifier, UnloweredGuard, UntilCondition, VoteSubject, WheneverEventExpiry,
+    ZoneChoiceCandidateSource, ZoneChoiceChooser, ZoneOwner,
 };
 // `DoubleTarget` has no production use in this module since the counter-doubling
 // discriminator moved to `Effect::is_counter_multiplication()`; the child
 // `tests` module still names it through `use super::*`.
 #[cfg(test)]
-use crate::types::ability::{AttackScope, AttackSubject, DoubleTarget};
+use crate::types::ability::{AttackSubject, CombatHistoryScope, DoubleTarget};
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
 use crate::types::game_state::{NextSpellModifier, RetargetScope};
@@ -173,7 +175,8 @@ use self::subject::{
 };
 use crate::parser::oracle_ir::ast::*;
 pub(crate) use crate::parser::oracle_ir::context::{
-    ChosenColorQualifierScope, ParseContext, TokenPtFollowup, TriggerConditionScope,
+    ChosenColorQualifierScope, ParseContext, PriorZoneChoicePartition, TokenPtFollowup,
+    TriggerConditionScope,
 };
 use crate::parser::oracle_ir::effect_chain::{
     AbilityIr, AbilityRootTransform, AbilityShellIr, AbsorbKind, ClauseDisposition, ClauseIr,
@@ -1630,6 +1633,62 @@ fn parse_dealt_damage_this_way_dies_trigger(
 /// Delegates to the shared word-boundary scanning primitive in `oracle_nom::primitives`.
 fn scan_contains_phrase(text: &str, phrase: &str) -> bool {
     nom_primitives::scan_contains(text, phrase)
+}
+
+/// CR 608.2d (override) + CR 701.9b (analogous): locate the "at random"
+/// selection qualifier at any WORD BOUNDARY and split the text around it,
+/// returning `(before, after)`.
+///
+/// This is the authority for the AS-ENTERS CHOICE axis specifically: the
+/// `Choose(Player)` arm in `parse_target_player_relative_clause` (which needs
+/// only the mode) and [`excise_selection_qualifier`] (which needs the split).
+///
+/// **Scope of that claim, stated honestly.** It is NOT yet the only reader of
+/// the phrase corpus-wide — `oracle_effect/imperative.rs`, `oracle_modal.rs` and
+/// `oracle_trigger.rs` still ask `scan_contains(.., "at random")` for their own
+/// unrelated clause shapes. Those sites only need the boolean and do not excise,
+/// so they are behaviourally equivalent today; converging them is a later,
+/// unrelated refactor, not something this doc may claim as already done.
+///
+/// Behaviour-identical to the `scan_contains(text, "at random")` it replaced:
+/// `scan_preceded` runs the same word-boundary loop with the same `tag`, and
+/// only additionally preserves the surrounding slices.
+pub(crate) fn scan_at_random(text: &str) -> Option<(&str, &str)> {
+    nom_primitives::scan_preceded(text, |input| {
+        tag::<_, _, OracleError<'_>>("at random").parse(input)
+    })
+    .map(|(before, _, after)| (before, after))
+}
+
+/// CR 608.2d (override) + CR 614.1c: remove an "at random" selection qualifier
+/// from a choice clause, bounded to the clause's OWN SENTENCE.
+///
+/// **The single authority for the EXCISION, not merely for the scan.** The
+/// as-enters classifier (`oracle_classifier::is_as_enters_choose_pattern`) and
+/// the as-enters builder (`oracle_replacement::parse_as_enters_choose`) must
+/// agree byte-for-byte on the phrase they hand to the choice-object table; a
+/// second copy of this arithmetic is precisely the classifier/builder drift that
+/// made every `all_consuming` object arm invisible whenever a qualifier was
+/// printed. One function, two callers.
+///
+/// BOUNDED TO THE CLAUSE'S OWN SENTENCE: a choice clause runs to the end of the
+/// LINE, not the end of the sentence (Camato Scout's is "a basic land type at
+/// random. ~ has landwalk of the chosen type"), so an unbounded scan would let a
+/// LATER sentence's "at random" retarget this choice's selection mode.
+///
+/// Returns `None` when the clause's own sentence carries no qualifier, so
+/// callers can keep their pre-existing path bit-identical for every other line.
+/// On `Some`, only the qualifier is removed — every other byte, including any
+/// following sentence, is preserved.
+pub(crate) fn excise_selection_qualifier(clause: &str) -> Option<String> {
+    let sentence = first_sentence(clause);
+    let (before, after) = scan_at_random(sentence)?;
+    Some(format!(
+        "{}{}{}",
+        before.trim_end(),
+        after,
+        &clause[sentence.len()..]
+    ))
 }
 
 /// CR 115.7 + CR 113.3b / CR 113.3c: locate the stack-object target grammar
@@ -5588,6 +5647,7 @@ fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
                         enters_with_counter: None,
                         enters_with_modifications: Vec::new(),
                         mana_spend_permission: None,
+                        cast_cost_modifier: None,
                     },
                     target: TargetFilter::TrackedSet {
                         id: TrackedSetId(0),
@@ -8626,28 +8686,46 @@ fn parse_for_each_object_copy_parts(
 /// `MostLife` sibling. Consumes the qualifier text; returns the parsed
 /// restriction so the caller can attach it to `ChoiceType::Opponent`.
 pub(crate) fn parse_opponent_most_life_restriction(input: &str) -> OracleResult<'_, PlayerFilter> {
-    let (input, _) = preceded(
-        tag(" with the most life"),
-        opt(tag(" among your opponents")),
+    // Unchanged public contract: consumes a MANDATORY leading space and an
+    // OPTIONAL fixed " among your opponents" tail, exactly as before. Kept
+    // as a thin delegator over the shared `parse_most_property_tail` core so
+    // none of its three consumers (`parse_required_defender_selector`,
+    // `try_parse_choose_player_to_verb`'s `ChoiceType::Opponent` path, and
+    // the `game/combat.rs` unit test) sees a different accepted-input set.
+    // The `peek(tag("with the most life"))` boundary guard preserves the
+    // EXACT pre-existing copula and property — "who has the most life"
+    // and "with the most speed"/"cards in hand" must keep declining here,
+    // even though `parse_most_property_tail` itself accepts both copulas
+    // and all three properties — so this entry point's accepted-input set
+    // never widens (S3). The leading space stays mandatory and the domain
+    // tail stays the fixed literal, never generalized to a phrase.
+    let (rest, _) = preceded(tag(" "), peek(tag("with the most life"))).parse(input)?;
+    let (rest, property) = parse_most_property_tail(rest)?;
+    let (rest, _) = opt(tag(" among your opponents")).parse(rest)?;
+    debug_assert_eq!(property, nom_quantity::PlayerProperty::Life);
+    let filter = nom_quantity::player_property_leader_filter(property, PlayerRelation::Opponent)
+        .ok_or_else(|| oracle_err(input))?;
+    Ok((rest, filter))
+}
+
+/// CR 102.1 + CR 102.2 + CR 102.3 + CR 119.3 / CR 402.3: the superlative
+/// predicate tail used by both grammatical positions (the effect
+/// subject/target arms below) — "with the most `<property>`" / "who has the
+/// most `<property>`". Space-less and domain-tail-free: the caller peels its
+/// own leading space and any domain-restricting suffix, so this core cannot
+/// widen any existing caller's accepted-input set (S3).
+///
+/// Sibling of `oracle_nom::condition::parse_unique_property_lead_tail`
+/// (condition-subject position, "more `<property>` than each other player"):
+/// that function parses its own comparative from its own tags rather than
+/// calling this one, but both feed the same downstream
+/// `nom_quantity::player_property_leader_filter`.
+fn parse_most_property_tail(input: &str) -> OracleResult<'_, nom_quantity::PlayerProperty> {
+    preceded(
+        alt((tag("with the most "), tag("who has the most "))),
+        nom_quantity::parse_player_property_keyword,
     )
-    .parse(input)?;
-    Ok((
-        input,
-        PlayerFilter::PlayerAttribute {
-            relation: PlayerRelation::Opponent,
-            attr: Box::new(QuantityRef::LifeTotal {
-                player: PlayerScope::ScopedPlayer,
-            }),
-            comparator: Comparator::GE,
-            value: Box::new(QuantityExpr::Ref {
-                qty: QuantityRef::LifeTotal {
-                    player: PlayerScope::Opponent {
-                        aggregate: AggregateFunction::Max,
-                    },
-                },
-            }),
-        },
-    ))
+    .parse(input)
 }
 
 /// CR 119.1 + CR 109.5 + CR 810.9a: "who has more life than you" as a
@@ -8982,6 +9060,43 @@ fn parse_controls_more_than_anchor<'a>(
     ))
 }
 
+/// CR 102.1 + CR 102.2 + CR 102.3 + CR 119.3 / CR 402.3: "who has the most
+/// `<property>`" / "with the most `<property>`" as a TARGET-position player
+/// predicate — the target-position sibling of U1's condition-position
+/// existential (`oracle_nom::condition::parse_unique_property_lead_tail`)
+/// and U2.3's subject-position arm (`subject.rs`). Consumes its OWN clause
+/// head via `parse_most_property_tail` — matching the convention
+/// [`parse_controls_more_than_anchor`] documents — so every arm of this
+/// clause's `alt` starts from the same input position. Closes P11's two
+/// target-position silent drops ("target player with the most life draws a
+/// card", "target opponent with the most life draws a card") as a side
+/// effect: before this arm existed, the qualifier was swallowed and the
+/// bare `TargetFilter::Player` left any player as a legal target.
+///
+/// `relation` is the HEAD NOUN's population, threaded in by the caller —
+/// `PlayerRelation::All` for "target player with the most `<property>`",
+/// `PlayerRelation::Opponent` for "target opponent with the most
+/// `<property>`". This must NOT be hardcoded to `All`: `relation` both
+/// gates the runtime candidate set (`matches_relation`,
+/// `game/effects/mod.rs`) AND selects the population the "most" superlative
+/// is measured against (`player_property_leader_filter`,
+/// `oracle_nom/quantity.rs` — `Opponent` maps to `PlayerScope::Opponent{Max}`,
+/// the max among the caster's opponents; `All` maps to
+/// `PlayerScope::AllPlayers{Max}`, the max among every player including the
+/// caster). Hardcoding `All` here for an "opponent"-headed target would
+/// require the candidate to also out-live the caster, and would leave no
+/// legal target in multiplayer whenever the caster itself leads on the
+/// property.
+fn parse_most_property_player_predicate(
+    input: &str,
+    relation: PlayerRelation,
+) -> OracleResult<'_, PlayerFilter> {
+    let (rest, property) = parse_most_property_tail(input)?;
+    let filter = nom_quantity::player_property_leader_filter(property, relation)
+        .ok_or_else(|| oracle_err(input))?;
+    Ok((rest, filter))
+}
+
 /// CR 115.1 + CR 601.2c + CR 603.3d: the `who`-headed relative clause that
 /// narrows a PLAYER TARGET's legal domain, returned as the CONJUNCTION of its
 /// printed restrictions.
@@ -9001,11 +9116,43 @@ fn parse_controls_more_than_anchor<'a>(
 /// (`nom_primitives::peek_clause_terminator`) on the returned remainder: binding
 /// a PREFIX of a printed restriction is an under-restricted target, which is the
 /// exact silent-drop failure this grammar exists to eliminate.
+///
+/// `head_relation` is the population named by the TARGET'S OWN head noun
+/// (`PlayerRelation::All` for "target player …", `PlayerRelation::Opponent`
+/// for "target opponent …") and is threaded through ONLY to the superlative
+/// leader predicate (see [`parse_most_property_player_predicate`]). It does
+/// NOT apply to the anchor comparative arm ("who controls more X than Y"):
+/// that arm's `relation` is fixed to `PlayerRelation::All` by design — see
+/// [`parse_controls_more_than_anchor`]'s doc comment — because its printed
+/// relation restriction, when present, is a separate conjunct anchored on
+/// the clause subject, not the head noun.
 pub(crate) fn parse_target_player_relative_clause<'a>(
     input: &'a str,
     ctx: &mut ParseContext,
+    head_relation: PlayerRelation,
 ) -> OracleResult<'a, Vec<PlayerFilter>> {
-    let (rest, predicate) = parse_controls_more_than_anchor(input, ctx)?;
+    // The clause's FIRST conjunct is now one of two predicate productions —
+    // the pre-existing anchor comparative ("who controls more X than Y",
+    // tried FIRST, no reordering) and the new superlative leader predicate
+    // ("who has the most X" / "with the most X") — but the
+    // conjunct-accumulation tail (`parse_relative_clause_relation_conjunct`)
+    // and the `Vec<PlayerFilter>` contract below are unchanged, so the
+    // Exodus Oath cycle's two-conjunct shape is preserved exactly.
+    //
+    // Both arms may write `ctx` (the anchor arm via
+    // `parse_type_phrase_folding_with_ctx`), so the anchor arm is tried
+    // against its OWN cloned context, committed to the caller's `ctx` only
+    // when it is the one that actually binds — the same speculative
+    // discipline the `oracle_target.rs` caller already applies around this
+    // whole function.
+    let mut anchor_ctx = ctx.clone();
+    let (rest, predicate) = match parse_controls_more_than_anchor(input, &mut anchor_ctx) {
+        Ok(ok) => {
+            *ctx = anchor_ctx;
+            ok
+        }
+        Err(_) => parse_most_property_player_predicate(input, head_relation)?,
+    };
     let mut filters = vec![predicate];
     let rest_lower = rest.to_lowercase();
     let rest = match nom_on_lower(rest, &rest_lower, parse_relative_clause_relation_conjunct) {
@@ -9127,7 +9274,10 @@ fn try_parse_choose_player_to_verb(
     // The "at random" qualifier is the tail after the head noun (e.g. before a
     // following ". When you do" sentence has already been split off), recorded as
     // a typed `TargetSelectionMode`.
-    let selection = if nom_primitives::scan_contains(after_player, "at random") {
+    // Routed through the shared `scan_at_random` authority rather than an inline
+    // scan, so every choice arm reads the qualifier the same way. This arm needs
+    // only the mode, so the split is discarded.
+    let selection = if scan_at_random(after_player).is_some() {
         TargetSelectionMode::Random
     } else {
         TargetSelectionMode::Chosen
@@ -9932,7 +10082,7 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     // CR 120.1 + CR 608.2c: "each <object-class filter> [you control] deals N damage
     // to <recipient>" — every matching object is its own damage source. Intercept
     // BEFORE the generic subject-stripping sites (mod.rs `9705`/`9735`,
-    // `subject.rs:178` via `try_parse_subject_predicate_ast`) flatten the source
+    // `subject.rs::try_parse_subject_predicate_ast`) flatten the source
     // class into a single ability-sourced `DealDamage`. Returns the supported
     // `EachSourceDealsDamage` clause, or a fail-closed `Unimplemented` for the
     // deferred attachment-host recipient (Aura Barbs clause 2).
@@ -10585,7 +10735,15 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         // `Some(Permanent)` (CR 611.2a — an explicitly written window is a stated one).
         // Both carriers travel through this one call; only the head clause's carrier
         // is ungated.
-        return with_clause_chain_duration(parse_effect_clause(rest, ctx), duration);
+        //
+        // CR 611.2a: publish the peeled duration for the body parse (see
+        // `ParseContext::stated_clause_duration`). SAVE/RESTORE, not set/clear: this
+        // dispatch recurses, and a nested clause that states its own duration must not
+        // leave it standing for the enclosing one.
+        let restore = ctx.stated_clause_duration.replace(duration.clone());
+        let body = parse_effect_clause(rest, ctx);
+        ctx.stated_clause_duration = restore;
+        return with_clause_chain_duration(body, duration);
     }
 
     // CR 614.1a + CR 514.2: floating turn-bound zone-change redirect ("if one or
@@ -13778,6 +13936,10 @@ fn reveal_filter_separator(input: &str) -> nom::IResult<&str, &str, OracleError<
 fn split_reveal_filter_disjuncts(filter_text: &str) -> Option<Vec<&str>> {
     let mut disjuncts = Vec::new();
     let mut remaining = filter_text;
+    // CR 701.20a: only an "or" connective makes the list disjunctive. A comma
+    // list without one ("a nonlegendary, nonland card" — Plargg, Dean of Chaos)
+    // stacks adjectives on one card and must stay a single conjunctive filter.
+    let mut has_or_connective = false;
     loop {
         // Scan to the next separator (or end of input) via the nom combinator.
         let mut split_at = None;
@@ -13794,7 +13956,8 @@ fn split_reveal_filter_disjuncts(filter_text: &str) -> Option<Vec<&str>> {
                     return None; // malformed: empty disjunct
                 }
                 disjuncts.push(frag);
-                let (after_sep, _) = reveal_filter_separator(&remaining[idx..]).ok()?;
+                let (after_sep, separator) = reveal_filter_separator(&remaining[idx..]).ok()?;
+                has_or_connective |= separator.trim_start_matches(',').trim() == "or";
                 remaining = after_sep;
             }
             None => {
@@ -13805,7 +13968,7 @@ fn split_reveal_filter_disjuncts(filter_text: &str) -> Option<Vec<&str>> {
             }
         }
     }
-    (disjuncts.len() >= 2).then_some(disjuncts)
+    (disjuncts.len() >= 2 && has_or_connective).then_some(disjuncts)
 }
 
 /// Build a [`TargetFilter`] from a single disjunct fragment of a reveal-until
@@ -13916,14 +14079,60 @@ fn build_reveal_until_filter(filter_text: &str) -> TargetFilter {
     // ("a creature or land card"); a comma+or list of distinct filters must be
     // split per-disjunct and assembled into an Or.
     if let Some(disjuncts) = split_reveal_filter_disjuncts(filter_text) {
-        let filters: Vec<TargetFilter> = disjuncts
+        let mut filters: Vec<TargetFilter> = disjuncts
             .iter()
             .map(|frag| build_reveal_until_disjunct_filter(frag.trim()))
             .collect();
+        distribute_shared_card_qualifier(&disjuncts, &mut filters);
         return TargetFilter::Or { filters };
     }
     let (parsed, _) = parse_target(filter_text);
     parsed
+}
+
+/// CR 701.20a + CR 202.3: In "an instant, sorcery, or enchantment card with
+/// converted mana cost less than N" (Underdark Beholder) the type words share
+/// ONE head noun, so the qualifier after "card" constrains every disjunct, not
+/// just the last. Applies only when the earlier disjuncts are bare type words
+/// (no "card" noun of their own) and the last one carries a post-noun
+/// qualifier; a list of distinct card phrases ("doctor card, a card with
+/// doctor's companion, or a vehicle card" — An Unearthly Child) is untouched.
+fn distribute_shared_card_qualifier(disjuncts: &[&str], filters: &mut [TargetFilter]) {
+    fn has_card_noun(fragment: &str) -> bool {
+        take_until::<_, _, OracleError<'_>>(" card")
+            .parse(fragment)
+            .is_ok()
+    }
+    fn has_post_noun_qualifier(fragment: &str) -> bool {
+        (take_until(" card"), tag::<_, _, OracleError<'_>>(" card "))
+            .parse(fragment)
+            .is_ok_and(|(qualifier, _)| !qualifier.trim().is_empty())
+    }
+    let (Some((last_text, earlier_texts)), Some((last_filter, earlier_filters))) =
+        (disjuncts.split_last(), filters.split_last_mut())
+    else {
+        return;
+    };
+    if earlier_texts.iter().any(|text| has_card_noun(text))
+        || !has_post_noun_qualifier(last_text.trim())
+    {
+        return;
+    }
+    let TargetFilter::Typed(TypedFilter {
+        properties: shared, ..
+    }) = last_filter
+    else {
+        return;
+    };
+    for filter in earlier_filters {
+        if let TargetFilter::Typed(typed) = filter {
+            for property in shared.iter() {
+                if !typed.properties.contains(property) {
+                    typed.properties.push(property.clone());
+                }
+            }
+        }
+    }
 }
 
 /// CR 701.20a: Parse `"reveal[s] cards from the top of <possessive> library until …"`
@@ -13959,6 +14168,7 @@ fn try_parse_reveal_until(tp: TextPair, player: TargetFilter) -> Option<ParsedEf
             matched_disposition: RevealUntilDisposition::KeepEach,
             kept_destination: Zone::Hand,
             rest_destination: Zone::Library,
+            rest_order: DigRestOrder::Random,
             enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             enters_attacking: false,
             kept_optional_to: None,
@@ -14012,6 +14222,7 @@ fn try_parse_reveal_until(tp: TextPair, player: TargetFilter) -> Option<ParsedEf
         matched_disposition: RevealUntilDisposition::KeepEach,
         kept_destination,
         rest_destination: Zone::Library,
+        rest_order: DigRestOrder::Random,
         enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         enters_attacking: false,
         kept_optional_to: None,
@@ -14185,7 +14396,7 @@ fn try_parse_per_grantee_play_grant(tp: TextPair<'_>) -> Option<ParsedEffectClau
             card_filter: None,
             single_use_group: None,
             single_use: false,
-            cast_cost_raise: None,
+            cast_cost_modifier: None,
             alt_ability_cost: None,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             invalidation: None,
@@ -14217,10 +14428,10 @@ fn try_parse_per_grantee_play_grant(tp: TextPair<'_>) -> Option<ParsedEffectClau
 /// attached and are correctly excluded from `has_exile_cast_permission`'s
 /// surfacing. No new variant needed — the existing primitives compose.
 ///
-/// The optional ", and you may spend mana as though it were mana of any
-/// color to cast those spells" conjunct folds into the same permission via
-/// `mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor)`,
-/// matching the wire-up used by `try_parse_exile_play_grant_with_any_mana`.
+/// A ", and you may spend mana as though it were mana of any color to cast
+/// those spells" conjunct never reaches this grammar: the clause splitter cuts
+/// it off (`starts_mana_spend_rider_conjunct`) and the chunk loop folds it onto
+/// this grant's `mana_spend_permission`.
 fn try_parse_cast_from_tracked_exile_grant(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
     let (permission_text, explicit_duration) = strip_trailing_duration(tp.original);
     let permission_lower = permission_text.to_lowercase();
@@ -14288,25 +14499,10 @@ fn try_parse_cast_from_tracked_exile_grant(tp: TextPair<'_>) -> Option<ParsedEff
     if !explicit_permission && !owns_exile_lifetime {
         return None;
     }
-    let rest_lower = &permission_tp.lower[permission_tp.lower.len() - rest_orig.len()..];
-
-    // Optional any-color mana conjunct: ", and you may spend mana as though
-    // it were mana of any color to cast those spells" (or "...any type...").
-    let mana_spend_permission = if rest_lower.is_empty() {
-        None
-    } else {
-        // Trailing text that is not the recognized conjunct — reject so the
-        // catch-all SpendManaAsAnyColor parse does not consume an unrelated
-        // suffix and silently drop the cast-permission half.
-        nom_on_lower(rest_orig, rest_lower, |i| {
-            let (i, _) = tag(", and you may spend mana as though it were mana of any ").parse(i)?;
-            let (i, _) = alt((tag("color"), tag("type"))).parse(i)?;
-            let (i, _) = tag(" to cast those spells").parse(i)?;
-            let (i, _) = eof.parse(i)?;
-            Ok((i, ()))
-        })?;
-        Some(ManaSpendPermission::AnyTypeOrColor)
-    };
+    // Trailing text is not this grant's — reject rather than drop it.
+    if !rest_orig.is_empty() {
+        return None;
+    }
 
     let clause = parsed_clause(Effect::GrantCastingPermission {
         permission: CastingPermission::PlayFromExile {
@@ -14323,11 +14519,11 @@ fn try_parse_cast_from_tracked_exile_grant(tp: TextPair<'_>) -> Option<ParsedEff
             frequency: CastFrequency::Unlimited,
             source_id: None,
             exiled_by_ability_controller: None,
-            mana_spend_permission,
+            mana_spend_permission: None,
             card_filter,
             single_use_group: None,
             single_use,
-            cast_cost_raise: None,
+            cast_cost_modifier: None,
             alt_ability_cost: None,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             invalidation: None,
@@ -14350,114 +14546,10 @@ fn try_parse_cast_from_tracked_exile_grant(tp: TextPair<'_>) -> Option<ParsedEff
     })
 }
 
-fn try_parse_exile_play_grant_with_any_mana(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
-    // Third-person "they may play/cast that card ... cast a spell this way" (Gonti,
-    // Night Minister) binds to the parent player target via `ParentTargetController`
-    // and the tracked exile set. First-person forms keep the legacy `Any` target
-    // (rebound to TrackedSet by the chain parser when chained after an exile).
-    let (rest, mode, grantee, target) = if let Ok((rest, _)) =
-        tag::<_, _, OracleError<'_>>("they may play ").parse(tp.lower)
-    {
-        (
-            rest,
-            CardPlayMode::Play,
-            crate::types::ability::PermissionGrantee::ParentTargetController,
-            TargetFilter::TrackedSet {
-                id: TrackedSetId(0),
-            },
-        )
-    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("they may cast ").parse(tp.lower) {
-        (
-            rest,
-            CardPlayMode::Cast,
-            crate::types::ability::PermissionGrantee::ParentTargetController,
-            TargetFilter::TrackedSet {
-                id: TrackedSetId(0),
-            },
-        )
-    } else {
-        let (rest, mode) = alt((
-            value(
-                CardPlayMode::Play,
-                alt((
-                    tag::<_, _, OracleError<'_>>("you may look at and play "),
-                    tag("you may play "),
-                    tag("look at and play "),
-                    tag("play "),
-                )),
-            ),
-            value(
-                CardPlayMode::Cast,
-                alt((tag("you may cast "), tag("cast "))),
-            ),
-        ))
-        .parse(tp.lower)
-        .ok()?;
-        (rest, mode, Default::default(), TargetFilter::Any)
-    };
-    let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>("that card"),
-        tag("that spell"),
-        tag("those cards"),
-        tag("it"),
-    ))
-    .parse(rest)
-    .ok()?;
-    let (rest, _) = tag::<_, _, OracleError<'_>>(" for as long as ")
-        .parse(rest)
-        .ok()?;
-    let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>("it remains exiled"),
-        tag("that card remains exiled"),
-        tag("those cards remain exiled"),
-    ))
-    .parse(rest)
-    .ok()?;
-    let (rest, _) = tag::<_, _, OracleError<'_>>(", and ").parse(rest).ok()?;
-    let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>("mana of any type can be spent to cast that spell"),
-        tag("mana of any color can be spent to cast that spell"),
-        tag("mana of any type can be spent to cast a spell this way"),
-        tag("mana of any color can be spent to cast a spell this way"),
-    ))
-    .parse(rest)
-    .ok()?;
-    eof::<_, OracleError<'_>>(rest).ok()?;
-
-    Some(parsed_clause(Effect::GrantCastingPermission {
-        permission: CastingPermission::PlayFromExile {
-            provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
-            mode,
-            duration: Duration::Permanent,
-            granted_to: crate::types::player::PlayerId(0),
-            frequency: CastFrequency::Unlimited,
-            source_id: None,
-            exiled_by_ability_controller: None,
-            mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
-            card_filter: None,
-            single_use_group: None,
-            single_use: false,
-            cast_cost_raise: None,
-            alt_ability_cost: None,
-            land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
-            invalidation: None,
-        },
-        target,
-        grantee,
-    }))
-}
-
 /// CR 400.7i: Parse "you may play/cast that card [this turn]" — impulse draw permission.
 fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedEffectClause> {
     let tp = tp.trim_end_matches('.');
 
-    // CR 118.9 + CR 609.4b: The any-mana conjunct must win over the bare
-    // per-grantee branch so "they may play that card ... mana of any type can
-    // be spent to cast a spell this way" (Gonti, Night Minister) keeps
-    // `mana_spend_permission: AnyTypeOrColor`.
-    if let Some(clause) = try_parse_exile_play_grant_with_any_mana(tp) {
-        return Some(clause);
-    }
     // CR 611.2a + CR 108.3: Per-object grant clauses from compound-exile chains.
     // These bind the grant to a player OTHER than the ability's controller via
     // Theme D's `granted_to` field, resolved per-iteration by
@@ -14469,9 +14561,9 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
     // CR 400.7i + CR 609.4b: Persistent duration-scoped variant —
     // "you may cast spells from among those exiled cards[, and you may spend
     // mana as though it were mana of any color to cast those spells]".
-    // Must run before the catch-all SpendManaAsAnyColor branch so the
-    // GrantCastingPermission half is not silently dropped (Nassari, Stolen
-    // Strategy, and similar exile-then-cast-permission patterns).
+    // Must run before the mana-spend catch-all so the GrantCastingPermission
+    // half is not swallowed with the concession (Nassari, Stolen Strategy, and
+    // similar exile-then-cast-permission patterns).
     if let Some(clause) = try_parse_cast_from_tracked_exile_grant(tp) {
         return Some(clause);
     }
@@ -14507,8 +14599,7 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
     // grant that the permission already implies (the controller can always see
     // a card they may play). Folded in as a verb-prefix variant so the no-mana-
     // conjunct form reaches the same grant as the bare "you may play those
-    // cards" path (the with-mana form is handled earlier by
-    // `try_parse_exile_play_grant_with_any_mana`).
+    // cards" path.
     let full_rest = nom_on_lower(tp.original, tp.lower, |input| {
         alt((
             value(
@@ -14685,7 +14776,7 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
             card_filter: None,
             single_use_group: None,
             single_use: false,
-            cast_cost_raise: None,
+            cast_cost_modifier: None,
             alt_ability_cost: None,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             invalidation,
@@ -14735,15 +14826,20 @@ fn try_parse_play_the_exiled_card_grant(tp: TextPair) -> Option<ParsedEffectClau
                 value(Duration::UntilEndOfTurn, tag(" until the end of turn")),
             ))
             .parse(input)?;
-            // CR 609.4b + CR 601.2: optional trailing "and mana of any type can
-            // be spent to cast that spell" scopes the any-type/any-color mana
-            // permission to the granted cast (Black Widow, Super Spy).
-            let (input, mana_spend_permission) = opt(value(
-                ManaSpendPermission::AnyTypeOrColor,
-                (
-                    tag(" and mana of any "),
-                    alt((tag("type"), tag("color"))),
-                    tag(" can be spent to cast that spell"),
+            // CR 118.14 + CR 609.4b: optional trailing " and mana of any type
+            // can be spent to cast that spell|it" scopes the mana concession
+            // to the granted cast (Black Widow, Super Spy). The comma form
+            // (Reno and Rude) never reaches here: the clause splitter cuts it
+            // off (`starts_mana_spend_rider_conjunct`) and the chunk loop folds
+            // it onto this grant.
+            let (input, mana_spend_permission) = opt(preceded(
+                tag(" and mana of any "),
+                terminated(
+                    parse_any_mana_word,
+                    (
+                        tag(" can be spent to cast "),
+                        alt((tag("that spell"), tag("it"))),
+                    ),
                 ),
             ))
             .parse(input)?;
@@ -14766,7 +14862,7 @@ fn try_parse_play_the_exiled_card_grant(tp: TextPair) -> Option<ParsedEffectClau
             card_filter: None,
             single_use_group: None,
             single_use: false,
-            cast_cost_raise: None,
+            cast_cost_modifier: None,
             alt_ability_cost: None,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             invalidation: None,
@@ -14939,11 +15035,14 @@ pub(crate) fn parse_exile_top_each_library_with_collection_counter_ir(
                 frequency: CastFrequency::OncePerTurn,
                 source_id: None,
                 exiled_by_ability_controller: None,
-                mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
+                // CR 609.4b + CR 106.1a: Evelyn prints "spend mana as though it
+                // were mana of any color" — the static line parser accepts only
+                // that spelling, so the grant can never pay `{C}` with colored mana.
+                mana_spend_permission: Some(ManaSpendPermission::AnyColor),
                 card_filter: None,
                 single_use_group: None,
                 single_use: false,
-                cast_cost_raise: None,
+                cast_cost_modifier: None,
                 alt_ability_cost: None,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 invalidation: None,
@@ -14971,6 +15070,7 @@ pub(crate) fn parse_exile_top_each_library_with_collection_counter_ir(
         count: QuantityExpr::Fixed { value: 1 },
         position: crate::types::ability::LibraryPosition::Top,
         face_down: false,
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
     });
     clause.sub_ability = Some(Box::new(put_counter));
     Some(EffectChainIr::single_clause(
@@ -15382,6 +15482,10 @@ fn build_aura_attach_clause(
         Effect::Attach {
             attachment: TargetFilter::SelfRef,
             target: TargetFilter::ParentTarget,
+            // The reanimated permanent is the host; the attachment is the source.
+            selection: AttachSelection::AtResolution {
+                count: AttachCardinality::One,
+            },
         },
     )
     .sub_ability(delayed);
@@ -15651,116 +15755,534 @@ fn parse_balance_arm_c(input: &str) -> OracleResult<'_, Vec<(EqualizeVerb, Targe
     Ok((input, pairs))
 }
 
-/// CR 608.2c/d + CR 701.8a: Whole-body recognizer for the battlefield
-/// "Choose up to N <permanents>, [then] destroy the rest" class (Duneblast,
-/// Mount Doom). The choice is made during resolution, so it publishes the
-/// spared objects into the chain's tracked set; the following mass destruction
-/// applies to the same typed battlefield filter minus that set.
-fn parse_choose_survivors_destroy_rest_ir(
-    text: &str,
-    kind: AbilityKind,
-    ctx: &ParseContext,
-) -> Option<EffectChainIr> {
-    let lower = text.to_ascii_lowercase();
-    let (max, after_count) = nom_on_lower(text, &lower, |input| {
-        let (input, _) = tag("choose up to ").parse(input)?;
-        let (input, max) = nom_primitives::parse_number.parse(input)?;
-        let (input, _) = space1.parse(input)?;
-        Ok((input, max))
-    })?;
-    let after_count_lower = &lower[lower.len() - after_count.len()..];
+/// The chooser axis of the keeper-and-dispose grammar: WHO nominates the
+/// keepers, and therefore whose permanents the disposal tail sweeps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeeperChooserScope {
+    /// No printed subject — the resolving object's controller nominates
+    /// (Duneblast, Mount Doom).
+    Controller,
+    /// "each player …" (Single Combat, Razia's Purification, Planetary
+    /// Annihilation, Limited Resources, Promise of Loyalty).
+    EachPlayer,
+    /// "each opponent …" (No One Will Hear Your Cries).
+    EachOpponent,
+}
 
-    #[derive(Clone, Copy)]
-    enum DestroyRestConnector {
-        Then,
-        Sentence,
+/// The head-verb axis: HOW the keeper is nominated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum KeeperHead {
+    /// "chooses <quantifier> <domain>".
+    Choose,
+    /// CR 122.1: "puts <quantifier> <type> counter[s] on <quantifier> <domain>".
+    /// The keeper is nominated BY receiving a counter, so the printed counter
+    /// type and count belong to the head rather than to a separate instruction.
+    /// This enum is the one axis that is not `Copy`: `CounterType::Generic`
+    /// owns a `String`.
+    Counter {
+        counter_type: CounterType,
+        count: u32,
+    },
+}
+
+/// The keeper-cardinality axis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeeperQuantifier {
+    Exact(u32),
+    UpTo(u32),
+}
+
+/// The disposal axis. CR 701.8a (destroy) and CR 701.21a (sacrifice) are
+/// different keyword actions with different replacement, regeneration and
+/// "who performs it" semantics, so the verb is typed rather than flagged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeeperDisposalVerb {
+    Destroy,
+    Sacrifice,
+}
+
+/// The printed separator between the keeper phrase and the disposal tail.
+/// CR 608.2c: a sentence separator makes the disposal the next printed
+/// instruction; `", then "` and `" and "` keep it a step of the same one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeeperTailConnector {
+    Then,
+    And,
+    Sentence,
+}
+
+impl KeeperTailConnector {
+    fn boundary(self) -> ClauseBoundary {
+        match self {
+            KeeperTailConnector::Then | KeeperTailConnector::And => ClauseBoundary::Then,
+            KeeperTailConnector::Sentence => ClauseBoundary::Sentence,
+        }
+    }
+}
+
+/// One parsed keeper-and-dispose instruction plus the byte spans its lowering
+/// needs for honest clause provenance. Offsets are into the lowercased input
+/// the head combinator ran on; the recognizer maps them onto the original-case
+/// text, which `to_ascii_lowercase` leaves byte-for-byte aligned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct KeeperDisposeHead {
+    scope: KeeperChooserScope,
+    head: KeeperHead,
+    quantifier: KeeperQuantifier,
+    filter: TargetFilter,
+    verb: KeeperDisposalVerb,
+    connector: KeeperTailConnector,
+    /// Offset at which the keeper phrase ends (the connector's first byte).
+    keeper_end: usize,
+    /// Span of the disposal tail — "sacrifices the rest".
+    disposal_span: (usize, usize),
+    /// Byte length of the trailing sentence that follows the instruction.
+    remainder_len: Option<usize>,
+}
+
+/// The shared count production: a cardinality followed by its separating space.
+///
+/// Both quantifier arms and the counter head compose this, so all three
+/// normalize the separator identically. No `parse_article` arm is needed —
+/// `parse_number` already accepts "a "/"an " through `parse_article_number`,
+/// the last arm of `parse_english_number`.
+fn parse_keeper_count(input: &str) -> OracleResult<'_, u32> {
+    terminated(nom_primitives::parse_number, space1).parse(input)
+}
+
+/// CR 608.2c + CR 701.8a + CR 701.21a: the whole-instruction head grammar for
+/// the keeper-and-dispose class — "[each player|each opponent] <head>
+/// <quantifier> <domain> [they control](, then| and|. )<dispose> the rest".
+///
+/// Every axis is one `alt()`, chained in printed order. The disposal tail must
+/// follow the control clause IMMEDIATELY; that adjacency is what makes the
+/// declined classes decline at a step a test can name rather than being swept
+/// up by a `take_until` reach for the tail. It is why "Choose a creature at
+/// random, then destroy the rest" (Last One Standing) and "Each player chooses
+/// six lands they control. Destroy all other permanents" (Urza's Sylex) fail
+/// here, at the separator and at `" the rest"` respectively.
+///
+/// The supported-combination gate lives INSIDE this combinator, so the
+/// classifier predicate (`is_keeper_dispose_head`) — which runs this same
+/// grammar to decide whether to route a line here at all — never routes away
+/// a line the gate itself refuses. That does not extend past the head: the
+/// lowering that consumes this head's output (`parse_keeper_dispose_rest_ir`)
+/// has its own post-head `return None` paths (for example the
+/// `TargetFilter::Typed` refutation in the `Controller` scope arm), which this
+/// grammar cannot see and which are fail-soft — a line that reaches one is
+/// declined, not misparsed, and no printed card currently reaches one.
+fn parse_keeper_dispose_head(input: &str) -> OracleResult<'_, KeeperDisposeHead> {
+    let start = input;
+    let offset = |rest: &str| start.len() - rest.len();
+
+    let (rest, scope) = map(
+        opt(alt((
+            value(KeeperChooserScope::EachPlayer, tag("each player ")),
+            value(KeeperChooserScope::EachOpponent, tag("each opponent ")),
+        ))),
+        |scope| scope.unwrap_or(KeeperChooserScope::Controller),
+    )
+    .parse(input)?;
+
+    let (rest, head) = alt((
+        value(KeeperHead::Choose, alt((tag("chooses "), tag("choose ")))),
+        map(
+            (
+                alt((tag("puts "), tag("put "))),
+                parse_keeper_count,
+                nom_primitives::parse_counter_type_typed,
+                tag(" counter"),
+                opt(tag("s")),
+                tag(" on "),
+            ),
+            |(_, count, counter_type, ..)| KeeperHead::Counter {
+                counter_type,
+                count,
+            },
+        ),
+    ))
+    .parse(rest)?;
+
+    let (rest, quantifier) = alt((
+        map(
+            preceded(tag("up to "), parse_keeper_count),
+            KeeperQuantifier::UpTo,
+        ),
+        map(parse_keeper_count, KeeperQuantifier::Exact),
+    ))
+    .parse(rest)?;
+
+    let (rest, filter) = nom_target::parse_type_phrase(rest)?;
+
+    // Recognized for its POSITION, not for a payload — which is why this
+    // production is a bare `alt` and carries no typed value. Nothing downstream
+    // could read one: both lowerings leave the emitted keeper filter's
+    // `controller` unset and carry the seat on the clause's player scope
+    // instead, and the per-seat eligibility is enforced at resolution by
+    // `choose_and_sacrifice_rest.rs::compute_eligible_creatures`, whose
+    // `obj.controller == player` test scopes each seat's choice to its own
+    // permanents whether or not the line prints this clause. The spellings are
+    // deliberately NOT routed through `nom_target::parse_controller_suffix` —
+    // that is the authority for `ControllerRef`-valued suffixes and accepts
+    // neither of them, and binding one here would bind the domain to the
+    // SPELL's controller rather than to each nominating seat.
+    //
+    // What this production does contribute is the ADJACENCY the disposal tail
+    // must follow: `keeper_dispose_head_recognizes_the_control_clause_positionally`
+    // pins that both spellings and their absence parse, and that an unmodelled
+    // possessive between the domain and the connector declines.
+    let (rest, _) = opt(alt((tag(" they control"), tag(" that player controls")))).parse(rest)?;
+    let keeper_end = offset(rest);
+
+    let (rest, connector) = alt((
+        value(KeeperTailConnector::Then, tag(", then ")),
+        value(KeeperTailConnector::And, tag(" and ")),
+        value(KeeperTailConnector::Sentence, tag(". ")),
+    ))
+    .parse(rest)?;
+    let disposal_start = offset(rest);
+
+    let (rest, verb) = alt((
+        value(
+            KeeperDisposalVerb::Sacrifice,
+            alt((tag("sacrifices"), tag("sacrifice"))),
+        ),
+        value(
+            KeeperDisposalVerb::Destroy,
+            alt((tag("destroys"), tag("destroy"))),
+        ),
+    ))
+    .parse(rest)?;
+    let (rest, _) = tag(" the rest").parse(rest)?;
+    let disposal_end = offset(rest);
+
+    // A trailing sentence is admitted only at a real sentence boundary, so a
+    // dangling fragment can never be absorbed into the instruction silently.
+    let (rest, remainder_len) = alt((
+        value(None::<usize>, (opt(tag(".")), eof)),
+        map(
+            preceded((tag("."), space1), nom::combinator::rest),
+            |tail: &str| Some(tail.len()),
+        ),
+    ))
+    .parse(rest)?;
+
+    // The supported-combination gate. Exhaustive on (scope, head, quantifier,
+    // verb) with NO wildcard arm, so a future per-player keeper-and-destroy
+    // primitive or a `KeeperConstraint` range variant becomes a compile error
+    // here rather than a silently wrong parse.
+    match (scope, &head, quantifier, verb) {
+        // CR 701.8a: the controller-scope "choose up to N, then destroy the
+        // rest" form. Duneblast, Mount Doom.
+        (
+            KeeperChooserScope::Controller,
+            KeeperHead::Choose,
+            KeeperQuantifier::UpTo(_),
+            KeeperDisposalVerb::Destroy,
+        ) => {}
+        // CR 101.4 + CR 701.21a: the per-player keeper-and-sacrifice class.
+        (
+            KeeperChooserScope::EachPlayer | KeeperChooserScope::EachOpponent,
+            _,
+            KeeperQuantifier::Exact(_),
+            KeeperDisposalVerb::Sacrifice,
+        ) => {}
+        // Zero-card axis: no printed card nominates a controller-scope keeper
+        // BY placing a counter. CR 122.1's counter is what nominates the
+        // keeper, and the controller-scope lowering
+        // (`ChooseObjectsIntoTrackedSet` + `DestroyAll` over the tracked-set
+        // complement) has no step to place one in, so accepting the SEMANTICS
+        // would silently drop the printed instruction. The HEAD is still
+        // accepted (not `Err`) here: MEASURED that refusing it at this
+        // grammar level de-routes the whole line past this recognizer, and
+        // the general effect-chain parser then independently parses "puts N
+        // counters on ... creatures" as a real targeted `Effect::PutCounter`
+        // and "destroy/sacrifice the rest" as `Destroy`/`Sacrifice { target:
+        // TrackedSet(0) }` over a tracked set NOTHING ever publishes — a
+        // coherent-looking but silently WRONG parse with no
+        // `Effect::Unimplemented` anywhere, strictly worse than today's
+        // defect. Accepting the head here keeps the line routed to
+        // `parse_keeper_dispose_rest_ir`, whose `Controller` arm lowers a
+        // `Counter` head to an explicit `Effect::unimplemented(..)` instead.
+        // See `tests::keeper_dispose_gate_marks_a_controller_scope_counter_head_unimplemented`
+        // for the pinned measurement and its mutation coverage.
+        (KeeperChooserScope::Controller, KeeperHead::Counter { .. }, _, _) => {}
+        // Zero-card axis: every printed controller-scope keeper cardinality in
+        // this class is an "up to N". Accepting a bare count here would claim an
+        // instruction no card prints.
+        (KeeperChooserScope::Controller, _, KeeperQuantifier::Exact(_), _) => {
+            return Err(oracle_err(start))
+        }
+        // Zero-card axis: no printed card reaches this combination. A `jq -r
+        // 'to_entries[] | select(.value.oracle_text != null) |
+        // select(.value.oracle_text | test("choose[s]? up to"; "i")) |
+        // select(.value.oracle_text | test("sacrifices? the rest"; "i")) |
+        // .key' client/public/card-data.json` census over "choose(s) up to
+        // ... sacrifice(s) the rest" finds three cards: Archfiend of
+        // Depravity's "that player chooses" declines earlier, at the
+        // head-verb step, on its unmodelled subject
+        // (`keeper_dispose_head_declines_an_unmodelled_subject`). The
+        // controller-scope lowering is also `DestroyAll` over the
+        // tracked-set complement; no controller-scope sacrifice primitive
+        // with that complement exists.
+        (
+            KeeperChooserScope::Controller,
+            _,
+            KeeperQuantifier::UpTo(_),
+            KeeperDisposalVerb::Sacrifice,
+        ) => return Err(oracle_err(start)),
+        // Deferred axis: the "up to N" per-player keeper cardinality. Covetous
+        // Elegy is its only card. `KeeperConstraint` has exactly one variant,
+        // `ExactCount`; a range form pulls `WaitingFor::KeepExactPermanentsChoice`'s
+        // `required_count`, the client adapter and the AI candidate seam into
+        // scope, so it is a separate unit.
+        (
+            KeeperChooserScope::EachPlayer | KeeperChooserScope::EachOpponent,
+            _,
+            KeeperQuantifier::UpTo(_),
+            _,
+        ) => return Err(oracle_err(start)),
+        // Deferred axis: the per-player keeper-and-DESTROY form. Divine
+        // Reckoning is its only card. CR 701.8a destroy and CR 701.21a sacrifice
+        // are different keyword actions, and `Effect::ChooseAndSacrificeRest` is
+        // sacrifice-specific down to its terminal, so this needs its own
+        // primitive rather than a flag on this one.
+        (
+            KeeperChooserScope::EachPlayer | KeeperChooserScope::EachOpponent,
+            _,
+            _,
+            KeeperDisposalVerb::Destroy,
+        ) => return Err(oracle_err(start)),
     }
 
-    let ((filter_len, connector), _) = nom_on_lower(after_count, after_count_lower, |input| {
-        let (input, (filter, connector)) = alt((
-            map(
-                terminated(
-                    take_until(", then destroy the rest"),
-                    tag(", then destroy the rest"),
-                ),
-                |filter: &str| (filter, DestroyRestConnector::Then),
-            ),
-            map(
-                terminated(take_until(". destroy the rest"), tag(". destroy the rest")),
-                |filter: &str| (filter, DestroyRestConnector::Sentence),
-            ),
-        ))
-        .parse(input)?;
-        let (input, _) = opt(tag(".")).parse(input)?;
-        let (input, _) = eof.parse(input)?;
-        Ok((input, (filter.len(), connector)))
-    })?;
+    Ok((
+        rest,
+        KeeperDisposeHead {
+            scope,
+            head,
+            quantifier,
+            filter,
+            verb,
+            connector,
+            keeper_end,
+            disposal_span: (disposal_start, disposal_end),
+            remainder_len,
+        },
+    ))
+}
 
-    let filter_text = after_count.get(..filter_len)?.trim();
-    // Throwaway — the parsed `filter` is KEPT while `filter_ctx` is dropped,
-    // which is exactly the shape rule 1 of `ChosenColorQualifierScope` forbids
-    // inheriting `ChainBound` into: a printed
-    // "… of the color of your choice" filter text here would stamp
-    // `FilterProp::IsChosenColor` and then discard the provenance that injects
-    // the matching chooser.
-    let mut filter_ctx = ctx.clone_throwaway();
-    let filter = parse_choose_object_selection_filter(filter_text, &mut filter_ctx)?;
-    let TargetFilter::Typed(mut destroy_filter) = filter.clone() else {
-        return None;
-    };
-    destroy_filter.properties.push(FilterProp::Not {
-        prop: Box::new(FilterProp::InTrackedSet {
-            id: TrackedSetId(0),
-        }),
-    });
+/// The routing predicate `oracle_classifier::should_defer_spell_to_effect`
+/// consumes. The parser IS the detector: this is the gate-aware head combinator
+/// itself, so a line the recognizer would refuse is never routed away from the
+/// static classifier.
+pub(crate) fn is_keeper_dispose_head(lower: &str) -> bool {
+    parse_keeper_dispose_head(lower).is_ok()
+}
 
-    let prefix_len = text.len().checked_sub(after_count.len())?;
-    let choose_end = prefix_len.checked_add(filter_len)?;
-    let connector_prefix = match connector {
-        DestroyRestConnector::Then => ", then ",
-        DestroyRestConnector::Sentence => ". ",
+/// CR 608.2c + CR 701.8a + CR 701.21a + CR 101.4: Whole-body recognizer for the
+/// keeper-and-dispose class — one keeper nomination followed immediately by a
+/// disposal of everything else in the same domain.
+///
+/// Two lowerings, selected by the chooser axis:
+/// * `Controller` → `ChooseObjectsIntoTrackedSet` + `DestroyAll` over the same
+///   typed filter minus the tracked set (Duneblast, Mount Doom).
+/// * `EachPlayer` / `EachOpponent` → one `ChooseAndSacrificeRest` scoped per
+///   player.
+///
+/// CR 608.2c: "The controller of the spell or ability follows its instructions
+/// in the order written. However, replacement effects may modify these actions."
+/// The printed counter precedes the sacrifice, and CR 614.1 makes that order
+/// observable: replacement effects "apply continuously as events happen — they
+/// aren't locked in ahead of time", so a permanent that would modify the counter
+/// placement and is itself about to be sacrificed must still be on the
+/// battlefield when the counter is placed. The mark therefore rides on
+/// `Effect::ChooseAndSacrificeRest` as `keeper_counter` and is placed inside the
+/// resolver's single funnel, ahead of the disposal — not as a chained clause
+/// after it. Driven by
+/// `tests/integration/promise_of_loyalty.rs::promise_of_loyalty_marks_the_keeper_before_the_sacrifice`.
+fn parse_keeper_dispose_rest_ir(
+    text: &str,
+    kind: AbilityKind,
+    ctx: &mut ParseContext,
+) -> Option<EffectChainIr> {
+    let lower = text.to_ascii_lowercase();
+    let (head, _) = nom_on_lower(text, &lower, parse_keeper_dispose_head)?;
+
+    let keeper_source = text.get(..head.keeper_end)?;
+    let disposal_source = text.get(head.disposal_span.0..head.disposal_span.1)?;
+    let remainder_source = match head.remainder_len {
+        Some(len) => Some(text.get(text.len().checked_sub(len)?..)?),
+        None => None,
     };
-    let destroy_start = choose_end.checked_add(connector_prefix.len())?;
-    let destroy_end = destroy_start.checked_add("destroy the rest".len())?;
-    let choose_source = text.get(..choose_end)?;
-    let destroy_source = text.get(destroy_start..destroy_end)?;
 
     let mut builder = ClauseIrBuilder::new(text);
-    builder
-        .clause(
-            choose_source,
-            parsed_clause(Effect::ChooseObjectsIntoTrackedSet {
-                chooser: TargetFilter::Controller,
-                filter,
-                min: 0,
-                max: Some(max),
-                cardinality: None,
-                eligibility: None,
-            }),
-            Some(match connector {
-                DestroyRestConnector::Then => ClauseBoundary::Then,
-                DestroyRestConnector::Sentence => ClauseBoundary::Sentence,
-            }),
-            ClauseDisposition::Emit {
-                followup: None,
-                intrinsic: None,
-            },
-        )
-        .push();
-    builder
-        .clause(
-            destroy_source,
-            parsed_clause(Effect::DestroyAll {
-                target: TargetFilter::Typed(destroy_filter),
-                cant_regenerate: false,
-            }),
-            None,
-            ClauseDisposition::Emit {
-                followup: None,
-                intrinsic: None,
-            },
-        )
-        .push();
+
+    match head.scope {
+        KeeperChooserScope::Controller => match &head.head {
+            // The gate accepts `KeeperHead::Counter` on this subject
+            // structurally (so this recognizer keeps routing the line, per
+            // the gate's own comment) but no controller-scope lowering exists
+            // for it: `ChooseObjectsIntoTrackedSet` + `DestroyAll` over the
+            // tracked-set complement has no step to place a counter in.
+            // CR 122.1's counter is what nominates the keeper on this
+            // subject, so silently building that lowering would drop the
+            // printed instruction. Claim the whole printed instruction as one
+            // honest gap instead of a per-sub-clause split — the disposal
+            // half is meaningless without the (unmodelled) counter
+            // nomination it depends on, so splitting it into "claimed" and
+            // "gapped" halves would misstate which part is unsupported.
+            KeeperHead::Counter { .. } => {
+                let whole_source = text.get(..head.disposal_span.1)?;
+                builder
+                    .clause(
+                        whole_source,
+                        parsed_clause(Effect::unimplemented(
+                            "keeper_dispose_controller_counter_head",
+                            whole_source,
+                        )),
+                        remainder_source.map(|_| ClauseBoundary::Sentence),
+                        ClauseDisposition::Emit {
+                            followup: None,
+                            intrinsic: None,
+                        },
+                    )
+                    .push();
+            }
+            KeeperHead::Choose => {
+                let TargetFilter::Typed(mut destroy_filter) = head.filter.clone() else {
+                    return None;
+                };
+                destroy_filter.properties.push(FilterProp::Not {
+                    prop: Box::new(FilterProp::InTrackedSet {
+                        id: TrackedSetId(0),
+                    }),
+                });
+                // The gate admits only `UpTo` on this subject for a `Choose`
+                // head; `Exact` is its zero-card `Err` arm, so this cannot be
+                // reached from a parse.
+                let KeeperQuantifier::UpTo(max) = head.quantifier else {
+                    return None;
+                };
+                builder
+                    .clause(
+                        keeper_source,
+                        parsed_clause(Effect::ChooseObjectsIntoTrackedSet {
+                            chooser: TargetFilter::Controller,
+                            filter: head.filter,
+                            min: 0,
+                            max: Some(max),
+                            cardinality: None,
+                            eligibility: None,
+                        }),
+                        Some(head.connector.boundary()),
+                        ClauseDisposition::Emit {
+                            followup: None,
+                            intrinsic: None,
+                        },
+                    )
+                    .push();
+                builder
+                    .clause(
+                        disposal_source,
+                        parsed_clause(Effect::DestroyAll {
+                            target: TargetFilter::Typed(destroy_filter),
+                            cant_regenerate: false,
+                        }),
+                        remainder_source.map(|_| ClauseBoundary::Sentence),
+                        ClauseDisposition::Emit {
+                            followup: None,
+                            intrinsic: None,
+                        },
+                    )
+                    .push();
+            }
+        },
+        KeeperChooserScope::EachPlayer | KeeperChooserScope::EachOpponent => {
+            // The gate admits only `Exact` on this subject; `UpTo` is the
+            // deferred Covetous Elegy axis, so this cannot be reached.
+            let KeeperQuantifier::Exact(printed_count) = head.quantifier else {
+                return None;
+            };
+            let keep_count = i32::try_from(printed_count).ok()?;
+            // CR 101.4: every player in scope nominates, in APNAP order. The
+            // effect iterates players itself, so the keeper filter carries NO
+            // controller and the printed control clause is expressed here.
+            let player_scope = match head.scope {
+                KeeperChooserScope::EachPlayer => PlayerFilter::All,
+                KeeperChooserScope::EachOpponent => PlayerFilter::Opponent,
+                // Unreachable: this whole block is inside the
+                // `KeeperChooserScope::EachPlayer | KeeperChooserScope::EachOpponent`
+                // match arm above (`Controller` is handled by the sibling arm),
+                // so a `Controller` value can never flow through this branch.
+                KeeperChooserScope::Controller => {
+                    unreachable!("excluded by the outer scope match arm above")
+                }
+            };
+            // CR 122.1 + CR 608.2c: a `KeeperHead::Counter` head's printed
+            // counter nominates the keeper AS PART of this same instruction,
+            // so it rides on the effect's `keeper_counter` field rather than a
+            // following `PutCounterAll` clause. `Choose` heads carry no
+            // counter.
+            let keeper_counter = match &head.head {
+                KeeperHead::Choose => None,
+                KeeperHead::Counter {
+                    counter_type,
+                    count,
+                } => Some(KeeperCounterMark {
+                    counter_type: counter_type.clone(),
+                    count: QuantityExpr::Fixed {
+                        value: i32::try_from(*count).ok()?,
+                    },
+                }),
+            };
+            builder
+                .clause(
+                    keeper_source,
+                    // CR 701.21a: each unchosen permanent is sacrificed by its
+                    // own controller, not destroyed by the spell's controller.
+                    parsed_clause(Effect::ChooseAndSacrificeRest {
+                        categories: Vec::new(),
+                        chooser_scope: crate::types::ability::CategoryChooserScope::EachPlayerSelf,
+                        choose_filter: head.filter.clone(),
+                        sacrifice_filter: head.filter,
+                        total_power_cap: None,
+                        // CR 609.3: a player with fewer eligible permanents than
+                        // the printed count keeps as many as they can.
+                        keeper_constraint: Some(KeeperConstraint::ExactCount {
+                            count: QuantityExpr::Fixed { value: keep_count },
+                        }),
+                        keeper_counter,
+                    }),
+                    remainder_source.map(|_| ClauseBoundary::Sentence),
+                    ClauseDisposition::Emit {
+                        followup: None,
+                        intrinsic: None,
+                    },
+                )
+                .player_scope(Some(player_scope))
+                .push();
+        }
+    }
+
+    // CR 608.2c: the trailing sentence is a separate printed instruction, parsed
+    // by the shared clause parser. Text this recognizer does not model therefore
+    // becomes `Effect::Unimplemented` and stays visible to coverage rather than
+    // being dropped.
+    if let Some(remainder_source) = remainder_source {
+        let remainder_clause = remainder_source.trim().trim_end_matches('.').trim_end();
+        let parsed = parse_effect_clause(remainder_clause, ctx);
+        builder
+            .clause(
+                remainder_clause,
+                parsed,
+                None,
+                ClauseDisposition::Emit {
+                    followup: None,
+                    intrinsic: None,
+                },
+            )
+            .push();
+    }
 
     Some(EffectChainIr {
         clauses: builder.finish(),
@@ -16218,6 +16740,7 @@ fn parse_threshold_land_balance_ir(
                 keeper_constraint: Some(KeeperConstraint::ExactCount {
                     count: QuantityExpr::Fixed { value: keep_count },
                 }),
+                keeper_counter: None,
             }),
             None,
             ClauseDisposition::Emit {
@@ -17475,45 +17998,74 @@ fn parse_clause_ast(text: &str, ctx: &mut ParseContext) -> ClauseAst {
     }
 }
 
-/// Peel an optional cardinality prefix from the noun phrase that precedes a
-/// positional placement terminator ("on top of" / "on the bottom of" / "into").
-///
-/// Returns `Some((Some(count), remainder))` when an explicit cardinality is
-/// recognized (e.g. "two cards from your hand" → `Fixed(2)` + "cards from your
-/// hand"), or `Some((None, input))` when the noun phrase has no leading
-/// quantity (the patcher leaves the existing `count: Fixed(1)` untouched).
-///
-/// Recognized prefixes for positional library placement:
-///   - `"x "` (with X-cost)     → `QuantityExpr::Ref { Variable("X") }`
-///   - numeric word/digit + " " → `QuantityExpr::Fixed { value: N }`
-///
-/// Cards like "put it on top" / "put that card on top" / "put target X on top"
-/// have no leading numeral and fall through to the `None` arm — the existing
-/// `count: Fixed(1)` is preserved. "Any number of …" forms are out of scope
-/// here; they involve a player-choice cardinality that is paired with a
-/// matching `MultiTargetSpec` and currently route through other effect
-/// paths (Brainstorm-class effects are handled at the trigger / sub-clause
-/// level, not by this patcher).
-fn peel_put_at_library_count(input: &str) -> Option<(Option<QuantityExpr>, &str)> {
+/// CR 115.1 (+ CR 115.1d for the trigger cohort) + CR 601.2c: the cardinality of
+/// the noun phrase in a positional library placement ("put <noun phrase> on top
+/// of / on the bottom of / into <library>"). Each shape names a DISTINCT rules
+/// concept, which is why this is a typed enum rather than a pair of `Option`s —
+/// a tuple would admit combinations the grammar cannot produce. `Exact` and
+/// `AnyNumber` both write the effect's own count, but with different semantics:
+///   * `Unstated`  — "target X" / "it" / "that card": no leading cardinality,
+///     so the lowering default of `count: Fixed(1)` stands.
+///   * `Exact`     — "two cards", "x cards": a concrete count on the effect.
+///   * `TargetSet` — "any number of [other|another] target …" / "up to N target
+///     …": an ANNOUNCED target set (CR 601.2c). The number of targets is fixed
+///     at announcement, so the placement set is the chosen targets and `count`
+///     is deliberately left alone.
+#[derive(Debug, PartialEq)]
+enum LibraryPlacementCardinality {
+    Unstated,
+    Exact(QuantityExpr),
+    TargetSet(MultiTargetSpec),
+    /// `AnyNumber` — "any number of <population>" with NO `target` word
+    /// (CR 115.10 + CR 115.10a: untargeted). A resolution-time choice of zero
+    /// through all eligible objects (CR 107.1c + CR 608.2d), written to the
+    /// effect's own `count` as the same `UpTo` wrapper the sacrifice class uses.
+    AnyNumber,
+}
+
+/// Peel the cardinality prefix from the noun phrase that precedes a positional
+/// placement terminator ("on top of" / "on the bottom of" / "into"), returning
+/// it alongside the remainder to hand to `parse_target`.
+fn peel_library_placement_cardinality(input: &str) -> (LibraryPlacementCardinality, &str) {
+    // CR 115.1 (+ CR 115.1d for the trigger cohort): `strip_optional_target_prefix`
+    // is the SINGLE authority for the announced target-set quantifiers, article
+    // guard included — it declines "any number of cards" and "up to one of them"
+    // without consuming. Tried FIRST because that is the precedence the grammar
+    // has; the numeral arms below could never see these inputs anyway, since
+    // they start with a word rather than a numeral.
+    if let (rest, Some(spec)) = strip_optional_target_prefix(input) {
+        return (LibraryPlacementCardinality::TargetSet(spec), rest);
+    }
+    // CR 107.1c + CR 115.10: untargeted "any number of <noun phrase>". Tried only
+    // AFTER the target-set authority above has declined, so "any number of target
+    // …" can never reach this arm. The pronoun form ("any number of them") is
+    // peeled here too; it is refused at the routing site, where the parsed
+    // recipient is known.
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("any number of ").parse(input) {
+        return (LibraryPlacementCardinality::AnyNumber, rest);
+    }
     // "x " — variable quantity bound to the spell's chosen X.
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("x ").parse(input) {
-        return Some((
-            Some(QuantityExpr::Ref {
+        return (
+            LibraryPlacementCardinality::Exact(QuantityExpr::Ref {
                 qty: QuantityRef::Variable {
                     name: "X".to_string(),
                 },
             }),
             rest,
-        ));
+        );
     }
     // Numeric ("two ", "three ", "1 ", …). `parse_number` accepts both English
     // number words and digits per the oracle-parser SKILL.
     if let Ok((after_num, n)) = nom_primitives::parse_number.parse(input) {
         if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(" ").parse(after_num) {
-            return Some((Some(QuantityExpr::Fixed { value: n as i32 }), rest));
+            return (
+                LibraryPlacementCardinality::Exact(QuantityExpr::Fixed { value: n as i32 }),
+                rest,
+            );
         }
     }
-    Some((None, input))
+    (LibraryPlacementCardinality::Unstated, input)
 }
 
 fn parse_exiled_cards_not_cast_cleanup(input: &str) -> Option<()> {
@@ -17565,91 +18117,109 @@ fn is_ownership_candidate(reading: GuardReading, effect: &Effect) -> bool {
         && crate::game::effects::cast_from_zone::graveyard_destination_rider(effect).is_some()
 }
 
+fn refine_put_at_library_position(
+    clause: &mut ParsedEffectClause,
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<MultiTargetSpec> {
+    // "put [N] [type] on top/bottom of library" — the imperative parser
+    // returns PutAtLibraryPosition { target: Any, count: Fixed(1) }
+    // because it dispatches on the positional suffix without extracting
+    // the noun phrase. This patch re-inspects the imperative text and
+    // assigns both the target filter and the cardinality. Covers:
+    //   - "put target X on top of Y's library"           (count = 1)
+    //   - "put target X on the bottom of Y's library"    (count = 1)
+    //   - "put target X into Y's library Nth from top"   (count = 1)
+    //   - "put two cards from your hand on top of your library in any order"
+    //     (Cavalier of Gales / Brainstorm class — count = N, filter = Card+InZone:Hand)
+    let mut placement_target_set = None;
+    if let Effect::PutAtLibraryPosition {
+        ref mut target,
+        ref mut count,
+        ..
+    } = clause.effect
+    {
+        if parse_exiled_cards_not_cast_cleanup(&text.to_lowercase()).is_some() {
+            *target = TargetFilter::ExiledBySource;
+            *count = QuantityExpr::Fixed { value: 0 };
+            return placement_target_set;
+        }
+        let lower_put = text.to_lowercase();
+        if matches!(*target, TargetFilter::Any | TargetFilter::ParentTarget)
+            && (nom_primitives::scan_contains(&lower_put, "put them on top")
+                || nom_primitives::scan_contains(&lower_put, "put the exiled cards on top")
+                || nom_primitives::scan_contains(&lower_put, "cards exiled this way"))
+        {
+            *target = TargetFilter::ExiledBySource;
+            if matches!(*count, QuantityExpr::Fixed { value: 1 }) {
+                *count = QuantityExpr::Ref {
+                    qty: QuantityRef::CardsExiledBySource,
+                };
+            }
+        }
+        let extracted = (|| -> Option<(Option<TargetFilter>, LibraryPlacementCardinality)> {
+            let lower = text.to_lowercase();
+            let (after_put, _) = tag::<_, _, OracleError<'_>>("put ")
+                .parse(lower.as_str())
+                .ok()?;
+            // Isolate the noun phrase before the first positional terminator.
+            let (_, before) = alt((
+                take_until::<_, _, OracleError<'_>>(" on top of"),
+                take_until(" on the bottom of"),
+                take_until(" into "),
+            ))
+            .parse(after_put)
+            .ok()?;
+            let (cardinality, after_count) = peel_library_placement_cardinality(before);
+            // CR 608.2k: thread the real trigger context so a bare object
+            // pronoun ("put it on the bottom …") binds to the trigger's
+            // `object_pronoun_ref` (the cast spell for spell-cast triggers)
+            // rather than defaulting to `ParentTarget`. `parse_target`
+            // spins up a fresh empty context, which loses that antecedent.
+            let (filter, _) = parse_target_with_ctx(after_count, ctx);
+            let new_target = if matches!(filter, TargetFilter::Any) {
+                None
+            } else {
+                Some(filter)
+            };
+            Some((new_target, cardinality))
+        })();
+        if let Some((maybe_filter, cardinality)) = extracted {
+            if *target == TargetFilter::Any {
+                if let Some(filter) = maybe_filter {
+                    *target = filter;
+                }
+            }
+            match cardinality {
+                LibraryPlacementCardinality::Unstated => {}
+                LibraryPlacementCardinality::Exact(count_expr) => *count = count_expr,
+                // CR 601.2c + CR 115.1: the announced targets, rather than the
+                // effect's default count, define a targeted placement's size.
+                LibraryPlacementCardinality::TargetSet(spec) => placement_target_set = Some(spec),
+                // CR 107.1c + CR 115.10a + CR 608.2d: untargeted "any number"
+                // selects zero through every card in the named population on resolution.
+                LibraryPlacementCardinality::AnyNumber => {
+                    if target.names_enumerable_population() {
+                        *count = QuantityExpr::up_to(QuantityExpr::Ref {
+                            qty: QuantityRef::ObjectCount {
+                                filter: target.clone(),
+                            },
+                        });
+                    }
+                }
+            }
+        }
+    }
+    placement_target_set
+}
+
 fn lower_clause_ast(ast: ClauseAst, ctx: &mut ParseContext) -> ParsedEffectClause {
     match ast {
         ClauseAst::Imperative { text } => {
             let mut clause = lower_imperative_clause(&text, ctx);
-            // "put [N] [type] on top/bottom of library" — the imperative parser
-            // returns PutAtLibraryPosition { target: Any, count: Fixed(1) }
-            // because it dispatches on the positional suffix without extracting
-            // the noun phrase. This patch re-inspects the imperative text and
-            // assigns both the target filter and the cardinality. Covers:
-            //   - "put target X on top of Y's library"           (count = 1)
-            //   - "put target X on the bottom of Y's library"    (count = 1)
-            //   - "put target X into Y's library Nth from top"   (count = 1)
-            //   - "put two cards from your hand on top of your library in any order"
-            //     (Cavalier of Gales / Brainstorm class — count = N, filter = Card+InZone:Hand)
-            if let Effect::PutAtLibraryPosition {
-                ref mut target,
-                ref mut count,
-                ..
-            } = clause.effect
-            {
-                if parse_exiled_cards_not_cast_cleanup(&text.to_lowercase()).is_some() {
-                    *target = TargetFilter::ExiledBySource;
-                    *count = QuantityExpr::Fixed { value: 0 };
-                    return clause;
-                }
-                let lower_put = text.to_lowercase();
-                if matches!(*target, TargetFilter::Any | TargetFilter::ParentTarget)
-                    && (nom_primitives::scan_contains(&lower_put, "put them on top")
-                        || nom_primitives::scan_contains(&lower_put, "put the exiled cards on top")
-                        || nom_primitives::scan_contains(&lower_put, "cards exiled this way"))
-                {
-                    *target = TargetFilter::ExiledBySource;
-                    if matches!(*count, QuantityExpr::Fixed { value: 1 }) {
-                        *count = QuantityExpr::Ref {
-                            qty: QuantityRef::CardsExiledBySource,
-                        };
-                    }
-                }
-                let extracted = (|| -> Option<(Option<TargetFilter>, Option<QuantityExpr>)> {
-                    let lower = text.to_lowercase();
-                    let (after_put, _) = tag::<_, _, OracleError<'_>>("put ")
-                        .parse(lower.as_str())
-                        .ok()?;
-                    // Isolate the noun phrase before the first positional terminator.
-                    let before = [" on top of", " on the bottom of", " into "]
-                        .iter()
-                        .find_map(|term| {
-                            take_until::<_, _, OracleError<'_>>(*term)
-                                .parse(after_put)
-                                .ok()
-                                .map(|(_, before)| before)
-                        })?;
-                    // Peel a leading cardinality, if present. Recognized forms:
-                    //   - "two cards ..."          → Fixed(2)
-                    //   - "x cards ..."            → Variable("X")
-                    //   - "any number of cards"   → AnyNumberOf
-                    // The remainder (e.g. "cards from your hand") is then handed to
-                    // `parse_target` for filter extraction. If no quantity prefix
-                    // matches, the noun phrase is fed to `parse_target` unchanged
-                    // (covers "target X" / "it" / "that card" — count stays 1).
-                    let (count_expr, after_count) =
-                        peel_put_at_library_count(before).unwrap_or((None, before));
-                    // CR 608.2k: thread the real trigger context so a bare object
-                    // pronoun ("put it on the bottom …") binds to the trigger's
-                    // `object_pronoun_ref` (the cast spell for spell-cast triggers)
-                    // rather than defaulting to `ParentTarget`. `parse_target`
-                    // spins up a fresh empty context, which loses that antecedent.
-                    let (filter, _) = parse_target_with_ctx(after_count, ctx);
-                    let new_target = if matches!(filter, TargetFilter::Any) {
-                        None
-                    } else {
-                        Some(filter)
-                    };
-                    Some((new_target, count_expr))
-                })();
-                if let Some((maybe_filter, maybe_count)) = extracted {
-                    if *target == TargetFilter::Any {
-                        if let Some(filter) = maybe_filter {
-                            *target = filter;
-                        }
-                    }
-                    if let Some(c) = maybe_count {
-                        *count = c;
-                    }
-                }
+            let placement_target_set = refine_put_at_library_position(&mut clause, &text, ctx);
+            if clause.multi_target.is_none() {
+                clause.multi_target = placement_target_set;
             }
             clause
         }
@@ -17682,6 +18252,22 @@ fn lower_clause_ast(ast: ClauseAst, ctx: &mut ParseContext) -> ParsedEffectClaus
                         // prints nor an honest record of the gap — it is a third behaviour
                         // the printed text does not license.
                         //
+                        // Before gapping, attempt the whole-body graveyard-redirect
+                        // authority (`parse_windowed_graveyard_redirect_install`):
+                        // a chain-position "If <subject> would be put into <graveyard>
+                        // ..., exile it instead" sentence (Magus of the Will's
+                        // one-line activated body) never reaches the line-level
+                        // replacement dispatcher, so without this attempt it gaps
+                        // here while the identical sentence on its own line
+                        // lowers. The authority's own mandatory "if ... would be
+                        // put into ... graveyard ... instead" grammar is the
+                        // single recognition gate — anything outside the class
+                        // still falls through to the gap below. (Sibling attempt
+                        // serves the IR path's deferred marks at
+                        // `oracle::resolve_guards_in_ability`; a clause deferred
+                        // there never reaches this inline verdict, so the
+                        // populations are disjoint.)
+                        //
                         // Gapping HERE rather than at the resolver is required, not
                         // incidental. The `has_unimplemented`-keyed routing gates trial-parse
                         // a line STANDALONE, so a mark is invisible to them where a gap is
@@ -17692,6 +18278,13 @@ fn lower_clause_ast(ast: ClauseAst, ctx: &mut ParseContext) -> ParsedEffectClaus
                         // re-routes its line and loses its `replacement_structure`.
                         // CR 614.1a: the EVENT reading IS the replacement reading, so this
                         // seam records only `Replacement`.
+                        if let Some(effect) =
+                            super::oracle_replacement::parse_windowed_graveyard_redirect_install(
+                                &clause_text,
+                            )
+                        {
+                            return parsed_clause(effect);
+                        }
                         return parsed_clause(gap_diagnosis::clause_gap_unimplemented_as(
                             ClauseGapKind::Replacement,
                             &clause_text,
@@ -18027,38 +18620,27 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
         return clause;
     }
 
-    // CR 601.2 + CR 609.4b: "cast target [type] card from [a | that player's]
-    // graveyard, and mana of any type can be spent to cast that spell" (Quistis
-    // Trepe, Tinybones the Pickpocket) is an in-place graveyard cast-from-zone
-    // grant carrying the any-type concession on the grant, NOT a bare
-    // SpendManaAsAnyColor static (which the catch-all below would degrade to,
-    // dropping the cast). Must run before that catch-all.
-    if let Some(effect) = try_parse_cast_target_from_graveyard_any_mana(text, ctx) {
-        return parsed_clause(effect);
-    }
-
-    // CR 609.4b: "spend mana as though it were mana of any [color|type] to cast ..." /
-    // "mana of any type can be spent to cast ..." — grants any-type/any-color mana
-    // permission for a cast-from-exile card (Outrageous Robbery's "any type" rider).
-    // Produce a GenericEffect with SpendManaAsAnyColor static.
-    // Variants: "spend colorless mana as though..." / "mana of any color to cast..."
-    {
-        let lower = text.to_lowercase();
-        if nom_primitives::scan_contains(&lower, "as though it were mana of any color")
-            || nom_primitives::scan_contains(&lower, "as though it were mana of any type")
-            || nom_primitives::scan_contains(&lower, "mana of any type can be spent to cast")
-        {
-            return parsed_clause(Effect::GenericEffect {
-                static_abilities: vec![StaticDefinition::new(StaticMode::SpendManaAsAnyColor {
-                    spell_filter: None,
-                    activation_source_filter: None,
-                })
-                .description(text.to_string())],
-                duration: None,
-                target: Some(TargetFilter::Controller),
-                end_cost: None,
-            });
-        }
+    // CR 609.4b: "spend mana as though it were mana of any [color|type]" /
+    // "mana of any type can be spent" with no cast grant before it in the chunk
+    // sequence (a rider after a grant is folded onto the grant by
+    // `try_parse_mana_spend_rider` earlier) is an honest gap. The only lowering
+    // this seam could give — a `GenericEffect` carrying a `SpendManaAsAnyColor`
+    // static — installs a transient effect with no modification, and payment
+    // reads a concession static only from functioning permanents and emblems
+    // (`player_board_wide_mana_spend_permission`), so no payment would ever
+    // see it. Nor could it carry what these clauses print: a scope ("to cast
+    // Case spells"), a one-use limit ("For one spell this turn", North Star;
+    // "the next time you cast that card") or a cast grant swallowed with it.
+    // A subject narrower than "mana" ("spend white mana as though …", False
+    // Dawn; "spend blue mana …", Quicksilver Elemental) relaxes one kind of mana
+    // only — the same gap the rider fold reports after a grant.
+    if let Some(single_kind) = mana_spend_concession_is_single_kind(&text.to_lowercase()) {
+        let gap = if single_kind {
+            UNREPRESENTABLE_MANA_SPEND_CONCESSION_GAP
+        } else {
+            STANDALONE_MANA_SPEND_CONCESSION_GAP
+        };
+        return parsed_clause(Effect::unimplemented(gap, text));
     }
 
     // CR 122.1 + CR 608.2d: shared-target counter choice — "put your choice of
@@ -18078,8 +18660,21 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
 
     let (stripped, duration) = strip_trailing_duration(text);
     let stripped_lower = stripped.to_ascii_lowercase();
+    // CR 611.2a: publish the peeled trailing duration for the body parse (see
+    // `ParseContext::stated_clause_duration`). Overwrites ONLY when this seam
+    // actually peeled something: a clause with no trailing duration must leave the
+    // enclosing LEADING duration intact, or Locke's "Until end of turn, you may cast
+    // a spell from among those cards" would arrive at the mechanism decision looking
+    // exactly like Nathan Drake's undurated sibling. Restored afterwards so a peeled
+    // duration cannot leak into the next clause.
+    let restore = duration
+        .clone()
+        .map(|peeled| ctx.stated_clause_duration.replace(peeled));
     let mut clause = try_parse_create_token_sequence(TextPair::new(stripped, &stripped_lower), ctx)
         .unwrap_or_else(|| parse_imperative_effect(stripped, ctx));
+    if let Some(previous) = restore {
+        ctx.stated_clause_duration = previous;
+    }
     // CR 601.2c: paired with the reset at the top of this function. The count is
     // produced by the same parse that produced the target filter
     // (`parse_each_of_target_distribution`), so it is the primary authority for
@@ -19159,6 +19754,10 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
             // self-reference so a `"that creature"` copy-token anaphor in the
             // continuation chunk still remaps to the enchanted host.
             host_self_reference: ctx.host_self_reference.clone(),
+            // CR 109.1 + CR 205.2: a continuation chunk is still the enclosing
+            // card's text, so its printed core types travel with it (CR 701.41a
+            // `support N` reads them).
+            source_core_types: ctx.source_core_types.clone(),
             ..Default::default()
         }
     } else {
@@ -19420,8 +20019,20 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
     {
         if let Some(verb) = extract_effect_verb(&primary_effect) {
             let reparsed_text = format!("{verb} {sub_text}");
-            let reparsed = parse_imperative_effect(&reparsed_text, &mut continuation_ctx);
+            let mut reparsed = parse_imperative_effect(&reparsed_text, &mut continuation_ctx);
             if !matches!(reparsed.effect, Effect::Unimplemented { .. }) {
+                // CR 601.2c + CR 115.1: each instance of "target" announces its own
+                // target set, so this conjunct ("… and a charge counter on each of any
+                // number of target artifacts") recovers its own quantifier from its own
+                // reparsed text through the counter-path authority. The reparse does
+                // not run `lower_imperative_clause`'s recovery; without this the
+                // conjunct's slot is mandatory, although CR 107.1c + CR 115.6 allow
+                // zero targets.
+                if matches!(reparsed.effect, Effect::PutCounter { .. })
+                    && reparsed.multi_target.is_none()
+                {
+                    reparsed.multi_target = extract_put_counter_multi_target(&reparsed_text);
+                }
                 sub_clause = reparsed;
             }
         }
@@ -21894,6 +22505,7 @@ fn try_parse_per_opponent_graveyard_free_cast(lower: &str) -> Option<Effect> {
         driver: CastFromZoneDriver::DuringResolution,
         mana_spend_permission: None,
         additional_cost: None,
+        cast_cost_modifier: None,
     })
 }
 
@@ -22233,11 +22845,14 @@ fn replace_target_with_parent(effect: &mut Effect) {
 /// `replace_target_with_parent`, but assigns `TargetFilter::SelfRef`.
 ///
 /// Only the effect arms reachable for the "name ~ then refer back" class are
-/// populated: zone changes (the issue card), single-object tap/untap, and
-/// `Transform` for the DFC family. Arms with
-/// `ParentTargetController`/`LastCreated` guards (`Sacrifice`, `Attach`) are
-/// intentionally omitted — those guards are meaningless for a `SelfRef` rebind,
-/// and no card in this class reaches them.
+/// populated: zone changes (the issue card), single-object tap/untap,
+/// `Transform` for the DFC family, and `Attach`'s ATTACHMENT operand for the
+/// FIN "transform ~, then attach it to <host>" class. `Attach` is the one arm
+/// whose rebind is limited to `ParentTarget` (see the arm comment); the
+/// `TriggeringSource` encoding names the trigger event's object and must not
+/// be re-pointed. Arms with `ParentTargetController`/`LastCreated` guards
+/// (`Sacrifice`) remain intentionally omitted — those guards are meaningless
+/// for a `SelfRef` rebind, and no card in this class reaches them.
 fn replace_target_with_self(effect: &mut Effect) {
     match effect {
         Effect::ChangeZone { target, .. } | Effect::ChangeZoneAll { target, .. } => {
@@ -22259,6 +22874,24 @@ fn replace_target_with_self(effect: &mut Effect) {
         // same source-binding fixup applies.
         Effect::FlipPermanent { target, .. } => {
             *target = TargetFilter::SelfRef;
+        }
+        // CR 608.2c + CR 701.3a (FIN Sidequest class — Sidequest: Play Blitzball):
+        // in "transform ~, then attach it to <host>", the bare-pronoun ATTACHMENT
+        // operand names the source the previous clause just transformed. Rewrite
+        // ONLY `attachment`; the fully-named host (`target`) keeps its own
+        // binding.
+        //
+        // `ParentTarget` is the only admitted encoding. The bare-pronoun
+        // attachment route (`imperative::parse_attachment_anaphor`) parses
+        // through a default `ParseContext` and therefore yields `ParentTarget`
+        // (the declared-slot and source-animation branches are the only
+        // alternatives, and neither applies here). The corpus's single
+        // `TriggeringSource` attachment operand (Ajani's Chosen, "you may attach
+        // it to the token") legitimately names the trigger event's object — a
+        // DIFFERENT antecedent — so admitting that encoding here would re-point
+        // a valid binding.
+        Effect::Attach { attachment, .. } if matches!(attachment, TargetFilter::ParentTarget) => {
+            *attachment = TargetFilter::SelfRef;
         }
         Effect::GenericEffect {
             target,
@@ -22442,10 +23075,10 @@ fn rebind_anaphoric_generic_effect_subject_to_parent(lower: &str, def: &mut Abil
     }
 }
 
-/// CR 115.10a + CR 601.2c: A damage clause whose recipient is a FRESH typed
-/// target structurally distinct from the anaphoric "It" subject an earlier
+/// CR 115.10a + CR 601.2c: A damage clause whose recipient is FRESH (a typed
+/// target, or a player) structurally distinct from the anaphoric "It" subject an earlier
 /// clause established — it declares its own recipient, not the boosted/
-/// counter'd object. Two shapes both witness this: (1) "creature an opponent
+/// counter'd object. Three shapes witness this: (1) "creature an opponent
 /// controls" / "creature you don't control" (canonicalize to
 /// `ControllerRef::Opponent`) — a different player's permanent can never be
 /// the subject's own controller's chosen object; (2) "each other creature" /
@@ -22453,14 +23086,28 @@ fn rebind_anaphoric_generic_effect_subject_to_parent(lower: &str, def: &mut Abil
 /// "another" exclusion excludes the referenced object *by definition*, so a
 /// board-sweep recipient (Chandra's Ignition class: "target creature you
 /// control deals damage equal to its power to each other creature") can never
-/// be the same object as "It" either. Per CR 601.2c each instance of the word
+/// be the same object as "It" either; (3) a PLAYER recipient
+/// (`TargetFilter::is_player_scope`) — CR 120.3a: damage dealt to a player makes
+/// that player lose life, so a printed player recipient is never the antecedent
+/// creature. Per CR 601.2c each instance of the word
 /// "target" is a separate target, and per CR 115.10a being affected (the
-/// source's power feeding the amount) does not make either recipient shape the
+/// source's power feeding the amount) does not make recipient shape (1) or (2) the
 /// same object as the boosted/counter'd creature. Recurses through
 /// `Or`/`And`/`Not` wrappers, mirroring `attach_controller_if_absent` /
-/// `rewrite_filter_controller`. `ParentTarget`/`SelfRef`/`Any`/
-/// `ParentTargetController` etc. are excluded (they are never `Typed` anyway).
+/// `rewrite_filter_controller`. Still excluded: `ParentTarget`, `SelfRef`, `Any`
+/// and `ParentTargetController`, none of which `is_player_scope` accepts
+/// and none of which is `Typed`.
 fn target_filter_is_distinct_recipient(filter: &TargetFilter) -> bool {
+    // CR 120.3a + CR 608.2c: a PLAYER recipient ("... to you", "... to target
+    // player") is printed by the clause itself, so it can never be the declared
+    // antecedent the anaphor names. Damage dealt to a player makes that player
+    // lose that much life (CR 120.3a); collapsing the recipient to `ParentTarget`
+    // would re-aim the clause at the antecedent creature instead. Decline the
+    // blanket anaphoric parent-rewrite for it exactly as for a fresh opponent
+    // target, and let the caller attribute the damage source to the antecedent.
+    if filter.is_player_scope() {
+        return true;
+    }
     match filter {
         TargetFilter::Typed(tf) => {
             tf.controller == Some(ControllerRef::Opponent)
@@ -22474,9 +23121,52 @@ fn target_filter_is_distinct_recipient(filter: &TargetFilter) -> bool {
     }
 }
 
-/// Returns true iff `effect` is a `DealDamage`/`DamageAll` whose recipient is a
-/// structurally distinct typed target (see `target_filter_is_distinct_recipient`
-/// — either opponent-controlled or an "other"/"another"-excluded board sweep).
+/// CR 120.2b + CR 608.2c: does this damage amount read a characteristic of the
+/// clause's ANAPHORIC subject, so that the subject the clause's own words name
+/// ("that creature" / "it") is the object dealing the damage?
+///
+/// CR 120.2b: the spell or ability specifies which object deals the damage.
+/// This is consulted only for a `ParentTargetController` recipient ("... to its
+/// controller"), which two printed grammars share while naming different
+/// sources:
+///   * "That creature deals damage equal to its power to its controller" - the
+///     subject is the anaphor and "its power" reads that same object, so the
+///     amount's scope is `Anaphoric` (`EventSource` inside a triggered ability,
+///     before `bind_anaphoric_damage_subject_keep_recipient` coerces it). The
+///     antecedent is the source.
+///   * "<card> deals damage equal to that creature's power to its controller" -
+///     the card names itself as the subject (CR 201.5), and the amount reads
+///     either the antecedent through a `Demonstrative` scope ("that creature's
+///     power") or the card itself through a `Source` scope ("this creature's
+///     power"). The card is the source, and stamping the antecedent would
+///     contradict it.
+///
+/// A printed constant ("<card> deals 2 damage to that creature's controller")
+/// has no object scope and is rejected with the second grammar.
+fn amount_reads_the_antecedent(amount: &QuantityExpr) -> bool {
+    let QuantityExpr::Ref { qty } = amount else {
+        return false;
+    };
+    let scope = match qty {
+        QuantityRef::Power { scope }
+        | QuantityRef::BasePower { scope }
+        | QuantityRef::Toughness { scope }
+        | QuantityRef::ObjectManaValue { scope }
+        | QuantityRef::ObjectColorCount { scope }
+        | QuantityRef::ObjectNameWordCount { scope }
+        | QuantityRef::ObjectTypelineComponentCount { scope }
+        | QuantityRef::ManaSymbolsInManaCost { scope, .. }
+        | QuantityRef::CountersOn { scope, .. } => scope,
+        _ => return false,
+    };
+    matches!(scope, ObjectScope::Anaphoric | ObjectScope::EventSource)
+}
+
+/// Returns true iff `effect` is a `DealDamage`/`DamageAll` whose recipient
+/// `target_filter_is_distinct_recipient` accepts (an opponent-controlled typed
+/// target, an "other"/"another"-excluded board sweep, or a player), or whose
+/// recipient is `ParentTargetController` with an amount
+/// `amount_reads_the_antecedent` accepts.
 /// Used to DECLINE the blanket anaphoric parent-rewrite for the "one-sided
 /// fight" class (Ambuscade, Clear Shot, Rabid Gnaw, ...) and the "counter-then-
 /// sweep" class (Nova Flame: "Put X +1/+1 counters on target creature you
@@ -22485,8 +23175,10 @@ fn target_filter_is_distinct_recipient(filter: &TargetFilter) -> bool {
 /// to `ParentTarget`.
 fn damage_clause_has_distinct_recipient(effect: &Effect) -> bool {
     match effect {
-        Effect::DealDamage { target, .. } | Effect::DamageAll { target, .. } => {
+        Effect::DealDamage { target, amount, .. } | Effect::DamageAll { target, amount, .. } => {
             target_filter_is_distinct_recipient(target)
+                || (matches!(target, TargetFilter::ParentTargetController)
+                    && amount_reads_the_antecedent(amount))
         }
         _ => false,
     }
@@ -22498,9 +23190,11 @@ fn damage_clause_has_distinct_recipient(effect: &Effect) -> bool {
 /// "... That creature deals damage equal to its power to this creature."). Per
 /// CR 201.5 the self-reference names just the source object, so the blanket
 /// anaphoric parent-rewrite must not collapse it to `ParentTarget` (which would
-/// re-aim the fight-back at clause 1's chosen target). The `Anaphoric` amount is
-/// resolved by the resolver's CR 608.2c `effect_context_object` referent, so no
-/// source/amount rebind is needed here.
+/// re-aim the fight-back at clause 1's chosen target). This predicate only
+/// recognizes the recipient shape; `bind_anaphoric_damage_subject_keep_recipient`'s
+/// self-reference arm attributes the damage source to the declared object
+/// (CR 120.1) and coerces a triggered ability's `EventSource` amount to
+/// `Anaphoric`.
 fn damage_clause_has_self_ref_recipient(effect: &Effect) -> bool {
     matches!(
         effect,
@@ -22514,23 +23208,38 @@ fn damage_clause_has_self_ref_recipient(effect: &Effect) -> bool {
     )
 }
 
-/// Coerce a per-object `QuantityRef` whose scope is `ObjectScope::Source` to
-/// `target`. The mirror of `rebind_anaphoric_ref` for the one-sided fight class:
-/// a "Then it deals damage equal to its power" sub-clause whose subject was
-/// classified as `SelfRef` gets its "its power" anaphor prematurely rebound to
-/// `Source` (the ability source) by the subject-stamping pass (~mod.rs:12278).
-/// For this class the "it" is the boosted creature (the parent TARGET,
-/// `targets[0]` once `damage_source = Target`), never the spell source — so the
-/// amount must be retargeted to `Anaphoric` (resolved to `targets[0]` by the
-/// runtime one-sided-fight fallback in `game/quantity.rs`), keeping the export
-/// in sync with the Oracle "its".
 #[derive(Clone, Copy)]
 enum SourceRefRebind {
     AllObjectRefs,
     PowerOrToughness,
 }
 
-fn rebind_source_ref(qty: &mut QuantityRef, target: ObjectScope, rebind: SourceRefRebind) {
+/// Coerce a per-object `QuantityRef` whose scope is `from` to `target`.
+///
+/// CR 608.2c: an anaphoric per-object amount ("its power") names one object; this
+/// walk only retargets WHICH object, never which characteristic. Two `from`
+/// scopes:
+///   * `ObjectScope::Source` — an amount a subject-stamping pass bound to the
+///     ability source. In the one-sided-fight class, a "Then it deals damage
+///     equal to its power" sub-clause whose subject was classified `SelfRef` had
+///     "its power" prematurely bound to the ability source (power 0 for a spell).
+///     Retargeted to `Anaphoric`, whose runtime read order ends at the
+///     one-sided-fight `targets[0]` fallback, keeping the export in sync with
+///     the Oracle "its". `restore_this_way_trigger_anaphor` retargets it to
+///     `Anaphoric` too,
+///     and `wrap_target_subject_damage` retargets a power/toughness amount to
+///     `Target`.
+///   * `ObjectScope::EventSource` — the declared-target damage-source class,
+///     where a triggered ability had bound "its power" to the TRIGGERING object
+///     (Stalking Yeti, Form of the Dinosaur, Hunter's Bow, Cyclops Gladiator).
+///     Once the clause's damage source is the declared object, its amount must
+///     read that object.
+fn rebind_object_scope_ref(
+    qty: &mut QuantityRef,
+    from: ObjectScope,
+    target: ObjectScope,
+    rebind: SourceRefRebind,
+) {
     if matches!(rebind, SourceRefRebind::PowerOrToughness)
         && !matches!(
             qty,
@@ -22553,16 +23262,21 @@ fn rebind_source_ref(qty: &mut QuantityRef, target: ObjectScope, rebind: SourceR
         | QuantityRef::CountersOn { scope, .. } => scope,
         _ => return,
     };
-    if *scope == ObjectScope::Source {
+    if *scope == from {
         *scope = target;
     }
 }
 
-/// `QuantityExpr` walker for `rebind_source_ref` (mirrors
+/// `QuantityExpr` walker for `rebind_object_scope_ref` (mirrors
 /// `rebind_anaphoric_object_scope`'s recursion).
-fn rebind_source_amount(expr: &mut QuantityExpr, target: ObjectScope, rebind: SourceRefRebind) {
+fn rebind_object_scope_amount(
+    expr: &mut QuantityExpr,
+    from: ObjectScope,
+    target: ObjectScope,
+    rebind: SourceRefRebind,
+) {
     match expr {
-        QuantityExpr::Ref { qty } => rebind_source_ref(qty, target, rebind),
+        QuantityExpr::Ref { qty } => rebind_object_scope_ref(qty, from, target, rebind),
         QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::Multiply { inner, .. }
         | QuantityExpr::ClampMin { inner, .. }
@@ -22570,15 +23284,15 @@ fn rebind_source_amount(expr: &mut QuantityExpr, target: ObjectScope, rebind: So
         | QuantityExpr::UpTo { max: inner }
         | QuantityExpr::Power {
             exponent: inner, ..
-        } => rebind_source_amount(inner, target, rebind),
+        } => rebind_object_scope_amount(inner, from, target, rebind),
         QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
             for inner in exprs {
-                rebind_source_amount(inner, target, rebind);
+                rebind_object_scope_amount(inner, from, target, rebind);
             }
         }
         QuantityExpr::Difference { left, right } => {
-            rebind_source_amount(left, target, rebind);
-            rebind_source_amount(right, target, rebind);
+            rebind_object_scope_amount(left, from, target, rebind);
+            rebind_object_scope_amount(right, from, target, rebind);
         }
         QuantityExpr::Fixed { .. } => {}
     }
@@ -22606,18 +23320,36 @@ fn rebind_source_amount(expr: &mut QuantityExpr, target: ObjectScope, rebind: So
 /// Gated to a `ZoneChangedThisWay` condition so only the reflexive-trigger body
 /// pronoun is touched; a true self-reference ("~ deals damage equal to its
 /// power") never carries this condition and keeps its `Source` scope. Mirrors
-/// the one-sided-fight `Source → Anaphoric` coercion (`rebind_source_amount`).
+/// the one-sided-fight `Source → Anaphoric` coercion (`rebind_object_scope_amount`).
 fn restore_this_way_trigger_anaphor(effect: &mut Effect) {
     match effect {
         Effect::DealDamage { amount, .. } | Effect::DamageEachPlayer { amount, .. } => {
-            rebind_source_amount(
+            rebind_object_scope_amount(
                 amount,
+                ObjectScope::Source,
                 ObjectScope::Anaphoric,
                 SourceRefRebind::AllObjectRefs,
             );
         }
         _ => {}
     }
+}
+
+/// CR 201.5 + CR 120.1: the self-reference arm of
+/// [`bind_anaphoric_damage_subject_keep_recipient`], exposed so the chunk-loop's
+/// GATED-clause rewrite can decline the blanket parent-rewrite for the same
+/// reason the two `condition.is_none()` pronoun rewrites already do. A damage
+/// clause whose recipient is the source object's own self-reference ("to this
+/// creature" / "to ~") is never aimed at the declared antecedent (CR 201.5), and
+/// its damage source IS that antecedent (CR 120.1) — and an "If you do" gate
+/// (CR 118.12) governs WHETHER the clause happens, not WHAT its anaphor names
+/// (CR 608.2c), so the gated form must bind identically. Restricted to this arm:
+/// a gated clause with any other recipient shape keeps the rewrite it has today.
+fn bind_self_ref_damage_subject(effect: &mut Effect) -> bool {
+    if !damage_clause_has_self_ref_recipient(effect) {
+        return false;
+    }
+    bind_anaphoric_damage_subject_keep_recipient(effect)
 }
 
 /// CR 120.1 + CR 608.2c: For a "one-sided fight" anaphoric damage clause
@@ -22633,54 +23365,116 @@ fn restore_this_way_trigger_anaphor(effect: &mut Effect) {
 /// controls" is a distinct target.
 ///
 /// The "its power" amount is left as `Power{Anaphoric}` (NOT rebound to
-/// `Target`): the runtime one-sided-fight fallback in `game/quantity.rs`
-/// resolves `Anaphoric` to that same `targets[0]` source object. Keeping the
+/// `Target`). `game/quantity.rs` reads an `Anaphoric` power or toughness from
+/// the earlier instruction's referent (`effect_context_object`) first, then
+/// from the trigger-event source and the cost referent, and last from the
+/// one-sided-fight fallback, which reads the first object target (`targets[0]`)
+/// only when `damage_source == Some(Target)`. Keeping the
 /// AST `Anaphoric` keeps the serialized export in sync with the Oracle "its"
 /// and avoids reintroducing #699 (where rebinding the source amount to `Target`
 /// alongside a clobbered recipient made the boosted creature damage itself).
-/// The only rebind here is `Source → Anaphoric`: the "Then it deals..." subject
-/// is classified `SelfRef`, so the subject-stamping pass (~mod.rs:12278)
+/// Two rebinds run here: `Source → Anaphoric` (the spell-subject case) and
+/// `EventSource → Anaphoric` (the triggered-ability case, Stalking Yeti / Form of
+/// the Dinosaur / Hunter's Bow / Cyclops Gladiator). The "Then it deals..."
+/// subject is classified `SelfRef`, so the subject-stamping pass
 /// prematurely binds "its power" to `Source` (the spell, power 0); coercing it
-/// to `Anaphoric` routes it back through the same runtime fallback. Returns true
+/// to `Anaphoric` puts it on that read order. Coercion alone does not make a
+/// triggered ability's amount read the declared object: when the earlier
+/// instruction leaves no referent (for example its damage was 0, CR 120.8, or
+/// its recipient can't be dealt damage) and the triggering object has a power,
+/// the trigger-event source is read before the fallback, so the amount reads
+/// the triggering object. Returns true
 /// (= decline the blanket `replace_target_with_parent`) when handled.
 ///
-/// Covers three recipient shapes: (1) the fresh-opponent recipient — attribute
+/// Covers five recipient shapes: (1) the fresh-opponent recipient — attribute
 /// the damage source to the parent target while preserving the recipient and
 /// the anaphoric amount; (2) the self-reference recipient ("to this
 /// creature"/"to ~", `TargetFilter::SelfRef`, the Karplusan Yeti fight-back
-/// class) — preserve the recipient verbatim with NO source/amount rebind;
+/// class) — preserve the recipient verbatim and attribute the damage source to
+/// the declared object (CR 120.1), coercing a triggered-ability `EventSource`
+/// amount to `Anaphoric`;
 /// (3) the "other"/"another"-excluded board-sweep recipient ("to each other
 /// creature", `FilterProp::Another` — the Chandra's Ignition / Nova Flame
 /// class, issue #4960) — same handling as (1): attribute the damage source to
 /// the parent target while preserving the sweep recipient and the anaphoric
-/// amount. Without this, `damage_source` stays `None` (the spell itself), so
+/// amount; (4) a printed PLAYER recipient (`TargetFilter::is_player_scope` —
+/// "to you": Form of the Dinosaur, Bind the Monster) — attribute the damage
+/// source to the declared object and preserve the player recipient (CR 120.3a);
+/// (5) the antecedent-relative player recipient (`ParentTargetController` with
+/// an amount `amount_reads_the_antecedent` accepts — Backlash, Traitor's Roar,
+/// Ana Battlemage) — the same handling. Shape (5) is admitted by
+/// `damage_clause_has_distinct_recipient`, not by
+/// `target_filter_is_distinct_recipient`, because the same recipient filter with
+/// a printed constant amount (Blur of Blades, Sonic Assault) has the SPELL as its
+/// source (CR 201.5) and must not be stamped. Without shape (3)'s handling,
+/// `damage_source` stays `None` (the spell itself), so
 /// the runtime one-sided-fight fallback in `game/quantity.rs` (gated on
 /// `damage_source == Some(Target)`) never fires and `Power{Anaphoric}`
 /// resolves to 0 — Nova Flame with any X dealt no damage.
 fn bind_anaphoric_damage_subject_keep_recipient(effect: &mut Effect) -> bool {
     // CR 201.5 + CR 608.2c: a self-reference recipient ("to this creature"/"to ~")
-    // is the source itself and must be preserved verbatim (fight-back class). No
-    // source/amount rebind: the resolver seeds the `Anaphoric` amount from the
-    // prior clause's damaged-object event (effect_context_object).
+    // is the source object itself and must be preserved verbatim (fight-back
+    // class). The recipient is NOT rewritten here.
     if damage_clause_has_self_ref_recipient(effect) {
+        // CR 120.1 + CR 120.2b: the object that deals damage is the source of
+        // that damage — here the DECLARED object the earlier instruction chose,
+        // not the resolving ability's source. `damage_source = Target` routes the
+        // clause through the existing one-sided-fight descent
+        // (`effects/mod.rs::is_one_sided_fight_damage_sub`), which prepends the
+        // declared object so `targets[0]` IS the subject and
+        // `deal_damage.rs::target_damage_source` selects it. The `SelfRef`
+        // recipient is unaffected by that prepend.
+        set_damage_clause_source_only(effect, DamageSource::Target);
+        // CR 608.2c: inside a triggered ability the subject-stamping
+        // pass had bound "its power" to the TRIGGERING object
+        // (`ObjectScope::EventSource` — Stalking Yeti's ETB, Cyclops Gladiator's
+        // attack trigger). Once the source is the declared object, the amount must
+        // read that same object. `game/quantity.rs` reads an `Anaphoric` power or
+        // toughness from the earlier instruction's referent
+        // (`effect_context_object`) first, then from the trigger-event source and
+        // the cost referent, and last from the one-sided-fight fallback gated on
+        // the `damage_source = Target` just stamped.
+        if let Effect::DealDamage { amount, .. } | Effect::DamageAll { amount, .. } = effect {
+            rebind_object_scope_amount(
+                amount,
+                ObjectScope::EventSource,
+                ObjectScope::Anaphoric,
+                SourceRefRebind::AllObjectRefs,
+            );
+        }
         return true;
     }
     if !damage_clause_has_distinct_recipient(effect) {
         return false;
     }
     // CR 115.10a + CR 601.2c + CR 608.2c + CR 120.1: preserve the distinct
-    // recipient (fresh-opponent target OR "other"-excluded board sweep) and
-    // attribute damage source to targets[0] (the boosted/counter'd "It"); leave
-    // "its power" as Power{Anaphoric} — the runtime resolves it to that same
-    // source object. Do NOT rebind to Target (that desyncs the export from
+    // recipient (fresh-opponent target, "other"-excluded board sweep, printed
+    // player, or antecedent-relative player) and
+    // attribute damage source to targets[0] (the anaphoric "It", the declared
+    // antecedent); leave
+    // "its power" as Power{Anaphoric} — the runtime reads it in the order this
+    // function's doc gives, whose last slot is that same source object. Do NOT
+    // rebind to Target (that desyncs the export from
     // the Oracle "its" and reintroduces #699).
     set_damage_clause_source_only(effect, DamageSource::Target);
-    // Source → Anaphoric only (the SelfRef-subject "Then it deals..." variant);
-    // gated inside this fresh-opponent branch so it can't touch unrelated
-    // Source-amount cards. Anaphoric amounts are already correct and untouched.
+    // Source → Anaphoric (the SelfRef-subject "Then it deals..." variant) and
+    // EventSource → Anaphoric (a triggered ability's "its power");
+    // gated inside this distinct-recipient branch so it can't touch unrelated
+    // Source- or EventSource-amount cards. Anaphoric amounts are already correct and untouched.
     if let Effect::DealDamage { amount, .. } | Effect::DamageAll { amount, .. } = effect {
-        rebind_source_amount(
+        rebind_object_scope_amount(
             amount,
+            ObjectScope::Source,
+            ObjectScope::Anaphoric,
+            SourceRefRebind::AllObjectRefs,
+        );
+        // CR 608.2c: same coercion as arm 1 — a triggered ability's
+        // "its power" had been bound to the triggering object; the declared
+        // object is now the source, so the amount is re-scoped to `Anaphoric`
+        // with it (Form of the Dinosaur, Hunter's Bow).
+        rebind_object_scope_amount(
+            amount,
+            ObjectScope::EventSource,
             ObjectScope::Anaphoric,
             SourceRefRebind::AllObjectRefs,
         );
@@ -22856,6 +23650,14 @@ fn has_typed_target_widened(effect: &Effect) -> bool {
         // `Effect::Unimplemented` -- discovered via a fresh coverage-parse-diff
         // run against this PR's own fix, not assumed.
         | Effect::SetLifeTotal { target, .. } => target,
+        Effect::TurnFaceUp { target } => {
+            return matches!(
+                target,
+                TargetFilter::ExiledBySource
+                    | TargetFilter::ParentTarget
+                    | TargetFilter::LastRevealed
+            ) || filter_introduces_typed_object(target);
+        }
         Effect::GenericEffect {
             target: Some(target),
             ..
@@ -23072,16 +23874,23 @@ fn chain_prior_chosen_target(clauses: &[ClauseIr]) -> Option<&TargetFilter> {
 /// overwritten by most-recent-only chain propagation"), which is why Malamet's
 /// two-target counter chain must re-key its condition to `Some(0)`
 /// (`lower::rekey_counter_slot_in_chain`: bind slot 0, "not the most-recent
-/// opponent target"). This walk is fail-closed in exactly the way that makes the
-/// two agree at EVERY declared index: it stops at the NEAREST declaring clause
-/// and blocks on anything nearer that is not a `ParentTarget` carrier, and a
+/// opponent target"). This walk stops at the NEAREST declaring clause, and a
 /// `ParentTarget` carrier declares no slot at all
-/// (`TargetFilter::is_context_ref`), so it cannot move "most recent". The
-/// antecedent returned here is therefore always the chain's most-recent declared
-/// object target — the object `None` already resolves. A multi-slot declaration
-/// head can never BE the antecedent either: `Effect::target_filter()` is `None`
-/// for a paired-subject effect by design, so the `_ => return None` arm blocks
-/// on it.
+/// (`TargetFilter::is_context_ref`), so it cannot move "most recent". Whether
+/// the antecedent returned here agrees with what `subject_slot: None` resolves
+/// at EVERY declared index is not characterised here. A multi-slot declaration
+/// head can never BE the antecedent, and that rests on the walk's return points,
+/// which are enumerable from the two arms below: `Effect::target_filter()` is
+/// `None` for a paired-subject effect by design, so the head node itself is
+/// never returned — one arm continues past a grant carrying a
+/// `ParentTarget`-affected static, and the other returns the last typed target
+/// of the clause's OWN sub-chain. Note what that does not say: a paired-subject
+/// head's sub-chain target CAN be returned; it is the head node that cannot.
+/// Corroboration measured during phase 4's implementation over the full card
+/// corpus: the recovering arm returned `Some` at 48 sites over 22 clause shapes,
+/// none of them a head. To re-measure, print `ClauseIr.source` from that arm
+/// when it returns `Some` and run `cargo export-cards data` over the full card
+/// corpus.
 ///
 /// Emitting `Some(index)` instead would be a regression, not a tightening: it
 /// indexes the FLATTENED root chain through
@@ -23108,20 +23917,62 @@ fn chain_prior_chosen_target(clauses: &[ClauseIr]) -> Option<&TargetFilter> {
 /// BASE is equally wrong on it (its condition just evaluates false) and the same
 /// gap already exists untouched for the three overlap nouns. If a card ever
 /// prints it, the fix is to DECLINE: have the caller skip seeding when the
-/// current chunk's own clause declares a non-`ParentTarget` object target, which
-/// keeps the fail-closed contract instead of binding the wrong referent.
+/// current chunk's own clause declares a non-`ParentTarget` object target,
+/// instead of binding the wrong referent.
 /// Malamet is the standing proof the shape is real —
 /// `lower::rekey_counter_slot_in_chain` must re-key to `Some(0)` precisely
 /// because its condition node has its own local target.
 fn chain_declared_object_target(clauses: &[ClauseIr]) -> Option<&TargetFilter> {
     for prev in clauses.iter().rev() {
-        if prev.condition.is_some() {
+        // CR 608.2c + CR 118.12 / CR 603.12: an affirmative "if you do" / "when you do" gate decides whether its
+        // instruction happens, not what that instruction declared, so its declared
+        // target stays the nearest antecedent of a later "that creature" (Magitek
+        // Scythe; Neyith of the Dire Hunt). Every other condition still blocks.
+        if prev
+            .condition
+            .as_ref()
+            .is_some_and(|condition| !condition.is_affirmative_reflexive_gate())
+        {
             return None;
         }
         match prev.parsed.effect.target_filter() {
             Some(TargetFilter::ParentTarget) => continue,
+            // CR 115.1 + CR 701.21a: a typed filter the slot collector does not
+            // announce as a target ("sacrifice a Blood token") declares no object
+            // target, so it is no antecedent of a later anaphor.
+            Some(TargetFilter::Typed(_))
+                if triggers::extract_target_filter_from_effect(&prev.parsed.effect).is_none() =>
+            {
+                return None
+            }
             Some(t @ TargetFilter::Typed(_)) if !t.is_player_scope() => return Some(t),
-            _ => return None,
+            Some(TargetFilter::Typed(_)) => return None,
+            // CR 608.2c: an earlier anaphor already bound to the declared target
+            // ("That land becomes a 0/0 Elemental creature") names the same object,
+            // so the walk passes it on to that target.
+            None if matches!(
+                &prev.parsed.effect,
+                Effect::GenericEffect { target: None, static_abilities, .. }
+                    if static_abilities
+                        .iter()
+                        .any(|s| matches!(s.affected, Some(TargetFilter::ParentTarget)))
+            ) =>
+            {
+                continue
+            }
+            // CR 608.2c + CR 115.1: a compound clause whose head names no typed target
+            // ("put a counter on it and a counter on up to one other target attacking
+            // creature") declares its object target on the compound remainder.
+            _ => {
+                return std::iter::successors(prev.parsed.sub_ability.as_deref(), |def| {
+                    def.sub_ability.as_deref()
+                })
+                .filter_map(|def| match def.effect.target_filter() {
+                    Some(t @ TargetFilter::Typed(_)) if !t.is_player_scope() => Some(t),
+                    _ => None,
+                })
+                .last();
+            }
         }
     }
     None
@@ -23549,6 +24400,8 @@ fn lower_subject_predicate_ast(
                     count,
                     position: crate::types::ability::LibraryPosition::Top,
                     face_down,
+                    // CR 608.2c: the subject exiles from their own library.
+                    actor: crate::types::ability::LibraryInstructionActor::LibraryPlayer,
                 });
             }
             // CR 701.40a + CR 608.2c: "<player> manifests the top [N] card(s) of
@@ -23699,6 +24552,10 @@ fn lower_subject_predicate_ast(
             // pick rewrite in the player-target wrapper below), so sibling
             // predicates keep their original scope.
             let mut clause = lower_imperative_clause(&text, ctx);
+            let placement_target_set = refine_put_at_library_position(&mut clause, &text, ctx);
+            if clause.multi_target.is_none() {
+                clause.multi_target = placement_target_set;
+            }
             // CR 601.2c + CR 603.3d: a printed subject on the sentence that
             // ANNOUNCES this ability's target overrides the default announcer.
             // Recorded on the chunk's `ParseContext`, which `parse_effect_chain_ir`
@@ -23821,7 +24678,9 @@ fn lower_subject_predicate_ast(
             {
                 if matches!(
                     clause.effect,
-                    Effect::ChangeZone { .. } | Effect::ChangeZoneAll { .. }
+                    Effect::ChangeZone { .. }
+                        | Effect::ChangeZoneAll { .. }
+                        | Effect::PutAtLibraryPosition { .. }
                 ) {
                     // CR 115.1c + CR 115.10a + CR 608.2d (issues #6505 / #6446):
                     // reuse `change_zone_target_choice_timing` so battlefield
@@ -23840,6 +24699,9 @@ fn lower_subject_predicate_ast(
                                 clause.multi_target.is_some(),
                                 &pred_lower,
                             ) == crate::types::ability::TargetChoiceTiming::Resolution
+                        }
+                        Effect::PutAtLibraryPosition { .. } => {
+                            !nom_primitives::scan_contains(&pred_lower, "target ")
                         }
                         _ => false,
                     };
@@ -23869,7 +24731,8 @@ fn lower_subject_predicate_ast(
                     if moved_object_is_they_control_pick {
                         match &mut clause.effect {
                             Effect::ChangeZone { target, .. }
-                            | Effect::ChangeZoneAll { target, .. } => {
+                            | Effect::ChangeZoneAll { target, .. }
+                            | Effect::PutAtLibraryPosition { target, .. } => {
                                 rebind_controller_scope(
                                     target,
                                     ControllerRef::You,
@@ -23881,7 +24744,8 @@ fn lower_subject_predicate_ast(
                     } else if !moved_object_is_resolution_pick {
                         match &mut clause.effect {
                             Effect::ChangeZone { target, .. }
-                            | Effect::ChangeZoneAll { target, .. } => {
+                            | Effect::ChangeZoneAll { target, .. }
+                            | Effect::PutAtLibraryPosition { target, .. } => {
                                 rebind_owned_scope(target, ControllerRef::TargetPlayer);
                             }
                             _ => {}
@@ -24069,7 +24933,7 @@ fn lower_subject_predicate_ast(
             if clause.multi_target.is_none() {
                 clause.multi_target = subject.multi_target;
             }
-            // CR 608.2c + CR 117.3a: Propagate the subject phrase's "may" modal
+            // CR 608.2c + CR 608.2d: Propagate the subject phrase's "may" modal
             // so the lowered ability is marked optional (e.g., "its controller
             // may search their library").
             if subject.is_optional {
@@ -24218,6 +25082,64 @@ fn extract_player_anchor_in_chain(clause: &ParsedEffectClause) -> Option<TargetF
         sub = def.sub_ability.as_deref();
     }
     None
+}
+
+/// CR 608.2c + CR 115.1: The player a search in `clause` or its `sub_ability`
+/// chain declares as its target ("search target opponent's library"), if any.
+fn declared_searched_player(clause: &ParsedEffectClause) -> Option<TargetFilter> {
+    let declared = |effect: &Effect| match effect {
+        Effect::SearchLibrary {
+            target_player: Some(filter),
+            ..
+        } => match filter {
+            TargetFilter::Player => Some(filter.clone()),
+            TargetFilter::Typed(tf)
+                if tf.type_filters.is_empty()
+                    && tf.properties.is_empty()
+                    && matches!(tf.controller, None | Some(ControllerRef::Opponent)) =>
+            {
+                Some(filter.clone())
+            }
+            _ => None,
+        },
+        _ => None,
+    };
+    if let Some(found) = declared(&clause.effect) {
+        return Some(found);
+    }
+    let mut sub = clause.sub_ability.as_deref();
+    while let Some(def) = sub {
+        if let Some(found) = declared(&def.effect) {
+            return Some(found);
+        }
+        sub = def.sub_ability.as_deref();
+    }
+    None
+}
+
+/// CR 608.2c + CR 115.1 + CR 701.24a: "that player shuffles" after a search of
+/// a declared player target shuffles that player's library, so each such
+/// anaphor in `clause` binds to the search's player-target slot.
+fn bind_searched_player_shuffle(clause: &mut ParsedEffectClause, searched: &TargetFilter) {
+    let bind = |effect: &mut Effect| {
+        if let Effect::Shuffle { target } = effect {
+            let names_searched = matches!(
+                target,
+                TargetFilter::ParentTargetController
+                    | TargetFilter::TriggeringPlayer
+                    | TargetFilter::ParentTarget
+            ) || (*target == *searched && *target != TargetFilter::Player);
+            if names_searched {
+                *target = TargetFilter::ParentTargetSlot { index: 0 };
+            }
+        }
+    };
+    bind(&mut clause.effect);
+    let mut sub = clause.sub_ability.as_deref_mut();
+    while let Some(def) = sub {
+        bind(def.effect.as_mut());
+        sub = def.sub_ability.as_deref_mut();
+    }
 }
 
 /// CR 108.3 + CR 109.4: Map a chain-level anchor subject (a `TargetFilter`
@@ -24808,8 +25730,9 @@ fn bind_damage_clause_source(
 
 /// CR 120.1: Set a damage clause's `damage_source` WITHOUT rebinding the
 /// anaphoric amount scope. The one-sided-fight fresh-opponent path keeps "its
-/// power" as `Power{Anaphoric}` (resolved to `targets[0]` by the runtime
-/// fallback) instead of collapsing it to `Target`, so it cannot reuse
+/// power" as `Power{Anaphoric}` (read in `game/quantity.rs`'s `Anaphoric` order,
+/// whose last slot is the `targets[0]` fallback) instead of collapsing it to
+/// `Target`, so it cannot reuse
 /// `bind_damage_clause_source` (which always rebinds the amount). Returns true
 /// iff the effect is a `DealDamage`/`DamageAll`.
 fn set_damage_clause_source_only(effect: &mut Effect, damage_source_ref: DamageSource) -> bool {
@@ -25025,8 +25948,9 @@ fn wrap_target_subject_damage(
         if let Effect::DealDamage { amount, .. } | Effect::DamageAll { amount, .. } =
             &mut clause.effect
         {
-            rebind_source_amount(
+            rebind_object_scope_amount(
                 amount,
+                ObjectScope::Source,
                 ObjectScope::Target,
                 SourceRefRebind::PowerOrToughness,
             );
@@ -25246,7 +26170,6 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
         | Effect::Draw { target, .. }
         | Effect::Scry { target, .. }
         | Effect::Surveil { target, .. }
-        | Effect::PutAtLibraryPosition { target, .. }
             if *target == TargetFilter::Any || *target == TargetFilter::Controller =>
         {
             *target = subject_filter;
@@ -26028,6 +26951,49 @@ fn exiled_cast_target_with_type_gate(rest: &str) -> TargetFilter {
     }
 }
 
+/// CR 608.2g + CR 611.2a: what a `from among …` batch anaphor lowers
+/// to, once its printed bound has been paired with the mechanism its grammar
+/// implies.
+///
+/// Three states rather than `Option<CastFromZoneDriver>`, because the pairing has
+/// three honest answers and an `Option` can only carry two. Overloading `None` to
+/// mean both "refuse" and "represent this a different way" is precisely the
+/// conflation that hides silent drops — the same medicine, for the same reason, as
+/// `CastCapReading`'s three-way split of what a bare `Option<u8>` used to encode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FromAmongBatchLowering {
+    /// The mechanism can carry the printed bound. Lower to `Effect::CastFromZone`.
+    Driver(CastFromZoneDriver),
+    /// CR 611.2a + CR 601.2a: a PAID batch grant that prints a cap of exactly one
+    /// AND states a durational scope. No `CastFromZoneDriver` represents this —
+    /// `LingeringPermission` records an independent per-object permission with no
+    /// shared budget, so it would grant the whole batch — but
+    /// `CastingPermission::PlayFromExile { single_use: true }` does: it is a
+    /// grant-scoped budget of ONE shared across every object carrying the same
+    /// `single_use_group`. Chandra, Hope's Beacon +1 already lowers to that shape
+    /// through `try_parse_cast_from_tracked_exile_grant`; this is the same shape
+    /// reached from the batch-anaphor surfaces (Locke, Treasure Hunter;
+    /// Chiss-Goria, Forge Tyrant).
+    SingleUseGrant,
+    /// No representation carries the printed bound. The caller emits
+    /// the honest gap and must NOT substitute a mechanism, because every
+    /// substitution available is strictly more permissive than the instruction.
+    Refused,
+}
+
+impl FromAmongBatchLowering {
+    /// Adapt a pairing authority that has only the two classical answers. Used by
+    /// the batch surfaces whose mechanism can never be promoted (the private-zone
+    /// hand pick and the self-library peek), so the promotion stays confined to
+    /// the arms that bind a chain-published set.
+    fn from_driver(driver: Option<CastFromZoneDriver>) -> Self {
+        match driver {
+            Some(driver) => Self::Driver(driver),
+            None => Self::Refused,
+        }
+    }
+}
+
 /// CR 608.2g: Decide the casting MECHANISM for a "from among …" batch anaphor.
 ///
 /// CR 608.2g says a resolving object "continues to resolve, which may include
@@ -26070,7 +27036,8 @@ fn from_among_batch_cast_driver(
     mode: CardPlayMode,
     without_paying: bool,
     rest: &str,
-) -> Option<CastFromZoneDriver> {
+    ctx: &ParseContext,
+) -> FromAmongBatchLowering {
     // CR 608.2c (strict lowering): the printed bounds are read FIRST and then
     // handed, together with the mechanism this grammar implies, to the single
     // pairing authority. Deciding the mechanism first and reading the bound
@@ -26078,26 +27045,67 @@ fn from_among_batch_cast_driver(
     // two sorcery spells from among them" for a PAID or duration-bearing clause
     // landed on `LingeringPermission`, i.e. an uncapped later-priority
     // permission — strictly more permissive than the printed instruction.
-    let bounds = from_among_batch_bounds(rest)?;
+    let Some(bounds) = from_among_batch_bounds(rest) else {
+        return FromAmongBatchLowering::Refused;
+    };
     // CR 305.1 + CR 611.2a: the two grammars that mean "exercised at a later
     // priority window". A PAID batch cast (Sanwell, Avenger Ace: "you may cast a
     // Vehicle or artifact creature spell from among them") needs a mana-payment
     // window the free-cast window primitive does not model, and a CR 305.1 land
     // play is a special action with no during-resolution mechanism. A duration
-    // stated INSIDE the clause is the third: the two reconciliation seams
-    // (`CastFromZoneDriver::with_lingering_duration`, called from
-    // `with_clause_duration` and from the trailing-duration fixup) only see a
-    // duration the chain STRIPPED off an edge of the clause; Ral, Leyline
-    // Prodigy states it mid-clause — "you may cast instant and sorcery spells
-    // from among them THIS TURN without paying their mana costs" — so neither
-    // seam fires and the check has to happen here.
+    // stated INSIDE the clause is the third: Ral, Leyline Prodigy states it
+    // mid-clause — "you may cast instant and sorcery spells from among them THIS
+    // TURN without paying their mana costs" — where no positional strip seam
+    // peels it, so `clause_states_a_duration` reads it straight off the fragment.
+    //
+    // DELIBERATELY NOT WIDENED with `ctx.stated_clause_duration`. A peeled
+    // duration must not reach this selection: a FREE capped clause (Aminatou's
+    // Augury) currently builds `ResolutionWindow` here and is refused later at
+    // the duration seam as `CAST_BOUND_LOST_TO_DURATION_GAP`, and widening this
+    // line would move it to `UNREPRESENTABLE_CAST_CAP_GAP` — a different gap
+    // name for an unchanged behaviour, which is a coverage-provenance regression
+    // for no gain. `leading_duration_over_a_capped_window_refuses` pins that.
+    // The threaded fact is consulted only by the promotion below, which is the
+    // one decision it is needed for.
     let mechanism =
         if mode != CardPlayMode::Cast || !without_paying || clause_states_a_duration(rest) {
             CastMechanism::LingeringPermission
         } else {
             CastMechanism::ResolutionWindow
         };
-    CastFromZoneDriver::for_batch_bounds(mechanism, bounds)
+    if let Some(driver) = CastFromZoneDriver::for_batch_bounds(mechanism, bounds) {
+        return FromAmongBatchLowering::Driver(driver);
+    }
+    // CR 611.2a + CR 601.2a: the refusal above is the per-object permission
+    // saying it has no shared cast budget. One shape in this engine DOES have
+    // one, and only for the exact bound this clause printed:
+    // `PlayFromExile { single_use: true }` authorizes at most ONE cast across the
+    // whole grant, shared by every object stamped with its `single_use_group`.
+    //
+    // Three conditions, each load-bearing:
+    //   * `!without_paying` — `PlayFromExile` has no free-cast channel, so a free
+    //     clause promoted here would silently drop "without paying its mana
+    //     cost" and make the player pay. Those clauses keep the existing
+    //     `ResolutionWindow` path and its refusal.
+    //   * `bounds.is_exactly_one_cast()` — `single_use` is a budget of one and
+    //     cannot express `N > 1` (March of Reckless Joy's two, Ashiok's three) or
+    //     a CR 202.3 running-total budget. Those stay refused; see the
+    //     `single_use` bool→count follow-up.
+    //   * a STATED duration — CR 608.2g is explicit that a resolving object
+    //     "continues to resolve, which may include casting other spells this
+    //     way" and that "no other spells can normally be cast … during
+    //     resolution", so a clause that states no durational scope has no later
+    //     priority window in which a lingering permission could be exercised.
+    //     Granting one would be strictly more permissive than the card. Nathan
+    //     Drake, Treasure Hunter and Sanwell, Avenger Ace print this exact
+    //     grammar WITHOUT a duration and must keep refusing — and at this point
+    //     they are byte-identical to Locke, which is why the fact arrives by
+    //     channel rather than from `rest`.
+    let states_peeled_duration = ctx.stated_clause_duration.is_some();
+    if !without_paying && bounds.is_exactly_one_cast() && states_peeled_duration {
+        return FromAmongBatchLowering::SingleUseGrant;
+    }
+    FromAmongBatchLowering::Refused
 }
 
 /// CR 608.2g: the driver for the self-library-peek form of the bare `from among`
@@ -26153,21 +27161,32 @@ const UNREPRESENTABLE_CAST_CAP_GAP: &str = "unrepresentable_cast_cap";
 /// exiled cards`) build the identical `Effect::CastFromZone` and differ only in
 /// the target binding, so they share one constructor. Routing them through it is
 /// what makes the strict refusal STRUCTURAL rather than a per-arm convention: a
-/// `None` driver becomes the honest `Effect::Unimplemented` gap here, and no arm
-/// — present or future — can construct a `CastFromZone` that silently drops a
+/// `Refused` lowering becomes the honest `Effect::Unimplemented` gap here, and no
+/// arm — present or future — can construct a `CastFromZone` that silently drops a
 /// printed cast cap. `refuse_unrepresentable_cast_cap` normally refuses the same
 /// clause earlier, at the entry to `try_parse_cast_effect`; this seam is the
 /// construction-site guarantee that survives any later reordering of the arms.
+///
+/// [`FromAmongBatchLowering::SingleUseGrant`] is the third outcome and is decided
+/// here for the same reason the refusal is: this is the one place that turns a
+/// pairing verdict into an `Effect`, so a promotion decided anywhere else would
+/// leave an arm able to build the wrong shape.
 fn from_among_batch_cast_effect(
-    driver: Option<CastFromZoneDriver>,
+    lowering: FromAmongBatchLowering,
     target: TargetFilter,
     mode: CardPlayMode,
     without_paying: bool,
     constraint: Option<CastPermissionConstraint>,
     fragment: &str,
 ) -> Effect {
-    let Some(driver) = driver else {
-        return Effect::unimplemented(UNREPRESENTABLE_CAST_CAP_GAP, fragment);
+    let driver = match lowering {
+        FromAmongBatchLowering::Driver(driver) => driver,
+        FromAmongBatchLowering::Refused => {
+            return Effect::unimplemented(UNREPRESENTABLE_CAST_CAP_GAP, fragment);
+        }
+        FromAmongBatchLowering::SingleUseGrant => {
+            return single_use_tracked_set_cast_grant(mode, constraint, &target, fragment);
+        }
     };
     Effect::CastFromZone {
         target,
@@ -26180,6 +27199,149 @@ fn from_among_batch_cast_effect(
         driver,
         mana_spend_permission: None,
         additional_cost: None,
+        cast_cost_modifier: None,
+    }
+}
+
+/// CR 601.3: The restriction a `from among` batch target carries BEYOND its
+/// zone binding — i.e. the part of the caller's target that
+/// `single_use_tracked_set_cast_grant` would throw away when it rebinds to the
+/// tracked set.
+///
+/// `None` means the target is a pure zone binding and nothing is lost. `Some`
+/// means the target restricts WHICH members may be cast, and the promotion must
+/// either represent that restriction on `card_filter` or refuse.
+///
+/// Compared against the head gate rather than merely tested for presence,
+/// because the two arms legitimately agree: the bare-anaphor arm builds its
+/// target with `exiled_cast_target_with_type_gate`, which reads the SAME
+/// `parse_cast_type_gate` the promotion does, so Chiss-Goria's `Artifact`
+/// appears on both sides and is not a loss. A conjunction with more than one
+/// non-zone leg returns the whole target, which can never equal a single head
+/// gate — so it refuses, which is the conservative answer for a shape no caller
+/// builds today.
+fn discarded_cast_restriction(target: &TargetFilter) -> Option<&TargetFilter> {
+    match target {
+        TargetFilter::ExiledBySource => None,
+        TargetFilter::And { filters } => {
+            let mut non_zone = filters
+                .iter()
+                .filter(|leg| !matches!(leg, TargetFilter::ExiledBySource));
+            let only = non_zone.next()?;
+            if non_zone.next().is_some() {
+                return Some(target);
+            }
+            Some(only)
+        }
+        other => Some(other),
+    }
+}
+
+/// CR 601.2a + CR 611.2a: the duration-scoped, capped-at-one grant over
+/// a chain-published batch.
+///
+/// Identical in shape to what `try_parse_cast_from_tracked_exile_grant` builds for
+/// Chandra, Hope's Beacon +1 — deliberately, because it is the same instruction
+/// reached from a different printed surface. That function recognizes only the
+/// `from among [those|the] exiled cards` anaphor; this reaches the sibling
+/// surfaces (`from among them`, `from among those cards`) that the batch arms own.
+///
+/// THE BINDING IS ZONE-BLIND, and that is load-bearing rather than incidental.
+/// The batch arms hand this seam an exile-ledger target (`ExiledBySource`, via
+/// `exiled_cast_target_with_type_gate` / `ensure_exile_zone_on_cast_target`), which
+/// is correct for an exile-sourced batch and WRONG for any other: Locke, Treasure
+/// Hunter's pool is the GRAVEYARD ("each player mills a card … you may cast a spell
+/// from among those cards"), and an exile leg would resolve against an empty set and
+/// silently swallow the permission. `TargetFilter::TrackedSet { id: TrackedSetId(0) }`
+/// names the set the chain published without naming a zone, so the same grant serves
+/// a milled, exiled, or revealed batch. The caller's `target` is therefore discarded
+/// here rather than threaded — the discard is the fix, not a loss.
+///
+/// The clause's printed type restriction rides on the permission's `card_filter`
+/// (Chandra's `Typed{AnyOf[Instant,Sorcery]}`, Chiss-Goria's `Typed{Artifact}`)
+/// rather than on the target, because it restricts WHICH members of the bound set
+/// may be cast — exactly what that field is for.
+fn single_use_tracked_set_cast_grant(
+    mode: CardPlayMode,
+    constraint: Option<CastPermissionConstraint>,
+    target: &TargetFilter,
+    fragment: &str,
+) -> Effect {
+    // CR 601.2a: `CastingPermission::PlayFromExile` has no cast-constraint
+    // channel, so a clause carrying one (a timing rider) must not be promoted
+    // into a grant that would silently drop it. Same strict-lowering rule the
+    // counted free-cast arm applies for `Effect::FreeCastFromZones`.
+    if constraint.is_some() {
+        return Effect::unimplemented(UNREPRESENTABLE_CAST_CAP_GAP, fragment);
+    }
+    // CR 601.3 (a player may begin to cast a spell only if an effect allows it):
+    // the printed type restriction is part of WHAT the grant allows, so losing it
+    // authorizes casts the card does not. That restriction can be stated in
+    // either of two places, and this seam reads only one of them. A HEAD gate
+    // ("cast an artifact spell from among them" — Chiss-Goria) is recovered from
+    // the fragment by `parse_cast_type_gate` and becomes `card_filter` below. A
+    // SUFFIX gate ("cast a spell from among the instant or sorcery cards exiled
+    // this way") is lifted by `parse_from_among_exiled_this_way` into the
+    // caller's `target` instead — and the promotion DISCARDS that target, because
+    // it must (the target carries an exile-zone leg that is wrong for a milled
+    // pool; see below).
+    //
+    // THE GUARD COMPARES THE TWO, rather than testing either alone. An earlier
+    // cut asked only `head_gate.is_none()`, which caught the suffix-only form and
+    // silently passed the COMBINATION: "cast an artifact spell from among the
+    // instant or sorcery cards exiled this way" has a head gate, so it promoted
+    // with `card_filter: Some(Artifact)` and dropped the instant-or-sorcery leg —
+    // authorizing an artifact that is neither. Asking instead "does the discarded
+    // target carry a restriction the installed filter does not represent?" covers
+    // suffix-only, head-only, and both-at-once with one question, and a future
+    // producer of either gate inherits it.
+    //
+    // The refusal itself is an ENGINE LOWERING LIMITATION, not a rule: no CR
+    // speaks to where in a sentence a restriction is printed. Carrying the suffix
+    // gate across would mean stripping its zone leg and re-hosting the remainder
+    // on `card_filter`, a capability this seam does not have; an honest gap is
+    // the correct landing until it does. No corpus card prints either refused
+    // shape today (measured), so this costs no coverage and closes the widening.
+    let head_gate = parse_cast_type_gate(fragment);
+    if discarded_cast_restriction(target) != head_gate.as_ref() {
+        return Effect::unimplemented(UNREPRESENTABLE_CAST_CAP_GAP, fragment);
+    }
+    Effect::GrantCastingPermission {
+        permission: CastingPermission::PlayFromExile {
+            provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+            mode,
+            // CR 611.2a: PLACEHOLDER, patched by `apply_duration_to_effect`'s
+            // `GrantCastingPermission` arm, which writes this field
+            // unconditionally through `normalize_play_from_exile_duration`. That
+            // arm is the single authority for this carrier; writing the threaded
+            // duration here directly would bypass the normalization and be
+            // overwritten anyway. This seam is reached only when a duration WAS
+            // stated (`from_among_batch_cast_driver` requires it), so the patch
+            // is guaranteed to run — `locke_grants_a_single_use_cast_until_end_of_turn`
+            // asserts the installed window rather than trusting that.
+            duration: Duration::Permanent,
+            // CR 611.2a/b: placeholder — `grant_permission::resolve` rewrites
+            // this to the concrete grantee at grant time.
+            granted_to: crate::types::player::PlayerId(0),
+            frequency: CastFrequency::Unlimited,
+            source_id: None,
+            exiled_by_ability_controller: None,
+            mana_spend_permission: None,
+            card_filter: head_gate,
+            // Stamped with the resolving set's id at grant time
+            // (`grant_permission::resolve`), which is what makes the one-cast
+            // budget shared across exactly this batch and no other.
+            single_use_group: None,
+            single_use: true,
+            cast_cost_modifier: None,
+            alt_ability_cost: None,
+            land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            invalidation: None,
+        },
+        target: TargetFilter::TrackedSet {
+            id: TrackedSetId(0),
+        },
+        grantee: Default::default(),
     }
 }
 
@@ -26652,8 +27814,14 @@ fn has_from_among_cards_exiled_with_self(rest: &str) -> bool {
     else {
         return false;
     };
+    parse_exile_link_host(after_anchor).is_ok()
+}
+
+/// The object that holds the exile link in "… exiled with ~ / this creature /
+/// …" (CR 607.2a).
+fn parse_exile_link_host(input: &str) -> OracleResult<'_, &str> {
     alt((
-        tag::<_, _, E>("~"),
+        tag("~"),
         tag("this creature"),
         tag("this artifact"),
         tag("this permanent"),
@@ -26661,8 +27829,24 @@ fn has_from_among_cards_exiled_with_self(rest: &str) -> bool {
         tag("this spell"),
         tag("it"),
     ))
-    .parse(after_anchor)
-    .is_ok()
+    .parse(input)
+}
+
+/// CR 607.2a: the whole cast object is "a[n] <type phrase> card exiled with
+/// ~" (Summon: Esper Valigarmanda: "cast an instant or sorcery card exiled
+/// with this Saga"; Raphael, Most Attitude: "play a card exiled with
+/// Raphael").
+fn names_a_card_exiled_with_self(rest: &str) -> bool {
+    (
+        opt(alt((tag::<_, _, OracleError<'_>>("an "), tag("a ")))),
+        super::oracle_nom::target::parse_type_phrase,
+        opt(tag(" card")),
+        tag(" exiled with "),
+        parse_exile_link_host,
+        eof,
+    )
+        .parse(rest)
+        .is_ok()
 }
 
 /// CR 601.3b + CR 702.8a: "you may cast [type] spells as though they had flash"
@@ -27016,6 +28200,51 @@ fn parse_owned_plus_lesser_exiled_subject(i: &str) -> OracleResult<'_, ()> {
     Ok((i, ()))
 }
 
+/// CR 406.6 + CR 607.2a: the SOURCE-ANCHORED tail of the plural exiled-cards
+/// anaphor — `" with <host-self-ref>"` ("cards exiled with ~", "cards exiled
+/// with this Class", "cards exiled with this enchantment").
+///
+/// This is the plural analogue of the singular `"the exiled card"` split that
+/// [`resolve_singular_exiled_card_target`] already performs: a permission
+/// naming its own source refers to that source's DURABLE exile ledger
+/// (CR 607.1/607.2a linked abilities), which spans resolutions, whereas the
+/// sibling `"cards exiled this way"` tail refers only to the cards the SAME
+/// resolution just produced and must keep its same-chain `ParentTarget`
+/// binding.
+///
+/// Deliberately accepts only `TargetFilter::SelfRef` — the HOST self-reference
+/// tokens (`~`, "this creature", "this Class", …) that `normalize_card_name_refs`
+/// folds the printed card name into. `TargetFilter::GrantingObject` — the
+/// placeholder a quoted granted body's by-name reference to its GRANTER is
+/// masked to — is rejected: that ledger belongs to the granting object, not to
+/// the granted one that carries the permission, so `ExiledBySource` resolved
+/// against the carrier would name the wrong object.
+fn parse_host_anchored_exiled_cards_tail(i: &str) -> OracleResult<'_, ()> {
+    let (i, _) = verify(
+        preceded(tag(" with "), nom_target::parse_self_reference),
+        |filter: &TargetFilter| matches!(filter, TargetFilter::SelfRef),
+    )
+    .parse(i)?;
+    Ok((i, ()))
+}
+
+/// Which anaphor opened a "cast/play <anaphor>" clause, insofar as the choice
+/// changes how the referent binds. CR 607.2a: a singular "the exiled card" and
+/// the source-anchored plural "cards exiled with ~" both read their source's
+/// durable exile ledger, while every other anaphor refers to the batch this
+/// resolution produced. Typed rather than a matched `&str` so the binding rule
+/// is an exhaustive match instead of stringly-typed dispatch.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CastAnaphor {
+    /// "the exiled card" — singular, binds to the source's ledger.
+    SingularExiledCard,
+    /// "cards exiled …" — splits further on its tail (see
+    /// `parse_host_anchored_exiled_cards_tail`).
+    PluralCardsExiled,
+    /// Every other anaphor; keeps `TargetFilter::ParentTarget`.
+    Other,
+}
+
 /// 1. Anaphoric — "cast it", "cast that spell", "cast those cards" — target is
 ///    `ParentTarget` (refers to the cards exiled / chosen by a prior effect).
 /// 2. Constrained — "cast a [type-phrase] [from <zone>] [with mana value <bound>]
@@ -27105,16 +28334,16 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
     // Branch 1: anaphoric forms. Order longer-first ("one of those cards"
     // before "those cards") so the prefix-match doesn't shadow the longer
     // anaphor.
-    if let Ok((_, matched_anaphor)) = alt((
-        tag::<_, _, E>("one of those cards"),
-        tag("the exiled card"),
-        tag("those cards"),
-        tag("cards exiled"),
-        tag("that card"),
-        tag("that spell"),
-        tag("the copy"),
-        tag("them"),
-        tag("it"),
+    if let Ok((after_anaphor, matched_anaphor)) = alt((
+        value(CastAnaphor::Other, tag::<_, _, E>("one of those cards")),
+        value(CastAnaphor::SingularExiledCard, tag("the exiled card")),
+        value(CastAnaphor::Other, tag("those cards")),
+        value(CastAnaphor::PluralCardsExiled, tag("cards exiled")),
+        value(CastAnaphor::Other, tag("that card")),
+        value(CastAnaphor::Other, tag("that spell")),
+        value(CastAnaphor::Other, tag("the copy")),
+        value(CastAnaphor::Other, tag("them")),
+        value(CastAnaphor::Other, tag("it")),
     ))
     .parse(rest)
     {
@@ -27180,11 +28409,29 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
         // separately-resolved ETB); otherwise it keeps `ParentTarget`
         // (Creative Technique later widens `ParentTarget` to `TrackedSet{0}`
         // via the `needs_tracked_set` pass; Discover the Impossible's
-        // same-chain `Dig`-to-exile keeps `ParentTarget` as-is). All other
-        // anaphors in this branch are unaffected.
-        let target = if matched_anaphor == "the exiled card"
-            && ctx.current_ability_exile_cost_zone.is_none()
-        {
+        // same-chain `Dig`-to-exile keeps `ParentTarget` as-is).
+        //
+        // CR 607.2a: the plural "cards exiled …" anaphor splits on its tail.
+        // The SOURCE-ANCHORED form ("cards exiled with ~ / with this Class /
+        // with this enchantment" — Urianger Augurelt's Play Arcanum, Rogue
+        // Class, Pick Up the Pace) names the permission's own source and so
+        // reads that source's durable exile ledger across resolutions; it gets
+        // the same treatment as the singular anaphor. The sibling "cards exiled
+        // this way" form (Chandra, Heart of Fire; Dream Harvest) refers to the
+        // batch this very resolution produced and must keep `ParentTarget`.
+        // Both still defer to `chain_has_prior_exile_producer`, so a
+        // source-anchored tail in a chain that ALSO exiles keeps its
+        // same-chain binding.
+        //
+        // All other anaphors in this branch are unaffected.
+        let anchors_to_source_exile_ledger = match matched_anaphor {
+            CastAnaphor::SingularExiledCard => ctx.current_ability_exile_cost_zone.is_none(),
+            CastAnaphor::PluralCardsExiled => {
+                parse_host_anchored_exiled_cards_tail(after_anaphor).is_ok()
+            }
+            CastAnaphor::Other => false,
+        };
+        let target = if anchors_to_source_exile_ledger {
             resolve_singular_exiled_card_target(
                 ctx.chain_has_prior_exile_producer,
                 TargetFilter::ParentTarget,
@@ -27203,6 +28450,7 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
             driver,
             mana_spend_permission: None,
             additional_cost: None,
+            cast_cost_modifier: None,
         });
     }
 
@@ -27227,7 +28475,7 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
         );
         ensure_exile_zone_on_cast_target(&mut nonland_card_filter);
         return Some(from_among_batch_cast_effect(
-            from_among_batch_cast_driver(mode, without_paying, rest),
+            from_among_batch_cast_driver(mode, without_paying, rest, ctx),
             TargetFilter::And {
                 filters: vec![TargetFilter::ExiledBySource, nonland_card_filter],
             },
@@ -27273,7 +28521,7 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
     // Hellcarver Demon, and similar.
     if let Some(target) = parse_from_among_exiled_this_way(rest) {
         return Some(from_among_batch_cast_effect(
-            from_among_batch_cast_driver(mode, without_paying, rest),
+            from_among_batch_cast_driver(mode, without_paying, rest, ctx),
             target,
             mode,
             without_paying,
@@ -27355,12 +28603,14 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
                 // makes a future "up to two … from among those cards" hand form
                 // refuse instead of silently reaching a one-card pick.
                 return Some(from_among_batch_cast_effect(
-                    from_among_batch_bounds(rest).and_then(|bounds| {
-                        CastFromZoneDriver::for_batch_bounds(
-                            CastMechanism::ResolutionTimePrivateZonePick,
-                            bounds,
-                        )
-                    }),
+                    FromAmongBatchLowering::from_driver(from_among_batch_bounds(rest).and_then(
+                        |bounds| {
+                            CastFromZoneDriver::for_batch_bounds(
+                                CastMechanism::ResolutionTimePrivateZonePick,
+                                bounds,
+                            )
+                        },
+                    )),
                     hand_target,
                     mode,
                     without_paying,
@@ -27392,9 +28642,9 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
             // be selected only for an exact single-card cap — never for
             // "any number of" and never for `N > 1`. That gate lives in the
             // shared pairing authority, not here.
-            from_among_self_library_cast_driver(rest)
+            FromAmongBatchLowering::from_driver(from_among_self_library_cast_driver(rest))
         } else {
-            from_among_batch_cast_driver(mode, without_paying, rest)
+            from_among_batch_cast_driver(mode, without_paying, rest, ctx)
         };
         // CR 601.3: the clause's card-type restriction is part of the
         // cast-legality predicate and must ride on the permission's target
@@ -27418,7 +28668,7 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
         // surface form carries type-restricted members too (Eager Flameguide's
         // "creature spells", Kylox's "instant and/or sorcery spells").
         return Some(from_among_batch_cast_effect(
-            from_among_batch_cast_driver(mode, without_paying, rest),
+            from_among_batch_cast_driver(mode, without_paying, rest, ctx),
             exiled_cast_target_with_type_gate(rest),
             mode,
             without_paying,
@@ -27510,8 +28760,23 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
             duration: None,
             driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
             mana_spend_permission: None,
+            cast_cost_modifier: None,
             additional_cost: None,
         });
+    }
+
+    // CR 607.2a + CR 608.2g: "you may cast an instant or sorcery card exiled
+    // with ~" (Summon: Esper Valigarmanda) names one card of the source's
+    // linked exile, cast as the ability resolves. Branch 2 reads a type LIST
+    // through `parse_cast_type_list`, which drops the singular "exiled with ~"
+    // link the single-type reader binds ("a card exiled with ~", Raphael, Most
+    // Attitude), so the grant would cover every exiled card of those types;
+    // and it would linger past the resolution. An honest gap instead.
+    if names_a_card_exiled_with_self(rest) && parse_cast_type_list(rest).is_some() {
+        return Some(Effect::unimplemented(
+            LINKED_EXILE_RESOLUTION_CAST_GAP,
+            rest,
+        ));
     }
 
     // Branch 1.9: the owned-linked + lesser-mana-value compound exile grant
@@ -27571,6 +28836,7 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
             duration: None,
             driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
             mana_spend_permission: None,
+            cast_cost_modifier: None,
             additional_cost: None,
         });
     }
@@ -27589,6 +28855,28 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
         .unwrap_or_else(|| super::oracle_target::parse_type_phrase_folding(cast_target_rest).0);
     if cast_filter_has_typed_leaf(&filter) {
         apply_cast_target_suffixes(&mut filter, rest);
+        // CR 400.3 + CR 115.1: in a triggered ability, "cast target … card from
+        // that player's graveyard" (Tinybones, the Pickpocket; Wrexial, the
+        // Risen Deep) chooses the card as the trigger goes on the stack, in the
+        // graveyard of the player its event names — and a graveyard holds only
+        // its owner's cards. `scan_zone_phrase` reads the possessive as a bare
+        // `InZone { Graveyard }`, so the owner is bound here, read off the same
+        // origin phrase the zone came from; without it any graveyard's card is a
+        // legal target. (`relative_player_scope` does not name that player here:
+        // `relative_player_scope_for_condition` reads a "~ deals combat damage
+        // to a player" head as `TargetPlayer`.)
+        if ctx.in_trigger
+            && cast_target_is_chosen_graveyard_card(rest, &filter)
+            && cast_origin_is_that_players_graveyard(rest)
+        {
+            add_cast_target_props(
+                &mut filter,
+                &[FilterProp::Owned {
+                    controller: ControllerRef::TriggeringPlayer,
+                }],
+                None,
+            );
+        }
         let alt_ability_cost = parse_alt_ability_cost_rider(lower);
         // CR 608.2g vs CR 611.2: shared filter-form driver authority. `mode` and
         // `alt_is_some` are no-ops for every current Branch-2 card (all hand-origin
@@ -27626,6 +28914,7 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
             driver,
             mana_spend_permission: None,
             additional_cost,
+            cast_cost_modifier: None,
         };
         crate::parser::oracle_ir::ast::refuse_additional_cost_on_lingering_cast(&mut effect);
         return Some(effect);
@@ -27643,6 +28932,7 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
         driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
         mana_spend_permission: None,
         additional_cost: None,
+        cast_cost_modifier: None,
     })
 }
 
@@ -27730,6 +29020,10 @@ fn during_resolution_for_filter_cast_clause(
 /// through a static permission and never reaches the cast-clause producer).
 const UNREPRESENTABLE_ADDITIONAL_COST_GAP: &str = "unrepresentable_additional_cost";
 
+/// The parser gap name for a cast of one card of a type list from the
+/// source's linked exile (`names_a_card_exiled_with_self`).
+const LINKED_EXILE_RESOLUTION_CAST_GAP: &str = "linked_exile_resolution_cast";
+
 /// The printed additional-cost wording is present on the clause, whatever
 /// follows "by paying".
 fn names_an_additional_cost(rest: &str) -> bool {
@@ -27766,6 +29060,22 @@ fn parse_additional_mana_cost_rider(rest: &str) -> Option<crate::types::mana::Ma
     Some(cost)
 }
 
+/// The origin phrase `apply_cast_target_suffixes` took the cast target's zone
+/// from (the first zone phrase of the clause) is exactly "from that player's
+/// graveyard" — not a later mention of that graveyard elsewhere in the clause.
+fn cast_origin_is_that_players_graveyard(rest: &str) -> bool {
+    type E<'a> = OracleError<'a>;
+    super::oracle_target::scan_zone_phrase_span(rest).is_some_and(|(span, ..)| {
+        (
+            opt(alt((tag::<_, _, E>("cards "), tag("card ")))),
+            tag("from that player's graveyard"),
+            eof,
+        )
+            .parse(span)
+            .is_ok()
+    })
+}
+
 /// CR 601.2c + CR 115.1: A "cast TARGET <card> from [a|your|…] graveyard"
 /// clause names one chosen card in a graveyard — the printed word "target"
 /// on the head and an `InZone { Graveyard }` property on every leaf of the
@@ -27792,88 +29102,6 @@ fn cast_target_is_chosen_graveyard_card(rest: &str, target: &TargetFilter) -> bo
     }
     let names_a_target = strip_cast_target_prefix(rest).len() != rest.len();
     names_a_target && every_leaf_in_a_graveyard(target)
-}
-
-/// CR 601.2 + CR 609.4b + CR 608.2g: "[you may ]cast target [type] card from
-/// [a graveyard | that player's graveyard], and mana of any type can be spent to
-/// cast that spell" — the in-place graveyard cast-from-zone grant with the
-/// any-type-mana concession (Quistis Trepe: instant/sorcery from a graveyard;
-/// Tinybones the Pickpocket: nonland permanent from the triggering player's
-/// graveyard).
-///
-/// Without this, the whole clause is captured by the catch-all
-/// `SpendManaAsAnyColor` static branch in `lower_imperative_clause`, degrading to
-/// a bare `GenericEffect{SpendManaAsAnyColor}` that DROPS the cast entirely (a CR
-/// 609.4b payment concession with no spell to cast). This routes the head through
-/// the established `CastFromZone`-building combinator (the path Harness the Storm
-/// uses for "cast target ... card from your graveyard") and forwards the any-type
-/// concession into `mana_spend_permission` so it is scoped to this specific cast
-/// rather than a global player permission.
-///
-/// CR 611.2a + CR 108.3 (multiplayer correctness): "that player's graveyard"
-/// binds to the triggering (combat-damaged) player via
-/// `Owned{ControllerRef::TriggeringPlayer}` so in a 3+ player game the cast is
-/// restricted to THAT player's graveyard — never any opponent's. "a graveyard"
-/// (Quistis) carries no owner constraint (own graveyard in practice).
-fn try_parse_cast_target_from_graveyard_any_mana(text: &str, ctx: &ParseContext) -> Option<Effect> {
-    type E<'a> = OracleError<'a>;
-    let lower = text.to_lowercase();
-    let trimmed = lower.trim().trim_end_matches('.');
-    // `clause_shell` usually strips a leading "you may "; strip defensively so
-    // the head reaches `try_parse_cast_effect` either way.
-    let (body, _) = opt(tag::<_, _, E>("you may ")).parse(trimmed).ok()?;
-
-    // Split the cast-from-graveyard head from the trailing any-type-mana
-    // conjunct, then require the full conjunct (no `contains` dispatch — a
-    // `take_until` anchor plus an exhaustive tail combinator).
-    let (rest, head) = take_until::<_, _, E>(", and mana of any ")
-        .parse(body)
-        .ok()?;
-    let (rest, _) = tag::<_, _, E>(", and mana of any ").parse(rest).ok()?;
-    let (rest, _) = alt((tag::<_, _, E>("type"), tag("color")))
-        .parse(rest)
-        .ok()?;
-    let (rest, _) = tag::<_, _, E>(" can be spent to cast ").parse(rest).ok()?;
-    let (rest, _) = alt((tag::<_, _, E>("that spell"), tag("a spell this way")))
-        .parse(rest)
-        .ok()?;
-    eof::<_, E>(rest).ok()?;
-
-    // Scope to the graveyard cast-from-zone class (not impulse-exile anaphors,
-    // which are handled earlier by `try_parse_play_from_exile`).
-    if !scan_contains_phrase(head, "graveyard") {
-        return None;
-    }
-
-    let mut effect = try_parse_cast_effect(head, ctx)?;
-    let Effect::CastFromZone {
-        mana_spend_permission,
-        target,
-        driver,
-        ..
-    } = &mut effect
-    else {
-        return None;
-    };
-    // CR 609.4b: scope the any-type concession to this specific granted cast.
-    *mana_spend_permission = Some(ManaSpendPermission::AnyTypeOrColor);
-    // CR 608.2g: "cast target ... from a graveyard" with no duration is a
-    // during-resolution paid cast, not a lingering permission.
-    *driver = crate::types::ability::CastFromZoneDriver::DuringResolution;
-    // CR 611.2a + CR 108.3: "that player's graveyard" = the triggering player's
-    // graveyard (`scan_zone_phrase` maps it to a bare `InZone{Graveyard}` with no
-    // owner). Add the owner constraint so the candidate set is the damaged
-    // player's graveyard alone.
-    if scan_contains_phrase(head, "that player's graveyard") {
-        add_cast_target_props(
-            target,
-            &[FilterProp::Owned {
-                controller: ControllerRef::TriggeringPlayer,
-            }],
-            None,
-        );
-    }
-    Some(effect)
 }
 
 fn parse_cast_permission_constraint(lower: &str) -> Option<CastPermissionConstraint> {
@@ -28075,6 +29303,260 @@ pub(crate) fn try_parse_alt_cost_rider(text: &str) -> Option<crate::types::abili
     parse_alt_ability_cost_rider(after_prefix)
 }
 
+/// CR 609.4b: what a mana rider after a cast grant asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ManaSpendRider {
+    /// "spend mana as though it were mana of any color/type …" / "Mana of any
+    /// type can be spent …" — the concession `ManaSpendPermission` models.
+    Concession(ManaSpendPermission),
+    /// "spend **colorless** mana as though …" (Abstruse Appropriation), "spend
+    /// mana **from snow sources** as though …" (Draugr Necromancer): only one
+    /// kind of mana is relaxed. `ManaSpendPermission` has no such shape, and
+    /// widening it to every mana would grant what the card does not print.
+    SingleKind,
+}
+
+/// The gap name for a `ManaSpendRider::SingleKind` rider after a cast grant:
+/// the grant itself lowers, the rider is an honest `Unimplemented` instead of
+/// a bare board-wide static nothing at cast time reads.
+pub(crate) const UNREPRESENTABLE_MANA_SPEND_CONCESSION_GAP: &str =
+    "unrepresentable_mana_spend_concession";
+
+/// The gap name for a mana-spend concession with no cast grant to fold onto:
+/// the engine has no payment-time carrier for an effect-granted concession.
+pub(crate) const STANDALONE_MANA_SPEND_CONCESSION_GAP: &str = "standalone_mana_spend_concession";
+
+/// CR 609.4b: Does the clause `lower` carry a mana-spend concession phrase, and
+/// if so, does it relax a single kind of mana only (`parse_spend_as_though_any_mana`)?
+/// `None` — no concession phrase. The standalone gap in `lower_imperative_clause`
+/// and the recovered-conjunct guard in `sequence.rs` both classify through this.
+pub(crate) fn mana_spend_concession_is_single_kind(lower: &str) -> Option<bool> {
+    let has_phrase = nom_primitives::scan_contains(lower, "as though it were mana of any color")
+        || nom_primitives::scan_contains(lower, "as though it were mana of any type")
+        || nom_primitives::scan_contains(lower, "mana of any type can be spent to cast");
+    has_phrase.then(|| {
+        matches!(
+            nom_primitives::scan_at_word_boundaries(lower, parse_spend_as_though_any_mana),
+            Some(ManaSpendRider::SingleKind)
+        )
+    })
+}
+
+/// CR 609.4b + CR 106.1a/106.1b: the word after "mana of any " — "color"
+/// names the five colors, "type" the six mana types (colorless included), so
+/// the two words are two permissions.
+fn parse_any_mana_word(input: &str) -> OracleResult<'_, ManaSpendPermission> {
+    alt((
+        value(ManaSpendPermission::AnyColor, tag("color")),
+        value(ManaSpendPermission::AnyTypeOrColor, tag("type")),
+    ))
+    .parse(input)
+}
+
+/// CR 609.4b: "spend <subject> as though it were mana of any <color|type>" —
+/// "spend mana" is the concession `ManaSpendPermission` models; any other
+/// subject ("colorless mana", "white mana", "mana from snow sources") relaxes a
+/// single kind of mana and is reported as `ManaSpendRider::SingleKind`. The
+/// rider fold and `mana_spend_concession_is_single_kind` (the standalone gap)
+/// both classify through this, so a single-kind subject is never widened.
+fn parse_spend_as_though_any_mana(input: &str) -> OracleResult<'_, ManaSpendRider> {
+    alt((
+        map(
+            preceded(
+                tag("spend mana as though it were mana of any "),
+                parse_any_mana_word,
+            ),
+            ManaSpendRider::Concession,
+        ),
+        value(
+            ManaSpendRider::SingleKind,
+            (
+                tag("spend "),
+                take_until(" as though it were mana of any "),
+                tag(" as though it were mana of any "),
+                parse_any_mana_word,
+            ),
+        ),
+    ))
+    .parse(input)
+}
+
+/// CR 118.14 + CR 609.4b: "mana of any <color|type> can be spent" — the other
+/// spelling of the concession the rider fold reads.
+fn parse_any_mana_can_be_spent(input: &str) -> OracleResult<'_, ManaSpendRider> {
+    map(
+        preceded(
+            tag("mana of any "),
+            terminated(parse_any_mana_word, tag(" can be spent")),
+        ),
+        ManaSpendRider::Concession,
+    )
+    .parse(input)
+}
+
+/// CR 118.14 + CR 609.4b: The any-color / any-type mana rider that follows a cast grant —
+/// "[you may] spend mana as though it were mana of any color to cast that
+/// spell" (Siphon Insight, Robber of the Rich), "Mana of any type can be spent
+/// to cast spells this way" (Black Cat, Cunning Thief, The Madcap Jester).
+/// The rider states no permission of its own: it applies only to mana spent
+/// casting through the PRECEDING grant — CR 118.14 says so for "mana of any
+/// type", and the "any color" rider names its object itself ("to cast that
+/// spell") — so it is a `PriorModifier`, not an effect. The word after "any" decides the permission
+/// (`parse_any_mana_word`); a rider that relaxes only one kind of mana is
+/// reported as `ManaSpendRider::SingleKind`.
+pub(crate) fn try_parse_mana_spend_rider(text: &str) -> Option<ManaSpendRider> {
+    let lower = text.to_lowercase();
+    let trimmed = lower.trim().trim_end_matches('.');
+    let (_, rider) = terminated(parse_mana_spend_rider, eof)
+        .parse(trimmed)
+        .ok()?;
+    Some(rider)
+}
+
+/// CR 118.14 + CR 609.4b: the rider grammar `try_parse_mana_spend_rider` reads,
+/// up to and including the object it names — without requiring the text to end
+/// there, so the clause splitter can recognize the same rider as a conjunct
+/// (`starts_mana_spend_rider_conjunct`).
+fn parse_mana_spend_rider(input: &str) -> OracleResult<'_, ManaSpendRider> {
+    // "If you cast a spell this way, mana of any type can be spent to cast it"
+    // (Bloodsoaked Insight): the gate restates what the rider already means —
+    // it applies only to a cast made through the grant — so it is dropped, as
+    // `try_parse_alt_cost_rider` drops the same prefix.
+    let (input, _) = opt(alt((
+        tag("if you cast a spell this way, "),
+        tag("if you cast it this way, "),
+    )))
+    .parse(input)?;
+    let (input, rider) = alt((
+        preceded(opt(tag("you may ")), parse_spend_as_though_any_mana),
+        parse_any_mana_can_be_spent,
+    ))
+    .parse(input)?;
+    let (input, _) = tag(" to cast ").parse(input)?;
+    let (input, _) = alt((
+        tag("that spell"),
+        tag("those spells"),
+        tag("spells this way"),
+        tag("spells cast this way"),
+        tag("a spell this way"),
+        tag("them"),
+        tag("it"),
+    ))
+    .parse(input)?;
+    Ok((input, rider))
+}
+
+/// CR 118.14 + CR 609.4b: Does the lowercase text after a comma open a
+/// ", and <mana rider>" conjunct that runs to the end of its sentence — "…,
+/// and mana of any type can be spent to cast that spell" (Hostage Taker),
+/// "…, and you may spend mana as though it were mana of any color to cast
+/// those spells" (King Narfi's Betrayal)? Such a conjunct is its own
+/// instruction: the clause splitter cuts it off the grant it follows so the
+/// chunk loop folds it onto that grant, whatever grammar reads the grant.
+pub(crate) fn starts_mana_spend_rider_conjunct(remainder_lower: &str) -> bool {
+    (
+        tag::<_, _, OracleError<'_>>("and "),
+        parse_mana_spend_rider,
+        alt((eof, tag("."))),
+    )
+        .parse(remainder_lower)
+        .is_ok()
+}
+
+/// CR 609.4b: Is `effect` a cast grant the mana rider can attach to — a
+/// `CastFromZone` or a `GrantCastingPermission { PlayFromExile }` that carries
+/// no `mana_spend_permission` yet?
+fn effect_awaits_mana_spend_permission(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::CastFromZone {
+            mana_spend_permission: None,
+            ..
+        } | Effect::GrantCastingPermission {
+            permission: CastingPermission::PlayFromExile {
+                mana_spend_permission: None,
+                ..
+            },
+            ..
+        }
+    )
+}
+
+/// CR 609.4b: The ONE traversal that picks the grant a mana rider modifies:
+/// the deepest awaiting grant under `effect` + `sub_ability` — the last one in
+/// text order, i.e. the grant the rider follows. Returns its depth in the
+/// `sub_ability` chain (0 = `effect` itself). The admission check and the stamp
+/// both call this, so they can never name different grants.
+fn awaiting_mana_spend_grant_depth(
+    effect: &Effect,
+    sub_ability: Option<&AbilityDefinition>,
+) -> Option<usize> {
+    sub_ability
+        .and_then(|sub| awaiting_mana_spend_grant_depth(&sub.effect, sub.sub_ability.as_deref()))
+        .map(|depth| depth + 1)
+        .or_else(|| effect_awaits_mana_spend_permission(effect).then_some(0))
+}
+
+/// CR 609.4b: Does the most recently emitted clause hold a cast grant the mana
+/// rider can attach to (`awaiting_mana_spend_grant_depth`)? The rider only ever
+/// modifies the grant it follows, so a rider with no such antecedent is the
+/// standalone concession gap instead of folding onto an unrelated earlier
+/// grant.
+fn prior_clause_grants_a_cast_without_mana_spend_permission(clauses: &[ClauseIr]) -> bool {
+    clauses
+        .iter()
+        .rev()
+        .find(|clause| !matches!(clause.disposition, ClauseDisposition::Continue { .. }))
+        .is_some_and(|clause| {
+            awaiting_mana_spend_grant_depth(
+                &clause.parsed.effect,
+                clause.parsed.sub_ability.as_deref(),
+            )
+            .is_some()
+        })
+}
+
+/// CR 609.4b: Stamp `permission` onto the cast grant the rider follows — in
+/// the LAST emitted def, the grant `awaiting_mana_spend_grant_depth` picks (the
+/// same traversal `prior_clause_grants_a_cast_without_mana_spend_permission`
+/// admitted the rider with). Returns `true` when a grant was stamped.
+pub(crate) fn attach_mana_spend_permission_to_prior_cast_grant(
+    defs: &mut [AbilityDefinition],
+    permission: ManaSpendPermission,
+) -> bool {
+    let Some(mut def) = defs.last_mut() else {
+        return false;
+    };
+    let Some(depth) = awaiting_mana_spend_grant_depth(&def.effect, def.sub_ability.as_deref())
+    else {
+        return false;
+    };
+    for _ in 0..depth {
+        let Some(sub) = def.sub_ability.as_deref_mut() else {
+            return false;
+        };
+        def = sub;
+    }
+    match &mut *def.effect {
+        Effect::CastFromZone {
+            mana_spend_permission: slot @ None,
+            ..
+        }
+        | Effect::GrantCastingPermission {
+            permission:
+                CastingPermission::PlayFromExile {
+                    mana_spend_permission: slot @ None,
+                    ..
+                },
+            ..
+        } => {
+            *slot = Some(permission);
+            true
+        }
+        _ => false,
+    }
+}
+
 /// CR 106.4 + CR 514.2: Recognise mana-retention riders that modify the mana
 /// produced by the previous clause rather than creating a standalone effect.
 fn try_parse_mana_retention_rider(text: &str) -> Option<ManaExpiry> {
@@ -28153,6 +29635,13 @@ fn attach_alt_cost_to_prior_cast_from_zone(
             // CR 601.2b: the fourth seam that can leave a cast grant on the
             // lingering mechanism; an additional cost cannot stay on it.
             crate::parser::oracle_ir::ast::refuse_additional_cost_on_lingering_cast(
+                def.effect.as_mut(),
+            );
+            // CR 601.2f: the mirror obligation for the opposite mechanism — the
+            // re-derivation above can move an already-absorbed "cast this way"
+            // cost rider OFF `LingeringPermission`, the only driver whose
+            // resolver stamps it onto the permissions it builds.
+            crate::parser::oracle_ir::ast::refuse_cast_cost_modifier_on_unsupported_driver(
                 def.effect.as_mut(),
             );
             return true;
@@ -28889,6 +30378,49 @@ fn parse_creature_type_enumeration(rest: &str) -> Option<Vec<String>> {
     }
 }
 
+/// CR 107.1 + CR 107.1a: a printed enumeration of whole numbers ("choose 2, 3,
+/// or 4" — Haktos the Unscarred) states an explicit candidate set of integers.
+/// Returns the enumeration's `(min, max)` when `rest` is a 2+-element ascending
+/// run of consecutive numbers, else `None`.
+///
+/// The engine's numeric choice carrier is a bounded RANGE
+/// (`ChoiceType::NumberRange`), so only a CONTIGUOUS ascending run can be
+/// represented without inventing or discarding a legal option. Lowering
+/// "2, 3, or 4" to `2..=4` is therefore a DELIBERATE lowering, not an
+/// equivalence — and a non-contiguous set ("1, 3, or 5") DECLINES here rather
+/// than collapsing to a range that would admit an option the card never printed.
+///
+/// The numeric sibling of [`parse_creature_type_enumeration`]: same separator
+/// axis, same `all_consuming` + `len() >= 2` gates, different item parser.
+fn parse_number_enumeration(rest: &str) -> Option<(u32, u32)> {
+    fn separator(input: &str) -> nom::IResult<&str, &str, OracleError<'_>> {
+        alt((tag(", or "), tag(", "), tag(" or "))).parse(input)
+    }
+    let rest = rest.trim_end_matches('.').trim_end();
+    let items = match all_consuming(nom::multi::separated_list1(
+        separator,
+        nom_primitives::parse_number,
+    ))
+    .parse(rest)
+    {
+        Ok((_, items)) if items.len() >= 2 => items,
+        _ => return None,
+    };
+    // Contiguity: ascending with a step of exactly 1. `windows(2)` rather than an
+    // index loop. `checked_add` rather than `+`: `parse_number` yields a `u32`
+    // parsed from arbitrary printed digits, so a pathological literal at
+    // `u32::MAX` would panic on overflow in a debug build. A successor that
+    // cannot be represented is by definition not the next element, so `None`
+    // folds to "not contiguous" — the same refusal every other gap takes.
+    if items
+        .windows(2)
+        .any(|pair| pair[0].checked_add(1) != Some(pair[1]))
+    {
+        return None;
+    }
+    Some((items[0], *items.last()?))
+}
+
 /// Match "choose a creature type", "choose a color", "choose odd or even",
 /// "choose a basic land type", "choose a card type" from lowercased Oracle text.
 /// CR 608.2d + CR 608.2e: Parse an "an opponent guesses ..." / "defending player
@@ -29163,6 +30695,34 @@ pub(crate) fn parse_named_choice_object_with_provenance(
     .is_ok()
     {
         Some(ChoiceType::CardName)
+    } else if let Some((min, max)) = parse_number_enumeration(rest) {
+        // CR 107.1: "choose 2, 3, or 4" (Haktos the Unscarred) — an explicit
+        // printed integer candidate set. Grouped with the other `NumberRange`
+        // producers below so every numeric choice shape lowers in one place.
+        //
+        // Placed ABOVE the generic `try_parse_labeled_choice` fallback at the end
+        // of this chain: without this arm a bare numeric enumeration reaches that
+        // fallback and becomes `ChoiceType::Labeled { options: ["2","3","4"] }` —
+        // a presentation-level choice that no numeric consumer can read. It
+        // cannot capture any earlier arm's text, because it is `all_consuming`
+        // over digits and every earlier arm's phrase begins with a letter.
+        Some(ChoiceType::NumberRange {
+            min,
+            max: Some(max),
+            // CR 608.2d: a player can't choose an illegal or impossible option,
+            // which is the rule a "that hasn't been chosen" clause expresses.
+            //
+            // This call is NOT parse-detection: `parse_number_enumeration` is
+            // `all_consuming`, so an enumeration leaves no tail and there is
+            // nothing to detect. It is routed through the shared detector purely
+            // so the DEFAULT comes from one place — the same
+            // `NumberDistinctness::Repeatable` its "a number between" sibling
+            // resolves to — instead of being restated here. If a distinctness
+            // clause ever appears on an enumeration, the arm's `all_consuming`
+            // gate declines the whole phrase first, so it would have to be
+            // handled before this point, not here.
+            distinctness: parse_number_distinctness(""),
+        })
     } else if let Ok((range_rest, _)) = tag::<_, _, E>("a number between ").parse(rest) {
         // "choose a number between 1 and 5 [that hasn't been chosen]"
         let mut parts = range_rest.splitn(3, ' ');
@@ -30086,6 +31646,46 @@ fn clause_ir_hand_reveal_target(clause: &ClauseIr) -> Option<TargetFilter> {
     }
 }
 
+/// CR 400.7j + CR 608.2c + CR 608.2d: The NEAREST earlier `ChooseFromZone`
+/// clause of this chain, when it is a single-card exile partition — reported
+/// as a [`PriorZoneChoicePartition`] carrying that pile's
+/// `ZoneChoiceCandidateSource`.
+///
+/// Feeds `ParseContext::prior_zone_choice_partition`, the state that lets the
+/// very next instruction's bare "the other" name the UNCHOSEN card (Coin of
+/// Fate). The runtime publishes the CHOSEN cards as the continuation's targets —
+/// and, when the continuation consumes one, as the fresh tracked set — while the
+/// complement reaches only the continuation's immediate `sub_ability` targets.
+/// So "the other" must lower to `ParentTarget` on that sub-ability, not to a
+/// `TrackedSet` (which would name the chosen card, i.e. exactly the wrong half).
+///
+/// The scan STOPS at the nearest `ChooseFromZone` rather than searching for a
+/// matching one: a chain whose most recent choice is some OTHER provenance is
+/// not this partition, and must keep its existing binding. Returning the source
+/// rather than a bool is what keeps "no partition here" and "a partition from a
+/// different source" distinguishable — that is what pins Wake to Slaughter ("An
+/// opponent chooses one of them. … Return the other …", `Legacy`) in place while
+/// leaving the distinction visible to consumers.
+fn chain_prior_zone_choice_partition(clauses: &[ClauseIr]) -> Option<PriorZoneChoicePartition> {
+    clauses
+        .iter()
+        .rev()
+        .find_map(|clause| match &clause.parsed.effect {
+            Effect::ChooseFromZone {
+                count: 1,
+                zone: Zone::Exile,
+                candidate_source,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                ..
+            } => Some(Some(PriorZoneChoicePartition {
+                candidate_source: *candidate_source,
+            })),
+            Effect::ChooseFromZone { .. } => Some(None),
+            _ => None,
+        })
+        .flatten()
+}
+
 /// The match arms naming every effect that establishes a NON-targeting
 /// object POPULATION — the `*All` / scope-`All` family whose `target` (or
 /// `filter`) is a population filter rather than a chosen target. This is why they
@@ -30266,6 +31866,14 @@ pub(super) fn publishes_exiled_cause_at_resolution(effect: &Effect) -> bool {
 /// wrapper (`conqueror's galleon`, `end-blaze epiphany`, `fire giant's fury`,
 /// `priority boarding`, `storm herald`, `waltz of rage`) back to the
 /// unrewritten `ParentTarget` binding.
+///
+/// `Effect::ChooseAndSacrificeRest` is deliberately absent even though
+/// `sacrifice_unchosen` does publish a tracked set at resolution: the effect
+/// names TWO populations (the keepers and the sacrificed rest), and which one
+/// a following anaphor means is resolved at resolution time by
+/// `publish_fresh_tracked_set`, not classified here. See
+/// `oracle_effect/tests.rs::counter_less_keeper_sibling_still_grants_the_selfref_prohibition`
+/// for the measured argument against widening this predicate.
 fn publishes_tracked_set_from_resolution(effect: &Effect) -> bool {
     is_exile_effect(effect)
         || publishes_exiled_cause_at_resolution(effect)
@@ -30277,6 +31885,9 @@ fn publishes_tracked_set_from_resolution(effect: &Effect) -> bool {
         // publisher so a following "those cards" move receives the tracked-set
         // sentinel that activates that runtime publication.
         || matches!(effect, Effect::SearchLibrary { .. })
+        // Seek publishes its sought cards the same way ("Seek two cards. You may
+        // shuffle them into your library." — Choice of Fortunes).
+        || matches!(effect, Effect::Seek { .. })
         || matches!(
             effect,
             Effect::PutCounter { .. }
@@ -30792,6 +32403,52 @@ fn contains_implicit_tracked_set_pronoun(lower: &str) -> bool {
         || copy_token_recall
         || play_from_exile_grant
         || free_cast_that_card_grant
+        || plural_library_shuffle_recall(lower)
+}
+
+/// CR 701.24c + CR 608.2c: the PLURAL library-recall anaphor — "[you may]
+/// shuffle them into <possessive> library" names every object the previous
+/// instruction put elsewhere (Choice of Fortunes: the two sought cards now in
+/// hand). Start-anchored like the other recalls so a same-sentence "create …
+/// and shuffle them into …" (Gunk Slug) is not a cross-clause anaphor.
+pub(crate) fn plural_library_shuffle_recall(lower: &str) -> bool {
+    (
+        opt(tag::<_, _, OracleError<'_>>("you may ")),
+        tag("shuffle them into "),
+    )
+        .parse(lower)
+        .is_ok()
+        && scan_contains_phrase(lower, "library")
+}
+
+/// CR 701.24c + CR 608.2c: "shuffle them into your library" after a tracked-set
+/// publisher moves EVERY member of that set, so the pronoun's singular
+/// `ChangeZone` (whose `TrackedSet` form means "choose one from among" —
+/// Expressive Iteration) becomes a mass `ChangeZoneAll` over the chain set.
+/// CR 701.24a: `TerminalShuffle` leaves the one shuffle to the chained terminal
+/// `Shuffle`, after every member has moved.
+fn rewrite_plural_library_recall_to_tracked_set(effect: &mut Effect) {
+    if let Effect::ChangeZone {
+        origin,
+        destination: Zone::Library,
+        target: TargetFilter::ParentTarget,
+        ..
+    } = effect
+    {
+        *effect = Effect::ChangeZoneAll {
+            origin: *origin,
+            destination: Zone::Library,
+            target: tracked_set_filter(),
+            enters_under: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            enter_with_counters: vec![],
+            face_down_profile: None,
+            library_position: None,
+            library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
+            random_order: false,
+        };
+    }
 }
 
 /// CR 608.2c: the SINGULAR battlefield-recall anaphor — "return it " at a
@@ -31304,6 +32961,36 @@ pub(crate) fn each_quantity_expr_mut(effect: &mut Effect, f: &mut impl FnMut(&mu
     }
 }
 
+/// Apply `f` to every [`QuantityRef`] leaf in a [`QuantityExpr`] tree.
+/// Companion to [`each_quantity_expr_mut`]: that visitor reaches the
+/// top-level expressions of an `Effect`, this one descends into them, so
+/// callers that rewrite refs (the scope-rebind walkers below, the damage
+/// recipient rebind in `lower.rs`) share one traversal instead of
+/// hand-rolling the recursion per call site. The match is exhaustive over
+/// `QuantityExpr` (no wildcard) so a new expression form breaks compilation
+/// here rather than silently escaping every rewrite.
+pub(crate) fn each_quantity_ref_mut(expr: &mut QuantityExpr, f: &mut impl FnMut(&mut QuantityRef)) {
+    match expr {
+        QuantityExpr::Ref { qty } => f(qty),
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Offset { inner, .. } => each_quantity_ref_mut(inner, f),
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            for inner in exprs {
+                each_quantity_ref_mut(inner, f);
+            }
+        }
+        QuantityExpr::UpTo { max } => each_quantity_ref_mut(max, f),
+        QuantityExpr::Power { exponent, .. } => each_quantity_ref_mut(exponent, f),
+        QuantityExpr::Difference { left, right } => {
+            each_quantity_ref_mut(left, f);
+            each_quantity_ref_mut(right, f);
+        }
+        QuantityExpr::Fixed { .. } => {}
+    }
+}
+
 /// CR 109.4 + CR 608.2c: Apply `f` to every `TargetFilter` reachable through
 /// the common target-bearing fields of an `Effect`. Companion to
 /// `each_quantity_expr_mut`; used by callers that need to rewrite target slots
@@ -31692,40 +33379,45 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
         }
     }
 
-    fn rewrite_quantity_expr(expr: &mut QuantityExpr) {
-        match expr {
-            QuantityExpr::Ref { qty } => match qty {
-                QuantityRef::LifeTotal {
-                    player: PlayerScope::Target,
-                } => {
-                    *qty = QuantityRef::LifeTotal {
-                        player: PlayerScope::ScopedPlayer,
-                    }
+    fn rewrite_quantity_ref(qty: &mut QuantityRef) {
+        match qty {
+            QuantityRef::LifeTotal {
+                player: PlayerScope::Target,
+            } => {
+                *qty = QuantityRef::LifeTotal {
+                    player: PlayerScope::ScopedPlayer,
                 }
-                QuantityRef::HandSize {
-                    player: PlayerScope::Target,
-                } => {
-                    *qty = QuantityRef::HandSize {
-                        player: PlayerScope::ScopedPlayer,
-                    }
+            }
+            QuantityRef::HandSize {
+                player: PlayerScope::Target,
+            } => {
+                *qty = QuantityRef::HandSize {
+                    player: PlayerScope::ScopedPlayer,
                 }
-                // CR 119.3 + CR 109.5 + CR 608.2c: "the life they/that player lost
-                // this turn" under a per-opponent `player_scope` loop binds to the
-                // iterating player, the same rebind the analogous
-                // `LifeTotal`/`HandSize` arms above perform for "their life"/"their
-                // hand". The leaf combinator emits `Target`; this walker (run only
-                // on `player_scope`-bearing defs) maps it to `ScopedPlayer`. A
-                // purely targeted clause (Blitzwing — no `player_scope`) never
-                // reaches this walker, so its `Target` survives to read the
-                // targeted opponent's own life lost.
-                QuantityRef::LifeLostThisTurn {
-                    player: PlayerScope::Target,
-                } => {
-                    *qty = QuantityRef::LifeLostThisTurn {
-                        player: PlayerScope::ScopedPlayer,
-                    }
+            }
+            // CR 119.3 + CR 109.5 + CR 608.2c: "the life they/that player lost
+            // this turn" under a per-opponent `player_scope` loop binds to the
+            // iterating player, the same rebind the analogous
+            // `LifeTotal`/`HandSize` arms above perform for "their life"/"their
+            // hand". The leaf combinator emits `Target`; this walker (run only
+            // on `player_scope`-bearing defs) maps it to `ScopedPlayer`. A
+            // purely targeted clause (Blitzwing — no `player_scope`) never
+            // reaches this walker, so its `Target` survives to read the
+            // targeted opponent's own life lost.
+            QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Target,
+            } => {
+                *qty = QuantityRef::LifeLostThisTurn {
+                    player: PlayerScope::ScopedPlayer,
                 }
-                QuantityRef::TargetZoneCardCount { zone } => match zone {
+            }
+            // CR 115.1 + CR 601.2c: rebind only anaphoric counts ("their …").
+            // An explicit "target player's/opponent's …" count declares its
+            // own announcement and must survive for the slot machinery.
+            QuantityRef::TargetZoneCardCount { zone, binding, .. }
+                if *binding == crate::types::ability::CountBinding::Anaphoric =>
+            {
+                match zone {
                     crate::types::ability::ZoneRef::Hand => {
                         *qty = QuantityRef::HandSize {
                             player: PlayerScope::ScopedPlayer,
@@ -31754,29 +33446,15 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
                     // form at least lets a targeting ability resolve
                     // correctly.
                     crate::types::ability::ZoneRef::Exile => {}
-                },
-                _ => {}
-            },
-            QuantityExpr::DivideRounded { inner, .. }
-            | QuantityExpr::Multiply { inner, .. }
-            | QuantityExpr::ClampMin { inner, .. }
-            | QuantityExpr::Offset { inner, .. } => rewrite_quantity_expr(inner),
-            QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
-                for inner in exprs {
-                    rewrite_quantity_expr(inner);
                 }
             }
-            QuantityExpr::UpTo { max } => rewrite_quantity_expr(max),
-            QuantityExpr::Power { exponent, .. } => rewrite_quantity_expr(exponent),
-            QuantityExpr::Difference { left, right } => {
-                rewrite_quantity_expr(left);
-                rewrite_quantity_expr(right);
-            }
-            QuantityExpr::Fixed { .. } => {}
+            _ => {}
         }
     }
 
-    each_quantity_expr_mut(&mut def.effect, &mut rewrite_quantity_expr);
+    each_quantity_expr_mut(&mut def.effect, &mut |expr| {
+        each_quantity_ref_mut(expr, &mut rewrite_quantity_ref)
+    });
     // CR 109.5: Explicit All scopes retain Controller for their ScopedPlayer rewrite;
     // inherited opponent-decline nodes have no local scope and still rebind here.
     if !matches!(def.player_scope, Some(PlayerFilter::All))
@@ -31899,24 +33577,29 @@ fn apply_player_scope_rewrites(def: &mut AbilityDefinition) {
 /// whose condition names "the chosen player's" phase step (The Rack) to read
 /// the source's persisted `ChosenAttribute::Player`.
 pub(crate) fn rewrite_player_quantity_refs_to_source_chosen(def: &mut AbilityDefinition) {
-    use crate::types::ability::{CountScope, PlayerScope, QuantityRef, ZoneRef};
+    use crate::types::ability::{CountBinding, CountScope, PlayerScope, QuantityRef, ZoneRef};
 
-    fn rewrite_qty(expr: &mut QuantityExpr) {
-        match expr {
-            QuantityExpr::Ref { qty } => match qty {
-                QuantityRef::LifeTotal { player }
-                | QuantityRef::HandSize { player }
-                | QuantityRef::LifeLostThisTurn { player }
-                | QuantityRef::LifeGainedThisTurn { player }
-                | QuantityRef::PartySize { player }
-                    if matches!(
-                        *player,
-                        PlayerScope::Target | PlayerScope::ScopedPlayer | PlayerScope::Controller
-                    ) =>
-                {
-                    *player = PlayerScope::SourceChosenPlayer;
-                }
-                QuantityRef::TargetZoneCardCount { zone } => match zone {
+    fn rewrite_ref(qty: &mut QuantityRef) {
+        match qty {
+            QuantityRef::LifeTotal { player }
+            | QuantityRef::HandSize { player }
+            | QuantityRef::LifeLostThisTurn { player }
+            | QuantityRef::LifeGainedThisTurn { player }
+            | QuantityRef::PartySize { player }
+                if matches!(
+                    *player,
+                    PlayerScope::Target | PlayerScope::ScopedPlayer | PlayerScope::Controller
+                ) =>
+            {
+                *player = PlayerScope::SourceChosenPlayer;
+            }
+            // CR 115.1 + CR 601.2c: rebind only anaphoric counts ("their …").
+            // An explicit "target player's/opponent's …" count declares its
+            // own announcement and must survive for the slot machinery.
+            QuantityRef::TargetZoneCardCount { zone, binding, .. }
+                if *binding == CountBinding::Anaphoric =>
+            {
+                match zone {
                     ZoneRef::Hand => {
                         *qty = QuantityRef::HandSize {
                             player: PlayerScope::SourceChosenPlayer,
@@ -31931,29 +33614,15 @@ pub(crate) fn rewrite_player_quantity_refs_to_source_chosen(def: &mut AbilityDef
                         };
                     }
                     ZoneRef::Exile => {}
-                },
-                _ => {}
-            },
-            QuantityExpr::DivideRounded { inner, .. }
-            | QuantityExpr::Multiply { inner, .. }
-            | QuantityExpr::ClampMin { inner, .. }
-            | QuantityExpr::Offset { inner, .. } => rewrite_qty(inner),
-            QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
-                for inner in exprs {
-                    rewrite_qty(inner);
                 }
             }
-            QuantityExpr::UpTo { max } => rewrite_qty(max),
-            QuantityExpr::Power { exponent, .. } => rewrite_qty(exponent),
-            QuantityExpr::Difference { left, right } => {
-                rewrite_qty(left);
-                rewrite_qty(right);
-            }
-            QuantityExpr::Fixed { .. } => {}
+            _ => {}
         }
     }
 
-    each_quantity_expr_mut(&mut def.effect, &mut rewrite_qty);
+    each_quantity_expr_mut(&mut def.effect, &mut |expr| {
+        each_quantity_ref_mut(expr, &mut rewrite_ref)
+    });
     if let Some(sub) = def.sub_ability.as_mut() {
         rewrite_player_quantity_refs_to_source_chosen(sub);
     }
@@ -31963,21 +33632,26 @@ pub(crate) fn rewrite_player_quantity_refs_to_source_chosen(def: &mut AbilityDef
 }
 
 pub(crate) fn rewrite_event_player_quantity_refs_to_scoped(def: &mut AbilityDefinition) {
-    use crate::types::ability::{CountScope, PlayerScope, QuantityRef, ZoneRef};
+    use crate::types::ability::{CountBinding, CountScope, PlayerScope, QuantityRef, ZoneRef};
 
-    fn rewrite_qty(expr: &mut QuantityExpr) {
-        match expr {
-            QuantityExpr::Ref { qty } => match qty {
-                QuantityRef::LifeTotal { player }
-                | QuantityRef::HandSize { player }
-                | QuantityRef::LifeLostThisTurn { player }
-                | QuantityRef::LifeGainedThisTurn { player }
-                | QuantityRef::PartySize { player }
-                    if *player == PlayerScope::Target =>
-                {
-                    *player = PlayerScope::ScopedPlayer;
-                }
-                QuantityRef::TargetZoneCardCount { zone } => match zone {
+    fn rewrite_ref(qty: &mut QuantityRef) {
+        match qty {
+            QuantityRef::LifeTotal { player }
+            | QuantityRef::HandSize { player }
+            | QuantityRef::LifeLostThisTurn { player }
+            | QuantityRef::LifeGainedThisTurn { player }
+            | QuantityRef::PartySize { player }
+                if *player == PlayerScope::Target =>
+            {
+                *player = PlayerScope::ScopedPlayer;
+            }
+            // CR 115.1 + CR 601.2c: rebind only anaphoric counts ("their …").
+            // An explicit "target player's/opponent's …" count declares its
+            // own announcement and must survive for the slot machinery.
+            QuantityRef::TargetZoneCardCount { zone, binding, .. }
+                if *binding == CountBinding::Anaphoric =>
+            {
+                match zone {
                     ZoneRef::Hand => {
                         *qty = QuantityRef::HandSize {
                             player: PlayerScope::ScopedPlayer,
@@ -31993,34 +33667,86 @@ pub(crate) fn rewrite_event_player_quantity_refs_to_scoped(def: &mut AbilityDefi
                     }
                     // No scoped-player equivalent for exile counts; leave as-is.
                     ZoneRef::Exile => {}
-                },
-                _ => {}
-            },
-            QuantityExpr::DivideRounded { inner, .. }
-            | QuantityExpr::Multiply { inner, .. }
-            | QuantityExpr::ClampMin { inner, .. }
-            | QuantityExpr::Offset { inner, .. } => rewrite_qty(inner),
-            QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
-                for inner in exprs {
-                    rewrite_qty(inner);
                 }
             }
-            QuantityExpr::UpTo { max } => rewrite_qty(max),
-            QuantityExpr::Power { exponent, .. } => rewrite_qty(exponent),
-            QuantityExpr::Difference { left, right } => {
-                rewrite_qty(left);
-                rewrite_qty(right);
-            }
-            QuantityExpr::Fixed { .. } => {}
+            _ => {}
         }
     }
 
-    each_quantity_expr_mut(&mut def.effect, &mut rewrite_qty);
+    each_quantity_expr_mut(&mut def.effect, &mut |expr| {
+        each_quantity_ref_mut(expr, &mut rewrite_ref)
+    });
     if let Some(sub) = def.sub_ability.as_mut() {
         rewrite_event_player_quantity_refs_to_scoped(sub);
     }
     if let Some(else_branch) = def.else_ability.as_mut() {
         rewrite_event_player_quantity_refs_to_scoped(else_branch);
+    }
+}
+
+/// CR 603.2 + CR 608.2c + CR 115.1: Lower an event-anchored anaphoric zone
+/// count to a scoped-player read. In a damage-done trigger whose recipient is
+/// the event player ("... deals damage to that player equal to the number of
+/// cards in their hand" — Sword of War and Peace), "their" is bound to the
+/// damaged player by the triggering event: no player choice is announced, so
+/// the count must not surface a companion announcement slot (the slot builder
+/// reads `TargetZoneCardCount` as proof of a declared target, and an
+/// any-player slot with more than one legal player stalls the trigger at
+/// target selection). Only anaphoric counts (`CountBinding::Anaphoric`) are
+/// rewritten — an explicit "target player's/opponent's ..." count declares
+/// its own announcement and stays for the slot machinery — and only inside
+/// effects whose own player anchor is the event player (`TriggeringPlayer`),
+/// so a genuinely announced recipient keeps its slot. Zone mapping mirrors
+/// `rewrite_event_player_quantity_refs_to_scoped` (exile has no scoped
+/// equivalent and is left as-is).
+pub(crate) fn rewrite_event_anchored_zone_counts_to_scoped(def: &mut AbilityDefinition) {
+    use crate::types::ability::{CountBinding, CountScope, PlayerScope, QuantityRef, ZoneRef};
+
+    fn rewrite_ref(qty: &mut QuantityRef) {
+        match qty {
+            // CR 115.1 + CR 601.2c: rebind only anaphoric counts ("their …").
+            // An explicit "target player's/opponent's …" count declares its
+            // own announcement and must survive for the slot machinery —
+            // scope alone cannot tell them apart (both use `TargetPlayer`).
+            QuantityRef::TargetZoneCardCount { zone, binding, .. }
+                if *binding == CountBinding::Anaphoric =>
+            {
+                match zone {
+                    ZoneRef::Hand => {
+                        *qty = QuantityRef::HandSize {
+                            player: PlayerScope::ScopedPlayer,
+                        }
+                    }
+                    ZoneRef::Library | ZoneRef::Graveyard => {
+                        *qty = QuantityRef::ZoneCardCount {
+                            zone: zone.clone(),
+                            card_types: Vec::new(),
+                            scope: CountScope::ScopedPlayer,
+                            filter: None,
+                        };
+                    }
+                    // No scoped-player equivalent for exile counts; leave as-is.
+                    ZoneRef::Exile => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn rewrite_effect(effect: &mut Effect) {
+        if matches!(effect.target_filter(), Some(TargetFilter::TriggeringPlayer)) {
+            each_quantity_expr_mut(effect, &mut |expr| {
+                each_quantity_ref_mut(expr, &mut rewrite_ref)
+            });
+        }
+    }
+
+    rewrite_effect(&mut def.effect);
+    if let Some(sub) = def.sub_ability.as_mut() {
+        rewrite_event_anchored_zone_counts_to_scoped(sub);
+    }
+    if let Some(else_branch) = def.else_ability.as_mut() {
+        rewrite_event_anchored_zone_counts_to_scoped(else_branch);
     }
 }
 
@@ -32469,6 +34195,7 @@ fn rebind_event_context_amount_counts(effect: &mut Effect, gate_qty: &QuantityRe
         | Effect::RuntimeHandled { .. }
         | Effect::Incubate { .. }
         | Effect::Amass { .. }
+        | Effect::EmpowerJace { .. }
         | Effect::Monstrosity { .. }
         | Effect::Renown { .. }
         | Effect::Bolster { .. }
@@ -35264,6 +36991,80 @@ fn clause_has_anaphoric_control_condition(clause: &ClauseIr) -> bool {
     )
 }
 
+/// CR 118.12 + CR 603.12 + CR 608.2c: bind a trailing `Otherwise, …` inside a
+/// REFLEXIVE OPTIONAL PAYMENT body to the outcome gate that will sit on this
+/// chain's root definition.
+///
+/// The class is CR 118.12's verbatim template — "[A player] may [do something].
+/// If [that player] [does], [effect]" — with a written-order else branch
+/// (CR 608.2c). Rent Is Due is the current corpus member: "you may tap two
+/// untapped creatures and/or Treasures you control. If you do, draw a card.
+/// Otherwise, sacrifice this enchantment."
+///
+/// WHY A SECOND AUTHORITY IS NEEDED, stated once. `oracle_trigger` splits that
+/// body into (cost, connector, "draw a card. Otherwise, sacrifice ~"), so the
+/// `EffectOutcome` connector is NOT part of the text the chain parser sees. The
+/// chain's own clauses therefore all carry `condition: None`, the in-loop
+/// `OtherwiseKind` predicate honestly reports "no antecedent", and the branch
+/// degrades to the `Fallback` marker. Lowering then stamps the connector onto
+/// the chain ROOT (`lower_trigger_ir`: `reflexive_ability.condition = connector`),
+/// which is exactly the node the else branch belongs on.
+///
+/// This runs at PARSE time, before any lowering, and writes the SAME
+/// `AbilityCondition` lowering will write — so the two views cannot diverge and
+/// the in-loop invariant ("Bound/Fallback is decided at parse time, never
+/// recomputed at lowering") is preserved: the decision is simply completed here
+/// with the one fact the chunk loop could not see.
+///
+/// FAIL-CLOSED. It upgrades ONLY the FIRST `Fallback` branch, ONLY when no
+/// clause BEFORE that branch already carries its own condition (a nearer
+/// antecedent inside the chain stays authoritative), and ONLY when a distinct
+/// root clause exists to anchor to. Any later `Otherwise` keeps its honest
+/// `Effect::unimplemented("otherwise", …)` marker, so a shape this does not
+/// genuinely support cannot read as covered.
+pub(crate) fn bind_otherwise_to_reflexive_chain_root(
+    chain: &mut EffectChainIr,
+    connector: &AbilityCondition,
+) {
+    // CR 608.2c: clauses lower in SOURCE ORDER, so only a condition that
+    // PRECEDES the fallback branch can be its nearer antecedent. A whole-chain
+    // scan would let a conditional clause written AFTER the `Otherwise` veto a
+    // binding it can never serve as the antecedent for, leaving the branch as
+    // `Effect::unimplemented`.
+    let Some(fallback_index) = chain.clauses.iter().position(|c| {
+        matches!(
+            c.disposition,
+            ClauseDisposition::BranchOtherwise {
+                kind: OtherwiseKind::Fallback,
+                ..
+            }
+        )
+    }) else {
+        return;
+    };
+    // The root of the lowered chain is the FIRST clause, and `AssemblyEnv`
+    // registers a conditional antecedent off the emitted root def's `condition`
+    // — so stamping clause 0 is what makes `LastWithRole(Conditional)` resolve.
+    // A branch AT index 0 has no root to anchor to.
+    if fallback_index == 0 {
+        return;
+    }
+    if chain.clauses[..fallback_index]
+        .iter()
+        .any(|c| c.condition.is_some())
+    {
+        return;
+    }
+    chain.clauses[0].condition = Some(connector.clone());
+    // Upgrade ONLY this branch. A second `Otherwise` further down the chain has
+    // a different antecedent question and is not answered by the root stamp.
+    if let ClauseDisposition::BranchOtherwise { kind, .. } =
+        &mut chain.clauses[fallback_index].disposition
+    {
+        *kind = OtherwiseKind::Bound;
+    }
+}
+
 /// Produce an intermediate representation of an effect chain from Oracle text.
 ///
 /// This is the IR-production half of the parse/lower split (Phase 48).
@@ -35557,7 +37358,7 @@ pub(crate) fn parse_effect_chain_ir(
     if let Some(ir) = parse_reciprocal_graveyard_choice_ir(text, kind) {
         return ir;
     }
-    if let Some(ir) = parse_choose_survivors_destroy_rest_ir(text, kind, ctx) {
+    if let Some(ir) = parse_keeper_dispose_rest_ir(text, kind, ctx) {
         return ir;
     }
     if let Some(ir) = parse_grant_graveyard_keyword_to_target_ir(text, kind, ctx) {
@@ -35709,6 +37510,9 @@ pub(crate) fn parse_effect_chain_ir(
     // player performs the action. Only propagates within a single sentence /
     // chain; the anchor is reset at each top-level call.
     let mut anchor_subject: Option<TargetFilter> = None;
+    // CR 608.2c: a caster-subject chunk does not disarm this, because "that
+    // player" still names the searched player after "You may cast that card".
+    let mut searched_player: Option<TargetFilter> = None;
     let mut chunk_diagnostics: Vec<OracleDiagnostic> = Vec::new();
     // CR 608.2c: "Repeat the following process N times." appears as its own
     // sentence before the body clause. The count is stashed here and applied
@@ -36069,6 +37873,57 @@ pub(crate) fn parse_effect_chain_ir(
             }
         }
 
+        // CR 118.14 + CR 609.4b: Any-color / any-type mana rider — "[, and you
+        // may] spend mana as though it were mana of any color to cast that
+        // spell" / "Mana of any type can be spent to cast spells this way". It
+        // applies only to mana spent casting through the PRECEDING grant (CR
+        // 118.14 for "any type"; the "any color" rider names "that spell"), so it
+        // folds onto that grant's `mana_spend_permission` and emits no sibling. Left
+        // standalone it degraded to a bare board-wide `SpendManaAsAnyColor`
+        // static that no cast-time payment check ever consults — the granted
+        // card could not be paid for with off-color mana at all — and its
+        // "you may" surfaced a spurious optional-effect prompt (Siphon Insight).
+        // Only folds when the clause it follows is such a grant; anything else
+        // is the standalone concession gap.
+        if let Some(rider) = try_parse_mana_spend_rider(normalized_text) {
+            if prior_clause_grants_a_cast_without_mana_spend_permission(builder.clauses()) {
+                match rider {
+                    ManaSpendRider::Concession(permission) => {
+                        builder
+                            .clause(
+                                normalized_text,
+                                placeholder_parsed_clause("mana_spend_rider_placeholder"),
+                                chunk.boundary_after,
+                                ClauseDisposition::ModifyPrior {
+                                    modifier: PriorModifier::ManaSpendPermission(permission),
+                                },
+                            )
+                            .push();
+                    }
+                    // A single-kind concession has no representation: the grant
+                    // stands, the rider is an honest gap — not a "may" prompt and
+                    // not a permission widened to every mana.
+                    ManaSpendRider::SingleKind => {
+                        builder
+                            .clause(
+                                normalized_text,
+                                parsed_clause(Effect::unimplemented(
+                                    UNREPRESENTABLE_MANA_SPEND_CONCESSION_GAP,
+                                    normalized_text,
+                                )),
+                                chunk.boundary_after,
+                                ClauseDisposition::Emit {
+                                    followup: None,
+                                    intrinsic: None,
+                                },
+                            )
+                            .push();
+                    }
+                }
+                continue;
+            }
+        }
+
         // CR 118.9: Alternative-cost rider — "[If you cast a spell
         // this way,] pay <ability-cost> rather than paying its mana cost."
         // This is a *modifier* on the previous chain entry's `CastFromZone`
@@ -36184,20 +38039,12 @@ pub(crate) fn parse_effect_chain_ir(
         }
 
         // CR 608.2c: "Otherwise, [effect]" — attach as else_ability on the
-        // most recent conditional def in the chain.
+        // most recent conditional def in the chain. The connector grammar is the
+        // shared `oracle_nom` authority the trigger-side hoist gate also calls,
+        // so the two sides cannot disagree about which antecedents are bindable.
         let lower_check = normalized_text.to_lowercase();
         let otherwise_rest = nom_on_lower(normalized_text, &lower_check, |i| {
-            value(
-                (),
-                alt((
-                    tag("otherwise, "),
-                    tag("otherwise "),
-                    tag("if not, "),
-                    tag("if no player does, "),
-                    tag("if no one does, "),
-                )),
-            )
-            .parse(i)
+            crate::parser::oracle_nom::condition::parse_otherwise_branch_connector(i)
         });
         if let Some((_, else_text)) = otherwise_rest {
             // CR 608.2c: The else-branch is parsed as its own chain, so its anaphors
@@ -36237,6 +38084,14 @@ pub(crate) fn parse_effect_chain_ir(
             // PARSE-TIME Bound/Fallback determination — this predicate MUST stay
             // exactly here (parse time). Recomputing "prior conditional present?"
             // at lowering could diverge from this state and move output.
+            //
+            // One fact is structurally invisible from inside this loop: a chain
+            // parsed as a CR 603.12 reflexive-payment BODY receives its outcome
+            // gate on the chain ROOT after this loop returns, because the
+            // connector text was split off before the chain parser ever saw it.
+            // `bind_otherwise_to_reflexive_chain_root` completes the decision for
+            // that one shape, still at parse time and with the identical
+            // `AbilityCondition` lowering will use.
             let kind = if has_condition || has_optional_may_head {
                 OtherwiseKind::Bound
             } else {
@@ -37055,7 +38910,10 @@ pub(crate) fn parse_effect_chain_ir(
         // on the text output from strip_if_you_do_conditional. For compound
         // "when you do, if it has N counters" patterns, WhenYouDo is always true for
         // non-optional parents (CR 603.12), so the QuantityCheck is the meaningful gate.
-        let (counter_cond, text) = strip_counter_conditional(&text, ctx.in_trigger);
+        let (counter_cond, text) = strip_counter_conditional(
+            &text,
+            conditions::CounterConditionalContext::from_parse_context(ctx),
+        );
         // CR 202.3 + CR 608.2c: Mana value threshold condition — same priority as counter_cond.
         let (mv_cond, text) = strip_mana_value_conditional(&text);
         // CR 608.2c: Spell-target superlative gate — "if it has the least/greatest
@@ -37901,6 +39759,12 @@ pub(crate) fn parse_effect_chain_ir(
             // self-reference so a `"that creature"` copy-token anaphor in any
             // chunk of an Aura/bestow card remaps to the enchanted host.
             host_self_reference: ctx.host_self_reference.clone(),
+            // CR 109.1 + CR 205.2: every chunk of a chain is still the enclosing
+            // card's text, so the card's printed core types travel with it.
+            // CR 701.41a `support N` reads them to pick the "other"/"any" branch
+            // of its expansion; this context is minted field-by-field rather than
+            // cloned, so anything card-scoped not listed here is silently lost.
+            source_core_types: ctx.source_core_types.clone(),
             // CR 608.2c + CR 608.2k + CR 406.6: the plural-anaphor antecedent
             // introduced by the trigger's intervening-if ("if there are cards
             // exiled with ~") is a property of the whole trigger body, not of
@@ -37927,6 +39791,16 @@ pub(crate) fn parse_effect_chain_ir(
                 .clauses()
                 .iter()
                 .any(clause_ir_is_self_library_peek),
+            // CR 400.7j + CR 608.2c + CR 608.2d: the nearest earlier single-card
+            // exile partition of this chain, with its candidate provenance. When
+            // that provenance is the source-bound cost-paid pile (Coin of Fate),
+            // this chunk's bare "the other" names the UNCHOSEN half — the runtime
+            // forwards it on the continuation's immediate sub-ability targets
+            // (`ParentTarget`), never on the tracked set. Carrying the source
+            // rather than a bool keeps every other `ChooseFromZone` partition
+            // (Wake to Slaughter's `Legacy`) visibly distinct from "no partition",
+            // and forces the consumer to name `CostPaidObjects` explicitly.
+            prior_zone_choice_partition: chain_prior_zone_choice_partition(builder.clauses()),
             // CR 400.1/400.2 + CR 608.2c: most-recent earlier same-chain
             // `RevealHand` target, so a later "cast a spell from among those
             // cards" anaphor (Silent-Blade Oni) binds to that player's hand
@@ -37975,6 +39849,7 @@ pub(crate) fn parse_effect_chain_ir(
             // creature") resolves to the slot the "Choose target X and target Y"
             // head declared. Refreshed from the chunk after parse.
             declared_target_slots: chain_declared_target_slots.clone(),
+            chain_declared_object_target: ctx.chain_declared_object_target.clone(),
             // CR 116.2b + CR 708.7: a granted activated-ability body context is a
             // property of the whole ability, not of an individual chunk, so all
             // chunks inside it share the flag — the head "turn this creature face
@@ -37999,6 +39874,15 @@ pub(crate) fn parse_effect_chain_ir(
             in_trigger: ctx.in_trigger,
             bare_card_aggregate_source,
             nearest_dig_rest_zone,
+            // CR 611.2a: this chunk's leading duration was peeled by
+            // `sequence::expand_leading_duration_chunks` before the chunk text was
+            // handed to the body parser, so the body can no longer see it. Publish
+            // it for the clause lowering (see `ParseContext::stated_clause_duration`).
+            // Set from the CHUNK rather than inherited from `ctx`, so a duration
+            // stated by an earlier chunk cannot promote a later capped chunk that
+            // states none — the fail-open direction, pinned by
+            // `a_stated_duration_does_not_leak_into_the_next_clause`.
+            stated_clause_duration: chunk.leading_duration.clone(),
             // CR 701.42a: propagate the staged meld partner so a reflexive
             // "exile them, then meld them into R" sub-clause parsed inside this
             // chunk (Vanille's "If you do, …" body, which chunks to a single
@@ -38006,6 +39890,13 @@ pub(crate) fn parse_effect_chain_ir(
             // `Effect::Meld { partner, .. }`. Without this the sub-clause loses
             // the partner and lowers to `Unimplemented`.
             pending_meld_partner: ctx.pending_meld_partner.clone(),
+            // CR 608.2c + CR 603.10: this chunk is ordinary text of the SAME
+            // trigger body, so it keeps the enclosing trigger's proven
+            // zone-change authority — that is what lets a trailing past-tense
+            // predicate ("… if it had a death counter on it") read the event
+            // object's LKI. This struct literal REPLACES the parent context, so
+            // the carry has to be spelled; `..Default::default()` would reset it.
+            trigger_zone_change: ctx.trigger_zone_change.clone(),
             ..Default::default()
         };
         let ctx = &mut chunk_ctx;
@@ -38101,8 +39992,8 @@ pub(crate) fn parse_effect_chain_ir(
         //     must be live BEFORE the cast; a delayed trigger firing after it
         //     would be too late. These lower to
         //     `CastFromZone` (the cast restated) or `GenericEffect` (a static
-        //     modification of the grant), and are left exactly as they parsed
-        //     before this change.
+        //     modification of the grant); the "mana of any type" rider now folds
+        //     onto the grant's `mana_spend_permission` (CR 118.14) instead.
         //   * a CONSEQUENCE of the cast — "put a +1/+1 counter on ~"
         //     (Helmut Zemo), "this creature gets +X/+0" (Ogre Battlecaster).
         //     CR 603.7: a separate ability that triggers on the later cast.
@@ -38253,6 +40144,7 @@ pub(crate) fn parse_effect_chain_ir(
                 .where_x_expression(where_x_expression.clone())
                 .target_selection_mode(chunk_ctx.target_selection_mode)
                 .target_chooser(chunk_ctx.target_chooser.clone())
+                .declared_target_choice_timing(chunk_ctx.declared_target_choice_timing.take())
                 .printed_color_choice(chunk_ctx.pending_printed_color_choice.take())
                 .push();
             continue;
@@ -38720,6 +40612,12 @@ pub(crate) fn parse_effect_chain_ir(
                 apply_anchor_subject_to_clause(&mut clause, anchor, &text_lower_for_anchor);
             }
         }
+        if searched_player.is_none() {
+            searched_player = declared_searched_player(&clause);
+        }
+        if let Some(ref searched) = searched_player {
+            bind_searched_player_shuffle(&mut clause, searched);
+        }
 
         // Anaphoric resolution: parse-time pronoun→parent-target rewrites.
         // These modify the parsed effect based on text analysis and previous
@@ -38742,7 +40640,7 @@ pub(crate) fn parse_effect_chain_ir(
         // which is exactly why a head-only rewrite corrupts the chain.
         let is_distributed_chunk = text_is_compound_subject_distribution(&text);
         // Kicker clauses referencing "that creature"/"it" inherit the parent's target.
-        // CR 608.2c: untouched — its `!builder.is_empty()` gate is intentionally broad
+        // CR 608.2c: its `!builder.is_empty()` gate is intentionally broad
         // (many antecedent shapes reach this without a `target_filter()`, e.g. a typed
         // trigger subject rebind chain), and narrowing it here regressed dozens of
         // unrelated cards (Feather, the Redeemed's exile-return rider; Managorger
@@ -38766,6 +40664,7 @@ pub(crate) fn parse_effect_chain_ir(
                 &text_lower,
                 &mut clause.effect,
             )
+            && !bind_self_ref_damage_subject(&mut clause.effect)
         {
             replace_target_with_parent(&mut clause.effect);
         }
@@ -38945,7 +40844,31 @@ pub(crate) fn parse_effect_chain_ir(
                 }
             )
         });
-        if (typed_trigger_subject || exile_then_return_transformed)
+        // CR 608.2c (FIN Sidequest class): "transform ~, then attach it to <host>".
+        // The previous clause named the source via `~` (a `SelfRef` Transform), so this
+        // clause's bare-pronoun attachment operand names that same source. Admitted as
+        // a third structural class beside the typed-subject and exile-then-return
+        // branches; the shared `has_anaphoric_reference` + prior-SelfRef-clause
+        // conjuncts below are the same authorities those two branches use.
+        let attach_anaphor_after_self_ref_transform =
+            matches!(
+                &clause.effect,
+                Effect::Attach {
+                    attachment: TargetFilter::ParentTarget,
+                    ..
+                }
+            ) && builder.clauses().last().is_some_and(|prev| {
+                matches!(
+                    &prev.parsed.effect,
+                    Effect::Transform {
+                        target: TargetFilter::SelfRef,
+                        ..
+                    }
+                )
+            });
+        if (typed_trigger_subject
+            || exile_then_return_transformed
+            || attach_anaphor_after_self_ref_transform)
             && has_anaphoric_reference(&text_lower)
             && builder
                 .clauses()
@@ -39269,11 +41192,63 @@ pub(crate) fn parse_effect_chain_ir(
             .rev()
             .filter(|c| !matches!(c.disposition, ClauseDisposition::Continue { .. }))
             .collect();
+        let effective_prev_is_search_destination_exile = absorbed_choice_prev.is_none()
+            && non_absorbed.first().is_some_and(|previous| {
+                matches!(
+                    previous.disposition.intrinsic(),
+                    Some(ContinuationAst::SearchDestination {
+                        destination: Zone::Exile,
+                        ..
+                    })
+                )
+            });
         let effective_prev_effect =
             absorbed_choice_prev.or_else(|| non_absorbed.first().map(|c| effective_effect_of(c)));
+        // CR 701.24c + CR 608.2c: "then shuffle(s) the rest into their library"
+        // directly after a `RevealUntil` whose rest pile went into the library
+        // shuffles that library — the revealing player's (Transmogrify, Blessed
+        // Reincarnation: the exiled creature's controller). The subject-elided
+        // clause parses with the caster default, so bind it to the reveal's
+        // player; an explicit subject ("that player shuffles …") already
+        // produced a non-default target. After any other antecedent the
+        // subject-elided "rest" is not a library pile (Wand of Wonder's exiled
+        // misses, Worldpurge's unchosen hand cards): a bare shuffle would drop
+        // the move, so keep the clause an explicit gap.
+        if let Effect::Shuffle {
+            target: TargetFilter::Controller,
+        } = clause.effect
+        {
+            let rest_library_player = match effective_prev_effect.as_ref() {
+                Some(Effect::RevealUntil {
+                    player,
+                    rest_destination: Zone::Library,
+                    ..
+                }) => Some(player.clone()),
+                _ => None,
+            };
+            match (
+                imperative::shuffle_rest_clause(&normalized_text.to_lowercase()),
+                rest_library_player,
+            ) {
+                (Some(_), Some(player)) => {
+                    clause.effect = Effect::Shuffle { target: player };
+                }
+                (Some(imperative::ShuffleRestClause::ThirdPerson), None) => {
+                    clause.effect = Effect::unimplemented("shuffle", normalized_text);
+                }
+                (Some(imperative::ShuffleRestClause::Imperative) | None, _) => {}
+            }
+        }
         let followup_continuation = effective_prev_effect
             .as_ref()
-            .and_then(|eff| parse_followup_continuation_ast(normalized_text, eff, ctx))
+            .and_then(|eff| {
+                sequence::parse_followup_continuation_ast_with_search_destination(
+                    normalized_text,
+                    eff,
+                    ctx,
+                    effective_prev_is_search_destination_exile,
+                )
+            })
             .or_else(|| {
                 // CR 608.2c: when the nearest non-absorbed clause is
                 // lookback-transparent (e.g. `Sacrifice` — Birthing Ritual),
@@ -39299,6 +41274,42 @@ pub(crate) fn parse_effect_chain_ir(
                         _ => None,
                     }
                 })
+            })
+            .or_else(|| {
+                // CR 701.20a + CR 608.2c: A clause disposing of cards revealed by an
+                // earlier `RevealUntil` ("put all cards revealed this way...",
+                // "put the nonland card into your hand and the rest...", "put the revealed cards...")
+                // may be separated from the `RevealUntil` by intervening transparent
+                // instructions that use the revealed card (such as `Pump` on Erratic Mutation,
+                // or `DealDamage` on Explosive Revelation).
+                // Scan `non_absorbed` (nearest-first) for a preceding `RevealUntil` antecedent.
+                // The parser is the detector: only bind if `parse_followup_continuation_ast`
+                // against the candidate `RevealUntil` produces a recognized pile-disposition
+                // continuation. The scan stops at an unparsed clause: an unrecognized
+                // instruction may itself select or re-bind the referent ("Choose one of the
+                // revealed creature cards", Dance, Pathetic Marionette), so a later "all
+                // other cards revealed this way" can no longer be read as the reveal's rest
+                // pile. `RevealUntilKept` is never bound across clauses: its "put it" /
+                // "put that card" anaphor names the nearest referent, and its application
+                // patches only the immediately preceding definition.
+                non_absorbed
+                    .iter()
+                    .map(|c| effective_effect_of(c))
+                    .take_while(|effect| !matches!(effect, Effect::Unimplemented { .. }))
+                    .find_map(|deeper| match deeper {
+                        Effect::RevealUntil { .. } => {
+                            match parse_followup_continuation_ast(normalized_text, &deeper, ctx) {
+                                Some(
+                                    continuation @ (ContinuationAst::RevealUntilAllToZone {
+                                        ..
+                                    }
+                                    | ContinuationAst::PutRest { .. }),
+                                ) => Some(continuation),
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    })
             })
             .or_else(|| {
                 // CR 707.10c: a "you may choose new targets for the copy/copies"
@@ -39483,6 +41494,7 @@ pub(crate) fn parse_effect_chain_ir(
                     .where_x_expression(where_x_expression)
                     .target_selection_mode(chunk_ctx.target_selection_mode)
                     .target_chooser(chunk_ctx.target_chooser.clone())
+                    .declared_target_choice_timing(chunk_ctx.declared_target_choice_timing.take())
                     .printed_color_choice(chunk_ctx.pending_printed_color_choice.take())
                     .push();
             }
@@ -39578,6 +41590,7 @@ pub(crate) fn parse_effect_chain_ir(
             .unless_pay(unless_pay)
             .target_selection_mode(chunk_ctx.target_selection_mode)
             .target_chooser(chunk_ctx.target_chooser.clone())
+            .declared_target_choice_timing(chunk_ctx.declared_target_choice_timing.take())
             .printed_color_choice(chunk_ctx.pending_printed_color_choice.take())
             .push();
 
@@ -42440,7 +44453,7 @@ mod change_targets_stack_object_tests {
 }
 
 /// CR 601.2c + CR 608.2c — unit tests for [`chain_declared_object_target`], the
-/// fail-closed reverse walk that supplies a demonstrative anaphor's antecedent.
+/// reverse walk that supplies a demonstrative anaphor's antecedent.
 ///
 /// **UNIT, explicitly labelled.** These do NOT satisfy the runtime-semantics
 /// requirement — the integration tests `hazel_end_step_copies_squirrel_token_twice`
@@ -42448,10 +44461,9 @@ mod change_targets_stack_object_tests {
 /// `thieving_skydiver_equipment_rider_condition_becomes_live` /
 /// `jackknight_contraption_rider_still_reads_the_entering_artifact` do.
 ///
-/// This module exists because **no corpus card distinguishes fail-closed from
-/// skip**: every card whose rider reaches the walk has exactly ONE prior clause,
-/// so `return None` and `continue` terminate identically there. A synthetic
-/// two-clause chain is the only fixture that separates them.
+/// This module covers the walk's behaviour directly, with no claim about what
+/// the corpus does or does not distinguish. A synthetic two-clause chain is the
+/// fixture these tests use to separate returning from continuing.
 #[cfg(test)]
 mod chain_declared_object_target_tests {
     use super::chain_declared_object_target;
@@ -42517,10 +44529,10 @@ mod chain_declared_object_target_tests {
     /// `SelfRef` (non-`Typed`), so the walk BLOCKS and never hands back the
     /// FARTHER clause's `Typed[Artifact]`.
     ///
-    /// Revert probe: change the walk's `_ => return None` arm to `_ => continue`
-    /// and this returns `Some(Typed[Artifact])` — the farther clause's target
-    /// becoming a nearer demonstrative's antecedent, the exact provenance error
-    /// the fail-closed arm exists to forbid.
+    /// Revert probe: make `chain_declared_object_target` continue past a node
+    /// that declares no typed target and this returns `Some(Typed[Artifact])` —
+    /// the farther clause's target becoming a nearer demonstrative's antecedent,
+    /// the exact provenance error the walk exists to forbid.
     #[test]
     fn chain_declared_object_target_blocks_at_a_non_typed_nearer_clause() {
         let mut builder = ClauseIrBuilder::new(
@@ -42609,22 +44621,20 @@ mod chain_declared_object_target_tests {
     /// `lower::rekey_counter_slot_in_chain` ("must bind slot 0 …, **not the
     /// most-recent** opponent target"), which is why Malamet's two-target
     /// counter chain has to re-key its condition to `Some(0)` at all. This walk
-    /// is fail-closed in exactly the way that makes the two agree at EVERY
-    /// index: it returns the NEAREST declaring clause and blocks on anything
-    /// nearer that is not a slot-less `ParentTarget` carrier
-    /// (`TargetFilter::is_context_ref` covers `ParentTarget`, so such a carrier
-    /// declares no slot and cannot move "most recent"). The antecedent it hands
-    /// back is therefore always the chain's most-recent declared object target
-    /// — the very object `None` resolves.
+    /// returns the NEAREST declaring clause, and a slot-less `ParentTarget`
+    /// carrier declares no slot (`TargetFilter::is_context_ref` covers
+    /// `ParentTarget`), so it cannot move "most recent". Whether the antecedent
+    /// returned here agrees with what `subject_slot: None` resolves at EVERY
+    /// declared index is not characterised here.
     ///
     /// Revert probe: make the walk return an index and the gate emit
     /// `subject_slot: Some(index)` for a non-zero antecedent, and the paired
     /// assertion in
     /// `conditions::tests::a_non_zero_slot_antecedent_still_emits_no_subject_slot`
-    /// fails. Change this walk's `_ => return None` arm to `_ => continue` (or
-    /// let a nearer non-`ParentTarget` clause through) and the "most recent"
-    /// guarantee this rests on is gone, so the nearest-declarer assertion below
-    /// fails too.
+    /// fails. Make `chain_declared_object_target` continue past a node that
+    /// declares no typed target instead of returning (or let a nearer
+    /// non-`ParentTarget` clause through) and the "most recent" guarantee this
+    /// rests on is gone, so the nearest-declarer assertion below fails too.
     #[test]
     fn the_antecedent_at_a_non_zero_declared_slot_is_the_most_recent_declarer() {
         let artifact = artifact_filter();
@@ -42797,5 +44807,190 @@ fn is_valid_card_target_filter(filter: &TargetFilter, clauses: &[ClauseIr]) -> b
             .iter()
             .any(|f| is_valid_card_target_filter(f, clauses)),
         other => !other.is_player_scope(),
+    }
+}
+
+/// Rows 1.F (parser/AST half) and 1.I — the literal numeric enumeration arm.
+///
+/// Row 1.F's three-field `NumberRange` triple is asserted HERE, at the
+/// parser/AST layer, and deliberately NOT from card-data: `ChoiceType` elides
+/// the `NumberDistinctness::Repeatable` default on the wire, so at that layer a
+/// correct `Repeatable` is byte-indistinguishable from an absent field and the
+/// assertion could not fail for the reason it exists.
+#[cfg(test)]
+mod number_enumeration_choice_tests {
+    use super::{parse_named_choice_object, parse_number_enumeration};
+    use crate::types::ability::{ChoiceType, NumberDistinctness};
+
+    /// Row 1.F — Haktos the Unscarred's printed candidate set, with ALL THREE
+    /// fields of the range triple named. An arm that set `distinctness` wrongly
+    /// would pass a two-field assertion and fails this one.
+    #[test]
+    fn haktos_enumeration_lowers_to_the_full_number_range_triple() {
+        assert_eq!(
+            parse_named_choice_object("2, 3, or 4"),
+            Some(ChoiceType::NumberRange {
+                min: 2,
+                max: Some(4),
+                distinctness: NumberDistinctness::Repeatable,
+            }),
+            "Haktos' text carries no distinctness clause, so the parse-detected \
+             distinctness must be Repeatable"
+        );
+    }
+
+    /// ADJACENT-BUT-WRONG GUARD (finding P1). At base this exact input produced
+    /// `ChoiceType::Labeled` over the option strings — a presentation-level
+    /// choice no numeric consumer can read. That is also precisely the shape
+    /// landing the at-random excision BEFORE this arm would have produced, which
+    /// is why the unit order is 1b before 1a.
+    #[test]
+    fn the_enumeration_is_not_claimed_by_the_labeled_fallback() {
+        let parsed = parse_named_choice_object("2, 3, or 4");
+        assert!(
+            !matches!(parsed, Some(ChoiceType::Labeled { .. })),
+            "a numeric enumeration must not lower to a presentation-level \
+             Labeled choice; got {parsed:?}"
+        );
+    }
+
+    /// THE P1 SAFETY PROPERTY, asserted permanently rather than argued.
+    ///
+    /// The un-excised object phrase must STILL be refused. The numeric arm is
+    /// `all_consuming` so it declines on the trailing qualifier, and the labeled
+    /// fallback rejects the three-word final label. The excision therefore has to
+    /// happen in the as-enters builder, and an arm that grew tolerant of a
+    /// trailing qualifier here would silently re-admit the wrong parse.
+    #[test]
+    fn the_unexcised_at_random_object_is_still_refused() {
+        assert_eq!(parse_named_choice_object("2, 3, or 4 at random"), None);
+    }
+
+    /// Row 1.I (i) — a NON-CONTIGUOUS set fails closed rather than collapsing to
+    /// a range that would admit options the card never printed.
+    #[test]
+    fn a_non_contiguous_enumeration_declines() {
+        assert_eq!(parse_number_enumeration("1, 3, or 5"), None);
+        assert_eq!(parse_number_enumeration("2, 4"), None);
+        // Descending and repeating runs are equally unrepresentable.
+        assert_eq!(parse_number_enumeration("4, 3, or 2"), None);
+        assert_eq!(parse_number_enumeration("2, 2, or 3"), None);
+    }
+
+    /// Row 1.I — PAIRED POSITIVE REACH-GUARD. Without it the refusal above could
+    /// be satisfied by a combinator that is simply inert.
+    #[test]
+    fn a_contiguous_enumeration_is_accepted() {
+        assert_eq!(parse_number_enumeration("1, 2, or 3"), Some((1, 3)));
+        assert_eq!(parse_number_enumeration("2, 3, or 4"), Some((2, 4)));
+        assert_eq!(parse_number_enumeration("7 or 8"), Some((7, 8)));
+        assert_eq!(
+            parse_named_choice_object("1, 2, or 3"),
+            Some(ChoiceType::NumberRange {
+                min: 1,
+                max: Some(3),
+                distinctness: NumberDistinctness::Repeatable,
+            })
+        );
+    }
+
+    /// Row 1.I (ii), corrected per finding P4 — `parse_named_choice_object` does
+    /// NOT return `None` for a non-contiguous set. The pre-existing labeled
+    /// catch-all claims it, exactly as at base. What the row requires is that
+    /// the RANGE LOWERING must not claim it, and that the value is BYTE-IDENTICAL
+    /// to its measured base value (a refusal, never a silent widening).
+    #[test]
+    fn a_non_contiguous_enumeration_keeps_its_measured_base_value() {
+        let parsed = parse_named_choice_object("1, 3, or 5");
+        assert_eq!(
+            parsed,
+            Some(ChoiceType::Labeled {
+                options: vec!["1".to_string(), "3".to_string(), "5".to_string()],
+            }),
+            "measured at base: the labeled catch-all owns this text, and this \
+             phase must not move it"
+        );
+        assert!(!matches!(parsed, Some(ChoiceType::NumberRange { .. })));
+    }
+
+    /// SIBLING — the arm did not capture the labeled fallback's own text.
+    #[test]
+    fn a_word_enumeration_still_reaches_the_labeled_fallback() {
+        assert_eq!(
+            parse_named_choice_object("Abzan or Mardu"),
+            Some(ChoiceType::Labeled {
+                options: vec!["Abzan".to_string(), "Mardu".to_string()],
+            })
+        );
+    }
+
+    /// SIBLING — the pre-existing `NumberRange` producer is untouched, proving
+    /// the new arm was inserted above it without shadowing it.
+    #[test]
+    fn the_a_number_between_sibling_is_unchanged() {
+        assert_eq!(
+            parse_named_choice_object("a number between 1 and 5"),
+            Some(ChoiceType::NumberRange {
+                min: 1,
+                max: Some(5),
+                distinctness: NumberDistinctness::Repeatable,
+            })
+        );
+    }
+
+    /// A single value is not a choice, and prose must not be mined for digits.
+    #[test]
+    fn single_values_and_prose_decline() {
+        assert_eq!(parse_number_enumeration("4"), None);
+        assert_eq!(parse_number_enumeration(""), None);
+        assert_eq!(parse_number_enumeration("2, 3, or a creature type"), None);
+        assert_eq!(parse_number_enumeration("draw 1, 2, or 3 cards"), None);
+    }
+}
+
+/// Row 1.G (sibling half) — `scan_at_random` is the single at-random authority,
+/// and lifting the `Choose(Player)` arm onto it is behaviour-preserving.
+#[cfg(test)]
+mod scan_at_random_authority_tests {
+    use super::scan_at_random;
+    use crate::parser::oracle_nom::primitives as nom_primitives;
+
+    /// The lift's core claim: the authority agrees with the `scan_contains`
+    /// boolean it replaced on every shape, including the word-boundary
+    /// false-positive cases that motivated `scan_contains` in the first place.
+    #[test]
+    fn agrees_with_the_scan_contains_boolean_it_replaced() {
+        for text in [
+            "a player at random",
+            "at random",
+            "a basic land type at random",
+            "a basic land type at random. ~ has landwalk of the chosen type",
+            "a color",
+            "",
+            "randomly",
+            "at randomness",
+            "scattered at random intervals",
+        ] {
+            assert_eq!(
+                scan_at_random(text).is_some(),
+                nom_primitives::scan_contains(text, "at random"),
+                "scan_at_random must agree with scan_contains on {text:?}"
+            );
+        }
+    }
+
+    /// The split is what the as-enters consumer needs and `scan_contains` cannot
+    /// provide: everything before the qualifier, and everything after it.
+    #[test]
+    fn splits_around_the_qualifier() {
+        assert_eq!(
+            scan_at_random("a basic land type at random"),
+            Some(("a basic land type ", ""))
+        );
+        assert_eq!(
+            scan_at_random("2, 3, or 4 at random"),
+            Some(("2, 3, or 4 ", ""))
+        );
+        assert_eq!(scan_at_random("a color"), None);
     }
 }

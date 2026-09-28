@@ -4,6 +4,7 @@ import {
   appendWorkspaceInstanceToResolvedDestination,
   createDraftWorkspaceState,
   moveWorkspaceInstance,
+  placeArrivingPoolCards,
   reconcileWorkspaceState,
   updateWorkspacePlacement,
 } from "../workspace/workspacePlacement";
@@ -41,6 +42,64 @@ function boardPreferences(): Record<DraftZone, DraftBoardPreferences> {
 }
 
 describe("workspace placement", () => {
+  // `draftStore.installWorkspace` and `multiplayerDraftStore.performPick` both
+  // call `placeArrivingPoolCards` ahead of their own `applyDestination`. What
+  // keeps a sideboard-bound pick out of the deck-sorted columns on those paths
+  // is their own `ownPlacement` arm, not the deck-zone guard the second case
+  // below pins: the card still carries reconcile's `"deck"` default when the
+  // pass runs, so the zone test never fires for them. That guard is the
+  // independent belt for a DIRECT caller that hands over an id already in the
+  // sideboard, which is what the second case exercises.
+  it("places_arriving_cards_into_the_columns_the_sort_means", () => {
+    const pool = [{ ...card("cheap"), cmc: 1 }, { ...card("costly"), cmc: 5 }];
+    const base = reconcileWorkspaceState(createDraftWorkspaceState(), pool);
+
+    const placed = placeArrivingPoolCards(
+      base, ["cheap", "costly"], pool, groups(), boardPreferences().deck,
+    );
+
+    // Six columns under a `cmc` sort, so `manaValueColumn` truncates and clamps
+    // to 5 — a card reconcile had just defaulted to column 0.
+    expect(base.placements.cheap.column).toBe(0);
+    expect(placed.placements.cheap.column).toBe(1);
+    expect(placed.placements.costly.column).toBe(5);
+  });
+
+  it("leaves_an_arriving_card_alone_when_its_placement_is_in_the_sideboard", () => {
+    const pool = [{ ...card("costly"), cmc: 5 }];
+    const sideboarded = { zone: "sideboard", row: 0, column: 0, order: 0 } as const;
+    const base: DraftWorkspaceState = {
+      ...createDraftWorkspaceState(),
+      placements: { costly: sideboarded },
+    };
+
+    const placed = placeArrivingPoolCards(
+      base, ["costly"], pool, groups(), boardPreferences().deck,
+    );
+
+    expect(placed.placements.costly).toEqual(sideboarded);
+  });
+
+  it("creates_no_placement_for_an_id_the_pool_does_not_hold", () => {
+    // The id must already HOLD a deck placement, or this reaches the
+    // `placement === undefined` guard instead and passes without ever
+    // exercising the pool lookup it is named for. `reconcileWorkspaceState`
+    // would strip a placement whose id is absent from the pool, so the base is
+    // built directly.
+    const pool = [card("present")];
+    const ghost = { zone: "deck", row: 0, column: 0, order: 0 } as const;
+    const base: DraftWorkspaceState = {
+      ...createDraftWorkspaceState(),
+      placements: { ghost },
+    };
+
+    const placed = placeArrivingPoolCards(
+      base, ["ghost"], pool, groups(), boardPreferences().deck,
+    );
+
+    expect(placed.placements.ghost).toEqual(ghost);
+  });
+
   it("reconciles_authoritative_instances_without_losing_manual_placement", () => {
     const manual = { zone: "sideboard", row: 1, column: 4, order: 7 } as const;
     const state: DraftWorkspaceState = {

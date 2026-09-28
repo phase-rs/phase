@@ -3,9 +3,9 @@ use serde::Serialize;
 use crate::parser::oracle_nom::enters_under::ControlClausePossessor;
 use crate::types::ability::MultiTargetSpec;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, ActivationRestriction, BounceSelection,
-    CastingPermission, ChosenCounterCountCondition, ContinuousModification, ControlWindow,
-    ControllerRef, CopyRetargetPermission, CounterAdjustment, CounterKindChooser,
+    AbilityCondition, AbilityCost, AbilityDefinition, ActivationRestriction, AttachSelection,
+    BounceSelection, CastingPermission, ChosenCounterCountCondition, ContinuousModification,
+    ControlWindow, ControllerRef, CopyRetargetPermission, CounterAdjustment, CounterKindChooser,
     CounterKindDomain, CounterSourceRider, DigRestOrder, DoorLockOp, Duration, Effect, EffectScope,
     FaceDownProfile, ForceBlockAttackerRef, GuardReading, LibraryPosition, ManaProduction,
     ManaSpendRestriction, ManaTargetRole, ModalSelectionConstraint, OutsideGameSourcePool,
@@ -50,7 +50,7 @@ pub(crate) struct ParsedEffectClause {
     /// Set when `parse_clause_ast` detects a leading conditional and the condition
     /// text is parseable by the nom condition combinator pipeline.
     pub(crate) condition: Option<AbilityCondition>,
-    /// CR 608.2c + CR 117.3a: Set when the parsed subject phrase carried a "may"
+    /// CR 608.2c + CR 608.2d: Set when the parsed subject phrase carried a "may"
     /// modal (e.g., "its controller may search their library"). Lowered into
     /// `AbilityDefinition.optional` so the resolver prompts the acting player.
     pub(crate) optional: bool,
@@ -397,6 +397,10 @@ pub(crate) enum ContinuationAst {
     /// library-to-hand search continuation are already represented by the intrinsic
     /// SearchDestination + reveal flag and should be absorbed.
     SearchResultClauseHandled,
+    /// "Exile it face down" after a SearchLibrary. The preceding search
+    /// definition carries a typed delivery intent rather than a battlefield
+    /// face-down profile marker.
+    ExileSearchResultFaceDown,
     /// "reveal it" immediately after a SearchLibrary whose destination is handled
     /// by a later conditional branch. Patches SearchLibrary.reveal without adding
     /// a default ChangeZone.
@@ -455,6 +459,23 @@ pub(crate) enum ContinuationAst {
         /// "put two of them into your hand and the rest on the bottom of your library".
         /// When None, a subsequent PutRest continuation handles rest_destination.
         rest_destination: Option<Zone>,
+        /// CR 401.2 + CR 701.20e + CR 608.2c: Set when the same clause names
+        /// BOTH library positions for the remainder instead of one destination
+        /// for all of it — "put one of those cards into your hand, one on top
+        /// of your library, and one on the bottom of your library" (Telling
+        /// Time). Carries how many of the remainder go on TOP; CR 401.2 leaves
+        /// the bottom as the only other position a library instruction can
+        /// name, so the bottom count is implied rather than stored twice.
+        /// Always accompanied by `rest_destination: Some(Zone::Library)`.
+        /// `None` for every uniform-remainder form, including the plain
+        /// "... and the rest on the bottom of your library".
+        ///
+        /// Boxed only to keep `clippy::large_enum_variant` satisfied:
+        /// `DigFromAmong` is already this enum's largest variant, and an
+        /// inline `QuantityExpr` here pushes it past the lint's ratio against
+        /// the second-largest variant.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rest_split_top_count: Option<Box<QuantityExpr>>,
         /// CR 400.5 + CR 608.2c: Only exact "in a random order" text sets
         /// `Random`; every other accepted form preserves existing behavior.
         #[serde(default)]
@@ -534,6 +555,11 @@ pub(crate) enum ContinuationAst {
         /// "put that card …" form (`KeepEach`).
         any_number: bool,
         rest_destination: Option<Zone>,
+        /// CR 400.5 + CR 608.2c + CR 701.20a: Rest-pile ordering. Defaults to
+        /// `Random` for library rest piles under CR 701.20a, or `PlayerChoice`
+        /// when "in any order" is specified.
+        #[serde(default)]
+        rest_order: crate::types::ability::DigRestOrder,
         /// CR 110.2a: "under your control" on the kept-card clause.
         enters_under: Option<ControllerRef>,
         /// CR 701.20a + CR 608.2c: `Some(decline_zone)` when the kept clause is
@@ -550,7 +576,14 @@ pub(crate) enum ContinuationAst {
     /// `rest_destination`. Used by cards like Balustrade Spy, Consuming Aberration,
     /// and Destroy the Evidence where "those cards" refers to all cards revealed
     /// during the RevealUntil resolution, not only the non-matching ones.
-    RevealUntilAllToZone { destination: Zone },
+    RevealUntilAllToZone {
+        destination: Zone,
+        #[serde(
+            default,
+            skip_serializing_if = "crate::types::ability::DigRestOrder::is_preserve"
+        )]
+        rest_order: crate::types::ability::DigRestOrder,
+    },
     /// CR 202.3 + CR 608.2c: "If its mana value is <comparator> <dynamic
     /// quantity>, put it onto <zone>[. Otherwise, put it into <zone>]." after
     /// RevealUntil — a card-property branch on the hit card's own mana value
@@ -927,10 +960,19 @@ pub(crate) enum ImperativeFamilyAst {
         counter_kind: PlayerCounterKind,
         count: QuantityExpr,
     },
-    /// CR 701.41a: Support N — put a +1/+1 counter on each of up to N target creatures.
-    /// `is_other` is true on permanents (targets "other" creatures), false on spells.
+    /// CR 701.41a: Support N — put a +1/+1 counter on each of up to N target
+    /// creatures. `count` is a `QuantityExpr` because the printed N is not
+    /// always a literal: Blitzball Stadium and The Crowd Goes Wild print
+    /// `support X`, whose value is the X announced for the spell that produced
+    /// the source (CR 107.3a).
+    ///
+    /// `is_other` follows CR 701.41a's own axis: true on a PERMANENT source,
+    /// false on an instant or sorcery spell. It excludes exactly one object —
+    /// the source — so it is load-bearing only when the source can itself be a
+    /// legal "target creature", and inert (but harmless, and correct under
+    /// animation) on a permanent that currently is not one.
     Support {
-        count: u32,
+        count: QuantityExpr,
         is_other: bool,
     },
 }
@@ -1415,6 +1457,11 @@ pub(crate) enum MultiZoneExileQuantifier {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+// Intentional: variants carry parser IR directly (the `Attach` arm's printed
+// role/cardinality plus its announced-count spec), mirroring
+// `oracle_ir::effect_chain` and `oracle_ir::doc`; boxing a field here would add
+// an allocation per parsed clause without changing what is carried.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum UtilityImperativeAst {
     Prevent {
         text: String,
@@ -1460,6 +1507,26 @@ pub(crate) enum UtilityImperativeAst {
         /// target ..." cardinality belongs to the ability's target selection,
         /// not the `Effect::Attach` payload.
         multi_target: Option<MultiTargetSpec>,
+        /// CR 115.1a/c/d/e + CR 608.2d: the printed role of the ATTACHMENT
+        /// operand — `Targeted` when the phrase prints "target …", otherwise
+        /// `AtResolution { count }` with the printed cardinality. Mirrored onto
+        /// `Effect::Attach.selection`; the HOST operand's timing stays the
+        /// ability-level `TargetChoiceTiming`.
+        selection: AttachSelection,
+    },
+    /// CR 608.2c (rules of English — number agreement) + CR 400.7: an Attach
+    /// instruction whose ATTACHMENT operand is a plural anaphor ("attach
+    /// them/those …"). The antecedent set has no typed provenance in the AST
+    /// (`TargetFilter` is singular; `GainControlAll` and the conjure family
+    /// publish no set), so the clause cannot be implemented correctly and
+    /// lowers to `Effect::unimplemented("plural_attachment_anaphor", fragment)`
+    /// — honest coverage instead of a wrong-operand attach.
+    ///
+    /// Follow-up: when the producers publish the affected set as typed
+    /// provenance, this variant becomes a set-valued attachment operand.
+    AttachPluralAnaphor {
+        /// The printed clause, for the `Unimplemented` description.
+        fragment: String,
     },
     UnattachAll {
         attachment: TargetFilter,
@@ -1528,6 +1595,12 @@ pub(crate) enum ChooseImperativeAst {
         chooser: crate::types::ability::Chooser,
         /// CR 608.2d (override): `Random` for "choose one of them at random".
         selection: crate::types::ability::CardSelectionMode,
+        /// CR 608.2d: WHICH set the anaphor names. The bare "of them"/"of those"
+        /// anaphors keep the historic tracked-set fallback (`Legacy`); the
+        /// source-bound "of the exiled cards" form inside an ability whose own
+        /// cost exiled the cards names that cost-payment record instead
+        /// (`CostPaidObjects`, CR 400.7j).
+        candidate_source: crate::types::ability::ZoneChoiceCandidateSource,
     },
     /// "choose a [filter] card in/from [player's] [zone]" — direct selection
     /// from visible/resolution-scoped zone contents. Lowered to `Effect::ChooseFromZone`.
@@ -1580,6 +1653,22 @@ pub(crate) enum ChooseImperativeAst {
         target: TargetFilter,
         domain: CounterKindDomain,
         chooser: CounterKindChooser,
+    },
+    /// CR 115.1 + CR 608.2d: A standalone, NON-target battlefield-object choice
+    /// ("choose a creature an opponent controls"). The chooser is the ability's
+    /// controller; the pick is made while the effect resolves (CR 608.2d), not
+    /// as a declared target. Parser IR only — it lowers onto the existing
+    /// `Effect::ChooseObjectsIntoTrackedSet`, which publishes the pick into the
+    /// resolution chain's tracked set so a linked "the chosen ‹object›" reader
+    /// (CR 607.2d) can consume it.
+    ///
+    /// `min`/`max` carry the printed quantifier ("a"/"an"/"another" → `(1, Some(1))`,
+    /// "up to N" → `(0, Some(N))` with a dynamic N collapsing to `None`,
+    /// "any number of" → `(0, None)`).
+    BattlefieldObject {
+        filter: TargetFilter,
+        min: u32,
+        max: Option<u32>,
     },
 }
 
@@ -2138,6 +2227,57 @@ pub(crate) fn refuse_additional_cost_on_lingering_cast(effect: &mut Effect) {
         crate::types::ability::ADDITIONAL_COST_ON_LINGERING_CAST_GAP,
         format!("additional cost the lingering permission cannot carry: {cost:?}"),
     );
+}
+
+/// CR 601.2f + CR 608.2c: the honest gap a "cast this way" cost rider becomes
+/// when no preceding grant can carry it.
+///
+/// Both refusal sites below build it here, so the no-host shape and the
+/// unsupported-driver shape name one gap rather than two that can drift. The
+/// description records the MODIFIER that was about to be lost rather than the
+/// Oracle fragment: the driver seam runs after lowering and no longer holds the
+/// source text, and the modifier is the load-bearing fact for anyone auditing
+/// the gap.
+pub(crate) fn cast_cost_modifier_without_host_gap(
+    modifier: &crate::types::ability::CastCostModifier,
+) -> Effect {
+    Effect::unimplemented(
+        crate::types::ability::CAST_COST_MODIFIER_WITHOUT_HOST_GAP,
+        format!("\"cast this way\" cost rider no preceding grant can carry: {modifier:?}"),
+    )
+}
+
+/// CR 601.2f + CR 608.2c: a `CastFromZone` that still carries a
+/// `cast_cost_modifier` on a driver OTHER than `LingeringPermission` would drop
+/// that rider at resolution, so the clause becomes the
+/// `CAST_COST_MODIFIER_WITHOUT_HOST_GAP` instead.
+///
+/// Twin of [`refuse_additional_cost_on_lingering_cast`], inverted on the driver
+/// axis because the two riders ride opposite mechanisms:
+/// `record_lingering_permissions` is the one site that stamps a cost modifier
+/// onto the permissions the grant creates, so `LingeringPermission` is the only
+/// driver with a slot — while an additional cost is charged only by the
+/// during-resolution cast.
+///
+/// Called at the one seam that can DEGRADE an already-stamped grant off the
+/// lingering mechanism (`attach_alt_cost_to_prior_cast_from_zone`, beside its
+/// twin); the absorption site refuses a non-`LingeringPermission` host up front
+/// (`attach_cast_cost_modifier_to_prior_cast_from_zone`), so that path never
+/// stamps one for this to find. Zero printed carriers today.
+pub(crate) fn refuse_cast_cost_modifier_on_unsupported_driver(effect: &mut Effect) {
+    let Effect::CastFromZone {
+        driver,
+        cast_cost_modifier: Some(modifier),
+        ..
+    } = effect
+    else {
+        return;
+    };
+    if *driver == crate::types::ability::CastFromZoneDriver::LingeringPermission {
+        return;
+    }
+    let gap = cast_cost_modifier_without_host_gap(modifier);
+    *effect = gap;
 }
 
 /// CR 611.2a + CR 608.2g + CR 608.2c: Carry a sentence's LEADING duration onto a
@@ -2903,6 +3043,7 @@ pub(crate) fn duration_governs(effect: &Effect) -> bool {
         | Effect::RuntimeHandled { .. }
         | Effect::Incubate { .. }
         | Effect::Amass { .. }
+        | Effect::EmpowerJace { .. }
         | Effect::Monstrosity { .. }
         | Effect::Specialize
         | Effect::Renown { .. }
@@ -3231,7 +3372,7 @@ mod duration_distribution_tests_7923 {
             card_filter: None,
             single_use_group: None,
             single_use: false,
-            cast_cost_raise: None,
+            cast_cost_modifier: None,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             // #7948: a self-standing play permission with full cast authority,
             // which is what this duration fixture models — NOT the
@@ -3260,6 +3401,7 @@ mod duration_distribution_tests_7923 {
             driver: CastFromZoneDriver::LingeringPermission,
             mana_spend_permission: None,
             additional_cost: None,
+            cast_cost_modifier: None,
         }
     }
 
@@ -3291,6 +3433,7 @@ mod duration_distribution_tests_7923 {
                 driver,
                 mana_spend_permission,
                 additional_cost,
+                cast_cost_modifier: None,
             },
             other => other,
         }

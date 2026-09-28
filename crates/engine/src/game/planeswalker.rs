@@ -3,7 +3,7 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{
     GameState, PendingCast, PendingCostMoveResume, StackEntry, StackEntryKind, WaitingFor,
 };
-use crate::types::identifiers::{CardId, ObjectId};
+use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaCost;
 use crate::types::player::PlayerId;
 
@@ -253,6 +253,13 @@ pub fn handle_activate_loyalty(
     // ability resolves to 0. Same single computation authority, same position: at
     // announcement, before targets are chosen (CR 601.2c, immediately below).
     super::ability_utils::publish_announced_x(state, &mut resolved, player, pw_id);
+    // CR 602.2 + CR 601.2c (capture L): the activation's journal facts, now,
+    // before its targets are chosen and before any loyalty is paid. Interactive
+    // targets add theirs at target settlement; automatic ones just below.
+    resolved.ability_index = Some(ability_index);
+    resolved.activation_record =
+        super::casting::capture_activation_record(state, player, pw_id, ability_index, &resolved)
+            .map(Box::new);
 
     // CR 602.2b + CR 601.2c: Targets are announced before costs are paid.
     // If this ability requires targets, prompt for selection first.
@@ -278,7 +285,21 @@ pub fn handle_activate_loyalty(
         if let Some(targets) = resolved_targets {
             let mut resolved = resolved;
             assign_targets_in_chain(state, &mut resolved, &targets)?;
-            return Ok(finalize_loyalty_activation(
+            // CR 601.2c: the automatically chosen targets, captured before the
+            // loyalty cost is paid.
+            let captured = super::casting::capture_activation_record(
+                state,
+                player,
+                pw_id,
+                ability_index,
+                &resolved,
+            );
+            if let (Some(record), Some(captured)) =
+                (resolved.activation_record.as_deref_mut(), captured)
+            {
+                record.targets = captured.targets;
+            }
+            return finalize_loyalty_activation(
                 state,
                 player,
                 pw_id,
@@ -286,7 +307,7 @@ pub fn handle_activate_loyalty(
                 resolved,
                 ability_index,
                 events,
-            ));
+            );
         }
 
         state.lands_tapped_for_mana.remove(&player);
@@ -297,8 +318,11 @@ pub fn handle_activate_loyalty(
             &target_slots,
             &target_constraints,
         )?;
-        let mut pending = PendingCast::new(pw_id, CardId(0), resolved, ManaCost::NoCost);
-        pending.activation_ability_index = Some(ability_index);
+        // CR 606.1: the mana-free loyalty fast path carries no cost-modifier
+        // snapshot — no reduction can touch a bare loyalty cost, and any raise
+        // routes the ability to the general flow instead.
+        let mut pending =
+            PendingCast::for_activation(pw_id, resolved, ManaCost::NoCost, ability_index, None);
         pending.target_constraints = target_constraints;
         // CR 606.4: Loyalty cost is paid after targets are chosen.
         // Stored here so handle_select_targets can call pay_ability_cost and
@@ -321,7 +345,7 @@ pub fn handle_activate_loyalty(
         });
     }
 
-    Ok(finalize_loyalty_activation(
+    finalize_loyalty_activation(
         state,
         player,
         pw_id,
@@ -329,7 +353,7 @@ pub fn handle_activate_loyalty(
         resolved,
         ability_index,
         events,
-    ))
+    )
 }
 
 /// CR 606.3 + CR 606.1: Record a loyalty-ability activation against both the
@@ -387,7 +411,10 @@ fn finalize_loyalty_activation(
     resolved: ResolvedAbility,
     ability_index: usize,
     events: &mut Vec<GameEvent>,
-) -> WaitingFor {
+) -> Result<WaitingFor, EngineError> {
+    // CR 602.2 + CR 601.2c: refuse before paying if the pre-payment record is
+    // missing (the activation is then reversed, with nothing recorded).
+    super::casting::require_activation_record(&resolved, player)?;
     // CR 606.4: Single authority for loyalty cost payment.
     let cost = crate::types::ability::AbilityCost::Loyalty {
         amount: loyalty_cost,
@@ -417,7 +444,7 @@ fn finalize_loyalty_activation(
                 resolved: Box::new(resolved),
                 ability_index,
             });
-            state.waiting_for.clone()
+            Ok(state.waiting_for.clone())
         }
         super::casting::PaymentOutcome::Failed { .. } => {
             unreachable!("loyalty cost cannot fail after can_activate_loyalty_ability passed")
@@ -437,7 +464,9 @@ fn complete_loyalty_activation(
     resolved: ResolvedAbility,
     ability_index: usize,
     events: &mut Vec<GameEvent>,
-) -> WaitingFor {
+) -> Result<WaitingFor, EngineError> {
+    let mut resolved = resolved;
+    let record = super::casting::take_activation_record(&mut resolved, player)?;
     record_loyalty_activation(state, pw_id, player);
 
     let assigned_targets = flatten_targets_in_chain(&resolved);
@@ -464,20 +493,22 @@ fn complete_loyalty_activation(
     );
     super::casting::commit_crime_after_stack_placement(state, crime_candidate, player, events);
 
-    super::restrictions::record_ability_activation(state, pw_id, ability_index);
-    // CR 117.1b: Priority permits unbounded activation. `pending_activations`
-    // is a per-priority-window AI-guard — see `GameState::pending_activations`.
-    state.pending_activations.push((pw_id, ability_index));
-    events.push(GameEvent::AbilityActivated {
-        player_id: player,
-        source_id: pw_id,
-        // CR 606.2: This is the non-targeted loyalty-activation path.
-        kind: activated_ability_kind(state, pw_id, ability_index),
-    });
+    // CR 606.2: `record_activated_ability_placed` classifies this as the
+    // non-targeted loyalty-activation path. A loyalty ability is never
+    // boast-tagged, so its boast emission is a no-op here.
+    super::casting::record_activated_ability_placed(
+        state,
+        player,
+        pw_id,
+        ability_index,
+        entry_id,
+        record,
+        events,
+    );
     state.lands_tapped_for_mana.remove(&player);
     priority::clear_priority_passes(state);
 
-    WaitingFor::Priority { player }
+    Ok(WaitingFor::Priority { player })
 }
 
 /// CR 606.4 + CR 616.1: Resume a loyalty activation parked while its loyalty
@@ -497,14 +528,7 @@ pub(crate) fn resume_loyalty_activation(
     else {
         unreachable!("loyalty-activation resume requires its typed continuation")
     };
-    Ok(complete_loyalty_activation(
-        state,
-        player,
-        pw_id,
-        *resolved,
-        ability_index,
-        events,
-    ))
+    complete_loyalty_activation(state, player, pw_id, *resolved, ability_index, events)
 }
 
 #[cfg(test)]

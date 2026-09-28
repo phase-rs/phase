@@ -2,10 +2,8 @@ import { motion } from "framer-motion";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import {
-  impactDelayMsForAnimationEvent,
-  isPlayerDamageAnimationEvent,
-} from "../../animation/types.ts";
+import { lifeChangeImpactDelayMs } from "../../animation/types.ts";
+import { useDisplayedLife } from "../../hooks/useDisplayedLife.ts";
 import { useAnimationStore } from "../../stores/animationStore.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
@@ -18,9 +16,10 @@ interface LifeTotalProps {
 
 export function LifeTotal({ playerId, size = "default", hideLabel = false }: LifeTotalProps) {
   const { t } = useTranslation("game");
-  const life = useGameStore(
+  const snapshotLife = useGameStore(
     (s) => s.gameState?.players[playerId]?.life ?? 20,
   );
+  const life = useDisplayedLife(playerId, snapshotLife);
   const activeStep = useAnimationStore((s) => s.activeStep);
   const [flashColor, setFlashColor] = useState<"red" | "green" | null>(null);
   const flashTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -28,9 +27,11 @@ export function LifeTotal({ playerId, size = "default", hideLabel = false }: Lif
   const speedMultiplier = usePreferencesStore((s) => s.animationSpeedMultiplier);
   const impactTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // The snapshot is the sole authority for the displayed number. Events only
-  // provide presentation feedback (flash timing/color); they must never be
-  // accumulated into a second client-side life total.
+  // Engine-supplied totals are the sole authority for the displayed number —
+  // the committed snapshot, or, while its animation is still playing, the
+  // `LifeChanged.new_total` of a hit that has already landed (`useDisplayedLife`).
+  // Events only provide presentation feedback here (flash timing/color); an
+  // amount must never be accumulated into a second client-side life total.
   // Flash timer is managed via ref — returning it from this effect would cancel
   // the flash when activeStep advances to the next step.
   useEffect(() => {
@@ -40,25 +41,17 @@ export function LifeTotal({ playerId, size = "default", hideLabel = false }: Lif
       const lifeEvent = effect.event;
       if (lifeEvent.data.player_id !== playerId) continue;
 
-      const playerDamageEvent = activeStep.effects.find(
-        (e) => isPlayerDamageAnimationEvent(e.event, playerId),
-      );
-      const groupedDamageEvent = effect.displayOnly
-        ? activeStep.effects.find((e) => e.event.type === "GroupedDamageFlurry")
-        : undefined;
-      const impactEvent = playerDamageEvent?.event ?? groupedDamageEvent?.event;
-
       const flashLifeChange = () => {
         setFlashColor(lifeEvent.data.amount < 0 ? "red" : "green");
         if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
         flashTimerRef.current = setTimeout(() => setFlashColor(null), 400);
       };
 
-      if (impactEvent) {
-        impactTimerRef.current = setTimeout(
-          flashLifeChange,
-          impactDelayMsForAnimationEvent(impactEvent) * speedMultiplier,
-        );
+      // Same delay the overlay records the new total on, so the flash and the
+      // number it is flashing about land together.
+      const impactDelay = lifeChangeImpactDelayMs(effect, activeStep.effects, playerId);
+      if (impactDelay > 0) {
+        impactTimerRef.current = setTimeout(flashLifeChange, impactDelay * speedMultiplier);
       } else {
         flashLifeChange();
       }

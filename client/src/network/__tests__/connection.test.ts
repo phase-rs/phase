@@ -66,7 +66,10 @@ vi.mock("peerjs", () => {
   return { default: FakePeer };
 });
 
-import { dialPeer, fetchFreshTurnConfig, safePeerError, PEER_CONNECT_OPTIONS, hostRoom, joinRoom, logSelectedIceCandidate } from "../connection";
+import { dialPeer, fetchFreshTurnConfig, safePeerError, PEER_CONNECT_OPTIONS, TURN_CREDENTIALS_URL, hostRoom, joinRoom, logSelectedIceCandidate } from "../connection";
+import { resolveTurnCredentialsUrl } from "../../config/turnCredentials";
+import { peerTransportFactory } from "../transport";
+import type { PeerTransportFactory } from "../transport";
 
 import { getDiagnosticHistory } from "../../services/troubleshooting";
 
@@ -234,6 +237,28 @@ describe("joinRoom", () => {
     await expect(joined).resolves.toMatchObject({ conn: { open: false } });
   });
 
+  it("uses the caller's transport factory for guest construction", async () => {
+    const created: Array<{ id?: string; options?: unknown }> = [];
+    const transportFactory: PeerTransportFactory = {
+      create(id, options) {
+        created.push({ id, options });
+        return peerTransportFactory.create(id, options);
+      },
+    };
+
+    const joining = joinRoom("ABCDE", undefined, undefined, transportFactory);
+    await flush();
+
+    expect(created).toHaveLength(1);
+    expect(created[0]).toMatchObject({
+      id: undefined,
+      options: { config: { iceServers: expect.any(Array) } },
+    });
+    peerState.emitPeer("open");
+    peerState.connHandlers.get("open")!();
+    await expect(joining).resolves.toMatchObject({ conn: { open: false } });
+  });
+
   it.each(["socket-error", "socket-closed", "server-error", "unavailable-id"])(
     "keeps an established guest alive after signaling %s",
     async (type) => {
@@ -301,12 +326,47 @@ describe("joinRoom", () => {
     await vi.advanceTimersByTimeAsync(60_000);
     expect(peerState.reconnectCalls).toBe(1);
   });
+
+  it("reuses the injected transport factory for host registration retries", async () => {
+    vi.useFakeTimers();
+    const created: Array<{ id?: string; options?: unknown }> = [];
+    const transportFactory: PeerTransportFactory = {
+      create(id, options) {
+        created.push({ id, options });
+        return peerTransportFactory.create(id, options);
+      },
+    };
+
+    const hosting = hostRoom(undefined, {
+      preferredRoomCode: "ABCDE",
+      transportFactory,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(created).toHaveLength(1);
+    expect(created[0]).toMatchObject({
+      id: "phase2-ABCDE",
+      options: { config: { iceServers: expect.any(Array) } },
+    });
+
+    peerState.emitPeer("error", Object.assign(new Error("room still registered"), { type: "unavailable-id" }));
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(created).toHaveLength(2);
+    expect(created[1]).toMatchObject({
+      id: "phase2-ABCDE",
+      options: { config: { iceServers: expect.any(Array) } },
+    });
+
+    peerState.emitPeer("open");
+    const host = await hosting;
+    host.destroy();
+  });
 });
 
 
 describe("strict fresh TURN credentials", () => {
   afterEach(() => vi.unstubAllGlobals());
   it("validates servers and forwards abort without caching or exporting secrets", async () => {
+    const configuredEndpoint = resolveTurnCredentialsUrl(process.env.TURN_CREDENTIALS_URL);
     const controller = new AbortController();
     const fetcher = vi.fn().mockResolvedValue(new Response(JSON.stringify({ iceServers: [
       { urls: "stun:example.org:3478" },
@@ -314,8 +374,9 @@ describe("strict fresh TURN credentials", () => {
     ] })));
     vi.stubGlobal("fetch", fetcher);
     const before = getDiagnosticHistory();
+    expect(TURN_CREDENTIALS_URL).toBe(configuredEndpoint);
     expect((await fetchFreshTurnConfig(controller.signal)).iceServers).toHaveLength(2);
-    expect(fetcher).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ signal: controller.signal, cache: "no-store" }));
+    expect(fetcher).toHaveBeenCalledWith(configuredEndpoint, expect.objectContaining({ signal: controller.signal, cache: "no-store" }));
     expect(getDiagnosticHistory()).toEqual(before);
   });
   it.each([

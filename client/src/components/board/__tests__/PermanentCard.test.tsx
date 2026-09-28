@@ -130,6 +130,7 @@ function renderPermanent(
     <BoardInteractionContext.Provider
       value={{
         activatableObjectIds,
+        blockableAttackerIds: new Set(),
         boardChoiceObjectIds,
         committedAttackerIds: new Set(),
         incomingAttackerCounts: new Map(),
@@ -1472,10 +1473,7 @@ describe("PermanentCard", () => {
         11: exiledTwo,
       },
       exile: [10, 11],
-      exile_links: [
-        { exiled_id: 10, source_id: 1, kind: "TrackedBySource" },
-        { exiled_id: 11, source_id: 1, kind: "TrackedBySource" },
-      ],
+      derived: { linked_exile_ids: { "1": [10, 11] } },
     };
     useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
 
@@ -1902,6 +1900,7 @@ describe("PermanentCard", () => {
       <BoardInteractionContext.Provider
         value={{
           activatableObjectIds: new Set([39]),
+          blockableAttackerIds: new Set(),
           boardChoiceObjectIds: new Set(),
           committedAttackerIds: new Set(),
           incomingAttackerCounts: new Map(),
@@ -2011,6 +2010,7 @@ describe("PermanentCard", () => {
       <BoardInteractionContext.Provider
         value={{
           activatableObjectIds: new Set(),
+          blockableAttackerIds: new Set(),
           boardChoiceObjectIds: new Set(),
           committedAttackerIds: new Set(),
           incomingAttackerCounts: new Map(),
@@ -2072,6 +2072,7 @@ describe("PermanentCard", () => {
       <BoardInteractionContext.Provider
         value={{
           activatableObjectIds: new Set(),
+          blockableAttackerIds: new Set(),
           boardChoiceObjectIds: new Set(),
           committedAttackerIds: new Set(),
           incomingAttackerCounts: new Map(),
@@ -2123,6 +2124,7 @@ describe("PermanentCard", () => {
       <BoardInteractionContext.Provider
         value={{
           activatableObjectIds: new Set(),
+          blockableAttackerIds: new Set(),
           boardChoiceObjectIds: new Set(),
           committedAttackerIds: new Set(),
           incomingAttackerCounts: new Map(),
@@ -2209,6 +2211,7 @@ describe("PermanentCard", () => {
       <BoardInteractionContext.Provider
         value={{
           activatableObjectIds: new Set(),
+          blockableAttackerIds: new Set(),
           boardChoiceObjectIds: new Set(),
           committedAttackerIds: new Set(),
           incomingAttackerCounts: new Map(),
@@ -2270,6 +2273,7 @@ describe("PermanentCard", () => {
       <BoardInteractionContext.Provider
         value={{
           activatableObjectIds: new Set([80]),
+          blockableAttackerIds: new Set(),
           boardChoiceObjectIds: new Set(),
           committedAttackerIds: new Set(),
           incomingAttackerCounts: new Map(),
@@ -2333,6 +2337,7 @@ describe("PermanentCard", () => {
       <BoardInteractionContext.Provider
         value={{
           activatableObjectIds: new Set([81]),
+          blockableAttackerIds: new Set(),
           boardChoiceObjectIds: new Set(),
           committedAttackerIds: new Set(),
           incomingAttackerCounts: new Map(),

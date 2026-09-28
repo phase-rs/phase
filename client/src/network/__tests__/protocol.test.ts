@@ -71,8 +71,8 @@ const PREVIEW_ANSWER = {
 } as never;
 
 describe("encodeWireMessage / decodeWireMessage", () => {
-  it("pins the P2P wire protocol to v54", () => {
-    expect(WIRE_PROTOCOL_VERSION).toBe(54);
+  it("pins the P2P wire protocol to v71", () => {
+    expect(WIRE_PROTOCOL_VERSION).toBe(71);
   });
 
   it("defaults shortcut actions for a legacy payload created before the additive field", () => {
@@ -284,6 +284,52 @@ describe("encodeWireMessage / decodeWireMessage", () => {
     expect(out).toEqual(msg);
   });
 
+  // CR 601.2a + CR 601.2b: an announced graveyard permission's digest travels
+  // as a string, so a value above 2^53 survives JSON between JavaScript peers
+  // bit for bit (a JSON number would have lost its low bits).
+  it("round-trips an announced graveyard permission with a digest above 2^53", async () => {
+    const digest = (2n ** 60n + 1n).toString(16).padStart(16, "0");
+    expect(Number.parseInt(digest, 16)).toBeGreaterThan(Number.MAX_SAFE_INTEGER);
+    const msg: P2PMessage = {
+      type: "state_update",
+      state: buildGameState({
+        waiting_for: {
+          type: "CastingVariantChoice",
+          data: {
+            player: 0,
+            object_id: 7,
+            card_id: 7,
+            options: [
+              {
+                variant: { type: "Blitz" },
+                face: "Current",
+                mana_cost: { type: "Cost", shards: ["Green"], generic: 3 },
+                authority: {
+                  announcement: {
+                    permission: { source: 3, grant: { type: "Static", index: 1 } },
+                    grant_digest: digest,
+                    slot_type: "Creature",
+                  },
+                  frequency: "OncePerTurnPerPermanentType",
+                },
+              },
+            ],
+          },
+        },
+      }),
+      events: [],
+      legalActions: [],
+      manaPaymentShortcutActions: [],
+      viewerInteraction: viewerInteractionWithProducedMana,
+    };
+    const out = await decodeWireMessage(await encodeWireMessage(msg));
+    expect(out).toEqual(msg);
+    const decoded = out as Extract<P2PMessage, { type: "state_update" }>;
+    const waiting = decoded.state.waiting_for;
+    if (waiting.type !== "CastingVariantChoice") throw new Error("menu lost");
+    expect(waiting.data.options[0].authority?.announcement.grant_digest).toBe(digest);
+  });
+
   it("round-trips monarch-bounded exile links", async () => {
     const msg: P2PMessage = {
       type: "state_update",
@@ -308,6 +354,83 @@ describe("encodeWireMessage / decodeWireMessage", () => {
     };
     const bytes = await encodeWireMessage(msg);
     await expect(decodeWireMessage(bytes)).resolves.toEqual(msg);
+  });
+
+  it("round-trips nonempty resolution-cast receipts and legacy empty cleanup", async () => {
+    const nonempty: P2PMessage = {
+      type: "state_update",
+      state: buildGameState({
+        waiting_for: {
+          type: "CastOffer",
+          data: {
+            player: 0,
+            kind: {
+              type: "GraveyardPaidCast",
+              hit_card: 17,
+              cast_transformed: false,
+              graveyard_replacement: {
+                type: "Library",
+                position: { type: "BeneathTop", depth: { type: "Fixed", value: 2 } },
+              },
+              cleanup: {
+                source_id: 11,
+                face_policy: {
+                  filter: { type: "Any" },
+                  source_id: 11,
+                  controller: 0,
+                  constraint: null,
+                },
+                exiled_misses: [],
+                reject_action: { type: "RemainExiled" },
+                success_action: { type: "BottomMisses" },
+                delayed_trigger_receipts: [{ token: 31, instance: 32, source_id: 11 }],
+              },
+            },
+          },
+        },
+      }),
+      events: [],
+      legalActions: [],
+      manaPaymentShortcutActions: [],
+      viewerInteraction: viewerInteractionWithProducedMana,
+    };
+    const legacyEmpty: P2PMessage = {
+      ...nonempty,
+      state: buildGameState({
+        waiting_for: {
+          type: "CastOffer",
+          data: {
+            player: 0,
+            kind: {
+              type: "GraveyardPaidCast",
+              hit_card: 17,
+              cast_transformed: false,
+              graveyard_replacement: {
+                type: "Library",
+                position: { type: "RandomWithinTop", n: { type: "Fixed", value: 3 } },
+              },
+              cleanup: {
+                source_id: 11,
+                face_policy: {
+                  filter: { type: "Any" },
+                  source_id: 11,
+                  controller: 0,
+                  constraint: null,
+                },
+                exiled_misses: [],
+                reject_action: { type: "RemainExiled" },
+                success_action: { type: "BottomMisses" },
+              },
+            },
+          },
+        },
+      }),
+    };
+
+    for (const message of [nonempty, legacyEmpty]) {
+      const bytes = await encodeWireMessage(message);
+      await expect(decodeWireMessage(bytes)).resolves.toEqual(message);
+    }
   });
 
   // (b) Tiny messages take FORMAT_RAW.

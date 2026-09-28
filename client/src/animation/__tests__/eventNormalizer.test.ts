@@ -15,8 +15,8 @@ function combatPlayerDamage(sourceId: number, playerId = 0, amount = 1): GameEve
   return { type: "DamageDealt", data: { source_id: sourceId, target: { Player: playerId }, amount, is_combat: true } };
 }
 
-function lifeChanged(playerId = 0, amount = -1): GameEvent {
-  return { type: "LifeChanged", data: { player_id: playerId, amount } };
+function lifeChanged(playerId = 0, amount = -1, newTotal?: number): GameEvent {
+  return { type: "LifeChanged", data: { player_id: playerId, amount, new_total: newTotal } };
 }
 
 function poisonCounterChanged(playerId = 0, amount = 1): GameEvent {
@@ -89,6 +89,78 @@ describe("normalizeEvents", () => {
     ];
 
     expect(normalizeEvents(events)).toEqual([]);
+  });
+
+  describe("Melded", () => {
+    const melded: GameEvent = {
+      type: "Melded",
+      data: { object_id: 10, partner_id: 11, controller: 0 },
+    };
+    const meldSequence: GameEvent[] = [
+      { type: "ZoneChanged", data: { object_id: 10, from: "Battlefield", to: "Exile" } },
+      { type: "ZoneChanged", data: { object_id: 11, from: "Battlefield", to: "Exile" } },
+      { type: "ZoneChanged", data: { object_id: 10, from: "Exile", to: "Battlefield" } },
+      melded,
+    ];
+
+    it("plays the forge animation as its own step at the meld duration", () => {
+      const steps = normalizeEvents([
+        { type: "SpellCast", data: { card_id: 1, controller: 0, object_id: 1 } },
+        melded,
+      ]);
+      expect(steps).toHaveLength(2);
+      expect(steps[1].effects.map((effect) => effect.event.type)).toEqual(["Melded"]);
+      expect(steps[1].duration).toBe(EVENT_DURATIONS.Melded);
+    });
+
+    it("presents the pair's exile and entry moves through the forge animation alone", () => {
+      const steps = normalizeEvents(meldSequence);
+      expect(steps).toHaveLength(1);
+      expect(steps[0].effects.map((effect) => effect.event.type)).toEqual(["Melded"]);
+    });
+
+    it("still animates unrelated zone moves in the same batch", () => {
+      const unrelated: GameEvent = {
+        type: "ZoneChanged",
+        data: { object_id: 12, from: "Battlefield", to: "Graveyard" },
+      };
+      const steps = normalizeEvents([
+        { type: "SpellCast", data: { card_id: 1, controller: 0, object_id: 1 } },
+        unrelated,
+        ...meldSequence,
+      ]);
+      const animated = steps.flatMap((step) => step.effects.map((effect) => effect.event));
+      expect(animated).toContainEqual(unrelated);
+      expect(animated.filter((event) => event.type === "ZoneChanged")).toHaveLength(1);
+    });
+
+    it("presents redirected exile attempts through the forge animation alone", () => {
+      const steps = normalizeEvents([
+        { type: "ZoneChanged", data: { object_id: 10, from: "Battlefield", to: "Graveyard" } },
+        { type: "ZoneChanged", data: { object_id: 11, from: "Battlefield", to: "Command" } },
+        { type: "ZoneChanged", data: { object_id: 10, from: "Graveyard", to: "Battlefield" } },
+        melded,
+      ]);
+      expect(steps).toHaveLength(1);
+      expect(steps[0].effects.map((effect) => effect.event.type)).toEqual(["Melded"]);
+    });
+
+    it("still animates a component's moves that precede the meld sequence", () => {
+      const earlierExile: GameEvent = {
+        type: "ZoneChanged",
+        data: { object_id: 11, from: "Hand", to: "Exile" },
+      };
+      const earlierReturn: GameEvent = {
+        type: "ZoneChanged",
+        data: { object_id: 11, from: "Exile", to: "Battlefield" },
+      };
+      const steps = normalizeEvents([earlierExile, earlierReturn, ...meldSequence]);
+      const animated = steps.flatMap((step) => step.effects.map((effect) => effect.event));
+      expect(animated.filter((event) => event.type === "ZoneChanged")).toEqual([
+        earlierExile,
+        earlierReturn,
+      ]);
+    });
   });
 
   it("SpellCast always starts a new step", () => {
@@ -347,6 +419,58 @@ describe("normalizeEvents", () => {
       event: { type: "LifeChanged", data: { player_id: 0, amount: -sources.length } },
       displayOnly: true,
     });
+  });
+
+  it("carries the last engine-reported total on a collapsed run's synthesized life change", () => {
+    const sources = Array.from({ length: GROUPED_COMBAT_DAMAGE_THRESHOLD }, (_, i) => i + 1);
+    // One engine event per hit, each reporting the total it left the player on.
+    const events = [
+      ...sources.flatMap((sourceId, hit) => [
+        combatPlayerDamage(sourceId),
+        lifeChanged(0, -1, 20 - hit - 1),
+      ]),
+      combatAggregate(sources),
+    ];
+
+    const steps = normalizeEvents(events);
+
+    expect(steps).toHaveLength(1);
+    // The run collapses to one visible hit, so it must land on the total the LAST
+    // consumed event reported — never a sum of amounts, and never the first total.
+    expect(steps[0].effects[1]).toMatchObject({
+      event: {
+        type: "LifeChanged",
+        data: { player_id: 0, amount: -sources.length, new_total: 20 - sources.length },
+      },
+      displayOnly: true,
+    });
+  });
+
+  it("leaves a collapsed run's synthesized total absent when no consumed event carried one", () => {
+    const sources = Array.from({ length: GROUPED_COMBAT_DAMAGE_THRESHOLD }, (_, i) => i + 1);
+    const events = [
+      ...sources.flatMap((sourceId) => [combatPlayerDamage(sourceId), lifeChanged()]),
+      combatAggregate(sources),
+    ];
+
+    const steps = normalizeEvents(events);
+
+    expect(expectLifeChanged(steps[0].effects[1].event).data.new_total).toBeUndefined();
+  });
+
+  it("uses the final consumed event's absent total for a collapsed run", () => {
+    const sources = Array.from({ length: GROUPED_COMBAT_DAMAGE_THRESHOLD }, (_, i) => i + 1);
+    const events = [
+      ...sources.flatMap((sourceId, hit) => [
+        combatPlayerDamage(sourceId),
+        hit === sources.length - 1 ? lifeChanged() : lifeChanged(0, -1, 20 - hit - 1),
+      ]),
+      combatAggregate(sources),
+    ];
+
+    const steps = normalizeEvents(events);
+
+    expect(expectLifeChanged(steps[0].effects[1].event).data.new_total).toBeUndefined();
   });
 
   it("groups aggregate combat damage when replacement effects change life-loss amount", () => {
