@@ -13,9 +13,10 @@
 //!
 //! An option that another option of its method matches or beats on every
 //! commitment, and beats on one, is rejected. The rest are scored by what
-//! they give up, in card-equivalents: a finality counter 0.6, an extra cost
-//! 1.0, a spent slot 0.4 per other graveyard card it could still admit this
-//! turn (at most 1.5; 0.05 when it would admit none), a destination rider 0.3.
+//! they give up, in card-equivalents (the `graveyard_authority_*` weights in
+//! `PolicyPenalties`): a finality counter, an extra cost, a spent slot per other
+//! graveyard card it could still admit this turn (capped; a small idle cost when
+//! it would admit none), a destination rider.
 
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
@@ -28,14 +29,8 @@ use engine::types::statics::{CastCostMode, CastFrequency};
 
 use super::context::PolicyContext;
 use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
+use crate::config::PolicyPenalties;
 use crate::features::DeckFeatures;
-
-const FINALITY_COST: f64 = 0.6;
-const EXTRA_COST: f64 = 1.0;
-const SLOT_COST_PER_DEMAND: f64 = 0.4;
-const SLOT_COST_CAP: f64 = 1.5;
-const IDLE_SLOT_COST: f64 = 0.05;
-const DESTINATION_COST: f64 = 0.3;
 
 /// The casting method an option announces a permission for.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -88,6 +83,7 @@ impl Commitment {
 
 fn commitment(
     state: &GameState,
+    penalties: &PolicyPenalties,
     player: PlayerId,
     object_id: ObjectId,
     option: &CastingVariantChoiceOption,
@@ -100,11 +96,13 @@ fn commitment(
         _ => return None,
     };
     let extra = match &authority.extra_cost {
-        Some(extra) if extra.mode == CastCostMode::Additional => EXTRA_COST,
+        Some(extra) if extra.mode == CastCostMode::Additional => {
+            penalties.graveyard_authority_extra_cost
+        }
         _ => 0.0,
     };
     let counter = match authority.enters_with_counter {
-        Some(CounterType::Finality) => FINALITY_COST,
+        Some(CounterType::Finality) => penalties.graveyard_authority_finality_cost,
         _ => 0.0,
     };
     let slot = if authority.frequency == CastFrequency::Unlimited {
@@ -117,13 +115,14 @@ fn commitment(
             &authority.announcement,
         );
         if demand == 0 {
-            IDLE_SLOT_COST
+            penalties.graveyard_authority_idle_slot
         } else {
-            (SLOT_COST_PER_DEMAND * f64::from(demand)).min(SLOT_COST_CAP)
+            (penalties.graveyard_authority_slot_per_demand * f64::from(demand))
+                .min(penalties.graveyard_authority_slot_cap)
         }
     };
     let destination = if authority.graveyard_destination_replacement.is_some() {
-        DESTINATION_COST
+        penalties.graveyard_authority_destination
     } else {
         0.0
     };
@@ -142,13 +141,14 @@ fn commitment(
 /// announces no graveyard permission.
 fn commitments(
     state: &GameState,
+    penalties: &PolicyPenalties,
     player: PlayerId,
     object_id: ObjectId,
     options: &[CastingVariantChoiceOption],
 ) -> Vec<Option<Commitment>> {
     options
         .iter()
-        .map(|option| commitment(state, player, object_id, option))
+        .map(|option| commitment(state, penalties, player, object_id, option))
         .collect()
 }
 
@@ -184,6 +184,7 @@ fn best_in_group(all: &[Option<Commitment>], anchor: usize) -> Option<usize> {
 /// to choose, and it is decided here without search.
 pub(crate) fn same_method_announcement(
     state: &GameState,
+    penalties: &PolicyPenalties,
     ai_player: PlayerId,
 ) -> Option<GameAction> {
     let WaitingFor::CastingVariantChoice {
@@ -198,7 +199,7 @@ pub(crate) fn same_method_announcement(
     if *player != ai_player || options.len() < 2 {
         return None;
     }
-    let all = commitments(state, *player, *object_id, options);
+    let all = commitments(state, penalties, *player, *object_id, options);
     let first = all.first()?.as_ref()?;
     if !all
         .iter()
@@ -213,6 +214,7 @@ pub(crate) fn same_method_announcement(
 /// the permission best to announce for it.
 pub(crate) fn fallback_announcement(
     state: &GameState,
+    penalties: &PolicyPenalties,
     options: &[CastingVariantChoiceOption],
 ) -> Option<GameAction> {
     let WaitingFor::CastingVariantChoice {
@@ -221,7 +223,7 @@ pub(crate) fn fallback_announcement(
     else {
         return None;
     };
-    let all = commitments(state, *player, *object_id, options);
+    let all = commitments(state, penalties, *player, *object_id, options);
     best_in_group(&all, 0).map(|index| GameAction::ChooseCastingVariant { index })
 }
 
@@ -272,7 +274,13 @@ impl TacticalPolicy for GraveyardAuthorityPolicy {
         let GameAction::ChooseCastingVariant { index } = ctx.candidate.action else {
             return na();
         };
-        let all = commitments(ctx.state, *player, *object_id, options);
+        let all = commitments(
+            ctx.state,
+            &ctx.config.policy_penalties,
+            *player,
+            *object_id,
+            options,
+        );
         let Some(Some(me)) = all.get(index) else {
             return na();
         };
@@ -282,13 +290,18 @@ impl TacticalPolicy for GraveyardAuthorityPolicy {
         let given_up = me.given_up();
         let reason = PolicyReason::new("graveyard_authority_given_up")
             .with_fact("given_up_milli", (given_up * 1000.0) as i64);
-        PolicyVerdict::score(-given_up, reason)
+        let delta = -given_up;
+        PolicyVerdict::score(delta, reason)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn weights() -> PolicyPenalties {
+        PolicyPenalties::default()
+    }
 
     fn c(method: Method, extra: f64, counter: f64, slot: f64) -> Option<Commitment> {
         Some(Commitment {
@@ -320,13 +333,33 @@ mod tests {
     #[test]
     fn leonardo_against_muldrotha_follows_slot_demand() {
         let idle = [
-            c(Method::Blitz, 0.0, FINALITY_COST, 0.0),
-            c(Method::Blitz, 0.0, 0.0, IDLE_SLOT_COST),
+            c(
+                Method::Blitz,
+                0.0,
+                weights().graveyard_authority_finality_cost,
+                0.0,
+            ),
+            c(
+                Method::Blitz,
+                0.0,
+                0.0,
+                weights().graveyard_authority_idle_slot,
+            ),
         ];
         assert_eq!(best_in_group(&idle, 0), Some(1));
         let wanted = [
-            c(Method::Blitz, 0.0, FINALITY_COST, 0.0),
-            c(Method::Blitz, 0.0, 0.0, 2.0 * SLOT_COST_PER_DEMAND),
+            c(
+                Method::Blitz,
+                0.0,
+                weights().graveyard_authority_finality_cost,
+                0.0,
+            ),
+            c(
+                Method::Blitz,
+                0.0,
+                0.0,
+                2.0 * weights().graveyard_authority_slot_per_demand,
+            ),
         ];
         assert_eq!(best_in_group(&wanted, 0), Some(0));
     }
@@ -336,13 +369,33 @@ mod tests {
     #[test]
     fn broodship_against_muldrotha_prefers_keeping_the_land() {
         let all = [
-            c(Method::Blitz, EXTRA_COST, 0.0, IDLE_SLOT_COST),
-            c(Method::Blitz, 0.0, 0.0, 2.0 * SLOT_COST_PER_DEMAND),
+            c(
+                Method::Blitz,
+                weights().graveyard_authority_extra_cost,
+                0.0,
+                weights().graveyard_authority_idle_slot,
+            ),
+            c(
+                Method::Blitz,
+                0.0,
+                0.0,
+                2.0 * weights().graveyard_authority_slot_per_demand,
+            ),
         ];
         assert_eq!(best_in_group(&all, 0), Some(1));
         let all = [
-            c(Method::Blitz, EXTRA_COST, 0.0, IDLE_SLOT_COST),
-            c(Method::Blitz, 0.0, 0.0, SLOT_COST_CAP),
+            c(
+                Method::Blitz,
+                weights().graveyard_authority_extra_cost,
+                0.0,
+                weights().graveyard_authority_idle_slot,
+            ),
+            c(
+                Method::Blitz,
+                0.0,
+                0.0,
+                weights().graveyard_authority_slot_cap,
+            ),
         ];
         assert_eq!(best_in_group(&all, 0), Some(0));
     }
@@ -417,11 +470,11 @@ mod tests {
             .expect("the unlimited permission is offered");
         let action = GameAction::ChooseCastingVariant { index: expected };
         assert_eq!(
-            same_method_announcement(runner.state(), P0),
+            same_method_announcement(runner.state(), &weights(), P0),
             Some(action.clone())
         );
         assert_eq!(
-            fallback_announcement(runner.state(), &options),
+            fallback_announcement(runner.state(), &weights(), &options),
             Some(action)
         );
     }

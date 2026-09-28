@@ -1265,3 +1265,25 @@ fn escape_beside_two_permissions_spends_neither() {
     assert!(per_type_used(runner).is_empty());
     assert!(!once_used(runner, lurrus));
 }
+
+/// The slot answer is bound to the announced grant's definition: a prompt
+/// whose announcement carries a changed digest is refused before payment.
+#[test]
+fn a_slot_answer_under_a_changed_digest_is_refused() {
+    let (mut runner, ornithopter) = ornithopter_board(true, false);
+    cast_from_graveyard(&mut runner, ornithopter).expect("the cast starts");
+    match &mut runner.state_mut().waiting_for {
+        WaitingFor::ChoosePermanentTypeSlot {
+            permission: Some(permission),
+            ..
+        } => permission.grant_digest = GrantDigest("0000000000000000".to_string()),
+        other => panic!("expected the slot prompt, got {other:?}"),
+    }
+    assert!(runner
+        .act(GameAction::ChoosePermanentTypeSlot {
+            slot: CoreType::Artifact,
+        })
+        .is_err());
+    assert_eq!(runner.state().objects[&ornithopter].zone, Zone::Graveyard);
+    assert!(per_type_used(&runner).is_empty());
+}
