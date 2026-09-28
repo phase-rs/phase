@@ -15,8 +15,9 @@
 use engine::ai_support::legal_actions_full;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, Effect, PlayerFilter, QuantityExpr,
-    QuantityModification, ReplacementDefinition, TargetFilter, TargetRef,
+    AbilityCost, AbilityDefinition, AbilityKind, Effect, ManaContribution, ManaProduction,
+    PlayerFilter, QuantityExpr, QuantityModification, ReplacementDefinition, TargetFilter,
+    TargetRef,
 };
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
@@ -579,6 +580,127 @@ fn mana_ability_life_cost_awaiting_replacement_ordering_is_paid_exactly_once() {
     );
     assert_eq!(runner.life(P0), 10 + losses[0]);
     assert!(black_mana_added(&events), "{events:?}");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player } if player == P0
+        ),
+        "got {:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// A synthetic mana ability whose own cost includes a Phyrexian mana sub-cost:
+/// `{1}{B/P}, {T}: Add {G}`, with a Plains to fund the {1} (so the sub-cost is
+/// paid by auto-tapping another source). No printed card is verified for this
+/// exact cost; the engine accepts the shape, so it is pinned by a fixture.
+fn phyrexian_costed_mana_source(scenario: &mut GameScenario) -> ObjectId {
+    scenario
+        .add_artifact_from_oracle(P0, "Phyrexian-Costed Mana Witness", "")
+        .with_ability_definition(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::Fixed {
+                        colors: vec![ManaColor::Green],
+                        contribution: ManaContribution::Base,
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .cost(AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost {
+                            shards: vec![ManaCostShard::PhyrexianBlack],
+                            generic: 1,
+                        },
+                    },
+                    AbilityCost::Tap,
+                ],
+            }),
+        )
+        .id()
+}
+
+#[test]
+fn phyrexian_life_in_a_mana_ability_sub_cost_is_paid_once_around_a_replacement_rider() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain).with_life(P0, 10);
+    let source = phyrexian_costed_mana_source(&mut scenario);
+    scenario
+        .add_creature(P0, "Life-Loss Rider", 0, 1)
+        .with_replacement_definition(life_loss_rider());
+    scenario.add_basic_land(P0, ManaColor::White);
+    let mut runner = scenario.build();
+    let ability_index = runner.state().objects[&source]
+        .abilities
+        .iter()
+        .position(|ability| {
+            matches!(ability.cost, Some(AbilityCost::Composite { .. }))
+                && matches!(*ability.effect, Effect::Mana { .. })
+        })
+        .expect("the witness has its mana ability");
+
+    let mut events = runner
+        .act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index,
+        })
+        .expect("activate the witness")
+        .events;
+    // CR 107.4f + CR 118.3b: a Plains is tapped for {1} and {B/P} is paid with
+    // 2 life; the rider's choice is still part of paying the cost.
+    assert_eq!(
+        runner.life(P0),
+        8,
+        "waiting {:?} events {events:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ChooseOneOfBranch { player, .. } if player == P0
+        ),
+        "got {:?}",
+        runner.state().waiting_for
+    );
+    events.extend(
+        runner
+            .act(GameAction::ChooseBranch { index: 0 })
+            .expect("gain 1 life; the activation finishes without paying again")
+            .events,
+    );
+
+    // One mana spend (the Plains' {W} for {1}) and one life payment, then the
+    // ability adds its {G}.
+    assert_eq!(runner.life(P0), 9);
+    let pool_after = &runner.state().players[P0.0 as usize].mana_pool;
+    assert_eq!(pool_after.count_color(ManaType::White), 0);
+    assert_eq!(pool_after.count_color(ManaType::Green), 1);
+    let losses = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                GameEvent::LifeChanged { player_id, amount, .. } if *player_id == P0 && *amount < 0
+            )
+        })
+        .count();
+    assert_eq!(losses, 1, "{events:?}");
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            GameEvent::ManaAdded {
+                mana_type: ManaType::Green,
+                ..
+            }
+        )),
+        "{events:?}"
+    );
     assert!(
         matches!(
             runner.state().waiting_for,

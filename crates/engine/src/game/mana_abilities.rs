@@ -3003,37 +3003,41 @@ fn pay_mana_ability_cost_component(
                 paid_discard_count,
                 pending.chosen_x,
             )?;
-            let (choice_player, paused_component) = match &component_progress {
-                ManaAbilityCostComponentProgress::Complete => (None, None),
-                ManaAbilityCostComponentProgress::Paused {
+            let handed_to_replacement = match &component_progress {
+                ManaAbilityCostComponentProgress::Complete => None,
+                ManaAbilityCostComponentProgress::HandedToReplacement {
                     remaining_life_payments,
                     choice_player,
-                    component,
                 } => {
                     cursor
                         .remaining_life_payments
                         .clone_from(remaining_life_payments);
-                    (*choice_player, Some(*component))
+                    Some(*choice_player)
                 }
             };
             // CR 614.6: The cost itself may be paid while a replacement's
             // interactive substitute remains unresolved. Advance the cursor
             // exactly once, then park the mana ability until that substitute
             // terminally leaves the resolution stack.
-            if paused_component.is_some() || state.waiting_for != prior_waiting_for {
-                // CR 118.3b + CR 616.1: a component whose event the replacement
-                // pipeline now delivers is paid; resuming must not pay it again.
-                let parked_cursor = match paused_component {
-                    Some(PausedCostComponent::HandedToReplacement) => {
-                        mana_ability_cursor_after_current_component(cursor)
-                    }
-                    Some(PausedCostComponent::Unfinished) | None => cursor.clone(),
-                };
+            if let Some(choice_player) = handed_to_replacement {
+                // CR 118.3b + CR 616.1: the replacement pipeline now delivers
+                // this component, so resuming must not pay it again.
                 pause_mana_ability_cost_payment(
                     state,
                     choice_player,
                     pending,
-                    parked_cursor,
+                    mana_ability_cursor_after_current_component(cursor),
+                    events,
+                    cost_event_start,
+                );
+                return Ok(ManaAbilityPaymentProgress::Paused);
+            }
+            if state.waiting_for != prior_waiting_for {
+                pause_mana_ability_cost_payment(
+                    state,
+                    None,
+                    pending,
+                    cursor.clone(),
                     events,
                     cost_event_start,
                 );
@@ -3810,7 +3814,9 @@ where
                 parent,
             )? {
                 ManaAbilityCostComponentProgress::Complete => {}
-                paused @ ManaAbilityCostComponentProgress::Paused { .. } => return Ok(paused),
+                paused @ ManaAbilityCostComponentProgress::HandedToReplacement { .. } => {
+                    return Ok(paused)
+                }
             }
         }
         // CR 605.1a (2026 amendment): unreachable by construction — an activated
@@ -3829,7 +3835,9 @@ where
                 super::quantity::resolve_quantity(state, amount, player, source_id).max(0) as u32;
             match pay_life_cost(state, player, resolved, events)? {
                 ManaAbilityCostComponentProgress::Complete => {}
-                paused @ ManaAbilityCostComponentProgress::Paused { .. } => return Ok(paused),
+                paused @ ManaAbilityCostComponentProgress::HandedToReplacement { .. } => {
+                    return Ok(paused)
+                }
             }
         }
         Some(AbilityCost::TapCreatures {
@@ -4069,23 +4077,18 @@ where
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ManaAbilityCostComponentProgress {
     Complete,
-    Paused {
+    /// CR 118.3b + CR 119.4 + CR 616.1: the component is paid, but its payment
+    /// is waiting on the replacement pipeline, which now owns delivering it: a
+    /// life payment whose replacement is still ordering or running its
+    /// interactive post-effect, or a mana sub-cost whose mana is spent and whose
+    /// Phyrexian life (`remaining_life_payments` is the unpaid suffix) paused
+    /// the same way. Resuming continues after the component rather than paying
+    /// it again. A payment that pauses before it spends anything (a nested
+    /// source's own cost) never reaches here: that child parks its own cursor.
+    HandedToReplacement {
         remaining_life_payments: Vec<u32>,
         choice_player: Option<PlayerId>,
-        component: PausedCostComponent,
     },
-}
-
-/// What a paused cost component still owes when its activation resumes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PausedCostComponent {
-    /// The component's own work is unfinished; resuming retries it.
-    Unfinished,
-    /// CR 118.3b + CR 119.4 + CR 616.1: the component's event was handed to the
-    /// replacement pipeline, which delivers it: a life payment whose replacement
-    /// is still ordering or running its interactive post-effect. The payment is
-    /// made, so resuming continues after it rather than paying again.
-    HandedToReplacement,
 }
 
 fn cost_sacrifices_reserved_source(
@@ -4214,17 +4217,15 @@ fn pay_life_cost(
         // belongs to the replacement pipeline, which delivers it, exactly as
         // the cast path treats them (`DeferredLifeCostResume::Cast`).
         PayLifeCostResult::PaidWithDeferredSubstitution { .. } => {
-            Ok(ManaAbilityCostComponentProgress::Paused {
+            Ok(ManaAbilityCostComponentProgress::HandedToReplacement {
                 remaining_life_payments: Vec::new(),
                 choice_player: None,
-                component: PausedCostComponent::HandedToReplacement,
             })
         }
         PayLifeCostResult::DeferredReplacementChoice { choice_player, .. } => {
-            Ok(ManaAbilityCostComponentProgress::Paused {
+            Ok(ManaAbilityCostComponentProgress::HandedToReplacement {
                 remaining_life_payments: Vec::new(),
                 choice_player: Some(choice_player),
-                component: PausedCostComponent::HandedToReplacement,
             })
         }
         PayLifeCostResult::InsufficientLife | PayLifeCostResult::Prohibited => Err(
@@ -4534,13 +4535,15 @@ fn pay_mana_sub_cost(
             .flatten();
         return Ok(match payment {
             super::casting::ManaCostPayment::Paid(()) => ManaAbilityCostComponentProgress::Complete,
+            // CR 107.4f + CR 118.3b: `ManaCostPayment::Paused` is returned only
+            // after the mana was spent, when a Phyrexian life payment paused on
+            // a replacement; the suffix it reports is still owed.
             super::casting::ManaCostPayment::Paused {
                 remaining_life_payments,
                 ..
-            } => ManaAbilityCostComponentProgress::Paused {
+            } => ManaAbilityCostComponentProgress::HandedToReplacement {
                 remaining_life_payments,
                 choice_player,
-                component: PausedCostComponent::Unfinished,
             },
         });
     };
