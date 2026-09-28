@@ -611,6 +611,26 @@ pub struct PolicyPenalties {
     /// Consumed by `CreatureTypeChoicePolicy`, which caps the counted members.
     #[serde(default = "default_creature_type_presence_unit")]
     pub creature_type_presence_unit: f64,
+    /// CR 601.2a + CR 601.2b: card-equivalent cost of a finality counter the announced permission puts on the permanent (Leonardo, Sewer Samurai). Consumed by
+    /// `GraveyardAuthorityPolicy`, which compares announcements of one method.
+    #[serde(default = "default_graveyard_authority_finality_cost")]
+    pub graveyard_authority_finality_cost: f64,
+    /// CR 601.2a + CR 601.2b: card-equivalent cost of each other graveyard card the announced permission's per-turn slot could still admit this turn. Consumed by
+    /// `GraveyardAuthorityPolicy`, which compares announcements of one method.
+    #[serde(default = "default_graveyard_authority_slot_per_demand")]
+    pub graveyard_authority_slot_per_demand: f64,
+    /// CR 601.2a + CR 601.2b: card-equivalent cost of the most a spent per-turn slot costs, however many cards it could admit. Consumed by
+    /// `GraveyardAuthorityPolicy`, which compares announcements of one method.
+    #[serde(default = "default_graveyard_authority_slot_cap")]
+    pub graveyard_authority_slot_cap: f64,
+    /// CR 601.2a + CR 601.2b: card-equivalent cost of a spent per-turn slot that could admit no other graveyard card this turn. Consumed by
+    /// `GraveyardAuthorityPolicy`, which compares announcements of one method.
+    #[serde(default = "default_graveyard_authority_idle_slot")]
+    pub graveyard_authority_idle_slot: f64,
+    /// CR 601.2a + CR 601.2b: card-equivalent cost of a destination rider the announced permission adds (the card goes elsewhere than the graveyard). Consumed by
+    /// `GraveyardAuthorityPolicy`, which compares announcements of one method.
+    #[serde(default = "default_graveyard_authority_destination")]
+    pub graveyard_authority_destination: f64,
     /// CR 205.3m: tiebreak toward the deck's detected dominant tribe when a
     /// creature type is chosen. Deliberately STRICTLY less than
     /// `creature_type_presence_unit`, so a type with one live member always
@@ -732,6 +752,11 @@ impl Default for PolicyPenalties {
             cost_reduction_defer_penalty: default_cost_reduction_defer_penalty(),
             discard_payoff_bonus: default_discard_payoff_bonus(),
             creature_type_presence_unit: default_creature_type_presence_unit(),
+            graveyard_authority_finality_cost: default_graveyard_authority_finality_cost(),
+            graveyard_authority_slot_per_demand: default_graveyard_authority_slot_per_demand(),
+            graveyard_authority_slot_cap: default_graveyard_authority_slot_cap(),
+            graveyard_authority_idle_slot: default_graveyard_authority_idle_slot(),
+            graveyard_authority_destination: default_graveyard_authority_destination(),
             creature_type_tribe_bonus: default_creature_type_tribe_bonus(),
             land_color_demand_unit: default_land_color_demand_unit(),
             land_tempo_rider_penalty: default_land_tempo_rider_penalty(),
@@ -745,6 +770,36 @@ impl Default for PolicyPenalties {
 /// `policy_penalties` section directly into this struct).
 fn default_graveyard_types_progress() -> f64 {
     2.5
+}
+
+/// CR 601.2a + CR 601.2b. Shared by `Default` and `#[serde(default)]` so a
+/// tuning artifact written before this field existed still deserializes.
+fn default_graveyard_authority_finality_cost() -> f64 {
+    0.6
+}
+
+/// CR 601.2a + CR 601.2b. Shared by `Default` and `#[serde(default)]` so a
+/// tuning artifact written before this field existed still deserializes.
+fn default_graveyard_authority_slot_per_demand() -> f64 {
+    0.4
+}
+
+/// CR 601.2a + CR 601.2b. Shared by `Default` and `#[serde(default)]` so a
+/// tuning artifact written before this field existed still deserializes.
+fn default_graveyard_authority_slot_cap() -> f64 {
+    1.5
+}
+
+/// CR 601.2a + CR 601.2b. Shared by `Default` and `#[serde(default)]` so a
+/// tuning artifact written before this field existed still deserializes.
+fn default_graveyard_authority_idle_slot() -> f64 {
+    0.05
+}
+
+/// CR 601.2a + CR 601.2b. Shared by `Default` and `#[serde(default)]` so a
+/// tuning artifact written before this field existed still deserializes.
+fn default_graveyard_authority_destination() -> f64 {
+    0.3
 }
 
 /// CR 205.3m. Half a card per creature-type member. Shared by `Default` and
@@ -1241,6 +1296,26 @@ pub const UNTUNED_POLICY_PENALTY_FIELDS: &[(&str, &str)] = &[
     (
         "loop_shortcut_winning_declare_bonus",
         "LoopShortcutPolicy band selector for a game-deciding CR 104.2a crown; deliberately kept OUT of the CMA-ES penalties vector — win-rate gradients from games that never reach a WaitingFor::LoopShortcut node would tune a win-detector into noise",
+    ),
+    (
+        "graveyard_authority_finality_cost",
+        "GraveyardAuthorityPolicy announcement weight; no paired-seed calibration yet: the duel suite rarely raises a multi-permission graveyard menu, so ai-gate carries little gradient for it",
+    ),
+    (
+        "graveyard_authority_slot_per_demand",
+        "GraveyardAuthorityPolicy announcement weight; no paired-seed calibration yet: the duel suite rarely raises a multi-permission graveyard menu, so ai-gate carries little gradient for it",
+    ),
+    (
+        "graveyard_authority_slot_cap",
+        "GraveyardAuthorityPolicy announcement weight; no paired-seed calibration yet: the duel suite rarely raises a multi-permission graveyard menu, so ai-gate carries little gradient for it",
+    ),
+    (
+        "graveyard_authority_idle_slot",
+        "GraveyardAuthorityPolicy announcement weight; no paired-seed calibration yet: the duel suite rarely raises a multi-permission graveyard menu, so ai-gate carries little gradient for it",
+    ),
+    (
+        "graveyard_authority_destination",
+        "GraveyardAuthorityPolicy announcement weight; no paired-seed calibration yet: the duel suite rarely raises a multi-permission graveyard menu, so ai-gate carries little gradient for it",
     ),
     (
         "creature_type_presence_unit",

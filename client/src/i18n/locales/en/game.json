@@ -1996,6 +1996,8 @@
     "additionalExile": "+ Exile a card",
     "additionalSacrifice": "+ Sacrifice a permanent",
     "additionalPayLife": "+ Pay life",
+    "additionalPayLifeAmount": "+ Pay {{amount}} life",
+    "additionalCollectEvidence": "+ Collect evidence {{amount}}",
     "additionalDiscard": "+ Discard a card",
     "additionalTapCreatures": "+ Tap creatures",
     "additionalGeneric": "+ {{type}}"
@@ -2123,6 +2125,7 @@
     "variantForetell": "Cast from Foretell",
     "variantOverload": "Cast with Overload",
     "variantBestow": "Cast with Bestow",
+    "variantBlitz": "Cast with Blitz",
     "variantFreerunning": "Cast with Freerunning",
     "variantFuse": "Cast with Fuse",
     "variantMutate": "Cast with Mutate",
@@ -2132,7 +2135,14 @@
     "variantMoreThanMeetsTheEye": "Cast Converted",
     "variantPrototype": "Cast with Prototype",
     "variantFaceDown": "Cast Face Down",
-    "variantFallback": "Cast with {{type}}"
+    "variantFallback": "Cast with {{type}}",
+    "viaSource": "via {{name}}",
+    "extraCostAdditional": "+ {{cost}}",
+    "extraCostAlternative": "instead of its mana cost: {{cost}}",
+    "entersWithCounter": "enters with a {{counter}} counter",
+    "slotPerType": "uses its {{type}} slot",
+    "slotChooseType": "choose a permanent type",
+    "slotOncePerTurn": "once this turn"
   },
   "categoryChoice": {
     "title": "Choose Permanents to Keep",

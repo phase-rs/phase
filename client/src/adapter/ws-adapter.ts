@@ -210,6 +210,13 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 89 — CR 118.9b graveyard permissions that require a casting method (Sabin,
+ *      Master Monk: "using its blitz ability"): GraveyardCastPermission gains
+ *      required_cast_keyword and casting-menu options gain additional_cost. A
+ *      v88 peer would drop the method silently and admit a printed-cost cast.
+ *      The same bump carries the announced graveyard permission (CR 601.2a-b):
+ *      casting-menu options gain authority, ChoosePermanentTypeSlot gains
+ *      permission, and the cast's context gains graveyard_permission_latch.
  * 88 — WaitingFor.DeclareBlockers gains block_capacities (CR 509.1a +
  *      CR 101.1): each able blocker's block limit, null for any number — see
  *      PROTOCOL_VERSION's own `/// 88` entry in
@@ -598,7 +605,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 88;
+export const PROTOCOL_VERSION = 89;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

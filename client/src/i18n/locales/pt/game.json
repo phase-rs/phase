@@ -1958,6 +1958,8 @@
     "additionalExile": "+ Exile uma carta",
     "additionalSacrifice": "+ Sacrifique um permanente",
     "additionalPayLife": "+ Pague vida",
+    "additionalPayLifeAmount": "+ Pague {{amount}} de vida",
+    "additionalCollectEvidence": "+ Coletar evidências {{amount}}",
     "additionalDiscard": "+ Descarte uma carta",
     "additionalTapCreatures": "+ Vire criaturas",
     "additionalGeneric": "+ {{type}}"
@@ -2085,6 +2087,7 @@
     "variantForetell": "Conjurar de Prever",
     "variantOverload": "Conjurar com Sobrecarregar",
     "variantBestow": "Conjurar com Conceder",
+    "variantBlitz": "Conjurar com Blitz",
     "variantFreerunning": "Conjurar com Freerunning",
     "variantFuse": "Conjurar com Fusão",
     "variantMutate": "Conjurar com Mutate",
@@ -2094,7 +2097,14 @@
     "variantMoreThanMeetsTheEye": "Cast Converted",
     "variantPrototype": "Conjurar com Protótipo",
     "variantFaceDown": "Conjurar Virada para Baixo",
-    "variantFallback": "Conjurar com {{type}}"
+    "variantFallback": "Conjurar com {{type}}",
+    "viaSource": "via {{name}}",
+    "extraCostAdditional": "+ {{cost}}",
+    "extraCostAlternative": "em vez de seu custo de mana: {{cost}}",
+    "entersWithCounter": "entra com um marcador de {{counter}}",
+    "slotPerType": "usa o espaço de {{type}}",
+    "slotChooseType": "escolha um tipo de permanente",
+    "slotOncePerTurn": "uma vez neste turno"
   },
   "categoryChoice": {
     "title": "Escolher Permanentes para Manter",
