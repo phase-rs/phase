@@ -115,6 +115,7 @@ fn redact_paid_cast_cleanup_authority(waiting_for: &mut WaitingFor) {
         | WaitingFor::CoinFlipKeepChoice { .. }
         | WaitingFor::DieKeepChoice { .. }
         | WaitingFor::DigChoice { .. }
+        | WaitingFor::DigRestSplitChoice { .. }
         | WaitingFor::SurveilChoice { .. }
         | WaitingFor::RevealChoice { .. }
         | WaitingFor::SearchChoice { .. }
@@ -532,6 +533,37 @@ fn privately_looked_at_ids_for_scope(
     visible
 }
 
+/// CR 401.2 + CR 401.4 + CR 701.20e: may `viewer` legitimately see the FACE of one card
+/// sitting in a hidden pile they have been asked to ACT on?
+///
+/// CR 401.2 states the two library prohibitions separately ("players can't look at OR
+/// change the order of cards in a library") and CR 401.4 lifts only the ordering one, so
+/// being the acting authority on a pile is never itself permission to see it. The answer
+/// is exactly the three look channels a dig records, and this is their single authority:
+///
+///  * [`is_visible_revealed_card`] carries two of them — `state.revealed_cards` (a
+///    CR 701.20a public reveal-dig) and `state.viewer_knows_card_identity` (a remembered
+///    CR 701.20e private look, written by `remember_card_identities`);
+///  * [`privately_looked_at_ids`] carries the third — the still-open look-only window
+///    (`private_look_player` / `DigSource::PriorLook`) and active search sessions.
+///
+/// These are the same three the `dig_visible` comment in
+/// [`identity_projection_for_viewer`] enumerates as the pile's whole visibility story.
+/// Exported so an out-of-crate consumer that must ACT on a hidden pile — the AI's
+/// `DigRestSplitChoice` arranger, which runs on the UNFILTERED `GameState` and would
+/// otherwise sort by true card value — asks this question instead of growing a fourth,
+/// silently drifting copy of the check.
+pub fn viewer_may_see_hidden_pile_card(
+    state: &GameState,
+    viewer: PlayerId,
+    obj_id: ObjectId,
+) -> bool {
+    let can_view_private_for_player =
+        |player: PlayerId| viewer_has_private_access_to_player(state, viewer, player);
+    is_visible_revealed_card(state, viewer, obj_id)
+        || privately_looked_at_ids(state, viewer, &can_view_private_for_player).contains(&obj_id)
+}
+
 /// Which of the three shipped identity leaves applies to one object in one viewer's
 /// projection.
 ///
@@ -665,17 +697,37 @@ pub(crate) fn identity_projection_for_viewer(
             (HashSet::new(), HashSet::new())
         };
 
-    let dig_visible: HashSet<ObjectId> = if let WaitingFor::DigChoice {
-        player, ref cards, ..
-    } = state.waiting_for
-    {
-        if can_view_private_for_player(player) {
-            cards.iter().copied().collect()
-        } else {
-            HashSet::new()
+    // CR 701.20e: the looked-at pile is shown only to the looking player, and
+    // the `DigChoice` prompt's `player` IS that looker — `effects::dig` parks it
+    // as `ability.controller`, the same player it hands the look to.
+    //
+    // The follow-up `DigRestSplitChoice` deliberately has NO arm here. Its
+    // `player` is the prompt's ACTING authority, which CR 401.4 makes the
+    // library's OWNER for a `DigRestSplitScope::OrderOnly` prompt — a different
+    // player than the looker whenever the dig read someone else's library.
+    // CR 401.2 states the two prohibitions separately ("players can't look at
+    // OR change the order of cards in a library") and CR 401.4 lifts only the
+    // ordering one, so submitting the arrangement is not permission to see the
+    // faces: that owner arranges BLIND, by position and id.
+    //
+    // The pile's face visibility is therefore left entirely to the look
+    // permissions the dig itself recorded, all of which are already in the OR
+    // chain below: `state.viewer_knows_card_identity` (written by
+    // `remember_card_identities` for a private "look at" dig),
+    // `private_look_visible` (the look-only / `DigSource::PriorLook` window),
+    // and `state.revealed_cards` (a CR 701.20a `reveal: true` dig, which IS
+    // public and must stay visible to the arranging owner).
+    let dig_visible: HashSet<ObjectId> = match state.waiting_for {
+        WaitingFor::DigChoice {
+            player, ref cards, ..
+        } => {
+            if can_view_private_for_player(player) {
+                cards.iter().copied().collect()
+            } else {
+                HashSet::new()
+            }
         }
-    } else {
-        HashSet::new()
+        _ => HashSet::new(),
     };
 
     // CR 701.22a: Scry instructs the player to look at the top N cards of
@@ -1891,6 +1943,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         ref selectable_cards,
         kept_destination,
         rest_destination,
+        rest_split_top_count,
         rest_order,
         source_id,
         enter_tapped,
@@ -1907,12 +1960,64 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
                 selectable_cards: selectable_cards.iter().map(|_| ObjectId(0)).collect(),
                 kept_destination,
                 rest_destination,
+                // The split SIZE is public (it is printed on the card); only
+                // the identities of the cards are private, and those are
+                // blanked above.
+                rest_split_top_count,
                 rest_order,
                 source_id,
                 enter_tapped,
                 enters_attacking,
             };
         }
+    }
+
+    // CR 701.20e + CR 701.20b: the remainder being split is still face down in
+    // the library and was shown only to the splitting player, so every other
+    // viewer sees a pile of the right SIZE with no identities. The carried
+    // `completion` is engine-internal bookkeeping (it holds the dig's deferred
+    // tail, including the same private object ids) and is stripped for EVERY
+    // viewer, the splitting player included — no client has any use for it.
+    if let WaitingFor::DigRestSplitChoice {
+        player,
+        library_owner,
+        ref cards,
+        top_count,
+        bottom_count: _,
+        scope,
+        source_id,
+        completion: _,
+    } = state.waiting_for
+    {
+        // `player` is the prompt's acting authority in every scope (the chooser
+        // for a partition prompt, the library's owner for a CR 401.4
+        // arrangement prompt), so it is the one viewer who needs the real ID
+        // LIST: the response is a full permutation of it, and a redacted list
+        // of `ObjectId(0)` placeholders cannot name the cards it reorders.
+        //
+        // Carrying the ids is NOT carrying the faces, and the two must not be
+        // conflated (CR 401.2 prohibits looking and reordering separately;
+        // CR 401.4 lifts only the reordering half). Whether this player may see
+        // what is PRINTED on each of these cards is decided independently, by
+        // the look permissions the dig recorded — see the `dig_visible` comment
+        // above. An `OrderOnly` owner who never looked arranges blind: real
+        // ids, `Hidden Card` faces.
+        //
+        // Re-derived through the constructor so `bottom_count` cannot drift
+        // from the redacted `cards` list.
+        filtered.waiting_for = WaitingFor::new_dig_rest_split(
+            player,
+            library_owner,
+            if can_view_private_for_player(player) {
+                cards.clone()
+            } else {
+                cards.iter().map(|_| ObjectId(0)).collect()
+            },
+            top_count,
+            scope,
+            source_id,
+            None,
+        );
     }
 
     if let WaitingFor::ScryChoice {

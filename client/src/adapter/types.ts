@@ -21,6 +21,9 @@ export type ObjectId = number;
 export type CardId = number;
 export type PlayerId = number;
 
+/** CR 701.42a / CR 730.2: the keyword that built a merged permanent. */
+export type MergeKind = "Mutate" | "Meld" | "Augment";
+
 // Engine masking sentinel emitted at the client boundary for hidden card faces.
 export const HIDDEN_CARD_NAME = "Hidden Card";
 
@@ -747,6 +750,18 @@ export type LibraryPosition =
   | { type: "RandomWithinTop"; n: Record<string, unknown> };
 
 export type SearchOrderingHint = "Unordered" | "OrderedToLibraryTop";
+
+// Which of a Telling Time-class remainder split's two decisions a
+// `DigRestSplitChoice` prompt still carries (mirrors the engine's
+// `DigRestSplitScope`, `serde(rename_all = "snake_case")`):
+//   * "partition_and_order" — the acting player owns both decisions;
+//   * "partition_only"      — the acting player only picks WHICH cards go on
+//                             top; the library's owner is asked for the order
+//                             afterwards (CR 401.4);
+//   * "order_only"          — the partition is settled and the acting player
+//                             (the library's owner) may only reorder WITHIN
+//                             each pile, never across the boundary.
+export type DigRestSplitScope = "partition_and_order" | "partition_only" | "order_only";
 
 // Narrow source-zone type for a `PayCost` exile-from-hand/graveyard cost —
 // only `Hand` (pitch spells) and `Graveyard` (escape) are valid (mirrors the
@@ -1655,6 +1670,19 @@ export interface GameObject {
    */
   is_copy?: boolean;
   /**
+   * CR 701.42a / CR 730.2: which keyword built this merged permanent (mirrors the
+   * engine's `merge_kind`). Present only on a merged permanent. `"Meld"` marks a
+   * melded permanent — one object represented by the two cards of a meld pair
+   * (CR 701.42a), displayed as its oversized combined card.
+   */
+  merge_kind?: MergeKind;
+  /**
+   * CR 701.42a / CR 730.2: the components representing a merged permanent,
+   * topmost first (mirrors the engine's `merged_components`). Present only on a
+   * merged permanent.
+   */
+  merged_components?: ObjectId[];
+  /**
    * Image-lookup routing hint from the engine. "Card" → look up the image
    * in the real-card database (default; also covers token-copies of real
    * cards like Twinflame/Helm of the Host). "Token" → look up the image
@@ -2484,6 +2512,7 @@ export type WaitingFor =
       };
     }
   | { type: "DigChoice"; data: { player: PlayerId; cards: ObjectId[]; keep_count: number; up_to?: boolean; selectable_cards?: ObjectId[]; kept_destination?: Zone | null; rest_destination?: Zone | null } }
+  | { type: "DigRestSplitChoice"; data: { player: PlayerId; library_owner: PlayerId; cards: ObjectId[]; top_count: number; bottom_count: number; scope: DigRestSplitScope; source_id?: ObjectId | null } }
   | { type: "SurveilChoice"; data: { player: PlayerId; cards: ObjectId[] } }
   | { type: "RevealChoice"; data: { player: PlayerId; cards: ObjectId[]; filter: unknown; optional?: boolean } }
   | { type: "SearchChoice"; data: { player: PlayerId; cards: ObjectId[]; count: number; reveal?: boolean; up_to?: boolean; allows_partial_find?: boolean; constraint?: SearchSelectionConstraint; ordering_hint?: SearchOrderingHint; split?: SearchDestinationSplit | null } }
@@ -3323,6 +3352,9 @@ export type GameEvent =
   | { type: "Transformed"; data: { object_id: ObjectId } }
   // CR 710.4: a Kamigawa flip permanent flipped to its alternative face.
   | { type: "Flipped"; data: { object_id: ObjectId } }
+  // CR 701.42a: a meld pair entered the battlefield as one melded permanent.
+  // `object_id` is the melded permanent; `partner_id` is the pair's other card.
+  | { type: "Melded"; data: { object_id: ObjectId; partner_id: ObjectId; controller: PlayerId } }
   | { type: "DayNightChanged"; data: { new_state: string } }
   | { type: "TurnedFaceUp"; data: { object_id: ObjectId } }
   | { type: "TurnedFaceDown"; data: { object_id: ObjectId } }

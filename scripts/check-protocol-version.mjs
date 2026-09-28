@@ -26,8 +26,9 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // target-gated activation costs (`ReduceAbilityCost { targets, frequency }`,
 // the per-turn activation journal and the target-settlement carrier fields);
 // v84 adds required dungeon choice card and room previews.
-// v85 adds the tagged ignored-die display event; v86 adds the CR 118.9b
-// required casting method on graveyard permissions
+// v85 adds the tagged ignored-die display event; v86 adds the tagged
+// GameEvent::Melded event; v87 adds the Dig remainder split choice; v88 adds
+// the CR 118.9b required casting method on graveyard permissions
 // (`GraveyardCastPermission.required_cast_keyword`), the casting-menu
 // option's `additional_cost`, and the announced graveyard permission (the
 // option's `authority`, the slot prompt's `permission`, the latched terms).
@@ -43,8 +44,10 @@ const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
 // +12: the v83 target-gated activation costs.
 // +13: the v84 dungeon choice card and room previews.
 // +14: the v85 ignored-die display event.
-// +15: the v86 graveyard cast-method requirement.
-const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 15;
+// +15: the v86 Melded event tag.
+// +16: the v87 Dig rest-split serialized choice and effect field.
+// +17: the v88 graveyard cast-method requirement and permission announcement.
+const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 17;
 // The LOBBY message-set version, not derived from the full-game number above.
 // The classifier below refuses an expression only on the SOURCE constants; this
 // script never reads itself, so its own EXPECTED_* must stay literals.
@@ -80,8 +83,11 @@ const PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION = 54;
 // +11: wire 65 moves with full-game v83 for target-gated activation costs.
 // +12: wire 66 moves with full-game v84 for dungeon choice previews.
 // +13: wire 67 moves with full-game v85 for ignored-die event batches.
-// +14: wire 68 moves with full-game v86 for the graveyard cast-method requirement.
-const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 14;
+// +14: wire 68 moves with full-game v86 for the Melded event tag.
+// +15: wire 69 moves with full-game v87 for the Dig rest-split choice.
+// +16: wire 70 moves with full-game v88 for the graveyard cast-method
+// requirement and permission announcement.
+const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 16;
 // The P2P DRAFT wire version. A FIFTH independent surface, and the one this
 // script previously did not read at all: `DRAFT_PROTOCOL_VERSION` is an
 // EXACT-MATCH first-contact gate (p2p-draft-host.ts / p2p-draft-guest.ts refuse

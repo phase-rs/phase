@@ -366,6 +366,17 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
                 mark_object_dirty_with_mana(state, *merged_id);
                 mark_battlefield_display_dirty(state);
             }
+            // CR 701.42a: the melded permanent now presents its combined back
+            // face, and its partner card became its second component.
+            GameEvent::Melded {
+                object_id,
+                partner_id,
+                ..
+            } => {
+                mark_object_dirty_with_mana(state, *object_id);
+                mark_object_dirty_with_mana(state, *partner_id);
+                mark_battlefield_display_dirty(state);
+            }
             GameEvent::CounterAdded { object_id, .. }
             | GameEvent::ObjectIntensified { object_id, .. }
             | GameEvent::CounterRemoved { object_id, .. }

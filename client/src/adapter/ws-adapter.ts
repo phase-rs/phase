@@ -210,13 +210,20 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
- * 86 — CR 118.9b graveyard permissions that require a casting method (Sabin,
+ * 88 — CR 118.9b graveyard permissions that require a casting method (Sabin,
  *      Master Monk: "using its blitz ability"): GraveyardCastPermission gains
  *      required_cast_keyword and casting-menu options gain additional_cost. A
- *      v85 peer would drop the method silently and admit a printed-cost cast.
+ *      v87 peer would drop the method silently and admit a printed-cost cast.
  *      The same bump carries the announced graveyard permission (CR 601.2a-b):
  *      casting-menu options gain authority, ChoosePermanentTypeSlot gains
  *      permission, and the cast's context gains graveyard_permission_latch.
+ * 87 — WaitingFor.DigRestSplitChoice and Effect.Dig.rest_split_top_count
+ *      extend serialized game state for Telling Time-class rest piles. The
+ *      exact handshake refuses v86 peers; P2P moves in lockstep (wire 69).
+ *      Lobby messages are unchanged.
+ * 86 — GameEvent gained the tagged Melded variant. Full-game event frames
+ *      can carry it, so the exact handshake refuses v85 peers. P2P moves in
+ *      lockstep (wire 68); lobby messages are unchanged.
  * 85 — GameEvent gained the tagged DieRollIgnored { player_id, sides, result }
  *      display event. StateUpdate carries GameEvent[]; older peers would
  *      accept the connection but omit ignored dice from the roll overlay.
@@ -592,7 +599,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 86;
+export const PROTOCOL_VERSION = 88;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
