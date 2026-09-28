@@ -91,6 +91,7 @@ mod black_bolt_lethal_voice_destroys_triggering_opponents_permanent;
 mod blessed_orator_other_anthem;
 mod blitz_em_dash_graveyard_cast;
 mod blizzard_brawl_snow_indestructible;
+mod block_capacities_blocker_prompt;
 mod blocked_history_primitive;
 mod bolas_citadel_regression;
 mod bombur_gentle_dreamer_conditional_untap;

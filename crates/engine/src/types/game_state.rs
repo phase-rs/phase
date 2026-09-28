@@ -13482,6 +13482,18 @@ pub enum WaitingFor {
             deserialize_with = "crate::types::deterministic_serde::deserialize_numeric_hash_map"
         )]
         must_be_blocked_targets: HashMap<ObjectId, Vec<ObjectId>>,
+        /// CR 509.1a + CR 101.1: per creature able to block, how many
+        /// attackers it may block — `None` for any number. Display-only —
+        /// computed by `combat::block_capacity`; the declaration validator's
+        /// own authority is `combat::extra_block_limit`, the same function's
+        /// numeric form.
+        #[serde(
+            default,
+            skip_serializing_if = "HashMap::is_empty",
+            serialize_with = "crate::types::deterministic_serde::hash_map",
+            deserialize_with = "crate::types::deterministic_serde::deserialize_numeric_hash_map"
+        )]
+        block_capacities: HashMap<ObjectId, Option<u32>>,
     },
     /// CR 502.3: During the untap step, the active player may choose not to
     /// untap permanents with "You may choose not to untap..." static abilities.
@@ -29946,6 +29958,7 @@ mod forced_cascade_window_tests {
                     block_requirements: Default::default(),
                     blocker_constraints: Default::default(),
                     must_be_blocked_targets: Default::default(),
+                    block_capacities: Default::default(),
                 },
             ),
             (
@@ -38692,6 +38705,7 @@ mod tests {
             block_requirements: HashMap::new(),
             blocker_constraints: Default::default(),
             must_be_blocked_targets: Default::default(),
+            block_capacities: Default::default(),
         }));
         variants.push(Box::new(WaitingFor::GameOver {
             winner: Some(PlayerId(0)),

@@ -211,6 +211,7 @@ fn declare_blockers_accepts_turn_boundary_auto_pass_but_rejects_stack_empty() {
         block_requirements: Default::default(),
         blocker_constraints: Default::default(),
         must_be_blocked_targets: Default::default(),
+        block_capacities: Default::default(),
     };
     let mut state = priority_state();
     state.phase = Phase::DeclareBlockers;
@@ -366,6 +367,7 @@ fn blockers_declaration_state(must_block: bool) -> GameState {
         block_requirements: Default::default(),
         blocker_constraints: Default::default(),
         must_be_blocked_targets: Default::default(),
+        block_capacities: Default::default(),
     };
     state
 }
@@ -464,6 +466,7 @@ fn no_legal_blockers_auto_submit_without_a_turn_boundary_preference() {
         block_requirements: Default::default(),
         blocker_constraints: Default::default(),
         must_be_blocked_targets: Default::default(),
+        block_capacities: Default::default(),
     };
     let waiting_for = state.waiting_for.clone();
     let mut result = ActionResult::applied(Vec::new(), waiting_for);
@@ -1031,6 +1034,7 @@ fn declare_blockers_opponents_turns_stop_pauses_empty_blocker_submit() {
         block_requirements: Default::default(),
         blocker_constraints: Default::default(),
         must_be_blocked_targets: Default::default(),
+        block_capacities: Default::default(),
     };
     let mut state = GameState {
         phase: Phase::DeclareBlockers,
@@ -1114,6 +1118,7 @@ fn declare_blockers_own_turn_stop_does_not_pause_on_opponents_turn() {
         block_requirements: Default::default(),
         blocker_constraints: Default::default(),
         must_be_blocked_targets: Default::default(),
+        block_capacities: Default::default(),
     };
     state.waiting_for = waiting_for.clone();
     state.phase_stops.insert(

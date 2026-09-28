@@ -10,7 +10,7 @@ import {
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 
-import type { GameObject, ObjectId, WaitingFor } from "../../adapter/types.ts";
+import type { AttackerInfo, GameObject, ObjectId, WaitingFor } from "../../adapter/types.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
 import { useCanActForWaitingState, usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
@@ -26,26 +26,24 @@ import {
   type BoardChoiceView,
 } from "../../viewmodel/gameStateView.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
-import { useUiStore } from "../../stores/uiStore.ts";
+import { type BlockerAssignments, useUiStore } from "../../stores/uiStore.ts";
+import { blockersByAttacker, blockTargetSelection, partitionBlockTargets } from "../../utils/combat.ts";
 import { useBoardInteractionState } from "./BoardInteractionContext.tsx";
 import { MeldedCardFrame } from "./MeldedCardFrame.tsx";
 import { PermanentCard } from "./PermanentCard.tsx";
-import {
-  getGroupRenderMode,
-  groupStaggerPx,
-  type BattlefieldRowType,
-} from "./groupRenderMode.ts";
+import { type GroupRenderMode, groupStaggerPx, type BattlefieldRowType } from "./groupRenderMode.ts";
 
 interface GroupedPermanentProps {
   group: GroupedPermanentType;
   rowType: BattlefieldRowType;
-  manualExpanded: boolean;
+  renderMode: GroupRenderMode;
   onExpand: () => void;
 }
 
 type PickerContext =
   | { mode: "attackers" | "blockers" | "equip" | "target" | "tap"; eligibleIds: ObjectId[] }
-  | { mode: "boardChoice"; eligibleIds: ObjectId[]; choice: BoardChoiceView };
+  | { mode: "boardChoice"; eligibleIds: ObjectId[]; choice: BoardChoiceView }
+  | { mode: "blockTargets"; eligibleIds: ObjectId[]; blockerId: ObjectId };
 
 const COLLAPSED_PICKER_WIDTH_PX = 208;
 const COLLAPSED_PICKER_GAP_PX = 8;
@@ -94,7 +92,7 @@ function waitingForPlayer(waitingFor: WaitingFor | null | undefined): number | n
 export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
   group,
   rowType,
-  manualExpanded,
+  renderMode,
   onExpand,
 }: GroupedPermanentProps) {
   const { t } = useTranslation("game");
@@ -107,11 +105,14 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
   const selectedAttackers = useUiStore((s) => s.selectedAttackers);
   const setGroupSelectedAttackers = useUiStore((s) => s.setGroupSelectedAttackers);
   const blockerAssignments = useUiStore((s) => s.blockerAssignments);
+  const pendingBlocker = useUiStore((s) => s.pendingBlocker);
+  const setGroupBlockerAssignments = useUiStore((s) => s.setGroupBlockerAssignments);
   const combatClickHandler = useUiStore((s) => s.combatClickHandler);
   const selectedCardIds = useUiStore((s) => s.selectedCardIds);
   const setGroupSelectedCards = useUiStore((s) => s.setGroupSelectedCards);
   const waitingFor = useGameStore((s) => s.waitingFor);
   const gameObjects = useGameStore((s) => s.gameState?.objects);
+  const combatAttackers = useGameStore((s) => s.gameState?.combat?.attackers);
   const manaPaymentPreviewSourceIds = useGameStore((s) => s.manaPaymentPreviewSourceIds);
   const {
     boardChoiceObjectIds,
@@ -119,15 +120,6 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
     validAttackerIds,
     validTargetObjectIds,
   } = useBoardInteractionState();
-  const containsAttacker = useMemo(() => {
-    if (rowType !== "creatures" || combatMode !== "blockers") return false;
-    return group.ids.some((id) => committedAttackerIds.has(id));
-  }, [combatMode, committedAttackerIds, group.ids, rowType]);
-
-  const renderMode = getGroupRenderMode(group, {
-    manualExpanded,
-    containsCommittedAttackerDuringBlockers: containsAttacker,
-  });
 
   const pickerContext = useMemo<PickerContext | null>(() => {
     if (renderMode !== "collapsed") return null;
@@ -145,6 +137,19 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
     if (combatMode === "attackers") {
       const eligibleIds = group.ids.filter((id) => validAttackerIds.has(id));
       return eligibleIds.length > 0 ? { mode: "attackers", eligibleIds } : null;
+    }
+
+    if (combatMode === "blockers" && waitingFor?.type === "DeclareBlockers" && pendingBlocker !== null) {
+      // A pile of ATTACKERS with a blocker pending: assign that blocker onto
+      // one or more members (CollapsedGroupPicker's blockTargets mode). Never
+      // matches the same group as the own-blockers branch below — a group is
+      // per controller, and attackers and this defender's blockers belong to
+      // different controllers.
+      const validTargetsForPending = new Set(waitingFor.data.valid_block_targets[pendingBlocker] ?? []);
+      const eligibleIds = group.ids.filter((id) => validTargetsForPending.has(id));
+      if (eligibleIds.length > 0) {
+        return { mode: "blockTargets", eligibleIds, blockerId: pendingBlocker };
+      }
     }
 
     if (combatMode === "blockers" && waitingFor?.type === "DeclareBlockers" && combatClickHandler) {
@@ -187,6 +192,7 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
     combatMode,
     gameObjects,
     group.ids,
+    pendingBlocker,
     playerId,
     renderMode,
     validAttackerIds,
@@ -204,6 +210,15 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
   const selectedTapCount = group.ids.filter((id) => selectedCardIds.includes(id)).length;
   const assignedBlockerCount = group.ids.filter((id) => blockerAssignments.has(id)).length;
   const committedAttackerCount = group.ids.filter((id) => committedAttackerIds.has(id)).length;
+  const directBlockers = useMemo(
+    () => blockersByAttacker(blockerAssignments),
+    [blockerAssignments],
+  );
+  // Distinct pile members with a direct blocker selection. A band-mate can
+  // also be blocked by the engine without a direct selection here (CR 702.22h).
+  const directBlockTargetCount = combatMode === "blockers"
+    ? group.ids.filter((id) => directBlockers.has(id)).length
+    : 0;
   const canOpenPicker = pickerContext != null;
 
   const aggregateRingClass =
@@ -305,6 +320,7 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
         )}
         <CollapsedGroupBadges
           assignedBlockerCount={assignedBlockerCount}
+          directBlockTargetCount={directBlockTargetCount}
           committedAttackerCount={committedAttackerCount}
           eligibleCount={pickerContext?.eligibleIds.length ?? 0}
           selectedAttackerCount={selectedAttackerCount}
@@ -320,6 +336,9 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
             setGroupSelectedAttackers={setGroupSelectedAttackers}
             setGroupSelectedCards={setGroupSelectedCards}
             waitingFor={waitingFor}
+            combatAttackers={combatAttackers}
+            blockerAssignments={blockerAssignments}
+            setGroupBlockerAssignments={setGroupBlockerAssignments}
             combatClickHandler={combatClickHandler}
             onClose={() => setPickerOpen(false)}
           />
@@ -384,6 +403,7 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
 
 interface CollapsedGroupBadgesProps {
   assignedBlockerCount: number;
+  directBlockTargetCount: number;
   committedAttackerCount: number;
   eligibleCount: number;
   selectedAttackerCount: number;
@@ -392,6 +412,7 @@ interface CollapsedGroupBadgesProps {
 
 function CollapsedGroupBadges({
   assignedBlockerCount,
+  directBlockTargetCount,
   committedAttackerCount,
   eligibleCount,
   selectedAttackerCount,
@@ -409,6 +430,11 @@ function CollapsedGroupBadges({
       {committedAttackerCount > 0 && (
         <span className="rounded bg-orange-600 px-1.5 py-0.5 text-[10px] font-bold leading-none text-white shadow">
           {t("permanent.attackingCount", { count: committedAttackerCount })}
+        </span>
+      )}
+      {directBlockTargetCount > 0 && (
+        <span className="rounded bg-sky-600 px-1.5 py-0.5 text-[10px] font-bold leading-none text-white shadow">
+          {t("permanent.directBlockTargetCount", { count: directBlockTargetCount })}
         </span>
       )}
       {actionCount > 0 && (
@@ -429,6 +455,9 @@ interface CollapsedGroupPickerProps {
   setGroupSelectedAttackers: (groupIds: ObjectId[], selectedIds: ObjectId[]) => void;
   setGroupSelectedCards: (groupIds: ObjectId[], selectedIds: ObjectId[]) => void;
   waitingFor: WaitingFor | null | undefined;
+  combatAttackers: AttackerInfo[] | undefined;
+  blockerAssignments: BlockerAssignments;
+  setGroupBlockerAssignments: (blockerId: ObjectId, groupIds: ObjectId[], attackerIds: ObjectId[]) => void;
   combatClickHandler: ((id: ObjectId) => void) | null;
   onClose: () => void;
 }
@@ -442,6 +471,9 @@ function CollapsedGroupPicker({
   setGroupSelectedAttackers,
   setGroupSelectedCards,
   waitingFor,
+  combatAttackers,
+  blockerAssignments,
+  setGroupBlockerAssignments,
   combatClickHandler,
   onClose,
 }: CollapsedGroupPickerProps) {
@@ -559,6 +591,17 @@ function CollapsedGroupPicker({
           selectedCardIds={selectedCardIds}
           setGroupSelectedCards={setGroupSelectedCards}
           onClose={onClose}
+        />
+      )}
+      {context.mode === "blockTargets" && waitingFor?.type === "DeclareBlockers" && (
+        <BlockTargetGroupControls
+          eligibleIds={context.eligibleIds}
+          blockerId={context.blockerId}
+          waitingFor={waitingFor}
+          combatAttackers={combatAttackers}
+          blockerAssignments={blockerAssignments}
+          setGroupBlockerAssignments={setGroupBlockerAssignments}
+          objects={objects}
         />
       )}
       {context.mode === "blockers" && (
@@ -707,6 +750,133 @@ function BoardChoiceGroupControls({
       >
         {t("boardChoice.confirm")}
       </button>
+    </div>
+  );
+}
+
+interface BlockTargetGroupControlsProps {
+  eligibleIds: ObjectId[];
+  blockerId: ObjectId;
+  waitingFor: Extract<WaitingFor, { type: "DeclareBlockers" }>;
+  combatAttackers: AttackerInfo[] | undefined;
+  blockerAssignments: BlockerAssignments;
+  setGroupBlockerAssignments: (blockerId: ObjectId, groupIds: ObjectId[], attackerIds: ObjectId[]) => void;
+  objects: Record<ObjectId, GameObject> | undefined;
+}
+
+/**
+ * One `role="group"` per {@link BlockTargetStack} (see the axis citations on
+ * `utils/combat.ts::partitionBlockTargets`), each with a count stepper that
+ * assigns the pending blocker to that many of the stack's members. Not
+ * `ObjectChoiceList`: every member of a stack is interchangeable by
+ * construction, so a #1..#N list would force a choice among indistinguishable
+ * tokens the way `BoardChoiceGroupControls` already avoids for board choices.
+ */
+function BlockTargetGroupControls({
+  eligibleIds,
+  blockerId,
+  waitingFor,
+  combatAttackers,
+  blockerAssignments,
+  setGroupBlockerAssignments,
+  objects,
+}: BlockTargetGroupControlsProps) {
+  const { t } = useTranslation("game");
+
+  const stacks = useMemo(
+    () =>
+      partitionBlockTargets(eligibleIds, blockerId, {
+        attackers: combatAttackers,
+        blockerAssignments,
+        blockRequirements: waitingFor.data.block_requirements,
+        blockerConstraints: waitingFor.data.blocker_constraints,
+        mustBeBlockedTargets: waitingFor.data.must_be_blocked_targets,
+        blockCapacities: waitingFor.data.block_capacities,
+      }),
+    [eligibleIds, blockerId, combatAttackers, blockerAssignments, waitingFor],
+  );
+
+  // CR 702.22c: label bands by a stable 1-based ordinal over the distinct
+  // band ids across every attacker in the current combat (ascending) — not
+  // just this picker's own stacks — so a band keeps the same number across
+  // different pending blockers and different piles instead of renumbering
+  // per picker.
+  const bandOrdinals = useMemo(() => {
+    const distinctBandIds = Array.from(
+      new Set(
+        (combatAttackers ?? [])
+          .map((attacker) => attacker.band_id ?? null)
+          .filter((id): id is number => id !== null),
+      ),
+    ).sort((a, b) => a - b);
+    return new Map(distinctBandIds.map((id, index) => [id, index + 1]));
+  }, [combatAttackers]);
+
+  const blockerName = objects?.[blockerId]?.name ?? t("attackTargetPicker.objectFallback", { id: blockerId });
+
+  return (
+    <div className="space-y-2">
+      <div className="truncate text-center text-[11px] font-semibold text-slate-200">
+        {t("permanent.blockingWith", { name: blockerName })}
+      </div>
+      {stacks.map((stack) => {
+        const targetName =
+          objects?.[stack.attackTarget.data]?.name
+          ?? t("attackTargetPicker.objectFallback", { id: stack.attackTarget.data });
+        // Every candidate comes from `valid_block_targets[pendingBlocker]`,
+        // which the picker only opens for the local player's own prompt
+        // (`GroupedPermanentDisplay`'s `pickerContext` gate) — so a Player
+        // target here is always this defender. No other-player name fallback.
+        const targetLabel =
+          stack.attackTarget.type === "Player"
+            ? t("attackTargetPicker.you")
+            : stack.attackTarget.type === "Planeswalker"
+              ? t("attackTargetPicker.planeswalkerTarget", { name: targetName })
+              : t("attackTargetPicker.battleTarget", { name: targetName });
+
+        const labelParts = [targetLabel];
+        if (stack.bandId !== null) {
+          labelParts.push(t("combat.bandBadge", { n: bandOrdinals.get(stack.bandId) }));
+        }
+        if (stack.mustBlock) labelParts.push(t("combat.mustBlockBadge"));
+        if (stack.mustBeBlocked) labelParts.push(t("combat.mustBeBlockedBadge"));
+        if (stack.minBlockers > 0) {
+          labelParts.push(t("combat.blockNeedsBadge", { required: stack.minBlockers }));
+        }
+        if (stack.otherBlockerIds.length > 0) {
+          labelParts.push(
+            t("permanent.blockedBy", {
+              names: stack.otherBlockerIds
+                .map((id) => objects?.[id]?.name ?? t("attackTargetPicker.objectFallback", { id }))
+                .join(", "),
+            }),
+          );
+        }
+        // Without a band, no direct selection means this attacker is
+        // unblocked. A banded attacker may be blocked through a band-mate,
+        // which this direct-selection picker deliberately does not derive.
+        if (
+          stack.bandId === null &&
+          stack.assignedIds.length === 0 &&
+          stack.otherBlockerIds.length === 0
+        ) {
+          labelParts.push(t("permanent.unblocked"));
+        }
+        const label = labelParts.join(" · ");
+
+        return (
+          <div key={stack.key} role="group" aria-label={label} className="space-y-1">
+            <div className="truncate text-[10px] text-slate-300">{label}</div>
+            <CountPickerControls
+              count={stack.assignedIds.length}
+              max={stack.maxAssignable}
+              onChange={(n) =>
+                setGroupBlockerAssignments(blockerId, stack.ids, blockTargetSelection(stack, n))
+              }
+            />
+          </div>
+        );
+      })}
     </div>
   );
 }
