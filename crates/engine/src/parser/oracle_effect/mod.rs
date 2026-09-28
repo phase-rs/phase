@@ -29451,7 +29451,7 @@ pub(crate) fn try_parse_mana_spend_rider(text: &str) -> Option<ManaSpendRider> {
 /// up to and including the object it names — without requiring the text to end
 /// there, so the clause splitter can recognize the same rider as a conjunct
 /// (`starts_mana_spend_rider_conjunct`).
-fn parse_mana_spend_rider(input: &str) -> OracleResult<'_, ManaSpendRider> {
+pub(crate) fn parse_mana_spend_rider(input: &str) -> OracleResult<'_, ManaSpendRider> {
     // "If you cast a spell this way, mana of any type can be spent to cast it"
     // (Bloodsoaked Insight): the gate restates what the rider already means —
     // it applies only to a cast made through the grant — so it is dropped, as
