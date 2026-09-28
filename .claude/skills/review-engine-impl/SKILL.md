@@ -1,5 +1,5 @@
 ---
-name: review-impl
+name: review-engine-impl
 description: Review an implementation in scope, such as an uncommitted diff, a just-finished agent change, a commit, or named files, for missing or wrong behavior in phase.rs. Use when Codex needs a findings-only architecture and correctness review across engine, parser, frontend, multiplayer, AI, deck, build, or release changes.
 ---
 

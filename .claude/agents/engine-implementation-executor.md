@@ -209,7 +209,7 @@ Hard failures:
 - Parser shape tests do not satisfy runtime semantics or coverage-support claims. Parser-only shape tests are acceptable only when unsupported semantics remain honest via `Effect::unimplemented`, an equivalent strict-failure marker, or unchanged red coverage.
 - If any changed behavioral seam has no mapped production-path test, add one or return it as a stop-and-return item.
 
-This is the single most common defect the `/review-impl` loop catches (shape-only tests on keyword and parser PRs). Catch it here, before review.
+This is the single most common defect the `/review-engine-impl` loop catches (shape-only tests on keyword and parser PRs). Catch it here, before review.
 
 ### New-field threading sweep
 
@@ -217,7 +217,7 @@ If the diff adds a field to an existing enum variant or struct, grep the variant
 
 ### Maintainer-simulation matrix
 
-Before returning, produce a matrix for every behavioral claim or changed seam. This is the artifact the orchestrator and `/review-impl` use to catch the failure modes maintainers have been flagging in PR review.
+Before returning, produce a matrix for every behavioral claim or changed seam. This is the artifact the orchestrator and `/review-engine-impl` use to catch the failure modes maintainers have been flagging in PR review.
 
 Each row MUST include:
 
@@ -266,7 +266,7 @@ Return a structured report to the orchestrator. This structured report is your r
 9. **Stop-and-return items** — any places you stopped rather than improvise.
 10. **CR annotations added/changed** — each one with the grep command that verified it.
 11. **Deviations from the plan** — what changed vs. the plan and why.
-12. **Risks** — anything the orchestrator's checkpoint, measurement, completion, or `/review-impl` loop should pay extra attention to.
+12. **Risks** — anything the orchestrator's checkpoint, measurement, completion, or `/review-engine-impl` loop should pay extra attention to.
 
 ### Measurement-only output
 
