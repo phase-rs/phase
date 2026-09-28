@@ -47,6 +47,8 @@ A worktree based on `origin/main` gives a clean branch we cherry-pick into, isol
 
 ## Sequence
 
+Begin every shell command in this skill, including monitor loops, with the [project-reference](../project-reference/SKILL.md#github--git-cli-automation) prelude: `export RTK_DISABLED=1; export GH_TOKEN=$(command gh auth token)`. Environment does not carry between tool calls, and rtk can fabricate whole `gh`/`git` outputs, including the queue state Step 6 reports.
+
 ### 0. Reconcile already-shipped commits (run this FIRST)
 
 **Squash-merges leave the originals stranded on local `main`.** When a prior ship's PR squash-merges, its commits collapse into one *new* commit on `origin/main` with a different SHA and patch-id. The original commits still sit on local `main`, invisible to any SHA- or `git cherry` patch-id comparison. Left alone they pile up across sessions and — worse — get **re-shipped**, because Step 1's `git rev-list origin/main..main` re-lists them. Clear them before doing anything else.
@@ -232,6 +234,7 @@ gh pr merge "$PR_NUMBER" --auto
 `--auto` is necessary, but it does **not** prove that the PR is in the merge queue. Keep the ship workflow active until the PR is closed/merged, or this query reports a non-null `mergeQueueEntry`:
 
 ```bash
+export RTK_DISABLED=1; export GH_TOKEN=$(command gh auth token)
 gh api graphql \
   -f owner=phase-rs -f name=phase -F number="$PR_NUMBER" \
   -f query='query($owner:String!, $name:String!, $number:Int!) {
