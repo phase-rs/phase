@@ -860,9 +860,9 @@ describe("collapsed attacker pile blocker-assignment picker (integration)", () =
     });
   });
 
-  it("merges a band-mate into the same 'Blocked by' stack instead of showing it as a separate Unblocked stack (CR 702.22h)", () => {
+  it("shows a band-mate of another blocker's pick by its own direct assignments", () => {
     // Attackers 14 and 15 share band 5 and both attack Player 0 (their
-    // DEFAULT_ATTACKERS target already), isolating the propagation axis.
+    // DEFAULT_ATTACKERS target already), isolating the band axis.
     const bandedAttackers: AttackerInfo[] = DEFAULT_ATTACKERS.map((attacker) =>
       attacker.object_id === 14 || attacker.object_id === 15
         ? { ...attacker, band_id: 5 }
@@ -877,51 +877,44 @@ describe("collapsed attacker pile blocker-assignment picker (integration)", () =
       bandedAttackers,
     );
 
-    // Blocker 101 assigns the band (claims lowest-id member 14).
+    // Blocker 101 directly assigns 14 (lowest-id member).
     clickPermanent(container, 101);
     fireEvent.click(screen.getByRole("button", { name: "Choose Scute Swarm token" }));
     const bandStackFor101 = groupWhere((label) => label.includes("Band 1"));
     fireEvent.click(within(bandStackFor101).getByRole("button", { name: "+1" }));
     fireEvent.click(screen.getByRole("button", { name: "Confirm Blockers (1)" }));
 
-    // The collapsed pile's blocked-count badge already counts BOTH band-mates
-    // here even though only 14 is directly assigned a blocker — 15 is blocked
-    // too via CR 702.22h band propagation.
-    expect(screen.getByText("blk 2")).toBeInTheDocument();
+    // The pile's badge counts only the one direct assignment (14); 15 has none.
+    expect(screen.getByText("blk 1")).toBeInTheDocument();
 
-    // Blocker 100's picker must show ONE stack covering both band-mates,
-    // labeled "Blocked by Runeclaw Bear" — never a second "Unblocked" stack
-    // for 15, which CR 702.22h also blocks the moment 14 is. 100 "Grizzly
-    // Bears" has capacity 1, so the stack's ceiling is 1, not its size 2.
+    // Blocker 100's picker shows 14 and 15 in two separate stacks (each keeps
+    // its own direct assignments), both still carrying the "Band 1" chip.
     clickPermanent(container, 100);
-    expect(screen.getAllByRole("group")).toHaveLength(1);
-    const blockedBandGroup = groupWhere((label) => label.includes("Blocked by Runeclaw Bear"));
-    expect(blockedBandGroup.getAttribute("aria-label")).not.toContain("Unblocked");
-    expect(within(blockedBandGroup).getByText("0 / 1")).toBeInTheDocument();
+    expect(screen.getAllByRole("group")).toHaveLength(2);
+    const blockedGroup = groupWhere(
+      (label) => label.includes("Band 1") && label.includes("Blocked by Runeclaw Bear"),
+    );
+    const unblockedGroup = groupWhere(
+      (label) => label.includes("Band 1") && label.includes("Unblocked") && !label.includes("Blocked by"),
+    );
+    expect(within(blockedGroup).getByText("0 / 1")).toBeInTheDocument();
+    expect(within(unblockedGroup).getByText("0 / 1")).toBeInTheDocument();
 
-    fireEvent.click(within(blockedBandGroup).getByRole("button", { name: "All" }));
+    fireEvent.click(within(blockedGroup).getByRole("button", { name: "All" }));
     fireEvent.click(screen.getByRole("button", { name: /Confirm Blockers/ }));
-    // 15 is not added: 100's capacity (1) is already exhausted by 14.
     expect(dispatchAction).toHaveBeenLastCalledWith({
       type: "DeclareBlockers",
       data: { assignments: [[101, 14], [100, 14]] },
     });
 
-    // Now that 100 also directly blocks 14, its band-mate 15 is held through
-    // 100's OWN band block (CR 702.22h) in addition to still being blocked by
-    // 101 directly — both facts appear in one label.
-    expect(screen.getAllByRole("group")).toHaveLength(2);
-    const directPick = groupWhere(
-      (label) => !label.includes("through its band") && label.includes("Blocked by Runeclaw Bear"),
-    );
-    const heldThroughOwnBand = groupWhere((label) => label.includes("through its band"));
-    expect(within(directPick).getByText("1 / 1")).toBeInTheDocument();
-    expect(heldThroughOwnBand.getAttribute("aria-label")).toContain(
-      "Blocked by Grizzly Bears through its band",
-    );
-    expect(heldThroughOwnBand.getAttribute("aria-label")).toContain("Blocked by Runeclaw Bear");
-    expect(within(heldThroughOwnBand).getByText("0 / 0")).toBeInTheDocument();
-    expect(within(heldThroughOwnBand).getByRole("button", { name: "+1" })).toBeDisabled();
+    expect(within(groupWhere((label) => label.includes("Blocked by Runeclaw Bear"))).getByText(
+      "1 / 1",
+    )).toBeInTheDocument();
+    const stillUnblocked = groupWhere((label) => label.includes("Unblocked"));
+    expect(within(stillUnblocked).getByText("0 / 0")).toBeInTheDocument();
+    expect(within(stillUnblocked).getByRole("button", { name: "+1" })).toBeDisabled();
+
+    expect(screen.getByText("blk 1")).toBeInTheDocument();
   });
 
   it("keeps a band's ordinal stable across different pending blockers instead of renumbering per picker (CR 702.22c)", () => {
@@ -981,7 +974,7 @@ describe("collapsed attacker pile blocker-assignment picker (integration)", () =
     });
   });
 
-  it("labels the band-mates of the pending blocker's own pick as blocked by it through the band, never Unblocked (CR 702.22h)", () => {
+  it("keeps the pending blocker's own band pick and its band-mates in one stack, and counts only the direct pick", () => {
     const bandedAttackers: AttackerInfo[] = DEFAULT_ATTACKERS.map((attacker) =>
       attacker.object_id === 14 || attacker.object_id === 15 || attacker.object_id === 16
         ? { ...attacker, band_id: 5, attack_target: { type: "Player" as const, data: 0 } }
@@ -999,31 +992,25 @@ describe("collapsed attacker pile blocker-assignment picker (integration)", () =
     clickPermanent(container, 100);
     fireEvent.click(screen.getByRole("button", { name: "Choose Scute Swarm token" }));
     expect(screen.getAllByRole("group")).toHaveLength(1);
-    const wholeBand = groupWhere(() => true);
-    expect(within(wholeBand).getByText("0 / 1")).toBeInTheDocument();
+    expect(within(groupWhere(() => true)).getByText("0 / 1")).toBeInTheDocument();
 
-    fireEvent.click(within(wholeBand).getByRole("button", { name: "All" }));
+    fireEvent.click(within(groupWhere(() => true)).getByRole("button", { name: "All" }));
     fireEvent.click(screen.getByRole("button", { name: "Confirm Blockers (1)" }));
     expect(dispatchAction).toHaveBeenLastCalledWith({
       type: "DeclareBlockers",
       data: { assignments: [[100, 14]] },
     });
 
-    expect(screen.getAllByRole("group")).toHaveLength(2);
-    const directPick = groupWhere((label) => !label.includes("through its band"));
-    const heldByOwnBand = groupWhere((label) => label.includes("through its band"));
-    expect(within(directPick).getByText("1 / 1")).toBeInTheDocument();
-    expect(heldByOwnBand.getAttribute("aria-label")).toContain("Blocked by Grizzly Bears through its band");
-    expect(heldByOwnBand.getAttribute("aria-label")).not.toContain("Unblocked");
-    expect(within(heldByOwnBand).getByText("0 / 0")).toBeInTheDocument();
-    expect(within(heldByOwnBand).getByRole("button", { name: "+1" })).toBeInTheDocument();
-    expect(within(heldByOwnBand).getByRole("button", { name: "+1" })).toBeDisabled();
+    expect(screen.getAllByRole("group")).toHaveLength(1);
+    const stack = groupWhere(() => true);
+    expect(within(stack).getByText("1 / 1")).toBeInTheDocument();
+    expect(within(stack).getByRole("button", { name: "+1" })).toBeDisabled();
+    expect(stack.getAttribute("aria-label")).toContain("Unblocked");
 
-    // The pile's badge counts all three band-mates as blocked, even though
-    // only 14 was ever directly assigned.
-    expect(screen.getByText("blk 3")).toBeInTheDocument();
+    // The pile's badge counts only the direct pick (14).
+    expect(screen.getByText("blk 1")).toBeInTheDocument();
 
-    fireEvent.click(within(directPick).getByRole("button", { name: "-1" }));
+    fireEvent.click(within(stack).getByRole("button", { name: "-1" }));
     expect(screen.getAllByRole("group")).toHaveLength(1);
     expect(within(groupWhere(() => true)).getByText("0 / 1")).toBeInTheDocument();
   });
@@ -1057,16 +1044,10 @@ describe("collapsed attacker pile blocker-assignment picker (integration)", () =
     expect(within(mustBeBlockedGroup).getByText("2 / 2")).toBeInTheDocument();
 
     fireEvent.click(within(mustBeBlockedGroup).getByRole("button", { name: "-1" }));
-    expect(screen.getAllByRole("group")).toHaveLength(2);
-    const directOnly = groupWhere((label) => !label.includes("through its band"));
-    const heldMustBeBlocked = groupWhere((label) => label.includes("through its band"));
-    expect(within(directOnly).getByText("1 / 1")).toBeInTheDocument();
-    expect(heldMustBeBlocked.getAttribute("aria-label")).toContain(
-      "Blocked by Runeclaw Bear through its band",
-    );
-    expect(heldMustBeBlocked.getAttribute("aria-label")).toContain("Must be blocked");
-    expect(within(heldMustBeBlocked).getByText("0 / 1")).toBeInTheDocument();
-    expect(within(heldMustBeBlocked).getByRole("button", { name: "+1" })).toBeEnabled();
+    expect(screen.getAllByRole("group")).toHaveLength(1);
+    const stillMustBeBlocked = groupWhere((label) => label.includes("Must be blocked"));
+    expect(within(stillMustBeBlocked).getByText("1 / 2")).toBeInTheDocument();
+    expect(within(stillMustBeBlocked).getByRole("button", { name: "+1" })).toBeEnabled();
 
     fireEvent.click(screen.getByRole("button", { name: "Confirm Blockers (1)" }));
     expect(dispatchAction).toHaveBeenLastCalledWith({
@@ -1074,7 +1055,7 @@ describe("collapsed attacker pile blocker-assignment picker (integration)", () =
       data: { assignments: [[101, 14]] },
     });
 
-    fireEvent.click(within(heldMustBeBlocked).getByRole("button", { name: "+1" }));
+    fireEvent.click(within(groupWhere((label) => label.includes("Must be blocked"))).getByRole("button", { name: "+1" }));
     fireEvent.click(screen.getByRole("button", { name: "Confirm Blockers (2)" }));
     expect(dispatchAction).toHaveBeenLastCalledWith({
       type: "DeclareBlockers",

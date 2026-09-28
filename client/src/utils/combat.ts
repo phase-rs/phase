@@ -292,15 +292,10 @@ export function evenSplit(count: number, buckets: number): number[] {
  * CR 509.1b/CR 702.111b (the minimum-blocker count another static or Menace
  * imposes on the attacker); CR 509.1c (a requirement carried by either
  * combatant — the pending blocker's own "block X if able", or the attacker's
- * "must be blocked" static); CR 702.22h (a block assigned to one attacker in
- * a band also blocks every other attacker in that band, so a banded member is
- * not interchangeable with a bandless one or a member of a different band —
- * CR 702.22c allows a pile to mix all three); and whether the pending
- * blocker's OWN block reaches a member directly or only through a band-mate
- * (`heldThroughBand` — the two are different choices even when every other
- * axis matches, since only the direct pick can satisfy a CR 509.1c
- * requirement on that member). Legality itself is not an axis: the caller
- * already filters to `valid_block_targets[pendingBlocker]` before stacking.
+ * "must be blocked" static); CR 702.22c (band membership — a member of one
+ * band is not interchangeable with a bandless member or a member of a
+ * different band). Legality itself is not an axis: the caller already
+ * filters to `valid_block_targets[pendingBlocker]` before stacking.
  */
 export interface BlockTargetStack {
   /** Stable key for the stack (the lowest member id, stringified). */
@@ -311,12 +306,10 @@ export interface BlockTargetStack {
   count: number;
   /** CR 509.1a: the attack target shared by every member of this stack. */
   attackTarget: AttackTarget;
-  /** Other blockers (never the pending one) already assigned to every member
-   *  of this stack, ascending — including blockers assigned only to a
-   *  band-mate (CR 702.22h: a block on one band member blocks the rest of the
-   *  band too). A double block onto an already-blocked attacker is a
-   *  different choice than a fresh block (CR 702.111b menace needs two or
-   *  more on the SAME attacker). */
+  /** Other blockers (never the pending one) directly assigned to every
+   *  member of this stack, ascending. A double block onto an already-blocked
+   *  attacker is a different choice than a fresh block (CR 702.111b menace
+   *  needs two or more on the SAME attacker). */
   otherBlockerIds: ObjectId[];
   /** CR 509.1b / CR 702.111b: the minimum-blocker count this stack's members
    *  require, 0 when none applies. */
@@ -334,70 +327,35 @@ export interface BlockTargetStack {
    *  ascending — kept in their stack rather than split out, so growing or
    *  shrinking the count can find them. */
   assignedIds: ObjectId[];
-  /** CR 702.22h: every member is already blocked by the pending blocker
-   *  through a band-mate's direct pair, not through a pair of its own — never
-   *  true for an `assignedIds` member. Display-only marker: it changes the
-   *  row's label, never its ceiling (a held member still needs a direct pick
-   *  to satisfy its own CR 509.1c requirement, so its stepper stays bounded
-   *  by {@link maxAssignable} like any other stack). */
-  heldThroughBand: boolean;
   /** The most of this stack's members the pending blocker may hold directly,
    *  from its published block capacity minus its direct assignments outside
    *  this stack (`partitionBlockTargets`'s `blockCapacities` option); `ids.length`
    *  when its capacity is absent or `null` (any number). Bounds the stepper's
-   *  `max`; a held or must-be-blocked member is bounded by capacity alone —
-   *  never zeroed just because it is held. */
+   *  `max`. No band-specific ceiling. */
   maxAssignable: number;
 }
 
 /**
- * CR 702.22h: once one attacker in a band is blocked, every other attacker in
- * the same band becomes blocked by that same blocker. Maps each attacker's
- * object id to every UI-assigned blocker that reaches it — directly, or
- * through a band-mate's direct pair — ascending; an attacker no blocker
- * reaches is absent. Built from two internal maps, never one keyed
- * `band ?? id`: band ids and attacker object ids are separate key spaces that
- * overlap numerically (`combat.rs::apply_attack_band_ids` numbers bands
- * `1u32..`; `GameState::new` starts `next_object_id` at 1), so a single merged
- * map would fold a bandless `ObjectId(n)` together with band `n`.
+ * Maps each attacker's object id to every blocker directly UI-assigned to
+ * it, ascending; an attacker no blocker is assigned to is absent. Band blocks
+ * are not previewed here — the engine applies them when it processes the
+ * declaration (`combat.rs::propagate_banding_block_state`, called from
+ * `combat.rs::declare_blockers_for_player`).
  */
 export function blockersByAttacker(
-  attackers: AttackerInfo[] | undefined,
   blockerAssignments: ReadonlyMap<ObjectId, ReadonlySet<ObjectId>>,
 ): ReadonlyMap<ObjectId, readonly ObjectId[]> {
-  const bandIdByAttacker = new Map<ObjectId, number>();
-  for (const attacker of attackers ?? []) {
-    if (attacker.band_id != null) bandIdByAttacker.set(attacker.object_id, attacker.band_id);
-  }
-
-  const byBand = new Map<number, Set<ObjectId>>();
-  const byId = new Map<ObjectId, Set<ObjectId>>();
+  const byId = new Map<ObjectId, ObjectId[]>();
   for (const [blockerId, attackerIds] of blockerAssignments) {
     for (const attackerId of attackerIds) {
-      const bandId = bandIdByAttacker.get(attackerId);
-      const bucketMap = bandId != null ? byBand : byId;
-      const bucketKey = bandId != null ? bandId : attackerId;
-      const bucket = bucketMap.get(bucketKey);
-      if (bucket) bucket.add(blockerId);
-      else bucketMap.set(bucketKey, new Set([blockerId]));
+      const bucket = byId.get(attackerId);
+      if (bucket) bucket.push(blockerId);
+      else byId.set(attackerId, [blockerId]);
     }
   }
-
-  // Every `byId` key (a direct assignment with no band, or to an id with no
-  // `attackers` record at all) reaches the result as-is; every attacker whose
-  // band has a `byBand` entry shares that band's blockers, sorted once.
   const result = new Map<ObjectId, readonly ObjectId[]>();
   for (const [attackerId, blockerIds] of byId) {
-    result.set(attackerId, Array.from(blockerIds).sort((a, b) => a - b));
-  }
-  const sortedByBand = new Map<number, readonly ObjectId[]>();
-  for (const [bandId, blockerIds] of byBand) {
-    sortedByBand.set(bandId, Array.from(blockerIds).sort((a, b) => a - b));
-  }
-  for (const attacker of attackers ?? []) {
-    if (attacker.band_id == null) continue;
-    const sorted = sortedByBand.get(attacker.band_id);
-    if (sorted) result.set(attacker.object_id, sorted);
+    result.set(attackerId, blockerIds.sort((a, b) => a - b));
   }
   return result;
 }
@@ -433,7 +391,7 @@ export function partitionBlockTargets(
     attackTargetById.set(attacker.object_id, attacker.attack_target);
     bandIdById.set(attacker.object_id, attacker.band_id ?? null);
   }
-  const reachingBlockers = blockersByAttacker(attackers, blockerAssignments);
+  const directBlockers = blockersByAttacker(blockerAssignments);
   const pendingConstraint = blockerConstraints?.[pendingBlocker];
   const mustBlockIds = new Set(
     pendingConstraint?.kind === "MustBlock" ? pendingConstraint.attackers ?? [] : [],
@@ -451,7 +409,6 @@ export function partitionBlockTargets(
     mustBeBlocked: boolean;
     bandId: number | null;
     assignedIds: ObjectId[];
-    heldThroughBand: boolean;
   }
   const buckets = new Map<string, Bucket>();
 
@@ -464,15 +421,9 @@ export function partitionBlockTargets(
     // rather than guessing a target.
     if (!attackTarget) continue;
     const isAssigned = pendingAssignments?.has(id) ?? false;
-    // CR 702.22h: every blocker `blockersByAttacker` says reaches `id` —
-    // directly or through a band-mate — blocks it. `otherBlockerIds` is that
-    // set minus the pending blocker; `heldThroughBand` is true exactly when
-    // the pending blocker itself is in that set WITHOUT a direct pair on
-    // `id` (CR 702.22h propagation from a band-mate, never true for an
-    // `isAssigned` member).
-    const reaching = reachingBlockers.get(id) ?? [];
-    const otherBlockerIds = reaching.filter((blockerId) => blockerId !== pendingBlocker);
-    const heldThroughBand = !isAssigned && reaching.includes(pendingBlocker);
+    const otherBlockerIds = (directBlockers.get(id) ?? []).filter(
+      (blockerId) => blockerId !== pendingBlocker,
+    );
     const minBlockers = blockRequirements?.[id]?.count ?? 0;
     const mustBlock = mustBlockIds.has(id);
     const mustBeBlocked = mustBeBlockedIds.has(id);
@@ -484,7 +435,6 @@ export function partitionBlockTargets(
       mustBlock,
       mustBeBlocked,
       bandId,
-      heldThroughBand,
     ].join("|");
 
     const bucket = buckets.get(signature);
@@ -501,7 +451,6 @@ export function partitionBlockTargets(
         mustBeBlocked,
         bandId,
         assignedIds: isAssigned ? [id] : [],
-        heldThroughBand,
       });
     }
   }
@@ -510,8 +459,7 @@ export function partitionBlockTargets(
     .map((bucket) => {
       // The most of this stack the pending blocker may hold directly: its
       // published capacity (`null`/absent = any number) minus its direct
-      // assignments OUTSIDE this stack. No band-specific ceiling — a held or
-      // must-be-blocked member is bounded by capacity alone.
+      // assignments OUTSIDE this stack. No band-specific ceiling.
       const outside = (pendingAssignments?.size ?? 0) - bucket.assignedIds.length;
       const maxAssignable =
         capacity == null ? bucket.ids.length : Math.min(bucket.ids.length, Math.max(0, capacity - outside));
@@ -526,7 +474,6 @@ export function partitionBlockTargets(
         mustBeBlocked: bucket.mustBeBlocked,
         bandId: bucket.bandId,
         assignedIds: bucket.assignedIds,
-        heldThroughBand: bucket.heldThroughBand,
         maxAssignable,
       };
     })
