@@ -6243,7 +6243,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         // insensitive per the same convention used by the live-object path.
         // Approach of the Second Sun's "you've cast another spell named
         // {LITERAL} this game" relies on this against the game-scope history.
-        FilterProp::Named { name } => record.name.eq_ignore_ascii_case(name),
+        FilterProp::Named { name } => card_names_match(&record.name, name),
         // SpellCastRecord carries no modal field — conservative gap (CR 700.2
         // evaluated on the live stack object, not the snapshot).
         FilterProp::Modal => false,
@@ -7173,13 +7173,13 @@ fn matches_filter_prop(
         // non-self-referential "counts as named" card appears, this may need a
         // source-filter check.
         FilterProp::Named { name } => {
-            obj.name.eq_ignore_ascii_case(name)
+            card_names_match(&obj.name, name)
                 || obj.static_definitions.iter_all().any(|sd| {
                     // Only count the alias if the static's active_zones include
                     // the object's current zone (or active_zones is empty = always).
                     if let StaticMode::CountsAsNamed { name: alias } = &sd.mode {
                         (sd.active_zones.is_empty() || sd.active_zones.contains(&obj.zone))
-                            && alias.eq_ignore_ascii_case(name)
+                            && card_names_match(alias, name)
                     } else {
                         false
                     }
@@ -7965,6 +7965,18 @@ pub(crate) fn object_has_no_abilities(obj: &GameObject) -> bool {
 ///    zone, so these are semantically not applicable and return `false`.
 /// 5. **Not-yet-supported.** Could plausibly be snapshotted or cross-referenced but
 ///    are not currently required. Returning `false` is a known conservative gap.
+/// CR 201.2 + CR 201.2a: case-insensitive card-name equality under full Unicode
+/// lowercase folding. `eq_ignore_ascii_case` folds only `A`–`Z`, while the Oracle
+/// parser lowers text with `str::to_lowercase`, so a stored "éowyn, shieldmaiden"
+/// never matched an object named "Éowyn, Shieldmaiden", and inside `Not` that
+/// miss became a false "not named" match. Single authority for every
+/// `FilterProp::Named` arm (live object, spell-cast record, zone-change record).
+pub(crate) fn card_names_match(a: &str, b: &str) -> bool {
+    a.chars()
+        .flat_map(char::to_lowercase)
+        .eq(b.chars().flat_map(char::to_lowercase))
+}
+
 fn zone_change_record_matches_property(
     prop: &FilterProp,
     state: &GameState,
@@ -8000,7 +8012,7 @@ fn zone_change_record_matches_property(
             !zone_change_record_matches_property(&FilterProp::Historic, state, record, source)
         }
         // CR 201.2: Name match (case-insensitive) on the event-time object.
-        FilterProp::Named { name } => record.name.eq_ignore_ascii_case(name),
+        FilterProp::Named { name } => card_names_match(&record.name, name),
         // CR 208 + CR 208.4b: Power/toughness metric threshold on the
         // event-time object. A `None` value (non-creature in some zones) treats
         // as 0, matching live-state behavior. The zone-change snapshot captures

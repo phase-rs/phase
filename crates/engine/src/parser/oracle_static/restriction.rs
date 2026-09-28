@@ -1963,6 +1963,10 @@ pub(crate) fn try_parse_graveyard_cast_permission(
         // creature, enchantment, land, planeswalker). The downstream slot
         // picker enforces the per-permanent-type per-turn limit.
         let affected = TargetFilter::Typed(TypedFilter::new(TypeFilter::Permanent));
+        // CR 102.1 + CR 601.3: "During each of your turns" limits the grant to
+        // turns its controller is the active player. The frequency only caps the
+        // count per turn; the turn restriction rides the condition, which every
+        // offer/admission/prepare consumer reads through `active_static_definitions`.
         return Some(
             StaticDefinition::new(StaticMode::GraveyardCastPermission {
                 frequency: CastFrequency::OncePerTurnPerPermanentType,
@@ -1972,6 +1976,7 @@ pub(crate) fn try_parse_graveyard_cast_permission(
                 enters_with_counter: None,
             })
             .affected(affected)
+            .condition(StaticCondition::DuringYourTurn)
             .description(text.to_string()),
         );
     }
@@ -2060,25 +2065,25 @@ pub(crate) fn try_parse_graveyard_cast_permission(
     // cycle's windowed form from the only branch that builds the two-part
     // `Or[Land, Card]` filter. See the hoisted site for the measurement.
 
-    // CR 117.1c: Optional "during your turn, " timing qualifier (Festival of
-    // Embers). When present, the permission is gated to the source controller's
-    // turn via a `ParsedCondition::IsYourTurn` static condition
-    // (`evaluate_condition` → `state.active_player == controller`), the
-    // rules-correct enforcement at CR 102.1 — not silently dropped.
-    let (lower, your_turn_only) = match nom_tag_lower(lower, lower, "during your turn, ") {
+    // CR 102.1 + CR 601.3: Optional "during your turn, " timing qualifier
+    // (Festival of Embers). When present, the permission is gated to the source
+    // controller's turn via `StaticCondition::DuringYourTurn` — not silently
+    // dropped.
+    let (lower, during_your_turn_head) = match nom_tag_lower(lower, lower, "during your turn, ") {
         Some(r) => (r, true),
         None => (lower, false),
     };
 
-    // Determine pattern and extract the rest after the prefix
-    let (rest, frequency, play_mode) = if let Some(r) = nom_tag_lower(
+    // Determine pattern and extract the rest after the prefix. The third flag
+    // records whether the lead itself names "each of your turns" (CR 102.1).
+    let (rest, frequency, play_mode, each_of_your_turns) = if let Some(r) = nom_tag_lower(
         lower,
         lower,
         "once during each of your turns, you may cast ",
     ) {
-        (r, CastFrequency::OncePerTurn, CardPlayMode::Cast)
+        (r, CastFrequency::OncePerTurn, CardPlayMode::Cast, true)
     } else if let Some(r) = nom_tag_lower(lower, lower, "you may play ") {
-        (r, CastFrequency::Unlimited, CardPlayMode::Play)
+        (r, CastFrequency::Unlimited, CardPlayMode::Play, false)
     } else {
         let r = nom_tag_lower(lower, lower, "you may cast ")?;
         // Only match if a graveyard anchor follows — avoid catching other "you
@@ -2088,8 +2093,12 @@ pub(crate) fn try_parse_graveyard_cast_permission(
         {
             return None;
         }
-        (r, CastFrequency::Unlimited, CardPlayMode::Cast)
+        (r, CastFrequency::Unlimited, CardPlayMode::Cast, false)
     };
+    // CR 102.1 + CR 601.3: "during your turn" and "(once) during each of your
+    // turns" both limit the grant to turns its controller is the active
+    // player. The frequency only caps the count per turn.
+    let your_turn_only = during_your_turn_head || each_of_your_turns;
 
     let (filter_text, trailing, pool_props) = split_graveyard_permission_anchor(rest)?;
 
@@ -2171,11 +2180,23 @@ pub(crate) fn try_parse_graveyard_cast_permission(
     // `.trim()` (not `.is_empty()`): a two-sentence "if X. If you do, Y."
     // permission leaves a whitespace-only residual (Undead Sprinter) that must
     // still be treated as fully consumed so the gate condition is not re-dropped.
-    // A condition whose parse leaves semantic text is dropped exactly as before
-    // (its residual still feeds the destination-rider check below).
+    //
+    // CR 601.3: a gate that is printed ("if …" / "as long as …") but not fully
+    // modelled declines the WHOLE permission. Emitting it with no condition
+    // would make the card castable from the graveyard unconditionally (strictly
+    // more permissive than printed). Declining leaves the line an honest
+    // unsupported gap. Measured over the export: only Risen Executioner's "if
+    // you pay {1} more …" cost-shaped gate moves.
+    let gate_present = alt((
+        tag::<_, _, OracleError<'_>>(" as long as "),
+        tag::<_, _, OracleError<'_>>(" if "),
+    ))
+    .parse(trailing)
+    .is_ok();
     let (condition, residual) = match parse_graveyard_permission_condition(trailing) {
         Ok((rest, condition)) if rest.trim().is_empty() => (Some(condition), rest),
-        Ok((rest, _)) => (None, rest),
+        Ok(_) => return None,
+        Err(_) if gate_present => return None,
         Err(_) => (None, trailing),
     };
     if graveyard_destination_replacement.is_some() && !is_punctuation_only(residual) {
@@ -2204,12 +2225,18 @@ pub(crate) fn try_parse_graveyard_cast_permission(
     })
     .affected(affected)
     .description(text.to_string());
+    // CR 102.1 + CR 601.3: the lead's turn restriction and a parsed gate both
+    // hold; neither may displace the other.
+    let condition = match (condition, your_turn_only) {
+        (Some(gate), true) => Some(StaticCondition::And {
+            conditions: vec![StaticCondition::DuringYourTurn, gate],
+        }),
+        (Some(gate), false) => Some(gate),
+        (None, true) => Some(StaticCondition::DuringYourTurn),
+        (None, false) => None,
+    };
     if let Some(condition) = condition {
         def = def.condition(condition);
-    } else if your_turn_only {
-        // CR 102.1 + CR 117.1c: gate the permission to the source controller's
-        // turn (Festival of Embers' "During your turn, ...").
-        def = def.condition(StaticCondition::DuringYourTurn);
     }
     if self_ref_permission {
         def = def.active_zones(vec![Zone::Graveyard]);
@@ -2622,12 +2649,17 @@ fn try_parse_disjunctive_graveyard_cast_permission(
     // CR 601.2a: Frequency prefix. Only the once-per-turn lead is a real printed
     // shape for this disjunctive form today; accept both the canonical wording
     // and the shorter "once each turn" synonym via the file-wide `or_else` chain.
-    let rest = nom_tag_lower(
+    // CR 102.1 + CR 601.3: "during each of your turns" restricts the grant to
+    // its controller's turns; "once each turn" does not name whose turn.
+    let (rest, your_turn_only) = nom_tag_lower(
         lower,
         lower,
         "once during each of your turns, you may play ",
     )
-    .or_else(|| nom_tag_lower(lower, lower, "once each turn, you may play "))?;
+    .map(|rest| (rest, true))
+    .or_else(|| {
+        nom_tag_lower(lower, lower, "once each turn, you may play ").map(|rest| (rest, false))
+    })?;
     if nom_primitives::scan_contains(rest, "if you do, it gains") {
         return None;
     }
@@ -2706,20 +2738,23 @@ fn try_parse_disjunctive_graveyard_cast_permission(
         }
     };
 
-    Some(
-        StaticDefinition::new(StaticMode::GraveyardCastPermission {
-            frequency: CastFrequency::OncePerTurn,
-            // CR 305.1: `Play` covers both the land-play and spell-cast branches.
-            play_mode: CardPlayMode::Play,
-            // Stack-exit redirect is wrong for the granted leave-battlefield
-            // rider (see doc comment); leave it unset.
-            graveyard_destination_replacement: None,
-            extra_cost: None,
-            enters_with_counter: None,
-        })
-        .affected(affected)
-        .description(text.to_string()),
-    )
+    let def = StaticDefinition::new(StaticMode::GraveyardCastPermission {
+        frequency: CastFrequency::OncePerTurn,
+        // CR 305.1: `Play` covers both the land-play and spell-cast branches.
+        play_mode: CardPlayMode::Play,
+        // Stack-exit redirect is wrong for the granted leave-battlefield
+        // rider (see doc comment); leave it unset.
+        graveyard_destination_replacement: None,
+        extra_cost: None,
+        enters_with_counter: None,
+    })
+    .affected(affected)
+    .description(text.to_string());
+    Some(if your_turn_only {
+        def.condition(StaticCondition::DuringYourTurn)
+    } else {
+        def
+    })
 }
 
 /// CR 305.1 + CR 601.2a + CR 114.4: Parse unlimited combined graveyard
