@@ -19,8 +19,8 @@ is not satisfied by reading the skill and editing by hand.
 
 The skill orchestrates the full pipeline — plan → review-plan → implement →
 review-engine-impl → commit — each step in a fresh agent context. A review loop
-closes when a round has no behavior findings; the skill's run limits bound the
-rest by finding class and your budget. This is how the repo keeps
+closes after two consecutive rounds without behavior findings; the skill's run
+limits bound the rest by finding class and your budget. This is how the repo keeps
 ad-hoc edits from shipping plausible-but-wrong ASTs, special-cased logic that
 breaks the next card, and unverified CR annotations.
 

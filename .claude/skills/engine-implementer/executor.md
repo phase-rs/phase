@@ -107,16 +107,19 @@ After a non-zero `tilt-wait.sh`, fetch details with `tilt logs <resource> --tail
 
 ### Parser preparatory gate
 
-If any modified file is under `crates/engine/src/parser/`, inspect added lines for string dispatch:
+If any modified or new file is under `crates/engine/src/parser/`, inspect added lines for string dispatch. You never stage, so a new file is untracked and absent from `git diff`; every line of it counts as added:
 
 ```bash
-git -C "$IMPLEMENTATION_WORKTREE" diff --name-only -z "$START_SHA" -- crates/engine/src/parser/ \
-  | while IFS= read -r -d '' f; do
-  git -C "$IMPLEMENTATION_WORKTREE" diff --unified=0 "$START_SHA" -- "$f" \
-    | grep '^+' | grep -v '^+++' | grep -vE '^\+\s*//' \
-    | grep -E '\.(contains|starts_with|ends_with|find|rfind|split|splitn|rsplit|split_once)\(' \
-    | grep -v '#\[test\]' | grep -v '#\[cfg(test)\]'
-done
+{
+  git -C "$IMPLEMENTATION_WORKTREE" diff --name-only -z "$START_SHA" -- crates/engine/src/parser/ \
+    | while IFS= read -r -d '' f; do
+    git -C "$IMPLEMENTATION_WORKTREE" diff --unified=0 "$START_SHA" -- "$f" | grep '^+' | grep -v '^+++'
+  done
+  git -C "$IMPLEMENTATION_WORKTREE" ls-files --others --exclude-standard -z -- crates/engine/src/parser/ \
+    | while IFS= read -r -d '' f; do sed 's/^/+/' "$IMPLEMENTATION_WORKTREE/$f"; done
+} | grep -vE '^\+\s*//' \
+  | grep -E '\.(contains|starts_with|ends_with|find|rfind|split|splitn|rsplit|split_once)\(' \
+  | grep -v '#\[test\]' | grep -v '#\[cfg(test)\]'
 ```
 
 The `rfind`/`split`/`split_once`/`rsplit` arms are deliberate: `scripts/check-parser-combinators.sh` does not catch them, so a green gate is not proof of combinator compliance — this inline grep covers that blind spot. Any output is a hard failure unless it is a test, comment, explicitly annotated non-dispatch structural use, or `oracle_util.rs` dual-string `TextPair` helper work.
@@ -197,10 +200,13 @@ Hard failures:
 
 ### CR-annotation diff gate
 
-`docs/MagicCompRules.txt` is gitignored and may be absent in a fresh worktree; if so, run `./scripts/fetch-comp-rules.sh` once. Before returning, grep every CR number you added or changed **in the diff** against it — not just the ones you remember writing:
+`docs/MagicCompRules.txt` is gitignored and may be absent in a fresh worktree; if so, run `./scripts/fetch-comp-rules.sh` once. Before returning, grep every CR number you added or changed **in the diff or in a new untracked file** against it — not just the ones you remember writing:
 
 ```bash
-git diff | grep -E '^\+' | grep -oE 'CR [0-9]{3}(\.[0-9]+[a-z]?)?' | sed 's/^CR //' | sort -u \
+{ git diff
+  git ls-files --others --exclude-standard -z \
+    | while IFS= read -r -d '' f; do grep -Iq . "$f" && sed 's/^/+/' "$f"; done
+} | grep -E '^\+' | grep -oE 'CR [0-9]{3}(\.[0-9]+[a-z]?)?' | sed 's/^CR //' | sort -u \
   | while read -r n; do grep -qE "^${n}([^0-9]|$)" docs/MagicCompRules.txt || echo "UNVERIFIED: CR ${n}"; done
 ```
 
