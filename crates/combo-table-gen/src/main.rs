@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use combo_table_gen::{build_combo_table, sha256_file_prefix, BuildLimits, PINNED_SNAPSHOT};
-use engine::database::CardDatabase;
+use engine::database::{CardDatabase, ComboTable};
 
 #[derive(Debug, Parser)]
 #[command(about = "Build or check the pinned facts-only Commander combo table")]
@@ -43,7 +43,12 @@ fn generate(args: &Args) -> Result<Vec<u8>> {
     let snapshot = File::open(&args.snapshot)
         .with_context(|| format!("failed to open snapshot {}", args.snapshot.display()))?;
     let doc = build_combo_table(snapshot, &pool, &PINNED_SNAPSHOT, &limits)?;
-    Ok(serde_json::to_vec(&doc)?)
+    let bytes = serde_json::to_vec(&doc)?;
+    let raw = std::str::from_utf8(&bytes).context("generated combo table was not valid UTF-8")?;
+    ComboTable::from_json_str(raw)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))
+        .context("generated combo table failed runtime validation")?;
+    Ok(bytes)
 }
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {

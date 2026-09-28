@@ -7,7 +7,7 @@ use combo_table_gen::{
 };
 use engine::database::{
     CardDatabase, ComboOutcome, ComboPieceZone, ComboRelevance, ComboResource, ComboSetup,
-    ComboTable,
+    ComboTable, ComboTableError,
 };
 use engine::game::bracket_estimate::BracketAxis;
 use flate2::read::GzDecoder;
@@ -31,9 +31,8 @@ fn decompressed_fixture() -> Vec<u8> {
     bytes
 }
 
-fn fixture_pin() -> PinnedComboSnapshot {
-    let bytes = decompressed_fixture();
-    let digest = Box::leak(format!("{:x}", Sha256::digest(&bytes)).into_boxed_str());
+fn fixture_pin_for(bytes: &[u8]) -> PinnedComboSnapshot {
+    let digest = Box::leak(format!("{:x}", Sha256::digest(bytes)).into_boxed_str());
     PinnedComboSnapshot {
         file: "spellbook-fixture.json.gz",
         sha256: digest,
@@ -41,6 +40,10 @@ fn fixture_pin() -> PinnedComboSnapshot {
         builder: "fixture-1",
         variant_count: 20,
     }
+}
+
+fn fixture_pin() -> PinnedComboSnapshot {
+    fixture_pin_for(&decompressed_fixture())
 }
 
 fn build() -> engine::database::ComboTableDoc {
@@ -51,6 +54,15 @@ fn build() -> engine::database::ComboTableDoc {
         &BuildLimits::default(),
     )
     .expect("fixture builds")
+}
+
+fn build_from_decompressed(bytes: &[u8]) -> Result<engine::database::ComboTableDoc, GenError> {
+    build_combo_table(
+        gzip(bytes).as_slice(),
+        &pool(),
+        &fixture_pin_for(bytes),
+        &BuildLimits::default(),
+    )
 }
 
 fn gzip(bytes: &[u8]) -> Vec<u8> {
@@ -162,6 +174,34 @@ fn structural_filter_drop_reasons() {
 }
 
 #[test]
+fn multi_zone_pieces_excludes_dropped_rows() {
+    let mut document: serde_json::Value =
+        serde_json::from_slice(&decompressed_fixture()).expect("fixture is valid JSON");
+    document["variants"][6]["uses"][0]["zoneLocations"] = serde_json::json!(["B", "C"]);
+    let bytes = serde_json::to_vec(&document).unwrap();
+
+    let counts = build_from_decompressed(&bytes)
+        .expect("fixture with an irrelevant multi-zone row builds")
+        .provenance
+        .filtered;
+    assert_eq!(counts.irrelevant, 1);
+    assert_eq!(counts.multi_zone_pieces, 3);
+}
+
+#[test]
+fn variant_resolving_to_self_pair_refuses_generation() {
+    let mut document: serde_json::Value =
+        serde_json::from_slice(&decompressed_fixture()).expect("fixture is valid JSON");
+    document["variants"][8]["uses"][1]["card"]["name"] = serde_json::json!("Island");
+    let bytes = serde_json::to_vec(&document).unwrap();
+
+    assert!(matches!(
+        build_from_decompressed(&bytes),
+        Err(GenError::SelfPair { key, .. }) if key == "island"
+    ));
+}
+
+#[test]
 fn relevance_uses_only_feature_status() {
     let doc = build();
     assert!(!doc.entries.iter().any(|entry| {
@@ -226,8 +266,17 @@ fn assemble_cost_is_mana_value_needed_plus_piece_values() {
 }
 
 #[test]
-fn duplicate_pairs_keep_the_strongest_row() {
-    let doc = build();
+fn duplicate_pairs_keep_winner_scalars_and_union_axes_and_outcomes() {
+    let mut document: serde_json::Value =
+        serde_json::from_slice(&decompressed_fixture()).expect("fixture is valid JSON");
+    document["variants"][18]["produces"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "feature": {"name": "Mass land denial", "status": "H"}
+        }));
+    let bytes = serde_json::to_vec(&document).unwrap();
+    let doc = build_from_decompressed(&bytes).expect("dedup fixture builds");
     let entry = doc
         .entries
         .iter()
@@ -235,7 +284,20 @@ fn duplicate_pairs_keep_the_strongest_row() {
         .expect("pair ships once");
     assert_eq!(entry.relevance, ComboRelevance::Standalone);
     assert_eq!(entry.popularity, 10);
-    assert_eq!(entry.outcomes, [ComboOutcome::Wins].into_iter().collect());
+    assert_eq!(entry.mana_value_needed, 1);
+    assert_eq!(
+        entry.outcomes,
+        [
+            ComboOutcome::Wins,
+            ComboOutcome::Unbounded(ComboResource::Draw),
+        ]
+        .into_iter()
+        .collect()
+    );
+    assert_eq!(
+        entry.axes,
+        [BracketAxis::MassLandDenial].into_iter().collect()
+    );
     assert_eq!(
         doc.entries
             .iter()
@@ -262,6 +324,18 @@ fn pieces_are_key_ordered_and_entries_sorted() {
 fn built_doc_loads_through_combo_table_from_json_str() {
     let raw = serde_json::to_string(&build()).unwrap();
     ComboTable::from_json_str(&raw).expect("engine table accepts generated artifact");
+}
+
+#[test]
+fn runtime_validation_rejects_a_self_pair() {
+    let mut doc = build();
+    doc.entries[0].pieces[1] = doc.entries[0].pieces[0].clone();
+    let raw = serde_json::to_string(&doc).unwrap();
+
+    assert!(matches!(
+        ComboTable::from_json_str(&raw),
+        Err(ComboTableError::SelfPair { .. })
+    ));
 }
 
 #[test]
