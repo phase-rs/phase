@@ -89,6 +89,8 @@ pub enum GenError {
     TooLarge { bytes: usize, max_bytes: usize },
     #[error("row {row} has an assemble cost that does not fit in u16")]
     AssembleCostOverflow { row: usize },
+    #[error("row {row} resolves both combo pieces to the same card face: {key}")]
+    SelfPair { row: usize, key: String },
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
@@ -253,6 +255,7 @@ struct Feature {
 struct Candidate {
     entry: ComboEntry,
     position: u32,
+    multi_zone_pieces: u32,
 }
 
 #[derive(Default)]
@@ -494,13 +497,14 @@ fn project_variant(
 
     let mut pieces = Vec::with_capacity(2);
     let mut piece_mana_values = Vec::with_capacity(2);
+    let mut multi_zone_pieces = 0;
     for use_row in variant.uses {
         let Some(face) = pool.get_face_by_name(&use_row.card.name) else {
             state.filtered.unknown_card += 1;
             return Ok(());
         };
         if use_row.zone_locations.len() > 1 {
-            state.filtered.multi_zone_pieces += 1;
+            multi_zone_pieces += 1;
         }
         let zone = if use_row.zone_locations.iter().any(|zone| zone == "L") {
             ComboPieceZone::Library
@@ -516,6 +520,12 @@ fn project_variant(
             zone,
         });
         piece_mana_values.push(face.mana_cost.mana_value());
+    }
+    if pieces[0].key == pieces[1].key {
+        return Err(GenError::SelfPair {
+            row: position as usize,
+            key: pieces[0].key.clone(),
+        });
     }
 
     let relevance = if variant.produces.iter().any(|row| row.feature.status == "S") {
@@ -609,6 +619,7 @@ fn project_variant(
             axes,
         },
         position,
+        multi_zone_pieces,
     });
     Ok(())
 }
@@ -643,16 +654,32 @@ fn deduplicate(state: &mut BuildState) -> Vec<ComboEntry> {
             std::collections::btree_map::Entry::Occupied(mut slot) => {
                 state.filtered.duplicate_pair += 1;
                 if candidate_is_better(&candidate, slot.get()) {
-                    slot.insert(candidate);
+                    let mut candidate = candidate;
+                    let incumbent = slot.get_mut();
+                    candidate
+                        .entry
+                        .outcomes
+                        .append(&mut incumbent.entry.outcomes);
+                    candidate.entry.axes.append(&mut incumbent.entry.axes);
+                    *incumbent = candidate;
+                } else {
+                    let incumbent = slot.get_mut();
+                    incumbent.entry.outcomes.extend(candidate.entry.outcomes);
+                    incumbent.entry.axes.extend(candidate.entry.axes);
                 }
             }
         }
     }
+    let mut multi_zone_pieces = 0;
     let entries: Vec<_> = by_pair
         .into_values()
-        .map(|candidate| candidate.entry)
+        .map(|candidate| {
+            multi_zone_pieces += candidate.multi_zone_pieces;
+            candidate.entry
+        })
         .collect();
     state.filtered.kept = u32::try_from(entries.len()).unwrap_or(u32::MAX);
+    state.filtered.multi_zone_pieces = multi_zone_pieces;
     entries
 }
 
