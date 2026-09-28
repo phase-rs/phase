@@ -2272,6 +2272,12 @@
     "dontAskAgain": "Non chiedere di nuovo in questa partita",
     "dontAskAgainForSameCard": "Usa questa scelta per ogni copia di questa carta in questa partita"
   },
+  "keywordDetail": {
+    "selfManaCost": "il suo costo di mana",
+    "selfManaValue": "il suo valore di mana",
+    "manaCostReduced": "il suo costo di mana ridotto di {{reduction}}",
+    "spliceOnto": "su {{subtype}} {{cost}}"
+  },
   "resolutionOptionalPayment": {
     "title": "Scegli un pagamento opzionale",
     "pay": "Paga {{cost}}",
