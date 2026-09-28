@@ -161,10 +161,10 @@ git rev-list --reverse <BASE>..<TIP>                # explicit range
 echo <SHA1> <SHA2>                                  # specific SHAs (already in order)
 ```
 
-Capture as a space-separated list: `SHAS="abc123 def456 ..."`. Verify they exist:
+Capture as an array, for the same zsh reason as `SHIPPED_PATHS`: `SHAS=($(git rev-list --reverse …))` or `SHAS=(abc123 def456)`. Verify they exist:
 
 ```bash
-for sha in $SHAS; do git cat-file -e "$sha" || { echo "missing: $sha"; exit 1; }; done
+for sha in "${SHAS[@]}"; do git cat-file -e "$sha" || { echo "missing: $sha"; exit 1; }; done
 ```
 
 ### 2. Derive branch name + worktree path
@@ -172,7 +172,7 @@ for sha in $SHAS; do git cat-file -e "$sha" || { echo "missing: $sha"; exit 1; }
 Use the first commit's subject (or user-provided topic) for both, kebab-case, no timestamps:
 
 ```bash
-TOPIC=$(git log -1 --format=%s "${SHAS%% *}" | head -c 50 | tr -cd 'a-zA-Z0-9 -' | tr ' ' '-' | tr -s '-' | sed 's/-$//')
+TOPIC=$(git log -1 --format=%s "${SHAS[@]:0:1}" | head -c 50 | tr -cd 'a-zA-Z0-9 -' | tr ' ' '-' | tr -s '-' | sed 's/-$//')
 BRANCH="ship/$TOPIC"
 WORKTREE="../forge.rs-ship-$TOPIC"
 ```
@@ -192,7 +192,7 @@ The worktree starts at `origin/main` HEAD with a fresh branch checked out. No wo
 ### 4. Cherry-pick the commits
 
 ```bash
-git cherry-pick $SHAS
+git cherry-pick "${SHAS[@]}"
 ```
 
 If a cherry-pick fails with a conflict, do NOT auto-resolve — abort and surface to the user:
