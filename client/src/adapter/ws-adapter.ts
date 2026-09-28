@@ -210,14 +210,35 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
- * 84 — FormatConfig gains `allow_experimental_dungeons`, the per-session
+ * 88 — FormatConfig gains `allow_experimental_dungeons`, the per-session
  *      capability flag behind the experimental dungeon pool (Baldur's Gate
  *      Wilderness joins the normal venture options and the initiative choice
  *      when set). A CAPABILITY bump like 24 and 50: the field is
- *      #[serde(default)], so a v83 peer parses a v84 GameState — and then
+ *      #[serde(default)], so a v87 peer parses a v88 GameState — and then
  *      runs the game without the pool the host chose. The exact-match version
- *      check at connect refuses the pairing. P2P moves in lockstep (wire 66);
+ *      check at connect refuses the pairing. P2P moves in lockstep (wire 70);
  *      lobby carriers move too, see LOBBY_PROTOCOL_VERSION 13 below.
+ * 87 — WaitingFor.DigRestSplitChoice and Effect.Dig.rest_split_top_count
+ *      extend serialized game state for Telling Time-class rest piles. The
+ *      exact handshake refuses v86 peers; P2P moves in lockstep (wire 69).
+ *      Lobby messages are unchanged.
+ * 86 — GameEvent gained the tagged Melded variant. Full-game event frames
+ *      can carry it, so the exact handshake refuses v85 peers. P2P moves in
+ *      lockstep (wire 68); lobby messages are unchanged.
+ * 85 — GameEvent gained the tagged DieRollIgnored { player_id, sides, result }
+ *      display event. StateUpdate carries GameEvent[]; older peers would
+ *      accept the connection but omit ignored dice from the roll overlay.
+ *      P2P moves in lockstep; lobby messages are unchanged.
+ * 84 — WaitingFor.ChooseDungeon options (DungeonPreview) gained required
+ *      `card`, `rooms`, and `room_count`: the whole dungeon behind each
+ *      choice, so the prompt previews each card instead of describing only
+ *      its entry room. A PARSE bump like 67, not a capability bump like 24:
+ *      none of the fields is serde-optional, so a v83 peer fails
+ *      deserialization on a snapshot paused at the dungeon choice, and the
+ *      reverse skew throws in render — this client reads `card`
+ *      unconditionally to resolve the preview art. Saved games still load
+ *      through the choice-preview migration. P2P moves in lockstep; lobby
+ *      messages are unchanged.
  * 83 — CR 601.2c + CR 602.2b target-gated activation costs (Professor Hojo,
  *      Kopala): ReduceAbilityCost statics carry targets and frequency,
  *      GameState journals each turn's activations, and the activation cost
@@ -579,7 +600,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 84;
+export const PROTOCOL_VERSION = 88;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

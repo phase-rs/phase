@@ -227,6 +227,25 @@ pub fn eliminate_players_simultaneously(
         }
     }
 
+    // CR 800.4a: a staged resolution-payment descriptor is a continuation
+    // owned by its payer/root owner. Retire it before the leave sweep when that
+    // owner departs; an unrelated player's concession must leave the payment
+    // live for its surviving owner. `GameAction::Concede` reaches this normal
+    // elimination path rather than the payment transcript authority.
+    let abandoned_payment = if let Some(owner) = state
+        .payment_transaction
+        .as_ref()
+        .map(|transaction| transaction.owner)
+    {
+        if leaving_set.contains(&owner) {
+            super::payment_transaction::abandon_for_owner_departure(state, owner)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     // CR 800.4a: elimination can remove frozen stack entries and a session's
     // canonical representative. Restore the pre-overlay preferences before
     // `do_eliminate` removes the departing player's own state, so teardown
@@ -538,6 +557,23 @@ pub fn eliminate_players_simultaneously(
             if !players::is_alive(state, recipient) {
                 state.pending_trigger_construction_priority_recipient =
                     Some(players::next_player_in_turn_order(state, recipient));
+            }
+        }
+
+        // CR 800.4a + CR 608.2c: a payer who leaves cannot finish the staged
+        // payment, but a surviving ability controller still owns the printed
+        // continuation. The transaction descriptor was retired before the
+        // leave sweep; resume only its failure tail after all topology cleanup
+        // so unconditional siblings see the final living-player set.
+        if let Some(transaction) = abandoned_payment.as_ref() {
+            if players::is_alive(state, transaction.root.controller) {
+                if let Err(error) = super::payment_transaction::resolve_abandoned_continuation(
+                    state,
+                    transaction,
+                    events,
+                ) {
+                    debug_assert!(false, "abandoned payment continuation failed: {error}");
+                }
             }
         }
     }

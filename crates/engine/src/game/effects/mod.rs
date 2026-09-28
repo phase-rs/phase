@@ -3446,7 +3446,7 @@ fn resolve_sub_with_missing_forward_result(
     Ok(())
 }
 
-fn apply_parent_chain_context(
+pub(crate) fn apply_parent_chain_context(
     child: &mut ResolvedAbility,
     parent: &ResolvedAbility,
     effect_context_object: Option<&CostPaidObjectSnapshot>,
@@ -3736,6 +3736,14 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
             //      events exist — it would snapshot a permanent +0/+0.
             | WaitingFor::DieKeepChoice { .. }
             | WaitingFor::DigChoice { .. }
+            // CR 608.2d + CR 608.2c: a Telling Time-class remainder split is a
+            // choice the effect offers, which "the player announces while
+            // applying the effect" (CR 608.2d) — a second, later pause in the
+            // SAME dig instruction, whose instructions are followed in the
+            // order written (CR 608.2c). Anything chained after the dig must
+            // wait for it, or the sub-ability would run while the remainder is
+            // still sitting undistributed.
+            | WaitingFor::DigRestSplitChoice { .. }
             | WaitingFor::SurveilChoice { .. }
             | WaitingFor::RevealChoice { .. }
             | WaitingFor::SearchChoice { .. }
@@ -15716,6 +15724,24 @@ fn resolve_chain_body(
                     if let Ok(result) = resolve_effect(state, iter_effective, events) {
                         if iterations == 1 {
                             immediate_effect_result = result;
+                        }
+                    }
+                    // CR 601.2h + CR 608.2c: a staged Composite owns the
+                    // complete resolution root (including its rider). The
+                    // payment transaction either committed, paused, or
+                    // aborted the shadow; stop this outer walker so it cannot
+                    // execute the same sub-ability a second time.
+                    if state.payment_transaction_just_handled {
+                        // A successful or paused staged transaction already
+                        // owns the complete root and must stop this outer
+                        // walker. An aborted payment, however, only cancels
+                        // the payment clause: the generic condition/sibling
+                        // descent below still has to run an unconditional
+                        // printed sibling while suppressing IfYouDo/WhenYouDo.
+                        let payment_failed = state.cost_payment_failed_flag;
+                        state.payment_transaction_just_handled = false;
+                        if !payment_failed {
+                            return Ok(());
                         }
                     }
                 }
@@ -38821,6 +38847,7 @@ mod tests {
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: None,
+                rest_split_top_count: None,
                 rest_order: crate::types::ability::DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,
@@ -39583,6 +39610,7 @@ mod tests {
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: None,
+                rest_split_top_count: None,
                 rest_order: crate::types::ability::DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,

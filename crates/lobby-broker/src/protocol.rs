@@ -60,15 +60,42 @@ pub struct TournamentRequestId(pub u64);
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
-/// 84 — `FormatConfig` gained `allow_experimental_dungeons`, the per-session
+/// 88 — `FormatConfig` gained `allow_experimental_dungeons`, the per-session
 ///      capability flag behind the experimental dungeon pool (Baldur's Gate
 ///      Wilderness joins the normal venture options and the initiative choice
 ///      when set). A CAPABILITY bump like 24 and 50: the field is
 ///      `#[serde(default)]`, so either side still parses a peer that omits
-///      it — but a v83 peer would silently fail the flag closed to `false`
+///      it — but a v87 peer would silently fail the flag closed to `false`
 ///      and run the game without the pool the host chose, a rule change no
 ///      parse error would catch. Full-game peers and P2P move in lockstep
-///      (wire 66); lobby carriers move too, see `LOBBY_PROTOCOL_VERSION` 13.
+///      (wire 70); lobby carriers move too, see `LOBBY_PROTOCOL_VERSION` 13.
+/// 87 — `WaitingFor::DigRestSplitChoice` and `Effect::Dig.rest_split_top_count`
+///      extend serialized game state for Telling Time-class rest piles. A v86
+///      peer cannot represent the split choice; full-game and P2P peers move
+///      in lockstep (wire 69). Lobby messages are unchanged.
+/// 86 — `GameEvent::Melded` is a new tagged variant in full-game event frames.
+///      A v85 client cannot present the meld sequence from a v86 server, so
+///      full-game and P2P peers move in lockstep (wire 68). Lobby messages are
+///      unchanged.
+/// 85 — `GameEvent` gained the tagged `DieRollIgnored { player_id, sides,
+///      result }` display-only variant. `StateUpdate.events` carries it to
+///      clients; a v84 peer would accept the session but omit ignored dice from
+///      the roll overlay. Full-game peers reject that silent display skew at
+///      handshake. P2P moves in lockstep; lobby messages are unchanged.
+/// 84 — `WaitingFor::ChooseDungeon` options (`DungeonPreview`) gained required
+///      `card` (`DungeonCardView`), `rooms` (`Vec<DungeonRoomNodeView>`), and
+///      `room_count` fields, publishing the whole dungeon behind each choice —
+///      the card's Scryfall identity plus every room with its outgoing edges
+///      and its position on the card face — so the prompt can preview each
+///      card instead of describing only its entry room. A PARSE bump like 67,
+///      not a silent capability loss like 24: none of the fields carries a
+///      serde default, so a v83 peer cannot deserialize a snapshot paused at
+///      the dungeon choice. The break is symmetric — a v84 client reading a
+///      v83 host's option finds no `card` and throws in render rather than
+///      degrading. Saved games still load: the choice-preview migration
+///      rebuilds older options from their `dungeon` key. P2P moves in
+///      lockstep; lobby messages are unchanged.
+///
 /// 83 — CR 601.2c + CR 602.2b target-gated activation costs (Professor Hojo,
 ///      Kopala): `StaticMode::ReduceAbilityCost` gains `targets` and
 ///      `frequency`, `GameState` gains the per-turn activation journal
@@ -700,7 +727,7 @@ pub struct TournamentRequestId(pub u64);
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 84;
+pub const PROTOCOL_VERSION: u32 = 88;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -1930,12 +1957,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 84);
+        assert_eq!(PROTOCOL_VERSION, 88);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which refuses an older full-game peer that cannot preserve the exact
         // Full-session identity across draft match attachment and follow-ups.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 83);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 87);
     }
 
     #[test]

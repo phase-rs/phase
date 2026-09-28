@@ -28,6 +28,7 @@ import {
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { useBoardInteractionState } from "./BoardInteractionContext.tsx";
+import { MeldedCardFrame } from "./MeldedCardFrame.tsx";
 import { PermanentCard } from "./PermanentCard.tsx";
 import {
   getGroupRenderMode,
@@ -227,6 +228,13 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
             ∞
           </span>
         </div>
+      );
+    }
+    if (group.representative?.isMelded) {
+      return (
+        <MeldedCardFrame>
+          <PermanentCard objectId={group.ids[0]} />
+        </MeldedCardFrame>
       );
     }
     return <PermanentCard objectId={group.ids[0]} />;

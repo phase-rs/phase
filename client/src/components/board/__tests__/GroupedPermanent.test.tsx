@@ -6,7 +6,11 @@ import { dispatchAction } from "../../../game/dispatch.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../../stores/preferencesStore.ts";
 import { useUiStore } from "../../../stores/uiStore.ts";
-import { buildGameObject, buildObjectMap } from "../../../test/factories/gameObjectFactory.ts";
+import {
+  buildGameObject,
+  buildObjectMap,
+  gameObjectFactory,
+} from "../../../test/factories/gameObjectFactory.ts";
 import {
   buildGameState,
   buildPendingCast,
@@ -179,6 +183,39 @@ describe("GroupedPermanentDisplay collapsed creature groups", () => {
     renderGroup({ group: { ...makeGroup([1]), isUnboundedPile: true } });
 
     expect(screen.getByText("∞")).toBeInTheDocument();
+  });
+
+  it("renders a melded permanent inside the oversized melded frame", () => {
+    const melded = gameObjectFactory
+      .creature(9, 10)
+      .named("Brisela, Voice of Nightmares")
+      .withId(6)
+      .melded([6, 7])
+      .build();
+    useGameStore.setState({
+      gameState: buildGameState({ objects: buildObjectMap(melded), battlefield: [6] }),
+    });
+
+    const { container } = renderGroup({
+      group: {
+        name: melded.name,
+        ids: [6],
+        count: 1,
+        representative: toCardProps(melded),
+        isUnboundedPile: false,
+      },
+    });
+
+    const frame = container.querySelector("[data-melded-card]");
+    expect(frame).not.toBeNull();
+    expect(frame?.querySelector('[data-object-id="6"]')).not.toBeNull();
+  });
+
+  it("renders an ordinary permanent at the row's card size", () => {
+    const { container } = renderGroup({ group: makeGroup([1]) });
+
+    expect(container.querySelector("[data-melded-card]")).toBeNull();
+    expect(container.querySelector('[data-object-id="1"]')).not.toBeNull();
   });
 
   it("renders ×N (not ∞) when a group is not an unbounded pile", () => {

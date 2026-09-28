@@ -79,6 +79,22 @@ export const DAMAGE_FLURRY_TRAIL_PARTICLE_MAX = 96;
 export const GROUPED_EVENT_RUN_THRESHOLD = 8;
 export const GROUPED_TOKEN_CREATION_THRESHOLD = GROUPED_EVENT_RUN_THRESHOLD;
 
+/** Base duration of the meld forge-and-flip animation, before pacing. */
+export const MELD_FORGE_DURATION_MS = 3200;
+
+/**
+ * Phase boundaries of the meld animation, as fractions of its duration: the
+ * two cards gather over the anvil, take three hammer blows, fuse into one
+ * white-hot blank, and the blank turns over to the combined oversized face.
+ * The tail after `flipped` holds the revealed card while it cools.
+ */
+export const MELD_FORGE_PHASES = {
+  gathered: 0.2,
+  strikes: [0.3, 0.4, 0.5],
+  fused: 0.58,
+  flipped: 0.8,
+} as const;
+
 export const EVENT_DURATIONS: Record<string, number> = {
   ZoneChanged: 400,
   DamageDealt: COMBAT_ENGAGEMENT_DURATION_MS,
@@ -90,9 +106,11 @@ export const EVENT_DURATIONS: Record<string, number> = {
   CounterRemoved: 200,
   PermanentTapped: 200,
   PermanentUntapped: 200,
+  Melded: MELD_FORGE_DURATION_MS,
 };
 
 export const DEFAULT_DURATION = 200;
+
 
 /** How long the card slam flight phase takes before impact (ms, before speed multiplier). */
 export const CARD_SLAM_FLIGHT_MS = 200;

@@ -944,6 +944,28 @@ fn append_resolve_all_revocations(
     );
 }
 
+/// States whose finite candidate domain `candidate_actions_exact` enumerates in
+/// full. The broad enumerator delegates them to the exact one, and
+/// `semantic_candidate_actions_with_probe` skips the broad pass for them, so
+/// each candidate is issued exactly once. Duplicates are not harmless: search
+/// policies that sample over candidates (softmax) would weight a duplicated
+/// choice twice.
+fn exact_owns_candidate_domain(waiting_for: &WaitingFor) -> bool {
+    matches!(
+        waiting_for,
+        WaitingFor::ResolveAllConsent { .. }
+            | WaitingFor::ResolveAllReady { .. }
+            | WaitingFor::MeldPairChoice { .. }
+            | WaitingFor::MeldAttackTargetChoice { .. }
+            | WaitingFor::EntryAttackTargetChoice { .. }
+            | WaitingFor::EntryControllerChoice { .. }
+            | WaitingFor::ChooseAnnouncingOpponent { .. }
+            | WaitingFor::ChooseGiftRecipient { .. }
+            | WaitingFor::MoveCountersDistribution { .. }
+            | WaitingFor::RemoveCountersChoice { .. }
+    )
+}
+
 pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
     candidate_actions_broad_with_probe(state, None)
 }
@@ -953,52 +975,22 @@ pub fn candidate_actions_broad_with_probe(
     probe: Option<&casting::PriorityCastProbe>,
 ) -> Vec<CandidateAction> {
     let actions = match &state.waiting_for {
+        // Keep in sync with `exact_owns_candidate_domain`; the match below is
+        // exhaustive, so a guard arm cannot stand in for these patterns.
         WaitingFor::ResolveAllConsent { .. }
         | WaitingFor::ResolveAllReady { .. }
         | WaitingFor::MeldPairChoice { .. }
         | WaitingFor::MeldAttackTargetChoice { .. }
-        | WaitingFor::EntryAttackTargetChoice { .. } => candidate_actions_exact(state),
+        | WaitingFor::EntryAttackTargetChoice { .. }
+        | WaitingFor::EntryControllerChoice { .. }
+        | WaitingFor::ChooseAnnouncingOpponent { .. }
+        | WaitingFor::ChooseGiftRecipient { .. }
+        | WaitingFor::MoveCountersDistribution { .. }
+        | WaitingFor::RemoveCountersChoice { .. } => {
+            debug_assert!(exact_owns_candidate_domain(&state.waiting_for));
+            candidate_actions_exact(state)
+        }
         WaitingFor::Priority { player } => priority_actions_with_probe(state, *player, probe),
-        WaitingFor::ChooseAnnouncingOpponent {
-            player, candidates, ..
-        } => candidates
-            .iter()
-            .map(|opponent| {
-                candidate(
-                    GameAction::ChooseAnnouncingOpponent {
-                        opponent: *opponent,
-                    },
-                    TacticalClass::Selection,
-                    Some(*player),
-                )
-            })
-            .collect(),
-        WaitingFor::ChooseGiftRecipient {
-            player, candidates, ..
-        } => candidates
-            .iter()
-            .map(|opponent| {
-                candidate(
-                    GameAction::ChooseGiftRecipient {
-                        opponent: *opponent,
-                    },
-                    TacticalClass::Selection,
-                    Some(*player),
-                )
-            })
-            .collect(),
-        WaitingFor::EntryControllerChoice { player, candidates } => candidates
-            .iter()
-            .map(|opponent| {
-                candidate(
-                    GameAction::ChooseEntryController {
-                        opponent: *opponent,
-                    },
-                    TacticalClass::Replacement,
-                    Some(*player),
-                )
-            })
-            .collect(),
         WaitingFor::ManaPayment {
             player,
             convoke_mode,
@@ -1024,15 +1016,6 @@ pub fn candidate_actions_broad_with_probe(
             ));
             actions
         }
-        WaitingFor::MoveCountersDistribution {
-            player,
-            available,
-            destinations,
-            ..
-        } => counter_move_distribution_candidates(*player, available, destinations),
-        WaitingFor::RemoveCountersChoice {
-            player, available, ..
-        } => counter_removal_candidates(*player, available),
         WaitingFor::TargetSelection {
             player,
             target_slots,
@@ -1382,6 +1365,59 @@ pub fn candidate_actions_broad_with_probe(
                 bounded_select_card_candidates(*player, selectable_cards, [max_keep])
             }
         }
+        // CR 401.2 + CR 401.4 + CR 608.2c: the submission is a full
+        // arrangement of the fixed remainder pile — leading `top_count`
+        // entries to the library top, the rest to the bottom.
+        //
+        // The strategically meaningful axis is WHICH cards take the top, so
+        // the partition is still enumerated with the same bounded combination
+        // helper the sibling `DigChoice` arm uses (identical pool/candidate
+        // caps). Each combination is then completed into the one canonical
+        // full permutation it implies: the chosen top cards in their
+        // combination order, followed by the unchosen cards in pile order.
+        // Order WITHIN a pile is deliberately not enumerated — it would be
+        // factorial for no tactical gain, and `phase-ai`'s `search.rs` heuristic
+        // orders both piles by intrinsic value when it actually picks. This
+        // mirrors `RippleBottomOrder` above, which likewise enumerates one
+        // arrangement rather than every permutation.
+        //
+        // CR 401.4: an `OrderOnly` prompt has no partition left to enumerate —
+        // the acting player is the library's OWNER and may only reorder within
+        // each already-settled pile. Enumerating combinations there would emit
+        // actions the resolver rejects, so it offers the one canonical
+        // arrangement (the pile as parked), matching the "order within a pile
+        // is not enumerated" rule above.
+        WaitingFor::DigRestSplitChoice {
+            player,
+            cards,
+            scope,
+            ..
+        } if !scope.partition_is_open() => vec![candidate(
+            GameAction::SelectCards {
+                cards: cards.clone(),
+            },
+            TacticalClass::Selection,
+            Some(*player),
+        )],
+        WaitingFor::DigRestSplitChoice {
+            player,
+            cards,
+            top_count,
+            ..
+        } => bounded_select_card_candidates(*player, cards, [(*top_count).min(cards.len())])
+            .into_iter()
+            .map(|mut candidate| {
+                if let GameAction::SelectCards { cards: chosen } = &mut candidate.action {
+                    let bottom: Vec<_> = cards
+                        .iter()
+                        .filter(|id| !chosen.contains(id))
+                        .copied()
+                        .collect();
+                    chosen.extend(bottom);
+                }
+                candidate
+            })
+            .collect(),
         WaitingFor::SurveilChoice { player, cards } => select_cards_variants(*player, cards, None),
         WaitingFor::RevealChoice {
             player,
@@ -3828,14 +3864,10 @@ fn semantic_candidate_actions_with_probe(
     probe: Option<&casting::PriorityCastProbe>,
 ) -> Vec<CandidateAction> {
     let mut actions = candidate_actions_exact(state);
-    // Resolve All consent is wholly represented by its finite exact domain.
-    // The broad enumerator delegates these same states to `candidate_actions_exact`
-    // for broad-only callers, so composing both here would expose every
-    // Grant, Decline, and Revoke choice twice.
-    if !matches!(
-        state.waiting_for,
-        WaitingFor::ResolveAllConsent { .. } | WaitingFor::ResolveAllReady { .. }
-    ) {
+    // The broad enumerator delegates exact-owned states back to
+    // `candidate_actions_exact` for broad-only callers, so composing both here
+    // would expose every choice twice.
+    if !exact_owns_candidate_domain(&state.waiting_for) {
         actions.extend(candidate_actions_broad_with_probe(state, probe));
     }
 
@@ -6448,6 +6480,33 @@ mod tests {
     /// CR 700.3a: the candidate set must offer a weight-balanced partition
     /// alongside the three legacy shapes, deterministically, and never the same
     /// vector twice (the decision contract matches these by exact equality).
+    /// CR 614.12a: an exact-owned opponent picker must issue each opponent
+    /// once. `candidate_actions` composes the exact and broad enumerators, and
+    /// the broad one used to repeat this arm, doubling every candidate.
+    #[test]
+    fn entry_controller_choice_issues_each_opponent_once() {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        state.waiting_for = WaitingFor::EntryControllerChoice {
+            player: PlayerId(0),
+            candidates: vec![PlayerId(1), PlayerId(2)],
+        };
+        let actions: Vec<GameAction> = candidate_actions(&state)
+            .into_iter()
+            .map(|candidate| candidate.action)
+            .collect();
+        assert_eq!(
+            actions,
+            vec![
+                GameAction::ChooseEntryController {
+                    opponent: PlayerId(1)
+                },
+                GameAction::ChooseEntryController {
+                    opponent: PlayerId(2)
+                },
+            ]
+        );
+    }
+
     #[test]
     fn balanced_partition_candidate_present_and_deterministic() {
         let mut state = GameState::new_two_player(42);

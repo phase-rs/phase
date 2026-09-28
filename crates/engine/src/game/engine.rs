@@ -60,6 +60,7 @@ use super::mana_sources;
 use super::match_flow;
 use super::morph;
 use super::mulligan;
+use super::payment_transaction;
 use super::planechase;
 use super::planeswalker;
 use super::priority;
@@ -1268,7 +1269,14 @@ pub(crate) fn apply_interaction_for_prospective_simulation(
     semantic_owner: PlayerId,
     action: GameAction,
 ) -> Result<ProspectiveSimulationOutcome, EngineError> {
-    let raw = apply_action_boundary_core(state, authenticated_actor, semantic_owner, action, None)?;
+    let raw = apply_action_boundary_core(
+        state,
+        authenticated_actor,
+        semantic_owner,
+        action,
+        None,
+        true,
+    )?;
     let (action, lifecycle_facts) = finish_action_boundary_with_lifecycle(
         state,
         raw,
@@ -1290,7 +1298,14 @@ pub(crate) fn apply_interaction_pre_reconciliation_for_life_safety(
     semantic_owner: PlayerId,
     action: GameAction,
 ) -> Result<ActionResult, EngineError> {
-    let raw = apply_action_boundary_core(state, authenticated_actor, semantic_owner, action, None)?;
+    let raw = apply_action_boundary_core(
+        state,
+        authenticated_actor,
+        semantic_owner,
+        action,
+        None,
+        true,
+    )?;
     let RawActionApplication {
         result, lifecycle, ..
     } = raw;
@@ -1350,6 +1365,7 @@ pub(super) fn apply_action_boundary_with_stack_limit(
         semantic_owner,
         action,
         stack_resolution_limit,
+        true,
     )?;
     finish_action_boundary(state, raw, mode)
 }
@@ -1407,6 +1423,7 @@ fn apply_action_boundary_core(
     semantic_owner: PlayerId,
     action: GameAction,
     stack_resolution_limit: Option<u32>,
+    authorize_actor: bool,
 ) -> Result<RawActionApplication, EngineError> {
     let lifecycle = super::lifecycle::enter_action_frame();
     if let Err(error) = mana_sources::preflight_tap_land_action(state, authenticated_actor, &action)
@@ -1468,8 +1485,9 @@ fn apply_action_boundary_core(
     // defers to the next boundary at which the flag is clear. No "outermost"
     // depth test is added: gating on it would leave AI-probe clones unrepaired
     // while the real state is repaired.
-    let pre_recovery_pass_was_authorized = matches!(&action, GameAction::PassPriority)
-        && check_actor_authorization(state, authenticated_actor, &action).is_ok();
+    let pre_recovery_pass_was_authorized = !authorize_actor
+        || (matches!(&action, GameAction::PassPriority)
+            && check_actor_authorization(state, authenticated_actor, &action).is_ok());
     let recovered_terminal_rest_boundary = sweep_and_recover_priority_boundary_rest(state);
     let recovered_stale_priority_pass =
         recovered_terminal_rest_boundary && matches!(&action, GameAction::PassPriority);
@@ -1505,11 +1523,11 @@ fn apply_action_boundary_core(
     state.exiled_from_hand_this_resolution = 0;
     state.die_result_this_resolution = None;
     state.consumed_before_priority_trigger_events.clear();
-    if recovered_stale_priority_pass && !pre_recovery_pass_was_authorized {
+    if authorize_actor && recovered_stale_priority_pass && !pre_recovery_pass_was_authorized {
         lifecycle.discard();
         return Err(EngineError::WrongPlayer);
     }
-    if !recovered_stale_priority_pass {
+    if authorize_actor && !recovered_stale_priority_pass {
         if let Err(err) = check_actor_authorization(state, authenticated_actor, &action) {
             lifecycle.discard();
             *state = boundary_snapshot;
@@ -1530,7 +1548,14 @@ fn apply_action_boundary_core(
             lifecycle,
         });
     }
-    let mut result = match apply_action(state, semantic_owner, action, stack_resolution_limit) {
+    let mut result = match if payment_transaction::owns_action(state, &action) {
+        // All staged-payment actions enter through this admission point. The
+        // authenticated actor is recorded for deterministic replay; the
+        // transaction module remains the sole commit/abort authority.
+        payment_transaction::apply_pending_action(state, authenticated_actor, action)
+    } else {
+        apply_action(state, semantic_owner, action, stack_resolution_limit)
+    } {
         Ok(result) => result,
         // CR 601.2h + CR 733.1: a typed reversal, restored below like any other.
         Err(EngineError::ActivationReversed { player }) => {
@@ -2087,7 +2112,16 @@ fn reconcile_terminal_result(state: &mut GameState, result: &mut ActionResult) {
     // The predicate lives in `sba` so it shares the same CR 101.2 "can't lose"
     // exception as the real player-loss SBA checks, and stays narrower than the
     // full SBA loop to avoid unrelated mid-resolution SBA prompts.
-    if sba::has_pending_player_loss_sba(state) {
+    //
+    // CR 704.3 + CR 104.3b: not while the game is inside a process no player
+    // receives priority during: a cast or activation (CR 601.2h; CR 602.2b), a
+    // special action (CR 116.2), a mana ability (CR 605.3b) or a triggered
+    // mana ability (CR 605.4a). Paying life down to 0 is a legal payment
+    // (CR 119.4), so the 0-life check waits until that process ends and a
+    // player would next receive priority. Until then that player is still in
+    // the game, so waiting on their choices is not the #962 softlock; prompts
+    // owned by a resolution keep the net.
+    if sba::has_pending_player_loss_sba(state) && !state.withholds_priority() {
         sba::check_state_based_actions(state, &mut result.events);
         // SBA may have advanced waiting_for (e.g., GameOver, or Priority for
         // the next living player). Sync the result.
@@ -8298,6 +8332,56 @@ pub fn apply_as_current(
     apply_as_current_with_mode(state, action, PublicFinalizeMode::Immediate)
 }
 
+/// Replays one action previously admitted by the outer action boundary. The
+/// transcript preserves the authenticated actor; semantic ownership is looked
+/// up from the same interaction/control state that authorized the original
+/// action, with the current WaitingFor actor as the legacy/test fallback.
+pub(crate) fn apply_recorded_action(
+    state: &mut GameState,
+    authenticated_actor: PlayerId,
+    action: GameAction,
+) -> Result<ActionResult, EngineError> {
+    let semantic_owner = match &action {
+        GameAction::Concede { player_id } => *player_id,
+        _ => interaction::semantic_owner_for_actor(state, authenticated_actor)
+            .or_else(|| state.waiting_for.acting_player())
+            .ok_or_else(|| {
+                EngineError::InvalidAction(
+                    "staged payment replay: no semantic owner for recorded action".to_string(),
+                )
+            })?,
+    };
+    apply_action_boundary_for_semantic_owner(
+        state,
+        authenticated_actor,
+        semantic_owner,
+        action,
+        PublicFinalizeMode::Immediate,
+    )
+}
+
+/// Replays an action that already crossed the authenticated interaction
+/// boundary. The transcript supplies both halves of that boundary, so replay
+/// must not re-authorize the historical submitter against a later topology
+/// (for example after that controller concedes). New incoming actions still
+/// use [`apply_recorded_action`] or the public boundary and remain fail-closed.
+pub(crate) fn apply_admitted_recorded_action(
+    state: &mut GameState,
+    authenticated_actor: PlayerId,
+    semantic_owner: PlayerId,
+    action: GameAction,
+) -> Result<ActionResult, EngineError> {
+    let raw = apply_action_boundary_core(
+        state,
+        authenticated_actor,
+        semantic_owner,
+        action,
+        None,
+        false,
+    )?;
+    finish_action_boundary(state, raw, PublicFinalizeMode::Immediate)
+}
+
 /// Simulation-apply variant of [`apply_as_current`] for throwaway clones that
 /// are never rendered: either the caller discards the mutated state (the AI
 /// `SimulationFilter` legality oracle reads only `.is_ok()`) or it keeps the
@@ -10455,6 +10539,12 @@ fn apply_action(
         WaitingFor::RevealChoice { .. }
             | WaitingFor::ManifestDreadChoice { .. }
             | WaitingFor::DigChoice { .. }
+            // CR 701.20a + CR 608.2c: a revealed card "remains revealed for as
+            // long as necessary to complete the parts of the effect that card
+            // is relevant to", and a reveal-dig's remainder split is a later
+            // pause in the SAME instruction — so its cards stay public across
+            // it exactly as they do across the keep selection above.
+            | WaitingFor::DigRestSplitChoice { .. }
             // CR 700.3 + CR 701.20a: Fact or Fiction reveals persist through
             // both the opponent's partition step and the controller's pile
             // choice — the cards remain public while both players interact.

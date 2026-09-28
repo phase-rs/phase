@@ -303,7 +303,8 @@
     "lostCoinFlip": "{{name}} perdeu o lançamento",
     "turnOrder": "Ordem dos turnos",
     "turnOrderItem": "Turno {{turn}}: {{name}}",
-    "youTakeTurn": "Você joga no turno {{turn}}"
+    "youTakeTurn": "Você joga no turno {{turn}}",
+    "ignoredDie": "Ignorado"
   },
   "chrome": {
     "back": "Voltar",

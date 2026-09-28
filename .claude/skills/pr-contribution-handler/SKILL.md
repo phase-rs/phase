@@ -44,7 +44,7 @@ This skill lands contributor work, but **only after it meets the maintainer's ba
 
 ### Independent review pass
 
-The bar wants a second, independent look on top of `review-impl` — historically an external bot supplied it for free. **Gemini Code Assist has been sunset**: never post `@gemini-code-assist` (or any Gemini) triggers. The bot no longer answers, so summoning it spends a round-trip and posts dead-noise comments while adding zero coverage.
+The bar wants a second, independent look on top of `review-engine-impl` — historically an external bot supplied it for free. **Gemini Code Assist has been sunset**: never post `@gemini-code-assist` (or any Gemini) triggers. The bot no longer answers, so summoning it spends a round-trip and posts dead-noise comments while adding zero coverage.
 
 - **CodeRabbit** is the free external reviewer for this public repo, and it reviews automatically on push — do not trigger it manually. When it has posted a review, treat its findings as the independent pass: confirm-or-refute each against the PR *head* (not the review timestamp — findings are routinely already fixed in later commits) and fold confirmed ones into the gate.
 - When **no external review exists** (CodeRabbit not yet run, or not installed) AND the PR trips a risk trigger — hot/shared path, new machinery, or the large-refactor value gate — run a local `/code-review` as the independent pass. Skip it for low-risk PRs an external review already covers: a local pass spends tokens, so scale it to blast radius rather than running it blanket.
@@ -58,7 +58,7 @@ When asked to ensure already-merged PRs meet the bar (or when a PR merged during
 
 Before changing code, read these files from the repo root and apply their logic:
 
-- `$review-impl` for the implementation-gap review lenses.
+- `$review-engine-impl` for the implementation-gap review lenses.
 - `.claude/agents/pr-review-comment-resolver.md` for phase.rs-specific review-comment fetching, categorization, prioritization, resolution, verification, and reporting.
 - `.agents/skills/engine-implementer/SKILL.md` when the PR needs the full engine implementation plan/review cycle.
 
@@ -334,7 +334,7 @@ When a comment asks for a questionable design, satisfy the underlying concern wh
 
 ## Architecture Review
 
-After comment resolution, run `$review-impl` against the PR diff.
+After comment resolution, run `$review-engine-impl` against the PR diff.
 
 Use this diff basis:
 
@@ -348,7 +348,7 @@ Ask, explicitly, TWO questions in this order:
 1. **Is the change in the architecturally correct LOCATION (the right seam)?** Is this fix made at the layer / module / function where the codebase's design says the responsibility belongs — or is it a symptom-patch at the wrong seam that merely makes the test pass? A change on the wrong code path is **technical debt even when CI is green**: it ossifies a dead or duplicate path, scatters logic that should live in one authority, and the *next* card in the class won't be covered because the real seam was never touched. **This is the single most important check in the entire review.** Increasing PR velocity NEVER justifies merging debt — a wrong-location fix that ships is worse than no fix, because it looks done while leaving the actual seam broken and now obscured. If the correct location is a different function/module than the PR touches, the verdict is **BLOCK** (close or request re-implementation at the right seam), or escalate to the full engine cycle — it is *not* an inline patch of the wrong location. Always cite the correct seam in the report, and release the assignment lock (see *Releasing the Assignment Lock*) when you BLOCK and hand the PR back. (Precedent: #1251 added a green, inert branch to `classify_quoted_inner` when the real fix belonged in `parse_spells_have_keyword` / `StaticMode::CastWithKeyword` — BLOCKED despite passing CI, because merging it would have ossified a dead path and left the target card class uncovered.)
 2. **Is the change AT that seam the MOST IDIOMATIC change possible?** Once the location is right, the implementation at it must be the one a principal engineer steeped in this codebase would write — the established building block reused rather than re-implemented, an existing typed enum parameterized rather than a new `bool` or sibling variant, `nom` combinators composed rather than string dispatch. A correct-but-unidiomatic change at the right seam is still a finding, not a nit: it passes CI and may even cover the class, but it diverges from house style and seeds the next contributor's copy-paste with a non-idiom. Bring it to the idiom before merge (improve the author's branch per Quality Bar rule 1) — never merge "works, but not how we'd write it."
 
-Apply the relevant lenses from `review-impl.md`, especially:
+Apply the relevant lenses from `review-engine-impl.md`, especially:
 
 - **correct location / right seam** — is this the layer and function a maintainer would change, or a wrong-place patch that adds debt? Highest priority; a "no" here is disqualifying regardless of how clean the code looks
 - **most idiomatic change at the seam** — once the location is right, is the implementation the one a principal engineer would write (building-block reuse over re-implementation, enum parameterization over a new bool/sibling, composed combinators over string dispatch)? A correct-but-unidiomatic change is a finding, not a nit
@@ -507,7 +507,7 @@ Classify from the behavior in the diff, not the author or PR title. Label every 
 
 Apply the policy-configured **`quality` label** in addition to the type label when the PR is additive and genuinely well executed: it adds real engine/parser/frontend capability or coverage, has almost no review churn, lands at the right seam, uses the house idioms, has discriminating tests/proof, and required no maintainer redesign beyond tiny local fixups. Do not apply `quality` to merely acceptable PRs, bugfixes with heavy correction, broad churn, PRs that needed substantial maintainer rescue, or anything still carrying unresolved deferrals. Record matching praise signals (`right-seam`, `scope-discipline`, `discriminating-runtime-test`, `parameterized-not-proliferated`, `evidence-backed-pushback` when applicable) in the local event.
 
-The manual quality gate is one-shot and current-PR-only: the claimed parse-impact count must equal the measured parse-diff count **and the normalized card sets must be identical**; `review-impl` must confirm the existing authority/right seam; and at least one production-pipeline test must be demonstrated to fail when the production change is reverted. Prior standing is irrelevant. Use the existing label and attach the existing praise tokens to the ordinary review/enqueue event—there is no `quality_recommended` event.
+The manual quality gate is one-shot and current-PR-only: the claimed parse-impact count must equal the measured parse-diff count **and the normalized card sets must be identical**; `review-engine-impl` must confirm the existing authority/right seam; and at least one production-pipeline test must be demonstrated to fail when the production change is reverted. Prior standing is irrelevant. Use the existing label and attach the existing praise tokens to the ordinary review/enqueue event—there is no `quality_recommended` event.
 
 After every delegated or direct label operation, verify live state with `gh pr view <PR> --json labels`. Stdout from `gh pr edit`, a handler report, or a local event is not proof. Missing type/quality labels must be repaired or reported before enqueue is considered complete.
 
@@ -577,7 +577,7 @@ For each PR, report:
 - checkout location and whether it was a worktree or main workspace
 - update status against `origin/main`
 - review comments resolved and any left manual
-- architecture-review findings from `review-impl.md`
+- architecture-review findings from `review-engine-impl.md`
 - inline fixes made vs full-cycle work invoked or recommended
 - deferred items completed vs left open
 - verification commands and results

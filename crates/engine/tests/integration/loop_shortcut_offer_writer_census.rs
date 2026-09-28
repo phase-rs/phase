@@ -323,7 +323,10 @@ fn census(needle: &str) -> Vec<Hit> {
 /// benign read: `game/visibility.rs`'s exhaustive
 /// `redact_paid_cast_cleanup_authority` match projects/redacts an already-open
 /// offer while minting no offer and holding no declaration or certification
-/// authority. The assert below is where the pair is authoritative.
+/// authority. The assert below is where the pair is authoritative. A third benign
+/// read, `WaitingFor::is_mana_ability_continuation` in `types/game_state.rs`,
+/// names the variant only in its exhaustive `=> false` arm (not a mana ability's
+/// activation).
 ///
 /// R8 CONJUNCT 2, same test — pin VALUE-legality has exactly ONE production
 /// consumer (`analysis::decision_template::declaration_conforms`), that consumer
@@ -356,7 +359,7 @@ fn the_loop_shortcut_offer_writer_surface_is_pinned_and_every_declare_site_valid
 
     assert_eq!(
         (production.len(), in_test.len()),
-        (24, 24),
+        (25, 24),
         "CR 732.2a OFFER-WRITER SURFACE CHANGED (not re-measured — this number is an \
          INVARIANCE pin over the whole 5d U-series).\n\
          The three CERTIFICATION-PATH writers are `reconcile_terminal_result` (object-growth \
@@ -432,6 +435,12 @@ fn the_loop_shortcut_offer_writer_surface_is_pinned_and_every_declare_site_valid
          live proposal. Two READS in one helper, not two writers: the helper mints through the \
          production seam and writes no offer of its own. PRODUCTION AND THE PER-FILE MULTISET \
          ARE BOTH UNMOVED.\n\
+         EIGHTH ADJUDICATION, PRODUCTION 24 => 25: `WaitingFor::is_mana_ability_continuation` \
+         in `engine/src/types/game_state.rs` (types/game_state.rs 4 => 5) was made exhaustive, \
+         so it lists `WaitingFor::LoopShortcut {{ .. }}` in its `=> false` arm. A match PATTERN \
+         that classifies the prompt as not a mana ability's activation: it mints no offer, reads \
+         none of its fields, and holds no declaration or certification authority, in a file \
+         with no certification-path writer. The benign READ case; the test half is unmoved.\n\
          measured per-file production multiset: {multiset:?}\n\
          production: {production:?}\n\
          test: {in_test:?}"
@@ -445,7 +454,7 @@ fn the_loop_shortcut_offer_writer_surface_is_pinned_and_every_declare_site_valid
             ("engine/src/game/interaction.rs".to_string(), 5),
             ("engine/src/game/scenario.rs".to_string(), 1),
             ("engine/src/game/visibility.rs".to_string(), 3),
-            ("engine/src/types/game_state.rs".to_string(), 4),
+            ("engine/src/types/game_state.rs".to_string(), 5),
             ("phase-ai/src/decision_kind.rs".to_string(), 1),
             ("phase-ai/src/policies/loop_shortcut.rs".to_string(), 1),
             ("phase-ai/src/projection.rs".to_string(), 1),
