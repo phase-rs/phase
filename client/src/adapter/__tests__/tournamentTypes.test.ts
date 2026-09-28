@@ -179,7 +179,7 @@ describe("tournament wire type mirrors", () => {
     ];
     expect(gates).toHaveLength(5);
 
-    // A hosted pairing arrives with report_gate "Hosted" (lobby v13): the UI
+    // A hosted pairing arrives with report_gate "Hosted" (lobby v14): the UI
     // treats it like Bye/Forfeit — no manual report affordance.
     const hostedGate: ReportGate = "Hosted";
     expect(JSON.parse(JSON.stringify(hostedGate))).toBe("Hosted");

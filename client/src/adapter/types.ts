@@ -5174,7 +5174,7 @@ export type BracketShape = "Swiss" | "SingleElimination";
  * mistyped tally is corrected.
  *
  * `Hosted` marks a pairing played on a server-authoritative table (lobby
- * protocol v13): its result is reported by the server on game-over, and a
+ * protocol v14): its result is reported by the server on game-over, and a
  * client `ReportMatchResult` is refused, so the UI hides the manual report
  * affordance for it exactly as it does for `Bye`/`Forfeit`.
  */
