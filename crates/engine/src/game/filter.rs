@@ -7950,6 +7950,18 @@ pub(crate) fn object_has_no_abilities(obj: &GameObject) -> bool {
         && obj.static_definitions.is_empty()
 }
 
+/// CR 201.2 + CR 201.2a: case-insensitive card-name equality under full Unicode
+/// lowercase folding. `eq_ignore_ascii_case` folds only `A`–`Z`, while the Oracle
+/// parser lowers text with `str::to_lowercase`, so a stored "éowyn, shieldmaiden"
+/// never matched an object named "Éowyn, Shieldmaiden", and inside `Not` that
+/// miss became a false "not named" match. Single authority for every
+/// `FilterProp::Named` arm (live object, spell-cast record, zone-change record).
+pub(crate) fn card_names_match(a: &str, b: &str) -> bool {
+    a.chars()
+        .flat_map(char::to_lowercase)
+        .eq(b.chars().flat_map(char::to_lowercase))
+}
+
 /// CR 603.10: Evaluate a `FilterProp` against a zone-change event snapshot.
 ///
 /// Properties fall into four groups:
@@ -7965,18 +7977,6 @@ pub(crate) fn object_has_no_abilities(obj: &GameObject) -> bool {
 ///    zone, so these are semantically not applicable and return `false`.
 /// 5. **Not-yet-supported.** Could plausibly be snapshotted or cross-referenced but
 ///    are not currently required. Returning `false` is a known conservative gap.
-/// CR 201.2 + CR 201.2a: case-insensitive card-name equality under full Unicode
-/// lowercase folding. `eq_ignore_ascii_case` folds only `A`–`Z`, while the Oracle
-/// parser lowers text with `str::to_lowercase`, so a stored "éowyn, shieldmaiden"
-/// never matched an object named "Éowyn, Shieldmaiden", and inside `Not` that
-/// miss became a false "not named" match. Single authority for every
-/// `FilterProp::Named` arm (live object, spell-cast record, zone-change record).
-pub(crate) fn card_names_match(a: &str, b: &str) -> bool {
-    a.chars()
-        .flat_map(char::to_lowercase)
-        .eq(b.chars().flat_map(char::to_lowercase))
-}
-
 fn zone_change_record_matches_property(
     prop: &FilterProp,
     state: &GameState,
