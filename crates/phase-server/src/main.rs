@@ -6738,7 +6738,6 @@ async fn handle_full_game_submission(
     socket: &mut NegotiatedSocket,
     state: &SharedState,
     db: &SharedDb,
-    combos: &SharedComboTable,
     draft_state: &SharedDraftState,
     connections: &SharedConnections,
     tx: &mpsc::UnboundedSender<ServerMessage>,
@@ -6813,7 +6812,6 @@ async fn handle_full_game_submission(
                 &player_token,
                 action,
                 Some(db.as_ref()),
-                combos,
             ),
             GameSubmission::Interaction(submission) => {
                 mgr.handle_interaction_with_rejection(&game_code, &player_token, submission)
@@ -7929,7 +7927,6 @@ async fn handle_client_message(
                 socket,
                 state,
                 db,
-                combos,
                 draft_state,
                 connections,
                 tx,
@@ -7946,7 +7943,6 @@ async fn handle_client_message(
                 socket,
                 state,
                 db,
-                combos,
                 draft_state,
                 connections,
                 tx,
@@ -9681,7 +9677,6 @@ async fn handle_client_message(
                         &player_token,
                         engine::types::actions::GameAction::Concede { player_id },
                         None,
-                        combos,
                     ) {
                         Ok(result) => {
                             let session = mgr
