@@ -1287,3 +1287,118 @@ fn a_slot_answer_under_a_changed_digest_is_refused() {
     assert_eq!(runner.state().objects[&ornithopter].zone, Zone::Graveyard);
     assert!(per_type_used(&runner).is_empty());
 }
+
+/// CR 601.2b + CR 614.1c: the counter rider is latched at announcement even
+/// when the permission itself stops existing during payment. A creature holds
+/// a graveyard permission with a finality-counter rider only because an
+/// artifact grants it; the artifact is sacrificed to Krark-Clan Ironworks for
+/// mana mid-payment, which takes the permission (and its rider) off the
+/// creature. The Grizzly Bears cast announced under it still enters with the
+/// counter.
+#[test]
+fn a_granted_counter_rider_is_latched_when_the_grant_ends_mid_payment() {
+    use engine::types::ability::{
+        CardPlayMode, ContinuousModification, StaticDefinition, TargetFilter, TypedFilter,
+    };
+    use engine::types::statics::StaticMode;
+    let permission = StaticDefinition::new(StaticMode::GraveyardCastPermission {
+        frequency: CastFrequency::Unlimited,
+        play_mode: CardPlayMode::Cast,
+        graveyard_destination_replacement: None,
+        extra_cost: None,
+        enters_with_counter: Some(CounterType::Finality),
+        required_cast_keyword: None,
+    })
+    .affected(TargetFilter::Typed(TypedFilter::creature()));
+    let grant = StaticDefinition::continuous()
+        .affected(TargetFilter::Typed(TypedFilter::creature()))
+        .modifications(vec![ContinuousModification::GrantStaticAbility {
+            definition: Box::new(permission),
+        }]);
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "Granted Host", 1, 1).id();
+    let granter = scenario
+        .add_artifact_from_oracle(P0, "Permission Granter", "")
+        .with_static_definition(grant)
+        .id();
+    let ironworks = scenario
+        .add_artifact_from_oracle(P0, "Krark-Clan Ironworks", KRARK_CLAN_IRONWORKS)
+        .id();
+    let bears = add_bears_to_graveyard(&mut scenario, "Grizzly Bears");
+    let mut runner = scenario.build();
+    engine::game::layers::flush_layers(runner.state_mut());
+    add_mana(&mut runner, ManaType::Green, 2);
+    assert!(
+        runner.state().objects[&host].static_definitions.len() > 0,
+        "reach: the host holds the granted permission"
+    );
+    let card_id = runner.state().objects[&bears].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: bears,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("the cast starts");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ManaPayment { .. }
+    ));
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: ironworks,
+            ability_index: 0,
+        })
+        .expect("Ironworks is activatable during payment");
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![granter],
+        })
+        .expect("sacrificing the granter for mana is legal");
+    runner
+        .act(GameAction::PassPriority)
+        .expect("committing the payment completes the cast");
+    assert_eq!(runner.state().objects[&granter].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&bears].zone, Zone::Stack);
+    runner.resolve_top();
+    let entered = &runner.state().objects[&bears];
+    assert_eq!(entered.zone, Zone::Battlefield);
+    assert_eq!(
+        entered.counters.get(&CounterType::Finality).copied(),
+        Some(1),
+        "the rider latched at announcement applies, counters: {:?}",
+        entered.counters
+    );
+}
+
+/// CR 118.9 + CR 118.9a: a graveyard permission whose extra cost is itself an
+/// alternative cost authorizes neither a Blitz cast (a spell takes only one
+/// alternative cost) nor, on this route, a printed-cost cast (which would owe
+/// that alternative instead of the mana cost, and isn't implemented): the
+/// Guardian can't be cast through it. The same permission with an additional
+/// cost is the reach control.
+#[test]
+fn an_alternative_cost_permission_authorizes_no_graveyard_cast() {
+    use engine::types::ability::{AbilityCost, QuantityExpr};
+    use engine::types::statics::{CastCostMode, CastExtraCost, StaticMode};
+    for mode in [CastCostMode::Additional, CastCostMode::Alternative] {
+        let mut permission = creature_permission(CastFrequency::Unlimited, None, vec![]);
+        if let StaticMode::GraveyardCastPermission { extra_cost, .. } = &mut permission.mode {
+            *extra_cost = Some(CastExtraCost {
+                cost: AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                },
+                mode,
+            });
+        }
+        let (runner, _host, guardian) = shared_slot_board(vec![permission], None);
+        let offered = offered_cast(&runner, guardian).is_some();
+        assert_eq!(
+            offered,
+            mode == CastCostMode::Additional,
+            "{mode:?}: offered {offered}"
+        );
+    }
+}

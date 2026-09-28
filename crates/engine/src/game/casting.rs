@@ -5860,6 +5860,9 @@ pub(crate) enum GraveyardAuthorityError {
     /// CR 118.9a: the grant is itself an alternative cost, so it can't
     /// authorize a method that brings its own.
     AlternativeRider,
+    /// CR 118.9: the grant's own alternative cost, which a graveyard cast
+    /// can't pay yet.
+    AlternativeCostUnsupported,
     /// A per-type permission with several slots, announced without one.
     SlotRequired,
     /// The announced slot is used, or isn't a type of the spell as cast.
@@ -5886,6 +5889,9 @@ impl From<GraveyardAuthorityError> for EngineError {
             GraveyardAuthorityError::AlternativeRider => {
                 "This graveyard permission is itself an alternative cost, so it can't be used \
                  with another alternative cost"
+            }
+            GraveyardAuthorityError::AlternativeCostUnsupported => {
+                "Casting from the graveyard for this permission's alternative cost is unsupported"
             }
             GraveyardAuthorityError::SlotRequired => {
                 "Choose which permanent type this graveyard permission is used for"
@@ -5981,12 +5987,20 @@ fn bind_graveyard_authority(
     }
     // CR 118.9a: only one alternative cost can be applied to a spell, so a
     // permission that is itself one can't carry a method that brings its own.
-    if rider.is_some()
-        && candidate.extra_cost.as_ref().is_some_and(|extra| {
-            matches!(extra.mode, crate::types::statics::CastCostMode::Alternative)
-        })
+    // A printed-cost cast through such a permission would pay that alternative
+    // instead of the mana cost, which the graveyard route doesn't implement
+    // (no printed card has the shape; coverage marks it): refused rather than
+    // charged the mana cost.
+    if candidate
+        .extra_cost
+        .as_ref()
+        .is_some_and(|extra| matches!(extra.mode, crate::types::statics::CastCostMode::Alternative))
     {
-        return Err(GraveyardAuthorityError::AlternativeRider);
+        return Err(if rider.is_some() {
+            GraveyardAuthorityError::AlternativeRider
+        } else {
+            GraveyardAuthorityError::AlternativeCostUnsupported
+        });
     }
     if candidate.frequency != CastFrequency::OncePerTurnPerPermanentType {
         return match slot_type {
