@@ -431,7 +431,7 @@ describe("partitionBlockTargets", () => {
     });
   });
 
-  it("does not propagate a blocker assignment across bandless attackers", () => {
+  it("keeps bandless attackers in separate stacks by their own direct assignments", () => {
     const blockerAssignments = new Map<ObjectId, Set<ObjectId>>([[101, new Set([14])]]);
     const stacks = partitionBlockTargets([14, 15], 100, {
       attackers: [attacker(14, P1, null), attacker(15, P1, null)],
