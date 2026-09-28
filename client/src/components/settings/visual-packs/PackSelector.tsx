@@ -26,6 +26,7 @@ const IMAGE_LOCALES = {
   es: "Español",
   fr: "Français",
   it: "Italiano",
+  ja: "日本語",
   pt: "Português",
 } as const;
 const MUTATION_ACTIONS = new Set(["install", "cancel", "resume", "repair", "remove"]);

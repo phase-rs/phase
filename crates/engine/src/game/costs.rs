@@ -43,7 +43,8 @@
 use std::collections::HashSet;
 
 use crate::types::ability::{
-    AbilityCost, EffectKind, TargetFilter, TypedFilter, REMOVE_COUNTER_COST_ALL,
+    AbilityCost, EffectKind, PlayerScope, QuantityExpr, QuantityRef, TargetFilter, TypedFilter,
+    REMOVE_COUNTER_COST_ALL,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
@@ -58,7 +59,7 @@ use crate::types::zones::Zone;
 use super::casting::{
     ability_mana_payment_excluded_sources, can_pay_effect_mana_cost_after_auto_tap,
     find_eligible_discard_targets, mana_ability_cost_payment_is_paused, pay_ability_mana_cost,
-    pay_ability_mana_cost_excluding, pay_effect_mana_cost_with_resume,
+    pay_ability_mana_cost_excluding, pay_effect_mana_cost_with_resume, PausedManaPayment,
 };
 use super::engine::EngineError;
 use super::filter::FilterContext;
@@ -841,7 +842,13 @@ fn pay_ability_cost_inner(
             // auto-tap path. Pre-flight then pay; either step failing is a
             // payment failure (not an engine error).
             PaymentScope::Resolution { .. } => {
-                if !can_pay_effect_mana_cost_after_auto_tap(state, player, source_id, cost) {
+                if !can_pay_effect_mana_cost_after_auto_tap(
+                    state,
+                    player,
+                    source_id,
+                    cost,
+                    PausedManaPayment::Resumable,
+                ) {
                     return Ok(payment_failed("insufficient mana"));
                 }
                 let resume = effect_pay_cost_mana_resume(
@@ -887,7 +894,13 @@ fn pay_ability_cost_inner(
             PaymentScope::Resolution { .. } => {
                 let amount = resolve_cost_quantity(state, quantity, player, source_id, scope);
                 let mana_cost = crate::types::mana::ManaCost::generic(amount.max(0) as u32);
-                if !can_pay_effect_mana_cost_after_auto_tap(state, player, source_id, &mana_cost) {
+                if !can_pay_effect_mana_cost_after_auto_tap(
+                    state,
+                    player,
+                    source_id,
+                    &mana_cost,
+                    PausedManaPayment::Resumable,
+                ) {
                     return Ok(payment_failed("insufficient mana"));
                 }
                 let resume = effect_pay_cost_mana_resume(
@@ -1314,6 +1327,7 @@ fn pay_ability_cost_inner(
                     enters_attacking: false,
                     owner_library: false,
                     track_exiled_by_source: true,
+                    face_down_in_exile: crate::types::ability::ExileConcealment::Public,
                     face_down_profile: None,
                     enter_with_counters: vec![],
                     conditional_enter_with_counters: vec![],
@@ -1828,6 +1842,56 @@ fn pay_ability_cost_inner(
     Ok(PaymentOutcome::Paid)
 }
 
+/// CR 601.2f + CR 602.2b: Determine an activating player's explicit
+/// half-life cost before the CR 601.2g mana-ability window. The fixed typed
+/// cost is also used read-only for offer and early affordability queries.
+pub(crate) fn lock_half_life_activation_cost(
+    state: &GameState,
+    activator: PlayerId,
+    source_id: ObjectId,
+    cost: &AbilityCost,
+) -> Option<AbilityCost> {
+    match cost {
+        AbilityCost::PayLife {
+            amount:
+                amount @ QuantityExpr::DivideRounded {
+                    inner, divisor: 2, ..
+                },
+        } if matches!(
+            inner.as_ref(),
+            QuantityExpr::Ref {
+                qty: QuantityRef::LifeTotal {
+                    player: PlayerScope::Controller
+                }
+            }
+        ) =>
+        {
+            Some(AbilityCost::PayLife {
+                // CR 119.4b: Zero life remains payable even at zero or negative life.
+                amount: QuantityExpr::Fixed {
+                    value: resolve_quantity(state, amount, activator, source_id).max(0),
+                },
+            })
+        }
+        AbilityCost::Composite { costs } => {
+            let mut locked_costs: Option<Vec<AbilityCost>> = None;
+            for (index, component) in costs.iter().enumerate() {
+                if let Some(locked) =
+                    lock_half_life_activation_cost(state, activator, source_id, component)
+                {
+                    locked_costs
+                        .get_or_insert_with(|| costs[..index].to_vec())
+                        .push(locked);
+                } else if let Some(components) = locked_costs.as_mut() {
+                    components.push(component.clone());
+                }
+            }
+            locked_costs.map(|costs| AbilityCost::Composite { costs })
+        }
+        _ => None,
+    }
+}
+
 /// CR 118.3 + CR 601.2h: The single payability authority. Returns whether
 /// `payer` could pay `cost` right now in the active [`PaymentScope`].
 ///
@@ -1860,19 +1924,31 @@ pub(crate) fn can_pay(
 ) -> bool {
     match scope {
         PaymentScope::Activation { ability_index, .. } => {
+            // CR 601.2f + CR 602.2b: Judge an offer using the cost that would
+            // lock before mana abilities, without committing that lock here.
+            let locked = lock_half_life_activation_cost(state, payer, source_id, cost);
+            let cost = locked.as_ref().unwrap_or(cost);
             if !cost.is_payable_for_activation(state, payer, source_id, *ability_index) {
                 return false;
             }
-            // CR 118.12a: disjunctive activation costs resolve via
-            // `ActivationCostOneOfChoice`, but each branch must still pass the
-            // same activation affordability authority (is_payable + dry-run) as a
-            // deterministic cost. `is_payable` alone does not catch tapped-source
-            // `{T}` legs — shard-style `OneOf([Composite([Mana, Tap]), …])` would
-            // otherwise surface as legal when every branch needs an untapped source.
-            if let AbilityCost::OneOf { costs } = cost {
-                return costs
-                    .iter()
-                    .any(|branch| can_pay(state, payer, source_id, branch, scope));
+            // CR 601.2h + CR 602.2b + CR 118.3: a disjunctive leg anywhere in the
+            // activation cost is payable iff some branch, substituted into the
+            // total cost, passes the same authority. Disjunctions resolve via
+            // `ActivationCostOneOfChoice`; `is_payable` alone does not catch
+            // tapped-source `{T}` legs (shard-style `OneOf([Composite([Mana, Tap]),
+            // …])`), nor sibling mana legs summed with a branch's mana (Camellia's
+            // `Composite([Mana {2}, OneOf([Exile, Sacrifice])])`).
+            if let Some(branches) = super::casting::find_one_of_cost(cost) {
+                return branches.iter().any(|branch| {
+                    super::casting::one_of_branch_payable_in(
+                        state,
+                        payer,
+                        source_id,
+                        cost,
+                        branch,
+                        *ability_index,
+                    )
+                });
             }
             // CR 701.67a: A bare Waterbend cost has no deterministic component
             // to dry-run — its affordability is fully answered by `is_payable`'s
@@ -2274,7 +2350,13 @@ fn can_pay_resolution(
     use crate::types::ability::{CardSelectionMode, DiscardSelfScope};
     match cost {
         AbilityCost::Mana { cost: mana_cost } => {
-            can_pay_effect_mana_cost_after_auto_tap(state, payer, ability.source_id, mana_cost)
+            can_pay_effect_mana_cost_after_auto_tap(
+                state,
+                payer,
+                ability.source_id,
+                mana_cost,
+                PausedManaPayment::Resumable,
+            )
         }
         // CR 118.4 + CR 107.3c: Resolve the dynamic generic to a concrete
         // amount, then check mana payability. Dynamic-generic ability costs
@@ -2283,7 +2365,13 @@ fn can_pay_resolution(
         AbilityCost::ManaDynamic { quantity } => {
             let amount = resolve_quantity_with_targets(state, quantity, ability);
             let mana = crate::types::mana::ManaCost::generic(amount.max(0) as u32);
-            can_pay_effect_mana_cost_after_auto_tap(state, payer, ability.source_id, &mana)
+            can_pay_effect_mana_cost_after_auto_tap(
+                state,
+                payer,
+                ability.source_id,
+                &mana,
+                PausedManaPayment::Resumable,
+            )
         }
         // CR 119.4: Pay life requires the player's life total to be at least the
         // payment amount (and no CantLoseLife lock).
@@ -2486,6 +2574,106 @@ mod tests {
     use crate::types::mana::{ManaCost, ManaCostShard};
 
     const P0: PlayerId = PlayerId(0);
+
+    #[test]
+    fn half_life_activation_lock_fixes_only_explicit_typed_leaf() {
+        let mut scenario = GameScenario::new();
+        scenario.with_life(P0, 7);
+        let source = scenario
+            .add_enchantment_from_oracle(
+                P0,
+                "Lurking Evil",
+                "Pay half your life, rounded up: This enchantment becomes a 4/4 Phyrexian Horror creature with flying.",
+            )
+            .id();
+        let mut runner = scenario.build();
+        let amount = |rounding| QuantityExpr::DivideRounded {
+            inner: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::LifeTotal {
+                    player: PlayerScope::Controller,
+                },
+            }),
+            divisor: 2,
+            rounding,
+        };
+        let composite = AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::PayLife {
+                    amount: amount(crate::types::ability::RoundingMode::Up),
+                },
+                AbilityCost::Tap,
+            ],
+        };
+        let locked =
+            lock_half_life_activation_cost(runner.state(), P0, source, &composite).unwrap();
+        assert!(matches!(
+            &locked,
+            AbilityCost::Composite { costs } if matches!(
+                costs.as_slice(),
+                [AbilityCost::PayLife { amount: QuantityExpr::Fixed { value: 4 } }, AbilityCost::Tap]
+            )
+        ));
+
+        runner.state_mut().players[P0.0 as usize].life = 5;
+        assert!(lock_half_life_activation_cost(runner.state(), P0, source, &locked).is_none());
+        let fixed = AbilityCost::PayLife {
+            amount: QuantityExpr::Fixed { value: 4 },
+        };
+        let excluded = HashSet::new();
+        let scope = PaymentScope::Activation {
+            excluded_sources: &excluded,
+            ability_index: Some(0),
+        };
+        assert!(can_pay(runner.state(), P0, source, &fixed, &scope));
+        runner.state_mut().players[P0.0 as usize].life = 3;
+        assert!(!can_pay(runner.state(), P0, source, &fixed, &scope));
+        runner.state_mut().players[P0.0 as usize].life = 5;
+        assert!(matches!(
+            lock_half_life_activation_cost(
+                runner.state(),
+                P0,
+                source,
+                &AbilityCost::PayLife {
+                    amount: amount(crate::types::ability::RoundingMode::Down),
+                },
+            ),
+            Some(AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 2 }
+            })
+        ));
+        for (life, expected) in [(0, 0), (-2, 0), (1, 1)] {
+            runner.state_mut().players[P0.0 as usize].life = life;
+            assert!(matches!(
+                lock_half_life_activation_cost(
+                    runner.state(),
+                    P0,
+                    source,
+                    &AbilityCost::PayLife {
+                        amount: amount(crate::types::ability::RoundingMode::Up),
+                    },
+                ),
+                Some(AbilityCost::PayLife { amount: QuantityExpr::Fixed { value } }) if value == expected
+            ));
+        }
+        assert!(lock_half_life_activation_cost(
+            runner.state(),
+            P0,
+            source,
+            &AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 2 }
+            }
+        )
+        .is_none());
+        assert!(lock_half_life_activation_cost(
+            runner.state(),
+            P0,
+            source,
+            &AbilityCost::Mana {
+                cost: ManaCost::NoCost,
+            }
+        )
+        .is_none());
+    }
 
     #[test]
     fn direct_resolution_executor_does_not_support_non_self_sacrifice() {

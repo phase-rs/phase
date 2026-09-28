@@ -531,6 +531,33 @@ describe("TournamentLandingPage failures", () => {
     expect(mocks.navigate).not.toHaveBeenCalled();
   });
 
+  it("renders the localized incompatible copy, interpolating the needed version, with nothing sent", async () => {
+    const user = userEvent.setup();
+    const fake = makeFakeSocket();
+    // This fake advertises no lobby version (undefined), which predates v8, so a
+    // Bo1 head-to-head selection is refused before any frame is sent.
+    primeSocket(fake);
+    renderPage();
+    await settle();
+
+    await user.type(screen.getByLabelText("Tournament name"), "Single-Game Bracket");
+    await user.selectOptions(screen.getByLabelText("Match"), "Bo1");
+    await user.click(screen.getByRole("button", { name: "Create Tournament" }));
+    await settle();
+
+    // The rendered copy is the localized `errors.incompatible` sentence with the
+    // typed version interpolated — NOT the store's English fallback message. The
+    // distinctive store-only phrase must never reach the UI.
+    const alert = screen.getByRole("alert");
+    expect(alert.textContent).toBe(
+      "This server is too old for that match structure (it needs lobby protocol 8). Nothing was sent.",
+    );
+    expect(alert.textContent).not.toContain("would apply its default structure");
+    // The refusal is pre-send: no frame, no navigation.
+    expect(fake.tally("CreateTournament")).toBe(0);
+    expect(mocks.navigate).not.toHaveBeenCalled();
+  });
+
   it("renders the aborted copy when a reconnect cuts an in-flight request short", async () => {
     const user = userEvent.setup();
     const fake = makeFakeSocket();

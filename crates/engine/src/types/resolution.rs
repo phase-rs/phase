@@ -131,6 +131,14 @@ pub struct PendingCoinFlip {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lose_effect: Option<Box<AbilityDefinition>>,
     pub kind: PendingCoinFlipKind,
+    /// CR 608.2h: the creating ability's chain-root target list, carried
+    /// across the Krark's Thumb keep-choice suspension so a counter-gated
+    /// "that many" nested in `win_effect`/`lose_effect` still resolves
+    /// against the live chain-root target once the flip's branch runs.
+    /// `#[serde(default)]` for in-flight states serialized before this field
+    /// existed.
+    #[serde(default)]
+    pub chain_root_targets: Vec<TargetRef>,
 }
 
 /// CR 706.6 + CR 614.1a: Full resolution context for a die-roll resolver paused
@@ -217,6 +225,14 @@ pub struct PendingDieRoll {
     /// forced remainder so the resume path drops both halves together.
     #[serde(default)]
     pub forced_ignored: Vec<usize>,
+    /// CR 608.2h: the creating ability's chain-root target list, carried
+    /// across the CR 706.6 ignore choice AND any mid-loop results-branch
+    /// suspension so a counter-gated "that many" nested in a results-table
+    /// branch still resolves against the live chain-root target once that
+    /// branch actually runs. `#[serde(default)]` for in-flight states
+    /// serialized before this field existed.
+    #[serde(default)]
+    pub chain_root_targets: Vec<TargetRef>,
 }
 
 /// CR 706.1 + CR 616.1: A die-roll INSTRUCTION parked across a replacement
@@ -263,6 +279,12 @@ pub struct PendingDieRollInstruction {
     /// Which caller owns the completion of this roll (see the type docs).
     #[serde(default)]
     pub continuation: DieRollContinuation,
+    /// CR 608.2h: the creating ability's chain-root target list, carried
+    /// across the CR 616.1 replacement-ordering choice so it survives into
+    /// the `PendingDieRoll` this instruction produces. `#[serde(default)]`
+    /// for in-flight states serialized before this field existed.
+    #[serde(default)]
+    pub chain_root_targets: Vec<TargetRef>,
 }
 
 /// CR 706.1: Which caller finishes a parked die-roll instruction once a CR 616.1
@@ -375,8 +397,8 @@ pub struct ChangeZoneFrame {
 ///
 /// `ChooseFromZone` stores its narrow trigger-context sidecar beside the
 /// continuation it will drain, not beside the independent per-category
-/// iterator. Keeping it here prevents a v1→v2 conversion from dropping that
-/// sidecar at a save boundary.
+/// iterator. Keeping it here prevents a legacy-to-typed-frame conversion from
+/// dropping that sidecar at a save boundary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AbilityContinuationFrame {
     pub pending: PendingContinuation,
@@ -496,7 +518,7 @@ impl ResolutionFrame {
 
     /// Whether this frame resides in `GameState::resolution_stack` at runtime.
     ///
-    /// The v2 wire also carries the remaining legacy resolution authorities as
+    /// The typed-frame wire also carries the remaining legacy resolution authorities as
     /// frames. Those are projected back into their dedicated state fields on
     /// decode, so they may follow an active stack-resident child in wire order.
     const fn is_runtime_stack_resident(&self) -> bool {
@@ -3650,15 +3672,18 @@ impl ResolutionStack {
 
 /// The full-state resolution wire version for typed [`ResolutionStack`] frames.
 ///
-/// Version 2 is the compatibility boundary for protocol-19 clients. Phase 4
-/// hardening changes neither this serialized shape nor the version.
-pub const RESOLUTION_STATE_WIRE_VERSION: u64 = 2;
+/// Version 3 distinguishes the current exploited-trigger source/victim roles
+/// from the legacy actor fallback stored in `valid_card`.
+pub const RESOLUTION_STATE_WIRE_VERSION: u64 = 3;
 
 /// Historical full-state resolution wire version accepted only for migration.
 ///
-/// The reader accepts v1 saves and converts them to v2 frames; the writer
+/// The reader accepts v1 saves and converts them to typed frames; the writer
 /// never emits v1 resolution fields.
 const LEGACY_RESOLUTION_STATE_WIRE_VERSION: u64 = 1;
+
+/// Historical typed-frame wire version accepted only for migration.
+const LEGACY_TYPED_FRAME_RESOLUTION_STATE_WIRE_VERSION: u64 = 2;
 
 /// The `GameState` fields whose serialized form is UNCONDITIONAL: each carries
 /// `#[serde(default …)]` but NO `skip_serializing_if`, so the derived
@@ -3667,7 +3692,7 @@ const LEGACY_RESOLUTION_STATE_WIRE_VERSION: u64 = 1;
 /// that can produce it is an explicit remover.
 ///
 /// The remover is `client_state_wire_value` (`crate::game::derived_views`),
-/// which strips exactly these three plus six `skip_serializing_if` siblings.
+/// which strips exactly these four plus six `skip_serializing_if` siblings.
 /// The six siblings are deliberately NOT listed here: their absence is
 /// value-dependent, so it proves nothing.
 ///
@@ -3682,35 +3707,34 @@ const LEGACY_RESOLUTION_STATE_WIRE_VERSION: u64 = 1;
 /// limit and what its serde-default control does and does not close. Read it
 /// there before trusting this list against a serde change. Do not delete it.
 ///
-/// STOPGAP, and scoped to stay one. This list exists only because the producer
-/// leaves no positive mark. The engine's other projection gate,
+/// The producer now also writes a positive `wire_projection` mark. This list
+/// remains as a legacy fallback for unmarked historical captures, because
+/// those bytes cannot be retroactively stamped. The engine's other projection gate,
 /// `reject_viewer_projection_as_authority` (`crate::types::game_state`), keys
 /// on a `viewer_projection` stamp its writer sets; the principled sibling here
-/// is the same thing for the client wire — a `wire_projection` stamp written at
-/// `client_state_wire_value` (`crate::game::derived_views`). That stamp is a
-/// DEFERRED item and is not shipped, so reading absence is what a reader must
-/// do UNTIL THE PRODUCER STAMPS. When it lands, this const and
-/// [`is_redacted_client_wire_projection`] are what it replaces, and a versioned
-/// payload already takes [`declare_raw_resolution_wire`]'s early return, so it
-/// can supersede this without conflicting with it.
+/// is the same thing for the client wire — the `wire_projection` stamp written
+/// at `client_state_wire_value` (`crate::game::derived_views`) is checked before
+/// any declared-version early return. The absence fingerprint below remains
+/// only for legacy unmarked captures.
 const CLIENT_WIRE_UNCONDITIONAL_FIELDS: &[&str] = &[
     "next_delayed_trigger_token",
     "next_delayed_trigger_instance",
+    "next_resolution_cast_offer_id",
     "resolved_rules_journal",
 ];
 
 /// Whether an unversioned raw payload was written by the client wire rather
-/// than by a raw persistence writer — inferred from what that writer REMOVED,
-/// because it leaves no positive mark. A fingerprint UNTIL THE PRODUCER STAMPS:
-/// see [`CLIENT_WIRE_UNCONDITIONAL_FIELDS`] for the deferred `wire_projection`
-/// stamp at `client_state_wire_value` that supersedes it.
+/// than by a raw persistence writer — legacy inference from what that writer
+/// removed. New client wires carry the positive `wire_projection` marker and
+/// are rejected before this fallback is consulted.
 ///
 /// Conjunctive on purpose. Each field individually went in at a different time
 /// — `resolved_rules_journal` in #6331 (2026-07-22), the two allocators in
 /// #6842 (2026-08-01), while `resolution_stack` itself landed in #6269
-/// (2026-07-21) — so a genuine save from a build in the 2026-07-21..22 window
-/// carries `resolution_stack` and lacks all three legitimately. Requiring all
-/// three keeps that window as small as the field history allows. It changes no
+/// (2026-07-21). `next_resolution_cast_offer_id` is newer still, but a genuine
+/// save from the 2026-07-21..22 window carries `resolution_stack` and lacks all
+/// four legitimately. Requiring all four keeps that window as small as the
+/// field history allows. It changes no
 /// outcome regardless: every `resolution_stack`-bearing unversioned payload was
 /// refused outright before the wire inference existed, so a window save fails
 /// either way. Only the wording it receives changes, and the refusal raised by
@@ -3719,8 +3743,8 @@ const CLIENT_WIRE_UNCONDITIONAL_FIELDS: &[&str] = &[
 ///
 /// The conjunction AND each entry of the `const` above are pinned by
 /// `redaction_fingerprint_is_conjunctive_over_every_unconditional_field`
-/// (`types/game_state.rs` `mod tests`), which decodes three payloads each
-/// carrying exactly one of the three keys. A `.any(…)` here, or a dropped
+/// (`types/game_state.rs` `mod tests`), which decodes four payloads each
+/// carrying exactly one of the four keys. A `.any(…)` here, or a dropped
 /// `const` entry, reddens it.
 fn is_redacted_client_wire_projection(object: &Map<String, Value>) -> bool {
     CLIENT_WIRE_UNCONDITIONAL_FIELDS
@@ -3741,19 +3765,14 @@ fn is_redacted_client_wire_projection(object: &Map<String, Value>) -> bool {
 /// 2. `client_state_wire_value` (`crate::game::derived_views`) — production
 ///    Rust, the origin of every payload that crosses the WASM boundary to the
 ///    client, and therefore of every client debug export. It runs that same
-///    derived `Serialize` and then removes nine top-level carriers plus a
-///    recursive six-key firing sweep. It removes NEITHER `resolution_stack`
-///    NOR `resolving_stack_entry`, so its output carries `resolution_stack`
-///    under exactly the same condition as (1).
+///    derived `Serialize`, writes a positive `wire_projection` marker, and
+///    removes the private top-level carriers plus recursive firing data. The
+///    shared viewer projection also removes the private `resolution_stack`.
 ///
-///    Writer (2)'s UNVERSIONED output is now REFUSED rather than inferred:
-///    [`is_redacted_client_wire_projection`] recognises it by the three
-///    unconditionally-serialized fields the redactor removes, and this function
-///    returns an error for it below. A VERSIONED client-wire payload is
-///    unaffected — it takes the first statement's early return and never
-///    reaches the fingerprint check, which is what leaves room for a future
-///    write-time `wire_projection` stamp to supersede the inference without
-///    conflicting with it.
+///    Writer (2)'s output is refused by the positive marker before any
+///    declared-version or unversioned wire inference. Historical unmarked
+///    captures still use [`is_redacted_client_wire_projection`] as a
+///    compatibility fallback below.
 ///
 ///    `phase_ai::saved_state::load_saved_game_state` is a second in-repo
 ///    consumer of this arm besides a player's restore: it decodes the
@@ -3766,26 +3785,25 @@ fn is_redacted_client_wire_projection(object: &Map<String, Value>) -> bool {
 ///
 /// This reader keys on that field, and the mapping holds for both writers.
 ///
-/// For writer (2) that agreement is a fact about a MUTABLE removal list, not a
-/// structural identity: if `client_state_wire_value` ever begins stripping
-/// `resolution_stack`, this rule silently stops applying to the entire
-/// client-wire population, with no compiler signal. That is why it is pinned by
-/// a test rather than by this comment — `client_wire_still_carries_resolution_stack`
-/// in `types/game_state.rs`'s `mod tests` goes red if the redactor's keep-list
-/// changes. Do not delete it.
+/// For historical writer (2) bytes that agreement is a fact about a MUTABLE
+/// removal list, not a structural identity. New bytes do not depend on that
+/// premise because the positive marker is checked first. The projection test
+/// in `types/game_state.rs` pins that the shared fail-closed redaction removes
+/// the private stack and emits the marker.
 ///
 /// The version stamped below is the same kind of mutable premise: the mapping
-/// is to the shape **v2** defines — v2's carrier is `resolution_frames`, and it
-/// deserializes the same `ResolutionStack` that `resolution_stack` does — not to
-/// "whatever the current version is", so it must be RE-DERIVED, not merely
-/// recompiled, if `RESOLUTION_STATE_WIRE_VERSION` moves.
+/// is to the current typed-frame shape, whose carrier is `resolution_frames`
+/// and which deserializes the same `ResolutionStack` that `resolution_stack`
+/// does. It must be RE-DERIVED, not merely recompiled, if the current wire
+/// changes shape.
 ///
 /// An undeclared payload carrying BOTH carriers is refused rather than
 /// inferred: choosing one would discard the other with no error, at an ingress
 /// that takes untrusted uploaded saves.
 ///
 /// `PersistedGameState::Raw` does NOT write this shape: its `Serialize` routes
-/// through `ResolutionStateWire::to_value`, which always declares version 2.
+/// through `ResolutionStateWire::to_value`, which always declares the current
+/// version.
 ///
 /// The mapping is exact, not heuristic. #6269 (`f4a6f32b85`, 2026-07-21) added
 /// `resolution_stack` and removed all 29 legacy `pending_*` /
@@ -3804,9 +3822,14 @@ fn is_redacted_client_wire_projection(object: &Map<String, Value>) -> bool {
 /// `resolution_stack` and `resolution_frames` carry the same serialized
 /// `ResolutionStack`, allocators included: `to_value` builds its frames by
 /// copying `state.resolution_stack` (see `canonicalize_legacy_resolution_state`),
-/// and the v2 branch deserializes the field straight back into `ResolutionStack`.
+/// and the typed-frame branch deserializes the field straight back into
+/// `ResolutionStack`.
 /// The move below is a rename, not a reinterpretation.
-pub(crate) fn declare_raw_resolution_wire(object: &mut Map<String, Value>) -> Result<(), String> {
+pub(crate) fn declare_raw_resolution_wire(value: &mut Value) -> Result<(), String> {
+    reject_wire_projection_marker(value)?;
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| "persisted game state must be a JSON object".to_string())?;
     if object.contains_key("resolution_state_version") {
         return Ok(());
     }
@@ -3850,17 +3873,17 @@ pub(crate) fn declare_raw_resolution_wire(object: &mut Map<String, Value>) -> Re
     // row carrying a payload that bears both carriers AND the fingerprint.
     //
     // SCOPED TO THIS ARM ON PURPOSE. A payload WITHOUT `resolution_stack` keeps
-    // the legacy v1 treatment untouched even when it bears the fingerprint:
-    // those payloads decode today, their exposure predates the wire inference,
-    // and refusing them would be a genuine availability regression for a defect
-    // this ingress did not introduce. Within this arm nothing regresses,
-    // because every `resolution_stack`-bearing unversioned payload was refused
-    // outright before the inference existed.
+    // the legacy v1 resolution-wire treatment even when it bears the
+    // fingerprint. The independent exploited-role ambiguity check below can
+    // still refuse it because no wire version exists to disambiguate that
+    // semantic layout. Those payloads otherwise decode today, their exposure
+    // predates the wire inference, and refusing them would be a genuine
+    // availability regression for a defect this ingress did not introduce.
     if object.contains_key("resolution_stack") && is_redacted_client_wire_projection(object) {
         return Err(
             // Written to be TRUE of both populations that reach here, not just
             // the client-wire one. A genuine save from the 2026-07-21..22 build
-            // window lacks all three fingerprint fields legitimately, and is
+            // window lacks all four fingerprint fields legitimately, and is
             // refused by this same statement; telling that player their file is
             // a debug export would be a false statement of fact about their
             // file. So the first clause states only what is observable of the
@@ -3872,6 +3895,15 @@ pub(crate) fn declare_raw_resolution_wire(object: &mut Map<String, Value>) -> Re
                 .to_string(),
         );
     }
+    if crate::types::game_state::contains_ambiguous_serialized_exploited_trigger_definition(value) {
+        return Err(
+            "unversioned raw resolution state contains an Exploited trigger with ambiguous role layout; restore a versioned save"
+                .to_string(),
+        );
+    }
+    let object = value
+        .as_object_mut()
+        .expect("the checked raw resolution state remains an object");
     match object.remove("resolution_stack") {
         Some(frames) => {
             object.insert("resolution_frames".to_string(), frames);
@@ -3890,9 +3922,25 @@ pub(crate) fn declare_raw_resolution_wire(object: &mut Map<String, Value>) -> Re
     Ok(())
 }
 
+/// Refuses a client projection at any persistence ingress, including a
+/// versioned/trusted envelope. Transport decoding intentionally does not call
+/// this helper because redacted client state is valid on the wire.
+pub(crate) fn reject_wire_projection_marker(value: &Value) -> Result<(), String> {
+    if value
+        .as_object()
+        .is_some_and(|object| object.contains_key("wire_projection"))
+    {
+        return Err(
+            "This saved game is missing the private rules record for the resolution it was paused in — this is what a debug export of the on-screen state looks like."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 /// V1 suspension carriers that may retain an active `GameEvent::ZoneChanged`.
 /// Both provenance materialization and occurrence-key reconciliation must visit
-/// this exact legacy surface before it projects into the v2 frame stack.
+/// this exact legacy surface before it projects into the typed frame stack.
 const LEGACY_LIVE_ZONE_CHANGED_EVENT_ROOTS: &[&str] = &[
     "pending_continuation",
     "pending_choose_zone_trigger_context",
@@ -3906,9 +3954,11 @@ const LEGACY_LIVE_ZONE_CHANGED_EVENT_ROOTS: &[&str] = &[
 /// Versioned wire adapter for full game-state persistence and transport.
 ///
 /// This adapter is the persistence seam between v1's legacy-only payloads and
-/// v2's typed frames. v1 decoding converts migrated family payloads into the
-/// runtime stack; v2 decoding restores those frames directly while retaining
-/// legacy slots solely for unmigrated families.
+/// typed frames. v1 decoding converts migrated family payloads into the
+/// runtime stack; v2/v3 decoding restores those frames directly while retaining
+/// legacy slots solely for unmigrated families. Both supported versions refuse
+/// `CreatureExploited` events that predate authoritative victim records; the
+/// version distinguishes frame layouts and cannot safely synthesize event facts.
 #[derive(Debug, Clone)]
 pub struct ResolutionStateWire {
     state: GameState,
@@ -3952,8 +4002,8 @@ impl ResolutionStateWire {
 
     /// Decodes persisted full-game state at the resolution compatibility boundary.
     ///
-    /// Version 1 is read only through the legacy migration path below. Version
-    /// 2 is the only shape this adapter writes for protocol-19 clients.
+    /// Version 1 is read only through the legacy migration path below. Versions
+    /// 2 and 3 share the typed-frame reader; only version 3 is written.
     fn from_value(mut value: Value) -> Result<Self, String> {
         let version = {
             let object = value
@@ -3970,21 +4020,26 @@ impl ResolutionStateWire {
 
         let decode_mode = match version {
             LEGACY_RESOLUTION_STATE_WIRE_VERSION => GameStateDecodeMode::ResolutionWireV1,
-            RESOLUTION_STATE_WIRE_VERSION => GameStateDecodeMode::ResolutionWireV2,
+            LEGACY_TYPED_FRAME_RESOLUTION_STATE_WIRE_VERSION => {
+                GameStateDecodeMode::ResolutionWireV2
+            }
+            RESOLUTION_STATE_WIRE_VERSION => GameStateDecodeMode::ResolutionWireV3,
             _ => {
                 return Err(format!(
-                    "unsupported resolution_state_version {version}; expected 1 or {RESOLUTION_STATE_WIRE_VERSION}"
+                    "unsupported resolution_state_version {version}; expected 1, 2, or {RESOLUTION_STATE_WIRE_VERSION}"
                 ));
             }
         };
         // `ResolutionStateWire` is a public persistence boundary in its own
         // right. Its historic-shape preparation and raw-state materialization
         // both belong to `GameStateDecode`; no wire branch gets a private
-        // `GameState` serde shortcut.
+        // `GameState` serde shortcut. Historical externally tagged exploit
+        // events are recognized there only to produce the same incompatibility
+        // diagnostic; this adapter does not add support for that event codec.
         GameStateDecode::prepare_resolution_wire(&mut value, decode_mode)?;
         let additional_live_event_roots = match decode_mode {
             GameStateDecodeMode::ResolutionWireV1 => LEGACY_LIVE_ZONE_CHANGED_EVENT_ROOTS,
-            GameStateDecodeMode::ResolutionWireV2 => &[],
+            GameStateDecodeMode::ResolutionWireV2 | GameStateDecodeMode::ResolutionWireV3 => &[],
             GameStateDecodeMode::PersistedRaw
             | GameStateDecodeMode::TrustedEnvelope
             | GameStateDecodeMode::DirectCurrentRaw => {
@@ -4161,6 +4216,7 @@ impl ResolutionStateWire {
                     }
                 }
                 normalize_legacy_completed_resolution_carrier(&mut legacy);
+                crate::types::game_state::normalize_resolution_cast_offer_allocator(&mut legacy)?;
                 let frames = canonicalize_legacy_resolution_state(&legacy)?;
                 frames
                     .validate(&legacy.waiting_for)
@@ -4170,7 +4226,7 @@ impl ResolutionStateWire {
                 debug_assert_runtime_resolution_invariants(&legacy);
                 Ok(Self { state: legacy })
             }
-            GameStateDecodeMode::ResolutionWireV2 => {
+            GameStateDecodeMode::ResolutionWireV2 | GameStateDecodeMode::ResolutionWireV3 => {
                 crate::types::game_state::reconcile_persisted_zone_change_occurrences(
                     &mut value,
                     &[],
@@ -4180,12 +4236,12 @@ impl ResolutionStateWire {
                     .expect("the checked resolution state wire remains an object");
                 if legacy_resolution_wire_field(object).is_some() {
                     return Err(
-                        "v2 resolution state must not contain a legacy resolution field"
+                        "typed-frame resolution state must not contain a legacy resolution field"
                             .to_string(),
                     );
                 }
                 let frames_value = object.get("resolution_frames").ok_or_else(|| {
-                    "v2 resolution state is missing resolution_frames".to_string()
+                    "typed-frame resolution state is missing resolution_frames".to_string()
                 })?;
                 if has_removed_batched_repeated_optional_payment(frames_value) {
                     return Err(
@@ -4205,7 +4261,8 @@ impl ResolutionStateWire {
                 state_object.remove("resolution_frames");
                 if state_object.remove("resolution_stack").is_some() {
                     return Err(
-                        "v2 resolution state must not contain runtime resolution_stack".to_string(),
+                        "typed-frame resolution state must not contain runtime resolution_stack"
+                            .to_string(),
                     );
                 }
                 let state = GameStateDecode::materialize_prepared(state_value)?;
@@ -4213,10 +4270,14 @@ impl ResolutionStateWire {
                     .validate(&state.waiting_for)
                     .map_err(|error| error.to_string())?;
                 let projected = project_frames_into_legacy_state(&state, &frames)?;
+                let mut projected = projected;
+                crate::types::game_state::normalize_resolution_cast_offer_allocator(
+                    &mut projected,
+                )?;
                 let canonical = canonicalize_legacy_resolution_state(&projected)?;
                 if canonical != frames {
                     return Err(
-                        "v2 resolution frames cannot be represented by the legacy runtime slots"
+                        "typed-frame resolution frames cannot be represented by the legacy runtime slots"
                             .to_string(),
                     );
                 }
@@ -4252,7 +4313,7 @@ impl ResolutionStateWire {
 /// belongs to the next priority window; it cannot keep the prior resolution
 /// carrier alive.
 ///
-/// This is intentionally limited to the v1 projection above. Current v2
+/// This is intentionally limited to the v1 projection above. Current
 /// snapshots must preserve their exact active carrier and are validated rather
 /// than normalized during decode.
 fn normalize_legacy_completed_resolution_carrier(state: &mut GameState) {
@@ -4417,7 +4478,7 @@ fn has_removed_batched_repeated_optional_payment(value: &Value) -> bool {
 /// Checks the Phase-3 runtime invariants after a restore and after every
 /// public action. Migrated families are authoritative in `ResolutionStack`;
 /// canonicalization combines those with unmigrated legacy families for the
-/// v2 wire boundary. Valid in-flight trigger occurrences may intentionally be
+/// typed-frame wire boundary. Valid in-flight trigger occurrences may intentionally be
 /// non-serializable and are checked only structurally at this boundary.
 #[cfg(debug_assertions)]
 pub(crate) fn debug_assert_runtime_resolution_invariants(state: &GameState) {
@@ -4435,14 +4496,14 @@ pub(crate) fn debug_assert_runtime_resolution_invariants(state: &GameState) {
         "the active inline-mana override must not survive a public boundary"
     );
 
-    if let Ok(v2) = ResolutionStateWire::from_game_state(state.clone()).to_value() {
-        let object = v2
+    if let Ok(current) = ResolutionStateWire::from_game_state(state.clone()).to_value() {
+        let object = current
             .as_object()
             .expect("resolution wire serialization is always an object");
         for field in legacy_resolution_wire_fields() {
             assert!(
                 !object.contains_key(*field),
-                "v2 resolution frames must not co-reside with legacy runtime field {field}"
+                "current resolution frames must not co-reside with legacy runtime field {field}"
             );
         }
     }
@@ -4993,7 +5054,7 @@ pub(crate) fn canonicalize_legacy_resolution_state(
     frames.restore_next_discard_frame_id(state.resolution_stack.next_discard_frame_id());
     // Threaded for the same reason as the two above: this function is both the
     // WRITER's canonicalization (`ResolutionStateWire::to_value`) and the
-    // right-hand side of the v2 identity gate, and `ResolutionStack` derives
+    // right-hand side of the typed-frame identity gate, and `ResolutionStack` derives
     // `PartialEq`. Without this, every save in which a post-replacement dispatch
     // ever occurred fails that gate on load.
     frames.restore_last_post_replacement_frame_id(
@@ -5024,7 +5085,7 @@ fn project_frames_into_legacy_state(
     projected
         .resolution_stack
         .restore_next_discard_frame_id(frames.next_discard_frame_id());
-    // The left-hand side of the v2 identity gate. `state` is materialized from a
+    // The left-hand side of the typed-frame identity gate. `state` is materialized from a
     // value with `resolution_frames` removed and `resolution_stack` forbidden,
     // so its allocator is `Default` (0); without this restore the projection's
     // allocator stays 0 while `frames` carries N, and the derived `PartialEq`
@@ -5236,13 +5297,14 @@ mod tests {
     };
     use crate::types::actions::GameAction;
     use crate::types::game_state::{
-        CastingVariant, CopyChosenStage, DrainStatus, DrawSequenceOrigin, GameState,
-        PendingBatchDeliveries, PendingChooseOneOf, PendingCopyTokenResolution,
+        CastingVariant, CopyChosenStage, DrainStatus, DrawSequenceOrigin, ExiledStopInput,
+        GameState, PendingBatchDeliveries, PendingChooseOneOf, PendingCopyTokenResolution,
         PendingCounterAdditionQueue, PendingCounterMoveQueue, PendingCounterRemovalQueue,
         PendingEachPlayerCopyChosen, PendingLifeTotalAssignment, PendingPerCategoryZoneChoice,
         PendingPerPlayerZoneChoice, PendingRepeatIteration, PendingRepeatUntil,
         PendingSpellResolution, PendingVoteBallotIteration, PostReplacementDrain,
-        ResidentDrainPolicy, StackEntry, StackEntryKind, ZoneDeliveryExileTracking,
+        RepeatUntilStopWitness, ResidentDrainPolicy, StackEntry, StackEntryKind,
+        ZoneDeliveryExileTracking,
     };
 
     use crate::types::identifiers::{CardId, LogicalZoneChangeGroupId, ObjectId};
@@ -5251,6 +5313,110 @@ mod tests {
     use crate::types::replacements::ReplacementEvent;
     use crate::types::zones::{EtbTapState, Zone};
     use std::collections::VecDeque;
+
+    fn state_with_recorded_exploit_event() -> (GameState, GameEvent) {
+        let mut state = GameState::new_two_player(42);
+        let exploiter = crate::game::zones::create_object(
+            &mut state,
+            CardId(80),
+            PlayerId(0),
+            "Exploit source".to_string(),
+            Zone::Battlefield,
+        );
+        let victim = crate::game::zones::create_object(
+            &mut state,
+            CardId(81),
+            PlayerId(0),
+            "Exploit victim".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&victim)
+            .expect("victim exists")
+            .is_token = true;
+        let mut departure_events = Vec::new();
+        crate::game::zones::move_to_zone(
+            &mut state,
+            victim,
+            Zone::Graveyard,
+            &mut departure_events,
+        );
+        let record = departure_events
+            .iter()
+            .find_map(|event| match event {
+                GameEvent::ZoneChanged {
+                    object_id, record, ..
+                } if *object_id == victim => Some(record.clone()),
+                _ => None,
+            })
+            .expect("the fixture emits an authoritative departure record");
+        let exploit = GameEvent::CreatureExploited {
+            exploiter,
+            sacrificed: victim,
+            record,
+        };
+        state.deferred_entry_events = vec![exploit.clone()];
+        (state, exploit)
+    }
+
+    fn v1_wire_value(state: GameState) -> Value {
+        let mut value = serde_json::to_value(state).expect("state serializes");
+        let object = value.as_object_mut().expect("state is an object");
+        object.remove("resolution_stack");
+        object.insert(
+            "resolution_state_version".to_string(),
+            Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION),
+        );
+        value
+    }
+
+    fn v2_wire_value(state: GameState) -> Value {
+        let mut value = ResolutionStateWire::from_game_state(state)
+            .to_value()
+            .expect("current wire serializes before fixture downgrade");
+        value["resolution_state_version"] =
+            Value::from(LEGACY_TYPED_FRAME_RESOLUTION_STATE_WIRE_VERSION);
+        value
+    }
+
+    #[test]
+    fn exploit_victim_record_survives_v1_and_v2_resolution_wires() {
+        let (state, expected) = state_with_recorded_exploit_event();
+        let wires = [v1_wire_value(state.clone()), v2_wire_value(state)];
+
+        for wire in wires {
+            let restored: ResolutionStateWire =
+                serde_json::from_value(wire).expect("complete exploit evidence restores");
+            assert_eq!(
+                restored.game_state().deferred_entry_events,
+                vec![expected.clone()]
+            );
+        }
+    }
+
+    #[test]
+    fn v1_and_v2_resolution_wires_reject_recordless_exploit_events() {
+        let (state, _) = state_with_recorded_exploit_event();
+        let mut wires = [v1_wire_value(state.clone()), v2_wire_value(state)];
+
+        for wire in &mut wires {
+            wire["deferred_entry_events"][0]["data"]
+                .as_object_mut()
+                .expect("event data is an object")
+                .remove("record");
+            let error = serde_json::from_value::<ResolutionStateWire>(wire.clone())
+                .expect_err("recordless exploit evidence must refuse the full wire")
+                .to_string();
+            assert!(
+                error.contains(
+                    "CreatureExploited snapshot lacks authoritative victim record; restore a save that contains the exploit departure record"
+                ),
+                "{error}"
+            );
+            assert!(error.contains("$.deferred_entry_events[0].data"), "{error}");
+        }
+    }
 
     #[test]
     fn removed_batched_repeated_payment_snapshot_is_detected() {
@@ -5473,6 +5639,7 @@ mod tests {
                 conditional_enter_with_counters: Vec::new(),
                 duration: None,
                 track_exiled_by_source: false,
+                face_down_in_exile: crate::types::ability::ExileConcealment::Public,
                 moved_count: None,
                 face_down_profile: None,
                 library_placement: None,
@@ -5530,21 +5697,21 @@ mod tests {
 
         let wire: ResolutionStateWire = serde_json::from_value(v1)
             .expect("v1 optional-effect fixture converts through the wire");
-        let v2 = serde_json::to_value(&wire).expect("converted fixture serializes as v2");
+        let current = serde_json::to_value(&wire).expect("converted fixture serializes");
         assert_eq!(
-            v2["resolution_state_version"],
+            current["resolution_state_version"],
             Value::from(RESOLUTION_STATE_WIRE_VERSION)
         );
-        assert!(v2.get("resolution_frames").is_some());
+        assert!(current.get("resolution_frames").is_some());
         for field in legacy_resolution_wire_fields() {
             assert!(
-                v2.get(*field).is_none(),
-                "v2 fixture must not write legacy field {field}"
+                current.get(*field).is_none(),
+                "current fixture must not write legacy field {field}"
             );
         }
 
-        serde_json::from_value::<ResolutionStateWire>(v2)
-            .expect("v2 optional-effect fixture restores for the runtime action path")
+        serde_json::from_value::<ResolutionStateWire>(current)
+            .expect("current optional-effect fixture restores for the runtime action path")
             .into_game_state()
     }
 
@@ -5562,21 +5729,21 @@ mod tests {
 
         let wire: ResolutionStateWire = serde_json::from_value(v1)
             .expect("v1 repeated-payment fixture converts through the wire");
-        let v2 = serde_json::to_value(&wire).expect("converted fixture serializes as v2");
+        let current = serde_json::to_value(&wire).expect("converted fixture serializes");
         assert_eq!(
-            v2["resolution_state_version"],
+            current["resolution_state_version"],
             Value::from(RESOLUTION_STATE_WIRE_VERSION)
         );
-        assert!(v2.get("resolution_frames").is_some());
+        assert!(current.get("resolution_frames").is_some());
         for field in legacy_resolution_wire_fields() {
             assert!(
-                v2.get(*field).is_none(),
-                "v2 fixture must not write legacy field {field}"
+                current.get(*field).is_none(),
+                "current fixture must not write legacy field {field}"
             );
         }
 
-        serde_json::from_value::<ResolutionStateWire>(v2)
-            .expect("v2 repeated-payment fixture restores for the runtime action path")
+        serde_json::from_value::<ResolutionStateWire>(current)
+            .expect("current repeated-payment fixture restores for the runtime action path")
             .into_game_state()
     }
 
@@ -5589,21 +5756,21 @@ mod tests {
 
         let wire: ResolutionStateWire =
             serde_json::from_value(v1).expect("v1 coin-flip fixture converts through the wire");
-        let v2 = serde_json::to_value(&wire).expect("converted fixture serializes as v2");
+        let current = serde_json::to_value(&wire).expect("converted fixture serializes");
         assert_eq!(
-            v2["resolution_state_version"],
+            current["resolution_state_version"],
             Value::from(RESOLUTION_STATE_WIRE_VERSION)
         );
-        assert!(v2.get("resolution_frames").is_some());
+        assert!(current.get("resolution_frames").is_some());
         for field in legacy_resolution_wire_fields() {
             assert!(
-                v2.get(*field).is_none(),
-                "v2 fixture must not write legacy field {field}"
+                current.get(*field).is_none(),
+                "current fixture must not write legacy field {field}"
             );
         }
 
-        serde_json::from_value::<ResolutionStateWire>(v2)
-            .expect("v2 coin-flip fixture restores for the runtime action path")
+        serde_json::from_value::<ResolutionStateWire>(current)
+            .expect("current coin-flip fixture restores for the runtime action path")
             .into_game_state()
     }
 
@@ -5619,21 +5786,21 @@ mod tests {
 
         let wire: ResolutionStateWire =
             serde_json::from_value(v1).expect("v1 proliferate fixture converts through the wire");
-        let v2 = serde_json::to_value(&wire).expect("converted fixture serializes as v2");
+        let current = serde_json::to_value(&wire).expect("converted fixture serializes");
         assert_eq!(
-            v2["resolution_state_version"],
+            current["resolution_state_version"],
             Value::from(RESOLUTION_STATE_WIRE_VERSION)
         );
-        assert!(v2.get("resolution_frames").is_some());
+        assert!(current.get("resolution_frames").is_some());
         for field in legacy_resolution_wire_fields() {
             assert!(
-                v2.get(*field).is_none(),
-                "v2 fixture must not write legacy field {field}"
+                current.get(*field).is_none(),
+                "current fixture must not write legacy field {field}"
             );
         }
 
-        serde_json::from_value::<ResolutionStateWire>(v2)
-            .expect("v2 proliferate fixture restores for the runtime action path")
+        serde_json::from_value::<ResolutionStateWire>(current)
+            .expect("current proliferate fixture restores for the runtime action path")
             .into_game_state()
     }
 
@@ -5646,21 +5813,21 @@ mod tests {
 
         let wire: ResolutionStateWire =
             serde_json::from_value(v1).expect("v1 mutate-merge fixture converts through the wire");
-        let v2 = serde_json::to_value(&wire).expect("converted fixture serializes as v2");
+        let current = serde_json::to_value(&wire).expect("converted fixture serializes");
         assert_eq!(
-            v2["resolution_state_version"],
+            current["resolution_state_version"],
             Value::from(RESOLUTION_STATE_WIRE_VERSION)
         );
-        assert!(v2.get("resolution_frames").is_some());
+        assert!(current.get("resolution_frames").is_some());
         for field in legacy_resolution_wire_fields() {
             assert!(
-                v2.get(*field).is_none(),
-                "v2 fixture must not write legacy field {field}"
+                current.get(*field).is_none(),
+                "current fixture must not write legacy field {field}"
             );
         }
 
-        serde_json::from_value::<ResolutionStateWire>(v2)
-            .expect("v2 mutate-merge fixture restores for the runtime action path")
+        serde_json::from_value::<ResolutionStateWire>(current)
+            .expect("current mutate-merge fixture restores for the runtime action path")
             .into_game_state()
     }
 
@@ -5878,25 +6045,27 @@ mod tests {
             .into_game_state()
     }
 
-    fn assert_reserializes_v2_only(state: GameState) {
-        let v2 = serde_json::to_value(ResolutionStateWire::from_game_state(state))
-            .expect("resumed fixture serializes as v2");
+    fn assert_reserializes_current_only(state: GameState) {
+        let current = serde_json::to_value(ResolutionStateWire::from_game_state(state))
+            .expect("resumed fixture serializes through the current resolution wire");
         assert_eq!(
-            v2["resolution_state_version"],
+            current["resolution_state_version"],
             Value::from(RESOLUTION_STATE_WIRE_VERSION)
         );
-        assert!(v2.get("resolution_frames").is_some());
+        assert!(current.get("resolution_frames").is_some());
         for field in legacy_resolution_wire_fields() {
             assert!(
-                v2.get(*field).is_none(),
-                "resumed v2 fixture must not write legacy field {field}"
+                current.get(*field).is_none(),
+                "resumed current fixture must not write legacy field {field}"
             );
         }
     }
 
     fn v2_fixture_with_frames(state: GameState, frames: ResolutionStack) -> Value {
         let mut v2 = serde_json::to_value(ResolutionStateWire::from_game_state(state))
-            .expect("empty v2 fixture serializes");
+            .expect("empty current fixture serializes");
+        v2["resolution_state_version"] =
+            Value::from(LEGACY_TYPED_FRAME_RESOLUTION_STATE_WIRE_VERSION);
         v2["resolution_frames"] = serde_json::to_value(frames).expect("fixture frames serialize");
         v2
     }
@@ -6027,6 +6196,7 @@ mod tests {
             win_effect: None,
             lose_effect: None,
             kind: PendingCoinFlipKind::Single,
+            chain_root_targets: Vec::new(),
         });
         let mut stack = ResolutionStack::default();
         stack.push_inner(frame);
@@ -6058,6 +6228,7 @@ mod tests {
             .validate(&WaitingFor::OpponentMayChoice {
                 player: PlayerId(1),
                 source_id: ObjectId(6),
+                decision_subject_id: None,
                 description: None,
                 remaining: Vec::new(),
             })
@@ -6067,6 +6238,7 @@ mod tests {
             optional_effect.validate(&WaitingFor::OpponentMayChoice {
                 player: PlayerId(1),
                 source_id: ObjectId(6),
+                decision_subject_id: None,
                 description: None,
                 remaining: Vec::new(),
             }),
@@ -6087,6 +6259,7 @@ mod tests {
             win_effect: None,
             lose_effect: None,
             kind: PendingCoinFlipKind::Single,
+            chain_root_targets: Vec::new(),
         }));
         assert_eq!(
             optional_effect.validate(&WaitingFor::CoinFlipKeepChoice {
@@ -6229,6 +6402,7 @@ mod tests {
         WaitingFor::OpponentMayChoice {
             player: PlayerId(1),
             source_id: ObjectId(7),
+            decision_subject_id: None,
             description: None,
             remaining: Vec::new(),
         }
@@ -6382,7 +6556,7 @@ mod tests {
     }
 
     #[test]
-    fn resolution_state_wire_converts_v1_to_v2_without_legacy_projection() {
+    fn resolution_state_wire_converts_v1_to_current_without_legacy_projection() {
         let mut state = GameState::new_two_player(42);
         state.waiting_for = WaitingFor::CoinFlipKeepChoice {
             player: PlayerId(0),
@@ -6397,6 +6571,7 @@ mod tests {
             win_effect: None,
             lose_effect: None,
             kind: PendingCoinFlipKind::Single,
+            chain_root_targets: Vec::new(),
         };
 
         let mut v1 = serde_json::to_value(&state).expect("legacy state serializes");
@@ -6407,16 +6582,16 @@ mod tests {
             serde_json::from_value(v1).expect("v1 legacy state converts through frames");
         assert_eq!(wire.game_state().active_coin_flip_frame(), Some(&pending));
 
-        let v2 = serde_json::to_value(&wire).expect("v2 wire serializes");
+        let current = serde_json::to_value(&wire).expect("current wire serializes");
         assert_eq!(
-            v2["resolution_state_version"],
+            current["resolution_state_version"],
             Value::from(RESOLUTION_STATE_WIRE_VERSION)
         );
-        assert!(v2.get("resolution_frames").is_some());
-        assert!(v2.get("pending_coin_flip").is_none());
+        assert!(current.get("resolution_frames").is_some());
+        assert!(current.get("pending_coin_flip").is_none());
 
-        let restored: ResolutionStateWire =
-            serde_json::from_value(v2).expect("v2 frame state restores for the runtime action");
+        let restored: ResolutionStateWire = serde_json::from_value(current)
+            .expect("current frame state restores for the runtime action");
         assert_eq!(
             restored.into_game_state().active_coin_flip_frame(),
             Some(&pending)
@@ -6424,9 +6599,10 @@ mod tests {
     }
 
     #[test]
-    fn resolution_wire_contract_pins_v2_and_the_v1_reader() {
-        assert_eq!(RESOLUTION_STATE_WIRE_VERSION, 2);
+    fn resolution_wire_contract_pins_v3_and_the_legacy_readers() {
+        assert_eq!(RESOLUTION_STATE_WIRE_VERSION, 3);
         assert_eq!(LEGACY_RESOLUTION_STATE_WIRE_VERSION, 1);
+        assert_eq!(LEGACY_TYPED_FRAME_RESOLUTION_STATE_WIRE_VERSION, 2);
 
         let mut v1 =
             serde_json::to_value(GameState::new_two_player(57)).expect("legacy state serializes");
@@ -6455,11 +6631,11 @@ mod tests {
             },
         );
         let wire = ResolutionStateWire::from_game_state(restored);
-        let v2 = serde_json::to_value(&wire).expect("v2 wire serializes");
-        assert!(v2.get("pending_choose_zone_trigger_context").is_none());
+        let current = serde_json::to_value(&wire).expect("current wire serializes");
+        assert!(current.get("pending_choose_zone_trigger_context").is_none());
 
-        let restored: ResolutionStateWire =
-            serde_json::from_value(v2).expect("v2 continuation sidecar projects for runtime");
+        let restored: ResolutionStateWire = serde_json::from_value(current)
+            .expect("current continuation sidecar projects for runtime");
         assert_eq!(
             restored
                 .into_game_state()
@@ -6529,11 +6705,11 @@ mod tests {
         let snapshot = HashSet::from([ObjectId(7), ObjectId(8)]);
         let restored = restore_v1_change_zone_fixture(state, None, Some(snapshot.clone()));
         let wire = ResolutionStateWire::from_game_state(restored);
-        let v2 = serde_json::to_value(&wire).expect("v2 wire serializes");
-        assert!(v2.get("devour_eligible_snapshot").is_none());
+        let current = serde_json::to_value(&wire).expect("current wire serializes");
+        assert!(current.get("devour_eligible_snapshot").is_none());
 
         let restored: ResolutionStateWire =
-            serde_json::from_value(v2).expect("v2 devour sidecar projects for runtime");
+            serde_json::from_value(current).expect("current devour sidecar projects for runtime");
         assert_eq!(
             restored.into_game_state().active_devour_eligible_snapshot(),
             Some(&snapshot)
@@ -6549,11 +6725,13 @@ mod tests {
         v1["resolution_state_version"] = Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
         let wire: ResolutionStateWire =
             serde_json::from_value(v1).expect("v1 payment count converts through frames");
-        let v2 = serde_json::to_value(&wire).expect("v2 wire serializes");
-        assert!(v2.get("optional_cost_payments_this_resolution").is_none());
+        let current = serde_json::to_value(&wire).expect("current wire serializes");
+        assert!(current
+            .get("optional_cost_payments_this_resolution")
+            .is_none());
 
         let restored: ResolutionStateWire =
-            serde_json::from_value(v2).expect("v2 payment count projects for runtime");
+            serde_json::from_value(current).expect("current payment count projects for runtime");
         assert_eq!(
             restored
                 .into_game_state()
@@ -6581,9 +6759,9 @@ mod tests {
 
         let wire: ResolutionStateWire =
             serde_json::from_value(v1).expect("paused drain and draw become one adjacent pair");
-        let v2 = serde_json::to_value(&wire).expect("converted pair serializes");
-        let frames: ResolutionStack =
-            serde_json::from_value(v2["resolution_frames"].clone()).expect("frame payload parses");
+        let current = serde_json::to_value(&wire).expect("converted pair serializes");
+        let frames: ResolutionStack = serde_json::from_value(current["resolution_frames"].clone())
+            .expect("frame payload parses");
         assert_eq!(
             frames.iter().map(ResolutionFrame::kind).collect::<Vec<_>>(),
             vec![FrameKind::PostReplacement, FrameKind::MultiDraw]
@@ -6594,20 +6772,20 @@ mod tests {
     fn resolution_state_wire_rejects_missing_unknown_and_mixed_versions() {
         let state = GameState::new_two_player(42);
         let wire = ResolutionStateWire::from_game_state(state);
-        let v2 = serde_json::to_value(wire).expect("v2 wire serializes");
+        let current = serde_json::to_value(wire).expect("current wire serializes");
 
-        let mut missing = v2.clone();
+        let mut missing = current.clone();
         missing
             .as_object_mut()
             .expect("wire is an object")
             .remove("resolution_state_version");
         assert!(serde_json::from_value::<ResolutionStateWire>(missing).is_err());
 
-        let mut unknown = v2.clone();
+        let mut unknown = current.clone();
         unknown["resolution_state_version"] = Value::from(99);
         assert!(serde_json::from_value::<ResolutionStateWire>(unknown).is_err());
 
-        let mut mixed = v2;
+        let mut mixed = current;
         mixed["pending_coin_flip"] = Value::Null;
         assert!(serde_json::from_value::<ResolutionStateWire>(mixed).is_err());
     }
@@ -6656,6 +6834,7 @@ mod tests {
         let opponent_may = WaitingFor::OpponentMayChoice {
             player: PlayerId(1),
             source_id: ObjectId(81),
+            decision_subject_id: None,
             description: None,
             remaining: Vec::new(),
         };
@@ -6740,6 +6919,7 @@ mod tests {
         repeated.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
             source_id: ObjectId(100),
+            decision_subject_id: None,
             description: None,
             may_trigger_key: None,
             same_card_may_trigger_choice_available: false,
@@ -6761,12 +6941,13 @@ mod tests {
         )
         .expect("repeated-payment fixture resumes through the real optional-choice action");
         assert!(repeated.active_repeated_optional_payment_frame().is_none());
-        assert_reserializes_v2_only(repeated);
+        assert_reserializes_current_only(repeated);
 
         let mut optional = GameState::new_two_player(102);
         optional.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
             source_id: ObjectId(102),
+            decision_subject_id: None,
             description: None,
             may_trigger_key: None,
             same_card_may_trigger_choice_available: false,
@@ -6786,7 +6967,7 @@ mod tests {
         )
         .expect("optional-effect fixture resumes through the real optional-choice action");
         assert!(optional.active_optional_effect_frame().is_none());
-        assert_reserializes_v2_only(optional);
+        assert_reserializes_current_only(optional);
 
         let mut coin = GameState::new_two_player(103);
         coin.waiting_for = WaitingFor::CoinFlipKeepChoice {
@@ -6804,6 +6985,7 @@ mod tests {
                 win_effect: None,
                 lose_effect: None,
                 kind: PendingCoinFlipKind::Single,
+                chain_root_targets: Vec::new(),
             },
         );
         apply_as_current(
@@ -6814,7 +6996,7 @@ mod tests {
         )
         .expect("coin-flip fixture resumes through the real keep-choice action");
         assert!(coin.active_coin_flip_frame().is_none());
-        assert_reserializes_v2_only(coin);
+        assert_reserializes_current_only(coin);
 
         let mut proliferate = GameState::new_two_player(104);
         proliferate.waiting_for = WaitingFor::ProliferateChoice {
@@ -6837,7 +7019,7 @@ mod tests {
         )
         .expect("proliferate fixture resumes through the real target-choice action");
         assert!(proliferate.active_proliferate_frame().is_none());
-        assert_reserializes_v2_only(proliferate);
+        assert_reserializes_current_only(proliferate);
 
         let mut scenario = GameScenario::new();
         let merging_id = scenario.add_creature(PlayerId(0), "Rider", 4, 4).id();
@@ -6872,7 +7054,68 @@ mod tests {
                 .merged_components,
             vec![merging_id, target_id]
         );
-        assert_reserializes_v2_only(mutate);
+        assert_reserializes_current_only(mutate);
+    }
+
+    /// CR 104.4b: save-compat for the `stop_progress` progress witness.
+    ///
+    /// A v1 `RepeatUntil` payload predates the field entirely, so it must
+    /// deserialize to `None` — "no baseline recorded", which can never cause a
+    /// stop and costs at most one extra iteration, the safe direction to fail.
+    /// Mirrors the `forwarded_result_context` discipline in `types/ability.rs`.
+    #[test]
+    fn v1_repeat_until_payload_without_stop_progress_restores_as_no_baseline() {
+        let mut repeat_ability = resolved_draw(212);
+        repeat_ability.repeat_until = Some(RepeatContinuation::UntilStopConditions {
+            stop_on_put_to_hand: true,
+            stop_on_duplicate_exiled_names: true,
+        });
+
+        let legacy = serde_json::json!({
+            "ability": serde_json::to_value(&repeat_ability).expect("ability serializes"),
+        });
+        let restored: PendingRepeatUntil =
+            serde_json::from_value(legacy).expect("v1 payload without stop_progress deserializes");
+        assert_eq!(
+            restored.stop_progress, None,
+            "a legacy payload carries no baseline, and `None` can never stop the repeat"
+        );
+        // Positive reach-guard: the payload really parsed — the frame's ability
+        // survived intact, so `stop_progress == None` is not a parse failure.
+        assert_eq!(
+            *restored.ability, repeat_ability,
+            "the legacy fixture must deserialize its ability, proving it parsed at all"
+        );
+
+        // Both ledger vecs carry a row, and DIFFERENT rows, so a round trip
+        // that dropped or conflated either one is visible.
+        let witness = RepeatUntilStopWitness {
+            exiled_this_turn: vec![ExiledStopInput {
+                object_id: ObjectId(212),
+                zone: Zone::Exile,
+                controller: PlayerId(0),
+                name: "Exiled This Way".to_string(),
+            }],
+            linked: vec![ExiledStopInput {
+                object_id: ObjectId(213),
+                zone: Zone::Hand,
+                controller: PlayerId(1),
+                name: "Linked This Way".to_string(),
+            }],
+        };
+        let frame = PendingRepeatUntil {
+            ability: Box::new(repeat_ability),
+            stop_progress: Some(witness.clone()),
+        };
+        let round_tripped: PendingRepeatUntil =
+            serde_json::from_str(&serde_json::to_string(&frame).expect("frame serializes"))
+                .expect("frame round-trips");
+        assert_eq!(
+            round_tripped.stop_progress,
+            Some(witness),
+            "a recorded baseline must survive a save/restore round trip"
+        );
+        assert_eq!(round_tripped, frame);
     }
 
     #[test]
@@ -6887,7 +7130,7 @@ mod tests {
             },
         ));
         assert!(continuation.active_ability_continuation().is_none());
-        assert_reserializes_v2_only(continuation);
+        assert_reserializes_current_only(continuation);
 
         let repeat_for = GameState::new_two_player(111);
         let repeat_for = resume_priority_fixture(restore_v1_repeat_for_fixture(
@@ -6901,7 +7144,7 @@ mod tests {
             },
         ));
         assert!(repeat_for.active_repeat_for().is_none());
-        assert_reserializes_v2_only(repeat_for);
+        assert_reserializes_current_only(repeat_for);
 
         let repeat_until = GameState::new_two_player(112);
         let mut repeat_ability = resolved_draw(112);
@@ -6910,6 +7153,7 @@ mod tests {
             repeat_until,
             PendingRepeatUntil {
                 ability: Box::new(repeat_ability),
+                stop_progress: None,
             },
         ));
         assert!(matches!(
@@ -6922,7 +7166,7 @@ mod tests {
         )
         .expect("repeat-until fixture resumes through the real repeat decision");
         assert!(repeat_until.active_repeat_until().is_none());
-        assert_reserializes_v2_only(repeat_until);
+        assert_reserializes_current_only(repeat_until);
 
         let ResolutionFrame::ChangeZone(change_zone_frame) = change_zone_frame(113) else {
             unreachable!("helper constructs a change-zone frame")
@@ -6934,7 +7178,7 @@ mod tests {
             Some(HashSet::from([ObjectId(113)])),
         ));
         assert!(change_zone.active_change_zone_frame().is_none());
-        assert_reserializes_v2_only(change_zone);
+        assert_reserializes_current_only(change_zone);
 
         let counter_moves = GameState::new_two_player(114);
         let counter_moves = resume_priority_fixture(restore_v1_counter_moves_fixture(
@@ -6946,7 +7190,7 @@ mod tests {
             },
         ));
         assert!(counter_moves.active_counter_moves().is_none());
-        assert_reserializes_v2_only(counter_moves);
+        assert_reserializes_current_only(counter_moves);
 
         let counter_removals = GameState::new_two_player(115);
         let counter_removals = resume_priority_fixture(restore_v1_counter_removals_fixture(
@@ -6961,7 +7205,7 @@ mod tests {
             },
         ));
         assert!(counter_removals.active_counter_removals().is_none());
-        assert_reserializes_v2_only(counter_removals);
+        assert_reserializes_current_only(counter_removals);
 
         let counter_additions = GameState::new_two_player(116);
         let counter_additions = resume_priority_fixture(restore_v1_counter_additions_fixture(
@@ -6972,7 +7216,7 @@ mod tests {
             },
         ));
         assert!(counter_additions.active_counter_additions().is_none());
-        assert_reserializes_v2_only(counter_additions);
+        assert_reserializes_current_only(counter_additions);
     }
 
     #[test]
@@ -7001,7 +7245,7 @@ mod tests {
         let mut batch = restore_v1_batch_delivery_fixture(batch, pending.clone());
         crate::game::zone_pipeline::drain_pending_batch_deliveries(&mut batch, &mut Vec::new());
         assert!(batch.active_batch_delivery().is_none());
-        assert_reserializes_v2_only(batch);
+        assert_reserializes_current_only(batch);
 
         let alias_state = GameState::new_two_player(120);
         let mut v1 = serde_json::to_value(alias_state).expect("legacy alias fixture serializes");
@@ -7012,7 +7256,7 @@ mod tests {
             .expect("v1 pending_mill_deliveries alias restores")
             .into_game_state();
         assert!(alias.active_batch_delivery().is_some());
-        assert_reserializes_v2_only(alias);
+        assert_reserializes_current_only(alias);
 
         let mut copy_token = restore_v1_copy_token_fixture(
             GameState::new_two_player(121),
@@ -7028,7 +7272,7 @@ mod tests {
             &mut Vec::new(),
         );
         assert!(copy_token.active_copy_token().is_none());
-        assert_reserializes_v2_only(copy_token);
+        assert_reserializes_current_only(copy_token);
     }
 
     #[test]
@@ -7072,11 +7316,12 @@ mod tests {
 
         let wire: ResolutionStateWire =
             serde_json::from_value(v1).expect("v1 nested pause converts through the wire");
-        let v2 = serde_json::to_value(&wire).expect("nested pause serializes as v2 frames");
+        let current =
+            serde_json::to_value(&wire).expect("nested pause serializes as current frames");
         for field in legacy_resolution_wire_fields() {
             assert!(
-                v2.get(*field).is_none(),
-                "nested v2 fixture must not write legacy field {field}"
+                current.get(*field).is_none(),
+                "nested current fixture must not write legacy field {field}"
             );
         }
 
@@ -7102,7 +7347,7 @@ mod tests {
         assert!(state.active_each_player_copy_chosen().is_none());
         assert!(state.active_copy_token().is_none());
         assert!(state.active_counter_additions().is_none());
-        assert_reserializes_v2_only(state);
+        assert_reserializes_current_only(state);
     }
 
     #[test]
@@ -7131,7 +7376,7 @@ mod tests {
             &mut Vec::new(),
         );
         assert!(each_player_copy.active_each_player_copy_chosen().is_none());
-        assert_reserializes_v2_only(each_player_copy);
+        assert_reserializes_current_only(each_player_copy);
 
         let choose_one_of = GameState::new_two_player(131);
         let mut choose_one_of = restore_v1_choose_one_of_fixture(
@@ -7149,7 +7394,7 @@ mod tests {
         );
         crate::game::effects::choose_one_of::resume_pending(&mut choose_one_of, &mut Vec::new());
         assert!(choose_one_of.active_choose_one_of().is_none());
-        assert_reserializes_v2_only(choose_one_of);
+        assert_reserializes_current_only(choose_one_of);
 
         let vote = GameState::new_two_player(132);
         let mut vote = restore_v1_vote_ballot_fixture(
@@ -7162,11 +7407,12 @@ mod tests {
                 remaining_voters: Vec::new(),
                 source_id: ObjectId(132),
                 controller: PlayerId(0),
+                chain_root_targets: Vec::new(),
             },
         );
         crate::game::effects::vote::drain_active_vote_ballot(&mut vote, &mut Vec::new());
         assert!(vote.active_vote_ballot().is_none());
-        assert_reserializes_v2_only(vote);
+        assert_reserializes_current_only(vote);
 
         let choose_from_zone = resolved_effect(
             133,
@@ -7199,7 +7445,7 @@ mod tests {
             &mut Vec::new(),
         );
         assert!(per_player.active_per_player_zone_choice().is_none());
-        assert_reserializes_v2_only(per_player);
+        assert_reserializes_current_only(per_player);
 
         let for_each_category = resolved_effect(
             134,
@@ -7227,7 +7473,7 @@ mod tests {
             &mut Vec::new(),
         );
         assert!(per_category.active_per_category_zone_choice().is_none());
-        assert_reserializes_v2_only(per_category);
+        assert_reserializes_current_only(per_category);
     }
 
     #[test]
@@ -7239,8 +7485,10 @@ mod tests {
             HashSet::new(),
             DrawSequenceOrigin::Plain,
         );
-        let v2 = serde_json::to_value(ResolutionStateWire::from_game_state(state))
+        let mut v2 = serde_json::to_value(ResolutionStateWire::from_game_state(state))
             .expect("v2 active draw fixture serializes");
+        v2["resolution_state_version"] =
+            Value::from(LEGACY_TYPED_FRAME_RESOLUTION_STATE_WIRE_VERSION);
         let mut with_outer_allocator = v2.clone();
         with_outer_allocator["resolution_frames"]["next_draw_sequence_frame_id"] = Value::from(99);
         let restored_with_outer =
@@ -7340,8 +7588,10 @@ mod tests {
     fn v2_reader_recovers_discard_allocator_and_rejects_duplicate_frame_ids() {
         let mut state = GameState::new_two_player(140);
         let captured = state.resolution_stack.begin_discard(None);
-        let v2 = serde_json::to_value(ResolutionStateWire::from_game_state(state))
+        let mut v2 = serde_json::to_value(ResolutionStateWire::from_game_state(state))
             .expect("v2 active discard fixture serializes");
+        v2["resolution_state_version"] =
+            Value::from(LEGACY_TYPED_FRAME_RESOLUTION_STATE_WIRE_VERSION);
 
         let mut stale_outer_allocator = v2.clone();
         stale_outer_allocator["resolution_frames"]["next_discard_frame_id"] = Value::from(0);
@@ -7740,7 +7990,7 @@ mod tests {
         // payload can present this shape. `validate` is still called with no
         // such recovery in front of it by the runtime invariant check
         // (`debug_assert_runtime_resolution_invariants`, after a restore and
-        // after every public action) and by the v2 WRITE side
+        // after every public action) and by the current WRITE side
         // (`ResolutionStateWire::to_value`), which is what this exercises.
         //
         // Constructed identically to `at_the_allocator` above except that the
@@ -7766,14 +8016,14 @@ mod tests {
         );
     }
 
-    /// **H6(d) — round-trip half.** The allocator survives the real v2 write →
-    /// read → identity-gate round trip.
+    /// **H6(d) — round-trip half.** The allocator survives the real current
+    /// write followed by the v2 compatibility read and identity gate.
     ///
     /// Deliberately goes through the WRITE side (`to_value` → `canonicalize` →
     /// `validate`) rather than through `v2_fixture_with_frames`, because the
     /// writer is half of what the round-trip threading breaks.
     #[test]
-    fn h6d_the_post_replacement_allocator_survives_the_v2_round_trip() {
+    fn h6d_the_post_replacement_allocator_survives_current_write_and_v2_read() {
         let mut state = GameState::new_two_player(147);
         state
             .resolution_stack
@@ -7802,8 +8052,10 @@ mod tests {
             "non-vacuity: the frame must be stamped before serializing"
         );
 
-        let v2 = serde_json::to_value(ResolutionStateWire::from_game_state(state))
-            .expect("stamped v2 fixture serializes");
+        let mut v2 = serde_json::to_value(ResolutionStateWire::from_game_state(state))
+            .expect("current writer serializes the fixture before its v2 downgrade");
+        v2["resolution_state_version"] =
+            Value::from(LEGACY_TYPED_FRAME_RESOLUTION_STATE_WIRE_VERSION);
         let restored = serde_json::from_value::<ResolutionStateWire>(v2)
             .expect("stamped v2 payload decodes")
             .into_game_state();
@@ -7844,7 +8096,7 @@ mod tests {
             &mut Vec::new(),
         );
         assert!(multi_draw.active_draw_sequence().is_none());
-        assert_reserializes_v2_only(multi_draw);
+        assert_reserializes_current_only(multi_draw);
 
         let mut connive = GameScenario::new();
         let conniver = connive.add_creature(PlayerId(0), "Conniver", 1, 1).id();
@@ -7875,7 +8127,7 @@ mod tests {
         )
         .expect("connive fixture re-enters through the production proposer");
         assert!(connive.active_connive_reentry().is_none());
-        assert_reserializes_v2_only(connive);
+        assert_reserializes_current_only(connive);
 
         let life = GameState::new_two_player(141);
         let pending_life_total_assignment = PendingLifeTotalAssignment {
@@ -7892,7 +8144,7 @@ mod tests {
             .into_game_state();
         crate::game::effects::life::drain_pending_life_total_assignment(&mut life, &mut Vec::new());
         assert!(life.active_life_total_assignment().is_none());
-        assert_reserializes_v2_only(life);
+        assert_reserializes_current_only(life);
 
         let mut spell = GameState::new_two_player(142);
         let spell_id = crate::game::zones::create_object(
@@ -7946,6 +8198,7 @@ mod tests {
             search_found_candidates: Vec::new(),
             depth: 0,
             is_optional: false,
+            choice_player: None,
             library_placement: None,
             exile_controller: None,
             exile_duration: None,
@@ -7967,7 +8220,7 @@ mod tests {
         apply_as_current(&mut spell, GameAction::ChooseReplacement { index: 0 })
             .expect("spell fixture resumes through the real replacement action");
         assert!(spell.active_spell_resolution().is_none());
-        assert_reserializes_v2_only(spell);
+        assert_reserializes_current_only(spell);
 
         let mut drains = PostReplacementDrainStack::default();
         assert!(drains.install(
@@ -7996,7 +8249,7 @@ mod tests {
             .is_none()
         );
         assert!(post_replacement.active_post_replacement_drains().is_none());
-        assert_reserializes_v2_only(post_replacement);
+        assert_reserializes_current_only(post_replacement);
     }
 
     #[test]
@@ -8029,25 +8282,25 @@ mod tests {
         );
         assert!(paired.active_draw_sequence().is_none());
         assert!(paired.active_post_replacement_drains().is_none());
-        assert_reserializes_v2_only(paired);
+        assert_reserializes_current_only(paired);
     }
 
     #[test]
     fn resolution_state_wire_rejects_translated_ambiguous_and_invalid_frame_shapes() {
         let base = GameState::new_two_player(150);
-        let v2 = serde_json::to_value(ResolutionStateWire::from_game_state(base.clone()))
-            .expect("base v2 fixture serializes");
+        let current = serde_json::to_value(ResolutionStateWire::from_game_state(base.clone()))
+            .expect("base current fixture serializes");
 
-        let mut v2_missing_frames = v2.clone();
-        v2_missing_frames
+        let mut current_missing_frames = current.clone();
+        current_missing_frames
             .as_object_mut()
-            .expect("v2 fixture is an object")
+            .expect("current fixture is an object")
             .remove("resolution_frames");
-        assert!(serde_json::from_value::<ResolutionStateWire>(v2_missing_frames).is_err());
+        assert!(serde_json::from_value::<ResolutionStateWire>(current_missing_frames).is_err());
 
-        let mut v2_with_legacy = v2.clone();
-        v2_with_legacy["pending_coin_flip"] = Value::Null;
-        assert!(serde_json::from_value::<ResolutionStateWire>(v2_with_legacy).is_err());
+        let mut current_with_legacy = current.clone();
+        current_with_legacy["pending_coin_flip"] = Value::Null;
+        assert!(serde_json::from_value::<ResolutionStateWire>(current_with_legacy).is_err());
 
         let mut v1_with_frames = serde_json::to_value(base.clone()).expect("v1 serializes");
         v1_with_frames["resolution_state_version"] =
@@ -8055,7 +8308,7 @@ mod tests {
         v1_with_frames["resolution_frames"] = Value::Array(Vec::new());
         assert!(serde_json::from_value::<ResolutionStateWire>(v1_with_frames).is_err());
 
-        let mut invalid_version_type = v2.clone();
+        let mut invalid_version_type = current.clone();
         invalid_version_type["resolution_state_version"] = Value::from("two");
         assert!(serde_json::from_value::<ResolutionStateWire>(invalid_version_type).is_err());
 
@@ -8068,6 +8321,7 @@ mod tests {
             win_effect: None,
             lose_effect: None,
             kind: PendingCoinFlipKind::Single,
+            chain_root_targets: Vec::new(),
         };
         let mut multiple_direct = serde_json::to_value(multiple_direct).expect("v1 serializes");
         multiple_direct["pending_coin_flip"] =
@@ -8087,6 +8341,7 @@ mod tests {
         buried_optional.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
             source_id: ObjectId(151),
+            decision_subject_id: None,
             description: None,
             may_trigger_key: None,
             same_card_may_trigger_choice_available: false,
@@ -8238,6 +8493,7 @@ mod tests {
             win_effect: None,
             lose_effect: None,
             kind: PendingCoinFlipKind::Single,
+            chain_root_targets: Vec::new(),
         }));
         assert!(
             serde_json::from_value::<ResolutionStateWire>(v2_fixture_with_frames(

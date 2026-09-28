@@ -100,6 +100,13 @@ const SERVER_BUILD_COMMIT = "lobby-rs";
 // native 10s tokio tick because each alarm wakes the (otherwise hibernating) DO:
 // 60s reaps a stale entry within a minute of the 300s threshold while still
 // letting a fully idle lobby hibernate (the alarm stops rescheduling when empty).
+// The timeout is measured from the listing's last host-liveness refresh
+// (`LobbyManager::check_expired`), not from creation or from the host's last
+// frame: frames advance that clock at most once per `LIVENESS_REFRESH_SECS`
+// (60s), so a listing can be reaped up to 60s sooner than 300s after its host's
+// last frame. Do NOT configure `setWebSocketAutoResponse` for Ping — an
+// auto-responded Ping never reaches the broker and would stop a connected
+// host's listing from being kept alive.
 const REAP_TIMEOUT_SECONDS = 300;
 const REAP_INTERVAL_MS = 60_000;
 
@@ -239,6 +246,11 @@ export class LobbyDO {
       // Public usage/analytics snapshot (read by the in-app lobby stats panel).
       if (pathname === "/stats") {
         return this.statsResponse();
+      }
+      // Public lobby listing (polled by the Discord card bot). Branched before
+      // the info-document fallthrough below, like the directory paths.
+      if (pathname === "/games") {
+        return this.gamesResponse();
       }
       // Server directory. These MUST be branched explicitly: this method's
       // default answer for any non-WebSocket path is the info document, so a
@@ -478,6 +490,17 @@ export class LobbyDO {
     });
     return Response.json(payload, {
       headers: { "Access-Control-Allow-Origin": "*", "Cache-Control": "no-store" },
+    });
+  }
+
+  /** Build the `/games` JSON: `{"games": [LobbyGame…]}`, the same listing
+   *  `LobbyUpdate` carries. The broker already serialized the array, so it is
+   *  spliced in rather than parsed and re-stringified. No CORS header: the only
+   *  consumer is the server-side bot. */
+  private async gamesResponse(): Promise<Response> {
+    const broker = await this.loadBroker();
+    return new Response(`{"games":${broker.public_games()}}`, {
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
     });
   }
 

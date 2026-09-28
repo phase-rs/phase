@@ -2,18 +2,25 @@ import type {
   BracketShape,
   GameFormat,
   MatchArity,
+  MatchType,
   PairingId,
   PodOutcome,
   ScoringPolicy,
   TournamentActionAckReply,
   TournamentActionRejectedReply,
   TournamentCreatedReply,
+  TournamentCredentialRenewedReply,
+  TournamentCredentialRole,
   TournamentJoinedReply,
   TournamentSummary,
   TournamentUpdateReply,
   TournamentView,
 } from "../adapter/types";
-import { MIN_LOBBY_PROTOCOL_FOR_TOURNAMENT_ACK } from "../adapter/ws-adapter";
+import {
+  lobbyProtocolRequiredForFormat,
+  MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING,
+  MIN_LOBBY_PROTOCOL_FOR_TOURNAMENT_ACK,
+} from "../adapter/ws-adapter";
 import type { PhaseSocket } from "./openPhaseSocket";
 
 /**
@@ -537,7 +544,14 @@ function gatedRequestOver(
 export interface CreateTournamentRequest {
   name: string;
   arity: MatchArity;
-  scoring: ScoringPolicy;
+  /**
+   * `null` means "Automatic" — let the broker apply its arity default
+   * (`ScoringPolicy::default_for_arity`) and report the resolved value back on
+   * `TournamentSummary.scoring`. An explicit policy overrides it. The send path
+   * substitutes {@link defaultScoringForArity} for a `null` here only against a
+   * pre-v6 broker that cannot accept an omitted `scoring`.
+   */
+  scoring: ScoringPolicy | null;
   bracket: BracketShape;
   totalRounds?: number | null;
   /**
@@ -553,14 +567,100 @@ export interface CreateTournamentRequest {
    * lobby protocol 7; ignored by a pre-v7 broker.
    */
   format?: GameFormat | null;
+  /**
+   * The match structure (Bo1 / Bo3). `null`/omitted resolves to the arity
+   * default (Bo3 head-to-head, Bo1 for pods). `Bo3` is head-to-head only — the
+   * broker rejects it at any other arity. Additive in lobby protocol 8; ignored
+   * by a pre-v8 broker.
+   */
+  matchType?: MatchType | null;
 }
 
-/** `CreateTournament` → `TournamentCreated` (point reply, carries the token). */
+/**
+ * Whether a `CreateTournament` request needs lobby protocol
+ * `MIN_LOBBY_PROTOCOL_FOR_MATCH_TYPE` to be honored — i.e. it selects a match
+ * structure a pre-v8 broker would silently apply DIFFERENTLY from a v8 broker.
+ *
+ * A pre-v8 broker discards `match_type` and applies the arity default: Bo3 for
+ * head-to-head, Bo1 for pods. So a request needs the capability exactly when its
+ * explicit `match_type` differs from that default:
+ * - **Bo1 head-to-head** — a pre-v8 broker runs it as Bo3.
+ * - **Bo3 pod** (any non-head-to-head arity) — a v8 broker *rejects* it (Bo3 is
+ *   head-to-head only), but a pre-v8 broker silently makes an arity-default Bo1
+ *   pod. Either way the organizer must not get a silent Bo1 pod.
+ *
+ * A selection that matches the pre-v8 default (Bo3 head-to-head, `Bo1`/`null`
+ * pods) is honored identically by both, so it is never gated. This encodes only
+ * the pre-v8 default boundary as a capability check; the broker stays the single
+ * authority for actually resolving and validating the structure.
+ */
+export function matchTypeNeedsCapability(
+  arity: MatchArity,
+  matchType: MatchType | null | undefined,
+): boolean {
+  if (matchType == null) return false;
+  const preV8Default: MatchType = arity === 2 ? "Bo3" : "Bo1";
+  return matchType !== preV8Default;
+}
+
+/**
+ * The BELOW-FLOOR COMPATIBILITY FALLBACK for {@link createTournamentOver}'s
+ * `scoring` gate, for a given arity. Mirrors `ScoringPolicy::default_for_arity`
+ * (`crates/lobby-broker/src/tournament.rs`).
+ *
+ * As of lobby protocol v6 the broker owns this default: `CreateTournament.scoring`
+ * is `Option<ScoringPolicy>` with `#[serde(default)]`, so a client omits it
+ * (`scoring: null`) and reads the resolved value back off
+ * `TournamentSummary.scoring`. The create form computes no default at all.
+ *
+ * This helper survives ONLY for the one direction that is not symmetric:
+ * omitting `scoring` against a pre-v6 broker is a hard `missing field \`scoring\``
+ * parse error, not a degrade, so below {@link MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING}
+ * the send path substitutes this explicit policy. It lives here, beside its sole
+ * consumer, rather than in `pages/tournamentPageState.ts`: a value import from
+ * that module would close the runtime cycle
+ * `tournamentClient → tournamentPageState → multiplayerStore → tournamentClient`.
+ *
+ * Arity-dependent by design: a fixed 3/1/0 would silently give every pod
+ * organizer MTR head-to-head scoring instead of MSTR pod scoring.
+ */
+export function defaultScoringForArity(arity: MatchArity): ScoringPolicy {
+  return { win_points: 2 * arity - 1, draw_points: 1, loss_points: 0 };
+}
+
+/**
+ * `CreateTournament` → `TournamentCreated` (point reply, carries the token).
+ *
+ * The `scoring` gate reads a **floor**, never the current version, exactly as
+ * `gatedRequestOver` reads {@link MIN_LOBBY_PROTOCOL_FOR_TOURNAMENT_ACK}: a v6
+ * or v7 broker still applies its own default, so `req.scoring === null` is sent
+ * as an omitted `scoring: null` and the broker resolves it. Below
+ * {@link MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING} — including a peer that
+ * advertises no lobby version at all, which predates broker-owned scoring — an
+ * omitted policy is a hard parse error there, so the client substitutes the
+ * explicit {@link defaultScoringForArity}. An explicit `req.scoring` is always
+ * sent verbatim regardless of version.
+ *
+ * Below {@link lobbyProtocolRequiredForFormat} for `req.format`, the display-only
+ * `format` label is sent as `null`, since a broker that predates the name would
+ * reject the whole frame.
+ */
 export function createTournamentOver(
   socket: PhaseSocket,
   req: CreateTournamentRequest,
   opts: TournamentRequestOptions = {},
 ): Promise<TournamentRpcResult<TournamentCreatedReply>> {
+  const lobbyProtocolVersion = socket.serverInfo.lobbyProtocolVersion;
+  const brokerOwnsDefault =
+    lobbyProtocolVersion !== undefined &&
+    lobbyProtocolVersion >= MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING;
+  const scoring =
+    req.scoring ?? (brokerOwnsDefault ? null : defaultScoringForArity(req.arity));
+  const formatNeeds = req.format == null ? null : lobbyProtocolRequiredForFormat(req.format);
+  const formatSendable =
+    formatNeeds === null ||
+    (lobbyProtocolVersion !== undefined && lobbyProtocolVersion >= formatNeeds);
+
   return requestOver<TournamentCreatedReply>(
     socket,
     {
@@ -568,11 +668,12 @@ export function createTournamentOver(
       data: {
         name: req.name,
         arity: req.arity,
-        scoring: req.scoring,
+        scoring,
         bracket: req.bracket,
         total_rounds: req.totalRounds ?? null,
         plus_rounds: req.plusRounds ?? null,
-        format: req.format ?? null,
+        format: formatSendable ? (req.format ?? null) : null,
+        match_type: req.matchType ?? null,
       },
     },
     matchReply<TournamentCreatedReply>("TournamentCreated", null),
@@ -617,6 +718,73 @@ export function getTournamentOver(
     socket,
     { type: "GetTournament", data: { code } },
     matchReply<TournamentUpdateReply>("TournamentUpdate", code),
+    opts,
+  );
+}
+
+/**
+ * `RenewTournamentCredential` → `TournamentCredentialRenewed` (point reply,
+ * carrying the freshly minted secret and its new expiry). Uncorrelated, exactly
+ * like {@link createTournamentOver} / {@link joinTournamentOver}: rotation is
+ * NOT one of the four gated actions (`crates/lobby-broker/src/protocol.rs:1128` —
+ * it carries no `request_id`), and its reply is a distinguishable point reply
+ * naming the `code` and `role` it answers for.
+ *
+ * `role` is the WIRE spelling (`"Organizer"` / `"Player"`, capitalized), never
+ * the store's lowercase display role — the broker rejects the lowercase form
+ * with a serde unknown-variant error. The matcher binds on BOTH `code` and
+ * `role`, because an organizer who also joined holds two authorities on one code
+ * and could rotate both concurrently on one socket; a `code`-only filter would
+ * let the other authority's reply settle this call with the wrong token.
+ *
+ * The presented `token` must still be accepted: the broker refuses rotation of
+ * an already-expired credential (it extends nothing that has lapsed,
+ * `crates/lobby-broker/src/tournament.rs`), so the caller renews from the client
+ * clock BEFORE `expires_at_ms`, never after a rejection.
+ *
+ * `rotationNonce` is the client-minted, per-attempt nonce that makes a lost
+ * reply recoverable under lobby protocol v9: a first attempt sends a fresh nonce
+ * and the broker mints; a RETRY after an uncertain result re-sends the SAME
+ * nonce with the SAME (possibly now-superseded) `token`, and the broker REPLAYS
+ * the already-committed secret rather than minting a second one. Presenting a
+ * superseded token WITHOUT the matching nonce is refused, which is what stops a
+ * stolen superseded secret from becoming a fresh authority — so the caller must
+ * hold the nonce stable across retries of the same rotation.
+ */
+export function renewTournamentCredentialOver(
+  socket: PhaseSocket,
+  code: string,
+  role: TournamentCredentialRole,
+  token: string,
+  rotationNonce: string,
+  opts: TournamentRequestOptions = {},
+): Promise<TournamentRpcResult<TournamentCredentialRenewedReply>> {
+  return requestOver<TournamentCredentialRenewedReply>(
+    socket,
+    {
+      type: "RenewTournamentCredential",
+      data: { code, role, token, rotation_nonce: rotationNonce },
+    },
+    (msg) => {
+      if (msg.type !== "TournamentCredentialRenewed") return null;
+      // Read as optional-everything at the trust boundary, as the other
+      // matchers here do: the frame is what it claims to be, not what has been
+      // established about it.
+      const data = msg.data as
+        | Partial<TournamentCredentialRenewedReply>
+        | undefined
+        | null;
+      if (data == null) return null;
+      if (data.code !== code || data.role !== role) return null;
+      if (typeof data.token !== "string") return null;
+      if (typeof data.expires_at_ms !== "number") return null;
+      return {
+        code: data.code,
+        role: data.role,
+        token: data.token,
+        expires_at_ms: data.expires_at_ms,
+      };
+    },
     opts,
   );
 }

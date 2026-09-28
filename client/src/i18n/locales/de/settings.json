@@ -5,6 +5,7 @@
   },
   "tabs": {
     "gameplay": "Spielablauf",
+    "ai": "KI-Gegner",
     "experimental": "Experimentell",
     "visual": "Grafik",
     "combat": "Tempo",
@@ -36,7 +37,11 @@
     "logDockSide": "Position des Spielprotokolls",
     "spellPayment": "Zauberspruch-Bezahlung",
     "manualManaPayment": "Manuelle Manabezahlung für Zaubersprüche",
-    "spellPaymentOptions": { "auto": "Automatisch", "autoExceptSacrificialMana": "Vor dem Opfern fragen", "manual": "Manuell" },
+    "spellPaymentOptions": {
+      "auto": "Automatisch",
+      "autoExceptSacrificialMana": "Vor dem Opfern fragen",
+      "manual": "Manuell"
+    },
     "nativeEngine": "Native Engine für lokale Spiele und gehostete Mehrspielerpartien verwenden",
     "nativeEngineDescription": "Verwende die heruntergeladene Engine für lokale KI-Spiele und Spiele, die du über eine Lobby hostest. Gäste verbinden sich weiterhin über die Peer-to-Peer-Verbindung der Lobby. Fällt auf die integrierte Engine zurück, wenn sie nicht verfügbar ist.",
     "boardBackground": "Spielfeldhintergrund",
@@ -133,9 +138,18 @@
       "right": "Rechtsbündig"
     },
     "presets": {
-      "default": { "label": "Layout 1", "description": "Das ausgewogene Standardlayout." },
-      "layout2": { "label": "Layout 2", "description": "Ein größeres Spielfeld mit eingeklappten Händen." },
-      "layout3": { "label": "Layout 3", "description": "Ein höheres unteres Drittel." }
+      "default": {
+        "label": "Layout 1",
+        "description": "Das ausgewogene Standardlayout."
+      },
+      "layout2": {
+        "label": "Layout 2",
+        "description": "Ein größeres Spielfeld mit eingeklappten Händen."
+      },
+      "layout3": {
+        "label": "Layout 3",
+        "description": "Ein höheres unteres Drittel."
+      }
     },
     "zones": {
       "playerHud": "Dein HUD",
@@ -422,9 +436,31 @@
     "incompleteTitle": "Offline-Vorbereitung ist unvollständig",
     "incompleteMessage": "Fehlt: {{capabilities}}. Offline arbeiten trotzdem aktivieren?",
     "confirmOffline": "Offline arbeiten aktivieren",
-    "states": { "needs-preparation": "Bereite dieses Gerät vor dem Offline-Arbeiten vor.", "preparing": "Lokale Spielfunktionen werden vorbereitet…", "ready": "Dieses Gerät ist für lokales Offline-Spiel bereit.", "failed": "Einige erforderliche Funktionen sind nicht bereit.", "reconnect-required": "Stelle die Verbindung wieder her, bevor du Offline-Spiel vorbereitest.", "reload-or-relaunch-required": "Lade die App neu oder starte den Desktop neu und bereite erneut vor." },
-    "capabilities": { "appShell": "App-Shell", "browserEngine": "Browser-Engine und Kartendatenbank", "scryfallSearch": "Kartensuchdaten", "preconCatalog": "Vorgefertigte Decks", "bundledAiCatalog": "KI-Deckkatalog", "deckLibrary": "Installierte Deckbibliothek", "coreVisuals": "Kartenrückseite und Manasymbole", "nativeEngine": "Native Engine" },
-    "capabilityStates": { "ready": "Bereit", "not-ready": "Nicht bereit", "reload-required": "Neuladen erforderlich", "not-applicable": "Nicht anwendbar", "not-installed": "Nicht installiert" }
+    "states": {
+      "needs-preparation": "Bereite dieses Gerät vor dem Offline-Arbeiten vor.",
+      "preparing": "Lokale Spielfunktionen werden vorbereitet…",
+      "ready": "Dieses Gerät ist für lokales Offline-Spiel bereit.",
+      "failed": "Einige erforderliche Funktionen sind nicht bereit.",
+      "reconnect-required": "Stelle die Verbindung wieder her, bevor du Offline-Spiel vorbereitest.",
+      "reload-or-relaunch-required": "Lade die App neu oder starte den Desktop neu und bereite erneut vor."
+    },
+    "capabilities": {
+      "appShell": "App-Shell",
+      "browserEngine": "Browser-Engine und Kartendatenbank",
+      "scryfallSearch": "Kartensuchdaten",
+      "preconCatalog": "Vorgefertigte Decks",
+      "bundledAiCatalog": "KI-Deckkatalog",
+      "deckLibrary": "Installierte Deckbibliothek",
+      "coreVisuals": "Kartenrückseite und Manasymbole",
+      "nativeEngine": "Native Engine"
+    },
+    "capabilityStates": {
+      "ready": "Bereit",
+      "not-ready": "Nicht bereit",
+      "reload-required": "Neuladen erforderlich",
+      "not-applicable": "Nicht anwendbar",
+      "not-installed": "Nicht installiert"
+    }
   },
   "artChain": {
     "emptyState": "Standard-Scryfall-Artwork wird verwendet. Füge unten Regeln hinzu, um anzupassen.",
@@ -443,6 +479,48 @@
       "oldest": "Ältester Druck",
       "preferBorderless": "Randlos bevorzugen",
       "preferExtended": "Erweitertes Artwork bevorzugen"
+    }
+  },
+  "llm": {
+    "title": "LLM-Gegner",
+    "intro": "Optional. Wenn du Phase mit einem LLM-Anbieter verbindest, kann ein KI-Platz — oder die Bots eines Drafts — von diesem Modell statt von der eingebauten KI gespielt werden. Nichts davon wird genutzt, bevor du einen Anbieter aktivierst und einem Platz zuweist; bei jedem Fehler übernimmt mitten im Spiel wieder die eingebaute KI.",
+    "empty": "Keine Anbieter konfiguriert. Die eingebaute KI steuert jeden Platz.",
+    "addProvider": "Anbieter hinzufügen",
+    "unnamed": "Unbenannter Anbieter",
+    "name": "Name",
+    "namePlaceholder": "Diesem Anbieter einen Namen geben (z. B. „Claude“)",
+    "enable": "Diesen Anbieter aktivieren",
+    "remove": "Diesen Anbieter entfernen",
+    "provider": "Anbieter",
+    "model": "Modell",
+    "modelId": "Modell-ID",
+    "customModel": "Eigenes …",
+    "modelPlaceholder": "Modell-ID (z. B. gpt-5, claude-sonnet-5)",
+    "endpoint": "Endpunkt",
+    "endpointPlaceholder": "https://dein-server/v1",
+    "apiKey": "API-Schlüssel",
+    "apiKeyPlaceholder": "API-Schlüssel einfügen",
+    "apiKeyOptional": "Bei lokalen Servern optional",
+    "apiKeyStorage": "Nur für diese Browsersitzung im Arbeitsspeicher. API-Schlüssel werden nie auf die Festplatte geschrieben und sind vom Backup-Export und der Cloud-Synchronisierung ausgenommen — nach einem Neuladen gibst du ihn erneut ein. Ein API-Schlüssel verlangt außerdem einen https://-Endpunkt, sofern der Server nicht auf localhost läuft.",
+    "apiKeyGet": "Schlüssel holen",
+    "test": "Verbindung testen",
+    "testing": "Test läuft …",
+    "testOk": "Verbunden.",
+    "draftToggle": {
+      "label": "Für Draft-Bots verwenden",
+      "hint": "Bot-Plätze in einem Draft wählen mit dem Modell, samt Set-Kontext des Formats.",
+      "profile": "Anbieter für den Draft"
+    },
+    "testHint": "Sendet eine echte Anfrage und prüft die Antwort genauso wie ein Spielzug es täte.",
+    "errors": {
+      "engineUnavailable": "Die Engine konnte nicht geladen werden.",
+      "requestNotBuilt": "Dieser Anbieter ist noch nicht vollständig eingerichtet.",
+      "undecodable": "Der Endpunkt hat geantwortet, aber nicht mit etwas, das das Spiel verwenden kann.",
+      "emptyBody": "Der Endpunkt hat eine leere Antwort zurückgegeben.",
+      "cancelled": "Der Test wurde abgebrochen.",
+      "timedOut": "Der Endpunkt hat nicht rechtzeitig geantwortet.",
+      "unreachable": "Der Endpunkt war nicht erreichbar. Prüfe die URL und ob der Anbieter Browser-Anfragen zulässt.",
+      "oversized": "Der Endpunkt hat weit mehr Daten zurückgegeben, als eine Chat-Antwort umfasst."
     }
   }
 }

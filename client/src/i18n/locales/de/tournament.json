@@ -54,6 +54,9 @@
     "lossPointsLabel": "Niederlage",
     "formatLabel": "Format",
     "formatNone": "Nicht angegeben",
+    "matchTypeLabel": "Match",
+    "matchTypeBo3": "Best of Three",
+    "matchTypeBo1": "Best of One",
     "plusRoundsLabel": "Zusätzliche Runden",
     "plusRoundsHint": "Werden zur automatischen Rundenzahl addiert (Schweizer plus N). Gilt nur, wenn Runden auf automatisch bleibt.",
     "submit": "Turnier erstellen",
@@ -147,6 +150,7 @@
     "connectionLost": "Verbindung zur Lobby verloren. Prüfe deine Serveradresse.",
     "aborted": "Diese Anfrage wurde abgebrochen.",
     "unsupported": "Die Anfrage wurde gesendet, aber dieser Server ist zu alt, um sie zu bestätigen. Prüfe das Turnier, bevor du es erneut versuchst.",
+    "incompatible": "Dieser Server ist zu alt für diese Matchstruktur (er benötigt Lobby-Protokoll {{needed}}). Es wurde nichts gesendet.",
     "notFound": "Kein Turnier mit diesem Code."
   }
 }

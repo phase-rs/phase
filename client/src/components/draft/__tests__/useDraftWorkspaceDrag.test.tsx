@@ -20,6 +20,19 @@ function rect(left: number, top: number, right: number, bottom: number): DOMRect
   return { left, top, right, bottom, width: right - left, height: bottom - top, x: left, y: top, toJSON: () => ({}) } as DOMRect;
 }
 
+function createWorkspaceSource(onDrop: WorkspaceDragSource["onDrop"]): WorkspaceDragSource {
+  return {
+    kind: "workspace",
+    instanceIds: ["card-1"],
+    cards: [card],
+    canonicalTarget: { zone: "deck", column: 0, row: 0 },
+    previewWidth: 146,
+    previewHeight: 204,
+    origin: { left: 0, top: 0, width: 146, height: 204 },
+    onDrop,
+  };
+}
+
 function firePointerActivation(
   element: Element,
   type: "click" | "dblclick",
@@ -39,28 +52,64 @@ function createInteraction() {
   };
 }
 
-function Harness({ interaction, onDrop, onAdmission = vi.fn(), onSettled, expanded = false, enabled = true, targetVersion = 0, sourceOverride, workspaceSourceOverride, workspaceTouchEnabled = false, secondaryActivation }: {
+function installGeometryHarness() {
+  let nextFrame = 1;
+  const frames = new Map<number, FrameRequestCallback>();
+  const requestAnimationFrame = vi.fn((callback: FrameRequestCallback) => {
+    const handle = nextFrame;
+    nextFrame += 1;
+    frames.set(handle, callback);
+    return handle;
+  });
+  const cancelAnimationFrame = vi.fn();
+  const observers: Array<{ emit(): void }> = [];
+  class ControlledResizeObserver {
+    constructor(private readonly callback: ResizeObserverCallback) {
+      observers.push(this);
+    }
+
+    observe = vi.fn();
+    unobserve = vi.fn();
+    disconnect = vi.fn();
+    emit() {
+      this.callback([], this as unknown as ResizeObserver);
+    }
+  }
+  vi.stubGlobal("requestAnimationFrame", requestAnimationFrame);
+  vi.stubGlobal("cancelAnimationFrame", cancelAnimationFrame);
+  vi.stubGlobal("ResizeObserver", ControlledResizeObserver);
+  return { cancelAnimationFrame, frames, observers, requestAnimationFrame };
+}
+
+function Harness({ interaction, onDrop, onAdmission = vi.fn(), onSettled, expanded = false, enabled = true, workspaceProjectionEnabled = true, retainLastValidWorkspaceTarget = false, targetPresent = true, targetVersion = 0, sourceOverride, workspaceSourceOverride, workspaceTouchEnabled = false, secondaryActivation, onController }: {
   interaction: ReturnType<typeof createInteraction>;
   onDrop(request: DraftDropRequest): DraftDropDispatch;
   onAdmission?: (admission: PackDropAdmission) => void;
   onSettled: (result: PackDropSettlement) => void;
   expanded?: boolean;
   enabled?: boolean;
+  workspaceProjectionEnabled?: boolean;
+  retainLastValidWorkspaceTarget?: boolean;
+  targetPresent?: boolean;
   targetVersion?: number;
   sourceOverride?: PackDropSource;
   workspaceSourceOverride?: WorkspaceDragSource;
   workspaceTouchEnabled?: boolean;
   secondaryActivation?: { readonly surface: "pack" | "workspace"; readonly sourceInstanceId: string };
+  onController?(controller: ReturnType<typeof useDraftWorkspaceDrag>): void;
 }) {
   const [clicks, setClicks] = useState(0);
   const [doubleClicks, setDoubleClicks] = useState(0);
   const drag = useDraftWorkspaceDrag({
     enabled,
+    workspaceProjectionEnabled,
+    retainLastValidWorkspaceTarget,
     readPickInteraction: interaction.read,
     subscribePickInteraction: interaction.subscribe,
     onDrop: onDrop as never,
     resolveCollapsedSideboardColumn: () => 2,
   });
+  onController?.(drag);
   const source: PackDropSource = sourceOverride ?? {
     kind: "pick" as const,
     authorityId: "card-1",
@@ -71,6 +120,7 @@ function Harness({ interaction, onDrop, onAdmission = vi.fn(), onSettled, expand
     interactionGeneration: 1,
     previewWidth: 146,
     previewHeight: 204,
+    previewImages: [],
     onAdmission,
     onSettled,
   };
@@ -126,36 +176,680 @@ function Harness({ interaction, onDrop, onAdmission = vi.fn(), onSettled, expand
           <div data-testid="sideboard-board" ref={drag.registerBoard("sideboard")} />
           <div data-testid="sideboard-column-0" ref={drag.registerColumn("sideboard", 0)} />
         </>
-      ) : <div key={targetVersion} data-testid="target" ref={drag.registerCollapsedSideboard} />}
+      ) : targetPresent && <div key={targetVersion} data-testid="target" ref={drag.registerCollapsedSideboard} />}
       <button type="button" onClick={drag.dispose}>dispose</button>
+      <button
+        type="button"
+        onClick={() => {
+          if (drag.workspaceProjection !== null && drag.workspaceProjection !== undefined) {
+            drag.markWorkspaceProjectionDestinationReady?.(drag.workspaceProjection.token, drag.geometryRevision);
+          }
+        }}
+      >
+        mark workspace projection destination ready
+      </button>
+      <button
+        type="button"
+        onClick={() => {
+          if (drag.workspaceProjection !== null && drag.workspaceProjection !== undefined) {
+            drag.completeWorkspaceProjection?.(drag.workspaceProjection.token, drag.geometryRevision);
+          }
+        }}
+      >
+        complete workspace projection
+      </button>
       <output data-testid="clicks">{clicks}:{doubleClicks}</output>
       <output data-testid="announcement">{drag.announcement}</output>
       <output data-testid="deck-drop-state">{JSON.stringify(drag.dropState("deck"))}</output>
+      <output data-testid="active-target">{JSON.stringify(drag.activeTarget)}</output>
+      <output data-testid="geometry-revision">{drag.geometryRevision}</output>
       <output data-testid="preview">{drag.dragPreview === null ? "" : JSON.stringify({
         ids: drag.dragPreview.source.instanceIds,
         cards: drag.dragPreview.source.cards.map((entry) => entry.instance_id),
         x: drag.dragPreview.clientX,
         y: drag.dragPreview.clientY,
       })}</output>
+      <output data-testid="workspace-projection">{drag.workspaceProjection === null ? "" : JSON.stringify(drag.workspaceProjection)}</output>
     </div>
   );
 }
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
 
 describe("useDraftWorkspaceDrag", () => {
+  it("retains_a_successful_workspace_projection_until_the_renderer_acknowledges_it", () => {
+    const interaction = createInteraction();
+    const onWorkspaceDrop = vi.fn(() => true);
+    render(
+      <Harness
+        interaction={interaction}
+        onDrop={vi.fn() as never}
+        onSettled={vi.fn()}
+        workspaceSourceOverride={createWorkspaceSource(onWorkspaceDrop)}
+      />,
+    );
+    const source = screen.getByTestId("source");
+    const target = screen.getByTestId("target");
+    source.setPointerCapture = vi.fn();
+    source.releasePointerCapture = vi.fn();
+    target.getBoundingClientRect = () => rect(0, 0, 100, 100);
+
+    fireEvent.pointerDown(source, { button: 0, clientX: 10, clientY: 10, isPrimary: true, pointerId: 99, pointerType: "mouse" });
+    fireEvent.pointerMove(source, { clientX: 30, clientY: 30, pointerId: 99, pointerType: "mouse" });
+    expect(screen.getByTestId("workspace-projection")).toHaveTextContent('"settling":false');
+
+    fireEvent.pointerUp(source, { clientX: 30, clientY: 30, pointerId: 99, pointerType: "mouse" });
+    expect(onWorkspaceDrop).toHaveBeenCalledWith({ zone: "sideboard", column: 2 });
+    expect(screen.getByTestId("preview")).toHaveTextContent("");
+    expect(screen.getByTestId("workspace-projection")).toHaveTextContent('"settling":true');
+
+    fireEvent.click(screen.getByRole("button", { name: "mark workspace projection destination ready" }));
+    expect(screen.getByTestId("workspace-projection")).toHaveTextContent('"settling":true');
+    fireEvent.click(screen.getByRole("button", { name: "complete workspace projection" }));
+    expect(screen.getByTestId("workspace-projection")).toHaveTextContent("");
+  });
+
+  it("clears_workspace_projection_latches_when_projection_is_disabled_and_ignores_stale_callbacks", () => {
+    const interaction = createInteraction();
+    const onWorkspaceDrop = vi.fn(() => true);
+    let controller: ReturnType<typeof useDraftWorkspaceDrag> | undefined;
+    const props = {
+      interaction,
+      onDrop: vi.fn() as never,
+      onSettled: vi.fn(),
+      workspaceSourceOverride: createWorkspaceSource(onWorkspaceDrop),
+      onController: (next: ReturnType<typeof useDraftWorkspaceDrag>) => { controller = next; },
+    };
+    const { rerender } = render(<Harness {...props} />);
+    const source = screen.getByTestId("source");
+    const target = screen.getByTestId("target");
+    source.setPointerCapture = vi.fn();
+    source.releasePointerCapture = vi.fn();
+    target.getBoundingClientRect = () => rect(0, 0, 100, 100);
+
+    fireEvent.pointerDown(source, { button: 0, clientX: 10, clientY: 10, isPrimary: true, pointerId: 301, pointerType: "mouse" });
+    fireEvent.pointerMove(source, { clientX: 30, clientY: 30, pointerId: 301, pointerType: "mouse" });
+    const token = controller!.workspaceProjection!.token;
+    const geometryRevision = controller!.geometryRevision;
+    rerender(<Harness {...props} workspaceProjectionEnabled={false} />);
+
+    expect(screen.getByTestId("workspace-projection")).toHaveTextContent("");
+    act(() => {
+      controller!.markWorkspaceProjectionDestinationReady?.(token, geometryRevision);
+      controller!.completeWorkspaceProjection?.(token, geometryRevision);
+    });
+    expect(screen.getByTestId("workspace-projection")).toHaveTextContent("");
+    expect(screen.getByTestId("preview")).toHaveTextContent('"ids":["card-1"]');
+  });
+
+  it("settles_workspace_projections_once_after_both_latch_signals_in_either_order_without_a_timeout", () => {
+    vi.useFakeTimers();
+    const interaction = createInteraction();
+    render(
+      <Harness
+        interaction={interaction}
+        onDrop={vi.fn() as never}
+        onSettled={vi.fn()}
+        workspaceSourceOverride={createWorkspaceSource(vi.fn(() => true))}
+      />,
+    );
+    const source = screen.getByTestId("source");
+    const target = screen.getByTestId("target");
+    source.setPointerCapture = vi.fn();
+    source.releasePointerCapture = vi.fn();
+    target.getBoundingClientRect = () => rect(0, 0, 100, 100);
+
+    const startAndDrop = (pointerId: number) => {
+      fireEvent.pointerDown(source, { button: 0, clientX: 10, clientY: 10, isPrimary: true, pointerId, pointerType: "mouse" });
+      fireEvent.pointerMove(source, { clientX: 30, clientY: 30, pointerId, pointerType: "mouse" });
+      fireEvent.pointerUp(source, { clientX: 30, clientY: 30, pointerId, pointerType: "mouse" });
+    };
+
+    startAndDrop(108);
+    fireEvent.click(screen.getByRole("button", { name: "complete workspace projection" }));
+    act(() => vi.advanceTimersByTime(701));
+    expect(screen.getByTestId("workspace-projection")).toHaveTextContent('"settling":true');
+    fireEvent.click(screen.getByRole("button", { name: "mark workspace projection destination ready" }));
+    expect(screen.getByTestId("workspace-projection")).toHaveTextContent("");
+
+    startAndDrop(109);
+    fireEvent.click(screen.getByRole("button", { name: "mark workspace projection destination ready" }));
+    expect(screen.getByTestId("workspace-projection")).toHaveTextContent('"settling":true');
+    fireEvent.click(screen.getByRole("button", { name: "complete workspace projection" }));
+    fireEvent.click(screen.getByRole("button", { name: "complete workspace projection" }));
+    expect(screen.getByTestId("workspace-projection")).toHaveTextContent("");
+  });
+
+  it("retains_motion_completion_that_occurs_before_workspace_drop_release", () => {
+    const interaction = createInteraction();
+    render(
+      <Harness
+        interaction={interaction}
+        onDrop={vi.fn() as never}
+        onSettled={vi.fn()}
+        workspaceSourceOverride={createWorkspaceSource(vi.fn(() => true))}
+      />,
+    );
+    const source = screen.getByTestId("source");
+    const target = screen.getByTestId("target");
+    source.setPointerCapture = vi.fn();
+    source.releasePointerCapture = vi.fn();
+    target.getBoundingClientRect = () => rect(0, 0, 100, 100);
+
+    fireEvent.pointerDown(source, { button: 0, clientX: 10, clientY: 10, isPrimary: true, pointerId: 112, pointerType: "mouse" });
+    fireEvent.pointerMove(source, { clientX: 30, clientY: 30, pointerId: 112, pointerType: "mouse" });
+    const token = JSON.parse(screen.getByTestId("workspace-projection").textContent ?? "{}").token as number;
+    fireEvent.click(screen.getByRole("button", { name: "complete workspace projection" }));
+    fireEvent.pointerUp(source, { clientX: 30, clientY: 30, pointerId: 112, pointerType: "mouse" });
+    expect(screen.getByTestId("workspace-projection")).toHaveTextContent("\"settling\":true");
+
+    act(() => {
+      fireEvent.click(screen.getByRole("button", { name: "mark workspace projection destination ready" }));
+    });
+    expect(screen.getByTestId("workspace-projection")).toHaveTextContent("");
+    expect(token).toBeGreaterThan(0);
+  });
+
+  it("invalidates_early_motion_completion_when_the_workspace_target_changes_before_release", () => {
+    const interaction = createInteraction();
+    render(
+      <Harness
+        expanded
+        interaction={interaction}
+        onDrop={vi.fn() as never}
+        onSettled={vi.fn()}
+        workspaceSourceOverride={createWorkspaceSource(vi.fn(() => true))}
+      />,
+    );
+    const source = screen.getByTestId("source");
+    source.setPointerCapture = vi.fn();
+    source.releasePointerCapture = vi.fn();
+    screen.getByTestId("deck-board").getBoundingClientRect = () => rect(0, 0, 220, 100);
+    screen.getByTestId("deck-column-0").getBoundingClientRect = () => rect(0, 0, 100, 100);
+    screen.getByTestId("deck-column-1").getBoundingClientRect = () => rect(120, 0, 220, 100);
+
+    fireEvent.pointerDown(source, { button: 0, clientX: 10, clientY: 10, isPrimary: true, pointerId: 113, pointerType: "mouse" });
+    fireEvent.pointerMove(source, { clientX: 30, clientY: 30, pointerId: 113, pointerType: "mouse" });
+    fireEvent.click(screen.getByRole("button", { name: "complete workspace projection" }));
+    fireEvent.pointerMove(source, { clientX: 150, clientY: 30, pointerId: 113, pointerType: "mouse" });
+    fireEvent.pointerUp(source, { clientX: 150, clientY: 30, pointerId: 113, pointerType: "mouse" });
+
+    fireEvent.click(screen.getByRole("button", { name: "mark workspace projection destination ready" }));
+    expect(screen.getByTestId("workspace-projection")).toHaveTextContent("\"settling\":true");
+    fireEvent.click(screen.getByRole("button", { name: "complete workspace projection" }));
+    expect(screen.getByTestId("workspace-projection")).toHaveTextContent("");
+  });
+
+  it("invalidates_early_motion_completion_when_same_target_geometry_changes_before_release", () => {
+    const geometry = installGeometryHarness();
+    const interaction = createInteraction();
+    render(
+      <Harness
+        interaction={interaction}
+        onDrop={vi.fn() as never}
+        onSettled={vi.fn()}
+        workspaceSourceOverride={createWorkspaceSource(vi.fn(() => true))}
+      />,
+    );
+    const source = screen.getByTestId("source");
+    const target = screen.getByTestId("target");
+    source.setPointerCapture = vi.fn();
+    source.releasePointerCapture = vi.fn();
+    target.getBoundingClientRect = () => rect(0, 0, 100, 100);
+
+    fireEvent.pointerDown(source, { button: 0, clientX: 10, clientY: 10, isPrimary: true, pointerId: 114, pointerType: "mouse" });
+    fireEvent.pointerMove(source, { clientX: 30, clientY: 30, pointerId: 114, pointerType: "mouse" });
+    fireEvent.click(screen.getByRole("button", { name: "complete workspace projection" }));
+
+    act(() => geometry.observers.forEach((observer) => observer.emit()));
+    act(() => geometry.frames.get(1)!(0));
+    expect(screen.getByTestId("geometry-revision")).toHaveTextContent("1");
+
+    fireEvent.pointerUp(source, { clientX: 30, clientY: 30, pointerId: 114, pointerType: "mouse" });
+    fireEvent.click(screen.getByRole("button", { name: "mark workspace projection destination ready" }));
+    expect(screen.getByTestId("workspace-projection")).toHaveTextContent('"settling":true');
+
+    fireEvent.click(screen.getByRole("button", { name: "complete workspace projection" }));
+    expect(screen.getByTestId("workspace-projection")).toHaveTextContent("");
+  });
+
+  it("ignores_stale_projection_signals_after_a_new_workspace_drag", () => {
+    const interaction = createInteraction();
+    let controller!: ReturnType<typeof useDraftWorkspaceDrag>;
+    render(
+      <Harness
+        interaction={interaction}
+        onDrop={vi.fn() as never}
+        onSettled={vi.fn()}
+        workspaceSourceOverride={createWorkspaceSource(vi.fn(() => true))}
+        onController={(next) => { controller = next; }}
+      />,
+    );
+    const source = screen.getByTestId("source");
+    const target = screen.getByTestId("target");
+    source.setPointerCapture = vi.fn();
+    source.releasePointerCapture = vi.fn();
+    target.getBoundingClientRect = () => rect(0, 0, 100, 100);
+
+    fireEvent.pointerDown(source, { button: 0, clientX: 10, clientY: 10, isPrimary: true, pointerId: 110, pointerType: "mouse" });
+    fireEvent.pointerMove(source, { clientX: 30, clientY: 30, pointerId: 110, pointerType: "mouse" });
+    fireEvent.pointerUp(source, { clientX: 30, clientY: 30, pointerId: 110, pointerType: "mouse" });
+    const staleToken = controller.workspaceProjection!.token;
+
+    fireEvent.pointerDown(source, { button: 0, clientX: 10, clientY: 10, isPrimary: true, pointerId: 111, pointerType: "mouse" });
+    fireEvent.pointerMove(source, { clientX: 30, clientY: 30, pointerId: 111, pointerType: "mouse" });
+    fireEvent.pointerUp(source, { clientX: 30, clientY: 30, pointerId: 111, pointerType: "mouse" });
+    const currentToken = controller.workspaceProjection!.token;
+    expect(currentToken).not.toBe(staleToken);
+
+    act(() => {
+      controller.markWorkspaceProjectionDestinationReady?.(staleToken, controller.geometryRevision);
+      controller.completeWorkspaceProjection?.(staleToken, controller.geometryRevision);
+    });
+    expect(controller.workspaceProjection?.token).toBe(currentToken);
+    act(() => {
+      controller.markWorkspaceProjectionDestinationReady?.(currentToken, controller.geometryRevision);
+      controller.completeWorkspaceProjection?.(currentToken, controller.geometryRevision);
+    });
+    expect(screen.getByTestId("workspace-projection")).toHaveTextContent("");
+  });
+
+  it("coalesces_geometry_refreshes_without_clearing_the_active_workspace_target", () => {
+    const geometry = installGeometryHarness();
+    const interaction = createInteraction();
+    render(
+      <Harness
+        interaction={interaction}
+        onDrop={vi.fn() as never}
+        onSettled={vi.fn()}
+        workspaceSourceOverride={createWorkspaceSource(vi.fn(() => true))}
+        expanded
+      />,
+    );
+    const source = screen.getByTestId("source");
+    source.setPointerCapture = vi.fn();
+    source.releasePointerCapture = vi.fn();
+    screen.getByTestId("deck-board").getBoundingClientRect = () => rect(0, 0, 200, 200);
+    screen.getByTestId("deck-column-0").getBoundingClientRect = () => rect(0, 0, 100, 200);
+
+    fireEvent.pointerDown(source, { button: 0, clientX: 10, clientY: 10, isPrimary: true, pointerId: 100, pointerType: "mouse" });
+    fireEvent.pointerMove(source, { clientX: 50, clientY: 50, pointerId: 100, pointerType: "mouse" });
+    expect(screen.getByTestId("active-target")).toHaveTextContent('{"zone":"deck","column":0,"row":null}');
+
+    act(() => {
+      geometry.observers.forEach((observer) => observer.emit());
+      geometry.observers.forEach((observer) => observer.emit());
+    });
+
+    expect(geometry.requestAnimationFrame).toHaveBeenCalledOnce();
+    expect(screen.getByTestId("active-target")).toHaveTextContent('{"zone":"deck","column":0,"row":null}');
+    act(() => geometry.frames.get(1)!(0));
+    expect(screen.getByTestId("geometry-revision")).toHaveTextContent("1");
+    expect(screen.getByTestId("active-target")).toHaveTextContent('{"zone":"deck","column":0,"row":null}');
+  });
+
+  it("lets_direct_pointer_movement_and_pointer_up_beat_a_stale_geometry_frame", () => {
+    const geometry = installGeometryHarness();
+    const interaction = createInteraction();
+    const onWorkspaceDrop = vi.fn(() => true);
+    render(
+      <Harness
+        interaction={interaction}
+        onDrop={vi.fn() as never}
+        onSettled={vi.fn()}
+        workspaceSourceOverride={createWorkspaceSource(onWorkspaceDrop)}
+        expanded
+      />,
+    );
+    const source = screen.getByTestId("source");
+    source.setPointerCapture = vi.fn();
+    source.releasePointerCapture = vi.fn();
+    screen.getByTestId("deck-board").getBoundingClientRect = () => rect(0, 0, 200, 200);
+    screen.getByTestId("deck-column-0").getBoundingClientRect = () => rect(0, 0, 100, 200);
+    screen.getByTestId("sideboard-board").getBoundingClientRect = () => rect(220, 0, 420, 200);
+    screen.getByTestId("sideboard-column-0").getBoundingClientRect = () => rect(220, 0, 320, 200);
+
+    fireEvent.pointerDown(source, { button: 0, clientX: 10, clientY: 10, isPrimary: true, pointerId: 101, pointerType: "mouse" });
+    fireEvent.pointerMove(source, { clientX: 50, clientY: 50, pointerId: 101, pointerType: "mouse" });
+    act(() => geometry.observers.forEach((observer) => observer.emit()));
+    fireEvent.pointerMove(source, { clientX: 270, clientY: 50, pointerId: 101, pointerType: "mouse" });
+    act(() => geometry.frames.get(1)!(0));
+
+    expect(screen.getByTestId("active-target")).toHaveTextContent('{"zone":"sideboard","column":0,"row":null}');
+    expect(screen.getByTestId("preview")).toHaveTextContent('"x":270,"y":50');
+    expect(screen.getByTestId("geometry-revision")).toHaveTextContent("0");
+    fireEvent.pointerUp(source, { clientX: 270, clientY: 50, pointerId: 101, pointerType: "mouse" });
+    expect(onWorkspaceDrop).toHaveBeenCalledWith({ zone: "sideboard", column: 0 });
+    act(() => geometry.frames.get(1)!(0));
+    expect(onWorkspaceDrop).toHaveBeenCalledOnce();
+    expect(screen.getByTestId("geometry-revision")).toHaveTextContent("0");
+  });
+
+  it("invalidates_geometry_frames_for_terminal_lifecycle_events", () => {
+    const actions = ["pointerUp", "pointerCancel", "lostPointerCapture", "dispose", "disable"] as const;
+    for (const action of actions) {
+      const geometry = installGeometryHarness();
+      const interaction = createInteraction();
+      const onWorkspaceDrop = vi.fn(() => true);
+      const rendered = render(
+        <Harness
+          interaction={interaction}
+          onDrop={vi.fn() as never}
+          onSettled={vi.fn()}
+          workspaceSourceOverride={createWorkspaceSource(onWorkspaceDrop)}
+        />,
+      );
+      const source = screen.getByTestId("source");
+      const target = screen.getByTestId("target");
+      source.setPointerCapture = vi.fn();
+      source.releasePointerCapture = vi.fn();
+      target.getBoundingClientRect = () => rect(0, 0, 100, 100);
+      fireEvent.pointerDown(source, { button: 0, clientX: 10, clientY: 10, isPrimary: true, pointerId: 102, pointerType: "mouse" });
+      fireEvent.pointerMove(source, { clientX: 30, clientY: 30, pointerId: 102, pointerType: "mouse" });
+      act(() => geometry.observers.forEach((observer) => observer.emit()));
+
+      if (action === "pointerUp") fireEvent.pointerUp(source, { clientX: 30, clientY: 30, pointerId: 102, pointerType: "mouse" });
+      else if (action === "pointerCancel") fireEvent.pointerCancel(source, { pointerId: 102, pointerType: "mouse" });
+      else if (action === "lostPointerCapture") fireEvent.lostPointerCapture(source, { pointerId: 102, pointerType: "mouse" });
+      else if (action === "dispose") fireEvent.click(screen.getByRole("button", { name: "dispose" }));
+      else rendered.rerender(
+        <Harness
+          interaction={interaction}
+          onDrop={vi.fn() as never}
+          onSettled={vi.fn()}
+          enabled={false}
+          workspaceSourceOverride={createWorkspaceSource(onWorkspaceDrop)}
+        />,
+      );
+      act(() => geometry.frames.get(1)!(0));
+
+      expect(screen.getByTestId("preview")).toHaveTextContent("");
+      expect(screen.getByTestId("active-target")).toHaveTextContent("null");
+      expect(screen.getByTestId("geometry-revision")).toHaveTextContent("0");
+      expect(onWorkspaceDrop).toHaveBeenCalledTimes(action === "pointerUp" ? 1 : 0);
+      rendered.unmount();
+    }
+  });
+
+  it("prevents_a_stale_geometry_frame_from_publishing_after_unmount", () => {
+    const geometry = installGeometryHarness();
+    const interaction = createInteraction();
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const rendered = render(
+      <Harness
+        interaction={interaction}
+        onDrop={vi.fn() as never}
+        onSettled={vi.fn()}
+        workspaceSourceOverride={createWorkspaceSource(vi.fn(() => true))}
+      />,
+    );
+    const source = screen.getByTestId("source");
+    const target = screen.getByTestId("target");
+    source.setPointerCapture = vi.fn();
+    source.releasePointerCapture = vi.fn();
+    target.getBoundingClientRect = () => rect(0, 0, 100, 100);
+    fireEvent.pointerDown(source, { button: 0, clientX: 10, clientY: 10, isPrimary: true, pointerId: 104, pointerType: "mouse" });
+    fireEvent.pointerMove(source, { clientX: 30, clientY: 30, pointerId: 104, pointerType: "mouse" });
+    act(() => geometry.observers.forEach((observer) => observer.emit()));
+
+    rendered.unmount();
+    act(() => geometry.frames.get(1)!(0));
+    expect(consoleError).not.toHaveBeenCalled();
+  });
+
+  it("rejects_detached_targets_and_replaces_stale_geometry_work_with_live_registration", () => {
+    const geometry = installGeometryHarness();
+    const interaction = createInteraction();
+    const onWorkspaceDrop = vi.fn(() => true);
+    const rendered = render(
+      <Harness
+        interaction={interaction}
+        onDrop={vi.fn() as never}
+        onSettled={vi.fn()}
+        retainLastValidWorkspaceTarget
+        targetVersion={0}
+        workspaceSourceOverride={createWorkspaceSource(onWorkspaceDrop)}
+      />,
+    );
+    const source = screen.getByTestId("source");
+    source.setPointerCapture = vi.fn();
+    source.releasePointerCapture = vi.fn();
+    screen.getByTestId("target").getBoundingClientRect = () => rect(0, 0, 100, 100);
+    fireEvent.pointerDown(source, { button: 0, clientX: 10, clientY: 10, isPrimary: true, pointerId: 103, pointerType: "mouse" });
+    fireEvent.pointerMove(source, { clientX: 30, clientY: 30, pointerId: 103, pointerType: "mouse" });
+    act(() => geometry.observers.forEach((observer) => observer.emit()));
+    rendered.rerender(
+      <Harness
+        interaction={interaction}
+        onDrop={vi.fn() as never}
+        onSettled={vi.fn()}
+        retainLastValidWorkspaceTarget
+        targetVersion={1}
+        workspaceSourceOverride={createWorkspaceSource(onWorkspaceDrop)}
+      />,
+    );
+    screen.getByTestId("target").getBoundingClientRect = () => rect(0, 0, 100, 100);
+    const frames = [...geometry.frames.entries()];
+    act(() => frames.slice(0, -1).forEach(([, callback]) => callback(0)));
+    expect(screen.getByTestId("geometry-revision")).toHaveTextContent("0");
+    act(() => frames[frames.length - 1][1](0));
+    expect(screen.getByTestId("geometry-revision")).toHaveTextContent("1");
+
+    rendered.rerender(
+      <Harness
+        interaction={interaction}
+        onDrop={vi.fn() as never}
+        onSettled={vi.fn()}
+        retainLastValidWorkspaceTarget
+        targetPresent={false}
+        workspaceSourceOverride={createWorkspaceSource(onWorkspaceDrop)}
+      />,
+    );
+    fireEvent.pointerUp(source, { clientX: 30, clientY: 30, pointerId: 103, pointerType: "mouse" });
+    expect(onWorkspaceDrop).not.toHaveBeenCalled();
+  });
+
+  it("retains_the_last_valid_workspace_target_through_an_invalid_pointer_position", () => {
+    const interaction = createInteraction();
+    const onWorkspaceDrop = vi.fn(() => true);
+    render(
+      <Harness
+        interaction={interaction}
+        onDrop={vi.fn() as never}
+        onSettled={vi.fn()}
+        retainLastValidWorkspaceTarget
+        workspaceSourceOverride={createWorkspaceSource(onWorkspaceDrop)}
+        expanded
+      />,
+    );
+    const source = screen.getByTestId("source");
+    source.setPointerCapture = vi.fn();
+    source.releasePointerCapture = vi.fn();
+    screen.getByTestId("deck-board").getBoundingClientRect = () => rect(0, 0, 200, 200);
+    screen.getByTestId("deck-column-0").getBoundingClientRect = () => rect(0, 0, 100, 200);
+    screen.getByTestId("deck-column-0-row-0").getBoundingClientRect = () => rect(0, 0, 100, 96);
+
+    fireEvent.pointerDown(source, { button: 0, clientX: 20, clientY: 20, isPrimary: true, pointerId: 101, pointerType: "mouse" });
+    fireEvent.pointerMove(source, { clientX: 50, clientY: 50, pointerId: 101, pointerType: "mouse" });
+    fireEvent.pointerMove(source, { clientX: 250, clientY: 50, pointerId: 101, pointerType: "mouse" });
+
+    expect(JSON.parse(screen.getByTestId("deck-drop-state").textContent!)).toEqual({
+      zoneActive: true,
+      column: 0,
+      row: 0,
+    });
+
+    fireEvent.pointerUp(source, { clientX: 250, clientY: 50, pointerId: 101, pointerType: "mouse" });
+
+    expect(onWorkspaceDrop).toHaveBeenCalledWith({ zone: "deck", column: 0, row: 0 });
+  });
+
+  it("does_not_retain_an_invalid_workspace_target_by_default", () => {
+    const interaction = createInteraction();
+    const onWorkspaceDrop = vi.fn(() => true);
+    render(
+      <Harness
+        interaction={interaction}
+        onDrop={vi.fn() as never}
+        onSettled={vi.fn()}
+        workspaceSourceOverride={createWorkspaceSource(onWorkspaceDrop)}
+        expanded
+      />,
+    );
+    const source = screen.getByTestId("source");
+    source.setPointerCapture = vi.fn();
+    source.releasePointerCapture = vi.fn();
+    screen.getByTestId("deck-board").getBoundingClientRect = () => rect(0, 0, 200, 200);
+    screen.getByTestId("deck-column-0").getBoundingClientRect = () => rect(0, 0, 100, 200);
+    screen.getByTestId("deck-column-0-row-0").getBoundingClientRect = () => rect(0, 0, 100, 96);
+
+    fireEvent.pointerDown(source, { button: 0, clientX: 20, clientY: 20, isPrimary: true, pointerId: 102, pointerType: "mouse" });
+    fireEvent.pointerMove(source, { clientX: 50, clientY: 50, pointerId: 102, pointerType: "mouse" });
+    fireEvent.pointerUp(source, { clientX: 250, clientY: 50, pointerId: 102, pointerType: "mouse" });
+
+    expect(onWorkspaceDrop).not.toHaveBeenCalled();
+  });
+
+  it("retains_a_valid_column_gap_target_without_a_concrete_row", () => {
+    const interaction = createInteraction();
+    const onWorkspaceDrop = vi.fn(() => true);
+    render(
+      <Harness
+        interaction={interaction}
+        onDrop={vi.fn() as never}
+        onSettled={vi.fn()}
+        retainLastValidWorkspaceTarget
+        workspaceSourceOverride={createWorkspaceSource(onWorkspaceDrop)}
+        expanded
+      />,
+    );
+    const source = screen.getByTestId("source");
+    source.setPointerCapture = vi.fn();
+    source.releasePointerCapture = vi.fn();
+    screen.getByTestId("deck-board").getBoundingClientRect = () => rect(0, 0, 200, 200);
+    screen.getByTestId("deck-column-0").getBoundingClientRect = () => rect(0, 0, 100, 200);
+    screen.getByTestId("deck-column-0-row-0").getBoundingClientRect = () => rect(0, 0, 100, 96);
+    screen.getByTestId("deck-column-0-row-1").getBoundingClientRect = () => rect(0, 104, 100, 200);
+
+    fireEvent.pointerDown(source, { button: 0, clientX: 20, clientY: 20, isPrimary: true, pointerId: 103, pointerType: "mouse" });
+    fireEvent.pointerMove(source, { clientX: 50, clientY: 100, pointerId: 103, pointerType: "mouse" });
+    fireEvent.pointerMove(source, { clientX: 250, clientY: 100, pointerId: 103, pointerType: "mouse" });
+
+    expect(JSON.parse(screen.getByTestId("deck-drop-state").textContent!)).toEqual({
+      zoneActive: true,
+      column: 0,
+      row: null,
+    });
+
+    fireEvent.pointerUp(source, { clientX: 250, clientY: 100, pointerId: 103, pointerType: "mouse" });
+
+    expect(onWorkspaceDrop).toHaveBeenCalledWith({ zone: "deck", column: 0 });
+  });
+
+  it("retains_a_collapsed_sideboard_target_until_release", () => {
+    const interaction = createInteraction();
+    const onWorkspaceDrop = vi.fn(() => true);
+    render(
+      <Harness
+        interaction={interaction}
+        onDrop={vi.fn() as never}
+        onSettled={vi.fn()}
+        retainLastValidWorkspaceTarget
+        workspaceSourceOverride={createWorkspaceSource(onWorkspaceDrop)}
+      />,
+    );
+    const source = screen.getByTestId("source");
+    const target = screen.getByTestId("target");
+    source.setPointerCapture = vi.fn();
+    source.releasePointerCapture = vi.fn();
+    target.getBoundingClientRect = () => rect(0, 0, 100, 100);
+
+    fireEvent.pointerDown(source, { button: 0, clientX: 10, clientY: 10, isPrimary: true, pointerId: 105, pointerType: "mouse" });
+    fireEvent.pointerMove(source, { clientX: 50, clientY: 50, pointerId: 105, pointerType: "mouse" });
+    fireEvent.pointerUp(source, { clientX: 250, clientY: 50, pointerId: 105, pointerType: "mouse" });
+
+    expect(onWorkspaceDrop).toHaveBeenCalledWith({ zone: "sideboard", column: 2 });
+  });
+
+  it("clears_a_retained_target_when_its_registration_is_replaced", () => {
+    const interaction = createInteraction();
+    const onWorkspaceDrop = vi.fn(() => true);
+    const { rerender } = render(
+      <Harness
+        interaction={interaction}
+        onDrop={vi.fn() as never}
+        onSettled={vi.fn()}
+        retainLastValidWorkspaceTarget
+        targetVersion={0}
+        workspaceSourceOverride={createWorkspaceSource(onWorkspaceDrop)}
+      />,
+    );
+    const source = screen.getByTestId("source");
+    source.setPointerCapture = vi.fn();
+    source.releasePointerCapture = vi.fn();
+    screen.getByTestId("target").getBoundingClientRect = () => rect(0, 0, 100, 100);
+
+    fireEvent.pointerDown(source, { button: 0, clientX: 10, clientY: 10, isPrimary: true, pointerId: 106, pointerType: "mouse" });
+    fireEvent.pointerMove(source, { clientX: 50, clientY: 50, pointerId: 106, pointerType: "mouse" });
+    rerender(
+      <Harness
+        interaction={interaction}
+        onDrop={vi.fn() as never}
+        onSettled={vi.fn()}
+        retainLastValidWorkspaceTarget
+        targetVersion={1}
+        workspaceSourceOverride={createWorkspaceSource(onWorkspaceDrop)}
+      />,
+    );
+    fireEvent.pointerUp(source, { clientX: 250, clientY: 50, pointerId: 106, pointerType: "mouse" });
+
+    expect(onWorkspaceDrop).not.toHaveBeenCalled();
+  });
+
+  it.each(["pick", "draft-effect"] as const)("does_not_retain_a_%s_pack_target", (kind) => {
+    const interaction = createInteraction();
+    const onDrop = vi.fn();
+    const sourceOverride: PackDropSource = kind === "pick"
+      ? {
+        kind, authorityId: "card-1", sourceInstanceId: "card-1", instanceIds: ["card-1"], cards: [card], sourceIndices: [0],
+        interactionGeneration: 1, previewWidth: 146, previewHeight: 204, previewImages: [], onAdmission: vi.fn(), onSettled: vi.fn(),
+      }
+      : {
+        kind, authorityId: "effect", sourceInstanceId: "card-1", instanceIds: ["card-1", "card-2"], cards: [card, { ...card, instance_id: "card-2" }], sourceIndices: [0, 1],
+        interactionGeneration: 1, previewWidth: 146, previewHeight: 204, previewImages: [], onAdmission: vi.fn(), onSettled: vi.fn(),
+      };
+    render(
+      <Harness
+        interaction={interaction}
+        onDrop={onDrop as never}
+        onSettled={vi.fn()}
+        retainLastValidWorkspaceTarget
+        sourceOverride={sourceOverride}
+        expanded
+      />,
+    );
+    const source = screen.getByTestId("source");
+    source.setPointerCapture = vi.fn();
+    source.releasePointerCapture = vi.fn();
+    screen.getByTestId("deck-board").getBoundingClientRect = () => rect(0, 0, 200, 200);
+    screen.getByTestId("deck-column-0").getBoundingClientRect = () => rect(0, 0, 100, 200);
+
+    fireEvent.pointerDown(source, { button: 0, clientX: 20, clientY: 20, isPrimary: true, pointerId: 104, pointerType: "mouse" });
+    fireEvent.pointerMove(source, { clientX: 50, clientY: 50, pointerId: 104, pointerType: "mouse" });
+    fireEvent.pointerUp(source, { clientX: 250, clientY: 50, pointerId: 104, pointerType: "mouse" });
+
+    expect(onDrop).not.toHaveBeenCalled();
+  });
+
   it("moves_a_workspace_card_to_the_exact_column_without_dispatching_a_pick", () => {
     const interaction = createInteraction();
     const onDrop = vi.fn();
     const onWorkspaceDrop = vi.fn(() => true);
-    const workspaceSource: WorkspaceDragSource = {
-      kind: "workspace",
-      instanceIds: ["card-1"],
-      cards: [card],
-      previewWidth: 146,
-      previewHeight: 204,
-      onDrop: onWorkspaceDrop,
-    };
+    const workspaceSource = createWorkspaceSource(onWorkspaceDrop);
     render(
       <Harness
         interaction={interaction}
@@ -176,11 +870,40 @@ describe("useDraftWorkspaceDrag", () => {
 
     fireEvent.pointerDown(source, { button: 0, clientX: 20, clientY: 20, isPrimary: true, pointerId: 1, pointerType: "mouse" });
     fireEvent.pointerMove(source, { clientX: 50, clientY: 150, pointerId: 1, pointerType: "mouse" });
+    expect(onWorkspaceDrop).not.toHaveBeenCalled();
     fireEvent.pointerUp(source, { clientX: 50, clientY: 150, pointerId: 1, pointerType: "mouse" });
 
     expect(onWorkspaceDrop).toHaveBeenCalledWith({ zone: "deck", column: 0, row: 1 });
     expect(onDrop).not.toHaveBeenCalled();
     expect(screen.getByTestId("announcement")).toHaveTextContent("Moved Card One.");
+  });
+
+  it("keeps_the_workspace_projection_sticky_after_returning_to_its_canonical_target", () => {
+    const interaction = createInteraction();
+    render(
+      <Harness
+        interaction={interaction}
+        onDrop={vi.fn() as never}
+        onSettled={vi.fn()}
+        workspaceSourceOverride={createWorkspaceSource(vi.fn(() => false))}
+        expanded
+      />,
+    );
+    const source = screen.getByTestId("source");
+    source.setPointerCapture = vi.fn();
+    source.releasePointerCapture = vi.fn();
+    screen.getByTestId("deck-board").getBoundingClientRect = () => rect(0, 0, 200, 200);
+    screen.getByTestId("deck-column-0").getBoundingClientRect = () => rect(0, 0, 100, 200);
+    screen.getByTestId("deck-column-1").getBoundingClientRect = () => rect(100, 0, 200, 200);
+    screen.getByTestId("deck-column-0-row-0").getBoundingClientRect = () => rect(0, 0, 100, 200);
+
+    fireEvent.pointerDown(source, { button: 0, clientX: 20, clientY: 20, isPrimary: true, pointerId: 45, pointerType: "mouse" });
+    fireEvent.pointerMove(source, { clientX: 150, clientY: 50, pointerId: 45, pointerType: "mouse" });
+    expect(screen.getByTestId("workspace-projection")).toHaveTextContent('"hasLeftCanonicalTarget":true');
+
+    fireEvent.pointerMove(source, { clientX: 50, clientY: 50, pointerId: 45, pointerType: "mouse" });
+    expect(screen.getByTestId("workspace-projection")).toHaveTextContent('"target":{"zone":"deck","column":0,"row":0}');
+    expect(screen.getByTestId("workspace-projection")).toHaveTextContent('"hasLeftCanonicalTarget":true');
   });
 
   it("moves_opted_in_touch_workspace_cards_across_zones_and_suppresses_the_drag_click", () => {
@@ -193,14 +916,7 @@ describe("useDraftWorkspaceDrag", () => {
         onDrop={onDrop as never}
         onSettled={vi.fn()}
         workspaceTouchEnabled
-        workspaceSourceOverride={{
-          kind: "workspace",
-          instanceIds: ["card-1"],
-          cards: [card],
-          previewWidth: 146,
-          previewHeight: 204,
-          onDrop: onWorkspaceDrop,
-        }}
+        workspaceSourceOverride={createWorkspaceSource(onWorkspaceDrop)}
         expanded
       />,
     );
@@ -238,14 +954,7 @@ describe("useDraftWorkspaceDrag", () => {
         interaction={interaction}
         onDrop={vi.fn() as never}
         onSettled={vi.fn()}
-        workspaceSourceOverride={{
-          kind: "workspace",
-          instanceIds: ["card-1"],
-          cards: [card],
-          previewWidth: 146,
-          previewHeight: 204,
-          onDrop: onWorkspaceDrop,
-        }}
+        workspaceSourceOverride={createWorkspaceSource(onWorkspaceDrop)}
         expanded
       />,
     );
@@ -336,6 +1045,7 @@ describe("useDraftWorkspaceDrag", () => {
       interactionGeneration: 1,
       previewWidth: 146,
       previewHeight: 204,
+      previewImages: [],
       onAdmission: vi.fn(),
       onSettled: vi.fn(),
     };
@@ -644,9 +1354,7 @@ describe("useDraftWorkspaceDrag", () => {
         interaction={interaction}
         onDrop={vi.fn() as never}
         onSettled={vi.fn()}
-        workspaceSourceOverride={{
-          kind: "workspace", instanceIds: ["card-1"], cards: [card], previewWidth: 146, previewHeight: 204, onDrop: () => true,
-        }}
+        workspaceSourceOverride={createWorkspaceSource(() => true)}
         secondaryActivation={secondaryActivation}
       />,
     );
@@ -695,9 +1403,7 @@ describe("useDraftWorkspaceDrag", () => {
         onDrop={vi.fn() as never}
         onSettled={vi.fn()}
         workspaceTouchEnabled
-        workspaceSourceOverride={{
-          kind: "workspace", instanceIds: ["card-1"], cards: [card], previewWidth: 146, previewHeight: 204, onDrop: onWorkspaceDrop,
-        }}
+        workspaceSourceOverride={createWorkspaceSource(onWorkspaceDrop)}
       />,
     );
     const source = screen.getByTestId("source");

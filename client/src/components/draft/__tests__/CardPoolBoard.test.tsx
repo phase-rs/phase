@@ -28,8 +28,10 @@ const previewProps = vi.hoisted(() => ({
 }));
 const workspaceImageState = vi.hoisted(() => ({
   defaultSrc: "/card.png" as string | null,
+  isLoading: false,
   sources: {} as Record<string, string | null>,
   faceSources: {} as Record<string, string | null>,
+  advanceFailedSource: vi.fn(),
 }));
 const workspaceAlternateFaceState = vi.hoisted(() => ({
   values: {} as Record<string, { name: string; faceIndex: number; side: "front" | "back" } | null>,
@@ -45,9 +47,10 @@ vi.mock("../../../hooks/useCardImage", () => ({
       : Object.prototype.hasOwnProperty.call(workspaceImageState.sources, cardName)
         ? workspaceImageState.sources[cardName]
         : workspaceImageState.defaultSrc,
-    isLoading: false,
+    isLoading: workspaceImageState.isLoading,
     isFlip: false,
     isRotated: false,
+    advanceFailedSource: workspaceImageState.advanceFailedSource,
   }),
 }));
 
@@ -70,8 +73,10 @@ vi.mock("../../card/HoverCardPreview", () => ({
 afterEach(() => {
   cleanup();
   workspaceImageState.defaultSrc = "/card.png";
+  workspaceImageState.isLoading = false;
   workspaceImageState.sources = {};
   workspaceImageState.faceSources = {};
+  workspaceImageState.advanceFailedSource.mockReset();
   workspaceAlternateFaceState.values = {};
 });
 
@@ -167,6 +172,7 @@ function createDragController(
     announcement: "",
     activeTarget: null,
     dragPreview: null,
+    geometryRevision: 0,
     handlePointerDown: vi.fn(),
     handleWorkspacePointerDown: vi.fn(),
     handlePointerMove: vi.fn(),
@@ -197,6 +203,61 @@ function firstWorkspaceCard() {
 }
 
 describe("card pool board primitives", () => {
+  it("keeps a loading workspace image mounted and forwards its load failure", () => {
+    const pool = [card("first")];
+    workspaceImageState.defaultSrc = "/loading-card.png";
+    workspaceImageState.isLoading = true;
+    render(
+      <CardPoolBoard
+        zone="deck"
+        pool={pool}
+        poolGroups={groups(["first"])}
+        workspace={placedState(["first"])}
+        preferences={preferences}
+        cardPreviewMode="none"
+        cardPreviewHoverDelayMs={0}
+        onWorkspaceChange={vi.fn()}
+        onPreferencesChange={vi.fn()}
+      />,
+    );
+
+    const image = screen.getByRole("img", { name: "first" });
+    expect(screen.queryByText("first")).toBeNull();
+    fireEvent.error(image);
+    expect(workspaceImageState.advanceFailedSource).toHaveBeenCalledWith("/loading-card.png");
+  });
+
+  it("isolates replacement image failures from stale image elements", () => {
+    const model = firstWorkspaceCard().card;
+    workspaceImageState.sources.first = "/old-card.png";
+    const { rerender } = render(
+      <WorkspaceCard
+        card={model}
+        stackIndex={0}
+        onActivate={vi.fn()}
+      />,
+    );
+
+    const oldImage = screen.getByRole("img", { name: "first" });
+    workspaceImageState.sources.first = "/new-card.png";
+    rerender(
+      <WorkspaceCard
+        card={model}
+        stackIndex={0}
+        onActivate={vi.fn()}
+      />,
+    );
+
+    const currentImage = screen.getByRole("img", { name: "first" });
+    expect(currentImage).not.toBe(oldImage);
+    fireEvent.error(oldImage);
+    expect(workspaceImageState.advanceFailedSource).not.toHaveBeenCalled();
+
+    fireEvent.error(currentImage);
+    expect(workspaceImageState.advanceFailedSource).toHaveBeenCalledOnce();
+    expect(workspaceImageState.advanceFailedSource).toHaveBeenCalledWith("/new-card.png");
+  });
+
   it("workspace_card_omits_all_drag_work_without_a_drag_capability", () => {
     const model = firstWorkspaceCard().card;
     const onActivate = vi.fn();
@@ -234,8 +295,10 @@ describe("card pool board primitives", () => {
       kind: "workspace" as const,
       instanceIds: [model.instanceId] as const,
       cards: [pool[0]] as const,
+      canonicalTarget: { zone: "deck" as const, column: 0, row: 0 },
       previewWidth: 90,
       previewHeight: 126,
+      origin: { left: 0, top: 0, width: 90, height: 126 },
       onDrop: vi.fn(),
     };
     const makeSource = vi.fn(() => returnedSource);
@@ -272,7 +335,13 @@ describe("card pool board primitives", () => {
     fireEvent.click(button, { detail: 1 });
 
     expect(makeSource).toHaveBeenCalledOnce();
-    expect(makeSource).toHaveBeenCalledWith(model, 90, 126);
+    expect(makeSource).toHaveBeenCalledWith(
+      model,
+      90,
+      126,
+      { src: "/card.png", alt: "first" },
+      { left: 0, top: 0, width: 90, height: 126 },
+    );
     expect(controller.handleWorkspacePointerDown).toHaveBeenCalledWith(
       expect.objectContaining({ type: "pointerdown" }),
       returnedSource,
@@ -287,6 +356,7 @@ describe("card pool board primitives", () => {
   it("wires_complete_drag_capability_through_card_pool_board_column_and_workspace_card", () => {
     const pool = [card("first")];
     const controller = createDragController();
+    const onWorkspaceChange = vi.fn();
     render(
       <CardPoolBoard
         zone="deck"
@@ -297,7 +367,7 @@ describe("card pool board primitives", () => {
         cardPreviewMode="none"
         cardPreviewHoverDelayMs={0}
         dragController={controller}
-        onWorkspaceChange={vi.fn()}
+        onWorkspaceChange={onWorkspaceChange}
         onPreferencesChange={vi.fn()}
       />,
     );
@@ -323,11 +393,21 @@ describe("card pool board primitives", () => {
       kind: "workspace",
       instanceIds: ["first"],
       cards: [pool[0]],
+      canonicalTarget: { zone: "deck", column: 0, row: 0 },
       previewWidth: 92,
       previewHeight: 128,
+      origin: { left: 0, top: 0, width: 92, height: 128 },
       onDrop: expect.any(Function),
     });
     expect(controller.handlePointerMove).toHaveBeenCalledOnce();
+    expect(source.onDrop({ zone: "deck", column: 0, row: 0 })).toBe(false);
+    expect(onWorkspaceChange).not.toHaveBeenCalled();
+    expect(source.onDrop({ zone: "deck", column: 0, row: 1 })).toBe(true);
+    expect(onWorkspaceChange).toHaveBeenLastCalledWith(expect.objectContaining({
+      placements: expect.objectContaining({
+        first: expect.objectContaining({ zone: "deck", column: 0, row: 1 }),
+      }),
+    }));
   });
 
   it("removes_virtual_basics_but_toggles_drafted_basic_lands_between_zones", () => {
@@ -410,6 +490,35 @@ describe("card pool board primitives", () => {
     expect(moved.placements.first).toEqual({ zone: "sideboard", row: 1, column: 1, order: 1 });
     expect(moved.placements.second).toEqual({ zone: "sideboard", row: 1, column: 1, order: 0 });
     expect(moved.placements.moving).toEqual({ zone: "sideboard", row: 1, column: 1, order: 2 });
+  });
+
+  it("keeps_an_unanchored_move_to_the_same_resolved_stack_as_an_identity_no_op", () => {
+    const state: DraftWorkspaceState = {
+      ...createDraftWorkspaceState(),
+      placements: {
+        moving: { zone: "deck", row: 1, column: 1, order: 0 },
+        other: { zone: "deck", row: 1, column: 1, order: 1 },
+      },
+    };
+    const pool = [card("moving"), card("other")];
+    const poolGroups = groups(["moving", "other"]);
+
+    expect(moveWorkspaceInstance(
+      state,
+      pool,
+      poolGroups,
+      boardPreferences,
+      "moving",
+      { zone: "deck", column: 1, beforeInstanceId: null },
+    )).toBe(state);
+    expect(moveWorkspaceInstance(
+      state,
+      pool,
+      poolGroups,
+      boardPreferences,
+      "moving",
+      { zone: "deck", column: 1, row: 1, beforeInstanceId: null },
+    )).toBe(state);
   });
 
   it.each([
@@ -1200,7 +1309,7 @@ describe("card pool board primitives", () => {
       }),
     }));
 
-    fireEvent.change(screen.getByRole("combobox", { name: "Sort board" }), {
+    fireEvent.change(screen.getByRole("combobox", { name: "Group by" }), {
       target: { value: "color" },
     });
 
@@ -1354,6 +1463,73 @@ describe("card pool board primitives", () => {
       workspace,
       { ...preferences, sort: "color", rows: "two", columnCount: 4 },
     )).toEqual({ column: 2, row: 0 });
+  });
+
+  /**
+   * THE ENGINE OWNS THE ROW, FOR ANY CARD IT HAS CLASSIFIED.
+   *
+   * `workspace_row_classification` is the published answer; a regex over the
+   * printed type line is a second opinion. They part company on exactly the
+   * cards a two-row board most needs to get right -- an artifact creature, a
+   * Vehicle the engine is currently treating as a creature, a changeling. This
+   * pins the engine's answer winning even when the type line reads the other
+   * way, in BOTH directions, so the assertion cannot be satisfied by a rule
+   * that merely happens to agree.
+   *
+   * REVERT-FAILING: restore `/\bcreature\b/i.test(card.type_line) ? 0 : 1` as
+   * the unconditional rule and both legs red.
+   */
+  it("takes_the_row_from_engine_classification_not_the_printed_type_line", () => {
+    // Reads "Creature" but the engine has classified it as a noncreature.
+    const artifactCreature = {
+      ...card("artifact-creature"),
+      type_line: "Artifact Creature — Construct",
+    };
+    // Reads as no creature at all, but the engine says it is one.
+    const animatedVehicle = { ...card("animated-vehicle"), type_line: "Artifact — Vehicle" };
+    const pool = [artifactCreature, animatedVehicle];
+    const poolGroups: DraftPoolGroups = {
+      ...groups([artifactCreature.instance_id]),
+      workspace_row_classification: {
+        creature_instance_ids: [animatedVehicle.instance_id],
+        noncreature_instance_ids: [artifactCreature.instance_id],
+      },
+    };
+    const workspace: DraftWorkspaceState = { ...placedState([]), placements: {} };
+    const twoRow = { ...preferences, rows: "two" as const, columnCount: 4 };
+
+    // Type line says creature, engine says no -> spell row.
+    expect(resolveWorkspacePickPlacement(
+      artifactCreature, "deck", pool, poolGroups, workspace, twoRow,
+    ).row).toBe(1);
+    // Type line says no creature, engine says yes -> creature row.
+    expect(resolveWorkspacePickPlacement(
+      animatedVehicle, "deck", pool, poolGroups, workspace, twoRow,
+    ).row).toBe(0);
+  });
+
+  /**
+   * The paired case the engine CANNOT answer, and the reason the rule above is
+   * conditional rather than absolute. `handleConfirmPick` resolves a placement
+   * for a card out of `current_pack`, which is not in `pool` and so not in
+   * `pool_groups`: an id missing from `creature_instance_ids` there means "not
+   * classified yet", not "not a creature". Reading it as the latter sent every
+   * picked creature to the spell row.
+   */
+  it("falls_back_to_the_type_line_for_a_card_the_engine_has_not_published_yet", () => {
+    const poolCard = card("already-in-pool");
+    const packCreature = { ...card("still-in-pack"), type_line: "Creature — Goblin" };
+    const poolGroups = groups([poolCard.instance_id]);
+    const workspace: DraftWorkspaceState = { ...placedState([]), placements: {} };
+
+    expect(resolveWorkspacePickPlacement(
+      packCreature,
+      "deck",
+      [poolCard],
+      poolGroups,
+      workspace,
+      { ...preferences, rows: "two" as const, columnCount: 4 },
+    ).row).toBe(0);
   });
 
   it("does_not_treat_a_mixed_shared_header_as_a_matching_color_column", () => {
@@ -1515,6 +1691,7 @@ describe("card pool board primitives", () => {
 
   it("fits_all_columns_within_the_available_board_width", () => {
     const pool = [card("first")];
+    let registeredBoard: HTMLElement | null = null;
     const { container } = render(
       <CardPoolBoard
         zone="deck"
@@ -1524,6 +1701,8 @@ describe("card pool board primitives", () => {
         preferences={preferences}
         cardPreviewMode="none"
         cardPreviewHoverDelayMs={0}
+        desktopCardAreaMinHeight
+        registerBoard={(element) => { registeredBoard = element; }}
         onWorkspaceChange={vi.fn()}
         onPreferencesChange={vi.fn()}
       />,
@@ -1536,7 +1715,11 @@ describe("card pool board primitives", () => {
     expect(columns).toHaveClass("min-w-0", "flex-1");
     expect(columns).not.toHaveClass("min-w-max");
     expect(columns?.parentElement).toHaveClass("p-6");
-    expect(columns?.parentElement?.parentElement).toHaveClass("overflow-x-hidden");
+    const horizontalScroller = columns?.parentElement?.parentElement;
+    expect(registeredBoard).toHaveClass("overflow-visible");
+    expect(registeredBoard).not.toHaveClass("overflow-x-auto", "overflow-x-hidden");
+    expect(horizontalScroller).toHaveClass("overflow-x-auto");
+    expect(horizontalScroller?.parentElement).toBe(registeredBoard);
   });
 
   it("groups_phone_columns_without_changing_logical_placement_or_two_row_structure", () => {
@@ -1595,6 +1778,34 @@ describe("card pool board primitives", () => {
       .toEqual([6, 1]);
   });
 
+  it("keeps_the_registered_desktop_board_outside_the_capped_columns_scroller", () => {
+    const pool = [card("first"), card("second")];
+    let registeredBoard: HTMLElement | null = null;
+    const { container } = render(
+      <CardPoolBoard
+        zone="deck"
+        pool={pool}
+        poolGroups={groups(pool.map((entry) => entry.instance_id))}
+        workspace={placedState(pool.map((entry) => entry.instance_id))}
+        preferences={{ ...preferences, columnCount: 2 }}
+        cardPreviewMode="none"
+        cardPreviewHoverDelayMs={0}
+        desktopCardAreaMinHeight
+        visualColumnCap={1}
+        registerBoard={(element) => { registeredBoard = element; }}
+        onWorkspaceChange={vi.fn()}
+        onPreferencesChange={vi.fn()}
+      />,
+    );
+
+    const columns = container.querySelector<HTMLElement>("[data-board-columns]")!;
+    const horizontalScroller = columns.parentElement;
+    expect(registeredBoard).toHaveClass("overflow-visible");
+    expect(registeredBoard).not.toHaveClass("overflow-x-auto", "overflow-x-hidden");
+    expect(horizontalScroller).toHaveClass("overflow-x-auto");
+    expect(horizontalScroller?.parentElement).toBe(registeredBoard);
+  });
+
   it("glows_the_entire_active_one_row_card_area_without_its_header", () => {
     const pool = [card("first")];
     const { container } = render(
@@ -1629,7 +1840,7 @@ describe("card pool board primitives", () => {
     expect(board).not.toHaveClass("border-dashed", "border-amber-300");
   });
 
-  it("glows_the_entire_active_two_row_card_area_while_preserving_row_targeting", () => {
+  it("glows_only_the_resolved_row_in_an_active_two_row_column", () => {
     const pool = [card("first")];
     const { container, rerender } = render(
       <CardPoolBoard
@@ -1652,7 +1863,9 @@ describe("card pool board primitives", () => {
     expect(activeColumn).toHaveAttribute("data-drop-state", "active");
     expect(rows[0]).toHaveAttribute("data-drop-state", "idle");
     expect(rows[1]).toHaveAttribute("data-drop-state", "active");
-    expect(cardArea).toHaveClass("draft-card-area-drop-active", "row-start-2", "row-span-2");
+    expect(cardArea).not.toHaveClass("draft-card-area-drop-active");
+    expect(rows[0]).not.toHaveClass("draft-card-area-drop-active");
+    expect(rows[1]).toHaveClass("draft-card-area-drop-active");
     expect(activeColumn.querySelector("header")?.contains(cardArea)).toBe(false);
     expect(activeColumn.querySelector("header")).toHaveClass("z-10");
     expect(activeColumn.querySelector('[data-drop-highlight="active"]')).not.toBeInTheDocument();
@@ -1674,6 +1887,48 @@ describe("card pool board primitives", () => {
       />,
     );
     expect(container.querySelector<HTMLElement>("[data-card-area]")).toHaveClass("rounded-[8px]");
+  });
+
+  it("applies_the_desktop_300px_floor_to_one_and_two_row_card_areas", () => {
+    const pool = [card("first")];
+    const { container, rerender } = render(
+      <CardPoolBoard
+        zone="deck"
+        pool={pool}
+        poolGroups={groups(["first"])}
+        workspace={placedState(["first"])}
+        preferences={preferences}
+        cardPreviewMode="none"
+        cardPreviewHoverDelayMs={0}
+        desktopCardAreaMinHeight
+        onWorkspaceChange={vi.fn()}
+        onPreferencesChange={vi.fn()}
+      />,
+    );
+
+    for (const column of container.querySelectorAll<HTMLElement>("[data-board-column]")) {
+      expect(column).toHaveClass("min-h-[300px]");
+      for (const row of column.querySelectorAll<HTMLElement>("[data-board-row]")) {
+        expect(row).toHaveClass("min-h-[300px]");
+      }
+    }
+
+    rerender(
+      <CardPoolBoard
+        zone="deck"
+        pool={pool}
+        poolGroups={groups(["first"])}
+        workspace={placedState(["first"])}
+        preferences={{ ...preferences, rows: "one" }}
+        cardPreviewMode="none"
+        cardPreviewHoverDelayMs={0}
+        desktopCardAreaMinHeight
+        onWorkspaceChange={vi.fn()}
+        onPreferencesChange={vi.fn()}
+      />,
+    );
+
+    expect(container.querySelector<HTMLElement>("[data-card-area]")).toHaveClass("min-h-[300px]");
   });
 
   it("reveals_sixteen_percent_of_the_card_width_between_stacked_cards", () => {

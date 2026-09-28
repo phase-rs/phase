@@ -642,9 +642,8 @@ pub struct ControlledPermanentsConjunct {
     pub source_scope: SourceExclusion,
 }
 
-/// CR 614.1a + CR 109.1: SINGLE AUTHORITY for the "\[other\] `<plural-type>` you
-/// control" noun phrase that follows "…to you and " in a compound damage
-/// recipient.
+/// CR 614.1a + CR 109.1: SINGLE AUTHORITY for the controlled-permanent noun
+/// phrase that follows "…to you and " in a compound damage recipient.
 ///
 /// Both damage surfaces compose this one combinator rather than re-spelling the
 /// noun list:
@@ -658,21 +657,59 @@ pub struct ControlledPermanentsConjunct {
 ///
 /// They previously kept two hand-rolled copies that had already drifted apart in
 /// both directions — one knew six nouns but not "other", the other knew "other"
-/// but only three nouns. One combinator, one noun `alt()`, one article `opt()`.
+/// but only three nouns. One combinator with composable cardinality and article
+/// axes keeps those noun forms in one authority.
 ///
-/// Composed one axis per combinator: the optional CR 109.1 "other" article, the
-/// plural type noun, and the fixed " you control" suffix.
+/// Composed one axis per combinator: plural cardinality (including "other" and
+/// "one or more") or singular article ("a"/"another"), the corresponding type
+/// noun, and the fixed " you control" suffix. Singular nouns must retain their
+/// article; accepting bare "creature you control" here would make this shared
+/// authority claim ungrammatical recipient text.
 pub fn parse_controlled_permanents_conjunct(
     input: &str,
 ) -> OracleResult<'_, ControlledPermanentsConjunct> {
-    let (input, other) = opt(tag("other ")).parse(input)?;
-    let (input, permanent_type) = alt((
-        value(Some(CoreType::Planeswalker), tag("planeswalkers")),
-        value(Some(CoreType::Creature), tag("creatures")),
-        value(Some(CoreType::Artifact), tag("artifacts")),
-        value(Some(CoreType::Enchantment), tag("enchantments")),
-        value(Some(CoreType::Land), tag("lands")),
-        value(None, tag("permanents")),
+    let (input, (permanent_type, source_scope)) = alt((
+        map(
+            (
+                opt(tag("one or more ")),
+                opt(tag("other ")),
+                alt((
+                    value(Some(CoreType::Planeswalker), tag("planeswalkers")),
+                    value(Some(CoreType::Creature), tag("creatures")),
+                    value(Some(CoreType::Artifact), tag("artifacts")),
+                    value(Some(CoreType::Enchantment), tag("enchantments")),
+                    value(Some(CoreType::Land), tag("lands")),
+                    value(None, tag("permanents")),
+                )),
+            ),
+            |(_, other, permanent_type)| {
+                (
+                    permanent_type,
+                    if other.is_some() {
+                        SourceExclusion::Exclude
+                    } else {
+                        SourceExclusion::Include
+                    },
+                )
+            },
+        ),
+        map(
+            (
+                alt((
+                    value(SourceExclusion::Include, tag("a ")),
+                    value(SourceExclusion::Exclude, tag("another ")),
+                )),
+                alt((
+                    value(Some(CoreType::Planeswalker), tag("planeswalker")),
+                    value(Some(CoreType::Creature), tag("creature")),
+                    value(Some(CoreType::Artifact), tag("artifact")),
+                    value(Some(CoreType::Enchantment), tag("enchantment")),
+                    value(Some(CoreType::Land), tag("land")),
+                    value(None, tag("permanent")),
+                )),
+            ),
+            |(source_scope, permanent_type)| (permanent_type, source_scope),
+        ),
     ))
     .parse(input)?;
     let (input, _) = tag(" you control").parse(input)?;
@@ -680,10 +717,7 @@ pub fn parse_controlled_permanents_conjunct(
         input,
         ControlledPermanentsConjunct {
             permanent_type,
-            source_scope: match other {
-                Some(_) => SourceExclusion::Exclude,
-                None => SourceExclusion::Include,
-            },
+            source_scope,
         },
     ))
 }
@@ -726,6 +760,31 @@ mod tests {
                 "the \"other\" article must reach the caller, not be opt()-discarded"
             );
         }
+
+        for (phrase, expected_type, expected_scope) in [
+            ("a permanent you control", None, SourceExclusion::Include),
+            (
+                "another permanent you control",
+                None,
+                SourceExclusion::Exclude,
+            ),
+            (
+                "one or more creatures you control",
+                Some(CoreType::Creature),
+                SourceExclusion::Include,
+            ),
+            (
+                "a creature you control",
+                Some(CoreType::Creature),
+                SourceExclusion::Include,
+            ),
+        ] {
+            let (rest, parsed) = parse_controlled_permanents_conjunct(phrase)
+                .unwrap_or_else(|_| panic!("{phrase} must parse"));
+            assert!(rest.is_empty(), "{phrase} must be fully consumed");
+            assert_eq!(parsed.permanent_type, expected_type);
+            assert_eq!(parsed.source_scope, expected_scope);
+        }
     }
 
     /// Hostile: the combinator must not claim a phrase whose controller clause is
@@ -737,6 +796,10 @@ mod tests {
             "creatures",
             "other stuff you control",
             "creature you control",
+            "other creature you control",
+            "a creatures you control",
+            "another creatures you control",
+            "one or more creature you control",
         ] {
             assert!(
                 parse_controlled_permanents_conjunct(phrase).is_err(),

@@ -16,6 +16,8 @@ use engine::game::game_object::AttachTarget;
 use engine::game::interaction::{
     bind_interaction_authority, derive_viewer_interaction, resolve_interaction_response,
 };
+use engine::game::scenario::GameScenario;
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::visibility::filter_state_for_viewer;
 use engine::game::zones::create_object;
 use engine::types::ability::{
@@ -43,10 +45,15 @@ use engine::types::resolved_commands::{
 };
 use engine::types::zones::Zone;
 
+use crate::support::shared_card_db;
+
 const P0: PlayerId = PlayerId(0);
 const P1: PlayerId = PlayerId(1);
 const P2: PlayerId = PlayerId(2);
 const P3: PlayerId = PlayerId(3);
+
+const KYNAIOS_STYLE_NESTED_LAND_ORACLE: &str =
+    "At the beginning of your end step, draw a card. Each player may put a land card from their hand onto the battlefield, then each opponent who didn't draws a card.";
 
 fn begin(state: &mut GameState) -> u64 {
     apply(
@@ -155,6 +162,7 @@ fn browser_partial_priority_equip_state() -> (GameState, ObjectId, ObjectId) {
                     target: TargetFilter::Typed(
                         TypedFilter::creature().controller(ControllerRef::You),
                     ),
+                    selection: engine::types::ability::AttachSelection::Targeted,
                 },
                 vec![TargetRef::Object(creature)],
                 equipment,
@@ -283,6 +291,182 @@ fn browser_partial_priority_equip_uses_the_shared_session_instead_of_a_prefix_pr
         Some(AttachTarget::Object(creature)),
     );
     assert!(state.auto_pass.is_empty());
+}
+
+/// The four-player Kynaios-and-Tiro shape keeps one triggered ability as the
+/// resolution owner while its effect fans out into one optional land choice
+/// per player.  Cleanup must wait for that nested chain to settle before the
+/// turn boundary is evaluated; otherwise the old path reached `start_next_turn`
+/// with the popped carrier still live.
+#[test]
+fn four_player_nested_land_choices_settle_before_cleanup_wraps_once() {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let face = db
+        .get_face_by_name("Kynaios and Tiro of Meletis")
+        .expect("integration card fixture must include Kynaios and Tiro of Meletis");
+    assert_eq!(
+        face.oracle_text.as_deref(),
+        Some(KYNAIOS_STYLE_NESTED_LAND_ORACLE),
+        "the regression must exercise the printed Kynaios-and-Tiro Oracle text"
+    );
+
+    let mut scenario = GameScenario::new_with_format(FormatConfig::commander(), 4, 0x9200);
+    scenario.at_phase(Phase::PostCombatMain);
+    scenario.add_real_card(P0, "Kynaios and Tiro of Meletis", Zone::Battlefield, db);
+    let mut land_ids = BTreeMap::new();
+    let p0_draw = scenario.add_card_to_library_top(P0, "P0 draw");
+    for (player, library_name) in [
+        (P1, "P1 draw filler"),
+        (P2, "P2 draw filler"),
+        (P3, "P3 draw filler"),
+    ] {
+        scenario.add_card_to_library_top(player, library_name);
+    }
+    for player in [P0, P1, P2, P3] {
+        let land = scenario.add_land_to_hand(player, "Plains").id();
+        land_ids.insert(player, land);
+    }
+
+    let mut runner = scenario.build();
+    runner.advance_to_end_step();
+    assert_eq!(runner.state().phase, Phase::End);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(!runner.state().stack.is_empty());
+
+    let starting_turn = runner.state().turn_number;
+    let starting_active = runner.state().active_player;
+    let mut events = Vec::new();
+
+    let mut land_choice_players = BTreeSet::new();
+    let mut land_placements = BTreeSet::new();
+    let mut saw_empty_stack_live_carrier = false;
+    let mut crossed_turn_boundary = false;
+    for _ in 0..160 {
+        if runner.state().turn_number != starting_turn {
+            crossed_turn_boundary = true;
+            break;
+        }
+
+        if runner.state().stack.is_empty()
+            && (runner.state().resolving_stack_entry.is_some()
+                || !runner.state().resolution_stack.is_empty()
+                || runner.state().active_ability_continuation().is_some())
+        {
+            saw_empty_stack_live_carrier = true;
+        }
+
+        if runner.state().resolving_stack_entry.is_some()
+            || runner.state().pending_liminal_entry_resume.is_some()
+        {
+            assert_eq!(
+                runner.state().turn_number,
+                starting_turn,
+                "a live nested resolution carrier must not advance the turn"
+            );
+            assert_eq!(
+                runner.state().active_player,
+                starting_active,
+                "a live nested resolution carrier must retain the active player"
+            );
+        }
+
+        let waiting_for = runner.state().waiting_for.clone();
+        let result = match waiting_for {
+            WaitingFor::Priority { .. } => runner
+                .act(GameAction::PassPriority)
+                .expect("priority pass must not panic in the nested land chain"),
+            WaitingFor::OptionalEffectChoice { player, .. } => {
+                let result = runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .expect("each player accepts the offered land choice");
+                let expected_land = *land_ids
+                    .get(&player)
+                    .expect("each optional land choice must belong to a known participant");
+                assert_eq!(
+                    runner.state().objects[&expected_land].zone,
+                    Zone::Battlefield,
+                    "participant {player:?}'s accepted land must enter the battlefield"
+                );
+                land_choice_players.insert(player);
+                land_placements.insert(player);
+                result
+            }
+            WaitingFor::EffectZoneChoice { player, cards, .. } => {
+                let expected_land = *land_ids
+                    .get(&player)
+                    .expect("each land choice must belong to a known participant");
+                assert_eq!(
+                    cards,
+                    vec![expected_land],
+                    "each participant must receive its own independent land choice"
+                );
+                let card = cards.first().copied().expect("land choice offers a card");
+                let result = runner
+                    .act(GameAction::SelectCards { cards: vec![card] })
+                    .expect("each player selects the offered land through apply");
+                assert_eq!(
+                    runner.state().objects[&expected_land].zone,
+                    Zone::Battlefield,
+                    "participant {player:?}'s selected land must enter the battlefield"
+                );
+                land_choice_players.insert(player);
+                land_placements.insert(player);
+                result
+            }
+            WaitingFor::OrderTriggers { triggers, .. } => runner
+                .act(GameAction::OrderTriggers {
+                    order: (0..triggers.len()).collect(),
+                })
+                .expect("nested trigger order uses the production choice route"),
+            other => panic!("unexpected nested Kynaios prompt: {other:?}"),
+        };
+        events.extend(result.events);
+    }
+
+    let expected_players = BTreeSet::from([P0, P1, P2, P3]);
+    assert_eq!(
+        land_choice_players, expected_players,
+        "the Oracle text must fan out one land choice to every player"
+    );
+    assert_eq!(
+        land_placements, expected_players,
+        "every participant's selected land must be placed independently"
+    );
+    assert!(
+        saw_empty_stack_live_carrier,
+        "the regression must reach the old empty-stack/live-carrier boundary"
+    );
+    assert_eq!(
+        runner.state().objects[&p0_draw].zone,
+        Zone::Hand,
+        "the trigger's mandatory controller draw must not be skipped"
+    );
+    assert!(
+        crossed_turn_boundary,
+        "the settled chain must reach the next turn"
+    );
+    assert_eq!(runner.state().turn_number, starting_turn + 1);
+    assert_eq!(runner.state().active_player, P1);
+    assert!(
+        matches!(runner.state().phase, Phase::Untap | Phase::Upkeep),
+        "the next turn must begin after one Cleanup -> Untap boundary, got {:?}",
+        runner.state().phase
+    );
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().resolution_stack.is_empty());
+    assert!(runner.state().resolving_stack_entry.is_none());
+    assert!(runner.state().pending_liminal_entry_resume.is_none());
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, GameEvent::TurnStarted { .. }))
+            .count(),
+        1,
+        "nested resolution must create exactly one next-turn event"
+    );
 }
 
 #[test]

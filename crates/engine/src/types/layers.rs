@@ -303,6 +303,7 @@ mod tests {
                     keywords: vec![],
                     abilities: Default::default(),
                     trigger_definitions: Default::default(),
+                    trigger_printed_origins: Default::default(),
                     replacement_definitions: Default::default(),
                     static_definitions: Default::default(),
                     room_halves: None,

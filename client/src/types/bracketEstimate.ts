@@ -15,6 +15,17 @@ export type ComboDeclaration =
 
 export const UNDECLARED_COMBO: ComboDeclaration = { kind: "undeclared" };
 
+/** Structural equality over the declaration's own fields; the picker emits fresh objects. */
+export function sameComboDeclaration(a: ComboDeclaration, b: ComboDeclaration): boolean {
+  switch (a.kind) {
+    case "undeclared":
+    case "none_intended":
+      return b.kind === a.kind;
+    case "intended":
+      return b.kind === "intended" && a.window === b.window;
+  }
+}
+
 export type Barometer =
   | "game_changers"
   | "extra_turns"

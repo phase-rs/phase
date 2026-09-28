@@ -65,8 +65,8 @@ use crate::features::mana_ramp::target_filter_references_land;
 use crate::features::DeckFeatures;
 
 use super::effect_classify::{
-    aggregate_player_impact_in, extract_target_filter, lethal_to_creature,
-    targeted_player_impact_in, PLAYER_IMPACT_PREFERENCE_BAND,
+    aggregate_player_impact_in, extract_target_filter, filter_admits_player, lethal_to_creature,
+    targeted_player_impact_in_with_bound_parent_target, PLAYER_IMPACT_PREFERENCE_BAND,
 };
 use super::self_protection_classify::{
     any_immediate_threat, is_self_protection_effect, self_protection_effect_payoff,
@@ -715,11 +715,12 @@ fn predicted_root_player_recipient(
     let mut opponent_accepted = false;
 
     for player in state.players.iter().filter(|player| !player.is_eliminated) {
-        let impact = targeted_player_impact_in(
+        let impact = targeted_player_impact_in_with_bound_parent_target(
             state,
             source_controller,
             Some(source_id),
             effects,
+            player.id,
             player.id,
         )
         .unwrap_or(aggregate);
@@ -1017,23 +1018,13 @@ fn deal_damage_is_trivial(
     if value > FACE_DAMAGE_TRIVIAL_CEILING {
         return false;
     }
-    if filter_can_target_player(target) && damage_lethal_to_opponent(state, ai_player, value) {
+    if filter_admits_player(target) && damage_lethal_to_opponent(state, ai_player, value) {
         return false;
     }
     if damage_kills_creature(state, ai_player, source_id, target, value) {
         return false;
     }
     true
-}
-
-fn filter_can_target_player(target: &TargetFilter) -> bool {
-    match target {
-        TargetFilter::Any | TargetFilter::Player => true,
-        // Typed filters select permanents, not players.
-        TargetFilter::Typed(_) => false,
-        // Unknown/compound filters: fail-open (assume a player could be hit).
-        _ => true,
-    }
 }
 
 fn damage_lethal_to_opponent(state: &GameState, ai_player: PlayerId, value: i32) -> bool {

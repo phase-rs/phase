@@ -371,6 +371,31 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
         (WaitingFor::OrderTriggers { triggers, .. }, GameAction::OrderTriggers { order }) => {
             !crate::game::triggers::is_valid_permutation(order, triggers.len())
         }
+        // CR 601.2b + CR 601.2f: same strict-permutation check the engine
+        // handler enforces, plus the announcement's legality against the
+        // prompt's own hybrid symbols (CR 107.4e).
+        (
+            WaitingFor::OrderCostReductions {
+                reductions,
+                hybrid_symbols,
+                ..
+            },
+            GameAction::OrderCostReductions {
+                order,
+                hybrid_announcement,
+            },
+        ) => {
+            !crate::game::triggers::is_valid_permutation(order, reductions.len())
+                || (!hybrid_announcement.is_empty()
+                    && (hybrid_announcement.len() != hybrid_symbols.len()
+                        || hybrid_announcement.iter().zip(hybrid_symbols).any(
+                            |(announced, symbol)| {
+                                !symbol
+                                    .announceable_halves()
+                                    .is_some_and(|halves| halves.contains(announced))
+                            },
+                        )))
+        }
         (
             WaitingFor::CopyTargetChoice { valid_targets, .. },
             GameAction::ChooseTarget { target },
@@ -425,13 +450,7 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
             },
             GameAction::ChooseActivationCostBranch { index },
         ) => costs.get(*index).is_none_or(|cost| {
-            !casting::can_pay_ability_cost_now(
-                state,
-                *player,
-                pending_cast.object_id,
-                cost,
-                pending_cast.activation_ability_index,
-            )
+            !casting::activation_one_of_branch_payable(state, *player, pending_cast, cost)
         }),
         (
             WaitingFor::DamageSourceChoice { options, .. },
@@ -847,6 +866,16 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
             selection_mismatch(chosen, selectable_cards, exact)
                 || (*up_to && chosen.len() > *keep_count)
         }
+        // CR 401.2 + CR 401.4 + CR 608.2c: the response is a full ARRANGEMENT
+        // of the fixed remainder pile, not a subset of it — the leading
+        // `top_count` entries take the library top and the rest take the
+        // bottom. So the legality gate is "exactly the whole pile, no
+        // duplicates", the same gate the sibling `RippleBottomOrder`
+        // permutation uses.
+        (
+            WaitingFor::DigRestSplitChoice { cards, .. },
+            GameAction::SelectCards { cards: chosen },
+        ) => selection_mismatch(chosen, cards, Some(cards.len())),
         (
             WaitingFor::CollectEvidenceChoice {
                 player: _, cards, ..
@@ -1291,6 +1320,7 @@ fn classify_flat_priority_action(action: &GameAction) -> FlatPriorityActionClass
         | GameAction::ChooseReplacement { .. }
         | GameAction::ChooseEntryController { .. }
         | GameAction::OrderTriggers { .. }
+        | GameAction::OrderCostReductions { .. }
         | GameAction::CancelCast
         | GameAction::Equip { .. }
         | GameAction::CrewVehicle { .. }
@@ -1622,12 +1652,16 @@ pub fn stage_two_action_set(
 ///     call below; the wider phrasing would claim coverage of shapes neither
 ///     stage enumerates.
 ///
-/// Otherwise the seat still Shortens and gets its window
-/// (`game::engine::apply_action`'s `RespondToShortcut(Shorten)` arm).
+/// Otherwise the seat still Shortens and gets its window — at the place 0 every AI site emits,
+/// the shortened proposal admits no place, so the shortcut is taken at once and CR 732.2b's new
+/// ending point IS that window, held by this seat.
 ///
 /// READ-ORDER: the proposal is read off the ORIGINAL `state`, before
 /// [`shortcut_probe`] re-parks its clone at `Priority` — the probe state carries
 /// no offer at all, so reading the crown from it would make arm (A) dead code.
+/// That same read supplies the CR 732.2b precondition ahead of both stages: a
+/// proposal admitting no place cannot be answered by naming one, so the seat
+/// Accepts rather than emitting a verdict `apply()` refuses.
 pub fn smart_shortcut_response(
     state: &GameState,
     polled_player: PlayerId,
@@ -1638,15 +1672,33 @@ pub fn smart_shortcut_response(
     // two-named-arms + `_` shape is the module's existing idiom for the same
     // question (`game::precast_copy_shortcut::normalize_untrusted_restore`,
     // `::rekey_after_trusted_restore`).
-    let crowned_winner = match &state.waiting_for {
-        WaitingFor::RespondToShortcut { proposal, .. } => proposal.predicted_winner,
+    let (crowned_winner, shortening_places) = match &state.waiting_for {
+        WaitingFor::RespondToShortcut { proposal, .. } => (
+            proposal.predicted_winner,
+            Some(proposal.shortening_places()),
+        ),
         // STRUCTURAL, not an oversight: `RespondToPrecastCopyShortcut` carries no
-        // proposal summary and therefore no `predicted_winner` field, so the
-        // pre-cast route has no crown to read and arm (A) is inapplicable rather
-        // than skipped. Stage 1 and arm (B) do apply, and both run below.
-        WaitingFor::RespondToPrecastCopyShortcut { .. } => None,
-        _ => None,
+        // proposal summary and therefore neither a `predicted_winner` field nor a
+        // range, so the pre-cast route has no crown to read and arm (A) is
+        // inapplicable rather than skipped, and the precondition below is inert
+        // there. Stage 1 and arm (B) do apply, and both run below.
+        WaitingFor::RespondToPrecastCopyShortcut { .. } => (None, None),
+        _ => (None, None),
     };
+
+    // CR 732.2b: a shortening responder names "a place where they will make a game
+    // choice that's different than what's been proposed", so the place must be one
+    // the proposal admits. A proposal of zero repetitions proposes no choice, its
+    // range holds no place, and `apply()` refuses every `Shorten` against it, place
+    // 0 included. Accept is then the only answer this seat can give that the reducer
+    // will take: `ai_support::candidates` builds exactly one candidate here and
+    // validates it against the reducer, so a verdict naming an excluded place is
+    // dropped rather than refused on submit, leaving the polled seat no legal action
+    // at all. Reading the range here answers for every ingress that reaches the
+    // window — the declare path's own mint and a restored `WaitingFor` alike.
+    if shortening_places.is_some_and(|places| places.is_empty()) {
+        return crate::analysis::loop_check::ShortcutResponse::Accept;
+    }
 
     let (probe, actions) = shortcut_probe(state, polled_player);
     if !has_meaningful_priority_action(probe.state(), &actions) {
@@ -2295,6 +2347,15 @@ pub fn flat_priority_actions_with_probe(
 /// flat `actions` list; auto-pass consumes the flat list, while board
 /// interaction consumes the grouped map.
 pub fn legal_actions_full(state: &GameState) -> LegalActionsFull {
+    // CR 601.2h + CR 608.2c: enumerate against the replayed payment shadow so
+    // the live choice remains actionable while canonical resources stay staged.
+    let payment_projected;
+    let state = if state.payment_transaction.is_some() {
+        payment_projected = crate::game::payment_transaction::project(state);
+        &payment_projected
+    } else {
+        state
+    };
     let priority_probe_storage;
     let flushed_storage;
     let (state, priority_probe) = match &state.waiting_for {

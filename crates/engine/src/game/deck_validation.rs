@@ -4,16 +4,18 @@ use serde::{Deserialize, Serialize};
 
 use crate::database::legality::{LegalityFormat, LegalityStatus};
 use crate::database::CardDatabase;
+use crate::game::ante::face_uses_ante;
 use crate::game::companion::{companion_starting_deck, is_eligible_companion};
 use crate::game::deck_loading::{deserialize_draft_set_codes, DeckEntry};
 use crate::parser::oracle::{compute_deck_copy_limit_from_text, oracle_text_allows_commander};
 use crate::types::card::{CardFace, CardRules, PrintedCardRef};
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::custom_format::{
-    passes_legacy_axis_gate, CommandZoneMode, LegalityRules, SetCode,
+    passes_legacy_axis_gate, AntePolicy, CommandZoneMode, LegalityRules, SetCode,
 };
 use crate::types::format::{
-    DeckCopyLimit, FormatConfig, GameFormat, SelectedFormat, SideboardPolicy,
+    CardPool, DeckCopyLimit, DeckSizeSubject, FormatConfig, GameFormat, SelectedFormat,
+    SideboardPolicy,
 };
 use crate::types::keywords::{Keyword, PartnerType};
 use crate::types::mana::{ManaColor, ManaCost};
@@ -591,6 +593,12 @@ fn evaluate_standard(
 enum CardPoolAuthority<'a> {
     LegalityTable(LegalityFormat),
     Declared(&'a DeclaredPool),
+    /// No authority is consulted, so no card is refused on pool grounds.
+    /// `status` answers `Some(LegalityStatus::Legal)` and not `None` because
+    /// in this type `None` means "the authority has no row for this card",
+    /// which every caller renders as "(not legal in {format_label})" — the
+    /// opposite verdict.
+    AdmitsEveryCard,
 }
 
 impl CardPoolAuthority<'_> {
@@ -598,20 +606,58 @@ impl CardPoolAuthority<'_> {
         match self {
             CardPoolAuthority::LegalityTable(format) => db.legality_status(name, format),
             CardPoolAuthority::Declared(pool) => pool.status(db, name),
+            CardPoolAuthority::AdmitsEveryCard => Some(LegalityStatus::Legal),
+        }
+    }
+
+    /// The per-card pool authority `format` declares.
+    ///
+    /// Total over every [`CardPool`]. The `DeclaredRules` arm is unreachable
+    /// from any dispatch — both custom evaluators resolve the pool with
+    /// `custom_format_pool` and construct `Declared` themselves — and answers
+    /// with an empty pool so that a custom format's bans can never be
+    /// discarded by a path that failed to resolve them. That is the same
+    /// fail-closed direction `max_deck_copies` takes for an unresolvable
+    /// custom format.
+    fn for_format(format: GameFormat) -> CardPoolAuthority<'static> {
+        match format.card_pool() {
+            CardPool::LegalityTable(table) => CardPoolAuthority::LegalityTable(table),
+            CardPool::NoEngineAuthority | CardPool::Unrestricted => {
+                CardPoolAuthority::AdmitsEveryCard
+            }
+            CardPool::DeclaredRules => CardPoolAuthority::Declared(unresolved_custom_pool()),
         }
     }
 }
 
+/// The pool a custom format gets when its declared rules were not resolved:
+/// empty, so every card is outside it and `DeclaredPool::status` answers
+/// `None`.
+fn unresolved_custom_pool() -> &'static DeclaredPool {
+    static POOL: std::sync::OnceLock<DeclaredPool> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| DeclaredPool {
+        legal_sets: Some(Vec::new()),
+        legal_cards: HashSet::new(),
+        banned: HashSet::new(),
+        restricted: HashSet::new(),
+    })
+}
+
 /// A custom format's resolved card pool: which cards are IN the pool (by
-/// printing — `legal_sets: None` means unrestricted), overlaid with its
-/// banned/restricted lists. Built once per evaluation by [`Self::resolve`]
-/// from a [`LegalityRules`] value, never assembled piecemeal.
+/// printing — `legal_sets: None` means unrestricted — or by name, via
+/// `legal_cards`), overlaid with its banned/restricted lists. Built once per
+/// evaluation by [`Self::resolve`] from a [`LegalityRules`] value, never
+/// assembled piecemeal.
 ///
 /// `Debug` is required because [`CardPoolAuthority`] borrows this type and
 /// derives `Debug` itself.
 #[derive(Debug)]
 struct DeclaredPool {
     legal_sets: Option<Vec<SetCode>>,
+    /// CR 201.3b canonical names, like `banned`/`restricted` below: a ruleset
+    /// naming a card individually must match a decklist spelling it by either
+    /// face. Unioned with `legal_sets` — see `LegalityRules::legal_cards`.
+    legal_cards: HashSet<String>,
     /// CR 201.3b: canonical (`canonical_deck_count_key`) names, so a banned
     /// entry naming a split/DFC's whole-card identity ("Fire // Ice") matches
     /// a decklist naming just one face ("Fire"). A banned/restricted entry
@@ -626,6 +672,11 @@ impl DeclaredPool {
     fn resolve(db: &CardDatabase, rules: &LegalityRules) -> Self {
         Self {
             legal_sets: rules.legal_sets.clone(),
+            legal_cards: rules
+                .legal_cards
+                .iter()
+                .map(|name| canonical_deck_count_key(db, name))
+                .collect(),
             banned: rules
                 .banned
                 .iter()
@@ -646,12 +697,24 @@ impl DeclaredPool {
     /// {format_label})" message in the shared evaluator, so the two card-pool
     /// authorities must report absence identically.
     fn status(&self, db: &CardDatabase, name: &str) -> Option<LegalityStatus> {
+        let canonical = canonical_deck_count_key(db, name);
         if let Some(sets) = &self.legal_sets {
-            if !printed_in_any_set(db, name, sets) {
+            // A named card is in the pool whether or not any legal set contains
+            // it — the two membership tests are a union, because a ruleset that
+            // names a card is stating a legality its set list could not.
+            //
+            // Checked only inside the `Some` arm: `legal_sets: None` already
+            // admits everything, so widening an unrestricted pool is a no-op.
+            if !self.legal_cards.contains(&canonical) && !printed_in_any_set(db, name, sets) {
                 return None;
             }
         }
-        let canonical = canonical_deck_count_key(db, name);
+        // CR 407.3 is deliberately NOT checked here. It is not a property of
+        // this format's declared card pool — it holds for every format that is
+        // not played for ante — and enforcing it in this authority would reach
+        // only constructed-shaped formats, leaving the commander validator and
+        // the FreeForAll / TwoHeadedGiant / Limited routes to disagree with it.
+        // `ante_deck_violations` applies it once, for all of them.
         if self.banned.contains(&canonical) {
             return Some(LegalityStatus::Banned);
         }
@@ -669,10 +732,13 @@ impl DeclaredPool {
 /// set-code convention (`draft_set_concessions`) — never uppercase-normalize.
 ///
 /// Fails CLOSED when `db.printings_for` returns `None`: "no evidence of a
-/// legal printing" is not "a legal printing." Two production paths hit this
-/// today: `phase-server` under `PHASE_DEV_FIXTURE=1` (`main.rs:2055-2062` →
-/// `from_mtgjson` → `oracle_loader.rs:147`'s empty printings index) and
-/// `CardDatabase::default()` (`server-core/src/draft_session.rs:1369`) — in
+/// legal printing" is not "a legal printing." One production path and one test
+/// path hit this today: `phase-server` under `PHASE_DEV_FIXTURE=1` (the
+/// `CardDataSource::DevFixture` arm in `main::serve` →
+/// `from_mtgjson` → `database::oracle_loader::load_from_mtgjson`'s empty
+/// printings index) and
+/// `CardDatabase::default()`, whose every occurrence in `server-core` is inside
+/// `#[cfg(test)]` (`session`, `deck_resolve`, `draft_session`) — in
 /// both, every card in the deck is rejected as "(not legal in
 /// {format_label})" rather than silently passing a `legal_sets`-restricted
 /// custom format.
@@ -684,6 +750,20 @@ fn printed_in_any_set(db: &CardDatabase, name: &str, sets: &[SetCode]) -> bool {
         sets.iter()
             .any(|allowed| allowed.0.eq_ignore_ascii_case(printed))
     })
+}
+
+/// Every name in a Limited deck must resolve before game admission.
+/// A draft session applies its configured minimum at submission; this
+/// generic gate has no session provenance from which to recover that minimum.
+fn evaluate_limited(unknown_cards: &BTreeSet<String>) -> CompatibilityCheck {
+    let mut reasons = Vec::new();
+    if !unknown_cards.is_empty() {
+        reasons.push(summarize_cards("Unknown cards", unknown_cards, 6));
+    }
+    CompatibilityCheck {
+        compatible: reasons.is_empty(),
+        reasons,
+    }
 }
 
 /// Shared validation for constructed-shaped formats (Standard, Pioneer,
@@ -703,23 +783,24 @@ fn evaluate_constructed(
     pool: CardPoolAuthority<'_>,
     format_label: &str,
 ) -> CompatibilityCheck {
+    let pairing = format_rules.format.commander_pairing();
     let mut reasons = Vec::new();
 
     if !unknown_cards.is_empty() {
         reasons.push(summarize_cards("Unknown cards", unknown_cards, 6));
     }
 
-    if !request.commander.is_empty() {
+    if !pairing.admits_count(request.commander.len()) {
         reasons.push(format!("{format_label} decks do not use a commander slot"));
     }
 
     // CR 100.5 / CR 903.5a: the format's own deck-size rule is authoritative —
     // never re-derive a hardcoded 60 by hand.
-    if !format_rules.deck_size.accepts(request.main_deck.len()) {
+    let total_cards = deck_size_subject_count(format_rules.format.deck_size_subject(), db, request);
+    if !format_rules.deck_size.accepts(total_cards) {
         reasons.push(format!(
-            "{format_label} deck must have {} cards (found {})",
-            format_rules.deck_size.requirement_phrase(),
-            request.main_deck.len()
+            "{format_label} deck must have {} cards (found {total_cards})",
+            format_rules.deck_size.requirement_phrase()
         ));
     }
 
@@ -910,6 +991,7 @@ fn evaluate_planechase(
     unknown_cards: &BTreeSet<String>,
     format_rules: &FormatConfig,
 ) -> CompatibilityCheck {
+    let pairing = format_rules.format.commander_pairing();
     let mut reasons = Vec::new();
 
     if !unknown_cards.is_empty() {
@@ -921,18 +1003,18 @@ fn evaluate_planechase(
             request.player_count
         ));
     }
-    if !request.commander.is_empty() {
+    if !pairing.admits_count(request.commander.len()) {
         reasons.push("Planechase decks do not use a commander slot".to_string());
     }
     // CR 100.5: `DeckSizeRule::accepts` is the sole authority — Planechase's
     // registry value is `Minimum(60)`, so this is behavior-neutral versus the
     // hardcoded `< 60` it replaces.
-    if !format_rules.deck_size.accepts(request.main_deck.len()) {
+    let total_cards = deck_size_subject_count(format_rules.format.deck_size_subject(), db, request);
+    if !format_rules.deck_size.accepts(total_cards) {
         let format_label = format_rules.format.label();
         reasons.push(format!(
-            "{format_label} deck must have {} cards (found {})",
-            format_rules.deck_size.requirement_phrase(),
-            request.main_deck.len()
+            "{format_label} deck must have {} cards (found {total_cards})",
+            format_rules.deck_size.requirement_phrase()
         ));
     }
 
@@ -1024,6 +1106,7 @@ fn evaluate_archenemy(
     unknown_cards: &BTreeSet<String>,
     format_rules: &FormatConfig,
 ) -> CompatibilityCheck {
+    let pairing = format_rules.format.commander_pairing();
     let mut reasons = Vec::new();
 
     if !unknown_cards.is_empty() {
@@ -1035,18 +1118,18 @@ fn evaluate_archenemy(
             request.player_count
         ));
     }
-    if !request.commander.is_empty() {
+    if !pairing.admits_count(request.commander.len()) {
         reasons.push("Archenemy decks do not use a commander slot".to_string());
     }
     // CR 100.5: `DeckSizeRule::accepts` is the sole authority — Archenemy's
     // registry value is `Minimum(60)`, so this is behavior-neutral versus the
     // hardcoded `< 60` it replaces.
-    if !format_rules.deck_size.accepts(request.main_deck.len()) {
+    let total_cards = deck_size_subject_count(format_rules.format.deck_size_subject(), db, request);
+    if !format_rules.deck_size.accepts(total_cards) {
         let format_label = format_rules.format.label();
         reasons.push(format!(
-            "{format_label} deck must have {} cards (found {})",
-            format_rules.deck_size.requirement_phrase(),
-            request.main_deck.len()
+            "{format_label} deck must have {} cards (found {total_cards})",
+            format_rules.deck_size.requirement_phrase()
         ));
     }
 
@@ -1176,6 +1259,24 @@ impl CommanderVariantRules {
             eligibility_error:
                 "Pauper Commander commander must be an uncommon creature, Vehicle, or Spacecraft",
             skip_commander_legality: true,
+            partner_grant: None,
+        }
+    }
+
+    /// This format widens WHO may be designated
+    /// (see `is_freeform_commander_eligible`); `partner_grant` is `None`
+    /// exactly as it is for every variant CR 903.13f(3) does not reach.
+    ///
+    /// `skip_commander_legality` is `false` because it exempts the commander
+    /// from a LEGALITY TABLE, and this format declares
+    /// `CardPool::Unrestricted`, so `legality_format()` is `None` and the block
+    /// the flag guards never runs. `false` is the honest value rather than a
+    /// meaningless `true`.
+    fn freeform_commander() -> Self {
+        Self {
+            eligible: is_freeform_commander_eligible,
+            eligibility_error: "Freeform Commander commanders must be cards that can be cast",
+            skip_commander_legality: false,
             partner_grant: None,
         }
     }
@@ -1329,6 +1430,7 @@ fn evaluate_commander_with_format(
 ) -> CompatibilityCheck {
     let legality_format = format_rules.format.legality_format();
     let format_label = format_rules.format.label();
+    let pairing = format_rules.format.commander_pairing();
     // CR 903.5a / CR 903.13f(1): the format's `DeckSizeRule` is the single
     // authority for min-vs-exact. Compared only through `accepts`, never by
     // hand — CR 903.13f(1) sets a minimum with NO maximum, which a literal
@@ -1345,7 +1447,7 @@ fn evaluate_commander_with_format(
         reasons.push(summarize_cards("Unknown cards", unknown_cards, 6));
     }
 
-    if request.commander.is_empty() || request.commander.len() > 2 {
+    if !pairing.admits_count(request.commander.len()) {
         reasons.push(format!(
             "{format_label} decks require 1 or 2 commanders (found {})",
             request.commander.len()
@@ -1396,8 +1498,7 @@ fn evaluate_commander_with_format(
     // staging area) and enforce CR 903.5e at game load by dropping them —
     // see `load_deck_into_state` in `deck_loading.rs`.
 
-    let represented_in_main = commanders_represented_in_main(db, request);
-    let total_cards = request.main_deck.len() + (request.commander.len() - represented_in_main);
+    let total_cards = deck_size_subject_count(format_rules.format.deck_size_subject(), db, request);
     if !deck_size.accepts(total_cards) {
         reasons.push(format!(
             "{format_label} deck must have {} cards (found {total_cards})",
@@ -1528,7 +1629,7 @@ fn evaluate_brawl(
     db: &CardDatabase,
     request: &DeckCompatibilityRequest,
     unknown_cards: &BTreeSet<String>,
-    legality_format: LegalityFormat,
+    pool: CardPoolAuthority<'_>,
     format_label: &str,
     format_rules: &FormatConfig,
 ) -> CompatibilityCheck {
@@ -1536,6 +1637,7 @@ fn evaluate_brawl(
     // singleton / identity checks — it is not part of the loaded deck.
     let stripped = request_without_sideboard(request);
     let request = &stripped;
+    let pairing = format_rules.format.commander_pairing();
     let mut reasons = Vec::new();
 
     if !unknown_cards.is_empty() {
@@ -1543,7 +1645,7 @@ fn evaluate_brawl(
     }
 
     // Brawl requires exactly 1 commander (no partner)
-    if request.commander.len() != 1 {
+    if !pairing.admits_count(request.commander.len()) {
         reasons.push(format!(
             "{format_label} decks require exactly 1 commander (found {})",
             request.commander.len()
@@ -1572,8 +1674,7 @@ fn evaluate_brawl(
     // total card count (main + commander, accounting for commander listed in
     // main) — never re-derive min-vs-exact here.
     let deck_size = format_rules.deck_size;
-    let represented_in_main = commanders_represented_in_main(db, request);
-    let total_cards = request.main_deck.len() + (request.commander.len() - represented_in_main);
+    let total_cards = deck_size_subject_count(format_rules.format.deck_size_subject(), db, request);
     if !deck_size.accepts(total_cards) {
         reasons.push(format!(
             "{format_label} deck must have {} cards (found {total_cards})",
@@ -1601,8 +1702,8 @@ fn evaluate_brawl(
         if unknown_cards.contains(name) {
             continue;
         }
-        match db.legality_status(name, legality_format) {
-            Some(status) if status.is_legal() => {}
+        match pool.status(db, name) {
+            Some(LegalityStatus::Legal) => {}
             Some(status) => {
                 illegal_cards.insert(format!(
                     "{} ({})",
@@ -1752,13 +1853,14 @@ fn evaluate_tiny_leaders(
     unknown_cards: &BTreeSet<String>,
     format_rules: &FormatConfig,
 ) -> CompatibilityCheck {
+    let pairing = format_rules.format.commander_pairing();
     let mut reasons = Vec::new();
 
     if !unknown_cards.is_empty() {
         reasons.push(summarize_cards("Unknown cards", unknown_cards, 6));
     }
 
-    if request.commander.is_empty() || request.commander.len() > 2 {
+    if !pairing.admits_count(request.commander.len()) {
         reasons.push(format!(
             "Tiny Leaders: Reborn decks require 1 or 2 commanders (found {})",
             request.commander.len()
@@ -1816,8 +1918,7 @@ fn evaluate_tiny_leaders(
         ));
     }
 
-    let represented_in_main = commanders_represented_in_main(db, request);
-    let total_cards = request.main_deck.len() + (request.commander.len() - represented_in_main);
+    let total_cards = deck_size_subject_count(format_rules.format.deck_size_subject(), db, request);
     if total_cards != 50 {
         reasons.push(format!(
             "Tiny Leaders: Reborn deck must have exactly 50 main+commander cards (found {total_cards})"
@@ -2034,9 +2135,53 @@ fn tiny_leaders_category_banned(face: &CardFace) -> bool {
         .to_ascii_lowercase();
     face.card_type.subtypes.iter().any(|subtype| {
         subtype.eq_ignore_ascii_case("Conspiracy") || subtype.eq_ignore_ascii_case("Attraction")
-    }) || text.contains("playing for ante")
+    }) || face_uses_ante(face)
         || text.contains("sticker")
         || text.contains("attraction")
+}
+
+/// CR 407.3: "When not playing for ante, players can't include these cards in
+/// their decks or sideboards." Returns the offending cards, by display name.
+///
+/// Applied once per evaluation, beside the other cross-format rules at the
+/// dispatch seam, rather than inside a card-pool authority. Three routes decide
+/// per-card legality — `CardPoolAuthority::LegalityTable` for built-in
+/// constructed formats, `CardPoolAuthority::Declared` for custom ones, and the
+/// commander validator — while FreeForAll, TwoHeadedGiant and Limited answer
+/// `true` with no per-card check at all. CR 407.3 binds all four: it is not a
+/// card-pool restriction a permissive format may waive, but a rule about
+/// whether this game is played for ante. Enforcing it in any one authority
+/// would let the others diverge — and the permissive route, which has no
+/// authority to enforce it in, is exactly where an ante card would slip
+/// through.
+///
+/// Scans `construction_deck_cards`, so the deck and the sideboard are covered
+/// by the same pass; CR 407.3 names both. Unknown names are skipped — they are
+/// reported separately, by name, and an unresolvable spelling is not evidence
+/// of an ante card.
+fn ante_deck_violations(
+    db: &CardDatabase,
+    request: &DeckCompatibilityRequest,
+    unknown_cards: &BTreeSet<String>,
+    format_rules: &FormatConfig,
+) -> BTreeSet<String> {
+    // CR 407.2: a format actually played for ante admits the class.
+    if crate::game::ante::policy_of(format_rules) == AntePolicy::Enabled {
+        return BTreeSet::new();
+    }
+    construction_deck_cards(request)
+        .filter(|name| !unknown_cards.contains(*name))
+        .filter(|name| deck_entry_uses_ante(db, name))
+        .map(|name| display_name(db, name))
+        .collect()
+}
+
+/// Whether a decklist entry resolves to a card of the CR 407.3 ante class.
+/// Reads the entry's resolved face, the same way `tiny_leaders_category_banned`'s
+/// call site does; an unknown name is not an ante card (unknown entries are
+/// reported separately, by name, before any legality verdict is formed).
+fn deck_entry_uses_ante(db: &CardDatabase, name: &str) -> bool {
+    db.get_face_by_name(name).is_some_and(face_uses_ante)
 }
 
 fn name_in_list(name: &str, list: &[&str]) -> bool {
@@ -2072,6 +2217,7 @@ fn evaluate_oathbreaker(
     unknown_cards: &BTreeSet<String>,
     format_rules: &FormatConfig,
 ) -> CompatibilityCheck {
+    let pairing = format_rules.format.commander_pairing();
     let mut reasons = Vec::new();
 
     if !unknown_cards.is_empty() {
@@ -2079,7 +2225,7 @@ fn evaluate_oathbreaker(
     }
 
     // Oathbreaker RC: exactly one Oathbreaker (legendary Planeswalker).
-    if request.commander.len() != 1 {
+    if !pairing.admits_count(request.commander.len()) {
         reasons.push(format!(
             "Oathbreaker decks require exactly 1 Oathbreaker (found {})",
             request.commander.len()
@@ -2140,21 +2286,7 @@ fn evaluate_oathbreaker(
     // so a composite-named ("Front // Back") Oathbreaker or signature spell
     // listed in the main deck by its front face is recognized as the same
     // physical card instead of being counted twice.
-    let commander_represented = commanders_represented_in_main(db, request);
-    let sig_represented = request
-        .signature_spell
-        .iter()
-        .filter(|n| request.main_deck.iter().any(|c| same_card(db, c, n)))
-        .count();
-    let total_cards = request.main_deck.len()
-        + (request
-            .commander
-            .len()
-            .saturating_sub(commander_represented))
-        + (request
-            .signature_spell
-            .len()
-            .saturating_sub(sig_represented));
+    let total_cards = deck_size_subject_count(format_rules.format.deck_size_subject(), db, request);
     if total_cards != 60 {
         reasons.push(format!(
             "Oathbreaker deck must have exactly 60 cards (found {total_cards})"
@@ -2255,10 +2387,10 @@ fn evaluate_momir(
         reasons.push(summarize_cards("Unknown cards", unknown_cards, 6));
     }
 
-    if request.main_deck.len() != 60 {
+    let total_cards = deck_size_subject_count(GameFormat::Momir.deck_size_subject(), db, request);
+    if total_cards != 60 {
         reasons.push(format!(
-            "Momir's Madness decks must have exactly 60 cards (found {})",
-            request.main_deck.len()
+            "Momir's Madness decks must have exactly 60 cards (found {total_cards})"
         ));
     }
 
@@ -2319,7 +2451,11 @@ fn evaluate_momir(
     if !request.sideboard.is_empty() {
         reasons.push("Momir's Madness does not use a sideboard".to_string());
     }
-    if !request.commander.is_empty() || !request.signature_spell.is_empty() {
+    if !GameFormat::Momir
+        .commander_pairing()
+        .admits_count(request.commander.len())
+        || !request.signature_spell.is_empty()
+    {
         reasons.push("Momir's Madness does not use command-zone cards".to_string());
     }
 
@@ -2471,7 +2607,7 @@ fn evaluate_selected_format_summary(
             db,
             request,
             &format_rules,
-            CardPoolAuthority::LegalityTable(LegalityFormat::Standard),
+            CardPoolAuthority::for_format(format),
             "Standard",
         ),
         GameFormat::Pioneer
@@ -2481,17 +2617,24 @@ fn evaluate_selected_format_summary(
         | GameFormat::Vintage
         | GameFormat::Historic
         | GameFormat::Timeless
-        | GameFormat::Pauper => quick_constructed_check(
+        | GameFormat::Pauper
+        | GameFormat::Freeform => quick_constructed_check(
             db,
             request,
             &format_rules,
-            CardPoolAuthority::LegalityTable(format.legality_format().unwrap()),
+            CardPoolAuthority::for_format(format),
             &format.label(),
         ),
         GameFormat::Commander => quick_commander_check(
             db,
             request,
             CommanderVariantRules::commander(),
+            &format_rules,
+        ),
+        GameFormat::FreeformCommander => quick_commander_check(
+            db,
+            request,
+            CommanderVariantRules::freeform_commander(),
             &format_rules,
         ),
         GameFormat::PauperCommander | GameFormat::DuelCommander => quick_commander_check(
@@ -2524,8 +2667,14 @@ fn evaluate_selected_format_summary(
         GameFormat::Brawl | GameFormat::HistoricBrawl => {
             quick_brawl_check(db, request, &format.label(), &format_rules)
         }
-        GameFormat::FreeForAll | GameFormat::TwoHeadedGiant | GameFormat::Limited => {
-            QuickCheckResult::compatible()
+        GameFormat::FreeForAll | GameFormat::TwoHeadedGiant => QuickCheckResult::compatible(),
+        GameFormat::Limited => {
+            let unknown_cards = collect_unknown_cards(db, request);
+            let check = evaluate_limited(&unknown_cards);
+            QuickCheckResult {
+                reason: check.reasons.into_iter().next(),
+                unknown_cards,
+            }
         }
         // Phase 1d: reachable for a `Resolved` Custom config (the early guard
         // above only answers "no opinion" for an unresolvable bare
@@ -2533,11 +2682,19 @@ fn evaluate_selected_format_summary(
         GameFormat::Custom(_) => quick_custom_format_check(db, request, &format_rules),
     };
 
-    (
-        Some(result.reason.is_none()),
-        result.reason.into_iter().collect(),
-        result.unknown_cards,
-    )
+    // CR 407.3, same cross-format rule the authoritative path applies — so the
+    // UI hint and the game-creation gate cannot disagree about an ante card.
+    let mut reasons: Vec<String> = result.reason.into_iter().collect();
+    let ante_cards = ante_deck_violations(db, request, &result.unknown_cards, &format_rules);
+    if !ante_cards.is_empty() {
+        reasons.push(summarize_cards(
+            "Can't be in a deck or sideboard unless the game is played for ante",
+            &ante_cards,
+            6,
+        ));
+    }
+
+    (Some(reasons.is_empty()), reasons, result.unknown_cards)
 }
 
 struct QuickCheckResult {
@@ -2575,18 +2732,19 @@ fn quick_constructed_check(
     pool: CardPoolAuthority<'_>,
     format_label: &str,
 ) -> QuickCheckResult {
-    if !request.commander.is_empty() {
+    let pairing = format_rules.format.commander_pairing();
+    if !pairing.admits_count(request.commander.len()) {
         return QuickCheckResult::incompatible(format!(
             "{format_label} decks do not use a commander slot"
         ));
     }
     // CR 100.5 / CR 903.5a: the format's own deck-size rule is authoritative —
     // never re-derive a hardcoded 60 by hand.
-    if !format_rules.deck_size.accepts(request.main_deck.len()) {
+    let total_cards = deck_size_subject_count(format_rules.format.deck_size_subject(), db, request);
+    if !format_rules.deck_size.accepts(total_cards) {
         return QuickCheckResult::incompatible(format!(
-            "{format_label} deck must have {} cards (found {})",
-            format_rules.deck_size.requirement_phrase(),
-            request.main_deck.len()
+            "{format_label} deck must have {} cards (found {total_cards})",
+            format_rules.deck_size.requirement_phrase()
         ));
     }
     match format_rules.sideboard_policy {
@@ -2662,10 +2820,11 @@ fn quick_commander_check(
     let legality_format = format_rules.format.legality_format();
     let format_label = format_rules.format.label();
     let expected = format_rules.deck_size;
+    let pairing = format_rules.format.commander_pairing();
     // CR 702.124g: at most two commanders. Pre-existing and unchanged by this
     // phase; named here so a later reader does not mistake draft-core's two
     // authorities for the complete set.
-    if request.commander.is_empty() || request.commander.len() > 2 {
+    if !pairing.admits_count(request.commander.len()) {
         return QuickCheckResult::incompatible(format!(
             "{format_label} decks require 1 or 2 commanders (found {})",
             request.commander.len()
@@ -2693,8 +2852,7 @@ fn quick_commander_check(
         return QuickCheckResult::incompatible(reason);
     }
 
-    let represented_in_main = commanders_represented_in_main(db, request);
-    let total_cards = request.main_deck.len() + (request.commander.len() - represented_in_main);
+    let total_cards = deck_size_subject_count(format_rules.format.deck_size_subject(), db, request);
     // CR 903.5a: the format's `DeckSizeRule` is the single authority for
     // min-vs-exact; this seam must not re-derive it with `!=`.
     if !expected.accepts(total_cards) {
@@ -2819,7 +2977,8 @@ fn quick_brawl_check(
     format_label: &str,
     format_rules: &FormatConfig,
 ) -> QuickCheckResult {
-    if request.commander.len() != 1 {
+    let pairing = format_rules.format.commander_pairing();
+    if !pairing.admits_count(request.commander.len()) {
         return QuickCheckResult::incompatible(format!(
             "{format_label} decks require exactly 1 commander (found {})",
             request.commander.len()
@@ -2895,7 +3054,7 @@ fn evaluate_selected_format(
                 request,
                 unknown_cards,
                 &format_rules,
-                CardPoolAuthority::LegalityTable(LegalityFormat::Standard),
+                CardPoolAuthority::for_format(format),
                 "Standard",
             );
             if !check.compatible {
@@ -2923,14 +3082,28 @@ fn evaluate_selected_format(
         | GameFormat::Vintage
         | GameFormat::Historic
         | GameFormat::Timeless
-        | GameFormat::Pauper => {
+        | GameFormat::Pauper
+        | GameFormat::Freeform => {
             let check = evaluate_constructed(
                 db,
                 request,
                 unknown_cards,
                 &format_rules,
-                CardPoolAuthority::LegalityTable(format.legality_format().unwrap()),
+                CardPoolAuthority::for_format(format),
                 &format.label(),
+            );
+            if !check.compatible {
+                reasons.extend(check.reasons);
+            }
+            check.compatible
+        }
+        GameFormat::FreeformCommander => {
+            let check = evaluate_commander_with_format(
+                db,
+                request,
+                unknown_cards,
+                CommanderVariantRules::freeform_commander(),
+                &format_rules,
             );
             if !check.compatible {
                 reasons.extend(check.reasons);
@@ -2963,7 +3136,7 @@ fn evaluate_selected_format(
                 db,
                 request,
                 unknown_cards,
-                format.legality_format().unwrap(),
+                CardPoolAuthority::for_format(format),
                 &format.label(),
                 &format_rules,
             );
@@ -3022,7 +3195,14 @@ fn evaluate_selected_format(
             }
             check.compatible
         }
-        GameFormat::FreeForAll | GameFormat::TwoHeadedGiant | GameFormat::Limited => true,
+        GameFormat::FreeForAll | GameFormat::TwoHeadedGiant => true,
+        GameFormat::Limited => {
+            let check = evaluate_limited(unknown_cards);
+            if !check.compatible {
+                reasons.extend(check.reasons);
+            }
+            check.compatible
+        }
         // Phase 1d: reachable for a `Resolved` Custom config (the early guard
         // above only fails closed for an unresolvable bare `Tag(Custom(_))`),
         // and delegates to the real evaluator.
@@ -3034,6 +3214,19 @@ fn evaluate_selected_format(
             check.compatible
         }
     };
+
+    // CR 407.3: ante cards are barred from decks and sideboards regardless of
+    // format — see `ante_deck_violations` for why this cannot live inside any
+    // one of the per-format arms above.
+    let ante_cards = ante_deck_violations(db, request, unknown_cards, &format_rules);
+    if !ante_cards.is_empty() {
+        compatible = false;
+        reasons.push(summarize_cards(
+            "Can't be in a deck or sideboard unless the game is played for ante",
+            &ante_cards,
+            6,
+        ));
+    }
 
     // CR 100.4 × MatchType::Bo3: BO3 requires a sideboard regardless of format.
     // `SideboardPolicy::Unlimited` formats (FreeForAll, TwoHeadedGiant) impose
@@ -3346,16 +3539,19 @@ fn same_card(db: &CardDatabase, left: &str, right: &str) -> bool {
     db.lookup_key(left) == db.lookup_key(right)
 }
 
-/// CR 903.5a: a commander is part of the 100, so a decklist that names it in
-/// both the command zone and the main deck describes ONE physical card. Counts
-/// how many command-zone entries are also present in the main deck, comparing
-/// resolved keys via `same_card` (CR 709.2 / CR 712.1 one-physical-card
-/// identity) so a composite/front-face spelling split is not mistaken for two
-/// distinct cards.
-fn commanders_represented_in_main(db: &CardDatabase, request: &DeckCompatibilityRequest) -> usize {
-    request
-        .commander
-        .iter()
+/// CR 903.5a / CR 709.2 / CR 712.1: how many entries of one command-zone slot
+/// are also in the main deck, compared by resolved card identity so a
+/// composite or front-face spelling is not mistaken for a second physical
+/// card. Slot-parameterised: `commanders_represented_in_main` is this with
+/// the commander slot, and Oathbreaker's signature-spell netting is this with
+/// the signature-spell slot instead of the inline copy it wrote before this
+/// phase.
+fn command_zone_entries_represented_in_main(
+    db: &CardDatabase,
+    request: &DeckCompatibilityRequest,
+    slot: &[String],
+) -> usize {
+    slot.iter()
         .filter(|name| {
             request
                 .main_deck
@@ -3363,6 +3559,45 @@ fn commanders_represented_in_main(db: &CardDatabase, request: &DeckCompatibility
                 .any(|card| same_card(db, card, name))
         })
         .count()
+}
+
+/// CR 903.5a: a commander is part of the 100, so a decklist that names it in
+/// both the command zone and the main deck describes ONE physical card.
+fn commanders_represented_in_main(db: &CardDatabase, request: &DeckCompatibilityRequest) -> usize {
+    command_zone_entries_represented_in_main(db, request, &request.commander)
+}
+
+/// The total card count `subject` measures for `request` — the single
+/// authority every deck-size site computes its count through. `saturating_sub`
+/// throughout: the subtrahend is produced by filtering the slot itself, so it
+/// is always `<= slot.len()` and no reachable input saturates: adopting the
+/// saturating form costs nothing and removes the question.
+fn deck_size_subject_count(
+    subject: DeckSizeSubject,
+    db: &CardDatabase,
+    request: &DeckCompatibilityRequest,
+) -> usize {
+    match subject {
+        DeckSizeSubject::MainDeck => request.main_deck.len(),
+        DeckSizeSubject::MainDeckAndCommanders => {
+            let represented = commanders_represented_in_main(db, request);
+            request.main_deck.len() + request.commander.len().saturating_sub(represented)
+        }
+        DeckSizeSubject::MainDeckAndCommandZone => {
+            let commander_represented = commanders_represented_in_main(db, request);
+            let signature_represented =
+                command_zone_entries_represented_in_main(db, request, &request.signature_spell);
+            request.main_deck.len()
+                + request
+                    .commander
+                    .len()
+                    .saturating_sub(commander_represented)
+                + request
+                    .signature_spell
+                    .len()
+                    .saturating_sub(signature_represented)
+        }
+    }
 }
 
 /// True when `name` denotes one of the deck's commanders under any spelling.
@@ -3991,6 +4226,73 @@ pub fn is_commander_eligible(face: &CardFace) -> bool {
     crate::database::synthesis::type_line_commander_eligible(face)
 }
 
+/// Commander eligibility for `GameFormat::FreeformCommander`:
+/// any card that can be CAST. A land cannot — CR 305.1 makes playing a land a
+/// special action rather than casting a spell, and CR 305.9 extends that to a
+/// card that is both a land and another type ("it can be played only as a land.
+/// It can't be cast as a spell"). CR 903.8 is why castability is the test at
+/// all: the commander tax is an additional cost on casting from the command
+/// zone, so a card that can never be cast from there has nothing to pay it.
+///
+/// A deliberate departure from CR 903.3, which this format does not apply.
+///
+/// Judges the face the decklist NAMES. `CardDatabase::get_face_by_name`
+/// resolves each face of a double-faced card under its own name, so a decklist
+/// naming the non-land face of such a card reaches a castable face and one
+/// naming the land face does not. That resolution is not this format's: it is
+/// how every commander-eligibility predicate here already behaves.
+///
+/// Every core type on the face must be castable, and the type list must be
+/// NONEMPTY: `Iterator::all` is vacuously `true` on an empty list, which
+/// would re-admit a face with no recognized `CoreType` at all (the fixture
+/// carries such faces — Vanguard/Avatar cards, whose CR 313 card type has no
+/// `CoreType` variant) as though it were castable.
+pub fn is_freeform_commander_eligible(face: &CardFace) -> bool {
+    let core_types = &face.card_type.core_types;
+    !core_types.is_empty()
+        && core_types
+            .iter()
+            .all(|core_type| core_type_can_be_cast(*core_type))
+}
+
+/// Whether a `CoreType` is ever CAST (as opposed to played, or put into the
+/// command zone some other way), independent of any specific card face.
+/// EXHAUSTIVE, deliberately, with no wildcard arm: a future `CoreType`
+/// variant must be classified here at compile time rather than silently
+/// admitted the way `is_freeform_commander_eligible`'s prior `Land`-only
+/// check admitted every other nontraditional type.
+fn core_type_can_be_cast(core_type: CoreType) -> bool {
+    match core_type {
+        CoreType::Artifact
+        | CoreType::Creature
+        | CoreType::Enchantment
+        | CoreType::Instant
+        | CoreType::Planeswalker
+        | CoreType::Sorcery
+        // CR 310.1: a battle card is cast.
+        | CoreType::Battle
+        // CR 308.1: a kindred (or legacy-errata'd tribal, CR 308.3) card
+        // follows the casting rules of its OTHER card type. That other type
+        // is a separate entry in the same face's `core_types` and is judged
+        // on its own arm, so this arm only has to avoid vetoing the `all()`
+        // check above by itself.
+        | CoreType::Kindred
+        | CoreType::Tribal => true,
+        // CR 305.1: a land is PLAYED, not cast. CR 305.9 extends this to a
+        // face that is a land and another type at once.
+        CoreType::Land => false,
+        // CR 108.2a: nontraditional card types, each of which its own CR
+        // section says explicitly "can't be cast": CR 309.2c (Dungeon),
+        // CR 311.2 (Plane), CR 312.2 (Phenomenon), CR 314.2 (Scheme),
+        // CR 315.3 (Conspiracy).
+        CoreType::Dungeon
+        | CoreType::Plane
+        | CoreType::Phenomenon
+        | CoreType::Scheme
+        | CoreType::Conspiracy => false,
+    }
+}
+
 fn is_pauper_commander_eligible(face: &CardFace) -> bool {
     use crate::types::card::Rarity;
 
@@ -4177,8 +4479,7 @@ mod tests {
 
     use crate::types::custom_format::{
         CombatDamageTiming, CommanderEligibilityRule, CustomFormatDef, CustomFormatId,
-        CustomFormatRules, LegacyRuleSet, LegendRuleScope, ManaBurnPolicy, PrintingFidelity,
-        ReprintPolicy, StructuralRules, WishOutsideGameScope,
+        CustomFormatRules, LegacyRuleSet, PrintingFidelity, ReprintPolicy, StructuralRules,
     };
     use crate::types::format::DeckSizeRule;
     use crate::types::keywords::PartnerType;
@@ -5342,6 +5643,88 @@ mod tests {
     }
 
     #[test]
+    fn slash_spellings_are_known_and_share_one_copy_count() {
+        let db_json = serde_json::json!({
+            "summon: choco/mog": {
+                "name": "Summon: Choco/Mog",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": [], "core_types": [], "subtypes": [] },
+                "power": null, "toughness": null, "loyalty": null, "defense": null,
+                "oracle_text": null, "non_ability_text": null, "flavor_name": null,
+                "keywords": [], "abilities": [], "triggers": [], "static_abilities": [], "replacements": [],
+                "color_override": null, "scryfall_oracle_id": null
+            },
+            "revival": {
+                "name": "Revival",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": [], "core_types": [], "subtypes": [] },
+                "power": null, "toughness": null, "loyalty": null, "defense": null,
+                "oracle_text": null, "non_ability_text": null, "flavor_name": null,
+                "keywords": [], "abilities": [], "triggers": [], "static_abilities": [], "replacements": [],
+                "color_override": null, "scryfall_oracle_id": null
+            },
+            "revenge": {
+                "name": "Revenge",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": [], "core_types": [], "subtypes": [] },
+                "power": null, "toughness": null, "loyalty": null, "defense": null,
+                "oracle_text": null, "non_ability_text": null, "flavor_name": null,
+                "keywords": [], "abilities": [], "triggers": [], "static_abilities": [], "replacements": [],
+                "color_override": null, "scryfall_oracle_id": null
+            },
+            // Supports the request's commander field so it does not itself
+            // register as unknown and pollute the assertion below.
+            "legal commander": {
+                "name": "Legal Commander",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": ["Legendary"], "core_types": ["Creature"], "subtypes": [] },
+                "power": null, "toughness": null, "loyalty": null, "defense": null,
+                "oracle_text": null, "non_ability_text": null, "flavor_name": null,
+                "keywords": [], "abilities": [], "triggers": [], "static_abilities": [], "replacements": [],
+                "color_override": null, "scryfall_oracle_id": null
+            }
+        })
+        .to_string();
+        let db = CardDatabase::from_json_str(&db_json).unwrap();
+
+        let mut main = expand("Summon: Choco/Mog", 3);
+        main.extend(expand("Summon: Choco // Mog", 2));
+        main.extend(expand("Revival/Revenge", 3));
+        main.extend(expand("Revival // Revenge", 2));
+        main.extend(expand("Summon: Choco", 1));
+        let request = DeckCompatibilityRequest {
+            main_deck: main,
+            sideboard: Vec::new(),
+            commander: vec!["Legal Commander".to_string()],
+            companion: Vec::new(),
+            planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
+            signature_spell: Vec::new(),
+            selected_format: None,
+            selected_match_type: None,
+            player_count: default_player_count(),
+            summary_only: false,
+            draft_set_codes: Vec::new(),
+        };
+
+        let unknown: Vec<String> = collect_unknown_cards(&db, &request).into_iter().collect();
+        assert_eq!(unknown, vec!["Summon: Choco".to_string()]);
+
+        let counts = combined_copy_counts(&db, &request, CommandZoneNetting::NetAgainstMainDeck);
+        assert_eq!(counts.get("summon: choco/mog"), Some(&5));
+        assert_eq!(counts.get("revival"), Some(&5));
+
+        let violations = copy_limit_violations(&db, &counts, DeckCopyLimit::UpTo(4));
+        assert!(violations.contains("Summon: Choco/Mog (5 copies)"));
+        assert!(violations.contains("Revival (5 copies)"));
+        assert_eq!(
+            violations.len(),
+            2,
+            "exactly these two names exceed the cap"
+        );
+    }
+
+    #[test]
     fn commander_accepts_nine_nazgul_copies() {
         let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
         let mut main = expand("Nazgul", 9);
@@ -6382,6 +6765,350 @@ mod tests {
     }
 
     #[test]
+    fn an_unresolved_custom_pool_refuses_rather_than_admits() {
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+        // `for_format`'s `DeclaredRules` arm, asserted rather than assumed
+        // unreachable — no production dispatch reaches it.
+        assert_eq!(
+            CardPoolAuthority::for_format(GameFormat::Custom(CustomFormatId(0)))
+                .status(&db, "Plains"),
+            None,
+            "an unresolved custom format must refuse every card, not admit one it bans"
+        );
+        // Paired positive reach-guard, mandatory: a `None` produced by a
+        // broken database is distinguishable from one produced by the
+        // fail-closed arm.
+        assert_eq!(
+            CardPoolAuthority::for_format(GameFormat::Standard).status(&db, "Plains"),
+            Some(LegalityStatus::Legal)
+        );
+    }
+
+    #[test]
+    fn the_brawl_quick_path_admits_exactly_one_commander() {
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+        let base = DeckCompatibilityRequest {
+            main_deck: expand("Plains", 59),
+            sideboard: Vec::new(),
+            commander: Vec::new(),
+            companion: Vec::new(),
+            planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
+            signature_spell: Vec::new(),
+            selected_format: Some(SelectedFormat::Tag(GameFormat::Brawl)),
+            selected_match_type: None,
+            player_count: default_player_count(),
+            summary_only: true,
+            draft_set_codes: Vec::new(),
+        };
+        const GUARD: &str = "Brawl decks require exactly 1 commander";
+
+        // Empty path: 0 commanders.
+        let zero = evaluate_deck_compatibility(&db, &base);
+        assert!(
+            zero.selected_format_reasons
+                .iter()
+                .any(|r| r.contains(GUARD) && r.contains("found 0")),
+            "0 commanders must be refused: {:?}",
+            zero.selected_format_reasons
+        );
+
+        let one = evaluate_deck_compatibility(
+            &db,
+            &DeckCompatibilityRequest {
+                commander: vec!["Legal Commander".to_string()],
+                ..base.clone()
+            },
+        );
+        assert!(
+            !one.selected_format_reasons
+                .iter()
+                .any(|r| r.contains(GUARD)),
+            "1 commander must be admitted: {:?}",
+            one.selected_format_reasons
+        );
+
+        let two = evaluate_deck_compatibility(
+            &db,
+            &DeckCompatibilityRequest {
+                commander: vec!["Legal Commander".to_string(), "Legal Commander".to_string()],
+                ..base.clone()
+            },
+        );
+        assert!(
+            two.selected_format_reasons
+                .iter()
+                .any(|r| r.contains(GUARD) && r.contains("found 2")),
+            "2 commanders must be refused: {:?}",
+            two.selected_format_reasons
+        );
+
+        // Over-count: 3.
+        let three = evaluate_deck_compatibility(
+            &db,
+            &DeckCompatibilityRequest {
+                commander: vec![
+                    "Legal Commander".to_string(),
+                    "Legal Commander".to_string(),
+                    "Legal Commander".to_string(),
+                ],
+                ..base
+            },
+        );
+        assert!(
+            three
+                .selected_format_reasons
+                .iter()
+                .any(|r| r.contains(GUARD) && r.contains("found 3")),
+            "3 commanders must be refused: {:?}",
+            three.selected_format_reasons
+        );
+    }
+
+    #[test]
+    fn momir_refuses_a_commander_without_a_signature_spell() {
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+        // No production path delivers the reverse fixture (a signature spell
+        // with the commander empty): both dispatch entries' signature-spell
+        // pre-guard refuses any non-Oathbreaker request carrying one, with a
+        // different message, before `evaluate_momir` ever runs.
+        let mut request = momir_request(momir_madness_deck());
+        request.commander = vec!["Legal Commander".to_string()];
+        let result = evaluate_deck_compatibility(&db, &request);
+        assert!(
+            result
+                .selected_format_reasons
+                .iter()
+                .any(|r| r.contains("Momir's Madness does not use command-zone cards")),
+            "a Momir deck carrying a commander must be refused: {:?}",
+            result.selected_format_reasons
+        );
+    }
+
+    #[test]
+    fn the_reference_columns_read_their_own_formats_pairing() {
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+        let base = DeckCompatibilityRequest {
+            main_deck: expand("Plains", 60),
+            sideboard: Vec::new(),
+            commander: Vec::new(),
+            companion: Vec::new(),
+            planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
+            signature_spell: Vec::new(),
+            selected_format: None,
+            selected_match_type: None,
+            player_count: default_player_count(),
+            summary_only: false,
+            draft_set_codes: Vec::new(),
+        };
+
+        // Fixture A — 0 commanders. Pins the Standard column to `NoCommander`
+        // against both other classes; its Commander-column presence is a
+        // reach-guard, not coverage (all three classes refuse 0).
+        let a = evaluate_deck_compatibility(&db, &base);
+        assert!(
+            !a.standard
+                .reasons
+                .iter()
+                .any(|r| r.contains("do not use a commander slot")),
+            "Standard column should admit 0 commanders: {:?}",
+            a.standard.reasons
+        );
+        assert!(
+            a.commander
+                .reasons
+                .iter()
+                .any(|r| r.contains("decks require 1 or 2 commanders")),
+            "Commander column should refuse 0 commanders: {:?}",
+            a.commander.reasons
+        );
+
+        // Fixture B — 2 commanders. Pins the Commander column to
+        // `PartnerFamilies` against both other classes.
+        let b = evaluate_deck_compatibility(
+            &db,
+            &DeckCompatibilityRequest {
+                commander: vec!["Legal Commander".to_string(), "Legal Commander".to_string()],
+                ..base
+            },
+        );
+        assert!(
+            b.standard
+                .reasons
+                .iter()
+                .any(|r| r.contains("Standard decks do not use a commander slot")),
+            "Standard column should refuse 2 commanders: {:?}",
+            b.standard.reasons
+        );
+        assert!(
+            !b.commander
+                .reasons
+                .iter()
+                .any(|r| r.contains("decks require 1 or 2 commanders")),
+            "Commander column should admit 2 commanders: {:?}",
+            b.commander.reasons
+        );
+    }
+
+    #[test]
+    fn deck_size_subject_count_reproduces_each_validators_arithmetic() {
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+
+        // (a) A `MainDeckAndCommanders` format whose commander is NOT in the
+        // main deck: `main.len() + 1`. This is the fixture that reds a
+        // subject swap — `MainDeck` returns `main.len()` on the same input.
+        let not_represented = DeckCompatibilityRequest {
+            main_deck: expand("Plains", 59),
+            commander: vec!["Legal Commander".to_string()],
+            ..Default::default()
+        };
+        assert_eq!(
+            deck_size_subject_count(
+                DeckSizeSubject::MainDeckAndCommanders,
+                &db,
+                &not_represented
+            ),
+            60
+        );
+        assert_eq!(
+            deck_size_subject_count(DeckSizeSubject::MainDeck, &db, &not_represented),
+            59,
+            "subject-swap mutation: MainDeck must disagree with MainDeckAndCommanders here"
+        );
+
+        // (b) The commander is also listed in the main deck: reds a dropped
+        // netting (`main.len() + 1` instead of `main.len()`).
+        let represented = DeckCompatibilityRequest {
+            main_deck: expand("Legal Commander", 60),
+            commander: vec!["Legal Commander".to_string()],
+            ..Default::default()
+        };
+        assert_eq!(
+            deck_size_subject_count(DeckSizeSubject::MainDeckAndCommanders, &db, &represented),
+            60
+        );
+
+        // (c) Oathbreaker with the signature spell also in the main deck:
+        // reds the second netting branch the same way.
+        let ob_db = dfc_oathbreaker_db();
+        let mut ob_main = vec!["Ob Front".to_string(), "Sig Front".to_string()];
+        ob_main.extend(expand("Mountain", 58));
+        let ob_represented = DeckCompatibilityRequest {
+            main_deck: ob_main,
+            commander: vec!["Ob Front".to_string()],
+            signature_spell: vec!["Sig Front".to_string()],
+            ..Default::default()
+        };
+        assert_eq!(
+            deck_size_subject_count(
+                DeckSizeSubject::MainDeckAndCommandZone,
+                &ob_db,
+                &ob_represented
+            ),
+            60
+        );
+
+        // (d) Empty command zone on a `MainDeckAndCommanders` format — the
+        // agreement boundary: `0 - 0`, production-reachable
+        // (`evaluate_commander_with_format`'s count guard is a
+        // push-and-continue, not a `return`). Pins that the helper adds no
+        // phantom entry at 0, not a `saturating_sub` branch — no reachable
+        // input ever saturates, because the subtrahend is produced by
+        // filtering the slot itself.
+        let empty_zone = DeckCompatibilityRequest {
+            main_deck: expand("Plains", 60),
+            ..Default::default()
+        };
+        assert_eq!(
+            deck_size_subject_count(DeckSizeSubject::MainDeckAndCommanders, &db, &empty_zone),
+            60
+        );
+        assert_eq!(
+            deck_size_subject_count(DeckSizeSubject::MainDeck, &db, &empty_zone),
+            60
+        );
+    }
+
+    #[test]
+    fn a_commander_listed_in_the_main_deck_is_counted_once() {
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+
+        // A Brawl deck whose commander is also listed in the main deck: the
+        // netted total must exactly meet the rule (60), not overcount to 61.
+        let mut brawl_main = vec!["Legal Commander".to_string()];
+        brawl_main.extend(expand("Plains", 59));
+        let brawl_request = DeckCompatibilityRequest {
+            main_deck: brawl_main,
+            commander: vec!["Legal Commander".to_string()],
+            selected_format: Some(SelectedFormat::Tag(GameFormat::Brawl)),
+            player_count: default_player_count(),
+            ..Default::default()
+        };
+        let brawl_result = evaluate_deck_compatibility(&db, &brawl_request);
+        assert!(
+            !brawl_result
+                .selected_format_reasons
+                .iter()
+                .any(|r| r.contains("deck must have")),
+            "netted Brawl total must not overcount: {:?}",
+            brawl_result.selected_format_reasons
+        );
+        // Paired positive control, one card short of the netted total.
+        let mut short_main = vec!["Legal Commander".to_string()];
+        short_main.extend(expand("Plains", 58));
+        let short_request = DeckCompatibilityRequest {
+            main_deck: short_main,
+            ..brawl_request.clone()
+        };
+        let short_result = evaluate_deck_compatibility(&db, &short_request);
+        assert!(
+            short_result
+                .selected_format_reasons
+                .iter()
+                .any(|r| r.contains("deck must have")),
+            "one card short of the netted total must still be refused: {:?}",
+            short_result.selected_format_reasons
+        );
+
+        // A Tiny Leaders deck whose single commander is also listed in the
+        // main deck: same netting, different validator and magnitude (50).
+        let mut tl_main = vec!["Legal Commander".to_string()];
+        tl_main.extend(expand("Plains", 49));
+        let tl_request = DeckCompatibilityRequest {
+            main_deck: tl_main,
+            commander: vec!["Legal Commander".to_string()],
+            selected_format: Some(SelectedFormat::Tag(GameFormat::TinyLeaders)),
+            player_count: default_player_count(),
+            ..Default::default()
+        };
+        let tl_result = evaluate_deck_compatibility(&db, &tl_request);
+        assert!(
+            !tl_result
+                .selected_format_reasons
+                .iter()
+                .any(|r| r.contains("50 main+commander cards")),
+            "netted Tiny Leaders total must not overcount: {:?}",
+            tl_result.selected_format_reasons
+        );
+        let mut tl_short_main = vec!["Legal Commander".to_string()];
+        tl_short_main.extend(expand("Plains", 48));
+        let tl_short_request = DeckCompatibilityRequest {
+            main_deck: tl_short_main,
+            ..tl_request.clone()
+        };
+        let tl_short_result = evaluate_deck_compatibility(&db, &tl_short_request);
+        assert!(
+            tl_short_result
+                .selected_format_reasons
+                .iter()
+                .any(|r| r.contains("50 main+commander cards")),
+            "one card short of the netted total must still be refused: {:?}",
+            tl_short_result.selected_format_reasons
+        );
+    }
+
+    #[test]
     fn brawl_valid_deck_passes() {
         let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
         let request = DeckCompatibilityRequest {
@@ -6795,6 +7522,249 @@ mod tests {
         // Non-Background enchantment is not a valid partner
         bg.card_type.subtypes = vec!["Aura".to_string()];
         assert!(!are_valid_partners(&commander, &bg, None));
+    }
+
+    /// In Freeform Commander, a
+    /// pairing is not decided by whether either card is legendary — a
+    /// deliberate departure from CR 702.124a's "two legendary cards",
+    /// matching the format's admission of a non-legendary solo commander.
+    /// The fixture is synthetic: the integration fixture carries no
+    /// non-legendary "Partner with" pair, and no printed Background is
+    /// non-legendary.
+    /// Every face here leaves `is_commander` absent — a real Background
+    /// carries `is_commander: true`, and `is_commander_eligible` returns early
+    /// on it, which would make Commander's control leg (3) pass for the wrong
+    /// reason (the flag, not CR 903.3's legendary-creature test).
+    fn freeform_commander_anything_goes_db_json() -> String {
+        fn face(
+            name: &str,
+            supertypes: &[&str],
+            core_types: &[&str],
+            subtypes: &[&str],
+            keywords: serde_json::Value,
+        ) -> Value {
+            serde_json::json!({
+                "name": name,
+                "mana_cost": { "type": "NoCost" },
+                "card_type": {
+                    "supertypes": supertypes,
+                    "core_types": core_types,
+                    "subtypes": subtypes
+                },
+                "power": if core_types.contains(&"Creature") { Value::String("1".to_string()) } else { Value::Null },
+                "toughness": if core_types.contains(&"Creature") { Value::String("1".to_string()) } else { Value::Null },
+                "loyalty": null, "defense": null,
+                "oracle_text": null, "non_ability_text": null, "flavor_name": null,
+                "keywords": keywords,
+                "abilities": [], "triggers": [], "static_abilities": [], "replacements": [],
+                "color_override": null, "scryfall_oracle_id": null, "legalities": {}
+            })
+        }
+        let mut cards = Map::new();
+        // Pair (1): two NON-LEGENDARY creatures, each "Partner with" the other.
+        cards.insert(
+            "test partner alpha".to_string(),
+            face(
+                "Test Partner Alpha",
+                &[],
+                &["Creature"],
+                &["Human"],
+                serde_json::json!([{ "Partner": { "type": "With", "data": "Test Partner Beta" } }]),
+            ),
+        );
+        cards.insert(
+            "test partner beta".to_string(),
+            face(
+                "Test Partner Beta",
+                &[],
+                &["Creature"],
+                &["Human"],
+                serde_json::json!([{ "Partner": { "type": "With", "data": "Test Partner Alpha" } }]),
+            ),
+        );
+        // Pair (2): a legendary Choose-a-Background commander + a NON-LEGENDARY
+        // Background enchantment.
+        cards.insert(
+            "test background commander".to_string(),
+            face(
+                "Test Background Commander",
+                &["Legendary"],
+                &["Creature"],
+                &["Human"],
+                serde_json::json!([{ "Partner": { "type": "ChooseABackground" } }]),
+            ),
+        );
+        cards.insert(
+            "test non-legendary background".to_string(),
+            face(
+                "Test Non-Legendary Background",
+                &[],
+                &["Enchantment"],
+                &["Background"],
+                serde_json::json!([]),
+            ),
+        );
+        // Selectivity control (4): a NON-Background, non-partner card.
+        cards.insert(
+            "test generic artifact".to_string(),
+            face(
+                "Test Generic Artifact",
+                &[],
+                &["Artifact"],
+                &[],
+                serde_json::json!([]),
+            ),
+        );
+        // Format-scoping control (3): padding so Commander's exact-100 deck
+        // size check passes (CR 903.5b's basic-land exemption).
+        cards.insert(
+            "test wastes".to_string(),
+            face(
+                "Test Wastes",
+                &["Basic"],
+                &["Land"],
+                &["Wastes"],
+                serde_json::json!([]),
+            ),
+        );
+        Value::Object(cards).to_string()
+    }
+
+    /// Pins the Freeform Commander pairing rule directly. This format declares
+    /// no partner grant, and without one pairing never reads whether either
+    /// is legendary.
+    #[test]
+    fn freeform_commander_admits_non_legendary_partner_pairs() {
+        let db = CardDatabase::from_json_str(&freeform_commander_anything_goes_db_json()).unwrap();
+        let wastes_98 = expand("Test Wastes", 98);
+
+        // (1) ADMIT: two non-legendary creatures, each "Partner with" the other.
+        let pair_1 = vec![
+            "Test Partner Alpha".to_string(),
+            "Test Partner Beta".to_string(),
+        ];
+        // (2) ADMIT: legendary Choose-a-Background commander + non-legendary Background.
+        let pair_2 = vec![
+            "Test Background Commander".to_string(),
+            "Test Non-Legendary Background".to_string(),
+        ];
+
+        for (label, pair) in [("pair 1", &pair_1), ("pair 2", &pair_2)] {
+            for summary_only in [false, true] {
+                let request = DeckCompatibilityRequest {
+                    main_deck: Vec::new(),
+                    commander: pair.clone(),
+                    selected_format: Some(SelectedFormat::Tag(GameFormat::FreeformCommander)),
+                    summary_only,
+                    ..DeckCompatibilityRequest::default()
+                };
+                let result = evaluate_deck_compatibility(&db, &request);
+                assert_eq!(
+                    result.selected_format_compatible,
+                    Some(true),
+                    "{label} summary_only={summary_only}: {:?}",
+                    result.selected_format_reasons
+                );
+            }
+
+            let full = validate_name_deck_for_format_full(
+                &db,
+                &[],
+                &[],
+                pair,
+                &[],
+                &[],
+                &[],
+                &[],
+                &[],
+                &FormatConfig::freeform_commander(),
+                None,
+                2,
+            );
+            assert_eq!(full, Ok(()), "{label} full leg");
+        }
+
+        // (3) FORMAT-SCOPING CONTROL: Commander refuses both pairs, but at
+        // ELIGIBILITY (a non-legendary card cannot be a commander at all),
+        // not at pairing — proving admission is THIS FORMAT's rule, not that
+        // the pairing check itself is selective. Padded to a 100-card
+        // Commander deck (`quick_commander_check`, the summary leg, checks
+        // deck size before eligibility on its first-failure return). Uses
+        // the full leg, whose reasons this control actually inspects.
+        for pair in [&pair_1, &pair_2] {
+            let full = validate_name_deck_for_format_full(
+                &db,
+                &wastes_98,
+                &[],
+                pair,
+                &[],
+                &[],
+                &[],
+                &[],
+                &[],
+                &FormatConfig::commander(),
+                None,
+                2,
+            );
+            let Err(reasons) = full else {
+                panic!("expected Commander to refuse {pair:?}, got Ok(())");
+            };
+            // Membership, not an exact list: synthetic cards also draw a
+            // "Not Commander legal" reason from the empty `legalities` map,
+            // which is not what this control is pinning.
+            assert!(
+                reasons
+                    .iter()
+                    .any(|r| r.contains("must be legendary creatures")),
+                "{pair:?}: {reasons:?}"
+            );
+        }
+
+        // (4) SELECTIVITY CONTROL: the Choose-a-Background commander refuses
+        // pairing with a card that is neither Background nor a partner —
+        // "anything goes" did not become "any two cards".
+        let pair_4 = vec![
+            "Test Background Commander".to_string(),
+            "Test Generic Artifact".to_string(),
+        ];
+        for summary_only in [false, true] {
+            let request = DeckCompatibilityRequest {
+                main_deck: Vec::new(),
+                commander: pair_4.clone(),
+                selected_format: Some(SelectedFormat::Tag(GameFormat::FreeformCommander)),
+                summary_only,
+                ..DeckCompatibilityRequest::default()
+            };
+            let result = evaluate_deck_compatibility(&db, &request);
+            assert_eq!(
+                result.selected_format_compatible,
+                Some(false),
+                "pair 4 summary_only={summary_only}: {:?}",
+                result.selected_format_reasons
+            );
+        }
+        let full_4 = validate_name_deck_for_format_full(
+            &db,
+            &[],
+            &[],
+            &pair_4,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &FormatConfig::freeform_commander(),
+            None,
+            2,
+        );
+        assert_eq!(
+            full_4,
+            Err(vec![
+                "Invalid partner pairing: Test Background Commander and Test Generic Artifact do \
+                 not have compatible partner keywords"
+                    .to_string()
+            ])
+        );
     }
 
     #[test]
@@ -9232,6 +10202,7 @@ mod tests {
             },
             legality: LegalityRules {
                 legal_sets: None,
+                legal_cards: Vec::new(),
                 banned: Vec::new(),
                 restricted: Vec::new(),
                 legacy: LegacyRuleSet::default(),
@@ -9313,6 +10284,44 @@ mod tests {
         Value::Object(cards).to_string()
     }
 
+    /// `legal_cards` is UNIONED with the set check, never a substitute for it,
+    /// and never an override of `banned`/`restricted`.
+    ///
+    /// The real case: Old School 95 names Mana Crypt legal AND restricts it.
+    /// Its only era printing is in no legal set, so without the union the
+    /// restriction would name a card that could never reach a deck — a dead
+    /// list entry rather than a one-copy limit.
+    #[test]
+    fn declared_pool_unions_named_cards_with_the_set_check() {
+        let db = CardDatabase::from_json_str(&custom_pool_db_json()).unwrap();
+        let rules = LegalityRules {
+            legal_sets: Some(vec![SetCode("MH3".to_string())]),
+            legal_cards: vec!["Out Of Pool Card".to_string()],
+            banned: Vec::new(),
+            restricted: vec!["Out Of Pool Card".to_string()],
+            legacy: LegacyRuleSet::default(),
+        };
+        let pool = DeclaredPool::resolve(&db, &rules);
+
+        // Named but printed only outside `legal_sets`: in the pool, and the
+        // restricted list still applies to it. Both halves matter — `Legal`
+        // here would mean the union skipped the later lists.
+        assert_eq!(
+            pool.status(&db, "Out Of Pool Card"),
+            Some(LegalityStatus::Restricted)
+        );
+
+        // Paired controls on the SAME pool: the set check still admits what it
+        // always did, and a card that is neither printed in a legal set nor
+        // named is still absent. Without these, a `legal_cards` that admitted
+        // everything would pass the assertion above.
+        assert_eq!(
+            pool.status(&db, "In Pool Card"),
+            Some(LegalityStatus::Legal)
+        );
+        assert_eq!(pool.status(&db, "No Printings Card"), None);
+    }
+
     /// Every non-negative pool assertion here is paired with a positive on the
     /// SAME `DeclaredPool` (same `rules` value), so a `printed_in_any_set`
     /// that always returned `false` would fail the positives instead of
@@ -9326,6 +10335,7 @@ mod tests {
         // rules-side direction.
         let rules = LegalityRules {
             legal_sets: Some(vec![SetCode("mh3".to_string())]),
+            legal_cards: Vec::new(),
             banned: Vec::new(),
             restricted: Vec::new(),
             legacy: LegacyRuleSet::default(),
@@ -9357,6 +10367,354 @@ mod tests {
         assert_eq!(pool.status(&db, "No Printings Card"), None);
     }
 
+    /// CR 407.3: the ante class is identified by the cards' own printed text,
+    /// so this fixture gives two of them the templated clause and withholds it
+    /// from the controls. All four cards are printed in sets Swedish Old
+    /// School declares legal, so pool membership never confounds the verdict.
+    fn ante_db_json() -> String {
+        let mut cards = serde_json::Map::new();
+        let ante_text = "Remove this card from your deck before playing if you're not playing for \
+                         ante.";
+        for (key, name, printing, oracle_text) in [
+            // On the format's restricted list AND an ante card.
+            (
+                "contract from below",
+                "Contract from Below",
+                "LEA",
+                Some(ante_text),
+            ),
+            // An ante card the format's own lists never mention.
+            ("jeweled bird", "Jeweled Bird", "ARN", Some(ante_text)),
+            // Restricted, not ante — the paired control that keeps the
+            // restricted verdict reachable.
+            ("black lotus", "Black Lotus", "LEA", None),
+            // In pool, on no list, not ante.
+            ("savannah lions", "Savannah Lions", "LEA", None),
+        ] {
+            let mut card = card_json_with_printings(name, &[printing]);
+            card["oracle_text"] = match oracle_text {
+                Some(text) => Value::String(text.to_string()),
+                None => Value::Null,
+            };
+            cards.insert(key.to_string(), card);
+        }
+        // Basic land, printed in a Swedish-legal set, so the pipeline tests
+        // below can build a real 60-card deck: `deck_with_copies`/
+        // `legal_60_main` pad with Plains, and the CR 100.2a basic-land
+        // exemption keeps 56 copies under the format's 4-copy ceiling.
+        let mut plains = card_json_with_printings("Plains", &["LEA"]);
+        plains["card_type"] = serde_json::json!({
+            "supertypes": ["Basic"],
+            "core_types": ["Land"],
+            "subtypes": ["Plains"]
+        });
+        cards.insert("plains".to_string(), plains);
+        Value::Object(cards).to_string()
+    }
+
+    /// `DeclaredPool` answers ONLY the format's own declared card pool. CR 407.3
+    /// is not part of that — it is applied once for every format by
+    /// `ante_deck_violations` — so an ante card gets whatever verdict the
+    /// preset's own lists give it here, and nothing more. Pinning that keeps a
+    /// future change from quietly reintroducing the rule in this authority,
+    /// where the permissive formats could never see it.
+    #[test]
+    fn declared_pool_judges_only_the_declared_lists_not_the_ante_rule() {
+        let db = CardDatabase::from_json_str(&ante_db_json()).unwrap();
+        let rules = crate::types::custom_format::swedish_old_school()
+            .rules
+            .legality;
+        let pool = DeclaredPool::resolve(&db, &rules);
+
+        // Restricted AND an ante card: `Restricted` is the pool's honest
+        // answer. The deck gate rejects it outright, one layer up.
+        assert_eq!(
+            pool.status(&db, "Contract from Below"),
+            Some(LegalityStatus::Restricted)
+        );
+
+        // An ante card the preset's lists never mention is simply legal AS FAR
+        // AS THE POOL IS CONCERNED — `validate_deck_for_format` is what keeps it
+        // out of a deck.
+        assert_eq!(
+            pool.status(&db, "Jeweled Bird"),
+            Some(LegalityStatus::Legal)
+        );
+
+        // Paired controls on the same pool value.
+        assert_eq!(
+            pool.status(&db, "Black Lotus"),
+            Some(LegalityStatus::Restricted)
+        );
+        assert_eq!(
+            pool.status(&db, "Savannah Lions"),
+            Some(LegalityStatus::Legal)
+        );
+    }
+
+    /// CR 407.3 must reach the SUMMARY dispatch too, not only the
+    /// authoritative one.
+    ///
+    /// `evaluate_selected_format_summary` carries its own copy of the check,
+    /// with a comment promising the UI hint cannot disagree with the
+    /// game-creation gate about an ante card. Nothing tested that promise:
+    /// every other ante test drives `validate_deck_for_format`, and
+    /// `summary_only` defaults to `false`, so deleting that block left the
+    /// whole suite green while the deck builder silently showed a deck as
+    /// legal that game creation would then refuse.
+    ///
+    /// Loops the flag rather than testing the summary path alone, matching
+    /// `commander_listed_by_composite_and_front_name_is_one_card` — the two
+    /// verdicts agreeing is the property worth pinning, and asserting the
+    /// summary result in isolation would not catch the two drifting apart.
+    #[test]
+    fn both_dispatches_agree_that_an_ante_card_is_illegal() {
+        let db = CardDatabase::from_json_str(&ante_db_json()).unwrap();
+        let config = FormatConfig::for_custom_rules(
+            &crate::types::custom_format::swedish_old_school().rules,
+        );
+
+        for summary_only in [false, true] {
+            // Paired control FIRST, on the same config and flag: a legal deck
+            // is accepted. The summary path answers `None` ("no opinion") for
+            // several shapes, and a `None` would satisfy neither assertion
+            // below — this proves the path is actually forming a verdict
+            // rather than declining to.
+            let legal = DeckCompatibilityRequest {
+                main_deck: expand("Plains", 60),
+                selected_format: Some(SelectedFormat::Resolved(Box::new(config.clone()))),
+                summary_only,
+                player_count: default_player_count(),
+                ..Default::default()
+            };
+            assert_eq!(
+                evaluate_deck_compatibility(&db, &legal).selected_format_compatible,
+                Some(true),
+                "summary_only={summary_only}: a clean deck must be accepted"
+            );
+
+            let with_ante = DeckCompatibilityRequest {
+                main_deck: legal_60_main("Jeweled Bird"),
+                selected_format: Some(SelectedFormat::Resolved(Box::new(config.clone()))),
+                summary_only,
+                player_count: default_player_count(),
+                ..Default::default()
+            };
+            let result = evaluate_deck_compatibility(&db, &with_ante);
+            assert_eq!(
+                result.selected_format_compatible,
+                Some(false),
+                "summary_only={summary_only}: CR 407.3 must reject the deck on BOTH dispatches, \
+                 got reasons {:?}",
+                result.selected_format_reasons
+            );
+            assert!(
+                result
+                    .selected_format_reasons
+                    .iter()
+                    .any(|reason| reason.contains("Jeweled Bird")),
+                "summary_only={summary_only}: the rejection must name the ante card, got {:?}",
+                result.selected_format_reasons
+            );
+        }
+    }
+
+    /// CR 407.3 across the routes that decide deck admission by DIFFERENT
+    /// authorities: permissive formats with no card-pool check at all
+    /// (FreeForAll / TwoHeadedGiant answer `true` unconditionally) and a custom
+    /// format on its own `DeclaredPool`. They must agree, which is the whole
+    /// reason the rule sits at the dispatch seam rather than inside one
+    /// authority — the permissive routes have no authority to put it in.
+    ///
+    /// The `LegalityTable` route is deliberately absent: an ante card is
+    /// already `NotLegal` in every sanctioned format's table, so a built-in
+    /// constructed format would reject this deck with or without CR 407.3 and
+    /// prove nothing. The permissive routes are where the rule is load-bearing.
+    #[test]
+    fn every_deck_admission_route_rejects_an_ante_card() {
+        let db = CardDatabase::from_json_str(&ante_db_json()).unwrap();
+
+        for format in [
+            // The routes with no card-pool authority to hide the rule in — the
+            // ones that would silently admit an ante card if CR 407.3 lived in
+            // `CardPoolAuthority`.
+            FormatConfig::free_for_all(),
+            FormatConfig::two_headed_giant(),
+            // DeclaredPool route, for contrast: a format that DOES consult a
+            // card pool must reach the same verdict by the same rule.
+            FormatConfig::for_custom_rules(
+                &crate::types::custom_format::swedish_old_school().rules,
+            ),
+        ] {
+            let label = format.format.label();
+            let request = DeckCompatibilityRequest {
+                main_deck: legal_60_main("Jeweled Bird"),
+                selected_format: Some(SelectedFormat::Resolved(Box::new(format.clone()))),
+                player_count: default_player_count(),
+                ..Default::default()
+            };
+            let Err(reasons) = validate_deck_for_format(&db, &request) else {
+                panic!("{label} must reject an ante card (CR 407.3)");
+            };
+            assert!(
+                reasons.iter().any(|reason| reason.contains("Jeweled Bird")),
+                "{label}: the rejection must name the ante card, got {reasons:?}"
+            );
+
+            // Same format, same deck shape, no ante card: accepted. Without
+            // this the loop would pass against a validator that rejected
+            // everything — and the permissive formats in particular accept
+            // essentially any deck, so a spurious rejection there would
+            // otherwise be invisible.
+            let control = DeckCompatibilityRequest {
+                main_deck: expand("Plains", 60),
+                selected_format: Some(SelectedFormat::Resolved(Box::new(format))),
+                player_count: default_player_count(),
+                ..Default::default()
+            };
+            assert!(
+                validate_deck_for_format(&db, &control).is_ok(),
+                "{label}: the same deck without the ante card must be accepted"
+            );
+        }
+    }
+
+    /// CR 407.3 through the ACTUAL admission route, not the private helper:
+    /// `FormatConfig::for_custom_rules` → `SelectedFormat::Resolved` →
+    /// `validate_deck_for_format` → `evaluate_custom_format` →
+    /// `custom_format_pool` → `DeclaredPool`. The sibling test above proves the
+    /// pure function; this proves the wiring that reaches it in production, so
+    /// a future refactor that stopped calling it would fail here.
+    ///
+    /// **Both halves of CR 407.3's boundary — "their decks or sideboards".**
+    /// The sideboard reaches the check only because `construction_deck_cards`
+    /// chains it; a main-deck-only regression would not notice if that stopped,
+    /// and the sideboard is exactly where a player would try to hide an ante
+    /// card. Uses `swedish_old_school()`'s real rules rather than a synthetic
+    /// config, since the preset is what ships.
+    #[test]
+    fn validate_deck_for_format_rejects_ante_cards_in_deck_and_sideboard() {
+        let db = CardDatabase::from_json_str(&ante_db_json()).unwrap();
+        let config = FormatConfig::for_custom_rules(
+            &crate::types::custom_format::swedish_old_school().rules,
+        );
+
+        let request_with = |main: Vec<String>, sideboard: Vec<String>| DeckCompatibilityRequest {
+            main_deck: main,
+            sideboard,
+            selected_format: Some(SelectedFormat::Resolved(Box::new(config.clone()))),
+            player_count: default_player_count(),
+            ..Default::default()
+        };
+
+        // Paired positive control on the SAME config: a legal 60-card deck with
+        // a legal sideboard is ACCEPTED. Without it, both rejections below
+        // would still pass against a validator that rejected every deck for
+        // some unrelated reason (deck size, pool membership, copy limit).
+        assert!(
+            validate_deck_for_format(&db, &request_with(expand("Plains", 60), Vec::new())).is_ok(),
+            "a 60-card Swedish-legal deck must be accepted, or the rejections below prove nothing"
+        );
+        assert!(
+            validate_deck_for_format(
+                &db,
+                &request_with(expand("Plains", 60), expand("Savannah Lions", 4))
+            )
+            .is_ok(),
+            "a legal sideboard must be accepted"
+        );
+
+        // CR 407.3, main deck.
+        let in_deck = validate_deck_for_format(
+            &db,
+            &request_with(legal_60_main("Jeweled Bird"), Vec::new()),
+        )
+        .expect_err("an ante card in the main deck must be rejected end-to-end");
+        assert!(
+            in_deck.iter().any(|reason| reason.contains("Jeweled Bird")),
+            "the rejection must name the offending card, got: {in_deck:?}"
+        );
+
+        // CR 407.3, sideboard — the half a main-deck-only test would miss.
+        let in_sideboard = validate_deck_for_format(
+            &db,
+            &request_with(expand("Plains", 60), expand("Jeweled Bird", 1)),
+        )
+        .expect_err("an ante card in the sideboard must be rejected end-to-end (CR 407.3)");
+        assert!(
+            in_sideboard
+                .iter()
+                .any(|reason| reason.contains("Jeweled Bird")),
+            "the sideboard rejection must name the offending card, got: {in_sideboard:?}"
+        );
+
+        // An ante card that is ALSO on the restricted list is rejected
+        // outright, not downgraded to "one copy is fine" — the ordering inside
+        // `DeclaredPool::status`, observed from outside it. Exactly ONE copy,
+        // which the restricted rule alone would permit: at four copies this
+        // would be rejected for the copy limit whether or not the ante rule
+        // exists, and would prove nothing about the ordering.
+        let restricted_ante = validate_deck_for_format(
+            &db,
+            &request_with(deck_with_copies("Contract from Below", 1, 60), Vec::new()),
+        )
+        .expect_err(
+            "one copy of a restricted ante card is legal under the restricted rule alone, so \
+             rejecting it is attributable to CR 407.3",
+        );
+        assert!(
+            restricted_ante
+                .iter()
+                .any(|reason| reason.contains("Contract from Below")),
+            "got: {restricted_ante:?}"
+        );
+    }
+
+    /// CR 407.2: playing for ante makes the class legal again.
+    ///
+    /// Pinned at `ante_deck_violations` rather than end-to-end, and the reason
+    /// is worth recording: `AntePolicy::Enabled` cannot reach deck evaluation
+    /// at all today, because `custom_format_pool`'s legacy-axis gate rejects
+    /// the whole format first — declaring an ante zone the engine does not
+    /// implement is refused before any card is looked at. An end-to-end
+    /// assertion here would therefore be testing the gate, not this rule. When
+    /// `LegacyAxis::Ante` joins `IMPLEMENTED_LEGACY_AXES`, the deck half is
+    /// already correct and this test is what says so.
+    #[test]
+    fn ante_deck_violations_admit_the_class_when_playing_for_ante() {
+        let db = CardDatabase::from_json_str(&ante_db_json()).unwrap();
+        let request = DeckCompatibilityRequest {
+            main_deck: legal_60_main("Jeweled Bird"),
+            sideboard: expand("Jeweled Bird", 1),
+            ..Default::default()
+        };
+
+        let mut for_ante = crate::types::custom_format::swedish_old_school().rules;
+        for_ante.legality.legacy.ante = AntePolicy::Enabled;
+        assert!(
+            ante_deck_violations(
+                &db,
+                &request,
+                &BTreeSet::new(),
+                &FormatConfig::for_custom_rules(&for_ante),
+            )
+            .is_empty(),
+            "CR 407.2: a format played for ante admits the class"
+        );
+
+        // Paired control on the SAME request: the default policy flags exactly
+        // that card, so the emptiness above is the policy taking effect and not
+        // a request the scan never looked at.
+        let excluded = FormatConfig::for_custom_rules(
+            &crate::types::custom_format::swedish_old_school().rules,
+        );
+        assert!(
+            ante_deck_violations(&db, &request, &BTreeSet::new(), &excluded)
+                .contains("Jeweled Bird"),
+            "the same deck under the default Excluded policy must flag the ante card"
+        );
+    }
+
     /// CR 201.3b: a banned/restricted entry naming a split/DFC's whole-card
     /// identity ("Fire // Ice") must match a decklist naming just one face
     /// ("Fire"), and banned beats restricted when a name (implausibly)
@@ -9366,6 +10724,7 @@ mod tests {
         let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
         let rules = LegalityRules {
             legal_sets: None,
+            legal_cards: Vec::new(),
             banned: vec!["Legal Standard".to_string()],
             restricted: vec!["Legal Standard".to_string(), "Not Standard".to_string()],
             legacy: LegacyRuleSet::default(),
@@ -9579,35 +10938,31 @@ mod tests {
     #[test]
     fn custom_format_rejects_every_undeclared_legacy_axis() {
         let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
-        // Loops over every axis NOT in `IMPLEMENTED_LEGACY_AXES` — currently
-        // all four, since that list is empty; a future phase populating it
-        // narrows this loop automatically (each entry is still exercised
-        // above by `passes_legacy_axis_gate`'s own direct assertion, so a
-        // freshly-implemented axis fails loudly here instead of silently
-        // dropping out).
+        // Loops over every axis NOT in `IMPLEMENTED_LEGACY_AXES`; each phase
+        // that implements one narrows this loop automatically. Mana burn left
+        // in Phase 2b, the Wish and legend-rule scopes in Phase 2cd, so what
+        // remains is combat-damage timing and ante — and both are still
+        // exercised above by `passes_legacy_axis_gate`'s own direct assertion,
+        // so a freshly-implemented axis fails loudly here rather than silently
+        // dropping out of coverage.
         let non_default_rulesets = [
-            LegacyRuleSet {
-                mana_burn: ManaBurnPolicy::Obsolete,
-                ..LegacyRuleSet::default()
-            },
             LegacyRuleSet {
                 damage_timing: CombatDamageTiming::OnStack,
                 ..LegacyRuleSet::default()
             },
+            // CR 407.2/407.4: only `Enabled` is a declared axis — it promises
+            // an ante zone and the ante action. The default `Excluded` is
+            // enforced (CR 407.3) and so is deliberately NOT gated, which is
+            // why it does not appear in this list.
             LegacyRuleSet {
-                wish_scope: WishOutsideGameScope::PreM10ReachesExile,
-                ..LegacyRuleSet::default()
-            },
-            LegacyRuleSet {
-                legend_rule_scope: LegendRuleScope::PreM14AnyController,
+                ante: AntePolicy::Enabled,
                 ..LegacyRuleSet::default()
             },
         ];
         for legacy in non_default_rulesets {
             assert!(
                 !passes_legacy_axis_gate(&legacy),
-                "IMPLEMENTED_LEGACY_AXES is empty, so every non-default axis must fail the \
-                 gate: {legacy:?}"
+                "an axis outside IMPLEMENTED_LEGACY_AXES must fail the gate: {legacy:?}"
             );
             let mut rules = base_custom_rules(DeckSizeRule::Minimum(60), DeckCopyLimit::Unlimited);
             rules.legality.legacy = legacy;
@@ -9675,7 +11030,9 @@ mod tests {
 
         let mut legacy_rules =
             base_custom_rules(DeckSizeRule::Minimum(60), DeckCopyLimit::Unlimited);
-        legacy_rules.legality.legacy.mana_burn = ManaBurnPolicy::Obsolete;
+        // Damage timing, not mana burn: Phase 2b implemented mana burn, so a
+        // mana-burn config is no longer rejected here.
+        legacy_rules.legality.legacy.damage_timing = CombatDamageTiming::OnStack;
         let legacy_config = FormatConfig::for_custom_rules(&legacy_rules);
         let legacy_request = DeckCompatibilityRequest {
             main_deck: expand("Plains", 60),

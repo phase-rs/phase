@@ -3411,7 +3411,9 @@ mod tests {
                     count,
                     QuantityExpr::Ref {
                         qty: QuantityRef::TargetZoneCardCount {
-                            zone: ZoneRef::Hand
+                            zone: ZoneRef::Hand,
+                            scope: ControllerRef::TargetOpponent,
+                            binding: crate::types::ability::CountBinding::Explicit,
                         }
                     },
                 );
@@ -3432,7 +3434,7 @@ mod tests {
     /// — generalized printing variant. Routes to `TargetFilter::Player`.
     #[test]
     fn add_mana_for_each_card_in_target_players_hand() {
-        use crate::types::ability::{TargetFilter, ZoneRef};
+        use crate::types::ability::{ControllerRef, TargetFilter, ZoneRef};
         let effect = try_parse_add_mana_effect("Add {U} for each card in target player's hand.")
             .expect("target-player variant must parse");
         let Effect::Mana {
@@ -3448,7 +3450,9 @@ mod tests {
             count,
             QuantityExpr::Ref {
                 qty: QuantityRef::TargetZoneCardCount {
-                    zone: ZoneRef::Hand
+                    zone: ZoneRef::Hand,
+                    scope: ControllerRef::TargetPlayer,
+                    binding: crate::types::ability::CountBinding::Explicit,
                 }
             },
         );

@@ -142,7 +142,9 @@
       "distinctColorIdentity": "Posto {{seat}} — condivide un'identità di colore con un altro posto.",
       "distinctCommander": "Posto {{seat}} — condivide un comandante con un altro posto."
     },
-    "podPreviewCount": "{{n}} mazzi corrispondono alle impostazioni attuali del pod"
+    "podPreviewCount": "{{n}} mazzi corrispondono alle impostazioni attuali del pod",
+    "brain": "Controllato da",
+    "brainEngine": "IA del motore"
   },
   "gameProvider": {
     "podSelectionRefused": {

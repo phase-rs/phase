@@ -10,7 +10,13 @@ export type HelloGateOutcome =
 export interface ConnAttachment {
   client_hello: { client_version: string; build_commit: string } | null;
   subscribed: boolean;
-  host_game: string | null;
+  /**
+   * The lobby registration this connection hosts. Mirrors
+   * `lobby_broker::LobbyRegistration`: the code plus the registration's
+   * generation, so a stamp outliving its reaped listing never acts on a later
+   * registration under the same code.
+   */
+  host_game: { game_code: string; generation: number } | null;
   reservations: unknown[];
   /**
    * Tournament codes this connection CREATED — one appended per successful

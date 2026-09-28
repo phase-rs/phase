@@ -16,8 +16,10 @@ import {
   buildCardPoolBoardModel,
   activateWorkspaceInstance,
   moveWorkspaceInstance,
+  normalizeWorkspaceMoveTarget,
   rebuildWorkspaceZone,
   rebuildWorkspaceZoneRows,
+  resolveWorkspaceRow,
   resolveAvailableBoardSort,
   type WorkspaceBoardModel,
   type WorkspaceCardEntryModel,
@@ -26,7 +28,12 @@ import {
 } from "./workspacePlacement";
 import type { DraftWorkspaceState, DraftZone } from "./types";
 import type { DraftBoardPreferences, DraftCardPreviewMode } from "./workspacePreferences";
-import type { DraftWorkspaceDragController, WorkspaceDragSource } from "./useDraftWorkspaceDrag";
+import type {
+  DraftWorkspaceDragController,
+  WorkspaceDragOrigin,
+  WorkspaceDragSource,
+} from "./useDraftWorkspaceDrag";
+import type { WorkspaceDragProjection } from "./WorkspaceCard";
 
 export interface CardPoolBoardProps {
   heading?: string;
@@ -52,12 +59,18 @@ export interface CardPoolBoardProps {
   phoneLayoutDialog?: boolean;
   phonePortraitDeckToolbar?: boolean;
   tabletMode?: boolean;
+  responsiveDraftGrouping?: boolean;
+  compactPhoneDraft?: boolean;
   compactDeckTypeCounts?: boolean;
+  builderTouchVisualToolbar?: boolean;
   visualColumnCapValue?: number;
   visualColumnCapMax?: number;
   onVisualColumnCapChange?(next: number): void;
   touchDragEnabled?: boolean;
   touchScrollEnabled?: boolean;
+  desktopCardAreaMinHeight?: boolean;
+  draggedSourceInstanceId?: string;
+  dragProjection?: WorkspaceDragProjection;
   onWorkspaceChange(next: DraftWorkspaceState): void;
   onPreferencesChange(next: DraftBoardPreferences): void;
 }
@@ -138,12 +151,18 @@ export function CardPoolBoard({
   phoneLayoutDialog = false,
   phonePortraitDeckToolbar = false,
   tabletMode = false,
+  responsiveDraftGrouping = false,
+  compactPhoneDraft = false,
   compactDeckTypeCounts = false,
+  builderTouchVisualToolbar = false,
   visualColumnCapValue,
   visualColumnCapMax,
   onVisualColumnCapChange,
   touchDragEnabled = false,
   touchScrollEnabled = false,
+  desktopCardAreaMinHeight = false,
+  draggedSourceInstanceId,
+  dragProjection,
   onWorkspaceChange,
   onPreferencesChange,
 }: CardPoolBoardProps) {
@@ -196,6 +215,16 @@ export function CardPoolBoard({
       ),
     );
   const showHeaders = forceShowHeaders || model.showHeaders;
+  const resolvedDragProjection = dragProjection === undefined
+    ? undefined
+    : {
+      ...dragProjection,
+      row: dragProjection.row ?? resolveWorkspaceRow(
+        dragProjection.sourceInstanceId,
+        resolvedPreferences,
+        poolGroups,
+      ),
+    };
 
   useEffect(() => {
     if (interactionLocked) return;
@@ -256,6 +285,8 @@ export function CardPoolBoard({
     card: WorkspaceCardEntryModel,
     previewWidth: number,
     previewHeight: number,
+    previewImage: import("./useDraftWorkspaceDrag").WorkspaceDragPreviewImage,
+    origin: WorkspaceDragOrigin,
   ): WorkspaceDragSource => {
     const draftCard = pool.find((entry) => entry.instance_id === card.instanceId) ?? {
       instance_id: card.instanceId,
@@ -267,13 +298,39 @@ export function CardPoolBoard({
       cmc: 0,
       type_line: "",
     };
+    const canonicalTarget = normalizeWorkspaceMoveTarget(
+      card.instanceId,
+      poolGroups,
+      allPreferences,
+      card.placement,
+    );
+    if (canonicalTarget === null) throw new Error("Workspace card has no canonical target");
     return {
       kind: "workspace",
       instanceIds: [card.instanceId],
       cards: [draftCard],
+      canonicalTarget,
       previewWidth,
       previewHeight,
-      onDrop: (target) => dispatchMove(card, { ...target, beforeInstanceId: null }),
+      origin,
+      previewImage,
+      onDrop: (target) => {
+        const normalizedTarget = normalizeWorkspaceMoveTarget(
+          card.instanceId,
+          poolGroups,
+          allPreferences,
+          target,
+        );
+        if (
+          normalizedTarget === null
+          || (
+            normalizedTarget.zone === canonicalTarget.zone
+            && normalizedTarget.column === canonicalTarget.column
+            && normalizedTarget.row === canonicalTarget.row
+          )
+        ) return false;
+        return dispatchMove(card, { ...normalizedTarget, beforeInstanceId: null });
+      },
     };
   };
 
@@ -436,8 +493,12 @@ export function CardPoolBoard({
       dragController={dragController}
       touchDragEnabled={touchDragEnabled}
       touchScrollEnabled={touchScrollEnabled}
+      desktopCardAreaMinHeight={desktopCardAreaMinHeight}
+      compactPhoneDraft={compactPhoneDraft}
+      draggedSourceInstanceId={draggedSourceInstanceId}
+      dragProjection={resolvedDragProjection}
       makeDragSource={makeDragSource}
-      registerCardArea={registerColumn?.(zone, column.column)}
+      registerRoot={registerColumn?.(zone, column.column)}
       registerCard={(instanceId) => (element) => {
         if (element === null) cardRefs.current.delete(instanceId);
         else cardRefs.current.set(instanceId, element);
@@ -454,7 +515,7 @@ export function CardPoolBoard({
   );
 
   return (
-    <div className="overflow-clip rounded-card border border-hairline bg-black/18 text-fg shadow-[0_10px_26px_rgba(0,0,0,0.2)]">
+    <div className={`${desktopCardAreaMinHeight ? "overflow-visible" : "overflow-clip"} rounded-card border border-hairline bg-black/18 text-fg shadow-[0_10px_26px_rgba(0,0,0,0.2)]`}>
       <DraftWorkspaceToolbar
         heading={heading}
         deckTypeCounts={deckTypeCounts}
@@ -469,14 +530,17 @@ export function CardPoolBoard({
         phoneLayoutDialog={phoneLayoutDialog}
         phonePortraitDeckToolbar={phonePortraitDeckToolbar}
         tabletMode={tabletMode}
+        responsiveDraftGrouping={responsiveDraftGrouping}
+        compactPhoneDraft={compactPhoneDraft}
         compactDeckTypeCounts={compactDeckTypeCounts}
+        builderTouchVisualToolbar={builderTouchVisualToolbar}
         visualColumnCapValue={visualColumnCapValue}
         visualColumnCapMax={visualColumnCapMax}
         onVisualColumnCapChange={onVisualColumnCapChange}
       />
       <div
         ref={registerBoard}
-        className="overflow-x-hidden bg-black/12"
+        className={`${desktopCardAreaMinHeight ? "overflow-visible" : "overflow-x-hidden"} bg-black/12`}
         data-drop-state={model.drop.state}
         aria-describedby={model.drop.active ? `${model.key}:drop-description` : undefined}
       >
@@ -488,10 +552,11 @@ export function CardPoolBoard({
             {t(model.drop.descriptionKey!)}
           </span>
         )}
+        <div className={desktopCardAreaMinHeight ? "overflow-x-auto" : undefined}>
         {visualColumnCap === undefined ? (
           <div className={model.rowCount === 2
-          ? "grid w-full grid-cols-[2rem_minmax(0,1fr)] grid-rows-[auto_auto_auto] gap-x-2 p-6"
-          : "flex w-full gap-2 p-6"
+          ? `grid w-full grid-cols-[2rem_minmax(0,1fr)] grid-rows-[auto_auto_auto] ${compactPhoneDraft ? "gap-x-1 p-3" : "gap-x-2 p-6"}`
+          : `flex w-full ${compactPhoneDraft ? "gap-1 p-3" : "gap-2 p-6"}`
           }>
           {model.rowCount === 2 && (
             <div
@@ -514,9 +579,9 @@ export function CardPoolBoard({
           )}
           <div
             data-board-columns
-            className={`grid min-w-0 flex-1 gap-x-2 ${model.rowCount === 2
+            className={`grid min-w-0 flex-1 ${compactPhoneDraft ? "gap-x-1" : "gap-x-2"} ${model.rowCount === 2
               ? "col-start-2 row-start-1 row-span-3 grid-rows-subgrid"
-              : "gap-y-2"
+              : compactPhoneDraft ? "gap-y-1" : "gap-y-2"
             }`}
             style={{
               gridTemplateColumns: `repeat(${model.columnCount}, minmax(0, 1fr))`,
@@ -527,13 +592,13 @@ export function CardPoolBoard({
           </div>
           </div>
         ) : (
-          <div data-board-columns className="grid min-w-0 gap-y-2 p-6">
+          <div data-board-columns className={`grid min-w-0 ${compactPhoneDraft ? "gap-y-1 p-3" : "gap-y-2 p-6"}`}>
             {visualColumnGroups.map((columns, groupIndex) => (
               model.rowCount === 2 ? (
                 <div
                   key={columns[0]?.key ?? groupIndex}
                   data-board-column-group={groupIndex}
-                  className="grid w-full grid-cols-[2rem_minmax(0,1fr)] grid-rows-[auto_auto_auto] gap-x-2"
+                  className={`grid w-full grid-cols-[2rem_minmax(0,1fr)] grid-rows-[auto_auto_auto] ${compactPhoneDraft ? "gap-x-1" : "gap-x-2"}`}
                 >
                   <div
                     data-row-headers
@@ -553,7 +618,7 @@ export function CardPoolBoard({
                     ))}
                   </div>
                   <div
-                    className="col-start-2 row-start-1 row-span-3 grid min-w-0 grid-rows-subgrid gap-x-2"
+                    className={`col-start-2 row-start-1 row-span-3 grid min-w-0 grid-rows-subgrid ${compactPhoneDraft ? "gap-x-1" : "gap-x-2"}`}
                     style={{
                       gridTemplateColumns: `repeat(${columns.length}, minmax(0, 1fr))`,
                       gridTemplateRows: "subgrid",
@@ -566,7 +631,7 @@ export function CardPoolBoard({
                 <div
                   key={columns[0]?.key ?? groupIndex}
                   data-board-column-group={groupIndex}
-                  className="grid min-w-0 gap-2"
+                  className={`grid min-w-0 ${compactPhoneDraft ? "gap-1" : "gap-2"}`}
                   style={{ gridTemplateColumns: `repeat(${columns.length}, minmax(0, 1fr))` }}
                 >
                   {columns.map(renderColumn)}
@@ -575,6 +640,7 @@ export function CardPoolBoard({
             ))}
           </div>
         )}
+        </div>
       </div>
       <HoverCardPreview
         card={previewCard?.preview ?? null}

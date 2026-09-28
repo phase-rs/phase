@@ -142,7 +142,9 @@
       "distinctColorIdentity": "Place {{seat}} — partage une identité couleur avec une autre place.",
       "distinctCommander": "Place {{seat}} — partage un commandant avec une autre place."
     },
-    "podPreviewCount": "{{n}} decks correspondent aux réglages actuels du pod"
+    "podPreviewCount": "{{n}} decks correspondent aux réglages actuels du pod",
+    "brain": "Contrôlé par",
+    "brainEngine": "IA du moteur"
   },
   "gameProvider": {
     "podSelectionRefused": {

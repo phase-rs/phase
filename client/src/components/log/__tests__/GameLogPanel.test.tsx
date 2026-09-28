@@ -85,6 +85,14 @@ describe("GameLogPanel", () => {
     vi.restoreAllMocks();
   });
 
+  it("layers the drawer above stack target arcs portaled over the board", () => {
+    render(<GameLogPanel />);
+
+    const drawer = screen.getByRole("heading", { name: "Game Log" }).closest("aside");
+    expect(drawer).not.toBeNull();
+    expect(drawer).toHaveClass("relative", "z-40");
+  });
+
   it("follows appended entries only when the reader is at the bottom", () => {
     const requestFrame = vi.fn((callback: FrameRequestCallback) => {
       callback(0);
@@ -239,7 +247,86 @@ describe("GameLogPanel", () => {
     });
     render(<GameLogPanel />);
 
-    expect(screen.getByText(/Turn 2 — Chandra · Declare Attackers/)).toBeInTheDocument();
+    const divider = screen.getByText(/Turn 2 — Chandra · Declare Attackers/);
+    expect(divider).toBeInTheDocument();
+    expect(divider).toHaveAttribute("data-boundary", "Turn");
+    expect(divider).toHaveClass("border-cyan-700/70", "font-bold", "tracking-[0.14em]");
+  });
+
+  it("renders typed presentation metadata and segments as a readable visual hierarchy", () => {
+    useGameStore.setState({
+      logHistory: [
+        entry(0, "", {
+          category: "Combat",
+          segments: [
+            { type: "PlayerName", value: { name: "Chandra", player_id: 0 } },
+            { type: "Text", value: " dealt " },
+            { type: "Number", value: 5 },
+            { type: "Text", value: " damage to " },
+            { type: "CardName", value: { object_id: 42, name: "Aetherling" } },
+            { type: "Text", value: " in " },
+            { type: "Zone", value: "Battlefield" },
+            { type: "Text", value: " with " },
+            { type: "Keyword", value: "lifelink" },
+            { type: "Text", value: " for " },
+            { type: "Mana", value: "{W}" },
+          ],
+          presentation: { importance: "Essential", tone: "Negative", boundary: "None", visibility: "Public" },
+        }),
+      ],
+    });
+    render(<GameLogPanel />);
+
+    const cardButton = screen.getByRole("button", { name: "Aetherling" });
+    const row = cardButton.closest("[data-category]");
+    expect(row).toHaveAttribute("data-category", "Combat");
+    expect(row).toHaveAttribute("data-tone", "Negative");
+    expect(row).toHaveAttribute("data-importance", "Essential");
+    expect(row).toHaveClass("border-l-red-400", "bg-red-950/25", "text-gray-100");
+    expect(row?.querySelector('[aria-hidden="true"]')).toHaveTextContent("⚔");
+    expect(row?.querySelector('[data-segment="Number"]')).toHaveClass("tabular-nums", "bg-white/10");
+    expect(row?.querySelector('[data-segment="CardName"]')).toHaveClass("font-bold", "text-yellow-200");
+    expect(cardButton).toHaveClass("min-h-11", "min-w-11", "-my-3");
+    expect(row?.querySelector('[data-segment="PlayerName"]')).toHaveClass("font-bold");
+    expect(row?.querySelector('[data-segment="Zone"]')).toHaveClass("bg-sky-950/70");
+    expect(row?.querySelector('[data-segment="Keyword"]')).toHaveClass("bg-violet-950/70");
+    expect(row?.querySelector('[data-segment="Mana"]')).toHaveClass("bg-amber-950/70");
+    expect(screen.getByText("Combat:")).toHaveClass("sr-only");
+  });
+
+  it("keeps timeline categories compact and reveals category labels in detailed views", async () => {
+    const user = userEvent.setup();
+    useGameStore.setState({
+      logHistory: [entry(0, "A spell resolved", { category: "Stack" })],
+    });
+    render(<GameLogPanel />);
+
+    expect(screen.getByText("Stack:")).toHaveClass("sr-only");
+    expect(screen.queryByText("Stack", { selector: "span" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Details" }));
+
+    expect(screen.getByText("Stack", { selector: "span" })).not.toHaveClass("sr-only");
+    expect(screen.queryByText("Stack:")).not.toBeInTheDocument();
+  });
+
+  it("renders phase dividers below turn dividers in the visual hierarchy", () => {
+    useGameStore.setState({
+      logHistory: [
+        entry(0, "", {
+          category: "Turn",
+          phase: "Upkeep",
+          presentation: { importance: "Context", tone: "Neutral", boundary: "Phase", visibility: "Public" },
+        }),
+        entry(1, "Untap resolved", { phase: "Upkeep" }),
+      ],
+    });
+    render(<GameLogPanel />);
+
+    const divider = screen.getByText("T1 · Upkeep");
+    expect(divider).toHaveAttribute("data-boundary", "Phase");
+    expect(divider).toHaveClass("bg-gray-800/30", "font-semibold", "tracking-wider");
+    expect(divider).not.toHaveClass("border-cyan-700/70", "font-bold");
   });
 
   it("opens a closed panel when the game ends and can then be dismissed", () => {

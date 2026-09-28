@@ -148,7 +148,7 @@ describe("MultiplayerPage connection mode", () => {
     // page that is always in P2P.
     renderPage();
     await openHostSetup();
-    expect(harness.hostSetup!.connectionMode).toBe("server");
+    expect(harness.hostSetup!.connectionMode).toBe("p2p");
 
     switchMode("p2p");
     expect(harness.hostSetup!.connectionMode).toBe("p2p");

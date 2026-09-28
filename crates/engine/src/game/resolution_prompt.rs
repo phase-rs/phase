@@ -507,6 +507,9 @@ fn effect_offers_choice(e: &Effect) -> bool {
         | Effect::RuntimeHandled { .. }
         | Effect::Incubate { .. }
         | Effect::Amass { .. }
+        // CR 701.71a + CR 608.2d: empower may prompt (EmpowerJaceChoice with 2+
+        // Jace tokens) — fail-closed MayPrompt.
+        | Effect::EmpowerJace { .. }
         | Effect::Monstrosity { .. }
         | Effect::Specialize
         | Effect::Renown { .. }
@@ -589,6 +592,7 @@ pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
         force_block_attacker: _, // exact force-block referent, no choice
         target_incarnations: _, // CR 400.7 referent pins, no choice
         selected_target_incarnations: _, // CR 400.7 selected-target pins, no choice
+        illegal_target_slots: _, // CR 608.2b resolution legality stamp, no choice
         controller: _, // player id
         original_controller: _, // player id
         scoped_player: _, // player id (iteration binding)
@@ -610,7 +614,7 @@ pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
         forward_result: _,               // bool
         chosen_x: _, // concrete cast-time X (chosen at announcement, not resolution)
         cost_paid_object: _, // concrete captured-object snapshot
-        cost_paid_object_ids: _, // concrete captured-object ids (issue #4948)
+        cost_paid_objects: _, // concrete cost-paid membership records (issue #4948)
         effect_context_object: _, // concrete captured-object snapshot
         amassed_army_object: _, // concrete captured-object snapshot
         ability_index: _, // usize provenance
@@ -621,6 +625,8 @@ pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
         sub_link: _, // SubAbilityLink kind tag
         sibling_condition: _, // SiblingCondition replication marker, no resolution-time choice
         parent_target_missing_reason: _, // seam flag
+        activation_cost_reduction: _,
+        activation_record: _,
     } = a;
 
     // CR 603.5 + CR 608.2d: an optional effect / optional targeting /
@@ -741,7 +747,7 @@ mod tests {
     use crate::types::counter::CounterType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
-    use crate::types::proposed_event::CounterPlacement;
+    use crate::types::proposed_event::{CounterPlacement, DrawEventStage};
     use crate::types::zones::Zone;
     use std::collections::BTreeMap;
 
@@ -881,10 +887,20 @@ mod tests {
                 // variant's own axis is the damage ledger.
                 ProposedEvent::Damage { .. } => axes.damage_records += 1,
                 // CR 121.1: the zone write is the companion `ZoneChange`'s; this
-                // variant's own axis is the draw ledger.
+                // variant's own axis is the draw ledger. CR 121.2a: the
+                // instruction writes that ledger only through the individual
+                // draws it is split into, which are recorded separately.
                 ProposedEvent::Draw {
-                    player_id, count, ..
-                } => *axes.cards_drawn.entry(*player_id).or_default() += i64::from(*count),
+                    player_id,
+                    count,
+                    stage,
+                    ..
+                } => match stage {
+                    DrawEventStage::Instruction => {}
+                    DrawEventStage::Individual => {
+                        *axes.cards_drawn.entry(*player_id).or_default() += i64::from(*count)
+                    }
+                },
                 other => unreachable!(
                     "accounted variant with no axis arm — the partition and this witness \
                      have drifted: {other:?}"
@@ -1481,6 +1497,7 @@ mod tests {
                 replacement::event_is_accounted(&ProposedEvent::Draw {
                     player_id: PlayerId(0),
                     count,
+                    stage: DrawEventStage::Individual,
                     applied: Default::default(),
                 }),
                 accounted

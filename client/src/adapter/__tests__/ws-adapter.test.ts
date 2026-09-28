@@ -1,12 +1,21 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+const lanGate = vi.hoisted(() => ({ supported: false, probe: vi.fn(), authorize: vi.fn() }));
+vi.mock("../../services/nativeEngineSocket", () => ({ NativeEngineSocket: class { constructor() { return new MockWebSocket("native-lan"); } } }));
+vi.mock("../../services/lan", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../services/lan")>(),
+  initializeLanCapabilities: lanGate.probe,
+  authorizeLanServer: lanGate.authorize,
+  canUseLanBridge: () => lanGate.supported,
+}));
+
 import {
   NativeEngineVersionMismatchError,
   PROTOCOL_VERSION,
   WebSocketAdapter,
 } from "../ws-adapter";
 import { AdapterError, supportsMatchConcede, supportsServerRewind } from "../types";
-import type { FormatConfig, GameState } from "../types";
+import type { FormatConfig, GameAction, GameState } from "../types";
 import type {
   InteractionChoiceId,
   InteractionId,
@@ -888,6 +897,7 @@ describe("WebSocketAdapter", () => {
             playerCount: 4,
             aiSeats: [],
             formatConfig,
+            boosterPackPool: ["Cube Card", "Cube Card", "Undealt sentinel"],
           },
         },
       );
@@ -898,6 +908,7 @@ describe("WebSocketAdapter", () => {
       const frame = JSON.parse(calls[calls.length - 1]![0] as string);
       expect(frame.type).toBe("CreateGameWithSettings");
       expect(frame.data.format_config).toEqual(formatConfig);
+      expect(frame.data.booster_pack_pool).toEqual(["Cube Card", "Cube Card", "Undealt sentinel"]);
 
       nativeSocket.dispatchSynthetic(
         "message",
@@ -1714,6 +1725,7 @@ describe("WebSocketAdapter", () => {
               zone: "Hand",
               run_etb: false,
               nonlegendary: false,
+              creation_kind: "Card",
               count: 0,
             },
           },
@@ -1798,6 +1810,40 @@ describe("WebSocketAdapter", () => {
         }),
       );
     });
+
+    it.each(["Card", "Token"] as const)(
+      "preserves the %s creation kind in a nonzero debug CreateCard action frame",
+      async (creationKind) => {
+        const action: GameAction = {
+          type: "Debug",
+          data: {
+            type: "CreateCard",
+            data: {
+              card_name: "Lightning Bolt",
+              owner: 0,
+              zone: "Battlefield",
+              run_etb: false,
+              nonlegendary: false,
+              creation_kind: creationKind,
+              count: 1,
+            },
+          },
+        };
+
+        ws.send.mockClear();
+        const pending = adapter.submitAction(action, 0);
+
+        expect(JSON.parse(ws.send.mock.lastCall![0] as string)).toEqual({
+          type: "Action",
+          data: { action },
+        });
+
+        // Settle the promise after inspecting the outgoing frame; ActionNoOp
+        // is not the source of truth for this transport assertion.
+        ws.dispatchSynthetic("message", JSON.stringify({ type: "ActionNoOp" }));
+        await pending;
+      },
+    );
 
     it("resolves a mana-payment preview only for its matching request", async () => {
       ws.send.mockClear();
@@ -2088,4 +2134,62 @@ describe("WebSocketAdapter", () => {
       });
     });
   });
+});
+
+
+it("waits for the first LAN capability probe before rejecting an HTTPS manual join", async () => {
+  const originalLocation = window.location;
+  Object.defineProperty(window, "location", { configurable: true, value: { ...originalLocation, protocol: "https:" } });
+  let release!: () => void;
+  lanGate.supported = false;
+  lanGate.authorize.mockReset().mockResolvedValue(undefined);
+  lanGate.probe.mockImplementation(() => new Promise<boolean>((resolve) => {
+    release = () => { lanGate.supported = true; resolve(true); };
+  }));
+  const manual = new WebSocketAdapter("ws://192.168.1.2:9374/ws", "join", { main_deck: [], sideboard: [] }, "ABC123");
+  MockWebSocket.last = null;
+  const initialized = manual.initialize();
+  // The adapter must not reject on mixed content while capability is unknown.
+  release();
+  // The transport's probe shares the resolved capability in production.
+  lanGate.probe.mockResolvedValue(true);
+  try {
+    await vi.waitFor(() => expect(MockWebSocket.last).not.toBeNull());
+    expect(lanGate.authorize).toHaveBeenCalledExactlyOnceWith("ws://192.168.1.2:9374/ws");
+    const socket = MockWebSocket.last!;
+    socket.dispatchSynthetic("message", SERVER_HELLO);
+    await vi.waitFor(() => expect(socket.send).toHaveBeenCalledWith(expect.stringContaining('"type":"JoinGameWithPassword"')));
+    socket.dispatchSynthetic("message", JSON.stringify({ type: "GameStarted", data: { state: createMockState(), your_player: 0 } }));
+    await expect(initialized).resolves.toBeUndefined();
+  } finally {
+    manual.dispose(); lanGate.supported = false;
+    Object.defineProperty(window, "location", { configurable: true, value: originalLocation });
+  }
+});
+
+
+it.each(["resolve", "reject"] as const)("disposes during a pending LAN probe before its late %s", async (completion) => {
+  let complete!: () => void;
+  const probe = new Promise<boolean>((resolve, reject) => {
+    complete = () => completion === "resolve" ? resolve(true) : reject(new Error("Late probe failure"));
+  });
+  lanGate.probe.mockReset().mockReturnValue(probe);
+  lanGate.authorize.mockReset();
+  const manual = new WebSocketAdapter("ws://192.168.1.2:9374/ws", "join", { main_deck: [], sideboard: [] }, "ABC123");
+  MockWebSocket.last = null;
+  const rejection = trackRejection(manual.initialize());
+  manual.dispose();
+  try {
+    expect(await rejection()).toMatchObject({
+      code: "WS_CLOSED",
+      message: "Adapter disposed before initialization completed",
+    });
+    complete();
+    await probe.catch(() => {});
+    expect(MockWebSocket.last).toBeNull();
+    expect(lanGate.authorize).not.toHaveBeenCalled();
+    expect(lanGate.probe).toHaveBeenCalledOnce();
+  } finally {
+    lanGate.probe.mockReset().mockResolvedValue(false);
+  }
 });

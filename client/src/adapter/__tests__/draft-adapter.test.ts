@@ -7,6 +7,7 @@ const wasm = vi.hoisted(() => ({
   submit_pick_for_seat: vi.fn(),
   submit_deck: vi.fn(),
   submit_deck_for_seat: vi.fn(),
+  suggest_lands_for_seat: vi.fn(),
   draft_procedure: vi.fn(),
 }));
 
@@ -77,6 +78,7 @@ describe("DraftAdapter engine coordinator", () => {
     wasm.submit_pick_for_seat.mockReturnValue({ status: "Drafting" });
     wasm.submit_deck.mockReturnValue({ status: "Deckbuilding" });
     wasm.submit_deck_for_seat.mockReturnValue({ status: "Deckbuilding" });
+    wasm.suggest_lands_for_seat.mockReturnValue({ Island: 17 });
     wasm.draft_procedure.mockReturnValue({
       commanders_required: 1,
       cube_min_deck_size: 73,
@@ -92,10 +94,15 @@ describe("DraftAdapter engine coordinator", () => {
       "DRAFT",
       "Swiss",
       "Competitive",
+      // Deliberately NOT the Medium default: a pod's bot difficulty has to
+      // travel, and a fixture that passed 2 could not tell a threaded argument
+      // from a cell that was already Medium.
+      3,
     );
     await adapter.submitPickForSeat(2, ["first", "second"]);
     await adapter.submitDeck(["Island"], ["Commander"]);
     await adapter.submitDeckForSeat(2, ["Island"], ["Commander"]);
+    const lands = await adapter.suggestLandsForSeat(2, ["Island"]);
     const procedure = await adapter.draftProcedure("CommanderDraft", "Swiss");
 
     expect(wasm.create_multiplayer_draft).toHaveBeenCalledWith(
@@ -106,11 +113,18 @@ describe("DraftAdapter engine coordinator", () => {
       "DRAFT",
       "Swiss",
       "Competitive",
+      // LAST, and exact-args: the engine reads this boundary positionally, so
+      // an argument inserted anywhere but the end silently shifts every one
+      // after it. This assertion is what makes that a red test rather than a
+      // draft created with the wrong kind or seed.
+      3,
     );
     expect(wasm.draft_procedure).toHaveBeenCalledWith(4, "Swiss");
     expect(wasm.submit_pick_for_seat).toHaveBeenCalledWith(2, '["first","second"]');
     expect(wasm.submit_deck).toHaveBeenCalledWith('["Island"]', '["Commander"]');
     expect(wasm.submit_deck_for_seat).toHaveBeenCalledWith(2, '["Island"]', '["Commander"]');
+    expect(wasm.suggest_lands_for_seat).toHaveBeenCalledWith(2, '["Island"]');
+    expect(lands).toEqual({ Island: 17 });
     expect(procedure.pick_selection_mode).toBe("Ordered");
     expect(procedure.cube_min_deck_size).toBe(73);
   });

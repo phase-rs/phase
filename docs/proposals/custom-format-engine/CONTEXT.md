@@ -909,11 +909,51 @@ its resolution directly:
    the custom-format engine itself** and, if ever pursued, belongs to a
    separate, later "tournament/match structure" design, not bundled into
    `CustomFormatDef`/`LegacyRuleSet` here.
-5. **Ante-card handling (new, from the Swedish Old School preset).** "Must be
-   removed before play unless the tournament is specifically played for ante"
-   is a *third* list-shaped rule, distinct from banned (illegal outright) and
-   restricted (legal, max 1) — the schema has no slot for it today. Needs a
-   decision: a third named list on `LegalityRules`, or folding it into
+5. ~~**Ante-card handling**~~ — **RESOLVED, Phase 1d** (neither of the two
+   options originally offered below; both were list-shaped, and the rule
+   isn't). The framing was "a *third* list-shaped rule, distinct from banned
+   (illegal outright) and restricted (legal, max 1)" — but **CR 407.3 does not
+   define the ante cards as a list**: it defines them as the cards bearing the
+   text "Remove this card from your deck before playing if you're not playing
+   for ante", and then says "when not playing for ante, players can't include
+   these cards in their decks or sideboards". The class is the printed text,
+   and the prohibition is already exactly `banned`'s deck-construction
+   semantics. So no new list, and no `banned` entries either.
+
+   **Resolution: `AntePolicy` (`Excluded` | `Enabled`) as a fifth
+   `LegacyRuleSet` axis, enforced by a class predicate, not a roster.**
+   - `Excluded` is the default, so every custom format — including every
+     Axis-A lobby save — gets CR 407.3 enforcement for free, and
+     `swedish_old_school()` needs no ante data of its own.
+   - Enforcement reuses the predicate `deck_validation.rs` already had:
+     `tiny_leaders_category_banned`'s `"playing for ante"` test, extracted as
+     `face_uses_ante` so both callers share one definition of the class.
+     Verified exact — Scryfall's `oracle:"playing for ante"` returns exactly
+     9 cards (Amulet of Quoz, Bronze Tablet, Contract from Below, Darkpact,
+     Demonic Attorney, Jeweled Bird, Rebirth, Tempest Efreet, Timmerian
+     Fiends), the whole class with no false positives. A 7-name list would
+     have been a snapshot of only the subset inside one format's set window.
+   - `DeclaredPool::status` checks it ahead of banned/restricted, because a
+     format may also RESTRICT an ante card — Swedish restricts three of the
+     seven it carves out — and one legal copy is still one copy too many.
+   - The rejected "`ante_enabled` toggle" half is answered by the axis'
+     `Enabled` variant, which is **gated** by `IMPLEMENTED_LEGACY_AXES` like
+     any other declared-but-unbuilt axis: it would promise the CR 407.2 ante
+     zone and CR 407.4 ante action, which no engine code provides. Note the
+     asymmetry — only `Enabled` is a declared axis; `Excluded` is enforced
+     today and so is never gated, or every custom format in existence would
+     be rejected.
+   - Why `LegacyRuleSet` and not `LegalityRules`: CR 407.1 calls ante a rule
+     from "earlier versions of the Magic rules", now "an optional variation on
+     the game" and "strictly forbidden under the Magic: The Gathering
+     Tournament Rules" — the same shape as mana burn. It also gets the
+     existing gate at both call sites (`custom_format_pool` and
+     `FormatConfig::deserialize`) for free rather than needing a parallel one.
+
+   Original framing, kept for its research, not as a live open question: "Must
+   be removed before play unless the tournament is specifically played for
+   ante" is a third list-shaped rule; the schema has no slot for it today.
+   Needs a decision: a third named list on `LegalityRules`, or folding it into
    `banned` gated by a new `ante_enabled: bool`/toggle. Low urgency (only 7
    cards; ante itself has no in-engine support and none is proposed here), but
    should not be silently dropped when the preset ships.

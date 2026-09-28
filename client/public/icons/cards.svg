@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title desc">
+  <title id="title">A drafted stack of cards</title>
+  <desc id="desc">Minimal vector icon of three overlapping cards fanned to the right, the front card upright.</desc>
+  <defs>
+    <linearGradient id="cardsRear" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#334155"/><stop offset="1" stop-color="#1E293B"/></linearGradient>
+    <linearGradient id="cardsFront" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3A475D"/><stop offset="1" stop-color="#222D40"/></linearGradient>
+  </defs>
+  <g transform="translate(46 66) rotate(-16)"><rect x="-24" y="-34" width="48" height="68" rx="7" fill="url(#cardsRear)" stroke="#7B899F" stroke-width="2.75"/></g>
+  <g transform="translate(64 65) rotate(-6)"><rect x="-24" y="-34" width="48" height="68" rx="7" fill="url(#cardsRear)" stroke="#94A0B4" stroke-width="2.75"/></g>
+  <g transform="translate(82 64)"><rect x="-25" y="-36" width="50" height="72" rx="7" fill="url(#cardsFront)" stroke="#B9C2D0" stroke-width="3"/><path d="M-14 -18 H14 M-14 0 H14 M-14 18 H6" fill="none" stroke="#D5DBE5" stroke-width="3" stroke-linecap="round" opacity=".62"/></g>
+</svg>

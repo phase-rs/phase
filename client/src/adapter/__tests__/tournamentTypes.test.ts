@@ -5,8 +5,10 @@ import type {
   MatchArity,
   PairingId,
   PairingOutcome,
+  ReportGate,
   ScoringPolicy,
   Tiebreaks,
+  TournamentAction,
   TournamentPairingView,
   TournamentView,
 } from "../types";
@@ -33,6 +35,10 @@ const PROBED_VIEW: TournamentView = {
     current_round: 2,
     total_rounds: 3,
     created_at: 1_700_000_000,
+    // Protocol v6: the RESOLVED scoring policy and the broker-owned set of
+    // currently-open tournament actions. A running event admits all three.
+    scoring: { win_points: 7, draw_points: 1, loss_points: 0 },
+    open_actions: ["StartRound", "EndTournament", "Drop"],
   },
   players: [
     { player_key: "key-a", display_name: "Alice", dropped: false },
@@ -46,6 +52,7 @@ const PROBED_VIEW: TournamentView = {
       round: 1,
       players: [{ player_key: "key-a", display_name: "Alice", dropped: false }],
       outcome: "Bye",
+      report_gate: "Bye",
     },
     {
       id: 1,
@@ -55,6 +62,7 @@ const PROBED_VIEW: TournamentView = {
         { player_key: "key-d", display_name: "Dave", dropped: true },
       ],
       outcome: { Forfeit: { winner: "key-b" } },
+      report_gate: "Forfeit",
     },
     {
       id: 2,
@@ -66,6 +74,9 @@ const PROBED_VIEW: TournamentView = {
       outcome: {
         Reported: { Decisive: { winner: "key-a", game_wins: { "key-a": 2, "key-b": 1 } } },
       },
+      // A running event keeps a reported pairing Open — re-reporting is how a
+      // mistyped tally is corrected.
+      report_gate: "Open",
     },
     {
       id: 3,
@@ -75,6 +86,7 @@ const PROBED_VIEW: TournamentView = {
         { player_key: "key-d", display_name: "Dave", dropped: true },
       ],
       outcome: { Reported: "Draw" },
+      report_gate: "Open",
     },
     {
       id: 4,
@@ -86,6 +98,7 @@ const PROBED_VIEW: TournamentView = {
       ],
       // Pending: emitted with no `skip_serializing_if`, so an explicit null.
       outcome: null,
+      report_gate: "Open",
     },
   ],
   standings: [
@@ -153,6 +166,36 @@ describe("tournament wire type mirrors", () => {
     // @ts-expect-error MatchArity crosses the wire as a bare number, never a wrapper object
     const wrappedArity: MatchArity = { arity: 4 };
     expect(wrappedArity).toBeDefined();
+  });
+
+  it("mirrors the v6 broker-owned affordance fields", () => {
+    // report_gate arms 1:1 with the Rust `ReportGate` enum.
+    const gates: ReportGate[] = ["Open", "TournamentNotRunning", "Bye", "Forfeit"];
+    expect(gates).toHaveLength(4);
+
+    // open_actions is a `BTreeSet<TournamentAction>` — a JSON array on the wire.
+    const actions: TournamentAction[] = ["StartRound", "EndTournament", "Drop"];
+    expect(JSON.parse(JSON.stringify(actions))).toEqual(actions);
+
+    // Present on the probed fixture and round-tripped with it above.
+    expect(PROBED_VIEW.summary.open_actions).toEqual([
+      "StartRound",
+      "EndTournament",
+      "Drop",
+    ]);
+    expect(PROBED_VIEW.summary.scoring).toEqual({
+      win_points: 7,
+      draw_points: 1,
+      loss_points: 0,
+    });
+    // Every pairing on a v6 frame carries a report_gate.
+    expect(PROBED_VIEW.pairings.every((p) => p.report_gate !== undefined)).toBe(
+      true,
+    );
+
+    // @ts-expect-error report_gate is a ReportGate arm, never an arbitrary string
+    const bogusGate: TournamentPairingView["report_gate"] = "Whenever";
+    expect(bogusGate).toBeDefined();
   });
 
   it("keeps the scoring policy flat", () => {

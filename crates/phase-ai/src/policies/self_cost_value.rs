@@ -2612,6 +2612,7 @@ mod tests {
                 vec![
                     Effect::ExtraTurn {
                         target: TargetFilter::Player,
+                        count: QuantityExpr::Fixed { value: 1 },
                     },
                     Effect::LoseLife {
                         amount: QuantityExpr::Fixed { value: 20 },

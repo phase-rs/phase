@@ -8,6 +8,8 @@
 //! exact `perf_counters` integers (never a timing assertion) and pin the hatch's
 //! soundness across the CR 117.4 resolution seam.
 
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+
 use engine::ai_support::legal_actions;
 use engine::game::engine::apply_for_simulation;
 use engine::game::perf_counters;
@@ -18,11 +20,177 @@ use engine::game::zones::create_object;
 use engine::types::ability::{Effect, QuantityExpr, ResolvedAbility, TargetFilter};
 use engine::types::actions::GameAction;
 use engine::types::game_state::{
-    CastingVariant, GameState, PendingContinuation, StackEntry, StackEntryKind, WaitingFor,
+    AutoPassMode, CastingVariant, GameState, PendingContinuation, StackEntry, StackEntryKind,
+    StackResolutionAutoPassOverlay, StackResolutionBudget, StackResolutionEntryFence,
+    StackResolutionPolicy, StackResolutionSession, WaitingFor,
 };
 use engine::types::identifiers::CardId;
+use engine::types::keywords::Keyword;
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
+
+use super::rules::run_combat;
+
+/// The extracted priority-pass hatch belongs after every common action-preparation
+/// step. This fixture deliberately uses independent sentinels for public reveal,
+/// private look, and manual mana-tap state so a pass cannot satisfy the cleanup
+/// assertions by clearing a different carrier.
+#[test]
+fn priority_pass_runs_after_all_common_action_preparation() {
+    let mut runner = {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::Upkeep);
+        scenario.build()
+    };
+    let marker = create_object(
+        runner.state_mut(),
+        CardId(9_101),
+        P0,
+        "Priority preparation marker".to_string(),
+        Zone::Library,
+    );
+    {
+        let state = runner.state_mut();
+        state.revealed_cards.insert(marker);
+        state.private_look_ids.push(marker);
+        state.private_look_player = Some(P0);
+        state.lands_tapped_for_mana.insert(P0, vec![marker]);
+    }
+
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    assert_eq!(runner.state().revealed_cards.len(), 1);
+    assert!(runner.state().revealed_cards.contains(&marker));
+    assert_eq!(runner.state().private_look_ids, vec![marker]);
+    assert_eq!(runner.state().private_look_player, Some(P0));
+    assert_eq!(
+        runner.state().lands_tapped_for_mana.get(&P0),
+        Some(&vec![marker])
+    );
+
+    runner
+        .act(GameAction::PassPriority)
+        .expect("the prepared priority holder may pass");
+
+    assert!(runner.state().revealed_cards.is_empty());
+    assert!(runner.state().private_look_ids.is_empty());
+    assert_eq!(runner.state().private_look_player, None);
+    assert!(
+        !runner.state().lands_tapped_for_mana.contains_key(&P0),
+        "the final common-preparation cleanup must run before the priority-pass hatch"
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P1 }
+    ));
+}
+
+/// An explicit public pass uses the installed-session (`None`) route, not the
+/// batch-supplied limit route. The first all-passed window must advance the
+/// persisted cursor exactly once; the final fenced resolution must restore the
+/// sparse preference baseline when the budget is exhausted.
+#[test]
+fn explicit_priority_pass_advances_installed_session_cursor_and_restores_baseline() {
+    let mut state = all_players_passed_window();
+    let lower = push_resolvable_spell(&mut state);
+    let upper = push_resolvable_spell(&mut state);
+    let baseline = BTreeMap::from([(
+        P0,
+        AutoPassMode::UntilTurnBoundary {
+            until: Default::default(),
+        },
+    )]);
+    let expected_auto_pass: HashMap<_, _> = baseline
+        .iter()
+        .map(|(&player, &mode)| (player, mode))
+        .collect();
+    state.stack_resolution_session = Some(StackResolutionSession {
+        entries: state
+            .stack
+            .iter()
+            .rev()
+            .map(StackResolutionEntryFence::capture)
+            .collect(),
+        cursor: 0,
+        representatives: BTreeSet::from([P0, P1]),
+        verified_pass_representatives: BTreeSet::new(),
+        budget: StackResolutionBudget::from_legacy_max_resolutions(2),
+        policy: StackResolutionPolicy::RecheckNoMeaningfulPriorityAction,
+        auto_pass_overlay: StackResolutionAutoPassOverlay {
+            baseline: baseline.clone(),
+        },
+    });
+
+    engine::game::engine::apply_as_current(&mut state, GameAction::PassPriority)
+        .expect("the prepared P0 pass resolves the session's top fence");
+
+    let session = state
+        .stack_resolution_session
+        .as_ref()
+        .expect("one of two fenced entries leaves the session live");
+    assert_eq!(
+        session.cursor, 1,
+        "one actual resolution advances one cursor slot"
+    );
+    assert_eq!(session.budget.max_resolutions(), Some(2));
+    assert_eq!(state.stack.len(), 1, "only the top fenced entry resolved");
+    assert!(
+        state.players[P0.0 as usize].graveyard.contains(&upper),
+        "reach-guard: the upper stack spell actually resolved"
+    );
+    assert!(
+        !state.players[P0.0 as usize].graveyard.contains(&lower),
+        "the lower fence remains for the second priority cycle"
+    );
+
+    engine::game::engine::apply_as_current(&mut state, GameAction::PassPriority)
+        .expect("P0 hands priority to P1 for the second cycle");
+    engine::game::engine::apply_as_current(&mut state, GameAction::PassPriority)
+        .expect("P1 completes the capped fenced session");
+
+    assert!(state.stack.is_empty());
+    assert!(state.stack_resolution_session.is_none());
+    assert_eq!(
+        state.auto_pass, expected_auto_pass,
+        "budget exhaustion restores exactly the pre-session preference baseline"
+    );
+}
+
+/// Combat's trample-assignment prompt is an ordinary (non-priority) action.
+/// This is an outcome regression for the helper's moved non-pass dispatch:
+/// lethal combat remains GameOver after extraction. It does not claim a
+/// conflicting computed wait or deletion sensitivity for the unchanged terminal
+/// guard; that guard is preserved structurally with the moved tail.
+#[test]
+fn lethal_ordinary_combat_assignment_preserves_game_over_transition() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let attacker = scenario.add_creature(P0, "Lethal Trampler", 5, 5).id();
+    let blocker = scenario
+        .add_creature(P1, "Lethal Assignment Blocker", 1, 1)
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().players[P1.0 as usize].life = 4;
+    {
+        let attacker = runner
+            .state_mut()
+            .objects
+            .get_mut(&attacker)
+            .expect("the attacker is on the battlefield");
+        attacker.base_keywords.push(Keyword::Trample);
+        attacker.keywords.push(Keyword::Trample);
+    }
+
+    run_combat(&mut runner, vec![attacker], vec![(blocker, attacker)]);
+
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::GameOver { winner: Some(P0) }
+    ));
+    assert!(runner.state().players[P1.0 as usize].is_eliminated);
+}
 
 /// T2. The hatch removes the clone at the exact call the projection makes.
 ///

@@ -52,12 +52,16 @@ import { ConfirmDialog } from "../ui/ConfirmDialog.tsx";
 import { ModalPanelShell } from "../ui/ModalPanelShell";
 import { MenuSelect } from "../ui/MenuSelect";
 import { downloadBackup, importBackupFromFile, type ImportMode } from "../../services/backup.ts";
+import { attemptSavedDeckWrite } from "../../services/savedDeckWriteFailure.ts";
 import { isDesktopTauri } from "../../services/platform.ts";
 import { useCloudSyncStore } from "../../stores/cloudSyncStore.ts";
 import { useSetCatalog } from "../../hooks/useSetSymbols.ts";
 import { DiscordIcon, GoogleIcon } from "../ui/ProviderIcons";
 import { VisualPackManager } from "./visual-packs/VisualPackManager.tsx";
 import { OfflinePreparationSection } from "./OfflinePreparationSection.tsx";
+import { LlmOpponentsSection } from "./LlmOpponentsSection.tsx";
+
+import { TroubleshootingDialog } from "../help/TroubleshootingDialog";
 
 export type SettingsHighlight = "board-background";
 
@@ -78,6 +82,7 @@ const LANGUAGE_OPTIONS: { value: SupportedLng; label: string }[] = [
   { value: "it", label: "Italiano" },
   { value: "pt", label: "Português" },
   { value: "pl", label: "Polski" },
+  { value: "ja", label: "日本語" },
 ];
 
 const CARD_SIZES: CardSizePreference[] = ["small", "medium", "large"];
@@ -100,6 +105,7 @@ function formatSpeed(value: number, max: number, labels: { instant: string; slow
 }
 const SETTINGS_TABS = [
   { id: "gameplay" },
+  { id: "ai" },
   { id: "experimental" },
   { id: "visual" },
   { id: "combat" },
@@ -153,6 +159,8 @@ export function PreferencesModal({
   returnFocusRef,
 }: PreferencesModalProps) {
   const { t } = useTranslation("settings");
+  const [troubleshootingOpen, setTroubleshootingOpen] = useState(false);
+  const troubleshootingButtonRef = useRef<HTMLButtonElement>(null);
   const setFlexEditMode = useUiStore((s) => s.setFlexEditMode);
   const boardBackgroundRef = useRef<HTMLDivElement | null>(null);
   const visualTabRef = useRef<HTMLButtonElement>(null);
@@ -325,6 +333,8 @@ export function PreferencesModal({
   const [activeTab, setActiveTab] = useState<SettingsTabId>(initialTab);
 
   return (
+    <>
+    {troubleshootingOpen && <TroubleshootingDialog onClose={() => setTroubleshootingOpen(false)} returnFocusRef={troubleshootingButtonRef} />}
     <ModalPanelShell
       title={t("modal.title")}
       subtitle={t("modal.subtitle")}
@@ -351,6 +361,7 @@ export function PreferencesModal({
                   </button>
                 ))}
               </nav>
+              <button ref={troubleshootingButtonRef} type="button" onClick={() => setTroubleshootingOpen(true)} className="mt-2 min-h-11 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-slate-200 hover:bg-white/10 active:bg-white/20 focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-300">{t("common:troubleshooting.title")}</button>
               <div className="hidden shrink-0 border-t border-white/5 pt-6 pb-8 md:block">
                 <ResetAllFooter resetAllPreferences={resetAllPreferences} />
               </div>
@@ -497,6 +508,12 @@ export function PreferencesModal({
                       )}
                     </SettingGroup>
                   </div>
+                </SettingsSection>
+              )}
+
+              {activeTab === "ai" && (
+                <SettingsSection title={t("llm.title")}>
+                  <LlmOpponentsSection />
                 </SettingsSection>
               )}
 
@@ -850,6 +867,7 @@ export function PreferencesModal({
             </div>
           </div>
     </ModalPanelShell>
+    </>
   );
 }
 
@@ -1166,7 +1184,9 @@ function DataSection() {
       setError(null);
       setStatus(null);
       try {
-        const result = await importBackupFromFile(file, mode);
+        const restored = await attemptSavedDeckWrite("restore", () => importBackupFromFile(file, mode));
+        if (!restored.ok) return;
+        const result = restored.value;
         const base = result.preferencesReplaced
           ? t("data.importedWithPreferences", { count: result.decksImported })
           : t("data.imported", { count: result.decksImported });

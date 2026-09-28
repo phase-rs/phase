@@ -9,7 +9,7 @@ use crate::types::ability::{
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{DrawSequenceOrigin, GameState, PendingDrawDelivery};
 use crate::types::identifiers::ObjectId;
-use crate::types::proposed_event::{AppliedReplacementKey, ProposedEvent};
+use crate::types::proposed_event::{AppliedReplacementKey, DrawEventStage, ProposedEvent};
 use crate::types::statics::StaticMode;
 #[cfg(test)]
 use crate::types::zones::Zone;
@@ -28,9 +28,10 @@ use crate::types::zones::Zone;
 /// for draw restrictions, `select_cards_to_draw` for library delivery, and
 /// `replacement::proposed_draw_survives_replacement` — which shares its
 /// applicability and substitution classifiers with the live pipeline — for the
-/// replacement leg. The individual draw is modeled as the same
-/// `ProposedEvent::Draw` shape `draw_through_replacement_with_applied` proposes,
-/// so the preflight and the resolver ask the identical question.
+/// replacement leg. The one-card draw is modeled as the same two
+/// `ProposedEvent::Draw` events the draw sequence proposes — the instruction,
+/// then its individual draw (CR 121.2a) — so the preflight and the resolver ask
+/// the identical questions.
 ///
 /// The single engine authority an AI draw-payoff preflight consults so it never
 /// credits a no-op draw.
@@ -39,14 +40,22 @@ pub fn can_draw_at_least_one(state: &GameState, player_id: crate::types::player:
     if select_cards_to_draw(state, player_id, allowed as usize).is_empty() {
         return false;
     }
-    // CR 121.2: the individual draw the payoff would ride on — the same event
-    // shape `draw_through_replacement_with_applied` proposes for one card.
-    let proposed = ProposedEvent::Draw {
-        player_id,
-        count: 1,
-        applied: HashSet::new(),
+    // CR 121.2 + CR 121.2a: the one-card instruction the payoff would ride on and
+    // its individual draw — the same events `start_draw_sequence` proposes, which
+    // proposes the instruction only when a replacement could apply to it.
+    let survives = |stage| {
+        replacement::proposed_draw_survives_replacement(
+            state,
+            &ProposedEvent::Draw {
+                player_id,
+                count: 1,
+                stage,
+                applied: HashSet::new(),
+            },
+        )
     };
-    replacement::proposed_draw_survives_replacement(state, &proposed)
+    (!replacement::draw_instruction_may_be_replaced(state) || survives(DrawEventStage::Instruction))
+        && survives(DrawEventStage::Individual)
 }
 
 /// Exact delivery fact for one fully specified draw instruction.
@@ -500,8 +509,74 @@ fn start_draw_sequence_with_origin_outcome(
     origin: DrawSequenceOrigin,
     events: &mut Vec<GameEvent>,
 ) -> DrawSequenceOutcome {
-    let frame_id = state.push_draw_sequence_with_origin(player, count, applied, origin);
+    // CR 121.2a: a replacement that refers to the number of cards drawn modifies
+    // the instruction "before considering any of the individual card draws", so
+    // the whole instruction is proposed once, before any unit. Its frame is
+    // pushed first, owing nothing until the consult settles its count
+    // (`settle_draw_instruction`): the consult then runs inside the same durable
+    // instruction a unit consult does, so a substitute's continuation drains
+    // under this frame (CR 616.1g) and a choice parks on it. When no replacement
+    // could apply to an instruction, the consult is skipped and the frame owes
+    // the full count at once.
+    if count == 0 || !replacement::draw_instruction_may_be_replaced(state) {
+        let frame_id = state.push_draw_sequence_with_origin(player, count, applied, origin);
+        return resume_draw_sequence_outcome(state, frame_id, events);
+    }
+    let frame_id = state.push_draw_sequence_with_origin(player, 0, applied.clone(), origin);
+    let result = draw_through_replacement_with_applied(
+        state,
+        player,
+        count,
+        DrawEventStage::Instruction,
+        applied,
+        events,
+        |state, event, _events| settle_draw_instruction(state, event),
+    );
+    let resumable = !matches!(result, ReplacementResult::NeedsChoice(_))
+        && state
+            .active_draw_sequence()
+            .is_some_and(|frame| frame.frame_id == frame_id);
+    if !resumable {
+        // The choice (or a prompt its continuation raised) resumes this frame.
+        return DrawSequenceOutcome::Parked(ReplacementResult::NeedsChoice(
+            state
+                .waiting_for
+                .acting_player()
+                .unwrap_or(state.active_player),
+        ));
+    }
     resume_draw_sequence_outcome(state, frame_id, events)
+}
+
+/// CR 121.2a + CR 614.5: Settle a replaced draw instruction into its active
+/// frame. The surviving count becomes the individual draws still owed, and the
+/// replacements already applied to the instruction ride on every one of them.
+/// Nothing is delivered here: each owed unit is proposed as its own individual
+/// draw when the frame resumes (CR 121.2).
+pub(crate) fn settle_draw_instruction(state: &mut GameState, event: ProposedEvent) {
+    let ProposedEvent::Draw {
+        player_id,
+        count,
+        stage: DrawEventStage::Instruction,
+        applied,
+    } = event
+    else {
+        debug_assert!(
+            false,
+            "settle_draw_instruction called without a draw instruction"
+        );
+        return;
+    };
+    match state.active_draw_sequence_mut() {
+        Some(frame) if frame.player == player_id => {
+            frame.remaining = count;
+            frame.applied = applied;
+        }
+        _ => debug_assert!(
+            false,
+            "a draw instruction settles into its own active frame"
+        ),
+    }
 }
 
 /// CR 121.6b: The single post-pause driver for a draw instruction — "if an effect
@@ -590,6 +665,7 @@ fn resume_draw_sequence_outcome(
             state,
             player,
             1,
+            DrawEventStage::Individual,
             applied,
             events,
             |state, event, events| {
@@ -699,6 +775,7 @@ fn resume_draw_sequence_outcome(
         result: ReplacementResult::Execute(ProposedEvent::Draw {
             player_id: frame.player,
             count: 0,
+            stage: DrawEventStage::Instruction,
             applied: HashSet::new(),
         }),
         delivered: frame.accumulated,
@@ -708,10 +785,13 @@ fn resume_draw_sequence_outcome(
 /// CR 614.5: Propose a draw while preserving replacements already applied to
 /// the instruction that produced it. The public wrapper starts a fresh draw;
 /// draw sequences use this authority to resume replacement continuations.
+/// `stage` is which of the two draw proposals this is (CR 121.2a): the whole
+/// instruction, or one of its individual draws.
 fn draw_through_replacement_with_applied(
     state: &mut GameState,
     player_id: crate::types::player::PlayerId,
     count: u32,
+    stage: DrawEventStage,
     applied: HashSet<AppliedReplacementKey>,
     events: &mut Vec<GameEvent>,
     apply_executed: impl FnOnce(&mut GameState, ProposedEvent, &mut Vec<GameEvent>),
@@ -719,6 +799,7 @@ fn draw_through_replacement_with_applied(
     let proposed = ProposedEvent::Draw {
         player_id,
         count,
+        stage,
         applied,
     };
     let result = replacement::replace_event(state, proposed, events);
@@ -764,6 +845,7 @@ pub fn apply_draw_after_replacement(
     let ProposedEvent::Draw {
         player_id,
         count,
+        stage,
         applied,
     } = event
     else {
@@ -773,6 +855,13 @@ pub fn apply_draw_after_replacement(
         );
         return 0;
     };
+    // CR 121.2: an instruction is settled into its frame and drawn one
+    // individual draw at a time, never delivered here as one batch.
+    debug_assert_eq!(
+        stage,
+        DrawEventStage::Individual,
+        "apply_draw_after_replacement called with a draw instruction"
+    );
 
     let allowed_count = allowed_draw_count(state, player_id, count);
     // CR 121.1 + CR 613.11: card selection routes through the single
@@ -1869,6 +1958,7 @@ mod tranche4_draw_pipeline_tests {
             ProposedEvent::Draw {
                 player_id: P0,
                 count: 1,
+                stage: DrawEventStage::Individual,
                 applied,
             },
             &mut events,
@@ -1937,6 +2027,7 @@ mod tranche4_draw_pipeline_tests {
             ProposedEvent::Draw {
                 player_id: P0,
                 count: 1,
+                stage: DrawEventStage::Individual,
                 applied: std::collections::HashSet::new(),
             },
             &mut events,

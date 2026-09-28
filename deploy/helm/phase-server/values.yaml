@@ -25,8 +25,13 @@ server:
   # clients their join URL. Defaults to https://<ingress.host> when the ingress
   # is enabled; required otherwise.
   publicUrl: ""
-  # Sets PHASE_DATA_MANIFEST_URL. Only needed if the image was built without
-  # PHASE_CHANNEL (e.g. upstream :preview images); release builds derive it.
+  # Sets PHASE_DATA_MANIFEST_URL. Empty: the binary derives it from its embedded
+  # channel, which serves release images and preview images whose fingerprint
+  # preview-server.json still lists. That manifest keeps only the current and
+  # previous fingerprints, and publications that push no image still rotate it,
+  # so any preview image, `:preview` included, can drop out. Set this, or
+  # pre-provision the data dir, for such an image or one built without
+  # PHASE_CHANNEL.
   dataManifestUrl: ""
   # Refuse to download card data at startup (data dir must be pre-provisioned).
   noDataDownload: false
@@ -117,14 +122,18 @@ web:
     # Affirmative opt-in to a mutable tag that tracks the server image.
     # Choose this when something bumps `image.tag` for you (a release
     # automation, a GitOps sync) and you want the SPA to move with it: the tag
-    # falls back through image.tag to "v<Chart.appVersion>", so the SPA and the
-    # server resolve to the same version by construction rather than by an
-    # operator remembering. They must stay within one protocol-version step of
-    # each other — a client accepts only [PROTOCOL_VERSION-1, PROTOCOL_VERSION]
-    # and the server advertises one number blind in an unprompted ServerHello —
-    # so a pinned digest that outlives two releases is a site that loads and
-    # then cannot connect. Mutually exclusive with `digest` and with `tag`:
-    # either would win over the tracking you asked for.
+    # falls back through image.tag to "v<Chart.appVersion>", so for release
+    # (vX.Y.Z) and sha-<12> tags the SPA and the server resolve to the same
+    # version by construction rather than by an operator remembering. A
+    # `preview` image.tag is not guaranteed to pair: separate jobs push the two
+    # images' preview tags, which can name different commits, so track preview
+    # with image.tag: sha-<12>. They must stay within one protocol-version step
+    # of each other — a client accepts only
+    # [PROTOCOL_VERSION-1, PROTOCOL_VERSION] and the server advertises one
+    # number blind in an unprompted ServerHello — so a pinned digest that
+    # outlives two releases is a site that loads and then cannot connect.
+    # Mutually exclusive with `digest` and with `tag`: either would win over
+    # the tracking you asked for.
     #
     # Requires image.tag to be set; the render fails otherwise. With image.tag
     # empty the tag falls back to "v<Chart.appVersion>", a constant this chart
@@ -153,6 +162,14 @@ web:
   # (the official lobby, which brokers browser-hosted P2P games). Set this to
   # this release's own public /ws endpoint to make server-run games the default.
   defaultMultiplayerServerUrl: ""
+  # Where a release build's "Try Preview" badge points, as an http:// or
+  # https:// URL: typically this site's own preview deployment. Rendered into
+  # /config.js like defaultMultiplayerServerUrl, and the render fails on an
+  # address the client would ignore. Empty = leave the image's build-time
+  # preview site. Only release-built images show the badge, and one built
+  # before this setting existed shows it but opens its built-in preview site
+  # whatever this holds.
+  previewSiteUrl: ""
   # Traefik rate limiting for the SPA route. The game API's limiter is sized for
   # API calls (20 req/s), and a cold SPA load is tens of asset requests at once,
   # so the web route deliberately does not share that bucket. Leave disabled
@@ -400,7 +417,13 @@ networkPolicy:
   ingressNamespaceLabels:
     kubernetes.io/metadata.name: kube-system
   # Allow HTTPS egress to the public internet for the card-data bootstrap
-  # (and nothing else besides DNS). Set false once data is on the PVC.
+  # (and nothing else besides DNS). The bootstrap connects out only when a
+  # data file is missing or this binary cannot load the copy on the PVC,
+  # which an upgrade can cause: a newer server may not read an export
+  # written for an older one. With this false and server.announceTo empty
+  # there is no route to replace it — a server that cannot read
+  # card-data.json puts the old copy back and exits instead of starting —
+  # so closing it makes re-provisioning the PVC a manual job.
   allowBootstrapEgress: true
 
 # The binary is static musl; musl's resolver fails on search-list expansion

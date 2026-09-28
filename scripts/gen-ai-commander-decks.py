@@ -10,7 +10,11 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-FEED_PATH = ROOT / "client/public/feeds/mtggoldfish-commander.json"
+# The live feed at client/public/feeds/mtggoldfish-commander.json is refreshed
+# upstream almost daily, so the manifest reads a vendored copy of the exact
+# 2026-09-08 feed it was generated from. `--check` stays reproducible across
+# feed refreshes; re-dating the manifest means replacing this snapshot.
+FEED_PATH = ROOT / "crates/engine/data/ai_commander_decks.feed-2026-09-08.json"
 CEDH_PATH = ROOT / "client/src/data/cedhDecks.ts"
 OUTPUT_PATH = ROOT / "crates/engine/data/ai_commander_decks.json"
 VERSION = "2026-09-27"

@@ -54,7 +54,7 @@ pub fn resolve(
 /// the producer's own.
 pub(crate) fn goad_targets(state: &GameState, ability: &ResolvedAbility) -> Vec<ObjectId> {
     if let Effect::GoadAll { target } = &ability.effect {
-        let effective_filter = crate::game::effects::resolved_object_filter(ability, target);
+        let effective_filter = crate::game::effects::resolved_object_filter(state, ability, target);
         let ctx = FilterContext::from_ability(ability);
         return state
             .battlefield_phased_in_ids()

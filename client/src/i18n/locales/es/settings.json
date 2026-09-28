@@ -5,6 +5,7 @@
   },
   "tabs": {
     "gameplay": "Jugabilidad",
+    "ai": "Oponentes IA",
     "experimental": "Experimental",
     "visual": "Visual",
     "combat": "Ritmo",
@@ -36,7 +37,11 @@
     "logDockSide": "Posición del registro de la partida",
     "spellPayment": "Pago de hechizos",
     "manualManaPayment": "Pago manual de maná para hechizos",
-    "spellPaymentOptions": { "auto": "Automático", "autoExceptSacrificialMana": "Preguntar antes de sacrificar", "manual": "Manual" },
+    "spellPaymentOptions": {
+      "auto": "Automático",
+      "autoExceptSacrificialMana": "Preguntar antes de sacrificar",
+      "manual": "Manual"
+    },
     "nativeEngine": "Usar el motor nativo para partidas locales y multijugador alojado",
     "nativeEngineDescription": "Usa el motor descargado para partidas locales contra IA y partidas que alojes mediante una sala. Los invitados siguen conectándose mediante la conexión punto a punto de la sala. Usa el motor integrado cuando no está disponible.",
     "boardBackground": "Fondo del tablero",
@@ -133,9 +138,18 @@
       "right": "Alinear a la derecha"
     },
     "presets": {
-      "default": { "label": "Diseño 1", "description": "El diseño equilibrado estándar." },
-      "layout2": { "label": "Diseño 2", "description": "Un campo de batalla más grande con las manos recogidas." },
-      "layout3": { "label": "Diseño 3", "description": "Un tercio inferior más alto." }
+      "default": {
+        "label": "Diseño 1",
+        "description": "El diseño equilibrado estándar."
+      },
+      "layout2": {
+        "label": "Diseño 2",
+        "description": "Un campo de batalla más grande con las manos recogidas."
+      },
+      "layout3": {
+        "label": "Diseño 3",
+        "description": "Un tercio inferior más alto."
+      }
     },
     "zones": {
       "playerHud": "Tu HUD",
@@ -422,9 +436,31 @@
     "incompleteTitle": "La preparación sin conexión está incompleta",
     "incompleteMessage": "Falta: {{capabilities}}. ¿Activar Trabajar sin conexión de todos modos?",
     "confirmOffline": "Activar Trabajar sin conexión",
-    "states": { "needs-preparation": "Prepara este dispositivo antes de trabajar sin conexión.", "preparing": "Preparando capacidades de juego local…", "ready": "Este dispositivo está listo para jugar sin conexión.", "failed": "Algunas capacidades necesarias no están listas.", "reconnect-required": "Vuelve a conectarte antes de preparar el juego sin conexión.", "reload-or-relaunch-required": "Recarga la aplicación o reinicia el escritorio y vuelve a preparar." },
-    "capabilities": { "appShell": "Aplicación", "browserEngine": "Motor y base de cartas", "scryfallSearch": "Datos de búsqueda", "preconCatalog": "Mazos preconstruidos", "bundledAiCatalog": "Catálogo de mazos de IA", "deckLibrary": "Biblioteca de mazos instalada", "coreVisuals": "Reverso de carta y símbolos de maná", "nativeEngine": "Motor nativo" },
-    "capabilityStates": { "ready": "Listo", "not-ready": "No listo", "reload-required": "Debe recargarse", "not-applicable": "No aplicable", "not-installed": "No instalado" }
+    "states": {
+      "needs-preparation": "Prepara este dispositivo antes de trabajar sin conexión.",
+      "preparing": "Preparando capacidades de juego local…",
+      "ready": "Este dispositivo está listo para jugar sin conexión.",
+      "failed": "Algunas capacidades necesarias no están listas.",
+      "reconnect-required": "Vuelve a conectarte antes de preparar el juego sin conexión.",
+      "reload-or-relaunch-required": "Recarga la aplicación o reinicia el escritorio y vuelve a preparar."
+    },
+    "capabilities": {
+      "appShell": "Aplicación",
+      "browserEngine": "Motor y base de cartas",
+      "scryfallSearch": "Datos de búsqueda",
+      "preconCatalog": "Mazos preconstruidos",
+      "bundledAiCatalog": "Catálogo de mazos de IA",
+      "deckLibrary": "Biblioteca de mazos instalada",
+      "coreVisuals": "Reverso de carta y símbolos de maná",
+      "nativeEngine": "Motor nativo"
+    },
+    "capabilityStates": {
+      "ready": "Listo",
+      "not-ready": "No listo",
+      "reload-required": "Debe recargarse",
+      "not-applicable": "No aplicable",
+      "not-installed": "No instalado"
+    }
   },
   "artChain": {
     "emptyState": "Usando la ilustración predeterminada de Scryfall. Añade reglas a continuación para personalizar.",
@@ -443,6 +479,48 @@
       "oldest": "Impresión más antigua",
       "preferBorderless": "Preferir sin marco",
       "preferExtended": "Preferir ilustración extendida"
+    }
+  },
+  "llm": {
+    "title": "Oponentes LLM",
+    "intro": "Opcional. Si conectas Phase a un proveedor de LLM, puedes ceder un asiento de IA —o los bots de un draft— a ese modelo en lugar de la IA integrada. Nada de esto se usa hasta que actives un proveedor y lo asignes a un asiento; ante cualquier fallo se vuelve a la IA integrada en plena partida.",
+    "empty": "No hay proveedores configurados. La IA integrada controla todos los asientos.",
+    "addProvider": "Añadir proveedor",
+    "unnamed": "Proveedor sin nombre",
+    "name": "Nombre",
+    "namePlaceholder": "Nombra este proveedor (p. ej. «Claude»)",
+    "enable": "Activar este proveedor",
+    "remove": "Eliminar este proveedor",
+    "provider": "Proveedor",
+    "model": "Modelo",
+    "modelId": "ID del modelo",
+    "customModel": "Personalizado…",
+    "modelPlaceholder": "ID del modelo (p. ej. gpt-5, claude-sonnet-5)",
+    "endpoint": "Endpoint",
+    "endpointPlaceholder": "https://tu-servidor/v1",
+    "apiKey": "Clave de API",
+    "apiKeyPlaceholder": "Pega tu clave de API",
+    "apiKeyOptional": "Opcional para servidores locales",
+    "apiKeyStorage": "Se mantiene en memoria solo durante esta sesión del navegador. Las claves de API nunca se escriben en disco y quedan excluidas de la copia de seguridad y de la sincronización en la nube, así que tendrás que volver a introducirla tras recargar. Además, una clave de API exige un endpoint https:// salvo que el servidor esté en localhost.",
+    "apiKeyGet": "Obtener una clave",
+    "test": "Probar conexión",
+    "testing": "Probando…",
+    "testOk": "Conectado.",
+    "draftToggle": {
+      "label": "Usar para los bots del draft",
+      "hint": "Los asientos de bot de un draft eligen con el modelo, usando el contexto de sets del formato.",
+      "profile": "Proveedor para el draft"
+    },
+    "testHint": "Envía una petición real y comprueba la respuesta igual que lo haría un turno de partida.",
+    "errors": {
+      "engineUnavailable": "No se pudo cargar el motor.",
+      "requestNotBuilt": "Este proveedor no está configurado por completo.",
+      "undecodable": "El endpoint respondió, pero no con algo que la partida pueda usar.",
+      "emptyBody": "El endpoint devolvió una respuesta vacía.",
+      "cancelled": "La prueba se canceló.",
+      "timedOut": "El endpoint no respondió a tiempo.",
+      "unreachable": "No se pudo contactar con el endpoint. Comprueba la URL y que el proveedor permita peticiones desde el navegador.",
+      "oversized": "El endpoint devolvió muchos más datos de los que cabe esperar de una respuesta de chat."
     }
   }
 }

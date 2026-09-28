@@ -1116,6 +1116,7 @@ const PARTITION_FIXTURES: Record<
   CoinFlipKeepChoice: NO_TARGET_REF_LEGAL_SET,
   DieKeepChoice: NO_TARGET_REF_LEGAL_SET,
   DigChoice: NO_TARGET_REF_LEGAL_SET,
+  DigRestSplitChoice: NO_TARGET_REF_LEGAL_SET,
   SurveilChoice: NO_TARGET_REF_LEGAL_SET,
   RevealChoice: NO_TARGET_REF_LEGAL_SET,
   SearchChoice: NO_TARGET_REF_LEGAL_SET,
@@ -1134,6 +1135,9 @@ const PARTITION_FIXTURES: Record<
   CostTypeChoice: NO_TARGET_REF_LEGAL_SET,
   SpliceOffer: NO_TARGET_REF_LEGAL_SET,
   DefilerPayment: NO_TARGET_REF_LEGAL_SET,
+  // CR 601.2f: the prompt carries reduction snapshots and locked costs, not a
+  // legal-target set — the caster reorders a list, they do not pick an object.
+  OrderCostReductions: NO_TARGET_REF_LEGAL_SET,
   CastOffer: NO_TARGET_REF_LEGAL_SET,
   ModalFaceChoice: NO_TARGET_REF_LEGAL_SET,
   AlternativeCastChoice: NO_TARGET_REF_LEGAL_SET,
@@ -1164,6 +1168,7 @@ const PARTITION_FIXTURES: Record<
   UnlessBounceChoice: NO_TARGET_REF_LEGAL_SET,
   ChooseRingBearer: NO_TARGET_REF_LEGAL_SET,
   RevealUntilKeptChoice: NO_TARGET_REF_LEGAL_SET,
+  RevealUntilBottomOrder: NO_TARGET_REF_LEGAL_SET,
   RepeatDecision: NO_TARGET_REF_LEGAL_SET,
   TopOrBottomChoice: NO_TARGET_REF_LEGAL_SET,
   PopulateChoice: NO_TARGET_REF_LEGAL_SET,
@@ -1184,6 +1189,7 @@ const PARTITION_FIXTURES: Record<
   RemoveCountersChoice: NO_TARGET_REF_LEGAL_SET,
   ChooseFromZoneChoice: NO_TARGET_REF_LEGAL_SET,
   BeholdChoice: NO_TARGET_REF_LEGAL_SET,
+  EmpowerJaceChoice: NO_TARGET_REF_LEGAL_SET,
   EffectZoneChoice: NO_TARGET_REF_LEGAL_SET,
   DrawnThisTurnTopdeckChoice: NO_TARGET_REF_LEGAL_SET,
   AssistChoosePlayer: NO_TARGET_REF_LEGAL_SET,

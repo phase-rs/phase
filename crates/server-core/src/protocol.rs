@@ -13,7 +13,7 @@ use engine::types::interaction::{
 };
 use engine::types::log::GameLogEntry;
 use engine::types::mana::ManaCost;
-use engine::types::match_config::MatchConfig;
+use engine::types::match_config::{MatchConfig, MatchType};
 use engine::types::player::PlayerId;
 use phase_ai::config::AiDifficulty;
 use serde::{Deserialize, Serialize};
@@ -268,6 +268,11 @@ pub struct TerminalBootstrapRequest {
     pub request_id: String,
 }
 
+// clippy::large_enum_variant: `CreateGameWithSettings` is the outlier. This
+// enum is a short-lived per-frame deserialize target that is matched and
+// destructured at once, never stored or queued, so boxing that variant's fields
+// buys nothing but call-site churn.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum ClientMessage {
@@ -380,6 +385,17 @@ pub enum ClientMessage {
         /// Enable ranked rating updates for this room.
         #[serde(default)]
         ranked: bool,
+        /// Room code pre-minted by a caller (the Discord LFG bot) that the host
+        /// claims instead of a server-minted one; `None` keeps server minting.
+        /// Twin of the lobby field added in lobby protocol 10. A server that
+        /// predates it ignores it and mints its own, which the client detects
+        /// as `GameCreated.game_code != requested`.
+        #[serde(default)]
+        requested_code: Option<String>,
+        /// Host-private Cube draft source for a native Full-server game. This
+        /// deliberately belongs to the Full session, never the lobby broker.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        booster_pack_pool: Option<Vec<String>>,
     },
     JoinGameWithPassword {
         game_code: String,
@@ -559,6 +575,12 @@ pub enum ClientMessage {
         /// display label only; the tournament enforces no deck legality.
         #[serde(default)]
         format: Option<GameFormat>,
+        /// The match structure (Bo1 / Bo3), mirroring
+        /// [`lobby_broker::LobbyClientMessage::CreateTournament`]'s field in the
+        /// same position with the same serde attribute (lobby protocol 8).
+        /// `None` resolves to the arity default; `Bo3` is head-to-head only.
+        #[serde(default)]
+        match_type: Option<MatchType>,
     },
     JoinTournament {
         code: String,
@@ -613,6 +635,11 @@ pub enum ClientMessage {
         code: String,
         role: TournamentRole,
         token: String,
+        /// Mirrors `rotation_nonce` on the lobby variant: the client-minted,
+        /// per-attempt nonce that lets a lost renewal reply be recovered by an
+        /// idempotent replay. `#[serde(default)]` for the same wire tolerance.
+        #[serde(default)]
+        rotation_nonce: String,
     },
 }
 
@@ -933,6 +960,8 @@ pub enum ServerMessage {
         reservation_token: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reservation_expires_at_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        draft_metadata: Option<DraftLobbyMetadata>,
     },
     PlayerSlotsUpdate {
         slots: Vec<PlayerSlotInfo>,
@@ -1095,10 +1124,10 @@ impl ServerMessage {
         }
     }
 
-    pub fn deck_rejected(message: impl Into<String>) -> Self {
+    pub fn error_with_code(code: ServerErrorCode, message: impl Into<String>) -> Self {
         Self::Error {
             message: message.into(),
-            code: Some(ServerErrorCode::DeckRejected),
+            code: Some(code),
         }
     }
 }
@@ -1578,6 +1607,12 @@ mod tests {
             draft_metadata: None,
             start_when_full: true,
             ranked: false,
+            requested_code: None,
+            booster_pack_pool: Some(vec![
+                "Cube Card".into(),
+                "Cube Card".into(),
+                "Undealt sentinel".into(),
+            ]),
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
@@ -1590,6 +1625,7 @@ mod tests {
                 player_count,
                 match_config,
                 room_name,
+                booster_pack_pool,
                 ..
             } => {
                 assert_eq!(display_name, "Alice");
@@ -1599,6 +1635,14 @@ mod tests {
                 assert_eq!(player_count, 4);
                 assert_eq!(match_config, MatchConfig::default());
                 assert_eq!(room_name, Some("Friday Night Commander".to_string()));
+                assert_eq!(
+                    booster_pack_pool,
+                    Some(vec![
+                        "Cube Card".into(),
+                        "Cube Card".into(),
+                        "Undealt sentinel".into()
+                    ])
+                );
             }
             _ => panic!("wrong variant"),
         }
@@ -2124,6 +2168,8 @@ mod tests {
             draft_metadata: None,
             start_when_full: true,
             ranked: false,
+            requested_code: None,
+            booster_pack_pool: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
@@ -2427,6 +2473,7 @@ mod tests {
             filled_seats: 2,
             reservation_token: None,
             reservation_expires_at_ms: None,
+            draft_metadata: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
@@ -2486,12 +2533,66 @@ mod tests {
             draft_metadata: None,
             start_when_full: true,
             ranked: false,
+            requested_code: None,
+            booster_pack_pool: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
         match parsed {
             ClientMessage::CreateGameWithSettings { host_peer_id, .. } => {
                 assert_eq!(host_peer_id, Some("peer-host-abc".to_string()));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn create_game_with_settings_requested_code_roundtrips() {
+        let msg = ClientMessage::CreateGameWithSettings {
+            deck: DeckData::default(),
+            display_name: "Alice".to_string(),
+            public: true,
+            password: None,
+            timer_seconds: None,
+            player_count: 2,
+            match_config: MatchConfig::default(),
+            ai_seats: vec![],
+            format_config: None,
+            room_name: None,
+            host_peer_id: None,
+            draft_metadata: None,
+            start_when_full: true,
+            ranked: false,
+            requested_code: Some("AB12CD".to_string()),
+            booster_pack_pool: None,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ClientMessage::CreateGameWithSettings { requested_code, .. } => {
+                assert_eq!(requested_code.as_deref(), Some("AB12CD"));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn create_game_with_settings_missing_requested_code_defaults_to_none() {
+        let json = r#"{
+          "type":"CreateGameWithSettings",
+          "data":{
+            "deck":{"main_deck":["Forest"],"sideboard":[]},
+            "display_name":"Alice",
+            "public":true,
+            "password":null,
+            "timer_seconds":null,
+            "player_count":2
+          }
+        }"#;
+        let parsed: ClientMessage = serde_json::from_str(json).unwrap();
+        match parsed {
+            ClientMessage::CreateGameWithSettings { requested_code, .. } => {
+                assert_eq!(requested_code, None);
             }
             _ => panic!("wrong variant"),
         }
@@ -2862,6 +2963,9 @@ mod tests {
                 },
             },
             launch_capability: DraftLaunchCapability::None,
+            // Read off the same procedure the kind above names, so the fixture
+            // stays a view the engine could actually have built.
+            distribution: DraftKind::Sealed.procedure().distribution,
             commanders_required: 0,
             current_pack_number: 0,
             pick_number: 2,
@@ -2895,6 +2999,13 @@ mod tests {
             pod_policy: PodPolicy::Competitive,
             pairings: Vec::new(),
             match_config: DraftKind::Sealed.match_config(),
+            // Sealed has no shared stack and no Winston play/draw election, so
+            // both are `None` -- which makes this round trip a free
+            // byte-compatibility assertion: with `skip_serializing_if` on both
+            // fields, this message's JSON is byte-identical to the pre-Winston
+            // wire shape.
+            shared_stack: None,
+            play_first_chooser: None,
         };
         let msg = ServerMessage::DraftStateUpdate { view: view.clone() };
         let json = serde_json::to_string(&msg).unwrap();
@@ -3190,6 +3301,9 @@ mod tests {
             match_config: DraftKind::Premier.match_config(),
             pools: None,
             current_packs: None,
+            // Premier has no shared stack; `skip_serializing_if` keeps this
+            // frame byte-identical to the pre-Winston wire shape.
+            shared_stack: None,
         };
         let msg = ServerMessage::DraftSpectatorView { view };
         let json = serde_json::to_string(&msg).unwrap();
@@ -3204,21 +3318,22 @@ mod tests {
         }
     }
 
-    /// The bump this number is at: `PendingManaAbility::chosen_tappers` moved
-    /// from `Vec<ObjectId>` to `Option<Vec<ObjectId>>` (#8698), so an ANSWERED
-    /// zero-tapper selection of the CR 107.3a X-sentinel form stops decoding
-    /// as an unanswered one. The field carries no `#[serde(default)]`, so the
-    /// pre-68 shape fails deserialization instead of inverting silently — see
-    /// `engine::types::game_state`'s
-    /// `chosen_tappers_pre_option_wire_shape_is_rejected`.
+    /// `GraveyardCastPermission.required_cast_keyword` (CR 118.9b) is new in
+    /// serialized full-game state; a v88 peer would drop it silently and admit
+    /// a printed-cost graveyard cast the permission forbids, so it must be
+    /// refused before it receives v89 state. v89 also carries the announced
+    /// graveyard permission (CR 601.2a + CR 601.2b: the casting-menu option's
+    /// `authority`, the slot prompt's `permission`, the cast's latched terms).
+    /// The preceding v88 bump gave `WaitingFor::DeclareBlockers` its
+    /// `block_capacities` (CR 509.1a + CR 101.1).
     ///
     /// The name embeds the numeral deliberately: `assert_eq!(PROTOCOL_VERSION,
     /// <n>)` under a function named for `<n-1>` is green, so
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_68_for_pending_mana_ability_chosen_tappers() {
-        assert_eq!(PROTOCOL_VERSION, 68);
+    fn protocol_version_is_89_for_graveyard_cast_methods() {
+        assert_eq!(PROTOCOL_VERSION, 89);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3229,7 +3344,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_68_for_pending_mana_ability_chosen_tappers` stays
+    /// `protocol_version_is_89_for_graveyard_cast_methods` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

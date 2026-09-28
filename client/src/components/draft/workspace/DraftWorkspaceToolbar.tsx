@@ -25,7 +25,10 @@ interface DraftWorkspaceToolbarProps {
   phoneLayoutDialog?: boolean;
   phonePortraitDeckToolbar?: boolean;
   tabletMode?: boolean;
+  responsiveDraftGrouping?: boolean;
+  compactPhoneDraft?: boolean;
   compactDeckTypeCounts?: boolean;
+  builderTouchVisualToolbar?: boolean;
   visualColumnCapValue?: number;
   visualColumnCapMax?: number;
   onVisualColumnCapChange?(next: number): void;
@@ -45,7 +48,10 @@ export function DraftWorkspaceToolbar({
   phoneLayoutDialog = false,
   phonePortraitDeckToolbar = false,
   tabletMode = false,
+  responsiveDraftGrouping = false,
+  compactPhoneDraft = false,
   compactDeckTypeCounts = false,
+  builderTouchVisualToolbar = false,
   visualColumnCapValue,
   visualColumnCapMax,
   onVisualColumnCapChange,
@@ -171,12 +177,21 @@ export function DraftWorkspaceToolbar({
         </button>
       </div>
     );
+  const phoneVisualTrailingControls = compactPhoneDraft ? (
+    <div data-phone-draft-visual-trailing className="flex min-w-0 flex-nowrap items-center gap-1">
+      {deckTypeCounts !== undefined && (
+        <DeckTypeCounts counts={deckTypeCounts} compact={compactDeckTypeCounts} />
+      )}
+      {deckControls}
+      {trailingControls}
+    </div>
+  ) : null;
 
   return (
     <div
       role="toolbar"
       aria-label={t("workspace.toolbar.label")}
-      className={`flex flex-wrap items-center gap-3 border-b border-hairline ${phonePortraitDeckToolbar ? "px-2" : "px-4"} py-1.5 shadow-[inset_0_-1px_0_rgba(0,0,0,0.2)] ${phoneMode ? "sticky top-0 z-20 bg-slate-950" : "bg-white/[0.035]"}`}
+      className={`flex ${compactPhoneDraft ? "flex-nowrap" : "flex-wrap"} items-center border-b border-hairline ${compactPhoneDraft ? "gap-1 px-1 py-1" : `gap-3 ${phonePortraitDeckToolbar ? "px-2" : "px-4"} py-1.5`} shadow-[inset_0_-1px_0_rgba(0,0,0,0.2)] ${phoneMode ? "sticky top-0 z-20 bg-slate-950" : "bg-white/[0.035]"}`}
     >
       {heading !== undefined && (
         <h2 className="shrink-0 font-display text-base font-semibold text-fg">{heading}</h2>
@@ -195,10 +210,9 @@ export function DraftWorkspaceToolbar({
               aria-label={t("workspace.layout.label")}
               disabled={interactionLocked}
               onClick={toggle}
-              className="inline-flex min-h-9 items-center gap-2 rounded-[6px] border border-hairline bg-slate-950/72 px-3 text-sm text-fg transition-colors hover:border-hairline-hover hover:bg-slate-900/88 disabled:cursor-not-allowed disabled:opacity-40"
+              className={`inline-flex min-h-9 items-center rounded-[6px] border border-hairline bg-slate-950/72 text-fg transition-colors hover:border-hairline-hover hover:bg-slate-900/88 disabled:cursor-not-allowed disabled:opacity-40 ${compactPhoneDraft ? "min-h-11 gap-1 px-2 text-xs" : "gap-2 px-3 text-sm"}`}
             >
               <span>{t("workspace.layout.label")}</span>
-              <span aria-hidden="true">▼</span>
             </button>
           )}
         >
@@ -211,7 +225,9 @@ export function DraftWorkspaceToolbar({
                 {layoutCapControls}
               </div>
               <div className="border-t border-hairline pt-2">
-                <h3 className="mb-1 text-center text-sm font-semibold text-fg">{t("workspace.sort.label")}</h3>
+                <h3 className="mb-1 text-center text-sm font-semibold text-fg">
+                  {t("workspace.sort.label")}{responsiveDraftGrouping ? ":" : ""}
+                </h3>
                 <div data-layout-sort-options className="grid grid-cols-2 gap-1.5">
                   {sorts.map((sort) => (
                     <button
@@ -290,13 +306,28 @@ export function DraftWorkspaceToolbar({
           {showHeadersControl}
         </>
       )}
-      {phoneLayoutDialog && tabletMode && showHeadersControl}
-      {phoneMode && !phoneLayoutDialog && columnControls}
-      {deckTypeCounts !== undefined && (
-        <DeckTypeCounts counts={deckTypeCounts} compact={compactDeckTypeCounts} />
+      {builderTouchVisualToolbar ? (
+        <>
+          {deckControls}
+          {deckTypeCounts !== undefined && (
+            <DeckTypeCounts counts={deckTypeCounts} compact={compactDeckTypeCounts} />
+          )}
+          {phoneLayoutDialog && showHeadersControl}
+          {trailingControls}
+        </>
+      ) : (
+        <>
+          {phoneLayoutDialog && tabletMode && showHeadersControl}
+          {phoneMode && !phoneLayoutDialog && columnControls}
+          {phoneVisualTrailingControls ?? <>
+            {deckTypeCounts !== undefined && (
+              <DeckTypeCounts counts={deckTypeCounts} compact={compactDeckTypeCounts} />
+            )}
+            {deckControls}
+            {trailingControls}
+          </>}
+        </>
       )}
-      {deckControls}
-      {trailingControls}
     </div>
   );
 }

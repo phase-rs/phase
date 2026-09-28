@@ -29,17 +29,18 @@ pub fn resolve(
     };
 
     let dur = ability.duration.clone().unwrap_or(Duration::UntilEndOfTurn);
-    let target_filter = crate::game::effects::resolved_object_filter(ability, target_filter);
+    let target_filter = crate::game::effects::resolved_object_filter(state, ability, target_filter);
 
     // CR 608.2c + 603.10a: Delegate target resolution to the unified 3-tier
     // dispatch (`resolved_targets`), matching `bounce` / `change_zone`. This
     // routes `SelfRef` through the post-#323 short-circuit so chained
     // `Pump { target: SelfRef }` sub-abilities resolve to the source object
     // rather than inheriting the parent's targets via chain propagation in
-    // `effects::mod.rs::resolve_ability_chain`.
-    let effective_targets =
-        crate::game::targeting::resolved_targets(ability, &target_filter, state);
-    let ids = crate::game::effects::effect_object_targets(&target_filter, &effective_targets);
+    // `effects::mod.rs::resolve_ability_chain`. CR 608.2b: a `ParentTargetSlot`
+    // subject whose target was illegal as the spell resolved gets no bonus
+    // ("the creature you control gets +1/+1" when that creature was stolen in
+    // response).
+    let ids = crate::game::effects::resolved_effect_object_ids(state, ability, &target_filter);
 
     // CR 608.2h + CR 613.4c: the pump amount is determined once, as the effect
     // resolves. When the P/T references the pumped object itself ("+X for each
@@ -185,7 +186,7 @@ pub(crate) fn pump_all_affected_objects(
     // `Not{SpecificObject{target}}`, excluding the already-pumped target so it is
     // not shrunk twice. No-op for filters without contextual refs, mirroring the
     // single `resolve` and `destroy`/`bounce`.
-    let target_filter = crate::game::effects::resolved_object_filter(ability, target);
+    let target_filter = crate::game::effects::resolved_object_filter(state, ability, target);
     // CR 107.3a + CR 601.2b: ability-context filter evaluation.
     let ctx = filter::FilterContext::from_ability(ability);
     // CR 702.26b: a phased-out permanent "is treated as though it does not
@@ -231,8 +232,7 @@ pub fn resolve_double_pt(
     // CR 608.2c + 603.10a: Same 3-tier dispatch as `pump.resolve` — `SelfRef`
     // short-circuits to `ability.source_id` so chained
     // `DoublePT { target: SelfRef }` sub-abilities don't inherit parent targets.
-    let effective_targets = crate::game::targeting::resolved_targets(ability, target_filter, state);
-    let ids = crate::game::effects::effect_object_targets(target_filter, &effective_targets);
+    let ids = crate::game::effects::resolved_effect_object_ids(state, ability, target_filter);
 
     for obj_id in ids {
         let modifications = double_modifications(state, obj_id, mode, factor)?;

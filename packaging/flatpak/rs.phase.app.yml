@@ -40,6 +40,15 @@ finish-args:
   # Hardware acceleration. Without it WebKit falls back to software rendering,
   # which is exactly the outcome the #8614 investigation was avoiding.
   - --device=dri
+  # Browser-style exports (game state, decks, logs) go to the download
+  # directory; without this grant the sandbox has none, so wry falls back to the
+  # process working directory and the export never reaches ~/Downloads.
+  # :create because flatpak exports XDG_DOWNLOAD_DIR only for a directory that
+  # already exists on the host. Read-write is flatpak's default here, so :create
+  # adds only directory creation over the plain grant; the write it allows is
+  # bounded by wry, which stats the target and picks a new name rather than
+  # overwriting.
+  - --filesystem=xdg-download:create
   # tao/tauri crash on the GDK Wayland backend (tauri-apps/tauri#8541), which
   # is why the AppImage's AppRun exports the same variable. Because the backend
   # is pinned to x11 here, --socket=wayland would grant an access this app can

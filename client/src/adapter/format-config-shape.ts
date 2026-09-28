@@ -99,7 +99,8 @@ function isCommandZoneMode(value: unknown): value is CommandZoneMode {
     && (enabled.eligibility_rule === "Standard"
       || enabled.eligibility_rule === "TinyLeaders"
       || enabled.eligibility_rule === "OathbreakerSignatureSpell"
-      || enabled.eligibility_rule === "BrawlColorIdentity")
+      || enabled.eligibility_rule === "BrawlColorIdentity"
+      || enabled.eligibility_rule === "FreeformAnyCastableCard")
   );
 }
 
@@ -114,6 +115,12 @@ function isLegacyRuleSet(value: unknown): boolean {
     && (value.damage_timing === "Modern" || value.damage_timing === "OnStack")
     && (value.wish_scope === "PostM10SideboardOnly" || value.wish_scope === "PreM10ReachesExile")
     && (value.legend_rule_scope === "Modern" || value.legend_rule_scope === "PreM14AnyController")
+    // Absent is valid: this axis postdates the Axis-A save path, and this
+    // predicate also validates definitions persisted locally before it
+    // existed. Rejecting those would discard every saved custom format
+    // outright — the same back-compat the engine's `#[serde(default)]`
+    // provides on the same field, where absent means "Excluded".
+    && (value.ante === undefined || value.ante === "Excluded" || value.ante === "Enabled")
   );
 }
 
@@ -155,6 +162,10 @@ export function isCustomFormatRulesShape(value: unknown): value is CustomFormatR
   return (
     isStringArray(legality.banned)
     && isStringArray(legality.restricted)
+    // Absent is valid: a definition persisted before this field existed
+    // carries no `legal_cards` key, and rejecting those would discard every
+    // custom format a player had already saved.
+    && (legality.legal_cards === undefined || isStringArray(legality.legal_cards))
     && isLegacyRuleSet(legality.legacy)
   );
 }

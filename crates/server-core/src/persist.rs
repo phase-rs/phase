@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use engine::types::game_state::PersistedGameState;
+use engine::types::game_state::{PersistedGameState, PlayerDeckPool};
 use phase_ai::config::AiDifficulty;
 use serde::{Deserialize, Serialize};
 
@@ -54,8 +54,23 @@ pub struct PersistedSession {
     pub start_when_full: bool,
     #[serde(default)]
     pub ranked: bool,
+    /// Host-private native Cube source. Older persisted sessions restore as
+    /// `None`; the list itself intentionally preserves order and duplicates.
+    #[serde(default)]
+    pub booster_pack_pool: Option<Vec<String>>,
     /// Lobby metadata for games still waiting for players.
     pub lobby_meta: Option<PersistedLobbyMeta>,
+    /// The deck-pool half of a persisted session, lifted out of `state` so a
+    /// mutation-time persist re-serializes only the dynamic remainder. Stored
+    /// in its own `deck_pools_json` column, never in a payload column.
+    ///
+    /// `skip_serializing` keeps the field out of the dynamic payload, which is
+    /// the point of the lift; `default` lets a payload decoded without it
+    /// produce an empty list that the reader then fills from the column. There
+    /// is exactly one restorable row shape, so no precedence rule lives here
+    /// or anywhere else.
+    #[serde(default, skip_serializing)]
+    pub deck_pools: Vec<PlayerDeckPool>,
 }
 
 /// Lobby metadata persisted alongside a waiting game.

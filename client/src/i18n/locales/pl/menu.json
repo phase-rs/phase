@@ -142,7 +142,9 @@
       "distinctColorIdentity": "Miejsce {{seat}} — ma tę samą tożsamość kolorów co inne miejsce.",
       "distinctCommander": "Miejsce {{seat}} — ma tego samego dowódcę co inne miejsce."
     },
-    "podPreviewCount": "{{n}} talii pasuje do bieżących ustawień podu"
+    "podPreviewCount": "{{n}} talii pasuje do bieżących ustawień podu",
+    "brain": "Sterowany przez",
+    "brainEngine": "AI silnika"
   },
   "gameProvider": {
     "podSelectionRefused": {

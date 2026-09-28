@@ -45,11 +45,13 @@ upload_to_r2() {
     "card-data.es.json:public/card-data.es.json" \
     "card-data.fr.json:public/card-data.fr.json" \
     "card-data.it.json:public/card-data.it.json" \
+    "card-data.ja.json:public/card-data.ja.json" \
     "card-data.pt.json:public/card-data.pt.json" \
     "scryfall-images.v2.de.json:public/scryfall-images.v2.de.json" \
     "scryfall-images.v2.es.json:public/scryfall-images.v2.es.json" \
     "scryfall-images.v2.fr.json:public/scryfall-images.v2.fr.json" \
     "scryfall-images.v2.it.json:public/scryfall-images.v2.it.json" \
+    "scryfall-images.v2.ja.json:public/scryfall-images.v2.ja.json" \
     "scryfall-images.v2.pt.json:public/scryfall-images.v2.pt.json" \
     "coverage-data.json:public/coverage-data.json" \
     "coverage-summary.json:public/coverage-summary.json"; do

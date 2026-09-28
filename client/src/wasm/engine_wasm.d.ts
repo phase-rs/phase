@@ -9,10 +9,40 @@
 export function apply_seat_mutation(state_json: string, mutation_json: string): any;
 
 /**
+ * Build the HTTP request for one LLM-driven AI decision.
+ *
+ * `endpoint_json` is the player's configured `LlmEndpointConfig`. `history_json`
+ * is the engine-authored game log the caller has accumulated from prior
+ * `ActionResult`s — engine data handed back for rendering, not a client
+ * derivation. Returns `null` when the seat has no decision to make; throws only
+ * on a malformed argument, which is a programming error rather than a runtime
+ * outcome.
+ */
+export function buildLlmDecisionRequest(difficulty: string, player_id: number, endpoint_json: string, history_json: string): any;
+
+/**
+ * Build the connection-probe request for an endpoint.
+ *
+ * Stateless by design: a player configures a provider in Settings, usually
+ * with no game running, and a test that required a live board would be
+ * untestable exactly when it is most needed. The request is built by the same
+ * `build_chat_request` a real decision uses, so a probe that succeeds proves
+ * the endpoint, credential and model the game path will use.
+ */
+export function buildLlmProbeRequest(endpoint_json: string): any;
+
+/**
  * Build the bounded card corpus for parallel AI scoring workers. The live
  * main engine remains the only authority that owns the full card database.
  */
 export function build_ai_card_subset(): string;
+
+/**
+ * The canonical printed name of each of `names`, index-aligned, `null` where
+ * `CardDatabase::canonical_name` has none. Errors if the card database is
+ * not loaded.
+ */
+export function canonicalCardNames(names: any): any;
 
 /**
  * Classify a deck's archetype (Aggro / Midrange / Control / Combo / Ramp) using
@@ -181,6 +211,17 @@ export function export_replay_log(): string;
 export function formatConfigForCustomRules(custom_rules: any): any;
 
 /**
+ * Convert an LLM completion into an authority-bound proposal.
+ *
+ * Mirrors `get_ai_action_proposal_from_scores`: the model's reply is an
+ * untrusted hint, so a fresh contract is derived from the live state and the
+ * selected action is admitted only if that contract contains it. There is
+ * intentionally no endpoint by which model text becomes a `GameAction` without
+ * this check.
+ */
+export function getAiActionProposalFromLlmResponse(player_id: number, fingerprint: string, provider_label: string, status: number, response_body: string): any;
+
+/**
  * Returns the engine-authored default AI rung for every Commander bracket.
  */
 export function getBracketDifficultyTable(): any;
@@ -314,6 +355,13 @@ export function get_stack_pressure(): any;
 export function get_viewer_snapshot_js(player_id: number): any;
 
 /**
+ * Combined viewer projection and event slice for one engine transition.
+ * Unlike the legacy state-only endpoint, this path validates the viewer id
+ * before narrowing it to the engine's representable PlayerId domain.
+ */
+export function get_viewer_transition_snapshot_js(player_id: number, events: any): any;
+
+/**
  * Whether the current game has an in-progress replay recording. `false`
  * before any game has started, or after the recording was invalidated by
  * undo/restore (see `restore_game_state`).
@@ -406,6 +454,13 @@ export function legal_targets_for_castables_js(object_ids: any): any;
  * to populate the Create Token dropdown — frontend never derives this list.
  */
 export function list_token_presets_js(): any;
+
+/**
+ * The engine-owned LLM provider catalog: vendors, default endpoints, and
+ * suggested model ids for the settings UI. The display layer renders exactly
+ * this rather than carrying a list of its own.
+ */
+export function llmProviderCatalog(): any;
 
 /**
  * Load the card database from a JSON string (card-data.json contents).
@@ -659,12 +714,26 @@ export function submit_interaction_js(actor: number, submission: any): any;
  */
 export function take_last_panic_message(): string | undefined;
 
+/**
+ * Validate a probe response through the engine's own extraction and decoding.
+ *
+ * The transport deliberately returns non-2xx bodies rather than rejecting, so
+ * that a vendor's error message survives to be shown. That makes "bytes came
+ * back" a meaningless success signal -- a rejected key and an unknown model
+ * both arrive as well-formed bodies. This is the authority that says whether a
+ * reply is one the game path could actually use.
+ */
+export function validateLlmProbeResponse(provider_label: string, status: number, response_body: string): any;
+
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly apply_seat_mutation: (a: number, b: number, c: number, d: number) => [number, number, number];
+    readonly buildLlmDecisionRequest: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
+    readonly buildLlmProbeRequest: (a: number, b: number) => [number, number, number];
     readonly build_ai_card_subset: () => [number, number, number, number];
+    readonly canonicalCardNames: (a: any) => [number, number, number];
     readonly classify_deck_js: (a: any) => [number, number, number];
     readonly clear_game_state: () => void;
     readonly commanderPartnerCandidates: (a: number, b: number, c: any, d: any) => [number, number, number];
@@ -678,6 +747,7 @@ export interface InitOutput {
     readonly export_game_state_json: () => [number, number, number, number];
     readonly export_replay_log: () => [number, number, number, number];
     readonly formatConfigForCustomRules: (a: any) => [number, number, number];
+    readonly getAiActionProposalFromLlmResponse: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number];
     readonly getBracketDifficultyTable: () => [number, number, number];
     readonly get_ai_action_proposal: (a: number, b: number, c: number) => [number, number, number];
     readonly get_ai_action_proposal_from_scores: (a: number, b: number, c: number, d: number, e: number, f: bigint) => [number, number, number];
@@ -692,6 +762,7 @@ export interface InitOutput {
     readonly get_filtered_game_state: (a: number) => any;
     readonly get_legal_actions_for_viewer_js: (a: number) => any;
     readonly get_viewer_snapshot_js: (a: number) => any;
+    readonly get_viewer_transition_snapshot_js: (a: number, b: any) => any;
     readonly has_replay_recording: () => number;
     readonly initialize_game: (a: any, b: number, c: number, d: any, e: any, f: number, g: number) => any;
     readonly initialize_multiplayer_host_game: (a: any, b: number, c: number, d: any, e: any, f: number, g: number) => any;
@@ -722,12 +793,14 @@ export interface InitOutput {
     readonly submit_ai_action_proposal: (a: number, b: number, c: number, d: any) => any;
     readonly submit_interaction_js: (a: number, b: any) => any;
     readonly take_last_panic_message: () => [number, number];
+    readonly validateLlmProbeResponse: (a: number, b: number, c: number, d: number, e: number) => any;
     readonly get_game_state: () => any;
     readonly get_legal_actions_js: () => any;
     readonly get_stack_pressure: () => any;
     readonly init_panic_hook: () => void;
     readonly replay_header_js: () => any;
     readonly list_token_presets_js: () => any;
+    readonly llmProviderCatalog: () => any;
     readonly create_initial_state: () => any;
     readonly getFormatRegistry: () => any;
     readonly clear_replay_playback: () => void;

@@ -120,6 +120,13 @@ fn is_plain_parent_target_delivery(delivery: &ResolvedAbility) -> bool {
     // `ZoneMoveRequest`, where neither provenance field changes the delivery;
     // rejecting them would make an otherwise identical triggered search fall
     // back to sequential resolution while the spell form batches correctly.
+    //
+    // `description` is deliberately absent from this list for the same reason.
+    // It is display text for whatever prompt a link raises, never behavior the
+    // `ZoneMoveRequest` would have to preserve — and since CR 608.2c chain
+    // links inherit the head's printed text
+    // (`ResolvedAbility::backfill_chain_description`), every delivery now
+    // carries one, so its presence discriminates nothing.
     delivery.targets.is_empty()
         && delivery.sub_ability.is_none()
         && delivery.else_ability.is_none()
@@ -133,7 +140,6 @@ fn is_plain_parent_target_delivery(delivery: &ResolvedAbility) -> bool {
         && matches!(delivery.target_choice_timing, TargetChoiceTiming::Stack)
         && delivery.target_selection_mode.is_chosen()
         && delivery.target_chooser.is_none()
-        && delivery.description.is_none()
         && delivery.repeat_for.is_none()
         && delivery.min_x_value == 0
         && !delivery.cant_be_copied
@@ -458,6 +464,7 @@ fn advance_acceptance(
     state.pending_scoped_library_search = Some(pending);
     state.waiting_for = WaitingFor::OptionalEffectChoice {
         player,
+        decision_subject_id: None,
         source_id,
         description,
         may_trigger_key: None,
@@ -557,9 +564,7 @@ fn prepare_scoped_group(
             state
                 .player_actions_this_way
                 .insert((player, PlayerActionKind::SearchedLibrary));
-            state
-                .player_actions_this_turn
-                .push((player, PlayerActionKind::SearchedLibrary));
+            super::record_player_action_this_turn(state, player, PlayerActionKind::SearchedLibrary);
         }
         if let Some(search) = prepared.active_search {
             let looked_at = search
@@ -1002,6 +1007,38 @@ mod tests {
 
         assert!(state.pending_scoped_library_search.is_some());
         assert!(state.active_optional_effect_frame().is_none());
+    }
+
+    /// The scoped (multi-player) search protocol records each
+    /// searcher's `SearchedLibrary` action exactly once — this is the
+    /// scoped-protocol counterpart to `player_actions_this_way_accumulates_
+    /// across_player_scope_iterations`, which exercises the sequential
+    /// per-player path instead.
+    #[test]
+    fn nonoptional_scoped_search_records_each_searcher_once() {
+        let (mut state, mut scoped_search, _) = three_player_scoped_search(true);
+        scoped_search.player_scope = Some(PlayerFilter::All);
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(&mut state, &scoped_search, &mut events, 0)
+            .expect("nonoptional all-player scoped search resolves");
+
+        assert!(
+            state.pending_scoped_library_search.is_some(),
+            "the scoped protocol, not the sequential path, must have run"
+        );
+
+        let action = crate::types::events::PlayerActionKind::SearchedLibrary;
+        for player in [PlayerId(0), PlayerId(1), PlayerId(2)] {
+            assert_eq!(
+                state
+                    .player_actions_this_turn
+                    .iter()
+                    .filter(|entry| **entry == (player, action))
+                    .count(),
+                1,
+                "{player:?} must be recorded exactly once"
+            );
+        }
     }
 
     /// The batch shortcut is deliberately limited to the two delivery shapes

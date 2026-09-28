@@ -11,10 +11,13 @@ use crate::types::card_type::{
 };
 use crate::types::mana::{ManaColor, ManaCost};
 use nom::branch::alt;
-use nom::bytes::complete::{tag, take_until};
-use nom::character::complete::space1;
-use nom::combinator::{eof, map_res, opt, peek, value};
-use nom::sequence::terminated;
+use nom::bytes::complete::{tag, take_till, take_until};
+use nom::character::complete::{alpha1, anychar, space1};
+use nom::combinator::{eof, map_res, opt, peek, recognize, value, verify};
+use nom::multi::many_till;
+use nom::sequence::{preceded, terminated};
+
+use super::oracle_effect::token::parse_complete_token_keyword_list;
 
 /// A borrowed pair of `(original, lowercase)` slices kept in lockstep.
 ///
@@ -240,6 +243,20 @@ pub fn strip_after<'a>(text: &'a str, needle: &str) -> Option<&'a str> {
 pub fn split_around<'a>(text: &'a str, needle: &str) -> Option<(&'a str, &'a str)> {
     text.find(needle)
         .map(|pos| (&text[..pos], &text[pos + needle.len()..]))
+}
+
+/// The choice clause's own sentence: everything up to the first `.`.
+///
+/// Shared by the as-enters classifier retry and the replacement builder's
+/// fallback so both derive the SAME object phrase from a two-sentence line —
+/// naming it twice is the drift that rejects Haktos's full line in one layer
+/// while the other accepts it. Nom `take_till`, not `split_once`: parser
+/// dispatch goes through combinators from the first line. Returns the whole
+/// input when it carries no `.`; callers trim.
+pub fn first_sentence(text: &str) -> &str {
+    take_till::<_, _, OracleError<'_>>(|c| c == '.')
+        .parse(text)
+        .map_or(text, |(_, head)| head)
 }
 
 /// Split a modeled static sentence from a following "The same is true for ..."
@@ -1724,6 +1741,7 @@ fn unmask_ring_tempts_you_phrase(text: String) -> String {
 
 const KEYWORD_ACTION_PLACEHOLDER: &str = "\u{E0001}";
 const CARD_NAMED_LITERAL_PLACEHOLDER: &str = "\u{E0002}";
+const KEYWORD_ACTION_WALKER_PLACEHOLDER: &str = "\u{E0003}";
 
 /// CR 701.40a / CR 701.58a / CR 701.62a: A handful of cards are *named* after a
 /// keyword action ("Manifest Dread" → "Manifest dread.", "Cloak" → "Cloak …").
@@ -1813,6 +1831,25 @@ enum NamedLiteralKind {
     Token,
 }
 
+/// Parse a token's late `with <keywords> named <name>` prefix.
+///
+/// The `with` clause must actually grant at least one token keyword. That keeps
+/// `named` operands in a token's count/filter/follow-up text out of the literal
+/// name mask, and deliberately reuses the classifier that token parsing uses.
+fn parse_late_token_named_literal_prefix(
+    input: &str,
+) -> OracleResult<'_, (usize, NamedLiteralKind)> {
+    let start = input;
+    let (input, _) = alt((tag("token with "), tag("tokens with "))).parse(input)?;
+    let (input, _keywords) = verify(
+        recognize(many_till(anychar, peek(tag(" named ")))),
+        |keywords: &&str| parse_complete_token_keyword_list(keywords).is_some(),
+    )
+    .parse(input)?;
+    let (input, _) = tag(" named ").parse(input)?;
+    Ok((input, (start.len() - input.len(), NamedLiteralKind::Token)))
+}
+
 fn parse_card_named_literal_prefix(input: &str) -> OracleResult<'_, (usize, NamedLiteralKind)> {
     alt((
         // CR 201.2a + CR 201.5c: a meld RESULT name ("meld them into Titania,
@@ -1844,6 +1881,7 @@ fn parse_card_named_literal_prefix(input: &str) -> OracleResult<'_, (usize, Name
             ("token named ".len(), NamedLiteralKind::Token),
             tag("token named "),
         ),
+        parse_late_token_named_literal_prefix,
         value(
             ("permanents named ".len(), NamedLiteralKind::CardFilter),
             tag("permanents named "),
@@ -2149,6 +2187,62 @@ fn unmask_card_named_literal_spans(text: String, originals: &[String]) -> String
     result
 }
 
+/// CR 701.71a: the walker word of an `empower <walker>` keyword action, on the
+/// lowercase shadow. Returns the walker word; the span before it is the fixed
+/// `"empower "` prefix.
+fn parse_keyword_action_walker(input: &str) -> OracleResult<'_, &str> {
+    preceded(tag("empower "), alpha1).parse(input)
+}
+
+/// Byte offset and length of the next keyword-action walker word, tried at each
+/// word boundary of `lower` (word-boundary scanning idiom).
+fn next_keyword_action_walker(lower: &str) -> Option<(usize, usize)> {
+    lower.char_indices().find_map(|(idx, _)| {
+        let is_word_boundary = idx == 0
+            || lower[..idx]
+                .chars()
+                .next_back()
+                .is_none_or(|c| !c.is_alphanumeric());
+        is_word_boundary
+            .then(|| parse_keyword_action_walker(&lower[idx..]).ok())
+            .flatten()
+            .map(|(_, walker)| (idx + "empower ".len(), walker.len()))
+    })
+}
+
+/// CR 701.71a: "Empower Jace" names a keyword action; its walker word is not a
+/// self-reference even on a card whose short name is "Jace" (Jace, Reality
+/// Sculptor's "[+1]: Empower Jace X, …"). Mask the walker word while
+/// `normalize_card_name_refs` runs, so every self-reference rewrite strategy
+/// skips it, and restore the printed casing afterwards.
+fn mask_keyword_action_walker_names(text: &str) -> (String, Vec<String>) {
+    let lower = text.to_ascii_lowercase();
+    let mut masked = String::with_capacity(text.len());
+    let mut originals = Vec::new();
+    let mut rest = text;
+    let mut lower_rest = lower.as_str();
+
+    while let Some((start, len)) = next_keyword_action_walker(lower_rest) {
+        let end = start + len;
+        masked.push_str(&rest[..start]);
+        masked.push_str(KEYWORD_ACTION_WALKER_PLACEHOLDER);
+        originals.push(rest[start..end].to_string());
+        rest = &rest[end..];
+        lower_rest = &lower_rest[end..];
+    }
+
+    masked.push_str(rest);
+    (masked, originals)
+}
+
+fn unmask_keyword_action_walker_names(text: String, originals: &[String]) -> String {
+    let mut result = text;
+    for original in originals {
+        result = result.replacen(KEYWORD_ACTION_WALKER_PLACEHOLDER, original, 1);
+    }
+    result
+}
+
 /// CR 201.5a: The granting-object self-reference marker. Emitted by
 /// [`mask_granting_self_reference_in_quotes`] when a card's own printed name
 /// appears in a self-reference (verb-object) position inside a *quoted granted
@@ -2388,6 +2482,7 @@ pub fn normalize_card_name_refs(text: &str, card_name: &str) -> String {
         None => (pre, Vec::new()),
     };
     let (text, card_named_originals) = mask_card_named_literal_spans(&text);
+    let (text, walker_originals) = mask_keyword_action_walker_names(&text);
     // Strip A- prefix (Alchemy rebalanced cards in MTGJSON)
     let effective_name = alchemy_effective_name(card_name);
 
@@ -2633,6 +2728,7 @@ pub fn normalize_card_name_refs(text: &str, card_name: &str) -> String {
     let effective_name_str = effective_name;
     result = result.replace("named ~", &format!("named {effective_name_str}"));
 
+    result = unmask_keyword_action_walker_names(result, &walker_originals);
     result = unmask_card_named_literal_spans(result, &card_named_originals);
     result = unmask_card_name_keyword_action(result, &kw_action_originals);
     unmask_ring_tempts_you_phrase(result)
@@ -3045,6 +3141,25 @@ mod tests {
     }
 
     #[test]
+    fn late_token_named_literal_prefix_requires_a_keyword_clause() {
+        let input = "token with flying and haste named hornet.";
+        let (rest, (prefix_len, kind)) = parse_late_token_named_literal_prefix(input).unwrap();
+        assert_eq!(rest, "hornet.");
+        assert_eq!(&input[..prefix_len], "token with flying and haste named ");
+        assert_eq!(kind, NamedLiteralKind::Token);
+
+        // `named` in a card-count operand is not a token name clause.
+        assert!(parse_late_token_named_literal_prefix(
+            "token with cards named goblin gathering in your graveyard"
+        )
+        .is_err());
+        assert!(parse_late_token_named_literal_prefix(
+            "token with flying and cards named goblin gathering"
+        )
+        .is_err());
+    }
+
+    #[test]
     fn normalize_token_named_literal_keeps_creator_name_inside_token_name() {
         // CR 111.4: Selenia, the Cursed Heart names the token it creates
         // "Selenia's Curse". That is the token's own literal name, not a
@@ -3058,6 +3173,34 @@ mod tests {
                 "Selenia, the Cursed Heart",
             ),
             "When ~ dies, create a legendary black Aura Curse enchantment token named Selenia's Curse attached to target opponent."
+        );
+    }
+
+    #[test]
+    fn normalize_late_token_named_literal_keeps_creator_name_inside_token_name() {
+        // CR 111.4: Crow Storm's late `with flying named Storm Crow` form
+        // names the created token. `Crow` is not in the engine's subtype list,
+        // so the generic first-word self-reference fallback would otherwise
+        // corrupt the literal token name to "Storm ~".
+        assert_eq!(
+            normalize_card_name_refs(
+                "Create a 1/2 blue Bird creature token with flying named Storm Crow.",
+                "Crow Storm",
+            ),
+            "Create a 1/2 blue Bird creature token with flying named Storm Crow."
+        );
+    }
+
+    #[test]
+    fn mixed_token_keyword_clause_does_not_mask_the_name_as_a_token() {
+        let input = "token with flying and cards named Goblin Gathering";
+        assert_eq!(
+            next_card_named_literal_prefix(input),
+            Some((
+                "token with flying and ".len(),
+                "cards named ".len(),
+                NamedLiteralKind::CardFilter,
+            )),
         );
     }
 
@@ -3219,6 +3362,26 @@ mod tests {
         assert_eq!(
             normalize_card_name_refs("When Sprouting Goblin enters", "A-Sprouting Goblin"),
             "When ~ enters"
+        );
+    }
+
+    #[test]
+    fn normalize_card_name_refs_keeps_empower_jace_walker_on_a_jace_card() {
+        // CR 701.71a: "Jace" in "Empower Jace X" names the keyword action's
+        // walker, not the card, even though the card's comma short name is
+        // "Jace". Red without the walker mask ("Empower ~ X").
+        assert_eq!(
+            normalize_card_name_refs(
+                "[+1]: Empower Jace X, where X is the number of Islands you control.",
+                "Jace, Reality Sculptor",
+            ),
+            "[+1]: Empower Jace X, where X is the number of Islands you control."
+        );
+        // Paired positive: a real comma short-name self-reference on the same
+        // card still normalizes, so the mask is scoped to the walker word.
+        assert_eq!(
+            normalize_card_name_refs("Jace deals 2 damage", "Jace, Reality Sculptor"),
+            "~ deals 2 damage"
         );
     }
 
@@ -4734,6 +4897,26 @@ mod tests {
         // Cross-string (lower/original) patterns must use find() on lowered + manual slicing.
         assert_eq!(strip_after("Hello World", "hello"), None);
         assert_eq!(strip_after("Hello World", "Hello"), Some(" World"));
+    }
+
+    // --- first_sentence tests ---
+
+    #[test]
+    fn first_sentence_cuts_at_the_first_period() {
+        assert_eq!(
+            super::first_sentence("choose 2, 3, or 4 at random. Haktos has protection."),
+            "choose 2, 3, or 4 at random"
+        );
+    }
+
+    #[test]
+    fn first_sentence_returns_the_whole_input_without_a_period() {
+        assert_eq!(super::first_sentence("choose a color"), "choose a color");
+    }
+
+    #[test]
+    fn first_sentence_of_empty_is_empty() {
+        assert_eq!(super::first_sentence(""), "");
     }
 
     // --- TextPair::strip_after tests ---

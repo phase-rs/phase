@@ -50,6 +50,9 @@ function customRules(id = 0): CustomFormatRules {
     },
     legality: {
       legal_sets: null,
+      // Present because the engine always emits it; the persisted-before-the-
+      // field case drops it explicitly in its own test below.
+      legal_cards: [],
       banned: [],
       restricted: [],
       legacy: {
@@ -57,6 +60,9 @@ function customRules(id = 0): CustomFormatRules {
         damage_timing: "Modern",
         wish_scope: "PostM10SideboardOnly",
         legend_rule_scope: "Modern",
+        // Present here because the engine always emits it; the
+        // persisted-before-the-axis case drops it explicitly below.
+        ante: "Excluded",
       },
     },
   };
@@ -257,6 +263,26 @@ describe("isCustomFormatRulesShape", () => {
     ).toBe(false);
   });
 
+  it("accepts an Enabled command zone with FreeformAnyCastableCard", () => {
+    // Paired with the "Bogus" rejection above so each is non-vacuous: this
+    // asserts an accept where that one asserts a reject for the same shape.
+    const rules = customRules();
+    expect(
+      isCustomFormatRulesShape({
+        ...rules,
+        structural: {
+          ...rules.structural,
+          command_zone_mode: {
+            Enabled: {
+              commander_damage_threshold: 21,
+              eligibility_rule: "FreeformAnyCastableCard",
+            },
+          },
+        },
+      }),
+    ).toBe(true);
+  });
+
   it("distinguishes a null legal_sets from a missing one", () => {
     const rules = customRules();
     // `null` means unrestricted — legal, and NOT the same claim as [].
@@ -281,6 +307,81 @@ describe("isCustomFormatRulesShape", () => {
         legality: {
           ...rules.legality,
           legacy: { ...rules.legality.legacy, mana_burn: "Whatever" },
+        },
+      }),
+    ).toBe(false);
+  });
+
+  it("validates legal_cards, and accepts a definition persisted without it", () => {
+    const rules = customRules();
+
+    // Present and valid.
+    expect(
+      isCustomFormatRulesShape({
+        ...rules,
+        legality: { ...rules.legality, legal_cards: ["Arena", "Sewers of Estark"] },
+      }),
+    ).toBe(true);
+
+    // Absent: a definition saved before the field existed must still load, or
+    // every custom format a player had saved would be discarded.
+    const { legal_cards: _dropped, ...legalityWithout } = rules.legality;
+    expect(
+      isCustomFormatRulesShape({ ...rules, legality: legalityWithout }),
+    ).toBe(true);
+
+    // Present but the wrong type — the guard stands between `JSON.parse` and
+    // code that will index it, so a non-array must be refused rather than
+    // reaching a `.map`.
+    for (const bad of ["Arena", 7, {}, [1, 2]]) {
+      expect(
+        isCustomFormatRulesShape({
+          ...rules,
+          legality: { ...rules.legality, legal_cards: bad },
+        }),
+      ).toBe(false);
+    }
+  });
+
+  it("accepts a definition persisted before the ante axis existed", () => {
+    // Back-compat with `localStorage`, one of the two untrusted ingresses
+    // this guard stands in front of: a `SavedCustomFormat` written before the
+    // ante axis carries no `ante` key. Rejecting it would silently discard
+    // every custom format a player had already saved. Mirrors the engine's
+    // `#[serde(default)]` on the same field.
+    const rules = customRules();
+    const { ante: _dropped, ...legacyWithoutAnte } = rules.legality.legacy;
+    expect(
+      isCustomFormatRulesShape({
+        ...rules,
+        legality: { ...rules.legality, legacy: legacyWithoutAnte },
+      }),
+    ).toBe(true);
+  });
+
+  it("validates the ante axis when present", () => {
+    const rules = customRules();
+    // Both real values are wire-VALID here. This guard checks shape, not
+    // policy: rejecting `Enabled` is the engine's `passes_legacy_axis_gate`
+    // job, and duplicating that decision in the display layer would be a
+    // second, drifting authority on what the engine implements.
+    for (const ante of ["Excluded", "Enabled"]) {
+      expect(
+        isCustomFormatRulesShape({
+          ...rules,
+          legality: {
+            ...rules.legality,
+            legacy: { ...rules.legality.legacy, ante },
+          },
+        }),
+      ).toBe(true);
+    }
+    expect(
+      isCustomFormatRulesShape({
+        ...rules,
+        legality: {
+          ...rules.legality,
+          legacy: { ...rules.legality.legacy, ante: "Whatever" },
         },
       }),
     ).toBe(false);

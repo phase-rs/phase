@@ -54,6 +54,9 @@
     "lossPointsLabel": "Sconfitta",
     "formatLabel": "Formato",
     "formatNone": "Non specificato",
+    "matchTypeLabel": "Partita",
+    "matchTypeBo3": "Al meglio dei tre",
+    "matchTypeBo1": "Partita singola",
     "plusRoundsLabel": "Turni aggiuntivi",
     "plusRoundsHint": "Aggiunti al numero di turni automatico (Svizzero più N). Si applica solo se Turni è lasciato automatico.",
     "submit": "Crea torneo",
@@ -147,6 +150,7 @@
     "connectionLost": "Connessione alla lobby persa. Controlla l'indirizzo del server.",
     "aborted": "Quella richiesta è stata annullata.",
     "unsupported": "La richiesta è stata inviata, ma questo server è troppo vecchio per confermarla. Controlla il torneo prima di riprovare.",
+    "incompatible": "Questo server è troppo vecchio per quella struttura di match (richiede il protocollo lobby {{needed}}). Non è stato inviato nulla.",
     "notFound": "Nessun torneo con quel codice."
   }
 }

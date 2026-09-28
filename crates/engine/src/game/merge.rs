@@ -239,6 +239,7 @@ fn merged_copiable_values(
         .unwrap_or_else(|| intrinsic_copiable_values(topmost));
     let mut abilities = Vec::new();
     let mut triggers = Vec::new();
+    let mut trigger_printed_origins = Vec::new();
     let mut statics = Vec::new();
     let mut replacements = Vec::new();
     let mut keywords: Vec<crate::types::keywords::Keyword> = Vec::new();
@@ -273,6 +274,11 @@ fn merged_copiable_values(
         );
         abilities.extend(abil.iter().cloned());
         triggers.extend(trig.iter().cloned());
+        trigger_printed_origins.extend(
+            crate::game::printed_cards::base_trigger_printed_origins(obj)
+                .iter()
+                .cloned(),
+        );
         statics.extend(stat.iter().cloned());
         // CR 707.2 / CR 611.2b: merged copiable values are printed/defining
         // characteristics, not runtime locks or target-bound die-exile riders
@@ -294,6 +300,7 @@ fn merged_copiable_values(
 
     values.abilities = Arc::new(abilities);
     values.trigger_definitions = Arc::new(triggers);
+    values.trigger_printed_origins = Arc::new(trigger_printed_origins);
     values.static_definitions = Arc::new(statics);
     values.replacement_definitions = Arc::new(replacements);
     values.keywords = keywords;

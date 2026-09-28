@@ -107,6 +107,7 @@ import {
 import { ReplacementModal } from "../components/modal/ReplacementModal.tsx";
 import { ResolveAllConsentModal } from "../components/modal/ResolveAllConsentModal.tsx";
 import { TriggerOrderModal } from "../components/modal/TriggerOrderModal.tsx";
+import { CostReductionOrderModal } from "../components/modal/CostReductionOrderModal.tsx";
 import { PeekTab } from "../components/modal/DialogShell.tsx";
 import { PeekRestoreTab } from "../components/modal/DialogHost.tsx";
 import { useModalPeek } from "../components/modal/useModalPeek.ts";
@@ -735,6 +736,12 @@ export function GamePage() {
   }, []);
 
   const handleNoDeck = useCallback((reason?: string, bracketViolation?: boolean) => {
+    if (sourceParam === "draft" && draftIdParam) {
+      navigate("/draft/quick?resume=1", {
+        state: { draftStartError: reason ?? null, draftId: draftIdParam },
+      });
+      return;
+    }
     if (reason) {
       // cEDH bracket lock: surface as a blocking modal rather than navigating
       // away, so the user can read the explanation before going back to setup.
@@ -748,7 +755,7 @@ export function GamePage() {
       return;
     }
     navigate("/");
-  }, [navigate]);
+  }, [navigate, sourceParam, draftIdParam]);
 
   const handleCardDataMissing = useCallback(() => {
     setShowCardDataMissing(true);
@@ -1613,16 +1620,16 @@ function GamePageContent({
             band would drag the hand vertically. Instead we give the row a
             CONSTANT height equal to the DEFAULT band and pin it to the track's
             bottom (`self-end`, the viewport edge, which never moves). The height
-            mirrors the resolver's default track exactly — `min(18%, 150px)` of
-            the grid's CONTENT box (`100dvh` minus the top-overlay padding) — but
+            uses the shared `--game-player-row-height` contract (also consumed by
+            board-choice controls) to mirror the resolver's default track. It is
             computed in viewport units so it ignores the LIVE (resized) track,
-            which a plain `18%` on a grid item would track instead. The hand thus
-            keeps its default resting position and stays put on resize; a grown
-            band opens empty space ABOVE the row (trading with the battlefield)
-            rather than shoving the hand up. */}
+            which a plain percentage on a grid item would track instead. The hand
+            thus keeps its default resting position and stays put on resize; a
+            grown band opens empty space ABOVE the row (trading with the
+            battlefield) rather than shoving the hand up. */}
         <div
           className="relative min-w-0 self-end overflow-visible"
-          style={{ height: "min(calc(0.18 * (100dvh - var(--game-top-overlay-offset, 0px))), 150px)" }}
+          style={{ height: "var(--game-player-row-height)" }}
           data-flex-zone="player-row"
         >
           <div className="flex items-end justify-center" data-flex-zone="playerHandRow">
@@ -1630,7 +1637,7 @@ function GamePageContent({
                 PlayerHand's own fan (see ZoneFanCard), so the row is just the hand.
                 The `playerHandRow` flex-zone hook drives the mobile hand-lift
                 transform in index.css. */}
-            <PlayerHand />
+            <PlayerHand interactionDisabled={boardChoiceLayerActive} />
           </div>
           <DraggableWidget
             target={{ kind: "widget", key: "playerPiles" }}
@@ -1739,7 +1746,7 @@ function GamePageContent({
         </div>
       </DraggableWidget>
 
-      <MobileHandDrawer />
+      <MobileHandDrawer interactionDisabled={boardChoiceLayerActive} />
       <FlexEditOverlay />
 
       {/* Game menu — top-left hamburger */}
@@ -2016,6 +2023,8 @@ function GamePageContent({
         {canActForWaitingState && <ResolveAllConsentModal playerId={playerId} />}
         {waitingFor?.type === "OrderTriggers" &&
           canActForWaitingState && <TriggerOrderModal />}
+        {waitingFor?.type === "OrderCostReductions" &&
+          canActForWaitingState && <CostReductionOrderModal />}
         <BattleProtectorModal />
         <MeldChoiceModal />
         <AssistChoosePlayerModal />

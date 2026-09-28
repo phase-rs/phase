@@ -341,6 +341,19 @@ fn try_peel_opponent_may_prefix(
                 ),
                 |scope| (None, Some(scope)),
             ),
+            // CR 607.2a + CR 108.3 + CR 608.2d: "the exiled card's owner may"
+            // (Spell Queller) — the owner of each card the source's linked
+            // exile ability exiled makes the choice, fanned out per owner. The
+            // subject grammar is shared with the mandatory route (Skyclave
+            // Apparition's "the exiled card's owner creates …"); only the
+            // trailing "may " is this site's own.
+            map(
+                terminated(
+                    super::oracle_effect::lower::parse_linked_exile_owner_subject,
+                    tag("may "),
+                ),
+                |scope| (None, Some(scope)),
+            ),
             value(
                 (None, Some(PlayerFilter::Opponent)),
                 tag("each opponent may "),
@@ -456,8 +469,9 @@ fn is_specialized_duration_carrier(text_lower: &str) -> bool {
         value((), tag("they may cast ")),
         // CR 601.2f — "the next [type] spell you cast this turn ..."
         // next-spell limiter (cost reduction, keyword grant). The
-        // specialized parser at `oracle_effect/mod.rs:571` requires
-        // "this turn" to be present in the input.
+        // specialized parser `oracle_effect::try_parse_grant_next_spell_ability`
+        // requires "this turn" (via `parse_next_spell_subject`) to be present
+        // in the input.
         value((), tag("the next ")),
         // CR 305.2 — "play an additional land this turn" / "play <n> additional
         // lands this turn" (Escape to the Wilds). `try_parse_additional_land_this_turn`
@@ -950,6 +964,63 @@ mod tests {
             peel_optional_slots("you may cast the exiled card without paying its mana cost");
         assert!(is_optional);
         assert_eq!(rest, "cast the exiled card without paying its mana cost");
+    }
+
+    /// CR 607.2a + CR 108.3 + CR 608.2d: every spelling of the linked-exile
+    /// owner subject composes with the trailing "may " into the same per-owner
+    /// optional scope, on both the chunk-loop entry (`peel_optional_slots`) and
+    /// the clause shell (`peel_clause`). The subject grammar is the one the
+    /// mandatory route uses, so a spelling cannot peel on one route only.
+    #[test]
+    fn peel_linked_exile_owner_may_captures_owner_scope_across_subjects() {
+        for subject in [
+            "the exiled card's owner",
+            "the exiled cards' owners",
+            "the owner of each card exiled with ~",
+            "the owner of each card exiled with this saga",
+        ] {
+            let text = format!("{subject} may cast that card without paying its mana cost");
+
+            let (is_optional, opponent_may_scope, implicit_scope, rest) =
+                peel_optional_slots(&text);
+            assert!(is_optional, "{subject}");
+            assert_eq!(opponent_may_scope, None, "{subject}");
+            assert_eq!(
+                implicit_scope,
+                Some(PlayerFilter::OwnersOfCardsExiledBySource),
+                "{subject}"
+            );
+            assert_eq!(
+                rest, "cast that card without paying its mana cost",
+                "{subject}"
+            );
+
+            let (peeled, ctx) = peel_clause(&text);
+            assert_eq!(
+                peeled, "cast that card without paying its mana cost",
+                "{subject}"
+            );
+            assert!(ctx.optional, "{subject}");
+            assert_eq!(ctx.opponent_may_scope, None, "{subject}");
+            assert_eq!(
+                ctx.may_implicit_player_scope,
+                Some(PlayerFilter::OwnersOfCardsExiledBySource),
+                "{subject}"
+            );
+        }
+    }
+
+    /// CR 608.2d: the owner subject is optional only when "may" follows it. The
+    /// mandatory form (Skyclave Apparition) is left for the player-scope subject
+    /// peel, which owns it.
+    #[test]
+    fn peel_linked_exile_owner_without_may_is_not_optional() {
+        let text = "the exiled card's owner creates an X/X blue Illusion creature token";
+        let (is_optional, opponent_may_scope, implicit_scope, rest) = peel_optional_slots(text);
+        assert!(!is_optional);
+        assert_eq!(opponent_may_scope, None);
+        assert_eq!(implicit_scope, None);
+        assert_eq!(rest, text);
     }
 
     #[test]

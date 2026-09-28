@@ -9,11 +9,13 @@
 //!   When this creature enters, tap target creature an opponent controls and put a stun counter on it.
 //!   {1}{U}, {T}: Shuffle this creature and target creature with a stun counter on it into their owners' libraries.
 
+use engine::game::ability_utils::build_resolved_from_def;
 use engine::game::effects;
 use engine::game::zones::create_object;
+use engine::parser::oracle_effect::parse_effect_chain;
 use engine::types::ability::{
-    ControllerRef, Effect, EffectScope, FilterProp, QuantityExpr, ResolvedAbility, TapStateChange,
-    TargetFilter, TargetRef, TypeFilter, TypedFilter,
+    AbilityKind, ControllerRef, Effect, EffectScope, FilterProp, QuantityExpr, ResolvedAbility,
+    TapStateChange, TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
@@ -237,6 +239,86 @@ fn activated_shuffle_both_into_owners_libraries() {
         "Should have at least 2 ZoneChanged events, got {}",
         zone_changes.len()
     );
+}
+
+/// CR 400.3 + CR 701.24a: The production parser chain freezes both owners
+/// before either move resolves. A stolen target therefore routes to and
+/// shuffles its owner's library alongside the source owner's library.
+#[test]
+fn parsed_compound_shuffle_tracks_mixed_owners() {
+    let mut state = GameState::new_two_player(42);
+    for i in 0..5 {
+        create_object(
+            &mut state,
+            CardId(300 + i),
+            PlayerId(0),
+            format!("P0 Lib {i}"),
+            Zone::Library,
+        );
+        create_object(
+            &mut state,
+            CardId(400 + i),
+            PlayerId(1),
+            format!("P1 Lib {i}"),
+            Zone::Library,
+        );
+    }
+    let drowner = create_object(
+        &mut state,
+        CardId(10),
+        PlayerId(0),
+        "Floodpits Drowner".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&drowner)
+        .expect("source exists")
+        .card_types
+        .core_types
+        .push(CoreType::Creature);
+    let stolen = create_object(
+        &mut state,
+        CardId(11),
+        PlayerId(1),
+        "Stolen Stunned Creature".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let object = state.objects.get_mut(&stolen).expect("target exists");
+        object.controller = PlayerId(0);
+        object.card_types.core_types.push(CoreType::Creature);
+        object.counters.insert(CounterType::Stun, 1);
+    }
+
+    let definition = parse_effect_chain(
+        "shuffle ~ and target creature with a stun counter on it into their owners' libraries",
+        AbilityKind::Spell,
+    );
+    let mut ability = build_resolved_from_def(&definition, drowner, PlayerId(0));
+    ability.targets = vec![TargetRef::Object(stolen)];
+
+    let mut events = Vec::new();
+    effects::resolve_ability_chain(&mut state, &ability, &mut events, 0)
+        .expect("parsed compound owner shuffle resolves");
+
+    assert_eq!(state.objects[&drowner].zone, Zone::Library);
+    assert_eq!(state.objects[&stolen].zone, Zone::Library);
+    assert_eq!(state.objects[&stolen].owner, PlayerId(1));
+    let mut shuffled_players: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::PlayerPerformedAction {
+                player_id,
+                action: engine::types::events::PlayerActionKind::ShuffledLibrary,
+                ..
+            } => Some(*player_id),
+            _ => None,
+        })
+        .collect();
+    shuffled_players.sort_unstable_by_key(|player| player.0);
+    shuffled_players.dedup();
+    assert_eq!(shuffled_players, vec![PlayerId(0), PlayerId(1)]);
 }
 
 /// Verify the parser produces correct output for the Floodpits Drowner activated ability text.

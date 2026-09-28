@@ -165,7 +165,7 @@ pub fn is_targeted_exchange_root(action: &GameAction) -> bool {
 /// confirmed seams, each disposed differently and deliberately:
 ///
 /// (i) SYNTHESIZED ON READ, DATA-DRIVEN (Activation) —
-/// `casting::activated_ability_definitions` (casting.rs:458) hands the AI indices
+/// `casting::activated_ability_definitions` hands the AI indices
 /// `printed_len + offset` whose definitions are rebuilt per call from
 /// `effective_off_zone_keywords` + `database::synthesis` and stored in no field.
 /// RAILED at runtime by the `RootBinding::Activation` index gate below. A rail is
@@ -256,10 +256,11 @@ pub fn is_targeted_exchange_root(action: &GameAction) -> bool {
 /// provably never calls." That clause was carried for three rounds with an
 /// instrument — a grep for LEAF installer names over three files — that could
 /// not have detected its own falsity: `stickers.rs:490` is reached through a
-/// WRAPPER (`zones.rs:511 rebuild_public_zone_stickers`) named in a file the
-/// grep already covered, so the grep returned zero while the route existed.
-/// (The route is in fact dead on a cast — `zones.rs:511` is inside
-/// `if from == Zone::Battlefield {` at `zones.rs:482` — but an instrument that
+/// WRAPPER (the `stickers::rebuild_public_zone_stickers` call in
+/// `zones::apply_zone_exit_cleanup`) named in a file the grep already
+/// covered, so the grep returned zero while the route existed. (The route is
+/// in fact dead on a cast — that call sits inside `zones::apply_zone_exit_cleanup`'s
+/// `if from == Zone::Battlefield {` block — but an instrument that
 /// is right by luck is not an instrument.) Dispose of a new site by reading ONE
 /// function: what does it write, and where does the content come from. If a
 /// negative reach claim is genuinely needed, discharge it with a BOUNDED
@@ -273,13 +274,16 @@ pub fn is_targeted_exchange_root(action: &GameAction) -> bool {
 /// to it. CR 123.5
 /// says stickers "are retained as that object moves to a public zone and
 /// continue to apply to the new object it becomes in that zone." The engine
-/// implements only half of that: `zones.rs:468-471` clears on a move to a
-/// hidden zone, and `zones.rs:508-513` re-applies ONLY on a battlefield exit
-/// (`from == Zone::Battlefield`, `zones.rs:482`). A card carrying a sticker in
+/// implements only half of that: the `if !zone_retains_stickers(to) && !obj_mut.stickers.is_empty() { .. obj_mut.stickers.clear(); }`
+/// guard in `zones::apply_zone_exit_cleanup` clears on a move to a
+/// hidden zone, and the `stickers::rebuild_public_zone_stickers` call in
+/// `zones::apply_zone_exit_cleanup` re-applies ONLY on a battlefield exit
+/// (`from == Zone::Battlefield` in `zones::apply_zone_exit_cleanup`). A card carrying a sticker in
 /// hand or library therefore keeps `obj.stickers` while `obj.abilities` never
 /// reflects it, so this predicate and the bind (`casting::combined_spell_ability_def`)
 /// read the same list and agree. IF THAT GAP IS EVER CLOSED — by un-gating
-/// `zones.rs:508-513`, by widening `zones.rs:482`, or by adding an entry-side
+/// the `stickers::rebuild_public_zone_stickers` call in `zones::apply_zone_exit_cleanup`,
+/// by widening the `from == Zone::Battlefield` guard in `zones::apply_zone_exit_cleanup`, or by adding an entry-side
 /// install (`zone_pipeline.rs` today contains zero occurrences of "sticker") —
 /// then an ability sticker's granted abilities are installed into `abilities`
 /// during the cast's own move to the stack, i.e. AFTER this predicate has read
@@ -340,7 +344,7 @@ pub fn root_may_yield_adverse_exchange(state: &GameState, action: &GameAction) -
         return true;
     }
     // CR 602.2b: an activated ability's announcement binds a definition chosen by
-    // `ability_index`, and `casting::activation_ability_definition` (casting.rs:497)
+    // `ability_index`, and `casting::activation_ability_definition`
     // resolves an index at or past `obj.abilities.len()` from four families that are
     // SYNTHESIZED ON READ and written into no field entered below:
     // `runtime_granted_cycling_abilities` (CR 702.29a),
@@ -572,7 +576,8 @@ fn bound_root_ability(state: &GameState, root: RootBinding) -> Option<&ResolvedA
                 StackEntryKind::Spell { ability: None, .. }
                 | StackEntryKind::ActivatedAbility { .. }
                 | StackEntryKind::TriggeredAbility { .. }
-                | StackEntryKind::KeywordAction { .. } => None,
+                | StackEntryKind::KeywordAction { .. }
+                | StackEntryKind::CombatDamage { .. } => None,
             })
     })
 }

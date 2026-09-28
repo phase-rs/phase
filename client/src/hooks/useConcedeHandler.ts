@@ -64,8 +64,9 @@ export interface ConcedeHandlerOptions {
  * Drop the pod-side record of a Commander launch after this client has conceded,
  * WITHOUT tearing the transport down.
  *
- * CR 104.3a: the conceding player leaves the game and loses it. CR 800.4a: the
- * rest of the table plays on. That second half is why this is deliberately NOT
+ * CR 104.3a: the conceding player leaves the game and loses it. CR 800.4: a
+ * multiplayer game continues after one or more players have left, so the rest of
+ * the table plays on. That second half is why this is deliberately NOT
  * `endCommanderSession()`. In this host-authoritative P2P topology the host's
  * adapter IS the game for everyone else, so disposing it because the host
  * conceded would end three other players' game — a rules violation, and a worse

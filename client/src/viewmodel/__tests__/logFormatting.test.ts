@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 
 import type { GameLogEntry, LogImportance } from "../../adapter/types";
-import { filterLogByView, logPresentation, timelineRows, toneClass } from "../logFormatting";
+import {
+  filterLogByView,
+  importanceClass,
+  logPresentation,
+  timelineRows,
+  toneClass,
+} from "../logFormatting";
 
 function entry(
   importance: LogImportance,
@@ -109,9 +115,19 @@ describe("game log presentation", () => {
     expect(timelineRows([{ ...firstBoundary, turn: 0 }], true)).toEqual([]);
   });
 
-  it("uses typed tones for non-color style cues", () => {
+  it("uses typed tones for both rail and surface cues", () => {
     expect(toneClass("Positive")).toContain("border-l-emerald");
+    expect(toneClass("Positive")).toContain("bg-emerald");
     expect(toneClass("Negative")).toContain("border-l-red");
+    expect(toneClass("Negative")).toContain("bg-red");
     expect(toneClass("Diagnostic")).toContain("border-l-fuchsia");
+    expect(toneClass("Diagnostic")).toContain("bg-fuchsia");
+  });
+
+  it("uses typed importance for text hierarchy", () => {
+    expect(importanceClass("Essential")).toBe("text-gray-100");
+    expect(importanceClass("Context")).toBe("text-gray-200");
+    expect(importanceClass("Detail")).toBe("text-gray-300");
+    expect(importanceClass("Diagnostic")).toBe("text-gray-400");
   });
 });

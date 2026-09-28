@@ -19,7 +19,6 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{
     GameState, OutsideGameChoiceEntry, OutsideGameChoiceSource, WaitingFor,
 };
-use rand::seq::IndexedRandom;
 
 pub fn resolve(
     state: &mut GameState,
@@ -44,12 +43,12 @@ pub fn resolve(
 
     // The shelf is stocked at rehydrate for any game whose cards can open a
     // pack (`boosters::game_opens_booster_packs`). An empty shelf means the
-    // loaded card database carries no set that can fill a pack — a bounded test
-    // database, or an AI worker holding a game-scoped subset. CR 609.3 ("do as
-    // much as possible"): open nothing rather than fail the whole resolution.
+    // active source cannot fill a pack — an unavailable cube or a database
+    // without a fillable product. CR 609.3 ("do as much as possible"):
+    // open nothing rather than fail the whole resolution.
     let pack = {
         let shelf = state.booster_shelf.clone();
-        let Some(product) = shelf.products.choose(&mut state.rng) else {
+        let Some(pack) = boosters::open_pack(&shelf, &mut state.rng) else {
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::OpenBoosterPack,
                 source_id: ability.source_id,
@@ -57,12 +56,9 @@ pub fn resolve(
             });
             return Ok(());
         };
-        (
-            product.set_code.clone(),
-            boosters::collate_pack(product, &mut state.rng),
-        )
+        pack
     };
-    let (set_code, cards) = pack;
+    let (origin, cards) = pack;
 
     // CR 701.20: "reveal the cards" — the WHOLE pack becomes public, not only
     // the card that is taken. The pack's cards are outside the game and have no
@@ -81,15 +77,26 @@ pub fn resolve(
     // CR 400.11: only the revealed cards matching the effect's filter may be
     // taken. `pack_slot` indexes the OPENED pack, not the filtered list, so the
     // slot a selection names is stable even when the filter excludes cards.
+    //
+    // CR 407.3: an ante card "can't be brought into the game from outside the
+    // game", so it is never OFFERED either — the pack is drawn from a set's
+    // whole card pool, which no deck-construction check has vetted. Filtering
+    // here rather than only at materialization keeps the prompt honest: a
+    // player is not shown a choice that would then be refused. The reveal above
+    // is deliberately left whole, because CR 407.3 restricts what may be taken,
+    // not what the pack contains.
     let choices: Vec<OutsideGameChoiceEntry> = cards
         .into_iter()
         .enumerate()
-        .filter(|(_, card)| matches_target_filter_against_face(card, &filter))
+        .filter(|(_, card)| {
+            matches_target_filter_against_face(card, &filter)
+                && crate::game::ante::admits_face_from_outside_game(state, card)
+        })
         .map(|(pack_slot, card)| OutsideGameChoiceEntry {
             name: card.name.clone(),
             source: OutsideGameChoiceSource::BoosterPack {
                 pack_slot,
-                set_code: set_code.clone(),
+                origin: origin.clone(),
                 card: Box::new(card),
             },
             // Each card in a pack is one physical card.

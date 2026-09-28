@@ -142,7 +142,9 @@
       "distinctColorIdentity": "Seat {{seat}} — shares a colour identity with another seat.",
       "distinctCommander": "Seat {{seat}} — shares a commander with another seat."
     },
-    "podPreviewCount": "{{n}} decks match the current pod settings"
+    "podPreviewCount": "{{n}} decks match the current pod settings",
+    "brain": "Driven by",
+    "brainEngine": "Engine AI"
   },
   "gameProvider": {
     "podSelectionRefused": {

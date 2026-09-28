@@ -26,11 +26,13 @@
 use engine::game::effects::deal_damage;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::ability::{
-    DamageModification, Effect, GameRestriction, QuantityExpr, ResolvedAbility, RestrictionExpiry,
-    ShieldKind, TargetFilter, TargetRef,
+    DamageModification, Effect, GameRestriction, PreventionFormula, QuantityExpr, ResolvedAbility,
+    RestrictionExpiry, ShieldKind, TargetFilter, TargetRef,
 };
 use engine::types::card_type::CoreType;
 use engine::types::events::GameEvent;
+use engine::types::mana::ManaCost;
+use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 
 const HEART_SHAPED_HERB: &str =
@@ -88,7 +90,9 @@ fn heart_shaped_herb_prevents_one_from_opponent_sources_not_own_and_never_deplet
     let repl = &runner.state().objects[&herb].replacement_definitions[0];
     assert_eq!(
         repl.damage_modification,
-        Some(DamageModification::PreventionMinus { value: 1 }),
+        Some(DamageModification::PreventionMinus {
+            value: PreventionFormula::fixed(1),
+        }),
         "Heart-Shaped Herb must install a continuous PreventionMinus(1) damage replacement, got {:?}",
         repl.damage_modification
     );
@@ -208,6 +212,7 @@ fn heart_shaped_herb_prevents_one_from_opponent_sources_not_own_and_never_deplet
 #[test]
 fn benevolent_unicorn_arithmetic_minus_reduces_without_prevention_bookkeeping() {
     let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
     let unicorn = scenario
         .add_creature_from_oracle(
             P0,
@@ -217,7 +222,15 @@ fn benevolent_unicorn_arithmetic_minus_reduces_without_prevention_bookkeeping() 
             "If a spell would deal damage to a permanent or player, it deals that much damage minus 1 to that permanent or player instead.",
         )
         .id();
-    let source = scenario.add_creature(P1, "Damage Source", 3, 3).id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Arithmetic Damage Spell",
+            true,
+            "This spell deals 3 damage to target creature or player.",
+        )
+        .with_mana_cost(ManaCost::zero())
+        .id();
     let mut runner = scenario.build();
 
     // The static parses to the ARITHMETIC provenance of the shared subtraction:
@@ -231,28 +244,22 @@ fn benevolent_unicorn_arithmetic_minus_reduces_without_prevention_bookkeeping() 
     );
     assert_eq!(repl.shield_kind, ShieldKind::None);
 
-    let p0_life_before = runner.life(P0);
-    let mut events = Vec::new();
-    deal_damage::resolve(
-        runner.state_mut(),
-        &damage_to_player_ability(source, P1, TargetRef::Player(P0), 3),
-        &mut events,
-    )
-    .expect("damage to P0 resolves");
+    let outcome = runner.cast(spell).target_player(P1).resolve();
     assert_eq!(
-        runner.life(P0),
-        p0_life_before - 2,
-        "the arithmetic replacement must still reduce 3 damage to 2"
+        outcome.life_delta(P1),
+        -2,
+        "the arithmetic replacement must reduce a spell's 3 damage to 2"
     );
     assert!(
-        !events
+        !outcome
+            .events()
             .iter()
             .any(|e| matches!(e, GameEvent::DamagePrevented { .. })),
         "arithmetic 'minus 1' prevents nothing — it must emit NO DamagePrevented \
          and satisfy no prevention-triggered ability"
     );
     assert_eq!(
-        runner.state().last_effect_count,
+        outcome.state().last_effect_count,
         None,
         "arithmetic 'minus 1' must not stamp the CR 615.5 prevented-amount handoff"
     );

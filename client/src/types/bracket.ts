@@ -40,6 +40,7 @@ export {
   type SignalSource,
   isBracketEstimate,
   isComboDeclaration,
+  sameComboDeclaration,
 } from "./bracketEstimate";
 
 /**

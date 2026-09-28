@@ -14,9 +14,7 @@ const SELECTED_TONE: Record<ConnectionMode, string> = {
   p2p: "bg-cyan-400/15 text-cyan-100 shadow-[inset_0_0_0_1px] shadow-cyan-300/25",
 };
 
-/** Render order. Neither mode is recommended over the other; server is first
- *  only because it is the auto-assigned default. */
-const MODES: readonly ConnectionMode[] = ["server", "p2p"];
+const MODES: readonly ConnectionMode[] = ["p2p", "server"];
 
 /**
  * The authority on which transport a HOSTED session uses: a dedicated server
@@ -35,9 +33,11 @@ const MODES: readonly ConnectionMode[] = ["server", "p2p"];
 export function ConnectionModeSwitch({
   value,
   onChange,
+  dedicatedAvailable = true,
 }: {
   value: ConnectionMode;
   onChange: (mode: ConnectionMode) => void;
+  dedicatedAvailable?: boolean;
 }) {
   const { t } = useTranslation("multiplayer");
 
@@ -53,9 +53,10 @@ export function ConnectionModeSwitch({
           <button
             key={mode}
             type="button"
+            disabled={mode === "server" && !dedicatedAvailable}
             onClick={() => onChange(mode)}
             aria-pressed={selected}
-            className={`min-h-11 flex-1 cursor-pointer whitespace-nowrap rounded-lg px-2 py-2 text-xs font-medium transition-colors ${
+            className={`min-h-11 flex-1 cursor-pointer whitespace-nowrap rounded-lg px-2 py-2 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
               selected
                 ? SELECTED_TONE[mode]
                 : "text-white/45 hover:bg-white/[0.05] hover:text-white/70"

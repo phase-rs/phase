@@ -48,6 +48,7 @@ use crate::planner::{
 };
 use crate::policies::context::{PolicyContext, SearchDepth};
 use crate::policies::copy_value::score_legend_rule_keep;
+use crate::policies::effect_classify::{aura_polarity, EffectPolarity};
 use crate::policies::strategy_helpers::{cmp_sacrifice, sacrifice_key};
 
 use crate::policies::tutor::score_search_choice_selection;
@@ -123,7 +124,22 @@ fn target_selection_has_no_modeled_effect(state: &GameState) -> bool {
         return false;
     };
 
-    ability_tree_has_no_modeled_effect(&pending_cast.ability)
+    let source_has_modeled_aura_effect = state
+        .objects
+        .get(&pending_cast.object_id)
+        .filter(|source| {
+            source
+                .card_types
+                .subtypes
+                .iter()
+                .any(|subtype| subtype == "Aura")
+        })
+        .is_some_and(|source| match aura_polarity(source) {
+            EffectPolarity::Beneficial | EffectPolarity::Harmful => true,
+            EffectPolarity::Contextual => false,
+        });
+
+    !source_has_modeled_aura_effect && ability_tree_has_no_modeled_effect(&pending_cast.ability)
 }
 
 fn ability_tree_has_no_modeled_effect(ability: &ResolvedAbility) -> bool {
@@ -1461,6 +1477,9 @@ pub fn fallback_action(
         // Take the engine's own issued answer instead of restating the rule.
         WaitingFor::ScryChoice { .. }
         | WaitingFor::DigChoice { .. }
+        // CR 401.2: exactly `top_count` cards, never an empty pick — take the
+        // engine's own issued answer rather than a blanket empty selection.
+        | WaitingFor::DigRestSplitChoice { .. }
         | WaitingFor::SurveilChoice { .. }
         | WaitingFor::RevealChoice { .. }
         | WaitingFor::SearchChoice { .. }
@@ -1477,6 +1496,11 @@ pub fn fallback_action(
         // an empty selection is illegal. Take the first candidate (any legal pick
         // resolves the prompt; the evaluated candidate enumerator picks properly).
         WaitingFor::BeholdChoice { choices, .. } => choices
+            .first()
+            .map(|&id| GameAction::SelectCards { cards: vec![id] }),
+        // CR 701.71a + CR 608.2d: empower Jace chooses exactly one Jace token;
+        // every candidate is legal, so take the first.
+        WaitingFor::EmpowerJaceChoice { choices, .. } => choices
             .first()
             .map(|&id| GameAction::SelectCards { cards: vec![id] }),
         // CR 705.1 + CR 614.1a: Krark's Thumb keep choice — keep the first
@@ -1600,10 +1624,12 @@ pub fn fallback_action(
                 }
             )
         }),
+        WaitingFor::CommanderZoneChoice { .. } => {
+            issued(|action| matches!(action, GameAction::DecideOptionalEffect { accept: true }))
+        }
         WaitingFor::OptionalEffectChoice { .. }
         | WaitingFor::OpponentMayChoice { .. }
         | WaitingFor::TributeChoice { .. }
-        | WaitingFor::CommanderZoneChoice { .. }
         | WaitingFor::MiracleReveal { .. }
         | WaitingFor::CastOffer {
             kind: CastOfferKind::Miracle { .. } | CastOfferKind::Madness { .. },
@@ -1629,8 +1655,14 @@ pub fn fallback_action(
             choice: engine::types::actions::UnlessCostBranch::Decline,
         }),
 
-        // Combat tax: decline to pay.
-        WaitingFor::CombatTaxPayment { .. } => Some(GameAction::PayCombatTax { accept: false }),
+        // CR 508.1j + CR 509.1f: combat tax. A declaration this AI completes only
+        // reaches the prompt under `CombatTaxPosture::Accept`, so paying whenever
+        // the quote is affordable is the answer that declaration was made for.
+        // A flat decline would discard it and re-open the identical declare
+        // prompt.
+        WaitingFor::CombatTaxPayment { .. } => Some(GameAction::PayCombatTax {
+            accept: engine::game::combat::pending_combat_tax_is_affordable(state),
+        }),
 
         // Equip/Populate/CopyTarget with no valid targets: CancelCast for
         // equip (activation that can be backed out); skip for non-cast.
@@ -1663,6 +1695,25 @@ pub fn fallback_action(
         // Trigger order: keep the engine-provided order.
         WaitingFor::OrderTriggers { triggers, .. } => Some(GameAction::OrderTriggers {
             order: (0..triggers.len()).collect(),
+        }),
+
+        // CR 601.2f: cost-reduction order. Take the engine's caster-optimal
+        // representative (`outcomes` is sorted cheapest-first), falling back to
+        // the identity permutation with nothing announced when the prompt
+        // somehow carries no outcome.
+        WaitingFor::OrderCostReductions {
+            reductions,
+            outcomes,
+            ..
+        } => Some(match outcomes.first() {
+            Some(outcome) => GameAction::OrderCostReductions {
+                order: outcome.order.clone(),
+                hybrid_announcement: outcome.hybrid_announcement.clone(),
+            },
+            None => GameAction::OrderCostReductions {
+                order: (0..reductions.len()).collect(),
+                hybrid_announcement: Vec::new(),
+            },
         }),
 
         // CR 103.5 + 103.5b: Mulligan default. In `Declare`, keep unless the AI
@@ -1790,10 +1841,11 @@ pub fn fallback_action(
         WaitingFor::RippleRevealChoice { .. } => Some(GameAction::RippleChoice {
             choice: engine::types::actions::CastChoice::Cast,
         }),
-        // CR 702.60a + CR 608.2d: Ripple bottom-order — submit the pile in its
+        // CR 702.60a + CR 608.2d: Ripple / reveal-until bottom-order — submit the pile in its
         // revealed order (any permutation is legal; order at the bottom of the
         // library carries no tactical weight).
-        WaitingFor::RippleBottomOrder { cards, .. } => Some(GameAction::SelectCards {
+        WaitingFor::RippleBottomOrder { cards, .. }
+        | WaitingFor::RevealUntilBottomOrder { cards, .. } => Some(GameAction::SelectCards {
             cards: cards.clone(),
         }),
         // CR 608.2g + CR 601.2: Invoke Calamity's free-cast window — finish the
@@ -1859,7 +1911,12 @@ pub fn fallback_action(
             ..
         } => Some(GameAction::ChooseAdventureFace { creature: true }),
         WaitingFor::ModalFaceChoice { .. } => {
-            Some(GameAction::ChooseModalFace { back_face: false })
+            issued(|action| matches!(action, GameAction::ChooseModalFace { back_face: false }))
+                .or_else(|| {
+                    issued(|action| {
+                        matches!(action, GameAction::ChooseModalFace { back_face: true })
+                    })
+                })
         }
         // CR 118.9: Default to the printed mana cost (Normal). Each keyword
         // resolves through its own post-payment handler in the engine; the
@@ -1867,8 +1924,17 @@ pub fn fallback_action(
         WaitingFor::AlternativeCastChoice { .. } => Some(GameAction::ChooseAlternativeCast {
             choice: AlternativeCastDecision::Normal,
         }),
+        // CR 601.2a + CR 601.2b: the first option's method, announced under
+        // the permission that gives up least.
         WaitingFor::CastingVariantChoice { options, .. } => {
-            (!options.is_empty()).then_some(GameAction::ChooseCastingVariant { index: 0 })
+            crate::policies::graveyard_authority::fallback_announcement(
+                state,
+                &config.policy_penalties,
+                options,
+            )
+            .or_else(|| {
+                (!options.is_empty()).then_some(GameAction::ChooseCastingVariant { index: 0 })
+            })
         }
         WaitingFor::ChoosePermanentTypeSlot {
             available_slots, ..
@@ -3198,7 +3264,12 @@ fn score_candidates_core(
     // build_ai_context runs first so combat gets the archetype-modulated profile.
     if matches!(
         state.waiting_for,
-        WaitingFor::DeclareAttackers { .. } | WaitingFor::DeclareBlockers { .. }
+        WaitingFor::DeclareAttackers { .. }
+            | WaitingFor::DeclareBlockers { .. }
+            // CR 508.1j + CR 509.1f: the combat-tax answer is bound to the
+            // declaration that incurred it, so it bypasses candidate scoring for
+            // the same reason the declarations themselves do.
+            | WaitingFor::CombatTaxPayment { .. }
     ) {
         let effective_profile = config.profile.with_strategy(&services.context.strategy);
         if let Some(action) = deterministic_combat_choice(
@@ -3574,6 +3645,13 @@ pub(crate) fn deterministic_choice(
 ) -> Option<GameAction> {
     if let Some(action) = resolving_effect_mana_choice(state, ai_player, actions)
         .or_else(|| evoke_variant_choice(state, ai_player))
+        .or_else(|| {
+            crate::policies::graveyard_authority::same_method_announcement(
+                state,
+                &config.policy_penalties,
+                ai_player,
+            )
+        })
     {
         return Some(action);
     }
@@ -3759,6 +3837,78 @@ pub(crate) fn deterministic_choice(
         return Some(GameAction::SelectCards { cards: kept });
     }
 
+    // CR 401.2 + CR 401.4: the submission is a full ARRANGEMENT of the
+    // remainder — the leading `top_count` entries take the library top and the
+    // rest take the bottom. Sorting the whole pile by intrinsic value descending
+    // and submitting it verbatim gets both decisions right at once with the
+    // same ordering the sibling dig and surveil arms use:
+    //   * partition — the most valuable `top_count` cards land on top, where
+    //     they are drawn soonest;
+    //   * CR 401.4 order — within the top pile the best card is drawn first,
+    //     and within the bottom pile the better cards sit nearer the rest of
+    //     the library (`route_rest_split_then` appends bottom entries in the
+    //     submitted order, so the last entry ends up bottom-most).
+    //
+    // CR 401.4: when the partition is already settled (`OrderOnly` — the acting
+    // player is the library's owner, not the chooser), sorting the WHOLE pile
+    // would move cards across the top/bottom boundary and be rejected. Sort
+    // each pile independently instead, which keeps the same "best first"
+    // heuristic inside the partition the chooser fixed.
+    if let WaitingFor::DigRestSplitChoice {
+        cards,
+        top_count,
+        scope,
+        ..
+    } = &state.waiting_for
+    {
+        let by_value_desc = |segment: &[engine::types::identifiers::ObjectId]| {
+            let mut scored: Vec<_> = segment
+                .iter()
+                .map(|&id| (id, intrinsic_value(state, id)))
+                .collect();
+            scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            scored.into_iter().map(|(id, _)| id).collect::<Vec<_>>()
+        };
+        // CR 401.2 + CR 401.4 + CR 701.20e (hidden information): being the
+        // acting authority on this pile is NOT permission to see it. CR 401.4
+        // hands the arrangement to the library's OWNER, who for a cross-player
+        // dig is a different player than CR 701.20e's looker — so `by_value_desc`
+        // above must not run over a segment this AI was never shown. Like the
+        // `OpponentGuess` pre-emption in `choose_action`, the defect is that
+        // eval/search reads the UNFILTERED `GameState`: sorting a blind pile
+        // "best first" is a real information leak, observable to an attentive
+        // opponent as a consistent best-card-first arrangement. Pre-empt it by
+        // submitting the pile in its already-parked encounter order (the
+        // identity permutation), which is `deterministic_choice`'s analogue of
+        // that arm's rules-fair non-informative answer.
+        //
+        // Keyed on actual look permission, not on `scope`, so the common
+        // same-player dig (and a revealed or otherwise known pile) keeps the
+        // full value heuristic. `viewer_may_see_hidden_pile_card` is the engine
+        // authority `visibility.rs` uses for the same question, so the AI and
+        // the client projection cannot drift apart.
+        let arrange = |segment: &[engine::types::identifiers::ObjectId]| {
+            let may_see = segment.iter().all(|&id| {
+                engine::game::visibility::viewer_may_see_hidden_pile_card(state, ai_player, id)
+            });
+            if may_see {
+                by_value_desc(segment)
+            } else {
+                segment.to_vec()
+            }
+        };
+        let arrangement = if scope.partition_is_open() {
+            arrange(cards)
+        } else {
+            let split_at = (*top_count).min(cards.len());
+            let (top, bottom) = cards.split_at(split_at);
+            let mut arrangement = arrange(top);
+            arrangement.extend(arrange(bottom));
+            arrangement
+        };
+        return Some(GameAction::SelectCards { cards: arrangement });
+    }
+
     if let WaitingFor::SurveilChoice { cards, .. } = &state.waiting_for {
         let mut scored: Vec<_> = cards
             .iter()
@@ -3862,17 +4012,7 @@ pub(crate) fn deterministic_choice(
     }
 
     // CR 608.2d: ChooseFromZoneChoice — select cards from a tracked set.
-    if let WaitingFor::ChooseFromZoneChoice {
-        cards,
-        count,
-        player,
-        ..
-    } = &state.waiting_for
-    {
-        let mut scored: Vec<_> = cards
-            .iter()
-            .map(|&id| (id, intrinsic_value(state, id)))
-            .collect();
+    if let WaitingFor::ChooseFromZoneChoice { player, .. } = &state.waiting_for {
         // The search optimizes for `ai_player`, so a choice made by any other
         // player is an opponent's (they pick the highest-value cards for
         // themselves; the AI picks the lowest when choosing for itself).
@@ -3881,14 +4021,39 @@ pub(crate) fn deterministic_choice(
         // controller (the authorized submitter), not the chooser, which would
         // misclassify the controlled player's choice.
         let is_opponent_chooser = *player != ai_player;
-        if is_opponent_chooser {
-            scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        } else {
-            scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-        }
-        let chosen: Vec<_> = scored.iter().take(*count).map(|(id, _)| *id).collect();
-        if !chosen.is_empty() {
-            return Some(GameAction::SelectCards { cards: chosen });
+
+        // Rank the engine-issued domain instead of rebuilding a selection from
+        // the prompt's raw card pool. The latter can violate a tracked-set
+        // constraint (Atraxa's distinct card types are one example), and the
+        // final contract gate then turns the decision into `None`. Maximum
+        // cardinality keeps the established `take(count)` behavior for
+        // `up_to` prompts. Stable sorting retains engine order on ties.
+        let mut scored: Vec<_> = issued_selections(actions)
+            .map(|selection| {
+                let value = selection
+                    .iter()
+                    .map(|id| intrinsic_value(state, *id))
+                    .sum::<f64>();
+                (selection, value)
+            })
+            .collect();
+        scored.sort_by(|(left_cards, left_value), (right_cards, right_value)| {
+            right_cards.len().cmp(&left_cards.len()).then_with(|| {
+                if is_opponent_chooser {
+                    right_value
+                        .partial_cmp(left_value)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                } else {
+                    left_value
+                        .partial_cmp(right_value)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                }
+            })
+        });
+        if let Some((chosen, _)) = scored.first() {
+            return Some(GameAction::SelectCards {
+                cards: chosen.to_vec(),
+            });
         }
     }
 
@@ -4114,6 +4279,17 @@ pub(crate) fn deterministic_choice(
     }
 
     // Combat decisions: delegate to specialized combat AI
+
+    // CR 508.1j + CR 509.1f: the declarations below may be completed under
+    // `CombatTaxPosture::Accept`, so a rollout reaches the tax prompt that
+    // follows. Answer it the same way the root does, or quiesce would stall on
+    // an uncommitted attack with no mana spent.
+    if matches!(state.waiting_for, WaitingFor::CombatTaxPayment { .. }) {
+        return Some(GameAction::PayCombatTax {
+            accept: engine::game::combat::pending_combat_tax_is_affordable(state),
+        });
+    }
+
     if let WaitingFor::DeclareAttackers {
         valid_attacker_ids,
         valid_attack_targets,
@@ -4135,7 +4311,12 @@ pub(crate) fn deterministic_choice(
             },
             context.and_then(|c| c.opponent_threat.as_ref()),
         );
-        return Some(validated_declare_attackers(state, attacks));
+        return Some(validated_declare_attackers(
+            state,
+            ai_player,
+            context.map(|context| context.session.as_ref()),
+            attacks,
+        ));
     }
 
     if let WaitingFor::DeclareBlockers {
@@ -4162,10 +4343,20 @@ pub(crate) fn deterministic_choice(
                 &config.profile,
                 Some(valid_block_targets),
             );
+            // CR 509.1c: a block tax is an offer the defender may
+            // take. Accepting keeps the taxed blockers; refusing lets the engine
+            // substitute its tax-free witness, which drops every one of them.
+            let default_features = crate::features::DeckFeatures::default();
+            let features = context
+                .and_then(|context| context.session.features.get(&ai_player))
+                .unwrap_or(&default_features);
+            let posture =
+                crate::combat_tax::plan_block_tax(state, ai_player, features, &assignments);
             return Some(engine::game::combat::complete_blocker_proposal(
                 state,
                 ai_player,
                 &assignments,
+                posture,
             ));
         }
         return Some(GameAction::DeclareBlockers {
@@ -4187,6 +4378,18 @@ fn deterministic_combat_choice(
     opponent_threat: Option<&ThreatProfile>,
     comparison_deadline: Option<engine::util::Deadline>,
 ) -> Option<GameAction> {
+    // CR 508.1j + CR 509.1f: the tax prompt belongs to the declaration that
+    // opened it, and that declaration was only completed under
+    // `CombatTaxPosture::Accept` because the AI chose to pay. Answering from the
+    // engine's affordability check, rather than re-scoring the tax against
+    // unrelated policies, means a planned payment is never declined; a decline
+    // would re-open the same declare prompt and the AI would re-propose into it.
+    if matches!(state.waiting_for, WaitingFor::CombatTaxPayment { .. }) {
+        return Some(GameAction::PayCombatTax {
+            accept: engine::game::combat::pending_combat_tax_is_affordable(state),
+        });
+    }
+
     if let WaitingFor::DeclareAttackers {
         valid_attacker_ids,
         valid_attack_targets,
@@ -4208,7 +4411,9 @@ fn deterministic_combat_choice(
             },
             opponent_threat,
         );
-        return Some(validated_declare_attackers(state, attacks));
+        return Some(validated_declare_attackers(
+            state, ai_player, session, attacks,
+        ));
     }
 
     if let WaitingFor::DeclareBlockers {
@@ -4231,10 +4436,20 @@ fn deterministic_combat_choice(
                 profile,
                 Some(valid_block_targets),
             );
+            // CR 509.1c: a block tax is an offer the defender may
+            // take. Accepting keeps the taxed blockers; refusing lets the engine
+            // substitute its tax-free witness, which drops every one of them.
+            let default_features = crate::features::DeckFeatures::default();
+            let features = session
+                .and_then(|session| session.features.get(&ai_player))
+                .unwrap_or(&default_features);
+            let posture =
+                crate::combat_tax::plan_block_tax(state, ai_player, features, &assignments);
             return Some(engine::game::combat::complete_blocker_proposal(
                 state,
                 ai_player,
                 &assignments,
+                posture,
             ));
         }
         return Some(GameAction::DeclareBlockers {
@@ -4245,36 +4460,33 @@ fn deterministic_combat_choice(
     None
 }
 
-/// CR 508.1 (issue #1523): Guard the combat AI's attacker declaration so the
-/// engine never rejects it. The combat AI draws attackers from the
-/// engine-provided `valid_attacker_ids`, but the chosen *subset* + *target
-/// assignment* can still be illegal as a whole — e.g. a "can't attack alone"
-/// creature swinging solo, a split must-attack-together pair, or a target an
-/// attacker may not legally be assigned. The action driver re-requests the AI's
-/// (deterministic) decision after a rejection, so an illegal declaration loops
-/// forever and softlocks the game ("repeated attempts to attack").
+/// CR 508.1d + CR 508.1h: turn the combat AI's heuristic assignment into the
+/// declaration the AI actually submits.
 ///
-/// Dry-run the declaration on a cloned state; if the engine would reject it,
-/// fall back to an engine-validated legal `DeclareAttackers` (the first such
-/// candidate from `legal_actions`, which prefers declining combat but still
-/// satisfies any mandatory must-attack requirement, since illegal candidates
-/// are filtered out by the simulation pipeline). This costs one state clone per
-/// attacker declaration — infrequent and far cheaper than the combat AI's own
-/// lookahead — and the fallback path only runs on the rare illegal choice.
+/// The assignment is a PROPOSAL. A combat tax on it is an offer the AI must first
+/// decide to take, and `plan_attack_tax` makes that call (trimming the strike to
+/// one worth paying for and affordable). The engine-owned completion then
+/// enforces it: the proposal survives only when it is hard-legal, meets the
+/// maximum requirement score, and carries no tax the posture rejects; otherwise
+/// the deterministic tax-free maximum-legal witness stands. That keeps the engine
+/// the single legality authority, so an illegal declaration can never be
+/// resubmitted in a loop (issue #1523).
 fn validated_declare_attackers(
     state: &GameState,
+    ai_player: PlayerId,
+    session: Option<&AiSession>,
     attacks: Vec<(
         engine::types::identifiers::ObjectId,
         engine::game::combat::AttackTarget,
     )>,
 ) -> GameAction {
-    // CR 508.1d: the AI's heuristic assignment is a PROPOSAL. The engine-owned
-    // completion returns it unchanged when it is hard-legal, meets the maximum
-    // requirement score, and incurs no tax; otherwise it returns the deterministic
-    // tax-free maximum-legal witness. This replaces the old clone-apply +
-    // first-generic-legal-action fallback with the single engine legality authority
-    // (no second combat validator, no repeat-tax loop).
-    engine::game::combat::complete_attacker_proposal(state, &attacks, &[])
+    let default_features = crate::features::DeckFeatures::default();
+    let features = session
+        .and_then(|session| session.features.get(&ai_player))
+        .unwrap_or(&default_features);
+    let (planned, posture) =
+        crate::combat_tax::plan_attack_tax(state, ai_player, features, &attacks);
+    engine::game::combat::complete_attacker_proposal(state, &planned, &[], posture)
 }
 
 /// CR 704.5g: does `share` of a divided damage pool destroy this target?
@@ -4586,10 +4798,12 @@ mod tests {
     use engine::game::scenario_db::GameScenarioDbExt;
     use engine::game::zones::create_object;
     use engine::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, CategoryChooserScope, ContinuousModification,
-        ControllerRef, Duration, Effect, EffectKind, ManaProduction, PlayerFilter, PtValue,
-        QuantityExpr, QuantityRef, ReplacementDefinition, ResolvedAbility, StaticDefinition,
-        TargetFilter, TargetRef, TriggerConstraint, TriggerDefinition, TypedFilter,
+        AbilityCost, AbilityDefinition, AbilityKind, CategoryChooserScope, CommanderOwnership,
+        ContinuousModification, ControllerRef, Duration, Effect, EffectKind, ManaProduction,
+        ModalChoice, ModalSelectionCondition, ModalSelectionConstraint, PlayerFilter, PtValue,
+        QuantityExpr, QuantityRef, ReplacementDefinition, ResolvedAbility, StaticCondition,
+        StaticDefinition, TargetFilter, TargetRef, TriggerConstraint, TriggerDefinition,
+        TypedFilter,
     };
     use engine::types::ability::{ChoiceType, ChosenAttribute};
     use engine::types::card_type::CoreType;
@@ -4608,7 +4822,7 @@ mod tests {
     use rand::rngs::SmallRng;
     use rand::SeedableRng;
 
-    use crate::config::{create_config, AiDifficulty, Platform};
+    use crate::config::{create_config, create_config_for_players, AiDifficulty, Platform};
     use crate::policies::context::PolicyContext;
     use crate::policies::{DecisionKind, PolicyReason, TacticalPolicy};
     use crate::session::SessionCache;
@@ -4623,6 +4837,193 @@ mod tests {
         let file = File::open(path).expect("integration fixture should open");
         let decoder = flate2::read::GzDecoder::new(BufReader::new(file));
         CardDatabase::from_export_reader(decoder).expect("integration fixture should load")
+    }
+
+    fn dark_ritual_window_runner(
+        phase: Phase,
+        active_player: PlayerId,
+    ) -> (GameRunner, ObjectId, ObjectId, ObjectId, ObjectId) {
+        let db = integration_card_db();
+        let mut scenario = GameScenario::new_n_player(4, 0x1544_2034_3617_2648);
+        scenario.at_phase(phase);
+        let ritual = scenario.add_real_card(P0, "Dark Ritual", Zone::Hand, &db);
+        let drone = scenario.add_real_card(P0, "Plague Drone", Zone::Hand, &db);
+        let first_swamp = scenario.add_basic_land(P0, ManaColor::Black);
+        let second_swamp = scenario.add_basic_land(P0, ManaColor::Black);
+        let mut runner = scenario.build();
+        rehydrate_game_from_card_db(runner.state_mut(), &db);
+
+        let state = runner.state_mut();
+        state.active_player = active_player;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+
+        (runner, ritual, drone, first_swamp, second_swamp)
+    }
+
+    #[test]
+    fn dark_ritual_respects_its_window_before_and_after_real_resolution() {
+        let exact_cast = |actions: &[CandidateAction], object_id| {
+            actions.iter().any(|candidate| {
+                matches!(
+                    &candidate.action,
+                    GameAction::CastSpell {
+                        object_id: candidate_id,
+                        ..
+                    } if *candidate_id == object_id
+                )
+            })
+        };
+        let easy = create_config_for_players(AiDifficulty::Easy, Platform::Native, 4);
+        let very_hard = create_config_for_players(AiDifficulty::VeryHard, Platform::Native, 4)
+            .into_measurement(17);
+
+        // Discord reports 1544203436172648468 and 1529960750846840891: P0 has
+        // priority during P2's end step. The forced cast below is a replay of
+        // the historical mistake, not an AI-selected action.
+        let (mut end_runner, end_ritual, end_drone, end_first_swamp, end_second_swamp) =
+            dark_ritual_window_runner(Phase::End, PlayerId(2));
+        let end_issued = validated_candidate_actions_for_semantic_owner(end_runner.state(), P0);
+        let end_contract = AiDecisionContract::issue(end_runner.state(), P0);
+        assert!(
+            exact_cast(&end_issued, end_ritual),
+            "reach guard: the engine must issue the exact Dark Ritual before policy scoring"
+        );
+        assert!(
+            end_contract
+                .candidates
+                .iter()
+                .any(|candidate| matches!(&candidate.action, GameAction::PassPriority)),
+            "reach guard: a finite PassPriority candidate must be available beside the vetoed ritual"
+        );
+        let end_scores = score_candidates(end_runner.state(), P0, &easy);
+        assert!(
+            end_scores.iter().any(|(action, score)| {
+                matches!(
+                    action,
+                    GameAction::CastSpell { object_id, .. } if *object_id == end_ritual
+                ) && !score.is_finite()
+            }),
+            "RitualSinkPolicy must reject the engine-issued end-step ritual through public scoring"
+        );
+        assert!(
+            end_scores.iter().any(|(action, score)| {
+                matches!(action, GameAction::PassPriority) && score.is_finite()
+            }),
+            "the non-finite ritual score must not be an all-rejected fallback"
+        );
+        for config in [&easy, &very_hard] {
+            let choice = choose_action(
+                end_runner.state(),
+                P0,
+                config,
+                &mut SmallRng::seed_from_u64(17),
+            )
+            .expect("the finite PassPriority candidate must produce a public choice");
+            assert!(
+                end_contract.contains_action(end_runner.state(), &choice),
+                "{config:?} must return an engine-issued action: {choice:?}"
+            );
+            assert!(
+                !matches!(
+                    &choice,
+                    GameAction::CastSpell { object_id, .. } if *object_id == end_ritual
+                ),
+                "{config:?} must not select the exact end-step Dark Ritual: {choice:?}"
+            );
+        }
+
+        assert!(!end_runner.state().objects[&end_first_swamp].tapped);
+        assert!(!end_runner.state().objects[&end_second_swamp].tapped);
+        end_runner.activate(end_first_swamp, 0).resolve();
+        let end_outcome = end_runner.cast(end_ritual).resolve();
+        end_outcome.assert_zone(&[end_ritual], Zone::Graveyard);
+        assert_eq!(
+            end_outcome.mana_pool_color(P0, ManaType::Black),
+            3,
+            "Dark Ritual must leave exactly its three black mana after paying {{B}}"
+        );
+        assert!(end_outcome.is_tapped(end_first_swamp));
+        assert!(!end_outcome.is_tapped(end_second_swamp));
+        assert!(
+            crate::zone_eval::available_mana(end_outcome.state(), P0)
+                >= end_outcome.state().objects[&end_drone]
+                    .mana_cost
+                    .mana_value(),
+            "the remaining Swamp plus ritual mana must reach the exact Plague Drone cost"
+        );
+        for _ in 0..3 {
+            if matches!(
+                end_runner.state().waiting_for,
+                WaitingFor::Priority { player } if player == P0
+            ) {
+                break;
+            }
+            end_runner
+                .act(GameAction::PassPriority)
+                .expect("priority must pass through the live end-step reducer");
+        }
+        assert!(matches!(
+            end_runner.state().waiting_for,
+            WaitingFor::Priority { player } if player == P0
+        ));
+        assert_eq!(end_runner.state().phase, Phase::End);
+        assert_eq!(
+            end_runner.state().players[P0.0 as usize]
+                .mana_pool
+                .count_color(ManaType::Black),
+            3,
+            "the pool must remain live while priority returns to P0 in the same end step"
+        );
+        assert!(
+            !exact_cast(
+                &validated_candidate_actions_for_semantic_owner(end_runner.state(), P0),
+                end_drone,
+            ),
+            "Plague Drone is unactionable at an opponent's end step despite sufficient mana"
+        );
+
+        // Same real cards and mana reach, but P0's own precombat main phase:
+        // the prospective sorcery-speed Drone is now a valid ritual sink.
+        let (mut main_runner, main_ritual, main_drone, main_first_swamp, main_second_swamp) =
+            dark_ritual_window_runner(Phase::PreCombatMain, P0);
+        let main_issued = validated_candidate_actions_for_semantic_owner(main_runner.state(), P0);
+        assert!(
+            exact_cast(&main_issued, main_ritual),
+            "reach guard: the engine must issue the exact Dark Ritual in P0's main phase"
+        );
+        assert!(
+            score_candidates(main_runner.state(), P0, &easy)
+                .iter()
+                .any(|(action, score)| {
+                    matches!(
+                        action,
+                        GameAction::CastSpell { object_id, .. } if *object_id == main_ritual
+                    ) && score.is_finite()
+                }),
+            "the real Plague Drone must keep Dark Ritual finite in P0's main phase"
+        );
+
+        main_runner.activate(main_first_swamp, 0).resolve();
+        let main_outcome = main_runner.cast(main_ritual).resolve();
+        main_outcome.assert_zone(&[main_ritual], Zone::Graveyard);
+        assert_eq!(main_outcome.mana_pool_color(P0, ManaType::Black), 3);
+        assert!(main_outcome.is_tapped(main_first_swamp));
+        assert!(!main_outcome.is_tapped(main_second_swamp));
+        assert!(
+            crate::zone_eval::available_mana(main_outcome.state(), P0)
+                >= main_outcome.state().objects[&main_drone]
+                    .mana_cost
+                    .mana_value(),
+            "the main-phase replay must retain the same positive mana-reach guard"
+        );
+        assert!(
+            exact_cast(
+                &validated_candidate_actions_for_semantic_owner(main_runner.state(), P0),
+                main_drone,
+            ),
+            "the engine must issue Plague Drone after real Dark Ritual resolution in P0's main phase"
+        );
     }
 
     #[derive(Clone, Copy, Debug)]
@@ -4978,6 +5379,7 @@ mod tests {
                         engine::types::ability::TypedFilter::creature()
                             .controller(ControllerRef::You),
                     ),
+                    selection: engine::types::ability::AttachSelection::Targeted,
                 },
             ));
         }
@@ -5094,6 +5496,7 @@ mod tests {
                 Effect::Attach {
                     attachment: TargetFilter::SelfRef,
                     target: TargetFilter::Any,
+                    selection: engine::types::ability::AttachSelection::Targeted,
                 },
             ));
         }
@@ -5164,6 +5567,81 @@ mod tests {
             "reach guard: the no-other-home equip activation must be a hard Reject \
              from EquipmentPriorityPolicy; got {equip_verdict:?}"
         );
+    }
+
+    /// P0 attacks P1 through Propaganda (verified Oracle text,
+    /// client/public/card-data.json 2026-05-10) with `lands` Forests open, and the
+    /// runner is left at the resulting `CombatTaxPayment` prompt. The engine
+    /// quotes a taxed declaration whether or not it is affordable, so both cases
+    /// reach the prompt.
+    fn propaganda_tax_prompt(lands: usize) -> GameRunner {
+        let mut scenario = GameScenario::new();
+        scenario.add_enchantment_from_oracle(
+            P1,
+            "Propaganda",
+            "Creatures can't attack you unless their controller pays {2} for each creature \
+             they control that's attacking you.",
+        );
+        let attacker = scenario.add_creature(P0, "Bear", 3, 3).id();
+        for _ in 0..lands {
+            scenario.add_basic_land(P0, ManaColor::Green);
+        }
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.phase = Phase::DeclareAttackers;
+        state.turn_number = 2;
+        state.waiting_for = WaitingFor::DeclareAttackers {
+            player: P0,
+            valid_attacker_ids: vec![attacker],
+            valid_attack_targets: vec![engine::game::combat::AttackTarget::Player(P1)],
+            valid_attack_targets_by_attacker: None,
+            attacker_constraints: Default::default(),
+        };
+        runner
+            .act(GameAction::DeclareAttackers {
+                attacks: vec![(attacker, engine::game::combat::AttackTarget::Player(P1))],
+                bands: vec![],
+            })
+            .expect("a taxed attack is legal to declare");
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::CombatTaxPayment { .. }
+            ),
+            "premise: the taxed declaration must open the prompt, got {:?}",
+            runner.state().waiting_for
+        );
+        runner
+    }
+
+    /// CR 508.1j: the rollout driver (`deterministic_choice`) and the deadlock-safe
+    /// `fallback_action` both answer a live combat-tax prompt from the engine's
+    /// affordability check. Without the rollout arm a lookahead that planned a
+    /// taxed attack would stall at the prompt with the attack uncommitted.
+    #[test]
+    fn combat_tax_prompt_is_answered_by_rollouts_and_the_fallback() {
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        for (lands, expected_accept) in [(2, true), (0, false)] {
+            let runner = propaganda_tax_prompt(lands);
+            let state = runner.state();
+            let expected = Some(GameAction::PayCombatTax {
+                accept: expected_accept,
+            });
+
+            assert_eq!(
+                deterministic_choice(state, P0, &config, &[], None),
+                expected,
+                "rollout answer with {lands} lands open"
+            );
+            let contract = AiDecisionContract::issue(state, P0);
+            assert_eq!(
+                fallback_action(state, &config, &contract),
+                expected,
+                "fallback answer with {lands} lands open"
+            );
+        }
     }
 
     /// T8 — the combat production wiring at `deterministic_choice`'s combat
@@ -5263,6 +5741,14 @@ mod tests {
         let forest = scenario.add_real_card(P0, "Forest", Zone::Library, &db);
         let island = scenario.add_real_card(P0, "Island", Zone::Library, &db);
         let phantom = scenario.add_real_card(P0, "Phantom Monster", Zone::Hand, &db);
+        // Give the opponent a library to draw from. Without one,
+        // passing priority is a genuine winning line (they deck out on their
+        // next draw), which the search scores at `WIN_SCORE` and prefers over
+        // every fetch line — making this assertion about the prospective route
+        // depend on the search never looking that far.
+        for _ in 0..10 {
+            scenario.add_real_card(P1, "Mountain", Zone::Library, &db);
+        }
         let mut runner = scenario.build();
         rehydrate_game_from_card_db(runner.state_mut(), &db);
         let config = create_config(AiDifficulty::Medium, Platform::Native);
@@ -5735,6 +6221,69 @@ mod tests {
             &create_config(AiDifficulty::VeryHard, Platform::Native),
             &test_contract(state),
         )
+    }
+
+    #[test]
+    fn fallback_preserves_commander_zone_return_behavior() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let commander = scenario
+            .add_creature_to_graveyard(P0, "Fallback Commander Return", 2, 2)
+            .id();
+        scenario.with_commander(commander);
+        let mut runner = scenario.build();
+        runner.state_mut().format_config.command_zone = true;
+        let mut events = Vec::new();
+        engine::game::zones::move_to_zone(
+            runner.state_mut(),
+            commander,
+            Zone::Graveyard,
+            &mut events,
+        );
+        engine::game::sba::check_state_based_actions(runner.state_mut(), &mut events);
+
+        let state = runner.state().clone();
+        let action = fallback_action_default(&state).expect("commander fallback must be issued");
+        assert_eq!(action, GameAction::DecideOptionalEffect { accept: true });
+        assert!(test_contract(&state).contains_action(&state, &action));
+        let mut applied = state;
+        engine::game::engine::apply_as_current(&mut applied, action)
+            .expect("the issued fallback must complete the real commander choice");
+        assert_eq!(applied.objects[&commander].zone, Zone::Command);
+        assert!(matches!(
+            applied.waiting_for,
+            WaitingFor::Priority { player: P0 }
+        ));
+    }
+
+    #[test]
+    fn chooser_keeps_historical_return_behavior_with_complete_domain() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let commander = scenario
+            .add_creature_to_graveyard(P0, "Chooser Commander Return", 2, 2)
+            .id();
+        scenario.with_commander(commander);
+        let mut runner = scenario.build();
+        runner.state_mut().format_config.command_zone = true;
+        let mut events = Vec::new();
+        engine::game::zones::move_to_zone(
+            runner.state_mut(),
+            commander,
+            Zone::Graveyard,
+            &mut events,
+        );
+        engine::game::sba::check_state_based_actions(runner.state_mut(), &mut events);
+
+        let config = create_config(AiDifficulty::VeryEasy, Platform::Native);
+        let action = choose_action(
+            runner.state(),
+            P0,
+            &config,
+            &mut SmallRng::seed_from_u64(8874),
+        )
+        .expect("the chooser must answer the commander prompt");
+        assert_eq!(action, GameAction::DecideOptionalEffect { accept: true });
     }
 
     /// Issue the decision contract for the seat a test state is prompting.
@@ -6646,6 +7195,68 @@ mod tests {
         id
     }
 
+    /// Real Drown in Dreams structure: a spell-level `ModalChoice` with two
+    /// independent Spell roots (draw X, mill twice X), not an embedded choice.
+    fn add_drown_in_dreams(state: &mut GameState, owner: PlayerId) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(1_544_805_279_936_282_634),
+            owner,
+            "Drown in Dreams".to_string(),
+            Zone::Hand,
+        );
+        let object = state.objects.get_mut(&id).unwrap();
+        object.mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::Blue],
+            generic: 2,
+        };
+        object.card_types.core_types.push(CoreType::Instant);
+        *Arc::make_mut(&mut object.abilities) = vec![
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::Variable {
+                            name: "X".to_string(),
+                        },
+                    },
+                    target: TargetFilter::Player,
+                },
+            ),
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Mill {
+                    count: QuantityExpr::Multiply {
+                        factor: 2,
+                        inner: Box::new(QuantityExpr::Ref {
+                            qty: QuantityRef::Variable {
+                                name: "X".to_string(),
+                            },
+                        }),
+                    },
+                    target: TargetFilter::Player,
+                    destination: Zone::Graveyard,
+                },
+            ),
+        ];
+        object.modal = Some(ModalChoice {
+            min_choices: 1,
+            max_choices: 1,
+            mode_count: 2,
+            constraints: vec![ModalSelectionConstraint::ConditionalMaxChoices {
+                condition: ModalSelectionCondition::Static {
+                    condition: StaticCondition::ControlsCommander {
+                        ownership: CommanderOwnership::Any,
+                    },
+                },
+                max_choices: 2,
+                otherwise_max_choices: 1,
+            }],
+            ..ModalChoice::default()
+        });
+        id
+    }
+
     fn activate_score(scored: &[(GameAction, f64)], source: ObjectId) -> Option<f64> {
         scored.iter().find_map(|(action, score)| match action {
             GameAction::ActivateAbility { source_id, .. } if *source_id == source => Some(*score),
@@ -6707,6 +7318,136 @@ mod tests {
         assert!(
             score.is_finite(),
             "with X >= 1 affordable the gate stands down; activation must score finite"
+        );
+    }
+
+    #[test]
+    fn drown_in_dreams_modal_xcast_gate_rejects_zero_and_allows_one() {
+        let mut zero_state = make_state();
+        let drown = add_drown_in_dreams(&mut zero_state, PlayerId(0));
+        // Pay Drown's fixed {2}{U} component while leaving X at zero.
+        add_mana(&mut zero_state, PlayerId(0), ManaType::Colorless, 2);
+        add_mana(&mut zero_state, PlayerId(0), ManaType::Blue, 1);
+        let config = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(1);
+        let session = AiSession::arc_from_game(&zero_state);
+        let zero_scores = score_candidates_core(&zero_state, PlayerId(0), &config, &session, None);
+        let zero_cast_score = zero_scores
+            .iter()
+            .find_map(|(action, score)| {
+                matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == drown)
+                    .then_some(*score)
+            })
+            .expect("real Priority root candidate must include Drown in Dreams");
+        assert!(
+            !zero_cast_score.is_finite(),
+            "Drown at max X=0 must be rejected, got {zero_cast_score}"
+        );
+        assert!(
+            action_score(&zero_scores, &GameAction::PassPriority).is_finite(),
+            "PassPriority remains a finite Priority alternative"
+        );
+        assert_eq!(
+            choose_action(
+                &zero_state,
+                PlayerId(0),
+                &config,
+                &mut SmallRng::seed_from_u64(1),
+            ),
+            Some(GameAction::PassPriority),
+            "the rejected zero-X cast cannot beat PassPriority"
+        );
+
+        let mut one_state = make_state();
+        let one_drown = add_drown_in_dreams(&mut one_state, PlayerId(0));
+        add_mana(&mut one_state, PlayerId(0), ManaType::Colorless, 3);
+        add_mana(&mut one_state, PlayerId(0), ManaType::Blue, 1);
+        let one_session = AiSession::arc_from_game(&one_state);
+        let one_scores =
+            score_candidates_core(&one_state, PlayerId(0), &config, &one_session, None);
+        assert!(
+            one_scores.iter().any(|(action, score)| {
+                matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == one_drown)
+                    && score.is_finite()
+            }),
+            "Drown at max X=1 remains a finite root candidate"
+        );
+
+        let cast = build_decision_context(&one_state)
+            .candidates
+            .into_iter()
+            .find(|candidate| {
+                matches!(candidate.action, GameAction::CastSpell { object_id, .. } if object_id == one_drown)
+            })
+            .expect("the finite Drown root carries a real cast candidate");
+        let mode_state = apply_candidate(&one_state, &cast)
+            .expect("casting the real modal spell reaches mode selection");
+        assert!(
+            matches!(mode_state.waiting_for, WaitingFor::ModeChoice { .. }),
+            "Drown must pause for its real spell-level mode choice"
+        );
+        let selected_mode = choose_action(
+            &mode_state,
+            PlayerId(0),
+            &config,
+            &mut SmallRng::seed_from_u64(2),
+        )
+        .expect("AI selects a real Drown mode");
+        let mode_candidate = build_decision_context(&mode_state)
+            .candidates
+            .into_iter()
+            .find(|candidate| candidate.action == selected_mode)
+            .expect("selected mode is engine-issued");
+        let target_state = apply_candidate(&mode_state, &mode_candidate)
+            .expect("selecting the mode continues the cast");
+        assert!(
+            matches!(target_state.waiting_for, WaitingFor::TargetSelection { .. }),
+            "the chosen Drown mode must declare its player target before X"
+        );
+        let selected_target = choose_action(
+            &target_state,
+            PlayerId(0),
+            &config,
+            &mut SmallRng::seed_from_u64(3),
+        )
+        .expect("AI selects a legal player target for Drown");
+        let target_candidate = build_decision_context(&target_state)
+            .candidates
+            .into_iter()
+            .find(|candidate| candidate.action == selected_target)
+            .expect("selected target is engine-issued");
+        let x_state = apply_candidate(&target_state, &target_candidate)
+            .expect("declaring the target continues to X selection");
+        assert!(
+            matches!(x_state.waiting_for, WaitingFor::ChooseXValue { max: 1, .. }),
+            "the paid fixed component leaves exactly X=1 affordable"
+        );
+        assert_eq!(
+            choose_action(
+                &x_state,
+                PlayerId(0),
+                &AiConfig::default(),
+                &mut SmallRng::seed_from_u64(4),
+            ),
+            Some(GameAction::ChooseX { value: 1 }),
+            "the real X-value policy prefers the funded modal X"
+        );
+        let chosen_x_candidate = build_decision_context(&x_state)
+            .candidates
+            .into_iter()
+            .find(|candidate| candidate.action == GameAction::ChooseX { value: 1 })
+            .expect("ChooseX(1) is engine-issued");
+        let paid_state = apply_candidate(&x_state, &chosen_x_candidate)
+            .expect("choosing X=1 continues to payment");
+        assert_eq!(
+            paid_state
+                .stack
+                .iter()
+                .find(|entry| entry.source_id == one_drown)
+                .and_then(|entry| entry.ability())
+                .expect("the paid modal spell reaches the stack")
+                .chosen_x,
+            Some(1),
+            "the chosen X propagates into the resolved spell ability"
         );
     }
     #[test]
@@ -10117,6 +10858,83 @@ mod tests {
         );
     }
 
+    fn unmodeled_aura_target_selection_state(
+        static_mode: Option<StaticMode>,
+    ) -> (GameState, ObjectId) {
+        let mut state = spell_target_selection_state(
+            make_state(),
+            vec![TargetRef::Player(PlayerId(1))],
+            vec![TargetRef::Player(PlayerId(1))],
+            false,
+        );
+        let source_id = {
+            let WaitingFor::TargetSelection { pending_cast, .. } = &mut state.waiting_for else {
+                panic!("target-selection fixture must retain its pending cast");
+            };
+            pending_cast.ability.effect =
+                Effect::unimplemented("unsupported_aura", "Unsupported Aura effect.");
+            pending_cast.object_id
+        };
+        let source = state
+            .objects
+            .get_mut(&source_id)
+            .expect("pending Aura source exists");
+        source.card_types.subtypes.push("Aura".to_string());
+        if let Some(static_mode) = static_mode {
+            source
+                .static_definitions
+                .push(StaticDefinition::new(static_mode));
+        }
+        (state, source_id)
+    }
+
+    #[test]
+    fn beneficial_aura_target_selection_keeps_the_normal_scoring_path() {
+        let (state, source_id) =
+            unmodeled_aura_target_selection_state(Some(StaticMode::CantBeBlocked));
+
+        assert_eq!(
+            aura_polarity(&state.objects[&source_id]),
+            EffectPolarity::Beneficial,
+            "reach guard: the Aura classifier recognizes the source benefit"
+        );
+        assert!(
+            !target_selection_has_no_modeled_effect(&state),
+            "a beneficial Aura must retain the normal effect-aware target scorer"
+        );
+    }
+
+    #[test]
+    fn harmful_aura_target_selection_keeps_the_normal_scoring_path() {
+        let (state, source_id) =
+            unmodeled_aura_target_selection_state(Some(StaticMode::CantAttack));
+
+        assert_eq!(
+            aura_polarity(&state.objects[&source_id]),
+            EffectPolarity::Harmful,
+            "reach guard: the Aura classifier recognizes the source harm"
+        );
+        assert!(
+            !target_selection_has_no_modeled_effect(&state),
+            "a harmful Aura must retain the normal effect-aware target scorer"
+        );
+    }
+
+    #[test]
+    fn contextual_aura_target_selection_keeps_the_direct_fallback() {
+        let (state, source_id) = unmodeled_aura_target_selection_state(None);
+
+        assert_eq!(
+            aura_polarity(&state.objects[&source_id]),
+            EffectPolarity::Contextual,
+            "reach guard: the Aura source has no modeled target polarity"
+        );
+        assert!(
+            target_selection_has_no_modeled_effect(&state),
+            "a contextual Aura must keep the direct reducer-validated fallback"
+        );
+    }
+
     #[test]
     fn modeled_else_branch_keeps_target_selection_on_the_normal_scoring_path() {
         let mut state = spell_target_selection_state(
@@ -10304,6 +11122,8 @@ mod tests {
             },
             block_requirements: HashMap::new(),
             blocker_constraints: Default::default(),
+            must_be_blocked_targets: Default::default(),
+            block_capacities: Default::default(),
         };
 
         for difficulty in [
@@ -10408,7 +11228,8 @@ mod tests {
             attacker_constraints: Default::default(),
         };
 
-        let action = validated_declare_attackers(&state, vec![(creature, target)]);
+        let action =
+            validated_declare_attackers(&state, PlayerId(0), None, vec![(creature, target)]);
 
         match action {
             GameAction::DeclareAttackers { attacks, .. } => assert!(
@@ -10543,6 +11364,7 @@ mod tests {
             candidate_objects: engine::im::Vector::new(),
             outcome_template: None,
             visibility: engine::types::ability::VoteVisibility::Open,
+            chain_root_targets: Vec::new(),
         }
     }
 
@@ -10907,6 +11729,7 @@ mod tests {
             candidate_objects: engine::im::Vector::new(),
             outcome_template: None,
             visibility: engine::types::ability::VoteVisibility::Open,
+            chain_root_targets: Vec::new(),
         };
         let action = fallback_action_default(&state).expect("fallback returns an action");
         assert!(
@@ -12810,6 +13633,7 @@ mod tests {
             enters_attacking: false,
             owner_library: false,
             track_exiled_by_source: false,
+            face_down_in_exile: engine::types::ability::ExileConcealment::Public,
             face_down_profile: None,
             enter_with_counters: Vec::new(),
             conditional_enter_with_counters: Vec::new(),
@@ -13333,6 +14157,7 @@ mod tests {
             selectable_cards: pool,
             kept_destination: None,
             rest_destination: None,
+            rest_split_top_count: None,
             rest_order: engine::types::ability::DigRestOrder::Preserve,
             source_id: None,
             enter_tapped: false,
@@ -13459,6 +14284,7 @@ mod tests {
                 selectable_cards: vec![pool[0]],
                 kept_destination: None,
                 rest_destination: None,
+                rest_split_top_count: None,
                 rest_order: engine::types::ability::DigRestOrder::Preserve,
                 source_id: None,
                 enter_tapped: false,
@@ -13565,6 +14391,7 @@ mod tests {
                 enters_attacking: false,
                 owner_library: false,
                 track_exiled_by_source: false,
+                face_down_in_exile: engine::types::ability::ExileConcealment::Public,
                 face_down_profile: None,
                 enter_with_counters: Vec::new(),
                 conditional_enter_with_counters: Vec::new(),
@@ -13973,6 +14800,133 @@ mod tests {
         assert!(
             choose_action(&state, bystander, &config, &mut rng).is_none(),
             "a seat that owes no decision must be declined, not asserted on"
+        );
+    }
+
+    /// Issue #6594: a constrained `ChooseFromZoneChoice` must be answered from
+    /// the resolver's issued domain. The raw heuristic would select eight
+    /// lands from this Atraxa-shaped pool, which violates `DistinctCardTypes`,
+    /// so the contract gate would turn the decision into `None` and leave the
+    /// continuation parked.
+    #[test]
+    fn choose_action_answers_constrained_zone_choice_and_resumes_continuation() {
+        let mut state = make_state();
+        let source_card = CardId(state.next_object_id);
+        let source = create_object(
+            &mut state,
+            source_card,
+            P0,
+            "Atraxa test source".to_string(),
+            Zone::Battlefield,
+        );
+        let lands: Vec<_> = (0..9).map(|_| land_in_hand(&mut state, P0)).collect();
+        let creature = creature_in_hand(&mut state, P0);
+
+        let categories = vec![
+            CoreType::Artifact,
+            CoreType::Battle,
+            CoreType::Creature,
+            CoreType::Enchantment,
+            CoreType::Instant,
+            CoreType::Land,
+            CoreType::Planeswalker,
+            CoreType::Sorcery,
+        ];
+        let change_zone = Box::new(ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Hand),
+                destination: Zone::Graveyard,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: engine::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: Vec::new(),
+                conditional_enter_with_counters: Vec::new(),
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+            Vec::new(),
+            source,
+            P0,
+        ));
+        let choose = ResolvedAbility {
+            sub_ability: Some(change_zone),
+            ..ResolvedAbility::new(
+                Effect::ChooseFromZone {
+                    count: 8,
+                    zone: Zone::Hand,
+                    additional_zones: Vec::new(),
+                    zone_owner: engine::types::ability::ZoneOwner::Controller,
+                    filter: None,
+                    chooser: engine::types::ability::Chooser::Controller.into(),
+                    candidate_source: engine::types::ability::ZoneChoiceCandidateSource::Legacy,
+                    reciprocal_role: None,
+                    up_to: true,
+                    constraint: Some(
+                        engine::types::ability::ChooseFromZoneConstraint::DistinctCardTypes {
+                            categories,
+                        },
+                    ),
+                    selection: engine::types::ability::CardSelectionMode::Chosen,
+                },
+                Vec::new(),
+                source,
+                P0,
+            )
+        };
+        engine::game::effects::resolve_ability_chain(&mut state, &choose, &mut Vec::new(), 0)
+            .expect("the resolver must park the constrained zone choice");
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ChooseFromZoneChoice { .. }
+        ));
+
+        let config = create_config(AiDifficulty::Medium, Platform::Native);
+        let contract = AiDecisionContract::issue(&state, P0);
+        let action = choose_action(&state, P0, &config, &mut SmallRng::seed_from_u64(6594))
+            .expect("the AI must answer the constrained choice");
+        assert!(
+            contract.contains_action(&state, &action),
+            "the public AI action must belong to the resolver-issued domain"
+        );
+        let selected = match &action {
+            GameAction::SelectCards { cards } => cards.clone(),
+            other => panic!("expected SelectCards, got {other:?}"),
+        };
+        assert_eq!(
+            selected.len(),
+            2,
+            "the fixture has only one creature and one distinct land type"
+        );
+        assert!(
+            selected.contains(&creature),
+            "a legal maximum-cardinality pick must include the sole creature"
+        );
+
+        engine::game::engine::apply_as_current(&mut state, action)
+            .expect("the accepted AI choice must resume the continuation");
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::Priority { player: P0 }
+        ));
+        for id in selected {
+            assert_eq!(
+                state.objects.get(&id).expect("selected object exists").zone,
+                Zone::Graveyard,
+                "the continuation must move selected cards to its destination"
+            );
+        }
+        assert!(
+            lands.iter().any(|id| {
+                state
+                    .objects
+                    .get(id)
+                    .is_some_and(|object| object.zone == Zone::Hand)
+            }),
+            "unchosen cards must remain in the source zone"
         );
     }
 
@@ -14550,5 +15504,425 @@ mod tests {
             contract.contains_action(&state, &action),
             "the answer must be in P1's issued domain"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // CR 401.2 + CR 401.4 + CR 701.20e: the `DigRestSplitChoice` arranger must
+    // not sort a pile it was never shown.
+    //
+    // The AI mirror of the engine-layer regression in
+    // `crates/engine/tests/integration/telling_time_rest_split.rs`
+    // (`an_order_only_prompt_does_not_show_the_arranging_owner_the_card_faces`):
+    // the client projection stopped leaking the faces, but `deterministic_choice`
+    // runs on the UNFILTERED `GameState` and was still ordering the blind pile
+    // best-card-first — a leak an attentive opponent reads straight off the
+    // arrangement. Same class as the `OpponentGuess` pre-emption in
+    // `choose_action`.
+    // -----------------------------------------------------------------------
+
+    /// P0 digs four off P1's library, keeps one, and the whole three-card
+    /// remainder goes to the BOTTOM (`rest_split_top_count == 0`), so CR 401.4
+    /// hands P1 an `OrderOnly` arrangement of a pile only P0 looked at.
+    ///
+    /// `reveal` is the one axis that decides whether P1 may see it: `false` is
+    /// CR 701.20e's private look (shown to P0 alone), `true` is CR 701.20a's
+    /// public reveal (shown to everyone, P1 included).
+    fn order_only_cross_player_pause(reveal: bool) -> (GameRunner, Vec<ObjectId>) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let mut builder = scenario.add_spell_to_hand(P0, "Borrowed Foresight", true);
+        builder.with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 1,
+        });
+        builder.with_ability(Effect::Dig {
+            // "target player's library" — the axis that makes the looker (P0,
+            // the spell's controller) and the library's owner (P1) differ.
+            player: TargetFilter::Player,
+            count: QuantityExpr::Fixed { value: 4 },
+            destination: Some(Zone::Hand),
+            keep_count: Some(1),
+            keep_count_expr: None,
+            up_to: false,
+            filter: TargetFilter::Any,
+            rest_destination: Some(Zone::Library),
+            rest_split_top_count: Some(QuantityExpr::Fixed { value: 0 }),
+            rest_order: engine::types::ability::DigRestOrder::Preserve,
+            reveal,
+            enter_tapped: false,
+            enters_attacking: false,
+            source: engine::types::ability::DigSource::Library,
+        });
+        let spell_id = builder.id();
+        let mut runner = scenario.build();
+
+        for index in 0..5 {
+            let card_id = CardId(runner.state().next_object_id);
+            let id = create_object(
+                runner.state_mut(),
+                card_id,
+                P1,
+                format!("Theirs{index}"),
+                Zone::Library,
+            );
+            runner
+                .state_mut()
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+        for _ in 0..2 {
+            let unit = ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]);
+            runner.state_mut().players[0].mana_pool.add(unit);
+        }
+
+        let outcome = runner.cast(spell_id).target_player(P1).resolve();
+        let looked_at = match outcome.final_waiting_for() {
+            WaitingFor::DigChoice { cards, player, .. } => {
+                assert_eq!(*player, P0, "P0 is the looker");
+                cards.clone()
+            }
+            other => panic!("expected the keep prompt first, got {other:?}"),
+        };
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![looked_at[0]],
+            })
+            .expect("keeping one looked-at card must be accepted");
+        (runner, looked_at)
+    }
+
+    /// Reads the pile out of the live split prompt and grades it so its PARKED
+    /// order is strictly worst→best. `by_value_desc` must therefore REVERSE it,
+    /// which is what makes "did the AI sort by value?" empirically detectable
+    /// rather than a coincidence of the fixture's natural order.
+    fn graded_split_pile(runner: &mut GameRunner, expect_scope_open: bool) -> Vec<ObjectId> {
+        let (pile, scope) = match &runner.state().waiting_for {
+            WaitingFor::DigRestSplitChoice { cards, scope, .. } => (cards.clone(), *scope),
+            other => panic!("expected the split prompt, got {other:?}"),
+        };
+        assert_eq!(
+            scope.partition_is_open(),
+            expect_scope_open,
+            "fixture must reach the intended split scope"
+        );
+        assert!(
+            pile.len() >= 2,
+            "a one-card pile has one arrangement, so the test could not discriminate"
+        );
+        for (index, &id) in pile.iter().enumerate() {
+            let obj = runner.state_mut().objects.get_mut(&id).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.power = Some(index as i32 + 1);
+            obj.toughness = Some(index as i32 + 1);
+        }
+        // Reach-guard: the grading really is strictly increasing under the very
+        // scorer `by_value_desc` uses, so `value_desc != parked` is guaranteed.
+        let state = runner.state();
+        for window in pile.windows(2) {
+            assert!(
+                crate::card_value::intrinsic_value(state, window[0])
+                    < crate::card_value::intrinsic_value(state, window[1]),
+                "parked order must be strictly worst-first for the test to discriminate"
+            );
+        }
+        pile
+    }
+
+    fn split_answer(state: &GameState, ai_player: PlayerId) -> Vec<ObjectId> {
+        let config = create_config(AiDifficulty::Medium, Platform::Native);
+        match deterministic_choice(state, ai_player, &config, &[], None) {
+            Some(GameAction::SelectCards { cards }) => cards,
+            other => panic!("the split arm must answer with an arrangement, got {other:?}"),
+        }
+    }
+
+    /// THE REGRESSION ASSERTION. P1 arranges a pile only P0 was shown, so the
+    /// AI must submit it in parked order — NOT best-card-first.
+    ///
+    /// Revert-failing: restoring the unconditional `by_value_desc` makes the
+    /// answer the reversed (value-sorted) pile and both assertions below fail.
+    #[test]
+    fn a_blind_order_only_pile_is_not_arranged_by_card_value() {
+        let (mut runner, _looked_at) = order_only_cross_player_pause(false);
+        let pile = graded_split_pile(&mut runner, false);
+        let value_sorted: Vec<ObjectId> = pile.iter().rev().copied().collect();
+
+        // Reach-guard: P1 genuinely lacks look permission here — this is the
+        // blind branch, not a fixture that accidentally reveals the pile.
+        for &id in &pile {
+            assert!(
+                !engine::game::visibility::viewer_may_see_hidden_pile_card(runner.state(), P1, id),
+                "CR 701.20e: the private look was shown to P0 only"
+            );
+        }
+
+        let answer = split_answer(runner.state(), P1);
+        assert_eq!(
+            answer, pile,
+            "CR 401.4 grants P1 the ORDER of these cards, not permission to look \
+             at them (CR 401.2 + CR 701.20e) — the AI must arrange blind, in \
+             parked order"
+        );
+        assert_ne!(
+            answer, value_sorted,
+            "best-card-first over a pile P1 never saw is an observable \
+             information leak"
+        );
+    }
+
+    /// PAIRED POSITIVE (same fixture, `reveal` flipped): a CR 701.20a public
+    /// reveal genuinely shows P1 the pile, so the value heuristic must survive.
+    /// This is the control proving the fix keys on LOOK PERMISSION rather than
+    /// blanket-blinding every `OrderOnly` arranger.
+    #[test]
+    fn a_revealed_order_only_pile_is_still_arranged_by_card_value() {
+        let (mut runner, _looked_at) = order_only_cross_player_pause(true);
+        let pile = graded_split_pile(&mut runner, false);
+        let value_sorted: Vec<ObjectId> = pile.iter().rev().copied().collect();
+
+        for &id in &pile {
+            assert!(
+                engine::game::visibility::viewer_may_see_hidden_pile_card(runner.state(), P1, id),
+                "CR 701.20a: a revealed pile is shown to all players, P1 included"
+            );
+        }
+
+        let answer = split_answer(runner.state(), P1);
+        assert_eq!(
+            answer, value_sorted,
+            "with legitimate look permission the AI must keep sorting best-first"
+        );
+    }
+
+    /// PAIRED POSITIVE (the common production path — every currently printed
+    /// card of this class, e.g. Telling Time): a same-player dig leaves the
+    /// looker as the arranger and the partition still open, so the full
+    /// value heuristic runs over the WHOLE pile, unchanged.
+    #[test]
+    fn a_same_player_split_is_still_arranged_by_card_value() {
+        // Verbatim Telling Time Oracle text through the real parser — the
+        // printed card this whole capability exists for.
+        const TELLING_TIME_ORACLE: &str = "Look at the top three cards of your \
+library. Put one of those cards into your hand, one on top of your library, and \
+one on the bottom of your library.";
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let mut builder =
+            scenario.add_spell_to_hand_from_oracle(P0, "Telling Time", false, TELLING_TIME_ORACLE);
+        builder.with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 1,
+        });
+        let spell_id = builder.id();
+        let mut runner = scenario.build();
+
+        for index in 0..4 {
+            let card_id = CardId(runner.state().next_object_id);
+            let id = create_object(
+                runner.state_mut(),
+                card_id,
+                P0,
+                format!("Mine{index}"),
+                Zone::Library,
+            );
+            runner
+                .state_mut()
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+        for _ in 0..2 {
+            let unit = ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]);
+            runner.state_mut().players[0].mana_pool.add(unit);
+        }
+
+        let outcome = runner.cast(spell_id).resolve();
+        let looked_at = match outcome.final_waiting_for() {
+            WaitingFor::DigChoice { cards, .. } => cards.clone(),
+            other => panic!("expected the keep prompt first, got {other:?}"),
+        };
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![looked_at[0]],
+            })
+            .expect("keeping one looked-at card must be accepted");
+
+        let pile = graded_split_pile(&mut runner, true);
+        let value_sorted: Vec<ObjectId> = pile.iter().rev().copied().collect();
+        let answer = split_answer(runner.state(), P0);
+        assert_eq!(
+            answer, value_sorted,
+            "the looker arranging their own library keeps the full value \
+             heuristic — this fix must not cost the AI its card evaluation on \
+             the common path"
+        );
+    }
+
+    /// A printed fetchland is useless until cracked: the land itself taps for
+    /// nothing, and its replacement enters untapped, so holding it plays the AI
+    /// a mana source short for no compensating information.
+    ///
+    /// Regression for the reported behaviour where the AI played Misty
+    /// Rainforest and then sat on it for turns before cracking it at an
+    /// arbitrary moment. Two independent defects produced that: `anti_self_harm`
+    /// read the fetch's `ChangeZone { target: Any }` as a beneficial creature
+    /// target and charged the full `wasted_cast_penalty` whenever the AI
+    /// controlled no creature, and with that gone nothing scored the activation
+    /// at all, so it tied with `PassPriority`.
+    ///
+    /// The hand is deliberately empty, so the prospective fetch-then-cast
+    /// certificate cannot supply the preference — this pins the tactical policy
+    /// itself. The assertion is on the scores rather than on a sampled choice:
+    /// selection is a softmax draw, so the ordering is the deterministic fact,
+    /// and it is what the reported symptom inverted.
+    #[test]
+    fn untapped_fetchland_outscores_passing_on_its_own_turn() {
+        let db = integration_card_db();
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let misty = scenario.add_real_card(P0, "Misty Rainforest", Zone::Battlefield, &db);
+        for _ in 0..3 {
+            scenario.add_real_card(P0, "Mountain", Zone::Battlefield, &db);
+        }
+        scenario.add_real_card(P0, "Forest", Zone::Library, &db);
+        scenario.add_real_card(P0, "Island", Zone::Library, &db);
+        // Without a library the opponent decks out on their next draw, making
+        // passing a winning line the search scores at `WIN_SCORE` — that would
+        // swamp the tempo question under test.
+        for _ in 0..10 {
+            scenario.add_real_card(P1, "Mountain", Zone::Library, &db);
+        }
+        let mut runner = scenario.build();
+        rehydrate_game_from_card_db(runner.state_mut(), &db);
+        let config = create_config(AiDifficulty::Medium, Platform::Native);
+        let state = runner.state();
+        let session = AiSession::arc_from_game(state);
+
+        let scored = score_candidates_with_session(state, P0, &config, &session);
+        let crack = scored
+            .iter()
+            .find(|(action, _)| {
+                matches!(action, GameAction::ActivateAbility { source_id, .. } if *source_id == misty)
+            })
+            .map(|(_, score)| *score)
+            .expect("the fetchland activation must be a scored candidate");
+        let pass = scored
+            .iter()
+            .find(|(action, _)| matches!(action, GameAction::PassPriority))
+            .map(|(_, score)| *score)
+            .expect("passing must be a scored candidate");
+
+        assert!(
+            crack > pass,
+            "cracking the fetchland ({crack}) must outscore passing ({pass})"
+        );
+
+        // Pin the policy that supplies the preference against the real card, so
+        // a classifier or library-gate regression cannot hide behind the score
+        // ordering. `EtbTapState` and the search filter both come from the card
+        // database here, not from a synthetic fixture.
+        let candidates = validated_candidate_actions_for_semantic_owner(state, P0);
+        let candidate = candidates
+            .iter()
+            .find(|candidate| {
+                matches!(&candidate.action, GameAction::ActivateAbility { source_id, .. } if *source_id == misty)
+            })
+            .expect("Misty's printed activation must be a validated candidate");
+        let decision = AiDecisionContext {
+            waiting_for: state.waiting_for.clone(),
+            candidates: candidates.clone(),
+        };
+        let context = crate::context::AiContext::empty(&config.weights);
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate,
+            ai_player: P0,
+            config: &config,
+            context: &context,
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        let verdict = crate::policies::registry::PolicyRegistry::shared()
+            .verdicts(&ctx)
+            .into_iter()
+            .find_map(|(id, verdict)| {
+                (id == crate::policies::registry::PolicyId::FetchLandPatience).then_some(verdict)
+            })
+            .expect("the fetch-land policy must report on an activation candidate");
+        match verdict {
+            PolicyVerdict::Score { delta, reason } => {
+                assert_eq!(reason.kind, "fetch_untapped_own_turn");
+                assert!(delta > 0.0, "the real card must be scored up, got {delta}");
+            }
+            PolicyVerdict::Reject { .. } => panic!("a printed fetchland must not be gated"),
+        }
+    }
+
+    /// Field of Ruin sacrifices itself and its printed chain holds a land
+    /// search and a put onto the battlefield — but as riders on "Destroy target
+    /// nonbasic land an opponent controls", not as a replacement for itself.
+    /// Against the real card database, with a basic in the AI's library, the
+    /// fetch-land policy must not treat that activation as a fetch.
+    #[test]
+    fn field_of_ruin_is_not_scored_as_a_fetchland() {
+        let db = integration_card_db();
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let field = scenario.add_real_card(P0, "Field of Ruin", Zone::Battlefield, &db);
+        scenario.add_real_card(P0, "Mountain", Zone::Library, &db);
+        let mut runner = scenario.build();
+        rehydrate_game_from_card_db(runner.state_mut(), &db);
+        let config = create_config(AiDifficulty::Medium, Platform::Native);
+        let state = runner.state();
+
+        let ability_index = state.objects[&field]
+            .abilities
+            .iter()
+            .position(|ability| matches!(&*ability.effect, Effect::Destroy { .. }))
+            .expect("Field of Ruin's printed ability destroys a land");
+        let candidate = CandidateAction {
+            action: GameAction::ActivateAbility {
+                source_id: field,
+                ability_index,
+            },
+            metadata: ActionMetadata::for_actor(Some(P0), TacticalClass::Ability),
+        };
+        let decision = AiDecisionContext {
+            waiting_for: state.waiting_for.clone(),
+            candidates: vec![candidate.clone()],
+        };
+        let context = crate::context::AiContext::empty(&config.weights);
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: P0,
+            config: &config,
+            context: &context,
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        let verdict = crate::policies::registry::PolicyRegistry::shared()
+            .verdicts(&ctx)
+            .into_iter()
+            .find_map(|(id, verdict)| {
+                (id == crate::policies::registry::PolicyId::FetchLandPatience).then_some(verdict)
+            })
+            .expect("the fetch-land policy must report on an activation candidate");
+        match verdict {
+            PolicyVerdict::Score { delta, reason } => {
+                assert_eq!(reason.kind, "fetch_patience_na");
+                assert_eq!(delta, 0.0);
+            }
+            PolicyVerdict::Reject { .. } => panic!("land destruction must not be gated as a fetch"),
+        }
     }
 }

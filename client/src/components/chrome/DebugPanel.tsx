@@ -88,7 +88,6 @@ export function DebugPanel({
     () => new Set<ConsoleLevel>(["log", "warn", "error"]),
   );
   const consoleContainerRef = useRef<HTMLDivElement>(null);
-  const consoleEndRef = useRef<HTMLDivElement>(null);
 
   // Smart scroll tracking: only auto-scroll if user is at the bottom
   const isAtBottomRef = useRef(true);
@@ -177,12 +176,25 @@ export function DebugPanel({
   const handleExportGameState = useCallback(() => {
     if (!adapter) return;
     exportAuthoritativeGameStateZip(adapter)
-      .then((filename) => setStatus({ type: "success", message: `Exported ${filename}` }))
+      .then((result) => {
+        // Under the desktop shell the message waits for the real destination;
+        // a browser can only ever name the file it asked for.
+        if (result.kind === "failed") {
+          return setStatus({ type: "error", message: t("help.status.exportFailed") });
+        }
+        const message =
+          result.kind === "requested"
+            ? t("help.status.exportRequested", { filename: result.filename })
+            : result.path
+              ? t("help.status.exportedTo", { path: result.path })
+              : t("help.status.exported", { filename: result.filename });
+        setStatus({ type: "success", message });
+      })
       .catch((err: unknown) => {
         if (err instanceof DOMException && err.name === "AbortError") return;
-        setStatus({ type: "error", message: "Failed to export game state" });
+        setStatus({ type: "error", message: t("help.status.exportFailed") });
       });
-  }, [adapter]);
+  }, [adapter, t]);
 
   // Same destination as the top-left report flag. Close this panel first — it
   // renders at z-[9999], above the report dialog's z-50 overlay, so leaving it
@@ -192,11 +204,20 @@ export function DebugPanel({
     useUiStore.getState().openCardReportDialog();
   }, []);
 
+  // Do not use `scrollIntoView()` here. The panel is rendered inside the
+  // paint-contained game board, so that method can also scroll the locked game
+  // viewport and leave the battlefield displaced after the panel closes.
+  const scrollConsoleToBottom = useCallback(() => {
+    const container = consoleContainerRef.current;
+    if (!container) return;
+    container.scrollTop = container.scrollHeight;
+  }, []);
+
   const scrollToBottom = useCallback(() => {
-    consoleEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    scrollConsoleToBottom();
     setNewMessageCount(0);
     setShowJumpToBottom(false);
-  }, []);
+  }, [scrollConsoleToBottom]);
 
   const visibleEntries = consoleSnapshot.filter((e) => enabledLevels.has(e.level));
 
@@ -290,11 +311,11 @@ export function DebugPanel({
     if (added <= 0) return;
 
     if (isAtBottomRef.current) {
-      consoleEndRef.current?.scrollIntoView({ behavior: "smooth" });
+      scrollConsoleToBottom();
     } else {
       setNewMessageCount((prev) => prev + added);
     }
-  }, [visibleEntries]);
+  }, [scrollConsoleToBottom, visibleEntries]);
 
   if (!open) return null;
 
@@ -516,7 +537,7 @@ export function DebugPanel({
             disabled={!gameState}
             className="w-full rounded bg-gray-800 px-2 py-1 text-xs transition-colors hover:bg-gray-700 disabled:cursor-not-allowed disabled:opacity-40"
           >
-            Copy Current State to Clipboard
+            {t("debug.copyDisplaySnapshot")}
           </button>
           <button
             onClick={handleExportGameState}
@@ -622,7 +643,6 @@ export function DebugPanel({
                   {entry.message}
                 </div>
               ))}
-              <div ref={consoleEndRef} />
             </div>
             {showJumpToBottom && (
               <button

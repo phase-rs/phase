@@ -110,6 +110,17 @@ function shortcutReplySpec(interaction: ViewerInteraction | null): ShortcutReply
   return null;
 }
 
+/** The live reply's interaction id — the identity React keys the responder body on. Walks the
+ *  same list as `shortcutReplySpec`, one predicate apart; see `shortcutInteractionId`'s
+ *  `Object.is` stability note. */
+function shortcutReplyInteractionId(interaction: ViewerInteraction | null): InteractionId | null {
+  for (const opportunity of interaction?.opportunities ?? []) {
+    if (opportunity.response.type !== "schema") continue;
+    if (opportunity.response.data.spec.type === "shortcutReply") return opportunity.interactionId;
+  }
+  return null;
+}
+
 /** The declaration's published candidates — the subjects and answers its statement points name
  *  by id. Walks the same list under the same predicate as the selector above.
  *
@@ -793,30 +804,73 @@ function DeclareShortcutOffer({
 
 /**
  * CR 732.2b/c: after the proposer declares, each other living player, in APNAP
- * order, may accept the shortcut or shorten it (break out to resume manual play).
- * Phase 3 discards `at_iteration` (no finite-K materialization), so "Break out"
- * dispatches a placeholder `at_iteration: 1`.
+ * order, may accept the shortcut or shorten it by naming the place where the sequence stops.
+ * The range of places a responder may name is the ENGINE's, published on the reply spec and read
+ * here rather than derived — a bound this modal states and does not own. A range that holds no
+ * place, which is a published floor above the published ceiling, offers no shorten control at all.
  */
 export function RespondToShortcutModal() {
-  const { t } = useTranslation("game");
   const canAct = useCanActForWaitingState();
   const waitingFor = useGameStore((s) => s.waitingFor);
+  // A branded string, not an object literal — the same `Object.is` stability reason the offer
+  // side's key carries.
+  const replyId = useGameStore((s) => shortcutReplyInteractionId(s.viewerInteraction));
+
+  if (waitingFor?.type !== "RespondToShortcut" || !canAct) return null;
+
+  // The key, for the same reason `DeclareShortcutModal` carries one: the body below holds a typed
+  // place across renders, and the transport may deliver a second responder window without the
+  // client ever committing a render at an intermediate state, so the guard above never runs
+  // between two consecutive windows. It also puts that guard above the body's `useState`.
+  return <RespondToShortcut key={replyId ?? "no-reply"} data={waitingFor.data} />;
+}
+
+function RespondToShortcut({
+  data,
+}: {
+  data: Extract<WaitingFor, { type: "RespondToShortcut" }>["data"];
+}) {
+  const { t } = useTranslation("game");
   const dispatch = useGameStore((s) => s.dispatch);
   // Both selectors return a reference INTO store state (or null), so both are `Object.is`-stable.
   const spec = useGameStore((s) => shortcutReplySpec(s.viewerInteraction));
   const publishedCandidates = useGameStore((s) => shortcutReplyCandidates(s.viewerInteraction));
 
+  // CR 732.2b: the two ends of the range of places this responder may name. Read live off the
+  // published spec, so a re-published narrower range immediately re-gates an entry already typed.
+  // `null` when the transport published no reply spec at all.
+  const minIteration = spec?.minIteration ?? null;
+  const maxIteration = spec?.maxIteration ?? null;
+  // A published floor above the published ceiling names no place — the shape a zero-count
+  // proposal projects — and neither does an absent spec.
+  const offersShorten =
+    minIteration !== null && maxIteration !== null && minIteration <= maxIteration;
+  // No client-side default: until the responder types, the box shows the published floor.
+  const [place, setPlace] = useState<string | null>(null);
+  const raw = place ?? String(minIteration ?? 0);
+  // `parseAmount` is the shared sanitization authority — it REJECTS an entry outside the published
+  // range rather than clamping. Inside that range the engine stays the authority: a place past what
+  // it will drive is refused at the responder's seam with the window intact, so the responder is
+  // told and can answer again. This modal holds no budget of its own.
+  const chosen = offersShorten ? parseAmount(raw, minIteration, maxIteration) : null;
+
   const handleAccept = useCallback(() => {
     dispatch({ type: "RespondToShortcut", data: { response: "Accept" } });
   }, [dispatch]);
 
-  const handleShorten = useCallback(() => {
-    dispatch({ type: "RespondToShortcut", data: { response: { Shorten: { at_iteration: 1 } } } });
-  }, [dispatch]);
+  const handleShorten = () => {
+    // THE refusal, and the first statement of the ONE handler both production entry points reach:
+    // the footer button's `onClick`, and the box's Enter (`onSubmit`, which `AmountInput` calls
+    // unconditionally and deliberately does not re-guard). It reads the same predicate the
+    // button's `disabled` reads, so the guard and the button state cannot drift.
+    if (chosen === null) return;
+    dispatch({
+      type: "RespondToShortcut",
+      data: { response: { Shorten: { at_iteration: chosen } } },
+    });
+  };
 
-  if (waitingFor?.type !== "RespondToShortcut" || !canAct) return null;
-
-  const { proposal } = waitingFor.data;
+  const { proposal } = data;
   const candidates = publishedCandidates ?? [];
   // CR 732.2b: everything below is a direct read of a published field. The count, the partition,
   // every per-seat magnitude and every answer are the engine's; this modal states them.
@@ -865,12 +919,18 @@ export function RespondToShortcutModal() {
       >
         {t("comboShortcut.accept")}
       </button>
-      <button
-        onClick={handleShorten}
-        className="min-h-11 rounded-[16px] border border-white/8 bg-white/5 px-6 py-2 font-semibold text-slate-200 transition hover:bg-white/8"
-      >
-        {t("comboShortcut.shorten")}
-      </button>
+      {/* CR 732.2b: offered only where the published range holds a place to name. */}
+      {offersShorten && (
+        <button
+          onClick={handleShorten}
+          disabled={chosen === null}
+          className={`min-h-11 rounded-[16px] border border-white/8 bg-white/5 px-6 py-2 font-semibold text-slate-200 transition hover:bg-white/8 ${
+            chosen === null ? "cursor-not-allowed opacity-50 hover:bg-white/5" : ""
+          }`}
+        >
+          {t("comboShortcut.shorten")}
+        </button>
+      )}
     </div>
   );
 
@@ -917,6 +977,24 @@ export function RespondToShortcutModal() {
             )}
             {mayRows}
           </div>
+        )}
+        {/* CR 732.2b: the place the responder names, over the engine's published range. The three
+            aria labels are the count picker's own: the named place becomes the proposal's new
+            count, so the number in this box IS a number of iterations. No `setMaximum` label, so
+            that optional control stays off. */}
+        {offersShorten && (
+          <AmountInput
+            raw={raw}
+            onRawChange={setPlace}
+            min={minIteration}
+            max={maxIteration}
+            onSubmit={handleShorten}
+            labels={{
+              input: t("comboShortcut.countAria"),
+              decrease: t("comboShortcut.countDecreaseAria"),
+              increase: t("comboShortcut.countIncreaseAria"),
+            }}
+          />
         )}
       </div>
     </DialogShell>

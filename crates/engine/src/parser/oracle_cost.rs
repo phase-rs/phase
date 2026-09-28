@@ -1,7 +1,7 @@
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_until};
 use nom::character::complete::multispace0;
-use nom::combinator::{all_consuming, map, opt, rest, value};
+use nom::combinator::{all_consuming, eof, map, opt, peek, rest, value, verify};
 use nom::error::ParseError;
 use nom::multi::separated_list1;
 use nom::sequence::{pair, preceded, separated_pair, terminated};
@@ -102,31 +102,68 @@ fn parse_oxford_mana_alternatives_nom(text: &str) -> Option<AbilityCost> {
     })
 }
 
-/// CR 601.2f: Parse a GERUND-form cost phrase ("discarding a card", "paying 1
-/// life", "sacrificing a creature") into an `AbilityCost` by de-conjugating the
-/// leading verb to its imperative stem and delegating to [`parse_oracle_cost`],
-/// the single cost authority.
+/// CR 601.2f + CR 118.8 + CR 601.2h: Parse a GERUND-form cost phrase
+/// ("discarding a card", "paying 2 life and sacrificing an artifact or
+/// creature") into an `AbilityCost` by de-conjugating each ` and `-joined
+/// component to its imperative stem and delegating the recomposed phrase to
+/// [`parse_oracle_cost`], the single cost authority.
 ///
 /// The gerund construction appears in "cast … by <doing X> in addition to
 /// (paying) its other costs" ADDITIONAL-cost riders (Festival of Embers pay-life;
-/// Dragon Man, Reformed Robot discard; Demilich / Helbrute exile-from-graveyard)
-/// and in the self-flash rider in `oracle_casting.rs`. English gerund→imperative
-/// is irregular (pay→paying, discard→discarding, sacrifice→sacrificing[−e],
+/// Dragon Man, Reformed Robot discard; Demilich / Helbrute exile-from-graveyard;
+/// Wickerfolk Indomitable / Demonic Embrace composite riders) and in the
+/// self-flash rider in `oracle_casting.rs`. English gerund→imperative is
+/// irregular (pay→paying, discard→discarding, sacrifice→sacrificing[−e],
 /// remove→removing[−e], exile→exiling[−e], tap→tapping[+p]), so it cannot be a
 /// generic `strip_suffix("ing")`; each verb is one composed `value(stem,
 /// tag(gerund))` arm. Extend by a single arm per cost verb, only once
 /// `parse_oracle_cost` models its imperative.
 ///
 /// Returns `AbilityCost::Unimplemented { .. }` when the leading verb is not a
-/// modeled cost gerund OR the delegated imperative is itself unmodeled, so
-/// callers can decline (or drop) rather than silently attach a wrong/absent cost.
+/// modeled cost gerund, **or any component's imperative is unmodeled**; never
+/// returns a tree containing an `Unimplemented` leg, so callers decline (or
+/// drop) rather than silently attaching a wrong or partially payable cost.
 pub(crate) fn parse_gerund_cost(phrase: &str) -> AbilityCost {
-    type E<'a> = super::oracle_nom::error::OracleError<'a>;
     let original = phrase.trim();
-    let lower = original.to_lowercase();
+    let parts = split_cost_parts(original);
+    let Some((first, rest)) = parts.split_first() else {
+        return AbilityCost::Unimplemented {
+            description: original.to_string(),
+        };
+    };
+    let Some(first) = deconjugate_gerund_component(first) else {
+        return AbilityCost::Unimplemented {
+            description: original.to_string(),
+        };
+    };
+    let recomposed =
+        std::iter::once(first)
+            .chain(rest.iter().map(|part| {
+                deconjugate_gerund_component(part).unwrap_or_else(|| (*part).to_string())
+            }))
+            .collect::<Vec<String>>()
+            .join(" and ");
+    let cost = parse_oracle_cost(&recomposed);
+    if cost.contains_unimplemented() {
+        AbilityCost::Unimplemented {
+            description: original.to_string(),
+        }
+    } else {
+        cost
+    }
+}
+
+/// De-conjugate one gerund cost component onto its imperative stem, preserving
+/// the component's remainder verbatim. `None` when the component does not open
+/// with a modeled cost gerund (the caller keeps it as-is; the imperative
+/// authority decides whether the recomposition is modeled).
+fn deconjugate_gerund_component(part: &str) -> Option<String> {
+    type E<'a> = super::oracle_nom::error::OracleError<'a>;
+    let part = part.trim();
+    let lower = part.to_lowercase();
     // Compose one `value(stem, tag(gerund))` arm per cost verb — each maps a
     // gerund onto the imperative stem `parse_oracle_cost` already recognizes.
-    let Some((stem, rest)) = nom_on_lower(original, &lower, |input| {
+    nom_on_lower(part, &lower, |input| {
         alt((
             value("pay", tag::<_, _, E<'_>>("paying ")),
             value("discard", tag("discarding ")),
@@ -136,12 +173,8 @@ pub(crate) fn parse_gerund_cost(phrase: &str) -> AbilityCost {
             value("exile", tag("exiling ")),
         ))
         .parse(input)
-    }) else {
-        return AbilityCost::Unimplemented {
-            description: original.to_string(),
-        };
-    };
-    parse_oracle_cost(&format!("{stem} {rest}"))
+    })
+    .map(|(stem, rest)| format!("{stem} {rest}"))
 }
 
 /// True when a top-level ` or ` branch parsed to a concrete activation cost
@@ -224,6 +257,26 @@ fn parse_oracle_cost_no_or(text: &str) -> AbilityCost {
     parse_single_cost(parts.first().map_or(text, String::as_str))
 }
 
+// CR 107.1a: Keep an explicit fractional rounding suffix inside its cost
+// component, rather than treating its comma as a component separator.
+fn parse_half_life_cost_prefix(input: &str) -> super::oracle_nom::error::OracleResult<'_, ()> {
+    value(
+        (),
+        pair(
+            tag("pay half "),
+            verify(nom_quantity::parse_possessive_quantity_ref, |qty| {
+                matches!(
+                    qty,
+                    QuantityRef::LifeTotal {
+                        player: PlayerScope::Controller
+                    }
+                )
+            }),
+        ),
+    )
+    .parse(input)
+}
+
 fn split_cost_parts(text: &str) -> Vec<&str> {
     let mut parts = Vec::new();
     let mut start = 0;
@@ -237,6 +290,18 @@ fn split_cost_parts(text: &str) -> Vec<&str> {
             '{' => brace_depth += 1,
             '}' => brace_depth = brace_depth.saturating_sub(1),
             ',' if brace_depth == 0 => {
+                // CR 107.1a: The rounding comma is part of the fractional
+                // life-cost clause; a later comma still separates costs.
+                let prefix = text[start..i].trim().to_lowercase();
+                let suffix = text[i..].to_lowercase();
+                if all_consuming(parse_half_life_cost_prefix)
+                    .parse(prefix.as_str())
+                    .is_ok()
+                    && nom_quantity::parse_explicit_rounding_suffix(&suffix).is_ok()
+                {
+                    i += ch.len_utf8();
+                    continue;
+                }
                 let part = text[start..i].trim();
                 if !part.is_empty() {
                     parts.push(part);
@@ -799,6 +864,20 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
     // "Pay N life" / "Pay life equal to <dynamic quantity>" / "N life"
     if let Some(((), rest)) = nom_on_lower(text, &lower, |i| value((), tag("pay ")).parse(i)) {
         let rest_lower = rest.to_lowercase();
+        // CR 107.1a + CR 601.2f: An explicit rounding direction belongs to
+        // this activation cost. Require the complete G12 grammar before using
+        // parse_half_rounded, whose absent-suffix fallback is for other contexts.
+        if all_consuming(pair(
+            parse_half_life_cost_prefix,
+            nom_quantity::parse_explicit_rounding_suffix,
+        ))
+        .parse(lower.as_str())
+        .is_ok()
+        {
+            let (_, amount) = nom_quantity::parse_half_rounded(&rest_lower)
+                .expect("complete half-life cost grammar was verified");
+            return AbilityCost::PayLife { amount };
+        }
         // CR 119.4 + CR 903.4 + CR 903.4f: "Pay life equal to the number of
         // colors in your commander(s)' color identity" — War Room. Parse via
         // dedicated combinator so the class covers both "commander's" and
@@ -829,8 +908,8 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
                 // CR 119.4 + CR 122.1: "Pay N life for each <clause>" — a
                 // per-object multiplier on the life cost (e.g. Tornado's
                 // "Pay 3 life for each velocity counter on this enchantment").
-                // Model on parse_unless_for_each_payment
-                // (oracle_effect/mod.rs:14482). `after_n` is
+                // Model on `oracle_effect::parse_unless_for_each_payment`.
+                // `after_n` is
                 // "life for each <clause>" because parse_number trim_start()s
                 // the remainder, so "life " / "for each " carry their
                 // separators on the TRAILING side.
@@ -922,6 +1001,31 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
                 filter: None,
                 selection: crate::types::ability::CardSelectionMode::Chosen,
                 self_scope: crate::types::ability::DiscardSelfScope::FromHand,
+            };
+        }
+        // CR 701.9b: Random is a selection mode on an otherwise ordinary
+        // hand-discard cost. Accept only the complete unfiltered grammar used
+        // by the measured card corpus. A typed or malformed random phrase must
+        // fail closed below instead of falling through to the chosen parser and
+        // silently giving the payer a choice.
+        if let Ok((_, count)) =
+            all_consuming(parse_random_discard_cost_body).parse(rest_lower.as_str())
+        {
+            return AbilityCost::Discard {
+                count: QuantityExpr::Fixed {
+                    value: count as i32,
+                },
+                filter: None,
+                selection: crate::types::ability::CardSelectionMode::Random,
+                self_scope: crate::types::ability::DiscardSelfScope::FromHand,
+            };
+        }
+        if preceded(take_until::<_, _, E<'_>>(" at random"), tag(" at random"))
+            .parse(rest_lower.as_str())
+            .is_ok()
+        {
+            return AbilityCost::Unimplemented {
+                description: text.to_string(),
             };
         }
         // CR 701.9a + CR 608.2c: "Discard a/<N> <type> card(s)" — capture the
@@ -1386,6 +1490,21 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
     }
 }
 
+/// CR 701.9b: Complete grammar for the corpus-supported fixed-count,
+/// unfiltered random discard-cost body. Variable `X` is deliberately excluded:
+/// treating it as the cost parser's usual zero sentinel would make a required
+/// random discard free rather than honestly unsupported.
+fn parse_random_discard_cost_body(input: &str) -> super::oracle_nom::error::OracleResult<'_, u32> {
+    alt((
+        value(1, tag("a card at random")),
+        terminated(
+            nom_primitives::parse_number,
+            alt((tag(" card at random"), tag(" cards at random"))),
+        ),
+    ))
+    .parse(input)
+}
+
 /// CR 601.2f + CR 602.2b: Recognize the *head* of a self ACTIVATED-ability
 /// cost-reduction sentence — "this ability costs {N} less to activate" —
 /// regardless of any trailing "if [condition]" / "for each [condition]" tail.
@@ -1426,6 +1545,66 @@ pub(crate) fn is_self_cost_reduction_prefix(lower: &str) -> bool {
     ))
     .parse(after_mana)
     .is_ok()
+}
+
+/// CR 118.7b/c/d: The mana scope named by a cost reduction's "This effect
+/// reduces only the amount of X mana you pay" rider.
+///
+/// Two printed forms exist — "colored" (Morophon, the Boundless; Edgewalker;
+/// Ragemonger; Bard Class; Head of the Class; Nekrataal Avatar; Vorthos,
+/// Steward of Myth) and a single named color (the Defiler cycle, "...only the
+/// amount of blue mana you pay"). Both express the SAME reach: the reduction
+/// may only cancel matching colored pips, and an unmatched unit is lost instead
+/// of spilling into generic mana the way CR 118.7b otherwise requires. The
+/// named color is preserved so a caller that must cross-check it against the
+/// reduction's own color (the Defiler cycle does) still can; callers that only
+/// need the reach discard the payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ColoredManaOnlyScope {
+    /// "...only the amount of colored mana you pay."
+    AnyColor,
+    /// "...only the amount of [white|blue|black|red|green] mana you pay."
+    Single(crate::types::mana::ManaColor),
+}
+
+/// CR 118.7b/c/d: Recognize the colored-only rider sentence, positioned at its
+/// start ("this effect reduces only ..." — already lowercase).
+///
+/// Single authority for this clause so the general `ModifyCost` path and the
+/// Defiler cycle's dedicated parser cannot drift apart on which phrasings count.
+pub(crate) fn parse_colored_mana_only_clause(
+    input: &str,
+) -> super::oracle_nom::error::OracleResult<'_, ColoredManaOnlyScope> {
+    let (rest, _) = tag("this effect reduces only the amount of ").parse(input)?;
+    let (rest, scope) = alt((
+        value(ColoredManaOnlyScope::AnyColor, tag("colored")),
+        map(nom_primitives::parse_color, ColoredManaOnlyScope::Single),
+    ))
+    .parse(rest)?;
+    let (rest, _) = tag(" mana you pay").parse(rest)?;
+    // Require a sentence boundary so a longer sentence that merely OPENS with
+    // this wording ("... mana you pay for that spell's kicker", say) cannot
+    // false-positive. Accepting a bare space here would admit exactly that
+    // continuation, so only a period or end-of-input terminates the rider.
+    // `peek` leaves the terminator for the caller — the Defiler parser consumes
+    // the trailing '.' itself. All 12 printed riders end with '.'; `eof` covers
+    // a line whose trailing period was already stripped upstream.
+    let (rest, _) = peek(alt((eof, tag(".")))).parse(rest)?;
+    Ok((rest, scope))
+}
+
+/// CR 118.7b/c/d: True when `lower` carries the colored-only rider anywhere in
+/// the line — the rider is a separate sentence appended to the reduction
+/// sentence, so it is scanned at word boundaries rather than anchored.
+///
+/// Known limitation: the answer is per-LINE, not bound to one specific
+/// reduction clause. A single Oracle line carrying two different reductions
+/// where only one takes the rider would attribute it to both. No printed card
+/// has that shape — all 12 riders in the corpus sit on a line with exactly one
+/// reduction — so binding the rider structurally to its clause is deferred
+/// until a card needs it.
+pub(crate) fn line_reduces_colored_mana_only(lower: &str) -> bool {
+    nom_primitives::scan_at_word_boundaries(lower, parse_colored_mana_only_clause).is_some()
 }
 
 /// CR 601.2f: Parse "this ability/spell costs {N} less/more to activate/cast for each [condition]".
@@ -2174,6 +2353,74 @@ mod tests {
     use crate::types::counter::CounterMatch;
     use crate::types::mana::{ManaCost, ManaCostShard};
 
+    #[test]
+    fn half_life_activation_cost_keeps_rounding_in_its_component() {
+        for (text, expected) in [
+            (
+                "Pay half your life, rounded up",
+                crate::types::ability::RoundingMode::Up,
+            ),
+            (
+                "Pay half your life, rounded down",
+                crate::types::ability::RoundingMode::Down,
+            ),
+        ] {
+            assert!(matches!(
+                parse_oracle_cost(text),
+                AbilityCost::PayLife {
+                    amount: QuantityExpr::DivideRounded {
+                        inner,
+                        divisor: 2,
+                        rounding,
+                    },
+                } if rounding == expected
+                    && matches!(*inner, QuantityExpr::Ref {
+                        qty: QuantityRef::LifeTotal { player: PlayerScope::Controller }
+                    })
+            ));
+        }
+
+        let AbilityCost::Composite { costs } =
+            parse_oracle_cost("{B}{B}, Pay half your life, rounded up, {T}")
+        else {
+            panic!("expected three cost components");
+        };
+        assert_eq!(costs.len(), 3);
+        assert!(matches!(costs[0], AbilityCost::Mana { .. }));
+        assert!(matches!(
+            costs[1],
+            AbilityCost::PayLife {
+                amount: QuantityExpr::DivideRounded {
+                    rounding: crate::types::ability::RoundingMode::Up,
+                    ..
+                }
+            }
+        ));
+        assert!(matches!(costs[2], AbilityCost::Tap));
+
+        assert!(matches!(
+            parse_oracle_cost("Pay 2 life"),
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 2 }
+            }
+        ));
+        assert!(matches!(
+            parse_oracle_cost("{W/P}"),
+            AbilityCost::Mana { .. }
+        ));
+    }
+
+    #[test]
+    fn half_life_cost_rejects_unsupported_rounding_qualifier() {
+        let AbilityCost::Composite { costs } =
+            parse_oracle_cost("{B}, Pay half your life, rounded up somehow")
+        else {
+            panic!("mana component must remain separate");
+        };
+        assert!(matches!(costs[0], AbilityCost::Mana { .. }));
+        assert!(matches!(costs[1], AbilityCost::Unimplemented { .. }));
+    }
+
     /// CR 205.2a + CR 601.2h: a sacrifice cost whose filter is a TYPE UNION with
     /// an article-led right conjunct keeps BOTH legs — "Sacrifice another
     /// creature or an artifact" (Mold Folk, Sivriss, Elite Headhunter, Street
@@ -2691,10 +2938,11 @@ mod tests {
         assert_eq!(parse_oracle_cost("{T}"), AbilityCost::Tap);
     }
 
-    /// CR 601.2f: `parse_gerund_cost` de-conjugates the gerund verb and delegates
-    /// to the single cost authority, so a gerund cost phrase lowers identically to
-    /// its imperative form across the whole verb class — and an unmodeled verb
-    /// stays honest `Unimplemented`. Tests the building block, not one card.
+    /// CR 601.2f + CR 118.8: `parse_gerund_cost` de-conjugates the gerund verb
+    /// (per ` and `-joined component) and delegates to the single cost
+    /// authority, so a gerund cost phrase lowers identically to its imperative
+    /// form across the whole verb class — and an unmodeled verb stays honest
+    /// `Unimplemented`. Tests the building block, not one card.
     #[test]
     fn gerund_cost_matches_imperative_authority() {
         for (gerund, imperative) in [
@@ -2702,6 +2950,24 @@ mod tests {
             ("paying 1 life", "pay 1 life"),
             ("sacrificing a creature", "sacrifice a creature"),
             ("sacrificing a Vehicle", "sacrifice a Vehicle"),
+            // CR 118.8 + CR 601.2f: Wickerfolk Indomitable / Demonic Embrace
+            // composite riders — each ` and `-joined gerund component
+            // de-conjugates before the joined phrase is delegated.
+            (
+                "paying 2 life and sacrificing an artifact or creature",
+                "pay 2 life and sacrifice an artifact or creature",
+            ),
+            (
+                "paying 3 life and discarding a card",
+                "pay 3 life and discard a card",
+            ),
+            // S6 pin: the second component is a bare noun continuation, not a
+            // gerund; it must stay verbatim so the imperative authority's
+            // `fixup_bare_noun_continuations` rehydrates it onto the first verb.
+            (
+                "sacrificing an artifact and a creature",
+                "sacrifice an artifact and a creature",
+            ),
             // CR 701.13a: the exile arm — Demilich / Helbrute cast-from-graveyard
             // riders exile cards as an additional cost.
             (
@@ -2769,18 +3035,115 @@ mod tests {
             ),
             "an unmodeled gerund verb must lower to Unimplemented"
         );
+
+        // Shape pins for the Wickerfolk Indomitable composite: the pay-life leg
+        // is fixed 2 and the sacrifice leg is a count-1 union.
+        let wickerfolk = parse_gerund_cost("paying 2 life and sacrificing an artifact or creature");
+        let AbilityCost::Composite { costs } = &wickerfolk else {
+            panic!("Wickerfolk's composite rider must lower to a Composite, got {wickerfolk:?}");
+        };
+        assert_eq!(
+            costs.len(),
+            2,
+            "composite must carry exactly two legs: {costs:?}"
+        );
+        assert_eq!(
+            costs[0],
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+            },
+        );
+        assert!(
+            matches!(
+                &costs[1],
+                AbilityCost::Sacrifice(SacrificeCost {
+                    target: TargetFilter::Or { .. },
+                    requirement: SacrificeRequirement::Count { count: 1 },
+                })
+            ),
+            "the sacrifice leg must union artifact/creature at count 1, got {:?}",
+            costs[1]
+        );
+
+        // Shape pin for Demonic Embrace's discard leg.
+        let demonic = parse_gerund_cost("paying 3 life and discarding a card");
+        let AbilityCost::Composite { costs } = &demonic else {
+            panic!("Demonic Embrace's composite rider must lower to a Composite, got {demonic:?}");
+        };
+        assert!(
+            matches!(
+                &costs[1],
+                AbilityCost::Discard {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    ..
+                }
+            ),
+            "the discard leg must be one card, got {:?}",
+            costs[1]
+        );
+
+        // S6 pin: the verb-before-bare-noun shape `fixup_bare_noun_continuations`
+        // requires survives the per-component split — both legs stay count-1
+        // Sacrifices, artifact filter first, creature filter second.
+        let s6 = parse_gerund_cost("sacrificing an artifact and a creature");
+        let AbilityCost::Composite { costs } = &s6 else {
+            panic!("the S6 pair must lower to a two-leg Composite, got {s6:?}");
+        };
+        assert_eq!(costs.len(), 2, "{costs:?}");
+        for (leg, expected) in costs
+            .iter()
+            .zip([TypeFilter::Artifact, TypeFilter::Creature])
+        {
+            let AbilityCost::Sacrifice(SacrificeCost {
+                target: TargetFilter::Typed(TypedFilter { type_filters, .. }),
+                requirement,
+            }) = leg
+            else {
+                panic!("S6 leg must be a typed Sacrifice, got {leg:?}");
+            };
+            assert_eq!(type_filters, &[expected]);
+            assert_eq!(requirement, &SacrificeRequirement::Count { count: 1 });
+        }
+    }
+
+    /// CR 118.8 + CR 601.2f: a composite gerund containing an unmodeled leg
+    /// collapses to a single top-level `Unimplemented` — never a `Composite`
+    /// carrying an unpayable leg. The modeled analogue is the positive
+    /// reach-guard.
+    #[test]
+    fn composite_gerund_with_unmodeled_leg_collapses() {
+        assert!(
+            matches!(
+                parse_gerund_cost("paying 2 life and frobnicating a card"),
+                AbilityCost::Unimplemented { .. }
+            ),
+            "an unmodeled component must collapse the whole composite, got {:?}",
+            parse_gerund_cost("paying 2 life and frobnicating a card")
+        );
+        assert!(
+            matches!(
+                parse_gerund_cost("paying 2 life and discarding a card"),
+                AbilityCost::Composite { .. }
+            ),
+            "reach-guard: the same shape with a modeled component must stay a Composite"
+        );
     }
 
     #[test]
     fn cost_explicit_count_continuation_with_unmodeled_rider_stays_unimplemented() {
         // Terminal explicit-count guard: a "<N>=2 …" continuation whose object
         // phrase carries an unmodeled rider that `parse_type_phrase_folding` cannot fully
-        // consume ("… that were dealt damage this turn") must stay honest
-        // `Unimplemented` — it must NOT fall through to the count-1 fallback,
-        // which would emit a broad supported cost that drops both the rider and
-        // the real count.
+        // consume must stay honest `Unimplemented` — it must NOT fall through to
+        // the count-1 fallback, which would emit a broad supported cost that
+        // drops both the rider and the real count. The rider here is a
+        // deliberately fabricated adjective (mirroring the "frobnicating"
+        // pattern above) rather than a real card phrase: "that were dealt
+        // damage this turn" used to serve this purpose, but the parser now
+        // models the `were` number-agreement sibling of `WasDealtDamageThisTurn`'s
+        // "was" row, which is the coverage gain that made this test's old
+        // example stop being an unmodeled rider.
         match parse_oracle_cost(
-            "Sacrifice a creature and two artifacts that were dealt damage this turn",
+            "Sacrifice a creature and two artifacts that are quantically entangled",
         ) {
             AbilityCost::Composite { costs } => {
                 assert!(
@@ -3707,6 +4070,46 @@ mod tests {
                 self_scope: crate::types::ability::DiscardSelfScope::FromHand,
             }
         );
+    }
+
+    #[test]
+    fn cost_discard_at_random_is_game_selected() {
+        for (text, expected) in [
+            ("Discard a card at random", 1),
+            ("Discard two cards at random", 2),
+        ] {
+            assert_eq!(
+                parse_oracle_cost(text),
+                AbilityCost::Discard {
+                    count: QuantityExpr::Fixed { value: expected },
+                    filter: None,
+                    selection: crate::types::ability::CardSelectionMode::Random,
+                    self_scope: crate::types::ability::DiscardSelfScope::FromHand,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn random_discard_cost_does_not_fall_back_to_chosen() {
+        for text in [
+            "Discard a creature card at random",
+            "Discard a card at random from your hand",
+            "Discard frobnitz at random",
+            "Discard X cards at random",
+        ] {
+            assert!(
+                matches!(parse_oracle_cost(text), AbilityCost::Unimplemented { .. }),
+                "{text} must fail closed"
+            );
+        }
+        assert!(matches!(
+            parse_oracle_cost("Discard a creature card"),
+            AbilityCost::Discard {
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                ..
+            }
+        ));
     }
 
     #[test]

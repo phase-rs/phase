@@ -6,7 +6,7 @@ use engine::game::scenario::{GameScenario, P0};
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
 use engine::types::mana::ManaCost;
-use engine::types::phase::Phase;
+use engine::types::phase::{Phase, PhaseGroup, TurnSegment};
 
 const FULL_THROTTLE: &str = "After this main phase, there are two additional combat phases.
 At the beginning of each combat this turn, untap all creatures that attacked this turn.";
@@ -33,20 +33,23 @@ fn full_throttle_schedules_two_extra_combats_after_main_phase() {
         runner.state().extra_phases[0],
         engine::types::game_state::ExtraPhase {
             anchor: Phase::PreCombatMain,
-            phase: Phase::BeginCombat,
+            segment: TurnSegment::Phase(PhaseGroup::Combat),
             attacker_restriction: None,
             attacker_restriction_source: None,
+            id: engine::types::identifiers::ExtraPhaseId(1),
         }
     );
     assert_eq!(
         runner.state().extra_phases[1],
         engine::types::game_state::ExtraPhase {
-            anchor: Phase::EndCombat,
-            phase: Phase::BeginCombat,
+            anchor: Phase::PreCombatMain,
+            segment: TurnSegment::Phase(PhaseGroup::Combat),
             attacker_restriction: None,
             attacker_restriction_source: None,
+            id: engine::types::identifiers::ExtraPhaseId(2),
         },
-        "the second extra combat must chain after the first combat ends"
+        "both extra combats follow this main phase; the turn runs them back to back \
+         (CR 500.8; ruling: no main phase between the two additional combat phases)"
     );
 }
 
@@ -71,13 +74,14 @@ fn full_throttle_postcombat_main_anchors_to_postcombat_main() {
     );
     assert_eq!(
         runner.state().extra_phases[1].anchor,
-        Phase::EndCombat,
-        "the second extra combat must chain after end of combat"
+        Phase::PostCombatMain,
+        "both extra combats follow the postcombat main phase (CR 500.8; ruling: \
+         straight to the end step after the two additional combat phases)"
     );
 }
 
 #[test]
-fn full_throttle_turn_advances_through_two_extra_combats() {
+fn full_throttle_turn_runs_two_extra_combats_then_the_natural_combat() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let _attacker = scenario.add_vanilla(P0, 1, 1);
@@ -133,7 +137,8 @@ fn full_throttle_turn_advances_through_two_extra_combats() {
         runner.state().extra_phases
     );
     assert_eq!(
-        declare_attackers_rounds, 2,
-        "Full Throttle must produce two reachable extra combat phases"
+        declare_attackers_rounds, 3,
+        "CR 500.8: the two additional combat phases run directly after this main \
+         phase, then the natural combat phase (Moraug / Full Throttle rulings)"
     );
 }

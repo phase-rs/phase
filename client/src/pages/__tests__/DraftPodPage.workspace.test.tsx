@@ -5,12 +5,18 @@ import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { WorkspaceDeckBuilderController } from "../../components/draft/LimitedDeckBuilder";
+import type {
+  LocalDeckBuilderController,
+  WorkspaceDeckBuilderController,
+} from "../../components/draft/LimitedDeckBuilder";
 import type { PackDisplayController, PackDisplayPresentation } from "../../components/draft/PackDisplay";
 import type { DraftShellPhoneAction, DraftShellTopAction } from "../../components/chrome/ShellContext";
+import { ShellProvider } from "../../components/chrome/ShellContext";
 import { DRAFT_WORKSPACE_PREFERENCES_KEY } from "../../constants/storage";
 import type { DraftWorkspaceProps } from "../../components/draft/workspace/DraftWorkspace";
+import type { DraftWorkspaceState } from "../../components/draft/workspace/types";
 import type { ResponsiveDraftLayout } from "../../components/draft/workspace/workspacePreferences";
+import type { DraftPoolGroupKind } from "../../adapter/draft-adapter";
 import { usePreferencesStore } from "../../stores/preferencesStore";
 import { DraftPodPage } from "../DraftPodPage";
 
@@ -19,8 +25,9 @@ const captured = vi.hoisted(() => ({
   workspace: null as DraftWorkspaceProps | null,
   deckbuilder: null as WorkspaceDeckBuilderController | null,
   builderLayout: null as ResponsiveDraftLayout | null,
+  builderShowSuggestions: null as boolean | null,
   previews: [] as Array<{ mode?: string; hoverDelayMs?: number }>,
-  menuShell: null as { layout?: string; contentWidthClass?: string; compactTopPadding?: boolean } | null,
+  menuShell: null as { layout?: string; contentWidthClass?: string; compactTopPadding?: boolean; fillEmbeddedHeight?: boolean } | null,
   presentation: null as PackDisplayPresentation | null,
   packLayout: null as ResponsiveDraftLayout | null,
   phoneToolbarPinned: null as boolean | null,
@@ -35,7 +42,29 @@ const captured = vi.hoisted(() => ({
   progressVariant: null as string | null,
   showProgress: null as boolean | null,
   hostPresentations: [] as string[],
+  renderRealDeckBuilder: false,
 }));
+
+const deckCompatibility = vi.hoisted(() => ({
+  evaluate: vi.fn(),
+}));
+
+deckCompatibility.evaluate.mockResolvedValue({
+  standard: { compatible: true, reasons: [] },
+  commander: { compatible: true, reasons: [] },
+  bo3_ready: true,
+  unknown_cards: [],
+  selected_format_compatible: false,
+  selected_format_reasons: ["CARD_DB rejected this compatibility request"],
+  color_identity: [],
+  color_distribution: [],
+});
+
+function isEditableDeckBuilderController(
+  controller: WorkspaceDeckBuilderController | null,
+): controller is LocalDeckBuilderController {
+  return controller !== null && controller.capabilities?.kind !== "fixed-pool";
+}
 
 const store = vi.hoisted(() => {
   const cards = [
@@ -46,13 +75,14 @@ const store = vi.hoisted(() => {
     status: "Drafting", kind: "Premier", commanders_required: 0, pool: cards, current_pack: cards, draft_effects: [],
     pool_groups: {
       color_groups: [], type_groups: [], cmc_groups: [], rarity_groups: [],
-      type_filter_options: [], color_filter_options: [],
+      type_filter_options: [] as DraftPoolGroupKind[], color_filter_options: [] as DraftPoolGroupKind[],
       color_counts: { white: 0, blue: 0, black: 0, red: 0, green: 0 },
       workspace_capabilities: { rarity_group_order: null },
       workspace_row_classification: { creature_instance_ids: [], noncreature_instance_ids: [] },
     },
     seats: [], current_pack_number: 1, pick_number: 1, pass_direction: "Left",
     cards_per_pack: 2, pack_count: 3, min_deck_size: 1, addable_cards: [],
+    draft_set_codes: ["TST"],
     timer_remaining_ms: null, standings: [], current_round: 0,
     tournament_format: "Swiss", pod_policy: "Casual", pairings: [], match_config: { match_type: "Bo1" },
   };
@@ -67,7 +97,7 @@ const store = vi.hoisted(() => {
         "copy-a": { zone: "sideboard", row: 0, column: 0, order: 0 },
       },
       virtualBasics: [],
-    },
+    } as DraftWorkspaceState,
     selectedCard: null,
     pendingPickIntent: null,
     interactionGeneration: 7,
@@ -90,6 +120,7 @@ const store = vi.hoisted(() => {
     setWorkspaceState: vi.fn(),
     addBasicLand: vi.fn(),
     removeBasicLand: vi.fn(),
+    autoSuggestLands: vi.fn(),
     submitDeck: vi.fn(),
     leave: vi.fn(),
     resumeDraft: vi.fn(async () => "absent" as const),
@@ -142,7 +173,7 @@ vi.mock("../../components/chrome/ShellContext", async (importOriginal) => ({
     captured.topActions = topActions ?? [];
   },
 }));
-vi.mock("../../components/menu/MenuShell", () => ({ MenuShell: (props: { children: ReactNode; layout?: string; contentWidthClass?: string; compactTopPadding?: boolean }) => {
+vi.mock("../../components/menu/MenuShell", () => ({ MenuShell: (props: { children: ReactNode; layout?: string; contentWidthClass?: string; compactTopPadding?: boolean; fillEmbeddedHeight?: boolean }) => {
   captured.menuShell = props;
   return <>{props.children}</>;
 } }));
@@ -225,13 +256,30 @@ vi.mock("../../components/draft/workspace/DraftWorkspace", () => ({
     return <div data-testid="workspace" />;
   },
 }));
-vi.mock("../../components/draft/LimitedDeckBuilder", () => ({
-  LimitedDeckBuilder: ({ local, responsiveLayout }: { local?: WorkspaceDeckBuilderController; responsiveLayout?: ResponsiveDraftLayout }) => {
-    captured.deckbuilder = local ?? null;
-    captured.builderLayout = responsiveLayout ?? null;
-    return <div data-testid="deckbuilder" />;
-  },
+vi.mock("../../services/deckCompatibility", () => ({
+  evaluateDeckCompatibility: (...args: unknown[]) => deckCompatibility.evaluate(...args),
 }));
+vi.mock("../../hooks/useDeckCardData", () => ({
+  useDeckCardData: () => ({ cardDataCache: new Map(), cacheCards: () => {} }),
+}));
+vi.mock("../../components/draft/LimitedDeckBuilder", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../components/draft/LimitedDeckBuilder")>();
+  return {
+    ...actual,
+    LimitedDeckBuilder: (props: {
+      local?: WorkspaceDeckBuilderController;
+      responsiveLayout?: ResponsiveDraftLayout;
+      showSuggestions?: boolean;
+    }) => {
+      captured.deckbuilder = props.local ?? null;
+      captured.builderLayout = props.responsiveLayout ?? null;
+      captured.builderShowSuggestions = props.showSuggestions ?? false;
+      return captured.renderRealDeckBuilder
+        ? <actual.LimitedDeckBuilder {...props} />
+        : <div data-testid="deckbuilder" />;
+    },
+  };
+});
 
 describe("DraftPodPage workspace", () => {
   beforeEach(() => {
@@ -239,6 +287,7 @@ describe("DraftPodPage workspace", () => {
     captured.workspace = null;
     captured.deckbuilder = null;
     captured.builderLayout = null;
+    captured.builderShowSuggestions = null;
     captured.previews = [];
     captured.menuShell = null;
     captured.presentation = null;
@@ -255,6 +304,7 @@ describe("DraftPodPage workspace", () => {
     captured.progressVariant = null;
     captured.showProgress = null;
     captured.hostPresentations = [];
+    captured.renderRealDeckBuilder = false;
     store.state.phase = "drafting";
     store.state.role = "host";
     store.state.view.kind = "Premier";
@@ -264,6 +314,16 @@ describe("DraftPodPage workspace", () => {
     usePreferencesStore.setState({ draftCardPreviewMode: "none", draftDoubleClickConfirmPick: true });
     localStorage.clear();
     vi.clearAllMocks();
+    deckCompatibility.evaluate.mockResolvedValue({
+      standard: { compatible: true, reasons: [] },
+      commander: { compatible: true, reasons: [] },
+      bo3_ready: true,
+      unknown_cards: [],
+      selected_format_compatible: false,
+      selected_format_reasons: ["CARD_DB rejected this compatibility request"],
+      color_identity: [],
+      color_distribution: [],
+    });
     store.state.leave.mockReset();
     store.state.leave.mockResolvedValue(undefined);
   });
@@ -299,8 +359,70 @@ describe("DraftPodPage workspace", () => {
     act(() => { store.state.phase = "deckbuilding"; });
     rendered.rerender(<MemoryRouter><DraftPodPage /></MemoryRouter>);
     expect(screen.getByTestId("deckbuilder")).toBeInTheDocument();
-    expect(captured.deckbuilder?.workspace).toBe(store.state.workspaceState);
-    expect(captured.deckbuilder?.capabilities).toEqual({ kind: "editable-pool", suggestions: false });
+    const deckbuilder = captured.deckbuilder;
+    if (!isEditableDeckBuilderController(deckbuilder)) {
+      throw new Error("editable deck builder controller not installed");
+    }
+    expect(deckbuilder.workspace).toBe(store.state.workspaceState);
+    expect(deckbuilder.capabilities).toEqual({ kind: "editable-pool", suggestions: true });
+    expect(captured.builderShowSuggestions).toBe(true);
+    expect(deckbuilder.onAutoSuggestDeck).toBeUndefined();
+    expect(deckbuilder.onAutoSuggestLands).toBe(store.state.autoSuggestLands);
+    await deckbuilder.onAutoSuggestLands?.();
+    expect(store.state.autoSuggestLands).toHaveBeenCalledOnce();
+    await deckbuilder.onSubmitDeck([]);
+    expect(store.state.submitDeck).toHaveBeenCalledWith([]);
+  });
+
+  it("clicks Submit in the real Set-backed guest builder and forwards no commanders", async () => {
+    const cards = Array.from({ length: 40 }, (_, index) => ({
+      instance_id: `guest-set-${index}`,
+      name: "Guest Set Card",
+      set_code: "TST",
+      collector_number: String(index + 1),
+      rarity: "common",
+      colors: [],
+      cmc: 1,
+      type_line: "Creature",
+    }));
+    const workspace: DraftWorkspaceState = {
+      schemaVersion: 1,
+      placements: Object.fromEntries(cards.map((card, index) => [
+        card.instance_id,
+        { zone: "deck" as const, row: 0, column: 0, order: index },
+      ])),
+      virtualBasics: [],
+    };
+    act(() => {
+      store.state.role = "guest";
+      store.state.phase = "deckbuilding";
+      store.state.view = {
+        ...store.state.view,
+        kind: "Premier",
+        commanders_required: 0,
+        min_deck_size: 40,
+        pool: cards,
+        draft_set_codes: ["TST"],
+        pool_groups: {
+          ...store.state.view.pool_groups,
+          type_filter_options: ["creature"],
+          color_filter_options: ["colorless"],
+        },
+      };
+      store.state.workspaceState = workspace;
+      captured.renderRealDeckBuilder = true;
+    });
+
+    render(<MemoryRouter><DraftPodPage /></MemoryRouter>);
+
+    await vi.waitFor(() => expect(deckCompatibility.evaluate).toHaveBeenCalledWith(
+      { main: [{ name: "Guest Set Card", count: 40 }], sideboard: [], commander: [] },
+      { selectedFormat: null, draftSetCodes: ["TST"] },
+    ));
+    const submit = screen.getByRole("button", { name: "Submit Deck" });
+    expect(submit).toBeEnabled();
+    fireEvent.click(submit);
+    await vi.waitFor(() => expect(store.state.submitDeck).toHaveBeenCalledWith([]));
   });
 
   it("forwards the engine commander requirement independently of draft kind", () => {
@@ -357,6 +479,19 @@ describe("DraftPodPage workspace", () => {
     }
   });
 
+  it("forwards embedded fill for responsive pod workspace phases", () => {
+    Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: 768 });
+    Object.defineProperty(window, "innerHeight", { configurable: true, writable: true, value: 1024 });
+
+    render(
+      <ShellProvider value>
+        <MemoryRouter><DraftPodPage /></MemoryRouter>
+      </ShellProvider>,
+    );
+
+    expect(captured.menuShell).toMatchObject({ fillEmbeddedHeight: true });
+  });
+
   it.each([
     ["phone-portrait", 430, 932, "h-[calc(100dvh_-_11rem)]"],
     ["phone-landscape", 924, 412, "h-[calc(100dvh_-_4rem)]"],
@@ -369,7 +504,7 @@ describe("DraftPodPage workspace", () => {
 
     expect(captured.shellMode).toBe("phone-drafting");
     expect(captured.progressVariant).toBe("pod");
-    expect(captured.showProgress).toBe(responsiveLayout === "phone-landscape");
+    expect(captured.showProgress).toBe(false);
     expect(captured.menuShell).toMatchObject({ compactTopPadding: true });
     expect(captured.packLayout).toBe(responsiveLayout);
     expect(captured.phoneToolbarPinned).toBe(true);
@@ -401,6 +536,7 @@ describe("DraftPodPage workspace", () => {
     act(() => { store.state.phase = "deckbuilding"; });
     rendered.rerender(<MemoryRouter><DraftPodPage /></MemoryRouter>);
     expect(captured.shellMode).toBe("phone-deckbuilding");
+    expect(captured.showProgress).toBe(false);
     expect(captured.phoneAction).toBeUndefined();
     expect(captured.builderLayout).toBe(responsiveLayout);
     expect(captured.hostActionsEnabled[captured.hostActionsEnabled.length - 1]).toBe(true);

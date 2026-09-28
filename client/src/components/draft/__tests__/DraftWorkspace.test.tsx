@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState, type ComponentProps } from "react";
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -27,14 +28,87 @@ import {
   type DraftWorkspacePreferences,
 } from "../workspace/workspacePreferences";
 
-const motionState = vi.hoisted(() => ({ reduced: false }));
+const motionState = vi.hoisted(() => ({
+  reduced: false,
+  nextMountId: 1,
+  mountCount: 0,
+  cleanupCount: 0,
+  animationCompleteHandlers: [] as Array<() => void>,
+  values: [] as Array<{
+    initial: unknown;
+    animate: unknown;
+    transition: unknown;
+    sourceInstanceId: string | undefined;
+    zone: string | undefined;
+    column: number | undefined;
+    row: number | undefined;
+    geometryRevision: number | undefined;
+  }>,
+}));
 const previewProps = vi.hoisted(() => ({
   values: [] as Array<{ mode?: string; hoverDelayMs?: number }>,
 }));
 
 vi.mock("framer-motion", async (importOriginal) => {
   const actual = await importOriginal<typeof import("framer-motion")>();
-  return { ...actual, useReducedMotion: () => motionState.reduced };
+  const MotionDiv = ({
+    initial,
+    animate,
+    transition,
+    "data-drag-projection-source-instance-id": sourceInstanceId,
+    "data-drag-projection-zone": zone,
+    "data-drag-projection-column": column,
+    "data-drag-projection-row": row,
+    "data-drag-projection-geometry-revision": geometryRevision,
+    onAnimationComplete,
+    ...props
+  }: ComponentProps<"div"> & {
+    initial?: unknown;
+    animate?: unknown;
+    transition?: unknown;
+    "data-drag-projection-source-instance-id"?: string;
+    "data-drag-projection-zone"?: string;
+    "data-drag-projection-column"?: number;
+    "data-drag-projection-row"?: number;
+    "data-drag-projection-geometry-revision"?: number;
+    onAnimationComplete?: () => void;
+  }) => {
+    const [mountId] = useState(() => motionState.nextMountId++);
+    useEffect(() => {
+      motionState.mountCount += 1;
+      return () => { motionState.cleanupCount += 1; };
+    }, []);
+    motionState.values.push({
+      initial,
+      animate,
+      transition,
+      sourceInstanceId,
+      zone,
+      column,
+      row,
+      geometryRevision,
+    });
+    if (onAnimationComplete !== undefined) motionState.animationCompleteHandlers.push(onAnimationComplete);
+    return (
+      <div
+        {...props}
+        data-workspace-drag-motion-mount-id={mountId}
+        data-drag-projection-source-instance-id={sourceInstanceId}
+        data-drag-projection-zone={zone}
+        data-drag-projection-column={column}
+        data-drag-projection-row={row}
+        data-drag-projection-geometry-revision={geometryRevision}
+      />
+    );
+  };
+  return {
+    ...actual,
+    motion: {
+      ...actual.motion,
+      div: MotionDiv,
+    },
+    useReducedMotion: () => motionState.reduced,
+  };
 });
 
 vi.mock("../../../hooks/useCardImage", () => ({
@@ -55,9 +129,15 @@ afterEach(() => {
   restoreBrowserHarness?.();
   restoreBrowserHarness = null;
   motionState.reduced = false;
+  motionState.nextMountId = 1;
+  motionState.mountCount = 0;
+  motionState.cleanupCount = 0;
+  motionState.animationCompleteHandlers = [];
+  motionState.values = [];
   previewProps.values = [];
   useMultiplayerDraftStore.getState().reset();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 function installBrowserHarness({
@@ -296,6 +376,7 @@ function TouchDragWorkspace({
   const interaction = { interactionGeneration: 1, pickInteractionLocked: false, pendingPickIntent: null } as const;
   const dragController = useDraftWorkspaceDrag({
     enabled: true,
+    workspaceProjectionEnabled: false,
     readPickInteraction: () => interaction,
     subscribePickInteraction: () => () => undefined,
     onDrop: () => { throw new Error("Workspace drags do not dispatch picks."); },
@@ -413,7 +494,7 @@ describe("draft workspace shell", () => {
     );
 
     const deck = container.querySelector<HTMLElement>('[data-zone="deck"]')!;
-    expect(within(deck).queryByRole("combobox", { name: "Sort board" })).not.toBeInTheDocument();
+    expect(within(deck).queryByRole("combobox", { name: "Group by" })).not.toBeInTheDocument();
     expect(within(deck).queryByRole("group", { name: "Board rows" })).not.toBeInTheDocument();
     expect(within(deck).queryByRole("checkbox", { name: "Show headers" })).not.toBeInTheDocument();
     const layoutTrigger = within(deck).getByRole("button", { name: "Layout" });
@@ -423,6 +504,7 @@ describe("draft workspace shell", () => {
     const layoutDialog = screen.getByRole("dialog", { name: "Layout" });
     expect(within(layoutDialog).getByRole("heading", { name: "Columns" })).toBeInTheDocument();
     expect(within(layoutDialog).getByText("Max columns per row")).toBeInTheDocument();
+    expect(within(layoutDialog).getByText("Group by:")).toBeInTheDocument();
     expect(within(layoutDialog).getByRole("group", { name: "Max columns per row" })).toBeInTheDocument();
     expect(layoutDialog.querySelector("[data-layout-sort-options]")).toHaveClass("grid", "grid-cols-2");
     expect(within(layoutDialog).getByRole("button", { name: "Mana value" })).toHaveAttribute("aria-pressed", "true");
@@ -446,7 +528,7 @@ describe("draft workspace shell", () => {
       .toHaveClass("shrink-0", "whitespace-nowrap");
   });
 
-  it("opens_the_phone_workspace_overlay_as_a_board_without_persisting_the_default_view", () => {
+  it.each(["phone-portrait", "phone-landscape"] as const)("opens_the_%s_draft_workspace_as_instance_backed_text_with_isolated_view_switching", (responsiveLayout) => {
     const cards = [card("deck"), card("side")];
     const preferenceChanges = vi.fn();
     const initialPreferences = preferences({
@@ -464,7 +546,7 @@ describe("draft workspace shell", () => {
             side: { zone: "sideboard", row: 0, column: 0, order: 0 },
           })}
           preferences={initialPreferences}
-          responsiveLayout="phone-portrait"
+          responsiveLayout={responsiveLayout}
           mobileOverlay
           mobileWorkspaceOpen={mobileWorkspaceOpen}
           onMobileWorkspaceOpenChange={setMobileWorkspaceOpen}
@@ -480,19 +562,56 @@ describe("draft workspace shell", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Show Deck workspace" }));
 
+    expect(within(deck).getByRole("region", { name: "Card pool" })).toBeInTheDocument();
+    expect(within(deck).getByRole("button", { name: "Visual builder" })).toBeInTheDocument();
+    expect(within(deck).getByRole("button", { name: "Close" })).toBeInTheDocument();
+    expect(within(deck).queryByRole("button", { name: "Add lands" })).not.toBeInTheDocument();
+    expect(within(deck).queryByRole("button", { name: /commander/i })).not.toBeInTheDocument();
+    expect(deck.querySelectorAll("header[aria-label^='Column ']")).toHaveLength(0);
+    const textComposition = container.querySelector<HTMLElement>("[data-workspace-composition='collapsed']")!;
+    expect(textComposition).toHaveClass("flex", "h-full", "min-h-0", "min-w-0", "flex-col", "overflow-hidden");
+    expect(textComposition.className).not.toContain("grid");
+    expect(container.querySelector('[data-zone="sideboard"]')).not.toBeInTheDocument();
+    const textControls = deck.querySelector<HTMLElement>("[data-compact-pool-primary-controls]")!;
+    const groupingControl = within(textControls).getByRole("button", { name: "Group by" });
+    const compactCounts = textControls.querySelector<HTMLElement>("[data-deck-type-counts]")!;
+    const textTrailingControls = deck.querySelector<HTMLElement>("[data-compact-pool-trailing-controls]")!;
+    expect(groupingControl.compareDocumentPosition(compactCounts) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(compactCounts.compareDocumentPosition(textTrailingControls) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(textTrailingControls).toHaveClass("ml-auto");
+    expect(preferenceChanges).not.toHaveBeenCalled();
+
+    fireEvent.click(within(deck).getByRole("button", { name: "Visual builder" }));
+
     expect(within(deck).getByRole("button", { name: "Layout" })).toBeInTheDocument();
+    expect(within(deck).getByRole("button", { name: "Text builder" })).toBeInTheDocument();
+    expect(within(deck).getByRole("button", { name: "Close" })).toBeInTheDocument();
+    const toolbar = within(deck).getByRole("toolbar", { name: "Board layout" });
+    expect(toolbar).toHaveClass("gap-1", "px-1", "py-1", "flex-nowrap");
+    expect(within(toolbar).getByRole("button", { name: "Layout" })).toHaveClass("min-h-11");
+    const visualTrailingControls = toolbar.querySelector<HTMLElement>("[data-phone-draft-visual-trailing]")!;
+    expect(visualTrailingControls).toHaveClass("flex", "flex-nowrap");
+    expect(visualTrailingControls).not.toHaveClass("ml-auto");
+    expect(visualTrailingControls).toContainElement(toolbar.querySelector<HTMLElement>("[data-deck-type-counts]"));
+    expect(screen.getByRole("region", { name: "Compact sideboard" })).toBeInTheDocument();
     expect(deck).toHaveClass("overflow-y-auto", "overscroll-contain");
     expect(within(deck).queryByRole("group", { name: "Board columns" })).not.toBeInTheDocument();
     expect(deck.querySelectorAll("header[aria-label^='Column ']")).toHaveLength(4);
+    expect(deck.querySelector("[data-board-columns]")).toHaveClass("gap-y-1", "p-3");
+    expect(deck.querySelector("header[aria-label^='Column ']")).toHaveClass("h-7", "px-1", "text-[10px]");
+    expect(within(deck).getAllByRole("button", { name: /Remove column/ })[0]).toHaveClass("h-6", "w-6");
     expect(container.querySelector("[data-mobile-workspace-scrim]")).toHaveClass(
       "fixed",
       "bg-slate-950",
       "overscroll-contain",
     );
-    const workspace = container.querySelector<HTMLElement>('[data-responsive-workspace-layout="phone-portrait"]')!;
+    const workspace = container.querySelector<HTMLElement>(`[data-responsive-workspace-layout="${responsiveLayout}"]`)!;
     expect(workspace).toHaveClass("bg-slate-950", "overscroll-contain");
     expect(preferenceChanges).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "Hide deck workspace" }));
+
+    fireEvent.click(within(deck).getByRole("button", { name: "Text builder" }));
+    expect(within(deck).getByRole("region", { name: "Card pool" })).toBeInTheDocument();
+    fireEvent.click(within(deck).getByRole("button", { name: "Close" }));
     expect(deck.querySelectorAll("header[aria-label^='Column ']")).toHaveLength(0);
   });
 
@@ -523,7 +642,7 @@ describe("draft workspace shell", () => {
     const deck = container.querySelector<HTMLElement>('[data-zone="deck"]')!;
     const layout = within(deck).getByRole("button", { name: "Layout" });
     expect(layout).toBeInTheDocument();
-    expect(within(deck).queryByRole("button", { name: "Sort board" })).not.toBeInTheDocument();
+    expect(within(deck).queryByRole("button", { name: "Group by" })).not.toBeInTheDocument();
     expect(deck).not.toHaveClass("overflow-y-auto");
     expect(container.querySelector('[data-responsive-workspace-layout="phone-portrait"]'))
       .toHaveClass("overflow-y-auto", "overscroll-contain");
@@ -622,6 +741,7 @@ describe("draft workspace shell", () => {
       announcement: "",
       activeTarget: null,
       dragPreview: null,
+      geometryRevision: 0,
       handlePointerDown: vi.fn(),
       handleWorkspacePointerDown: vi.fn(),
       handlePointerMove: vi.fn(),
@@ -686,54 +806,223 @@ describe("draft workspace shell", () => {
     expect(deckCard()).toHaveClass("touch-pan-y");
   });
 
+  it("layers_the_collapsed_draft_phone_landscape_sideboard_below_its_operable_rail_header", () => {
+    render(
+      <DraftWorkspace
+        pool={[card("side-card")]}
+        poolGroups={groups([card("side-card")])}
+        workspace={state({ "side-card": { zone: "sideboard", row: 0, column: 0, order: 0 } })}
+        preferences={preferences({ sideboardCollapsed: null })}
+        responsiveLayout="phone-landscape"
+        onWorkspaceChange={vi.fn()}
+        onPreferencesChange={vi.fn()}
+      />,
+    );
+
+    const sideboard = screen.getByRole("region", { name: "Compact sideboard" });
+    const header = sideboard.querySelector("header")!;
+    const toggle = within(sideboard).getByRole("button", { name: "Show sideboard (1 card)" });
+    expect(sideboard).toHaveAttribute("data-sideboard-collapsed", "true");
+    expect(sideboard).toHaveClass("relative");
+    expect(header).toHaveClass("relative", "z-10", "h-full", "flex-1");
+    expect(toggle.parentElement).toHaveClass("relative", "z-10");
+    expect(toggle.parentElement).not.toHaveClass("mt-10");
+    expect(sideboard.querySelector("[data-sideboard-card-area]")).toHaveClass("absolute", "inset-0");
+    fireEvent.click(toggle);
+    expect(toggle).toBeEnabled();
+  });
+
+  it.each([
+    ["phone-landscape", "grid-rows-[minmax(0,1fr)_minmax(152px,32vh)]"],
+    ["tablet-landscape", "grid-rows-[minmax(0,1fr)_minmax(152px,32vh)]"],
+  ] as const)("uses_full_width_rows_for_the_expanded_%s_draft_sideboard", (responsiveLayout, rowClass) => {
+    const cards = [card("deck"), card("side")];
+    const { container } = render(
+      <DraftWorkspace
+        pool={cards}
+        poolGroups={groups(cards)}
+        workspace={state({
+          deck: { zone: "deck", row: 0, column: 0, order: 0 },
+          side: { zone: "sideboard", row: 0, column: 0, order: 0 },
+        })}
+        preferences={preferences({ sideboardCollapsed: false })}
+        responsiveLayout={responsiveLayout}
+        responsiveContext="draft"
+        onWorkspaceChange={vi.fn()}
+        onPreferencesChange={vi.fn()}
+      />,
+    );
+
+    const composition = container.querySelector<HTMLElement>('[data-workspace-composition="collapsed"]')!;
+    expect(composition).toHaveClass("grid", "grid-cols-1", rowClass);
+    expect(composition.className).not.toMatch(/grid-cols-\[minmax\(0,1fr\)_\d+px\]/);
+  });
+
+  it.each([
+    ["phone-landscape", "grid-cols-[minmax(0,1fr)_172px]"],
+    ["tablet-landscape", "grid-cols-[minmax(0,1fr)_196px]"],
+  ] as const)("preserves_the_expanded_%s_builder_sideboard_right_rail", (responsiveLayout, railClass) => {
+    const cards = [card("deck"), card("side")];
+    const { container } = render(
+      <DraftWorkspace
+        pool={cards}
+        poolGroups={groups(cards)}
+        workspace={state({
+          deck: { zone: "deck", row: 0, column: 0, order: 0 },
+          side: { zone: "sideboard", row: 0, column: 0, order: 0 },
+        })}
+        preferences={preferences({
+          builderPhoneSideboardCollapsed: false,
+          sideboardCollapsed: false,
+        })}
+        responsiveLayout={responsiveLayout}
+        responsiveContext="builder"
+        onWorkspaceChange={vi.fn()}
+        onPreferencesChange={vi.fn()}
+      />,
+    );
+
+    expect(container.querySelector('[data-workspace-composition="collapsed"]'))
+      .toHaveClass("grid", railClass);
+  });
+
   it("lays_out_the_draft_sideboard_in_ordered_overlapping_responsive_columns", () => {
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      const width = this.dataset.cardArea !== undefined && this.closest('[data-zone="deck"]') !== null
+        ? 91
+        : 0;
+      return { left: 0, top: 0, right: width, bottom: 0, width, height: 0, x: 0, y: 0, toJSON: () => ({}) } as DOMRect;
+    });
     const cards = Array.from({ length: 7 }, (_, index) => card(`side-${index}`));
     const workspace = state(Object.fromEntries(cards.map((entry, index) => [
       entry.instance_id,
       { zone: "sideboard" as const, row: 0 as const, column: 0, order: index },
     ])));
+    const responsivePreferences = preferences({
+      sideboardCollapsed: false,
+      phoneDeckVisualColumnCaps: { portrait: 4, landscape: 6 },
+    });
     const props = {
       pool: cards,
       poolGroups: groups(cards),
       workspace,
-      preferences: preferences({ sideboardCollapsed: false }),
+      preferences: responsivePreferences,
       onWorkspaceChange: vi.fn(),
       onPreferencesChange: vi.fn(),
     };
     const { rerender } = render(<DraftWorkspace {...props} responsiveLayout="phone-portrait" />);
     const stack = () => screen.getByRole("region", { name: "Compact sideboard" })
       .querySelector<HTMLElement>("[data-card-stack]")!;
+    const cardArea = () => screen.getByRole("region", { name: "Compact sideboard" })
+      .querySelector<HTMLElement>("[data-sideboard-card-area]")!;
     const positions = () => [...stack().querySelectorAll<HTMLElement>("[data-sideboard-column]")]
       .map((node) => [node.dataset.sideboardColumn, node.dataset.sideboardRow]);
     const cardAt = (row: number, column: number) => stack()
       .querySelector<HTMLElement>(`[data-sideboard-row="${row}"][data-sideboard-column="${column}"] [data-instance-id]`)!;
 
-    expect(stack()).toHaveAttribute("data-sideboard-column-count", "2");
-    expect(positions().slice(0, 4)).toEqual([["0", "0"], ["1", "0"], ["0", "1"], ["1", "1"]]);
+    expect(stack()).toHaveAttribute("data-sideboard-column-count", "4");
+    expect(stack()).toHaveAttribute("data-sideboard-column-width", "91");
+    expect(cardArea()).toHaveAttribute("data-deck-row-layout", "one");
+    expect(cardArea()).toHaveClass("p-6");
+    expect(cardArea()).not.toHaveClass("pl-16", "p-2");
+    expect(positions().slice(0, 5)).toEqual([["0", "0"], ["1", "0"], ["2", "0"], ["3", "0"], ["0", "1"]]);
     expect(cardAt(1, 0).style.top).toBe("56px");
-    expect(cardAt(0, 1).style.left).toBe("calc(50% + 4px)");
-    expect(stack().querySelector<HTMLElement>("[data-sideboard-stack-spacer]")!.style.marginBottom).toBe("168px");
+    expect(cardAt(0, 1).style.left).toBe("99px");
+    expect(cardAt(0, 1).style.width).toBe("91px");
+    expect(stack().querySelector<HTMLElement>("[data-sideboard-stack-spacer]")!.style.width).toBe("91px");
+    expect(stack().querySelector<HTMLElement>("[data-sideboard-stack-spacer]")!.style.marginBottom).toBe("56px");
+    expect(screen.getByRole("region", { name: "Compact sideboard" }).querySelectorAll("header[aria-label^='Column ']")).toHaveLength(0);
 
     rerender(<DraftWorkspace {...props} responsiveLayout="phone-landscape" />);
-    expect(stack()).toHaveAttribute("data-sideboard-column-count", "1");
-    expect(positions().slice(0, 3)).toEqual([["0", "0"], ["0", "1"], ["0", "2"]]);
+    expect(stack()).toHaveAttribute("data-sideboard-column-count", "6");
+    expect(positions().slice(0, 3)).toEqual([["0", "0"], ["1", "0"], ["2", "0"]]);
     expect(cardAt(1, 0).style.top).toBe("32px");
-    expect(stack().querySelector<HTMLElement>("[data-sideboard-stack-spacer]")!.style.marginBottom).toBe("192px");
+    expect(stack().querySelector<HTMLElement>("[data-sideboard-stack-spacer]")!.style.marginBottom).toBe("32px");
 
     rerender(<DraftWorkspace {...props} responsiveLayout="tablet-portrait" />);
-    expect(stack()).toHaveAttribute("data-sideboard-column-count", "3");
-    expect(positions().slice(0, 4)).toEqual([["0", "0"], ["1", "0"], ["2", "0"], ["0", "1"]]);
+    expect(stack()).toHaveAttribute("data-sideboard-column-count", "4");
+    expect(positions().slice(0, 4)).toEqual([["0", "0"], ["1", "0"], ["2", "0"], ["3", "0"]]);
     expect(cardAt(1, 0).style.top).toBe("72px");
-    expect(stack().querySelector<HTMLElement>("[data-sideboard-stack-spacer]")!.style.marginBottom).toBe("144px");
+    expect(stack().querySelector<HTMLElement>("[data-sideboard-stack-spacer]")!.style.marginBottom).toBe("72px");
 
     rerender(<DraftWorkspace {...props} responsiveLayout="tablet-landscape" />);
-    expect(stack()).toHaveAttribute("data-sideboard-column-count", "1");
-    expect(positions().slice(0, 3)).toEqual([["0", "0"], ["0", "1"], ["0", "2"]]);
+    expect(stack()).toHaveAttribute("data-sideboard-column-count", "6");
+    expect(positions().slice(0, 3)).toEqual([["0", "0"], ["1", "0"], ["2", "0"]]);
     expect(cardAt(1, 0).style.top).toBe("40px");
-    expect(stack().querySelector<HTMLElement>("[data-sideboard-stack-spacer]")!.style.marginBottom).toBe("240px");
+    expect(stack().querySelector<HTMLElement>("[data-sideboard-stack-spacer]")!.style.marginBottom).toBe("40px");
+
+    rerender(
+      <DraftWorkspace
+        {...props}
+        preferences={preferences({
+          sideboardCollapsed: false,
+          phoneDeckVisualColumnCaps: { portrait: 4, landscape: 6 },
+          deck: { ...preferences().deck, rows: "two" },
+        })}
+        responsiveLayout="tablet-landscape"
+      />,
+    );
+    expect(cardArea()).toHaveAttribute("data-deck-row-layout", "two");
+    expect(cardArea()).toHaveClass("p-6", "pl-16");
   });
 
-  it("renders_one_fixed_ordered_pointer_following_overlay", () => {
+  it.each(["draft", "builder"] as const)(
+    "centers_the_collapsed_tablet_landscape_%s_sideboard_label_behind_the_toggle",
+    (responsiveContext) => {
+      render(
+        <DraftWorkspace
+          pool={[card("side-card")]}
+          poolGroups={groups([card("side-card")])}
+          workspace={state({ "side-card": { zone: "sideboard", row: 0, column: 0, order: 0 } })}
+          preferences={preferences({ sideboardCollapsed: true })}
+          responsiveLayout="tablet-landscape"
+          responsiveContext={responsiveContext}
+          onWorkspaceChange={vi.fn()}
+          onPreferencesChange={vi.fn()}
+        />,
+      );
+
+      const sideboard = screen.getByRole("region", { name: "Compact sideboard" });
+      const heading = within(sideboard).getByRole("heading", { name: /Sideboard/ });
+      const toggle = within(sideboard).getByRole("button", { name: "Show sideboard (1 card)" });
+      expect(heading).toHaveClass("pointer-events-none", "absolute", "inset-0", "items-center", "justify-center");
+      expect(toggle.parentElement).toHaveClass("relative", "z-10");
+      expect(heading.parentElement).toHaveClass("h-full", "flex-1");
+      expect(sideboard.querySelector("[data-sideboard-card-area]")).toHaveClass("absolute", "inset-0");
+      fireEvent.click(toggle);
+      expect(toggle).toBeEnabled();
+    },
+  );
+
+  it.each([
+    ["phone-portrait", 4],
+    ["phone-landscape", 6],
+    ["tablet-portrait", 4],
+    ["tablet-landscape", 6],
+  ] as const)("keeps_the_empty_%s_draft_sideboard_on_the_shared_%s_column_cap", (responsiveLayout, columnCount) => {
+    render(
+      <DraftWorkspace
+        pool={[]}
+        poolGroups={groups([])}
+        workspace={state({})}
+        preferences={preferences({
+          sideboardCollapsed: false,
+          phoneDeckVisualColumnCaps: { portrait: 4, landscape: 6 },
+        })}
+        responsiveLayout={responsiveLayout}
+        onWorkspaceChange={vi.fn()}
+        onPreferencesChange={vi.fn()}
+      />,
+    );
+
+    const sideboard = screen.getByRole("region", { name: "Compact sideboard" });
+    expect(within(sideboard).getByText("No cards in the sideboard")).toBeInTheDocument();
+    expect(sideboard.querySelector("[data-card-stack]"))
+      .toHaveAttribute("data-sideboard-column-count", String(columnCount));
+    expect(sideboard.querySelector("[data-instance-id], [data-drag-projection-slot]")).not.toBeInTheDocument();
+  });
+
+  it("renders_one_fixed_82_5_percent_ordered_pointer_following_overlay", () => {
     const cards = [card("effect-a"), card("effect-b")];
     const source = {
       kind: "draft-effect" as const,
@@ -745,6 +1034,7 @@ describe("draft workspace shell", () => {
       interactionGeneration: 1,
       previewWidth: 146,
       previewHeight: 204,
+      previewImages: [],
       onAdmission: vi.fn(),
       onSettled: vi.fn(),
     };
@@ -752,6 +1042,7 @@ describe("draft workspace shell", () => {
       announcement: "Dragging effect-a, effect-b.",
       activeTarget: null,
       dragPreview: { source, clientX: 100, clientY: 120 },
+      geometryRevision: 0,
       handlePointerDown: vi.fn(), handleWorkspacePointerDown: vi.fn(),
       handlePointerMove: vi.fn(), handlePointerUp: vi.fn(),
       handlePointerCancel: vi.fn(), handleLostPointerCapture: vi.fn(),
@@ -781,8 +1072,1038 @@ describe("draft workspace shell", () => {
     expect(overlay).toHaveStyle({ left: "112px", top: "132px", pointerEvents: "none" });
     const previews = [...overlay.querySelectorAll<HTMLElement>("[data-drag-instance-id]")];
     expect(previews.map((element) => element.dataset.dragInstanceId)).toEqual(["effect-a", "effect-b"]);
-    expect(Number.parseFloat(previews[0].style.width)).toBeLessThan(source.previewWidth);
-    expect(Number.parseFloat(previews[0].style.height)).toBeLessThan(source.previewHeight);
+    expect(Number.parseFloat(previews[0].style.width)).toBeCloseTo(source.previewWidth * 0.825);
+    expect(Number.parseFloat(previews[0].style.height)).toBeCloseTo(source.previewHeight * 0.825);
+  });
+
+  it.each([
+    { reduced: false, transition: { duration: 0.16, ease: "easeOut" } },
+    { reduced: true, transition: { duration: 0 } },
+  ])("animates_a_workspace_pointer_drag_to_its_first_distinct_target_and_retains_it_through_release", ({ reduced, transition }) => {
+    const cards = [card("deck-card"), card("deck-sibling")];
+    const origin = { left: 18, top: 32, width: 90, height: 126 };
+    const destination = { left: 270, top: 145, width: 112, height: 157 };
+    motionState.reduced = reduced;
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      if (this.getAttribute("aria-label") === "Inspect deck-card") {
+        return { ...origin, right: 108, bottom: 158, x: origin.left, y: origin.top, toJSON: () => ({}) } as DOMRect;
+      }
+      if (this.dataset.dragProjectionSlot === "deck-card") {
+        return { ...destination, right: 382, bottom: 302, x: destination.left, y: destination.top, toJSON: () => ({}) } as DOMRect;
+      }
+      if (
+        this.closest('[data-zone="deck"]') !== null
+        && this.dataset.boardColumn === undefined
+        && this.dataset.boardRow === undefined
+        && this.dataset.dropState !== undefined
+      ) {
+        return { left: 0, top: 0, right: 400, bottom: 400, width: 400, height: 400, x: 0, y: 0, toJSON: () => ({}) } as DOMRect;
+      }
+      if (this.dataset.boardColumn === "1") {
+        return { left: 200, top: 0, right: 400, bottom: 400, width: 200, height: 400, x: 200, y: 0, toJSON: () => ({}) } as DOMRect;
+      }
+      return { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0, x: 0, y: 0, toJSON: () => ({}) } as DOMRect;
+    });
+
+    function WorkspaceDragMotionHarness() {
+      const [workspace, setWorkspace] = useState(state({
+        "deck-card": { zone: "deck", row: 0, column: 0, order: 0 },
+        "deck-sibling": { zone: "deck", row: 0, column: 0, order: 1 },
+      }));
+      const dragController = useDraftWorkspaceDrag({
+        enabled: true,
+        workspaceProjectionEnabled: true,
+        readPickInteraction: () => ({ interactionGeneration: 1, pickInteractionLocked: false, pendingPickIntent: null }),
+        subscribePickInteraction: () => () => undefined,
+        onDrop: () => { throw new Error("Workspace drags do not dispatch picks."); },
+        resolveCollapsedSideboardColumn: () => 0,
+      });
+      return (
+        <DraftWorkspace
+          pool={cards}
+          poolGroups={groups(cards)}
+          workspace={workspace}
+          preferences={preferences({ deck: { ...preferences().deck, columnCount: 2, rows: "two" } })}
+          dragController={dragController}
+          onWorkspaceChange={setWorkspace}
+          onPreferencesChange={vi.fn()}
+        />
+      );
+    }
+
+    const { container } = render(<WorkspaceDragMotionHarness />);
+    const deck = container.querySelector<HTMLElement>('[data-zone="deck"]')!;
+    const targetColumn = deck.querySelector<HTMLElement>('[data-board-column="1"]')!;
+    const cardButton = screen.getByRole("button", { name: "Inspect deck-card" });
+    cardButton.setPointerCapture = vi.fn();
+    cardButton.releasePointerCapture = vi.fn();
+
+    fireEvent.pointerDown(cardButton, {
+      button: 0,
+      clientX: 30,
+      clientY: 44,
+      isPrimary: true,
+      pointerId: 71,
+      pointerType: "mouse",
+    });
+    fireEvent.pointerMove(cardButton, { clientX: 270, clientY: 190, pointerId: 71, pointerType: "mouse" });
+
+    expect(targetColumn.querySelector('[data-drag-projection-slot="deck-card"]')).toBeInTheDocument();
+    expect(motionState.values[motionState.values.length - 1]).toEqual({
+      initial: origin,
+      animate: destination,
+      transition,
+      sourceInstanceId: "deck-card",
+      zone: "deck",
+      column: 1,
+      row: 0,
+      geometryRevision: 0,
+    });
+
+    fireEvent.pointerUp(cardButton, { clientX: 270, clientY: 190, pointerId: 71, pointerType: "mouse" });
+    expect(container.querySelector('[data-drag-projection="deck-card"]')).toBeInTheDocument();
+    expect(targetColumn.querySelector('[data-instance-id="deck-card"]')).toHaveClass("absolute", "opacity-0");
+  });
+
+  it("projects_a_desktop_draft_workspace_drag_into_its_resolved_row_without_changing_headers", () => {
+    const cards = [card("deck-card"), card("deck-sibling"), card("side-card")];
+    const origin = { left: 18, top: 32, width: 90, height: 126 };
+    const destination = { left: 270, top: 145, width: 112, height: 157 };
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      return this.dataset.dragProjectionSlot === "deck-card"
+        ? { ...destination, right: 382, bottom: 302, x: destination.left, y: destination.top, toJSON: () => ({}) } as DOMRect
+        : { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0, x: 0, y: 0, toJSON: () => ({}) } as DOMRect;
+    });
+    const source: WorkspaceDragSource = {
+      kind: "workspace",
+      instanceIds: ["deck-card"],
+      cards: [cards[0]],
+      canonicalTarget: { zone: "deck", column: 0, row: 0 },
+      previewWidth: 146,
+      previewHeight: 204,
+      origin,
+      previewImage: { src: "/alternate-face.png", alt: "Alternate deck card" },
+      onDrop: vi.fn(() => true),
+    };
+    const dragController = {
+      announcement: "Dragging deck-card.",
+      activeTarget: { zone: "deck" as const, column: 1, row: null },
+      dragPreview: { source, clientX: 100, clientY: 120 },
+      workspaceProjection: {
+        token: 1,
+        source,
+        clientX: 100,
+        clientY: 120,
+        target: { zone: "deck" as const, column: 1, row: null },
+        hasLeftCanonicalTarget: true,
+        settling: false,
+      },
+      geometryRevision: 0,
+      handlePointerDown: vi.fn(), handleWorkspacePointerDown: vi.fn(),
+      handlePointerMove: vi.fn(), handlePointerUp: vi.fn(),
+      handlePointerCancel: vi.fn(), handleLostPointerCapture: vi.fn(),
+      consumeCompatibilityActivation: vi.fn(() => false),
+      registerBoard: vi.fn(() => vi.fn()), registerColumn: vi.fn(() => vi.fn()),
+      registerCollapsedSideboard: vi.fn(), dropState: vi.fn(() => ({ zoneActive: false, column: null, row: null })),
+      invalidateGeometry: vi.fn(), dispose: vi.fn(),
+    } satisfies DraftWorkspaceDragController;
+
+    const { container } = render(
+      <DraftWorkspace
+        pool={cards}
+        poolGroups={groups(cards)}
+        workspace={state({
+          "deck-card": { zone: "deck", row: 0, column: 0, order: 0 },
+          "deck-sibling": { zone: "deck", row: 0, column: 0, order: 1 },
+          "side-card": { zone: "sideboard", row: 0, column: 0, order: 0 },
+        })}
+        preferences={preferences({ deck: { ...preferences().deck, columnCount: 2, rows: "two" } })}
+        dragController={dragController}
+        onWorkspaceChange={vi.fn()}
+        onPreferencesChange={vi.fn()}
+      />,
+    );
+
+    const deck = container.querySelector<HTMLElement>('[data-zone="deck"]')!;
+    const sourceColumn = deck.querySelector<HTMLElement>('[data-board-column="0"]')!;
+    const targetColumn = deck.querySelector<HTMLElement>('[data-board-column="1"]')!;
+    expect(screen.queryByTestId("draft-drag-preview")).not.toBeInTheDocument();
+    expect(sourceColumn.querySelector('[data-instance-id="deck-card"]')).toHaveClass("absolute", "opacity-0", "w-full");
+    expect(sourceColumn.querySelector<HTMLElement>('[data-instance-id="deck-sibling"]')).toHaveStyle({ marginTop: "" });
+    const slot = targetColumn.querySelector<HTMLElement>('[data-drag-projection-slot="deck-card"]')!;
+    expect(slot).toBeInTheDocument();
+    const projection = container.querySelector<HTMLElement>('[data-drag-projection="deck-card"]')!;
+    expect(projection).toHaveAttribute("data-workspace-drag-motion", "enabled");
+    expect(motionState.values[motionState.values.length - 1]).toEqual({
+      initial: origin,
+      animate: destination,
+      transition: { duration: 0.16, ease: "easeOut" },
+      sourceInstanceId: "deck-card",
+      zone: "deck",
+      column: 1,
+      row: 0,
+      geometryRevision: 0,
+    });
+    expect(projection.querySelector("img")).toHaveAttribute("src", "/alternate-face.png");
+    expect(targetColumn.querySelector("[data-board-row='0'] [data-drag-projection-slot]")).toBeInTheDocument();
+    expect(targetColumn.querySelector("[data-board-row='1'] [data-drag-projection-slot]")).not.toBeInTheDocument();
+    expect(sourceColumn.querySelector("[data-card-count]")).toHaveTextContent("2");
+    expect(targetColumn.querySelector("[data-card-count]")).toHaveTextContent("0");
+  });
+
+  it("marks_committed_projection_geometry_and_motion_completion_without_elevating_the_board_panel", () => {
+    const cards = [card("deck-card")];
+    const source: WorkspaceDragSource = {
+      kind: "workspace",
+      instanceIds: ["deck-card"],
+      cards: [cards[0]],
+      canonicalTarget: { zone: "deck", column: 0, row: 0 },
+      previewWidth: 146,
+      previewHeight: 204,
+      origin: { left: 18, top: 32, width: 90, height: 126 },
+      onDrop: vi.fn(() => true),
+    };
+    const markDestinationReady = vi.fn();
+    const completeProjection = vi.fn();
+    const dragController = {
+      announcement: "Moving deck-card.",
+      activeTarget: { zone: "deck" as const, column: 1, row: 0 },
+      dragPreview: null,
+      workspaceProjection: {
+        token: 7,
+        source,
+        clientX: 100,
+        clientY: 120,
+        target: { zone: "deck" as const, column: 1, row: 0 },
+        hasLeftCanonicalTarget: true,
+        settling: true,
+      },
+      geometryRevision: 0,
+      markWorkspaceProjectionDestinationReady: markDestinationReady,
+      completeWorkspaceProjection: completeProjection,
+      handlePointerDown: vi.fn(), handleWorkspacePointerDown: vi.fn(),
+      handlePointerMove: vi.fn(), handlePointerUp: vi.fn(),
+      handlePointerCancel: vi.fn(), handleLostPointerCapture: vi.fn(),
+      consumeCompatibilityActivation: vi.fn(() => false),
+      registerBoard: vi.fn(() => vi.fn()), registerColumn: vi.fn(() => vi.fn()),
+      registerCollapsedSideboard: vi.fn(), dropState: vi.fn(() => ({ zoneActive: false, column: null, row: null })),
+      invalidateGeometry: vi.fn(), dispose: vi.fn(),
+    } satisfies DraftWorkspaceDragController;
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      return this.dataset.dragProjectionSlot === "deck-card"
+        ? { left: 270, top: 145, right: 382, bottom: 302, width: 112, height: 157, x: 270, y: 145, toJSON: () => ({}) } as DOMRect
+        : { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0, x: 0, y: 0, toJSON: () => ({}) } as DOMRect;
+    });
+    const { container } = render(
+      <DraftWorkspace
+        pool={cards}
+        poolGroups={groups(cards)}
+        workspace={state({ "deck-card": { zone: "deck", row: 0, column: 1, order: 0 } })}
+        preferences={preferences({ deck: { ...preferences().deck, columnCount: 2, rows: "two" } })}
+        dragController={dragController}
+        onWorkspaceChange={vi.fn()}
+        onPreferencesChange={vi.fn()}
+      />,
+    );
+
+    expect(markDestinationReady).toHaveBeenCalledWith(7, 0);
+    const projection = container.querySelector<HTMLElement>('[data-drag-projection="deck-card"]')!;
+    expect(projection).toHaveClass("pointer-events-none", "z-50");
+    expect(container.querySelector('[data-board-column="1"] [data-instance-id="deck-card"]')).toHaveClass("opacity-0");
+    act(() => motionState.animationCompleteHandlers[motionState.animationCompleteHandlers.length - 1]?.());
+    expect(completeProjection).toHaveBeenCalledWith(7, 0);
+  });
+
+  it("retains_the_workspace_projection_between_hovered_targets", () => {
+    const cards = [card("deck-card"), card("deck-sibling"), card("side-card")];
+    const origin = { left: 18, top: 32, width: 90, height: 126 };
+    const deckDestination = { left: 270, top: 145, width: 112, height: 157 };
+    const sideboardDestination = { left: 510, top: 180, width: 118, height: 160 };
+    const source: WorkspaceDragSource = {
+      kind: "workspace",
+      instanceIds: ["deck-card"],
+      cards: [cards[0]],
+      canonicalTarget: { zone: "deck", column: 0, row: 0 },
+      previewWidth: 146,
+      previewHeight: 204,
+      origin,
+      onDrop: vi.fn(() => true),
+    };
+    let activeTarget: DraftWorkspaceDragController["activeTarget"] = { zone: "deck", column: 1, row: 0 };
+    let geometryRevision = 0;
+    const dragController = {
+      announcement: "Dragging deck-card.",
+      get activeTarget() { return activeTarget; },
+      dragPreview: { source, clientX: 100, clientY: 120 },
+      get workspaceProjection() {
+        return {
+          token: 1,
+          source,
+          clientX: 100,
+          clientY: 120,
+          target: activeTarget,
+          hasLeftCanonicalTarget: true,
+          settling: false,
+        };
+      },
+      get geometryRevision() { return geometryRevision; },
+      handlePointerDown: vi.fn(), handleWorkspacePointerDown: vi.fn(),
+      handlePointerMove: vi.fn(), handlePointerUp: vi.fn(),
+      handlePointerCancel: vi.fn(), handleLostPointerCapture: vi.fn(),
+      consumeCompatibilityActivation: vi.fn(() => false),
+      registerBoard: vi.fn(() => vi.fn()), registerColumn: vi.fn(() => vi.fn()),
+      registerCollapsedSideboard: vi.fn(), dropState: vi.fn(() => ({ zoneActive: false, column: null, row: null })),
+      invalidateGeometry: vi.fn(), dispose: vi.fn(),
+    } satisfies DraftWorkspaceDragController;
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      if (this.dataset.dragProjectionSlot !== "deck-card") {
+        return { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0, x: 0, y: 0, toJSON: () => ({}) } as DOMRect;
+      }
+      const destination = this.closest('[data-zone="sideboard"]') === null ? deckDestination : sideboardDestination;
+      return { ...destination, right: destination.left + destination.width, bottom: destination.top + destination.height, x: destination.left, y: destination.top, toJSON: () => ({}) } as DOMRect;
+    });
+    const props = {
+      pool: cards,
+      poolGroups: groups(cards),
+      workspace: state({
+        "deck-card": { zone: "deck", row: 0, column: 0, order: 0 },
+        "deck-sibling": { zone: "deck", row: 0, column: 0, order: 1 },
+        "side-card": { zone: "sideboard", row: 0, column: 0, order: 0 },
+      }),
+      preferences: preferences({ deck: { ...preferences().deck, columnCount: 2, rows: "two" } }),
+      dragController,
+      onWorkspaceChange: vi.fn(),
+      onPreferencesChange: vi.fn(),
+    };
+    const { container, rerender } = render(<DraftWorkspace {...props} />);
+    expect(motionState.values[motionState.values.length - 1]).toMatchObject({
+      zone: "deck", column: 1, geometryRevision: 0, animate: deckDestination,
+    });
+    const mountId = container.querySelector<HTMLElement>('[data-drag-projection="deck-card"]')!
+      .dataset.workspaceDragMotionMountId;
+    expect(mountId).toBe("1");
+    expect(motionState.mountCount).toBe(1);
+
+    activeTarget = { zone: "sideboard", column: 0, row: 0 };
+    geometryRevision = 1;
+    rerender(<DraftWorkspace {...props} />);
+
+    const sideboardEntries = motionState.values.filter((entry) => entry.zone === "sideboard");
+    expect(sideboardEntries).toHaveLength(1);
+    expect(sideboardEntries[0]).toMatchObject({
+      sourceInstanceId: "deck-card",
+      zone: "sideboard",
+      column: 0,
+      row: 0,
+      geometryRevision: 1,
+      animate: sideboardDestination,
+    });
+    expect(sideboardEntries).not.toContainEqual(expect.objectContaining({ animate: deckDestination }));
+    const projection = container.querySelector('[data-drag-projection="deck-card"]')!;
+    expect(projection).toHaveAttribute("data-drag-projection-geometry-revision", "1");
+    expect(projection).toHaveAttribute("data-workspace-drag-motion-mount-id", mountId!);
+    expect(motionState.mountCount).toBe(1);
+    expect(motionState.cleanupCount).toBe(0);
+
+    activeTarget = { zone: "deck", column: 1, row: 0 };
+    geometryRevision = 2;
+    rerender(<DraftWorkspace {...props} />);
+
+    expect(motionState.values[motionState.values.length - 1]).toMatchObject({
+      zone: "deck", column: 1, geometryRevision: 2, animate: deckDestination,
+    });
+    expect(container.querySelector('[data-drag-projection="deck-card"]'))
+      .toHaveAttribute("data-workspace-drag-motion-mount-id", mountId!);
+    expect(motionState.mountCount).toBe(1);
+    expect(motionState.cleanupCount).toBe(0);
+  });
+
+  it("keeps_a_desktop_deck_drag_projected_into_an_expanded_sideboard_through_geometry_refresh", () => {
+    const frames = new Map<number, FrameRequestCallback>();
+    let nextFrame = 1;
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      const handle = nextFrame;
+      nextFrame += 1;
+      frames.set(handle, callback);
+      return handle;
+    });
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    const observers: ResizeObserverCallback[] = [];
+    class ControlledResizeObserver {
+      constructor(callback: ResizeObserverCallback) { observers.push(callback); }
+      observe = vi.fn();
+      unobserve = vi.fn();
+      disconnect = vi.fn();
+    }
+    vi.stubGlobal("ResizeObserver", ControlledResizeObserver);
+    const cards = [card("deck-card"), card("side-card")];
+    const origin = { left: 18, top: 32, width: 90, height: 126 };
+    let destination = { left: 510, top: 180, width: 118, height: 160 };
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      if (this.dataset.dragProjectionSlot === "deck-card") {
+        return {
+          ...destination,
+          right: destination.left + destination.width,
+          bottom: destination.top + destination.height,
+          x: destination.left,
+          y: destination.top,
+          toJSON: () => ({}),
+        } as DOMRect;
+      }
+      return { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0, x: 0, y: 0, toJSON: () => ({}) } as DOMRect;
+    });
+    function ExpandedSideboardDragHarness() {
+      const [workspace, setWorkspace] = useState(state({
+        "deck-card": { zone: "deck", row: 0, column: 0, order: 0 },
+        "side-card": { zone: "sideboard", row: 0, column: 0, order: 0 },
+      }));
+      const dragController = useDraftWorkspaceDrag({
+        enabled: true,
+        workspaceProjectionEnabled: true,
+        readPickInteraction: () => ({ interactionGeneration: 1, pickInteractionLocked: false, pendingPickIntent: null }),
+        subscribePickInteraction: () => () => undefined,
+        onDrop: () => { throw new Error("Workspace drags do not dispatch picks."); },
+        resolveCollapsedSideboardColumn: () => 0,
+      });
+      return (
+        <>
+          <DraftWorkspace
+            pool={cards}
+            poolGroups={groups(cards)}
+            workspace={workspace}
+            preferences={preferences({ deck: { ...preferences().deck, columnCount: 2, rows: "two" } })}
+            dragController={dragController}
+            onWorkspaceChange={setWorkspace}
+            onPreferencesChange={vi.fn()}
+          />
+          <output data-testid="deck-card-zone">{workspace.placements["deck-card"]?.zone}</output>
+        </>
+      );
+    }
+
+    const { container } = render(<ExpandedSideboardDragHarness />);
+    const deck = container.querySelector<HTMLElement>('[data-zone="deck"]')!;
+    const sideboard = container.querySelector<HTMLElement>('[data-zone="sideboard"]')!;
+    const deckBoard = deck.querySelector<HTMLElement>("[data-drop-state]")!;
+    const deckColumn = deck.querySelector<HTMLElement>('[data-board-column="0"]')!;
+    const sideboardBoard = sideboard.querySelector<HTMLElement>("[data-drop-state]")!;
+    const sideboardColumn = sideboard.querySelector<HTMLElement>('[data-board-column="0"]')!;
+    deckBoard.getBoundingClientRect = () => ({ ...origin, right: 218, bottom: 332, width: 200, height: 300, x: origin.left, y: origin.top, toJSON: () => ({}) } as DOMRect);
+    deckColumn.getBoundingClientRect = deckBoard.getBoundingClientRect;
+    sideboardBoard.getBoundingClientRect = () => ({ left: 420, top: 100, right: 760, bottom: 500, width: 340, height: 400, x: 420, y: 100, toJSON: () => ({}) } as DOMRect);
+    sideboardColumn.getBoundingClientRect = sideboardBoard.getBoundingClientRect;
+    const cardButton = screen.getByRole("button", { name: "Inspect deck-card" });
+    cardButton.getBoundingClientRect = () => ({ ...origin, right: 108, bottom: 158, x: origin.left, y: origin.top, toJSON: () => ({}) } as DOMRect);
+    cardButton.setPointerCapture = vi.fn();
+    cardButton.releasePointerCapture = vi.fn();
+
+    fireEvent.pointerDown(cardButton, { button: 0, clientX: 30, clientY: 44, isPrimary: true, pointerId: 72, pointerType: "mouse" });
+    fireEvent.pointerMove(cardButton, { clientX: 520, clientY: 190, pointerId: 72, pointerType: "mouse" });
+    const projectedSource = deck.querySelector('[data-instance-id="deck-card"]')!;
+    expect(projectedSource).toHaveClass("opacity-0");
+    expect(sideboardBoard).toHaveAttribute("data-drop-state", "active");
+    expect(sideboardColumn.querySelector('[data-drag-projection-slot="deck-card"]')).toBeInTheDocument();
+    expect(container.querySelector('[data-drag-projection="deck-card"]'))
+      .toHaveAttribute("data-drag-projection-zone", "sideboard");
+    expect(motionState.values[motionState.values.length - 1]).toMatchObject({ animate: destination, geometryRevision: 0 });
+
+    destination = { left: 540, top: 210, width: 121, height: 164 };
+    act(() => observers.forEach((observer) => observer([], {} as ResizeObserver)));
+    expect(frames.size).toBe(1);
+    expect(projectedSource).toHaveClass("opacity-0");
+    expect(sideboardBoard).toHaveAttribute("data-drop-state", "active");
+    act(() => frames.get(1)!(0));
+    expect(projectedSource).toHaveClass("opacity-0");
+    expect(sideboardBoard).toHaveAttribute("data-drop-state", "active");
+    expect(motionState.values[motionState.values.length - 1]).toMatchObject({ animate: destination, geometryRevision: 1 });
+
+    fireEvent.pointerUp(cardButton, { clientX: 520, clientY: 190, pointerId: 72, pointerType: "mouse" });
+    expect(screen.getByTestId("deck-card-zone")).toHaveTextContent("sideboard");
+  });
+
+  it("keeps_the_source_in_its_stack_when_the_effective_workspace_target_is_unchanged", () => {
+    const cards = [card("deck-card")];
+    const source: WorkspaceDragSource = {
+      kind: "workspace",
+      instanceIds: ["deck-card"],
+      cards: [cards[0]],
+      canonicalTarget: { zone: "deck", column: 0, row: 0 },
+      previewWidth: 146,
+      previewHeight: 204,
+      origin: { left: 0, top: 0, width: 146, height: 204 },
+      onDrop: vi.fn(() => true),
+    };
+    const dragController = {
+      announcement: "Dragging deck-card.",
+      activeTarget: { zone: "deck" as const, column: 0, row: 0 },
+      dragPreview: { source, clientX: 100, clientY: 120 },
+      geometryRevision: 0,
+      handlePointerDown: vi.fn(), handleWorkspacePointerDown: vi.fn(),
+      handlePointerMove: vi.fn(), handlePointerUp: vi.fn(),
+      handlePointerCancel: vi.fn(), handleLostPointerCapture: vi.fn(),
+      consumeCompatibilityActivation: vi.fn(() => false),
+      registerBoard: vi.fn(() => vi.fn()), registerColumn: vi.fn(() => vi.fn()),
+      registerCollapsedSideboard: vi.fn(), dropState: vi.fn(() => ({ zoneActive: false, column: null, row: null })),
+      invalidateGeometry: vi.fn(), dispose: vi.fn(),
+    } satisfies DraftWorkspaceDragController;
+
+    const { container } = render(
+      <DraftWorkspace
+        pool={cards}
+        poolGroups={groups(cards)}
+        workspace={state({ "deck-card": { zone: "deck", row: 0, column: 0, order: 0 } })}
+        preferences={preferences()}
+        dragController={dragController}
+        onWorkspaceChange={vi.fn()}
+        onPreferencesChange={vi.fn()}
+      />,
+    );
+
+    const sourceCard = container.querySelector<HTMLElement>('[data-instance-id="deck-card"]')!;
+    expect(sourceCard).not.toHaveClass("absolute", "opacity-0");
+    expect(container.querySelector("[data-drag-projection-slot]")).not.toBeInTheDocument();
+  });
+
+  it("restores_the_canonical_source_after_dragging_across_a_column_and_back", () => {
+    const cards = [card("deck-card")];
+    function DragHarness() {
+      const [workspace, setWorkspace] = useState(state({
+        "deck-card": { zone: "deck", row: 0, column: 0, order: 0 },
+      }));
+      const dragController = useDraftWorkspaceDrag({
+        enabled: true,
+        workspaceProjectionEnabled: true,
+        readPickInteraction: () => ({ interactionGeneration: 1, pickInteractionLocked: false, pendingPickIntent: null }),
+        subscribePickInteraction: () => () => undefined,
+        onDrop: () => { throw new Error("Workspace drags do not dispatch picks."); },
+        resolveCollapsedSideboardColumn: () => 0,
+      });
+      return <DraftWorkspace
+        pool={cards}
+        poolGroups={groups(cards)}
+        workspace={workspace}
+        preferences={preferences({ deck: { ...preferences().deck, columnCount: 2, rows: "two" } })}
+        dragController={dragController}
+        onWorkspaceChange={setWorkspace}
+        onPreferencesChange={vi.fn()}
+      />;
+    }
+
+    const { container } = render(<DragHarness />);
+    const deck = container.querySelector<HTMLElement>('[data-zone="deck"]')!;
+    const board = deck.querySelector<HTMLElement>("[data-drop-state]")!;
+    const columns = [...deck.querySelectorAll<HTMLElement>("[data-board-column]")];
+    const columnRects = [
+      { left: 100, top: 100, right: 280, bottom: 400, width: 180, height: 300, x: 100, y: 100, toJSON: () => ({}) },
+      { left: 280, top: 100, right: 460, bottom: 400, width: 180, height: 300, x: 280, y: 100, toJSON: () => ({}) },
+    ] as DOMRect[];
+    board.getBoundingClientRect = () => ({ left: 100, top: 100, right: 460, bottom: 400, width: 360, height: 300, x: 100, y: 100, toJSON: () => ({}) } as DOMRect);
+    columns.forEach((column, index) => {
+      column.getBoundingClientRect = () => columnRects[index];
+      column.querySelectorAll<HTMLElement>("[data-board-row]").forEach((row) => {
+        row.getBoundingClientRect = () => columnRects[index];
+      });
+    });
+    const cardButton = screen.getByRole("button", { name: "Inspect deck-card" });
+    cardButton.getBoundingClientRect = () => ({ left: 120, top: 120, right: 210, bottom: 246, width: 90, height: 126, x: 120, y: 120, toJSON: () => ({}) } as DOMRect);
+    cardButton.setPointerCapture = vi.fn();
+    cardButton.releasePointerCapture = vi.fn();
+
+    fireEvent.pointerDown(cardButton, { button: 0, clientX: 140, clientY: 140, isPrimary: true, pointerId: 91, pointerType: "mouse" });
+    fireEvent.pointerMove(cardButton, { clientX: 340, clientY: 180, pointerId: 91, pointerType: "mouse" });
+    expect(deck.querySelector('[data-instance-id="deck-card"]')).toHaveClass("opacity-0");
+    expect(columns[1].querySelector('[data-drag-projection-slot="deck-card"]')).toBeInTheDocument();
+    expect(container.querySelector('[data-drag-projection="deck-card"]')).toBeInTheDocument();
+
+    fireEvent.pointerMove(cardButton, { clientX: 160, clientY: 180, pointerId: 91, pointerType: "mouse" });
+    expect(deck.querySelector('[data-instance-id="deck-card"]')).toHaveClass("absolute", "opacity-0");
+    expect(columns[0].querySelector('[data-drag-projection-slot="deck-card"]')).toBeInTheDocument();
+    expect(container.querySelector('[data-drag-projection="deck-card"]')).toBeInTheDocument();
+
+    fireEvent.pointerUp(cardButton, { clientX: 160, clientY: 180, pointerId: 91, pointerType: "mouse" });
+    expect(deck.querySelector('[data-instance-id="deck-card"]')).not.toHaveClass("absolute", "opacity-0");
+    expect(container.querySelector("[data-drag-projection-slot]")).not.toBeInTheDocument();
+    expect(container.querySelector("[data-drag-projection]")).not.toBeInTheDocument();
+  });
+
+  it("keeps_a_sideboard_source_projected_when_returning_to_its_canonical_column", () => {
+    const cards = [card("sideboard-card")];
+    function DragHarness() {
+      const [workspace, setWorkspace] = useState(state({
+        "sideboard-card": { zone: "sideboard", row: 0, column: 0, order: 0 },
+      }));
+      const dragController = useDraftWorkspaceDrag({
+        enabled: true,
+        workspaceProjectionEnabled: true,
+        readPickInteraction: () => ({ interactionGeneration: 1, pickInteractionLocked: false, pendingPickIntent: null }),
+        subscribePickInteraction: () => () => undefined,
+        onDrop: () => { throw new Error("Workspace drags do not dispatch picks."); },
+        resolveCollapsedSideboardColumn: () => 0,
+      });
+      return <DraftWorkspace
+        pool={cards}
+        poolGroups={groups(cards)}
+        workspace={workspace}
+        preferences={preferences({ sideboard: { ...preferences().sideboard, columnCount: 2, rows: "two" } })}
+        dragController={dragController}
+        onWorkspaceChange={setWorkspace}
+        onPreferencesChange={vi.fn()}
+      />;
+    }
+
+    const { container } = render(<DragHarness />);
+    const sideboard = container.querySelector<HTMLElement>('[data-zone="sideboard"]')!;
+    const board = sideboard.querySelector<HTMLElement>("[data-drop-state]")!;
+    const columns = [...sideboard.querySelectorAll<HTMLElement>("[data-board-column]")];
+    const columnRects = [
+      { left: 100, top: 100, right: 280, bottom: 400, width: 180, height: 300, x: 100, y: 100, toJSON: () => ({}) },
+      { left: 280, top: 100, right: 460, bottom: 400, width: 180, height: 300, x: 280, y: 100, toJSON: () => ({}) },
+    ] as DOMRect[];
+    board.getBoundingClientRect = () => ({ left: 100, top: 100, right: 460, bottom: 400, width: 360, height: 300, x: 100, y: 100, toJSON: () => ({}) } as DOMRect);
+    columns.forEach((column, index) => {
+      column.getBoundingClientRect = () => columnRects[index];
+      column.querySelectorAll<HTMLElement>("[data-board-row]").forEach((row) => {
+        row.getBoundingClientRect = () => columnRects[index];
+      });
+    });
+    const cardButton = screen.getByRole("button", { name: "Inspect sideboard-card" });
+    cardButton.getBoundingClientRect = () => ({ left: 120, top: 120, right: 210, bottom: 246, width: 90, height: 126, x: 120, y: 120, toJSON: () => ({}) } as DOMRect);
+    cardButton.setPointerCapture = vi.fn();
+    cardButton.releasePointerCapture = vi.fn();
+
+    fireEvent.pointerDown(cardButton, { button: 0, clientX: 140, clientY: 140, isPrimary: true, pointerId: 92, pointerType: "mouse" });
+    fireEvent.pointerMove(cardButton, { clientX: 340, clientY: 180, pointerId: 92, pointerType: "mouse" });
+    expect(columns[1].querySelector('[data-drag-projection-slot="sideboard-card"]')).toBeInTheDocument();
+
+    fireEvent.pointerMove(cardButton, { clientX: 160, clientY: 180, pointerId: 92, pointerType: "mouse" });
+    expect(sideboard.querySelector('[data-instance-id="sideboard-card"]')).toHaveClass("absolute", "opacity-0");
+    expect(columns[0].querySelector('[data-drag-projection-slot="sideboard-card"]')).toBeInTheDocument();
+    expect(container.querySelector('[data-drag-projection="sideboard-card"]')).toBeInTheDocument();
+
+    fireEvent.pointerUp(cardButton, { clientX: 160, clientY: 180, pointerId: 92, pointerType: "mouse" });
+    expect(sideboard.querySelector('[data-instance-id="sideboard-card"]')).not.toHaveClass("absolute", "opacity-0");
+    expect(container.querySelector("[data-drag-projection-slot]")).not.toBeInTheDocument();
+    expect(container.querySelector("[data-drag-projection]")).not.toBeInTheDocument();
+  });
+
+  it("suppresses_a_workspace_projection_when_an_external_update_removes_its_source", () => {
+    const cards = [card("deck-card")];
+    const source: WorkspaceDragSource = {
+      kind: "workspace",
+      instanceIds: ["deck-card"],
+      cards: [cards[0]],
+      canonicalTarget: { zone: "deck", column: 0, row: 0 },
+      previewWidth: 146,
+      previewHeight: 204,
+      origin: { left: 0, top: 0, width: 146, height: 204 },
+      onDrop: vi.fn(() => true),
+    };
+    const dragController = {
+      announcement: "Dragging deck-card.",
+      activeTarget: { zone: "sideboard" as const, column: 0, row: 0 },
+      dragPreview: { source, clientX: 100, clientY: 120 },
+      geometryRevision: 0,
+      handlePointerDown: vi.fn(), handleWorkspacePointerDown: vi.fn(),
+      handlePointerMove: vi.fn(), handlePointerUp: vi.fn(),
+      handlePointerCancel: vi.fn(), handleLostPointerCapture: vi.fn(),
+      consumeCompatibilityActivation: vi.fn(() => false),
+      registerBoard: vi.fn(() => vi.fn()), registerColumn: vi.fn(() => vi.fn()),
+      registerCollapsedSideboard: vi.fn(), dropState: vi.fn(() => ({ zoneActive: false, column: null, row: null })),
+      invalidateGeometry: vi.fn(), dispose: vi.fn(),
+    } satisfies DraftWorkspaceDragController;
+
+    const { container } = render(
+      <DraftWorkspace
+        pool={[]}
+        poolGroups={groups([])}
+        workspace={state({})}
+        preferences={preferences()}
+        dragController={dragController}
+        onWorkspaceChange={vi.fn()}
+        onPreferencesChange={vi.fn()}
+      />,
+    );
+
+    expect(container.querySelector("[data-drag-projection]")).not.toBeInTheDocument();
+  });
+
+  it("projects_a_desktop_draft_workspace_drag_into_an_empty_collapsed_sideboard", () => {
+    const cards = [card("deck-card")];
+    const origin = { left: 18, top: 32, width: 90, height: 126 };
+    motionState.reduced = true;
+    const source: WorkspaceDragSource = {
+      kind: "workspace",
+      instanceIds: ["deck-card"],
+      cards: [cards[0]],
+      canonicalTarget: { zone: "deck", column: 0, row: 0 },
+      previewWidth: 146,
+      previewHeight: 204,
+      origin,
+      previewImage: { src: null, alt: "Saved front image unavailable" },
+      onDrop: vi.fn(() => true),
+    };
+    const dragController = {
+      announcement: "Dragging deck-card.",
+      activeTarget: { zone: "sideboard" as const, column: 0, row: null },
+      dragPreview: { source, clientX: 100, clientY: 120 },
+      workspaceProjection: {
+        token: 1,
+        source,
+        clientX: 100,
+        clientY: 120,
+        target: { zone: "sideboard" as const, column: 0, row: null },
+        hasLeftCanonicalTarget: true,
+        settling: false,
+      },
+      geometryRevision: 0,
+      handlePointerDown: vi.fn(), handleWorkspacePointerDown: vi.fn(),
+      handlePointerMove: vi.fn(), handlePointerUp: vi.fn(),
+      handlePointerCancel: vi.fn(), handleLostPointerCapture: vi.fn(),
+      consumeCompatibilityActivation: vi.fn(() => false),
+      registerBoard: vi.fn(() => vi.fn()), registerColumn: vi.fn(() => vi.fn()),
+      registerCollapsedSideboard: vi.fn(), dropState: vi.fn(() => ({ zoneActive: false, column: null, row: null })),
+      invalidateGeometry: vi.fn(), dispose: vi.fn(),
+    } satisfies DraftWorkspaceDragController;
+
+    const { container } = render(
+      <DraftWorkspace
+        pool={cards}
+        poolGroups={groups(cards)}
+        workspace={state({ "deck-card": { zone: "deck", row: 0, column: 0, order: 0 } })}
+        preferences={preferences({ sideboardCollapsed: true })}
+        dragController={dragController}
+        onWorkspaceChange={vi.fn()}
+        onPreferencesChange={vi.fn()}
+      />,
+    );
+
+    const sideboard = container.querySelector<HTMLElement>('[data-drop-target="collapsed-sideboard"]')!;
+    expect(screen.queryByTestId("draft-drag-preview")).not.toBeInTheDocument();
+    expect(sideboard.querySelector('[data-drag-projection-slot="deck-card"]')).toBeInTheDocument();
+    const projection = container.querySelector<HTMLElement>('[data-drag-projection="deck-card"]')!;
+    expect(projection).toHaveAttribute("data-workspace-drag-motion", "reduced");
+    expect(motionState.values[motionState.values.length - 1]).toEqual({
+      initial: origin,
+      animate: { left: 0, top: 0, width: 0, height: 0 },
+      transition: { duration: 0 },
+      sourceInstanceId: "deck-card",
+      zone: "sideboard",
+      column: 0,
+      row: 0,
+      geometryRevision: 0,
+    });
+    expect(projection).not.toHaveTextContent("Saved front image unavailable");
+    expect(projection.querySelector("img")).not.toBeInTheDocument();
+    expect(sideboard.querySelector("[data-card-stack]")).toBeInTheDocument();
+    expect(within(sideboard).queryByText("No cards in sideboard")).not.toBeInTheDocument();
+    expect(within(sideboard.parentElement!).getByRole("heading", { name: "Sideboard (0 cards)" })).toBeInTheDocument();
+  });
+
+  it("keeps_a_compact_workspace_pointer_overlay_despite_a_stale_controller_projection", () => {
+    const cards = [card("deck-card")];
+    const source: WorkspaceDragSource = {
+      kind: "workspace",
+      instanceIds: ["deck-card"],
+      cards: [cards[0]],
+      canonicalTarget: { zone: "deck", column: 0, row: 0 },
+      previewWidth: 146,
+      previewHeight: 204,
+      origin: { left: 0, top: 0, width: 146, height: 204 },
+      onDrop: vi.fn(() => true),
+    };
+    const dragController = {
+      announcement: "Dragging deck-card.",
+      activeTarget: { zone: "deck" as const, column: 0, row: 0 },
+      dragPreview: { source, clientX: 100, clientY: 120 },
+      workspaceProjection: {
+        token: 1,
+        source,
+        clientX: 100,
+        clientY: 120,
+        target: { zone: "sideboard" as const, column: 0, row: 0 },
+        hasLeftCanonicalTarget: true,
+        settling: false,
+      },
+      geometryRevision: 0,
+      handlePointerDown: vi.fn(), handleWorkspacePointerDown: vi.fn(),
+      handlePointerMove: vi.fn(), handlePointerUp: vi.fn(),
+      handlePointerCancel: vi.fn(), handleLostPointerCapture: vi.fn(),
+      consumeCompatibilityActivation: vi.fn(() => false),
+      registerBoard: vi.fn(() => vi.fn()), registerColumn: vi.fn(() => vi.fn()),
+      registerCollapsedSideboard: vi.fn(), dropState: vi.fn(() => ({ zoneActive: false, column: null, row: null })),
+      invalidateGeometry: vi.fn(), dispose: vi.fn(),
+    } satisfies DraftWorkspaceDragController;
+
+    render(
+      <DraftWorkspace
+        pool={cards}
+        poolGroups={groups(cards)}
+        workspace={state({ "deck-card": { zone: "deck", row: 0, column: 0, order: 0 } })}
+        preferences={preferences()}
+        dragController={dragController}
+        responsiveLayout="phone-portrait"
+        responsiveContext="builder"
+        onWorkspaceChange={vi.fn()}
+        onPreferencesChange={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("draft-drag-preview")).toHaveClass("opacity-60");
+    expect(Number.parseFloat(screen.getByTestId("draft-drag-preview").querySelector<HTMLElement>("[data-drag-instance-id]")!.style.width)).toBeCloseTo(58.4);
+    expect(document.querySelector("[data-drag-projection]")).not.toBeInTheDocument();
+    expect(document.querySelector("[data-drag-projection-slot]")).not.toBeInTheDocument();
+    expect(document.querySelector("[data-instance-id=\"deck-card\"]")).not.toHaveClass("opacity-0");
+  });
+
+  it.each(["null", "token-zero"] as const)("keeps_%s_workspace_projection_on_the_responsive_pointer_preview_path", (projectionState) => {
+    const cards = [card("deck-card")];
+    const source: WorkspaceDragSource = {
+      kind: "workspace",
+      instanceIds: ["deck-card"],
+      cards: [cards[0]],
+      canonicalTarget: { zone: "deck", column: 0, row: 0 },
+      previewWidth: 146,
+      previewHeight: 204,
+      origin: { left: 0, top: 0, width: 146, height: 204 },
+      onDrop: vi.fn(() => true),
+    };
+    const markDestinationReady = vi.fn();
+    const completeProjection = vi.fn();
+    const dragController = {
+      announcement: "Dragging deck-card.",
+      activeTarget: { zone: "deck" as const, column: 0, row: 0 },
+      dragPreview: { source, clientX: 100, clientY: 120 },
+      workspaceProjection: projectionState === "null" ? null : {
+        token: 0,
+        source,
+        clientX: 100,
+        clientY: 120,
+        target: { zone: "deck" as const, column: 0, row: 0 },
+        hasLeftCanonicalTarget: true,
+        settling: true,
+      },
+      geometryRevision: 0,
+      markWorkspaceProjectionDestinationReady: markDestinationReady,
+      completeWorkspaceProjection: completeProjection,
+      handlePointerDown: vi.fn(), handleWorkspacePointerDown: vi.fn(),
+      handlePointerMove: vi.fn(), handlePointerUp: vi.fn(),
+      handlePointerCancel: vi.fn(), handleLostPointerCapture: vi.fn(),
+      consumeCompatibilityActivation: vi.fn(() => false),
+      registerBoard: vi.fn(() => vi.fn()), registerColumn: vi.fn(() => vi.fn()),
+      registerCollapsedSideboard: vi.fn(), dropState: vi.fn(() => ({ zoneActive: true, column: 0, row: 0 })),
+      invalidateGeometry: vi.fn(), dispose: vi.fn(),
+    } satisfies DraftWorkspaceDragController;
+
+    const { container } = render(
+      <DraftWorkspace
+        pool={cards}
+        poolGroups={groups(cards)}
+        workspace={state({ "deck-card": { zone: "deck", row: 0, column: 0, order: 0 } })}
+        preferences={preferences()}
+        dragController={dragController}
+        responsiveLayout="phone-portrait"
+        responsiveContext="builder"
+        onWorkspaceChange={vi.fn()}
+        onPreferencesChange={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("draft-drag-preview")).toBeInTheDocument();
+    expect(container.querySelector('[data-drag-projection="deck-card"]')).not.toBeInTheDocument();
+    expect(container.querySelector('[data-drag-projection-slot="deck-card"]')).not.toBeInTheDocument();
+    expect(container.querySelector('[data-instance-id="deck-card"]')).not.toHaveClass("opacity-0");
+    expect(markDestinationReady).not.toHaveBeenCalled();
+    expect(completeProjection).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["desktop", "draft"],
+    ["desktop", "builder"],
+  ] as const)("uses_the_tokenized_workspace_projection_in_%s_%s", (responsiveLayout, responsiveContext) => {
+    const cards = [card("deck-card")];
+    const source: WorkspaceDragSource = {
+      kind: "workspace",
+      instanceIds: ["deck-card"],
+      cards: [cards[0]],
+      canonicalTarget: { zone: "deck", column: 0, row: 0 },
+      previewWidth: 146,
+      previewHeight: 204,
+      origin: { left: 18, top: 32, width: 90, height: 126 },
+      onDrop: vi.fn(() => true),
+    };
+    const dragController = {
+      announcement: "Dragging deck-card.",
+      activeTarget: { zone: "deck" as const, column: 0, row: 0 },
+      dragPreview: { source, clientX: 100, clientY: 120 },
+      workspaceProjection: {
+        token: 1,
+        source,
+        clientX: 100,
+        clientY: 120,
+        target: { zone: "deck" as const, column: 0, row: 0 },
+        hasLeftCanonicalTarget: true,
+        settling: false,
+      },
+      geometryRevision: 0,
+      handlePointerDown: vi.fn(), handleWorkspacePointerDown: vi.fn(),
+      handlePointerMove: vi.fn(), handlePointerUp: vi.fn(),
+      handlePointerCancel: vi.fn(), handleLostPointerCapture: vi.fn(),
+      consumeCompatibilityActivation: vi.fn(() => false),
+      registerBoard: vi.fn(() => vi.fn()), registerColumn: vi.fn(() => vi.fn()),
+      registerCollapsedSideboard: vi.fn(), dropState: vi.fn(() => ({ zoneActive: true, column: 0, row: 0 })),
+      invalidateGeometry: vi.fn(), dispose: vi.fn(),
+    } satisfies DraftWorkspaceDragController;
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      return this.dataset.dragProjectionSlot === "deck-card"
+        ? { left: 270, top: 145, right: 382, bottom: 302, width: 112, height: 157, x: 270, y: 145, toJSON: () => ({}) } as DOMRect
+        : { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0, x: 0, y: 0, toJSON: () => ({}) } as DOMRect;
+    });
+
+    const { container } = render(
+      <DraftWorkspace
+        pool={cards}
+        poolGroups={groups(cards)}
+        workspace={state({ "deck-card": { zone: "deck", row: 0, column: 0, order: 0 } })}
+        preferences={preferences()}
+        dragController={dragController}
+        responsiveLayout={responsiveLayout}
+        responsiveContext={responsiveContext}
+        onWorkspaceChange={vi.fn()}
+        onPreferencesChange={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByTestId("draft-drag-preview")).not.toBeInTheDocument();
+    expect(container.querySelector('[data-instance-id="deck-card"]')).toHaveClass("opacity-0");
+    expect(container.querySelector('[data-drag-projection-slot="deck-card"]')).toBeInTheDocument();
+    expect(container.querySelector('[data-drag-projection="deck-card"]')).toBeInTheDocument();
+  });
+
+  it.each([
+    ["phone-portrait", "draft", "deck", "sideboard"],
+    ["phone-landscape", "draft", "deck", "sideboard"],
+    ["tablet-portrait", "draft", "deck", "sideboard"],
+    ["tablet-landscape", "draft", "deck", "sideboard"],
+    ["phone-portrait", "builder", "deck", "sideboard"],
+    ["phone-landscape", "builder", "deck", "sideboard"],
+    ["tablet-portrait", "builder", "deck", "sideboard"],
+    ["tablet-landscape", "builder", "deck", "sideboard"],
+    ["phone-portrait", "draft", "sideboard", "deck"],
+    ["phone-landscape", "draft", "sideboard", "deck"],
+    ["tablet-portrait", "draft", "sideboard", "deck"],
+    ["tablet-landscape", "draft", "sideboard", "deck"],
+    ["phone-portrait", "builder", "sideboard", "deck"],
+    ["phone-landscape", "builder", "sideboard", "deck"],
+    ["tablet-portrait", "builder", "sideboard", "deck"],
+    ["tablet-landscape", "builder", "sideboard", "deck"],
+  ] as const)("keeps_compact_%s_%s_%s_to_%s_workspace_drags_on_the_pointer_preview_path", (responsiveLayout, responsiveContext, sourceZone, targetZone) => {
+    const cards = [card("side-a"), card("side-b"), card("deck-card")];
+    const source: WorkspaceDragSource = {
+      kind: "workspace",
+      instanceIds: ["deck-card"],
+      cards: [cards[2]],
+      canonicalTarget: { zone: "deck", column: 0, row: 0 },
+      previewWidth: 146,
+      previewHeight: 204,
+      origin: { left: 18, top: 32, width: 90, height: 126 },
+      onDrop: vi.fn(() => true),
+    };
+    const dragController = {
+      announcement: "Dragging deck-card.",
+      activeTarget: { zone: targetZone, column: 0, row: null },
+      dragPreview: { source, clientX: 100, clientY: 120 },
+      workspaceProjection: {
+        token: 1, source, clientX: 100, clientY: 120,
+        target: { zone: targetZone, column: 0, row: null },
+        hasLeftCanonicalTarget: true, settling: false,
+      },
+      geometryRevision: 0,
+      handlePointerDown: vi.fn(), handleWorkspacePointerDown: vi.fn(),
+      handlePointerMove: vi.fn(), handlePointerUp: vi.fn(),
+      handlePointerCancel: vi.fn(), handleLostPointerCapture: vi.fn(),
+      consumeCompatibilityActivation: vi.fn(() => false),
+      registerBoard: vi.fn(() => vi.fn()), registerColumn: vi.fn(() => vi.fn()),
+      registerCollapsedSideboard: vi.fn(), dropState: vi.fn(() => ({ zoneActive: true, column: 0, row: null })),
+      invalidateGeometry: vi.fn(), dispose: vi.fn(),
+    } satisfies DraftWorkspaceDragController;
+    const { container } = render(
+      <DraftWorkspace
+        pool={cards}
+        poolGroups={groups(cards)}
+        workspace={state({
+          "side-a": { zone: "sideboard", row: 0, column: 0, order: 0 },
+          "side-b": { zone: "sideboard", row: 0, column: 1, order: 0 },
+          "deck-card": { zone: sourceZone, row: 0, column: 0, order: 0 },
+        })}
+        preferences={preferences({
+          sideboardCollapsed: false,
+          builderPhoneSideboardCollapsed: false,
+          phoneDeckVisualColumnCaps: { portrait: 4, landscape: 6 },
+        })}
+        dragController={dragController}
+        responsiveLayout={responsiveLayout}
+        responsiveContext={responsiveContext}
+        onWorkspaceChange={vi.fn()}
+        onPreferencesChange={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("draft-drag-preview")).toHaveClass("opacity-60");
+    expect(Number.parseFloat(screen.getByTestId("draft-drag-preview").querySelector<HTMLElement>("[data-drag-instance-id]")!.style.width)).toBeCloseTo(58.4);
+    expect(container.querySelector('[data-drag-projection="deck-card"]')).not.toBeInTheDocument();
+    expect(container.querySelector('[data-drag-projection-slot="deck-card"]')).not.toBeInTheDocument();
+    expect(container.querySelector('[data-instance-id="deck-card"]')).not.toHaveClass("opacity-0");
+  });
+
+  it.each([
+    "phone-portrait",
+    "phone-landscape",
+    "tablet-portrait",
+    "tablet-landscape",
+  ] as const)("keeps_a_collapsed_%s_workspace_drag_on_the_pointer_preview_path", (responsiveLayout) => {
+    const cards = [card("deck-card")];
+    const source: WorkspaceDragSource = {
+      kind: "workspace", instanceIds: ["deck-card"], cards: [cards[0]],
+      canonicalTarget: { zone: "deck", column: 0, row: 0 },
+      previewWidth: 146, previewHeight: 204,
+      origin: { left: 18, top: 32, width: 90, height: 126 },
+      onDrop: vi.fn(() => true),
+    };
+    const dragController = {
+      announcement: "Dragging deck-card.",
+      activeTarget: { zone: "sideboard" as const, column: 0, row: null },
+      dragPreview: { source, clientX: 100, clientY: 120 },
+      workspaceProjection: {
+        token: 1, source, clientX: 100, clientY: 120,
+        target: { zone: "sideboard" as const, column: 0, row: null },
+        hasLeftCanonicalTarget: true, settling: false,
+      },
+      geometryRevision: 0,
+      handlePointerDown: vi.fn(), handleWorkspacePointerDown: vi.fn(),
+      handlePointerMove: vi.fn(), handlePointerUp: vi.fn(),
+      handlePointerCancel: vi.fn(), handleLostPointerCapture: vi.fn(),
+      consumeCompatibilityActivation: vi.fn(() => false),
+      registerBoard: vi.fn(() => vi.fn()), registerColumn: vi.fn(() => vi.fn()),
+      registerCollapsedSideboard: vi.fn(), dropState: vi.fn(() => ({ zoneActive: true, column: 0, row: null })),
+      invalidateGeometry: vi.fn(), dispose: vi.fn(),
+    } satisfies DraftWorkspaceDragController;
+    const { container } = render(
+      <DraftWorkspace
+        pool={cards}
+        poolGroups={groups(cards)}
+        workspace={state({ "deck-card": { zone: "deck", row: 0, column: 0, order: 0 } })}
+        preferences={preferences({ sideboardCollapsed: true })}
+        dragController={dragController}
+        responsiveLayout={responsiveLayout}
+        onWorkspaceChange={vi.fn()}
+        onPreferencesChange={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("draft-drag-preview")).toHaveClass("opacity-60");
+    expect(container.querySelector('[data-drag-projection="deck-card"]')).not.toBeInTheDocument();
+    expect(container.querySelector('[data-drag-projection-slot="deck-card"]')).not.toBeInTheDocument();
+    expect(container.querySelector('[data-instance-id="deck-card"]')).not.toHaveClass("opacity-0");
   });
 
   it("clamps_the_complete_overlay_to_desktop_window_edges", () => {
@@ -798,12 +2119,14 @@ describe("draft workspace shell", () => {
       interactionGeneration: 1,
       previewWidth: 146,
       previewHeight: 204,
+      previewImages: [],
       onAdmission: vi.fn(),
       onSettled: vi.fn(),
     };
     const dragController = {
       announcement: "Dragging effect-a, effect-b.", activeTarget: null,
       dragPreview: { source, clientX: 796, clientY: 596 },
+      geometryRevision: 0,
       handlePointerDown: vi.fn(), handleWorkspacePointerDown: vi.fn(),
       handlePointerMove: vi.fn(), handlePointerUp: vi.fn(),
       handlePointerCancel: vi.fn(), handleLostPointerCapture: vi.fn(),
@@ -829,8 +2152,8 @@ describe("draft workspace shell", () => {
     );
 
     expect(screen.getByTestId("draft-drag-preview")).toHaveStyle({
-      left: "635.4px",
-      top: "487.8px",
+      left: "555.1px",
+      top: "431.7px",
     });
   });
 
@@ -854,12 +2177,14 @@ describe("draft workspace shell", () => {
       interactionGeneration: 1,
       previewWidth: 146,
       previewHeight: 204,
+      previewImages: [],
       onAdmission: vi.fn(),
       onSettled: vi.fn(),
     };
     const dragController = {
       announcement: "Dragging single.", activeTarget: null,
       dragPreview: { source, clientX: 425, clientY: 755 },
+      geometryRevision: 0,
       handlePointerDown: vi.fn(), handleWorkspacePointerDown: vi.fn(),
       handlePointerMove: vi.fn(), handlePointerUp: vi.fn(),
       handlePointerCancel: vi.fn(), handleLostPointerCapture: vi.fn(),
@@ -882,8 +2207,8 @@ describe("draft workspace shell", () => {
     );
 
     expect(screen.getByTestId("draft-drag-preview")).toHaveStyle({
-      left: "329.7px",
-      top: "607.8px",
+      left: "289.55px",
+      top: "551.7px",
     });
   });
 
@@ -911,12 +2236,14 @@ describe("draft workspace shell", () => {
       interactionGeneration: 1,
       previewWidth: 146 * DRAFT_WORKSPACE_PACK_SCALE_MAX,
       previewHeight: 204 * DRAFT_WORKSPACE_PACK_SCALE_MAX,
+      previewImages: [],
       onAdmission: vi.fn(),
       onSettled: vi.fn(),
     };
     const dragController = {
       announcement: "Dragging effect-a, effect-b.", activeTarget: null,
       dragPreview: { source, clientX: 500, clientY: 500 },
+      geometryRevision: 0,
       handlePointerDown: vi.fn(), handleWorkspacePointerDown: vi.fn(),
       handlePointerMove: vi.fn(), handlePointerUp: vi.fn(),
       handlePointerCancel: vi.fn(), handleLostPointerCapture: vi.fn(),
@@ -1068,7 +2395,7 @@ describe("draft workspace shell", () => {
     await waitFor(() => expect(workspaceChanges).toHaveBeenCalledTimes(1));
   });
 
-  it("does_not_call_onWorkspaceChange_for_already_normalized_input", async () => {
+  it("does_not_call_onWorkspaceChange_for_already_normalized_input", () => {
     const cards = [
       card("shared-a", "Shared Name", "AAA", "1"),
       card("shared-b", "Shared Name", "BBB", "2"),
@@ -1089,7 +2416,7 @@ describe("draft workspace shell", () => {
       />,
     );
 
-    await waitFor(() => expect(workspaceChanges).not.toHaveBeenCalled());
+    expect(workspaceChanges).not.toHaveBeenCalled();
   });
 
   it("renders_each_live_identity_exactly_once_after_restored_out_of_range_placement_normalization", () => {
@@ -1161,7 +2488,7 @@ describe("draft workspace shell", () => {
     expect(deckToolbar.firstElementChild).toBe(deckHeading);
     expect(deckToolbar).toHaveClass("py-1.5");
     expect(deckToolbar).not.toHaveClass("py-2.5");
-    expect(deckToolbar).toContainElement(within(deckToolbar).getByRole("combobox", { name: "Sort board" }));
+    expect(deckToolbar).toContainElement(within(deckToolbar).getByRole("combobox", { name: "Group by" }));
     expect(screen.getByText("Sideboard (0 cards)")).toBeInTheDocument();
   });
 
@@ -1256,6 +2583,7 @@ describe("draft workspace shell", () => {
       workspace: state({ one: { zone: "deck", row: 0, column: 0, order: 0 } }),
       onWorkspaceChange: vi.fn(),
       onPreferencesChange: preferenceChanges,
+      deckControls: <button type="button">Add Lands</button>,
       compactDeckControls: <button type="button">Add Lands</button>,
       responsiveLayout: "phone-landscape" as const,
       responsiveContext: "builder" as const,
@@ -1267,7 +2595,7 @@ describe("draft workspace shell", () => {
     expect(screen.getByRole("button", { name: "Visual builder" })).toHaveClass("min-h-11");
     const phonePrimary = container.querySelector<HTMLElement>("[data-compact-pool-primary-controls]")!;
     expect(within(phonePrimary).getAllByRole("button").map((button) => button.textContent))
-      .toEqual(["Group", "Add Lands", "Visual builder"]);
+      .toEqual(["Group by", "Add Lands", "Visual builder"]);
     expect(phonePrimary.children[2]).toHaveAttribute("data-deck-type-counts");
     expect(container.querySelector("[data-compact-pool-trailing-controls]")).toHaveClass("ml-auto");
     expect(container.querySelector("[data-deck-type-counts]")).toHaveClass("text-[0.65625rem]");
@@ -1306,6 +2634,10 @@ describe("draft workspace shell", () => {
     expect(screen.getByRole("region", { name: "Compact sideboard" })).toBeInTheDocument();
     expect(screen.getByRole("toolbar", { name: "Board layout" })).toHaveClass("px-2");
     expect(container.querySelector("[data-deck-type-counts]")).toHaveClass("text-[0.65625rem]");
+    const phoneVisualToolbar = screen.getByRole("toolbar", { name: "Board layout" });
+    expect(Array.from(phoneVisualToolbar.children).slice(0, 5).map((child) => (
+      child.hasAttribute("data-deck-type-counts") ? "DeckTypeCounts" : child.textContent
+    ))).toEqual(["Layout", "Add Lands", "DeckTypeCounts", "Show headers", "Text builder"]);
 
     rerender(<DraftWorkspace
       {...props}
@@ -1314,7 +2646,7 @@ describe("draft workspace shell", () => {
     />);
     const tabletPrimary = container.querySelector<HTMLElement>("[data-compact-pool-primary-controls]")!;
     expect(within(tabletPrimary).getAllByRole("button").map((button) => button.textContent))
-      .toEqual(["Group", "Add Lands", "Visual builder"]);
+      .toEqual(["Group by", "Add Lands", "Visual builder"]);
     expect(within(tabletPrimary).getByRole("button", { name: "Visual builder" })).toHaveClass("min-h-11");
     expect(container.querySelector("[data-deck-type-counts]")).toHaveClass("text-sm");
     expect(container.querySelector<HTMLElement>("[data-zone='deck']")).toHaveClass("overflow-hidden");
@@ -1322,9 +2654,9 @@ describe("draft workspace shell", () => {
       .toHaveClass("flex", "h-full", "min-h-0", "flex-col", "overflow-hidden");
     expect(screen.queryByRole("heading", { name: "Deck (1 card)", level: 2 })).not.toBeInTheDocument();
     expect(screen.queryByRole("region", { name: "Compact sideboard" })).not.toBeInTheDocument();
-    fireEvent.click(within(tabletPrimary).getByRole("button", { name: "Group" }));
+    fireEvent.click(within(tabletPrimary).getByRole("button", { name: "Group by" }));
     fireEvent.click(screen.getByRole("menuitemradio", { name: "Color" }));
-    expect(within(tabletPrimary).getByRole("button", { name: "Group" })).toBeInTheDocument();
+    expect(within(tabletPrimary).getByRole("button", { name: "Group by" })).toBeInTheDocument();
 
     rerender(<DraftWorkspace
       {...props}
@@ -1334,6 +2666,11 @@ describe("draft workspace shell", () => {
     expect(screen.getByRole("button", { name: "Text builder" })).toHaveClass("min-h-11");
     expect(screen.getByRole("toolbar", { name: "Board layout" })).toHaveClass("px-4");
     expect(container.querySelector("[data-deck-type-counts]")).toHaveClass("text-sm");
+    const tabletVisualToolbar = screen.getByRole("toolbar", { name: "Board layout" });
+    expect(Array.from(tabletVisualToolbar.children).slice(0, 5).map((child) => (
+      child.hasAttribute("data-deck-type-counts") ? "DeckTypeCounts" : child.textContent
+    ))).toEqual(["Layout", "Add Lands", "DeckTypeCounts", "Headers", "Text builder"]);
+    expect(screen.getByRole("button", { name: "Text builder" })).toHaveClass("ml-auto");
 
     rerender(<DraftWorkspace
       {...props}
@@ -1366,7 +2703,7 @@ describe("draft workspace shell", () => {
       expect(preferenceChanges).toHaveBeenLastCalledWith(expect.objectContaining({ explicitView: "compact" }));
 
       rerender(<DraftWorkspace {...props} preferences={preferences({ explicitView: "compact" })} />);
-      expect(screen.getByRole("button", { name: "Group" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Group by" })).toBeInTheDocument();
       expect(screen.getByRole("button", { name: "Add Lands" })).toBeInTheDocument();
       expect(screen.getByRole("button", { name: "Visual builder" })).toBeInTheDocument();
       expect(screen.getByText("one")).toBeInTheDocument();
@@ -1430,7 +2767,7 @@ describe("draft workspace shell", () => {
     expect(within(compactSideboard).getByText("No cards in the sideboard")).toBeInTheDocument();
   });
 
-  it("removes_virtual_basics_clicked_in_the_compact_sideboard", () => {
+  it("removes_virtual_basics_clicked_in_the_phone_text_sideboard_filter", () => {
     const workspaceChanges = vi.fn();
     render(
       <StatefulWorkspace
@@ -1446,16 +2783,17 @@ describe("draft workspace shell", () => {
       />,
     );
 
-    const compactSideboard = screen.getByRole("region", { name: "Compact sideboard" });
-    expect(within(compactSideboard).getByRole("button", { name: "Remove Island" }))
+    fireEvent.click(screen.getByRole("button", { name: "Sideboard (1)" }));
+    const sideboardPoolCard = screen.getByRole("button", { name: "Remove Island" });
+    expect(sideboardPoolCard)
       .toBeInTheDocument();
-    fireEvent.click(within(compactSideboard).getByRole("button", { name: "Inspect Island" }));
+    fireEvent.click(screen.getByRole("button", { name: "Island" }));
 
     expect(lastWorkspaceChange(workspaceChanges)).toMatchObject({
       placements: {},
       virtualBasics: [],
     });
-    expect(within(compactSideboard).getByText("No cards in the sideboard")).toBeInTheDocument();
+    expect(screen.getByText("No cards in this view")).toBeInTheDocument();
   });
 
   it("resolves_restored_rarity_to_cmc_for_cube_board_ui_order_and_mutations", () => {
@@ -1489,7 +2827,7 @@ describe("draft workspace shell", () => {
     expect(headers[0].querySelector("[data-sort-designation]")).toHaveAttribute("title", "Mana value 1");
     expect(headers[1].querySelector("[data-sort-designation]")).toHaveAttribute("title", "Mana value 3");
 
-    const sortSelect = within(deck).getByRole("combobox", { name: "Sort board" });
+    const sortSelect = within(deck).getByRole("combobox", { name: "Group by" });
     expect(sortSelect).toHaveValue("cmc");
     expect(preferenceChanges).not.toHaveBeenCalled();
     sortSelect.focus();
@@ -1644,7 +2982,7 @@ describe("draft workspace shell", () => {
     expect(screen.getByText("Moved moving to Deck, column 2, position 1.")).toBeInTheDocument();
   });
 
-  it("removes_actions_while_preserving_compact_movement_surfaces", () => {
+  it("removes_actions_while_preserving_phone_text_movement_surfaces", () => {
     const cards = [card("moving")];
     const workspaceChanges = vi.fn();
     const { container } = render(
@@ -1663,10 +3001,11 @@ describe("draft workspace shell", () => {
     fireEvent.click(within(initialPoolCard).getByRole("button", { name: "Move moving to Sideboard" }));
     expect(lastWorkspaceChange(workspaceChanges).placements.moving.zone).toBe("sideboard");
 
-    const compactSideboard = screen.getByRole("region", { name: "Compact sideboard" });
-    fireEvent.click(within(compactSideboard).getByRole("button", { name: "Move moving to Deck" }));
+    fireEvent.click(screen.getByRole("button", { name: "Sideboard (1)" }));
+    fireEvent.click(screen.getByRole("button", { name: "Move moving to Deck" }));
     expect(lastWorkspaceChange(workspaceChanges).placements.moving.zone).toBe("deck");
 
+    fireEvent.click(screen.getByRole("button", { name: "Deck (1)" }));
     const poolCard = container.querySelector<HTMLElement>('[aria-label="Card pool"] [data-instance-id="moving"]')!;
     fireEvent.click(within(poolCard).getByRole("button", { name: "Move moving to Sideboard" }));
     expect(lastWorkspaceChange(workspaceChanges).placements.moving.zone).toBe("sideboard");
@@ -1730,7 +3069,7 @@ describe("draft workspace shell", () => {
     expect(toggle).toHaveAttribute("aria-expanded", "false");
     expect(toggle.querySelector("[aria-hidden='true']")).toBeInTheDocument();
     expect(toggle).toBeEnabled();
-    expect(within(collapsed).queryByRole("combobox", { name: "Sort board" })).not.toBeInTheDocument();
+    expect(within(collapsed).queryByRole("combobox", { name: "Group by" })).not.toBeInTheDocument();
     expect(within(collapsed).queryByRole("group", { name: "Board rows" })).not.toBeInTheDocument();
     expect(within(collapsed).queryByRole("group", { name: "Board columns" })).not.toBeInTheDocument();
     expect(within(collapsed).queryByRole("checkbox", { name: "Show headers" })).not.toBeInTheDocument();
@@ -1759,6 +3098,7 @@ describe("draft workspace shell", () => {
     const controller: DraftWorkspaceDragController = {
       announcement: "", get activeTarget() { return activeTarget; },
       dragPreview: null,
+      geometryRevision: 0,
       handlePointerDown: vi.fn(), handleWorkspacePointerDown: vi.fn(),
       handlePointerMove: vi.fn(), handlePointerUp: vi.fn(),
       handlePointerCancel: vi.fn(), handleLostPointerCapture: vi.fn(),
@@ -1820,7 +3160,7 @@ describe("draft workspace shell", () => {
       row: null,
     };
     const controller = {
-      announcement: "", activeTarget, dragPreview: null,
+      announcement: "", activeTarget, dragPreview: null, geometryRevision: 0,
       handlePointerDown: vi.fn(), handleWorkspacePointerDown: vi.fn(),
       handlePointerMove: vi.fn(), handlePointerUp: vi.fn(),
       handlePointerCancel: vi.fn(), handleLostPointerCapture: vi.fn(),
@@ -1936,7 +3276,7 @@ describe("draft workspace shell", () => {
     const cards = [card("side")];
     const workspaceChanges = vi.fn();
     const controller = {
-      announcement: "", activeTarget: null, dragPreview: null,
+      announcement: "", activeTarget: null, dragPreview: null, geometryRevision: 0,
       handlePointerDown: vi.fn(), handleWorkspacePointerDown: vi.fn(),
       handlePointerMove: vi.fn(), handlePointerUp: vi.fn(), handlePointerCancel: vi.fn(),
       handleLostPointerCapture: vi.fn(), consumeCompatibilityActivation: vi.fn(() => false),
@@ -1955,6 +3295,17 @@ describe("draft workspace shell", () => {
       />,
     );
     const cardButton = screen.getByRole("button", { name: "Inspect side" });
+    cardButton.getBoundingClientRect = () => ({
+      left: 21,
+      top: 34,
+      right: 111,
+      bottom: 160,
+      width: 90,
+      height: 126,
+      x: 21,
+      y: 34,
+      toJSON: () => ({}),
+    });
     for (const key of ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"]) {
       fireEvent.keyDown(cardButton, { key, ctrlKey: true, shiftKey: true });
     }
@@ -1962,7 +3313,11 @@ describe("draft workspace shell", () => {
     expect(workspaceChanges).not.toHaveBeenCalled();
     expect(controller.handleWorkspacePointerDown).toHaveBeenCalledWith(
       expect.anything(),
-      expect.objectContaining({ kind: "workspace", instanceIds: ["side"] }),
+      expect.objectContaining({
+        kind: "workspace",
+        instanceIds: ["side"],
+        origin: { left: 21, top: 34, width: 90, height: 126 },
+      }),
     );
     fireEvent.click(cardButton);
     expect(lastWorkspaceChange(workspaceChanges).placements.side.zone).toBe("deck");
@@ -1999,7 +3354,7 @@ describe("draft workspace shell", () => {
     const cards = [card("side")];
     const workspaceChanges = vi.fn();
     const controller = {
-      announcement: "", activeTarget: null, dragPreview: null,
+      announcement: "", activeTarget: null, dragPreview: null, geometryRevision: 0,
       handlePointerDown: vi.fn(), handleWorkspacePointerDown: vi.fn(),
       handlePointerMove: vi.fn(), handlePointerUp: vi.fn(), handlePointerCancel: vi.fn(),
       handleLostPointerCapture: vi.fn(), consumeCompatibilityActivation: vi.fn(() => false),
@@ -2050,7 +3405,7 @@ describe("draft workspace shell", () => {
     expect(toggle).toHaveAttribute("title", "Hide sideboard");
     expect(toggle).toHaveAttribute("aria-expanded", "true");
     expect(toggle.querySelector("[aria-hidden='true']")).toBeInTheDocument();
-    expect(within(toolbar).getByRole("combobox", { name: "Sort board" })).toBeInTheDocument();
+    expect(within(toolbar).getByRole("combobox", { name: "Group by" })).toBeInTheDocument();
     expect(within(toolbar).getByRole("group", { name: "Board rows" })).toBeInTheDocument();
     expect(within(toolbar).getByRole("group", { name: "Board columns" })).toBeInTheDocument();
     expect(within(toolbar).getByRole("checkbox", { name: "Show headers" })).toBeInTheDocument();
@@ -2059,6 +3414,6 @@ describe("draft workspace shell", () => {
 
     rerender(<DraftWorkspace {...props} interactionLocked />);
     expect(within(sideboard).getByRole("button", { name: "Hide sideboard" })).toBeDisabled();
-    expect(within(sideboard).getByRole("combobox", { name: "Sort board" })).toBeDisabled();
+    expect(within(sideboard).getByRole("combobox", { name: "Group by" })).toBeDisabled();
   });
 });

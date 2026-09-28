@@ -614,7 +614,7 @@ fn hallow_targets_axe_via_bolt_bend(
 /// effect resolves as CR 115.7a's no-change instead of an unanswerable
 /// prompt (phase-rs/phase#8355 round-6 defect B10).
 ///
-/// REVERT-FAILING in two directions: at `bb28b0e8b` the prompt PARKS here
+/// REVERT-FAILING in two directions: at BASE the prompt PARKS here
 /// (the flat `legal_new_targets.is_empty()` guard never fires, because the
 /// union is non-empty) and offers a pool no `Single` submission can ever
 /// satisfy for this position — an unanswerable prompt. Against a collapse
@@ -826,7 +826,7 @@ fn hallow_targets_axe_with_shock_also_on_stack_via_bolt_bend() -> (GameRunner, O
 /// slot is offered and admits its own CR-legal pool: Hallow (verbatim) with a
 /// Lava Axe (its current target) and a Shock on the stack.
 ///
-/// REVERT-FAILING in three directions, all against `bb28b0e8b`: BASE's pool
+/// REVERT-FAILING in three directions, all against BASE, whose pool
 /// authority disagreed with its enforcement authority (round-5 defect B9) — it
 /// offered the four-member player/creature cascade and refused both instants
 /// that were actually CR-legal for this slot.

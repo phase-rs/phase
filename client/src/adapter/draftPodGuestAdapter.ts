@@ -10,7 +10,7 @@
  * participates in an 8-seat draft pod instead of a game.
  */
 
-import type { DraftPlayerView, SeatPublicView } from "./draft-adapter";
+import type { DraftPlayerView, SeatPublicView, SharedStackPileDecision } from "./draft-adapter";
 import {
   P2PDraftGuest,
   type DraftGuestConnection,
@@ -49,6 +49,7 @@ export type DraftPodGuestEvent =
   | { type: "viewUpdated"; view: DraftPlayerView }
   | { type: "pickAcknowledged"; view: DraftPlayerView }
   | { type: "deckSubmissionAcknowledged"; submissionId: string; view: DraftPlayerView }
+  | { type: "recoveredDeckSubmissionAccepted"; mainDeck: string[]; commanders: string[]; view: DraftPlayerView }
   | { type: "lobbyUpdate"; seats: SeatPublicView[]; joined: number; total: number }
   | { type: "draftPaused"; reason: DraftPauseReason }
   | { type: "draftResumed" }
@@ -289,6 +290,14 @@ export class DraftPodGuestAdapter {
           view: event.view,
         });
         break;
+      case "recoveredDeckSubmissionAccepted":
+        this.emit({
+          type: "recoveredDeckSubmissionAccepted",
+          mainDeck: event.mainDeck,
+          commanders: event.commanders,
+          view: event.view,
+        });
+        break;
       case "lobbyUpdate":
         this.emit({
           type: "lobbyUpdate",
@@ -445,6 +454,19 @@ export class DraftPodGuestAdapter {
     await this.guest.submitPickWithDraftEffect(effectCardInstanceId, cardInstanceIds);
   }
 
+  /**
+   * One whole shared-stack turn decision for this pod's local seat. Like
+   * `submitPick`, it returns nothing: the host answers out of band with
+   * `draft_pick_ack`, which the store awaits as `pickAcknowledged`.
+   */
+  async submitSharedStackDecision(
+    pile: number,
+    decision: SharedStackPileDecision,
+  ): Promise<void> {
+    if (!this.guest) throw new Error("Guest not initialized");
+    await this.guest.submitSharedStackDecision(pile, decision);
+  }
+
   async submitDeck(mainDeck: string[], commanders: string[]): Promise<void> {
     if (!this.guest) throw new Error("Guest not initialized");
     await this.guest.submitDeck(mainDeck, commanders);
@@ -453,6 +475,11 @@ export class DraftPodGuestAdapter {
   async updateWorkspace(state: DraftWorkspaceState): Promise<void> {
     if (!this.guest) throw new Error("Guest not initialized");
     await this.guest.updateWorkspace(state);
+  }
+
+  async suggestLands(): Promise<Record<string, number>> {
+    if (!this.guest) throw new Error("Guest not initialized");
+    return this.guest.suggestLands();
   }
 
   sendMatchSettlement(settlement: DraftMatchSettlement): void {

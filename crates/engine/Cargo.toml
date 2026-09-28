@@ -68,6 +68,12 @@ name = "set-check"
 path = "src/bin/set_check.rs"
 
 [[bin]]
+name = "preset-audit"
+path = "src/bin/preset_audit.rs"
+# Test-enabled: inline tests pin how Scryfall responses are classified, with
+# canned bodies and no network access.
+
+[[bin]]
 name = "parser-gap-analyzer"
 path = "src/bin/parser_gap_analyzer.rs"
 test = false
@@ -126,6 +132,11 @@ name = "bracket-baseline"
 path = "src/bin/bracket_baseline.rs"
 # Test-enabled: inline tests cover count expansion, gate boundaries, and explicit non-estimates.
 
+[[bin]]
+name = "resolution-face-census"
+path = "src/bin/resolution_face_census.rs"
+required-features = ["test-support"]
+
 [build-dependencies]
 # build.rs converts data/known-tokens.toml → JSON in OUT_DIR so the runtime
 # embed avoids the ~1s-per-process debug-mode toml_edit parse (see build.rs).
@@ -134,6 +145,11 @@ serde_json = "1"
 
 [dev-dependencies]
 flate2 = "1"
+# Test-only. `game_state_stack_high_water.rs` queries the running thread's real
+# stack bounds (`pthread_getattr_np` / `pthread_get_stackaddr_np`) instead of
+# inferring them from a local address. Already in Cargo.lock transitively, so
+# this vendors nothing new.
+libc = "0.2"
 engine = { path = ".", package = "phase-engine", features = ["test-support", "bracket-corpus"] }
 tempfile = "3"
 insta = { version = "1", features = ["json"] }

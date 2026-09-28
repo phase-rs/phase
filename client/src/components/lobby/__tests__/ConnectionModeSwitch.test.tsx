@@ -7,6 +7,19 @@ import { ConnectionModeSwitch } from "../ConnectionModeSwitch";
 describe("ConnectionModeSwitch", () => {
   afterEach(cleanup);
 
+  it("disables dedicated hosting until a server is available", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const { rerender } = render(<ConnectionModeSwitch value="p2p" onChange={onChange} dedicatedAvailable={false} />);
+    const dedicated = screen.getByRole("button", { name: "Dedicated server" });
+    expect(dedicated).toBeDisabled();
+    await user.click(dedicated);
+    expect(onChange).not.toHaveBeenCalled();
+    rerender(<ConnectionModeSwitch value="p2p" onChange={onChange} dedicatedAvailable />);
+    await user.click(dedicated);
+    expect(onChange).toHaveBeenCalledWith("server");
+  });
+
   it("offers both modes and marks the active one as pressed", () => {
     render(<ConnectionModeSwitch value="server" onChange={vi.fn()} />);
 

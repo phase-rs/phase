@@ -1,4 +1,5 @@
 import type { GameFormat, TokenImageRef } from "../adapter/types";
+import { formatMetadata } from "../data/formatRegistry";
 import type { CardImageSource, ImageRungs } from "./visualPacks/types.ts";
 
 interface ScryfallImageFace {
@@ -699,21 +700,9 @@ export interface ScryfallCard {
   }>;
 }
 
-const SCRYFALL_LEGALITY_KEY_OVERRIDES: Partial<Record<GameFormat, string | null>> = {
-  Archenemy: null,
-  Brawl: "standardbrawl",
-  DuelCommander: "duel",
-  FreeForAll: null,
-  HistoricBrawl: "brawl",
-  Limited: null,
-  TinyLeaders: null,
-  TwoHeadedGiant: null,
-};
-
+/** The engine-published key of `format`'s legality table; undefined when the card data records none. */
 export function scryfallLegalityKey(format: GameFormat): string | undefined {
-  const override = SCRYFALL_LEGALITY_KEY_OVERRIDES[format];
-  if (override === null) return undefined;
-  return override ?? format.toLowerCase();
+  return formatMetadata(format)?.legality_key ?? undefined;
 }
 
 interface ScryfallSearchResponse {
@@ -842,6 +831,16 @@ function buildFoldedNameIndex(data: ScryfallDataMap): Map<string, string> {
     if (!index.has(folded)) {
       index.set(folded, key);
     }
+    // Decks saved while the deck repair rewrote a bare "/" to " // " carry a
+    // name like "Summon: Choco/Mog" as "Summon: Choco // Mog"; index that
+    // spelling too.
+    if (!key.includes("//")) {
+      const parts = key.split("/").map((part) => part.trim()).filter(Boolean);
+      if (parts.length > 1) {
+        const spaced = foldDiacritics(parts.join(" // "));
+        if (!index.has(spaced)) index.set(spaced, key);
+      }
+    }
   }
   return index;
 }
@@ -853,14 +852,18 @@ function resolveNameLookupKey(name: string): string {
   const folded = foldDiacritics(normalized);
   const foldedHit = scryfallFoldedNameIndex?.get(folded);
   if (foldedHit) return foldedHit;
-  // A combined multi-face name ("Front // Back", or a hand-typed glued
-  // "Front//Back") is not itself an export key — multi-face cards are keyed by
-  // oracle id, spaced display name, and front-face name. When the combined form
-  // misses, fall back to the front face so the card still resolves to its
-  // entry. A single card whose own name contains "//" (e.g. "SP//dr, Piloted by
-  // Peni") is a primary key and already returned above, so it never splits here.
-  if (normalized.includes("//")) {
-    const frontFace = normalized.split("//")[0].trim();
+  // A combined multi-face name ("Front // Back", a hand-typed glued
+  // "Front//Back", or a single-slash "Front/Back") is not itself an export key —
+  // multi-face cards are keyed by oracle id, spaced display name, and front-face
+  // name. When the combined form misses, fall back to the front face so the card
+  // still resolves to its entry. The separator is the first "//", or the first
+  // "/" when there is none, as in the engine's `split_composite_name`. A single
+  // card whose own name contains a separator ("SP//dr, Piloted by Peni",
+  // "Summon: Choco/Mog") is a primary key and already returned above, so it
+  // never splits here.
+  const separator = normalized.includes("//") ? "//" : "/";
+  if (normalized.includes(separator)) {
+    const frontFace = normalized.split(separator)[0].trim();
     if (frontFace && frontFace !== normalized) {
       if (scryfallDataResolved[frontFace]) return frontFace;
       const frontFolded = scryfallFoldedNameIndex?.get(foldDiacritics(frontFace));

@@ -447,7 +447,7 @@ checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 
 [[package]]
 name = "combo-table-gen"
-version = "0.78.0"
+version = "0.95.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -680,7 +680,7 @@ checksum = "780955b8b195a21ab8e4ac6b60dd1dbdcec1dc6c51c0617964b08c81785e12c9"
 
 [[package]]
 name = "draft-core"
-version = "0.78.0"
+version = "0.95.0"
 dependencies = [
  "phase-engine",
  "rand 0.9.4",
@@ -692,7 +692,7 @@ dependencies = [
 
 [[package]]
 name = "draft-wasm"
-version = "0.78.0"
+version = "0.95.0"
 dependencies = [
  "console_error_panic_hook",
  "draft-core",
@@ -700,6 +700,7 @@ dependencies = [
  "js-sys",
  "phase-ai",
  "phase-engine",
+ "phase-llm",
  "rand 0.9.4",
  "rand_chacha 0.9.0",
  "serde",
@@ -758,7 +759,7 @@ dependencies = [
 
 [[package]]
 name = "engine-inventory-gen"
-version = "0.78.0"
+version = "0.95.0"
 dependencies = [
  "anyhow",
  "proc-macro2",
@@ -771,13 +772,14 @@ dependencies = [
 
 [[package]]
 name = "engine-wasm"
-version = "0.78.0"
+version = "0.95.0"
 dependencies = [
  "console_error_panic_hook",
  "getrandom 0.3.4",
  "js-sys",
  "phase-ai",
  "phase-engine",
+ "phase-llm",
  "rand 0.9.4",
  "rand_chacha 0.9.0",
  "seat-reducer",
@@ -823,7 +825,7 @@ checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
 
 [[package]]
 name = "feed-scraper"
-version = "0.78.0"
+version = "0.95.0"
 dependencies = [
  "clap",
  "reqwest",
@@ -1576,7 +1578,7 @@ checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
 name = "lobby-broker"
-version = "0.78.0"
+version = "0.95.0"
 dependencies = [
  "phase-engine",
  "serde",
@@ -1613,7 +1615,7 @@ checksum = "c41e0c4fef86961ac6d6f8a82609f55f31b05e4fce149ac5710e439df7619ba4"
 
 [[package]]
 name = "manabrew-compat"
-version = "0.78.0"
+version = "0.95.0"
 dependencies = [
  "manabrew-protocol",
  "phase-engine",
@@ -1946,7 +1948,7 @@ dependencies = [
 
 [[package]]
 name = "phase-ai"
-version = "0.78.0"
+version = "0.95.0"
 dependencies = [
  "flate2",
  "mimalloc",
@@ -1965,13 +1967,14 @@ dependencies = [
 
 [[package]]
 name = "phase-engine"
-version = "0.78.0"
+version = "0.95.0"
 dependencies = [
  "assert_matches",
  "flate2",
  "im",
  "indexmap",
  "insta",
+ "libc",
  "nom",
  "petgraph",
  "phase-engine",
@@ -1998,8 +2001,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "phase-llm"
+version = "0.95.0"
+dependencies = [
+ "draft-core",
+ "phase-ai",
+ "phase-engine",
+ "serde",
+ "serde_json",
+ "url",
+]
+
+[[package]]
 name = "phase-server"
-version = "0.78.0"
+version = "0.95.0"
 dependencies = [
  "axum",
  "clap",
@@ -2166,7 +2181,7 @@ dependencies = [
 
 [[package]]
 name = "probe-pin"
-version = "0.78.0"
+version = "0.95.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2691,7 +2706,7 @@ dependencies = [
 
 [[package]]
 name = "seat-reducer"
-version = "0.78.0"
+version = "0.95.0"
 dependencies = [
  "phase-ai",
  "phase-engine",
@@ -2858,7 +2873,7 @@ dependencies = [
 
 [[package]]
 name = "server-core"
-version = "0.78.0"
+version = "0.95.0"
 dependencies = [
  "draft-core",
  "lobby-broker",

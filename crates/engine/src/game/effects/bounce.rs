@@ -252,6 +252,7 @@ pub fn resolve(
                     enters_attacking: false,
                     owner_library: false,
                     track_exiled_by_source: false,
+                    face_down_in_exile: crate::types::ability::ExileConcealment::Public,
                     // CR 708.2a: bounce returns cards face up; no face-down entry.
                     face_down_profile: None,
                     enter_with_counters: vec![],
@@ -348,6 +349,7 @@ pub fn resolve(
                     enters_attacking: false,
                     owner_library: false,
                     track_exiled_by_source: false,
+                    face_down_in_exile: crate::types::ability::ExileConcealment::Public,
                     // CR 708.2a: bounce returns cards face up; no face-down entry.
                     face_down_profile: None,
                     enter_with_counters: vec![],
@@ -465,7 +467,7 @@ pub fn resolve_all(
             properties: vec![],
         })
     } else {
-        crate::game::effects::resolved_object_filter(ability, &target_filter)
+        crate::game::effects::resolved_object_filter(state, ability, &target_filter)
     };
     let scoped_ability;
     let ability = if filter_uses_scoped_player(&effective_filter) && ability.scoped_player.is_none()
@@ -529,6 +531,7 @@ pub fn resolve_all(
                 enters_attacking: false,
                 owner_library: false,
                 track_exiled_by_source: false,
+                face_down_in_exile: crate::types::ability::ExileConcealment::Public,
                 // CR 708.2a: bounce returns cards face up; no face-down entry.
                 face_down_profile: None,
                 enter_with_counters: vec![],

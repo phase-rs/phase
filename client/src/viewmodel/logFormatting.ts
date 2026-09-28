@@ -128,14 +128,27 @@ export function timelineRows(
 export function toneClass(tone: LogTone): string {
   switch (tone) {
     case "Positive":
-      return "border-l-emerald-400 text-emerald-300";
+      return "border-l-emerald-400 bg-emerald-950/25";
     case "Negative":
-      return "border-l-red-400 text-red-300";
+      return "border-l-red-400 bg-red-950/25";
     case "Informational":
-      return "border-l-cyan-400 text-cyan-300";
+      return "border-l-cyan-400 bg-cyan-950/25";
     case "Diagnostic":
-      return "border-l-fuchsia-400 text-fuchsia-300";
+      return "border-l-fuchsia-400 bg-fuchsia-950/25";
     case "Neutral":
-      return "border-l-gray-600 text-gray-400";
+      return "border-l-gray-600 bg-gray-800/25";
+  }
+}
+
+export function importanceClass(importance: LogImportance): string {
+  switch (importance) {
+    case "Essential":
+      return "text-gray-100";
+    case "Context":
+      return "text-gray-200";
+    case "Detail":
+      return "text-gray-300";
+    case "Diagnostic":
+      return "text-gray-400";
   }
 }

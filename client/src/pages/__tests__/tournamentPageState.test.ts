@@ -8,17 +8,21 @@ import { describe, expect, it } from "vitest";
 import type {
   PairingOutcome,
   PlayerSummary,
+  TournamentAction,
+  TournamentPairingView,
+  TournamentSummary,
   TournamentView,
 } from "../../adapter/types";
 import type { TournamentCredential } from "../../stores/multiplayerStore";
 import {
   arityLabel,
   decisiveGameWins,
-  defaultScoringForArity,
   failureLabel,
   formatTiebreakValue,
   gameWinsEntries,
+  isActionOpen,
   isActiveEntrant,
+  isPairingReportable,
   isReportable,
   myPairing,
   outcomeLabelKey,
@@ -111,6 +115,76 @@ describe("isReportable", () => {
 
   it.each(cases)("%s", (_label, outcome, expected) => {
     expect(isReportable(outcome)).toBe(expected);
+  });
+});
+
+// The v6 authority: consumes the broker's per-pairing `report_gate` when
+// present and falls back to the status-blind `isReportable` only when it is
+// absent (a pre-v6 broker).
+describe("isPairingReportable", () => {
+  const pairing = (
+    report_gate: TournamentPairingView["report_gate"],
+    outcome: PairingOutcome | null,
+  ): TournamentPairingView => ({
+    id: 1,
+    round: 1,
+    players: [...seats],
+    outcome,
+    report_gate,
+  });
+
+  // Present `report_gate` is authoritative — gate strictly on `"Open"`.
+  it.each([
+    ["Open", true],
+    ["TournamentNotRunning", false],
+    ["Bye", false],
+    ["Forfeit", false],
+  ] as const)("consumes report_gate %s", (gate, expected) => {
+    expect(isPairingReportable(pairing(gate, null))).toBe(expected);
+  });
+
+  // The bug fix: an already-`Reported` pairing on a finished event is refused
+  // via `TournamentNotRunning`, though its outcome alone still looks
+  // re-reportable.
+  it("refuses a reported pairing once the tournament is not running", () => {
+    const reported: PairingOutcome = { Reported: "Draw" };
+    expect(isPairingReportable(pairing("TournamentNotRunning", reported))).toBe(
+      false,
+    );
+    // Same outcome, still running → the broker keeps it open for corrections.
+    expect(isPairingReportable(pairing("Open", reported))).toBe(true);
+  });
+
+  // Absent `report_gate` (pre-v6 broker) degrades to the outcome-only fallback.
+  it.each([
+    ["pending", null, true],
+    ["bye", "Bye", false],
+  ] as const)("falls back to isReportable when absent: %s", (_l, outcome, expected) => {
+    expect(isPairingReportable(pairing(undefined, outcome))).toBe(expected);
+  });
+});
+
+// Consumes the broker's `open_actions`; treats an absent set (pre-v6 broker)
+// as OPEN so an older server keeps the credential-only behaviour.
+describe("isActionOpen", () => {
+  const summary = (open_actions?: TournamentAction[]): TournamentSummary =>
+    ({ open_actions }) as TournamentSummary;
+
+  it("is true for an action present in the set", () => {
+    expect(isActionOpen(summary(["StartRound", "Drop"]), "StartRound")).toBe(true);
+  });
+
+  it("is false for an action absent from a present set", () => {
+    // A running event withholds nothing here, but a Registration event omits
+    // EndTournament and a terminal event omits everything.
+    expect(isActionOpen(summary(["StartRound", "Drop"]), "EndTournament")).toBe(
+      false,
+    );
+    expect(isActionOpen(summary([]), "StartRound")).toBe(false);
+  });
+
+  it("defaults to open when the set is absent (pre-v6 broker)", () => {
+    expect(isActionOpen(summary(undefined), "EndTournament")).toBe(true);
   });
 });
 
@@ -385,22 +459,6 @@ describe("viewerRoles", () => {
   });
 });
 
-// V12 — mirrors `ScoringPolicy::default_for_arity`'s `2n-1 / 1 / 0`. A
-// hardcoded 3/1/0 reds the arity-4 case.
-describe("defaultScoringForArity", () => {
-  it.each([
-    [2, 3],
-    [4, 7],
-    [128, 255],
-  ])("arity %i prefills %i win points", (arity, winPoints) => {
-    expect(defaultScoringForArity(arity)).toEqual({
-      win_points: winPoints,
-      draw_points: 1,
-      loss_points: 0,
-    });
-  });
-});
-
 // V13 — head-to-head vs pod, carrying the seat count the catalog interpolates.
 describe("arityLabel", () => {
   it("labels arity 2 as head-to-head", () => {
@@ -484,6 +542,15 @@ describe("failureLabel", () => {
       { ok: false, reason: "unsupported", message: "cannot confirm" },
       "errors.unsupported",
     ],
+    // The locally-produced refusal `createTournament` returns when the broker's
+    // lobby protocol is too old to honor the requested match structure. Unlike
+    // `rejected`, it carries a TYPED `needed` version, not an English message,
+    // so each locale renders its own sentence.
+    [
+      "an incompatible broker",
+      { ok: false, reason: "incompatible", neededLobbyVersion: 8, message: "needs v8" },
+      "errors.incompatible",
+    ],
   ];
 
   it.each(cases)("maps %s to %s", (_label, failure, key) => {
@@ -499,11 +566,26 @@ describe("failureLabel", () => {
     expect(label).toEqual({ key: "errors.serverRejected", message });
   });
 
-  // Exactly one arm carries an interpolation variable, so a consumer's
-  // `"message" in label` narrowing is total.
+  // Exactly one arm carries a passthrough `message` (the broker's rejection
+  // text); the incompatible arm carries a typed `needed` instead, so a
+  // consumer's `"message" in label` narrowing stays total.
   it("attaches a message to the rejection arm and to no other", () => {
     const withMessage = cases.filter(([, failure]) => "message" in failureLabel(failure));
     expect(withMessage.map(([, , key]) => key)).toEqual(["errors.serverRejected"]);
+  });
+
+  // The incompatible arm surfaces the STRUCTURED required version for i18n
+  // interpolation, never the store's English message — so the rendered sentence
+  // is fully localizable.
+  it("carries a typed needed version on the incompatible arm, not a message", () => {
+    const label = failureLabel({
+      ok: false,
+      reason: "incompatible",
+      neededLobbyVersion: 8,
+      message: "needs v8",
+    });
+    expect(label).toEqual({ key: "errors.incompatible", needed: 8 });
+    expect("message" in label).toBe(false);
   });
 
   it("maps the two not_authorized roles to different keys", () => {

@@ -160,6 +160,124 @@ fn hatchery_granted_replicate_charges_the_recipient_slivers_mana_cost_once() {
     );
 }
 
+/// CR 702.56a + CR 702.56b (issue #8050 class): a single granted Replicate
+/// instance paid N times must copy the spell exactly N times. The cast-time
+/// payment loop records one `AdditionalCostInstancePayment` row per payment, so
+/// a seam that enqueues one copy trigger per row multiplies with the trigger's
+/// own per-payment `repeat_for` and yields N * N tokens (4 payments -> 16).
+#[test]
+fn one_hatchery_grant_paid_four_times_creates_exactly_four_tokens() {
+    let (mut runner, muscle) = hatchery_grants_replicate_scenario(1);
+    // Muscle's {1}{G}, then four granted Replicate {1}{G} payments.
+    add_green_mana(&mut runner, 10);
+
+    cast_creature(&mut runner, muscle);
+    for payment in 0..4 {
+        assert_replicate_prompt(&runner, 0, payment);
+        runner
+            .act(GameAction::DecideOptionalCost { pay: true })
+            .expect("each granted Replicate payment must be accepted");
+    }
+    assert_replicate_prompt(&runner, 0, 4);
+    runner
+        .act(GameAction::DecideOptionalCost { pay: false })
+        .expect("declining a fifth payment must finish casting");
+
+    assert_replicate_payment_records(&runner, muscle, &[(0, 1), (0, 1), (0, 1), (0, 1)]);
+    assert_eq!(
+        runner.state().players[P0.0 as usize].mana_pool.total(),
+        0,
+        "the base cost and four granted Replicate payments must consume all ten green mana"
+    );
+
+    runner.advance_until_stack_empty();
+    assert_eq!(
+        muscle_token_count(&runner),
+        4,
+        "four payments for ONE granted Replicate instance must create four tokens, not sixteen"
+    );
+}
+
+/// CR 702.56b: "If a spell has multiple instances of replicate, each is paid
+/// separately and triggers based on the payments made for it, not any other
+/// instance of replicate." Casting Hatchery Sliver while a second Hatchery
+/// Sliver grants it replicate gives the spell a printed instance (ordinal 0)
+/// and a granted instance (ordinal 1). Paying them unevenly must produce
+/// `printed_payments + granted_payments` tokens — this is the printed/granted
+/// ordinal boundary the dynamic seam slices on, so it exercises both the
+/// face-synthesized trigger and the `printed_count..effective_count` range.
+///
+/// REVERT-TO-RED: restoring the per-payment-row seam in
+/// `collect_pending_triggers_with_collection` makes the granted instance enqueue
+/// one trigger per payment, each already repeating per payment — 2 + 3 * 3 = 11
+/// tokens instead of 5.
+#[test]
+fn printed_and_granted_replicate_instances_each_copy_only_their_own_payments() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let mut grantor =
+        scenario.add_creature_from_oracle(P0, "Hatchery Sliver", 2, 2, HATCHERY_SLIVER_ORACLE);
+    grantor
+        .with_mana_cost(sliver_mana_cost())
+        .with_subtypes(vec!["Sliver"]);
+    let cast_hatchery = scenario
+        .add_creature_to_hand_from_oracle(P0, "Hatchery Sliver", 2, 2, HATCHERY_SLIVER_ORACLE)
+        .with_mana_cost(sliver_mana_cost())
+        .with_subtypes(vec!["Sliver"])
+        .id();
+    let mut runner = scenario.build();
+    // Hatchery's {1}{G}, two printed Replicate payments, three granted payments.
+    add_green_mana(&mut runner, 12);
+
+    cast_creature(&mut runner, cast_hatchery);
+    for payment in 0..2 {
+        assert_replicate_prompt(&runner, 0, payment);
+        runner
+            .act(GameAction::DecideOptionalCost { pay: true })
+            .expect("each printed Replicate payment must be accepted");
+    }
+    assert_replicate_prompt(&runner, 0, 2);
+    runner
+        .act(GameAction::DecideOptionalCost { pay: false })
+        .expect("declining a third printed payment must advance to the granted instance");
+
+    for payment in 0..3 {
+        assert_replicate_prompt(&runner, 1, payment);
+        runner
+            .act(GameAction::DecideOptionalCost { pay: true })
+            .expect("each granted Replicate payment must be accepted");
+    }
+    assert_replicate_prompt(&runner, 1, 3);
+    runner
+        .act(GameAction::DecideOptionalCost { pay: false })
+        .expect("declining a fourth granted payment must finish casting");
+
+    // Reach-guard: both instances really took payments, on their own ordinals.
+    assert_replicate_payment_records(
+        &runner,
+        cast_hatchery,
+        &[(0, 1), (0, 1), (1, 1), (1, 1), (1, 1)],
+    );
+    assert_eq!(
+        runner.state().players[P0.0 as usize].mana_pool.total(),
+        0,
+        "the base cost and five Replicate payments must consume all twelve green mana"
+    );
+
+    runner.advance_until_stack_empty();
+    let hatchery_tokens = runner
+        .state()
+        .battlefield
+        .iter()
+        .filter_map(|id| runner.state().objects.get(id))
+        .filter(|object| object.name == "Hatchery Sliver" && object.is_token)
+        .count();
+    assert_eq!(
+        hatchery_tokens, 5,
+        "each Replicate instance must copy only for its own payments: 2 printed + 3 granted"
+    );
+}
+
 #[test]
 fn two_hatchery_grants_keep_replicate_payments_on_distinct_ordinals() {
     let (mut runner, muscle) = hatchery_grants_replicate_scenario(2);

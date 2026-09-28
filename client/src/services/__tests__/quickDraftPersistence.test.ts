@@ -17,6 +17,8 @@ import {
   drainQuickDraftPersistence,
   inspectActiveQuickDraftLifecycle,
   loadActiveQuickDraft,
+  loadDraftRun,
+  type DraftRunState,
   loadQuickDraftSession,
   recordDraftMatchResult,
   saveDraftRun,
@@ -144,6 +146,42 @@ describe("quick draft persistence coordinator", () => {
       sessionJson: "session",
       workspace: null,
     });
+  });
+
+  it.each([false, true].flatMap((duplicate) => [false, true].map((bound) => ({ duplicate, bound }))))(
+    "retains the selected seat through result removal (duplicate=$duplicate, bound=$bound)", async ({ duplicate, bound }) => {
+    const run: DraftRunState = {
+      format: "run", playerDeck: ["Player"], opponentDeck: ["Latest Bot"], usedBotSeats: [1, 4],
+      ...(bound ? { lastOpponentSeat: 1 } : {}),
+      draft_set_codes: ["opaque+token", "CaseToken", "opaque+token"],
+      results: duplicate ? [{ gameId: "game", result: "draw" }] : [],
+      activeMatch: { draftId: "draft", gameId: "game", format: "run", resultCountAtLaunch: 0,
+        botSeat: 1, opponentDeck: ["Latest Bot"] },
+    };
+    await saveDraftRun("draft", run);
+    const makeMeta = () => ({ id: "draft", setCode: "DISPLAY+ONLY", difficulty: 2,
+      phase: "playing" as const, pickCount: 1, updatedAt: Date.now() });
+    const result = await recordDraftMatchResult({ draftId: "draft", gameId: "game", result: "draw", makeMeta });
+    expect(result?.run).toMatchObject({ lastOpponentSeat: 1, draft_set_codes: run.draft_set_codes,
+      results: [{ gameId: "game", result: "draw" }], opponentDeck: ["Latest Bot"] });
+    expect(result?.run.activeMatch).toBeUndefined();
+    await expect(loadDraftRun("draft")).resolves.toEqual(result?.run);
+    expect(idb.set).toHaveBeenCalledTimes(2);
+    await recordDraftMatchResult({ draftId: "draft", gameId: "game", result: "draw", makeMeta });
+    expect(idb.set).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["draft", "deck", "seat"])("does not infer a legacy seat from a mismatching stage %s", async (mismatch) => {
+    const run: DraftRunState = { format: "run", results: [], playerDeck: ["Player"],
+      opponentDeck: ["Latest Bot"], usedBotSeats: [1, 4],
+      activeMatch: { draftId: mismatch === "draft" ? "other" : "draft", gameId: "game",
+        format: "run", resultCountAtLaunch: 0, botSeat: mismatch === "seat" ? 7 : 4,
+        opponentDeck: mismatch === "deck" ? ["Other Bot"] : ["Latest Bot"] } };
+    await saveDraftRun("draft", run);
+    const result = await recordDraftMatchResult({ draftId: "draft", gameId: "game", result: "draw",
+      makeMeta: () => ({ id: "draft", setCode: "TST", difficulty: 2, phase: "playing", pickCount: 0, updatedAt: Date.now() }) });
+    expect(result?.run.lastOpponentSeat).toBeUndefined();
+    expect(result?.run.results).toHaveLength(1);
   });
 
   it("repairs metadata and clears a matching stage on duplicate result", async () => {

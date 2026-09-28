@@ -1,10 +1,32 @@
-use crate::types::ability::TriggerDefinition;
+use nom::branch::alt;
+use nom::bytes::complete::tag;
+use nom::combinator::{all_consuming, opt, recognize};
+use nom::sequence::preceded;
+use nom::Parser;
+
+use crate::types::ability::{TargetFilter, TriggerDefinition};
 use crate::types::triggers::TriggerMode;
 use crate::types::Zone;
 
 use super::filter::translate_filter;
 use super::svar::SvarResolver;
 use super::types::{ForgeAbilityLine, ForgeTranslateError};
+
+fn validate_exploited_filter(filter: &str) -> Result<&str, ForgeTranslateError> {
+    let filter = filter.trim();
+    let mut parser = all_consuming(alt((
+        tag::<_, _, nom::error::Error<&str>>("Any"),
+        tag("Card.Self"),
+        recognize((
+            tag("Creature"),
+            opt(preceded(tag("."), alt((tag("YouCtrl"), tag("OppCtrl"))))),
+        )),
+    )));
+    parser
+        .parse(filter)
+        .map(|(_, matched)| matched)
+        .map_err(|_| ForgeTranslateError::UnparsableFilter(filter.to_string()))
+}
 
 /// Translate a Forge `T:` line into a `TriggerDefinition`.
 ///
@@ -39,8 +61,25 @@ pub(crate) fn translate_trigger(
         }
     }
 
-    // ValidCard$ → valid_card filter
-    if let Some(filter_str) = params.get("ValidCard") {
+    if matches!(trigger.mode, TriggerMode::Exploited) {
+        if params.has("InvertValidSource") || params.has("InvertValidCard") {
+            return Err(ForgeTranslateError::Other(
+                "inverted Exploited filters are unsupported".to_string(),
+            ));
+        }
+
+        trigger.valid_source = Some(match params.get("ValidSource") {
+            Some(filter_str) => translate_filter(validate_exploited_filter(filter_str)?)?,
+            None => TargetFilter::Any,
+        });
+        trigger.valid_card = params
+            .get("ValidCard")
+            .map(validate_exploited_filter)
+            .transpose()?
+            .map(translate_filter)
+            .transpose()?;
+    } else if let Some(filter_str) = params.get("ValidCard") {
+        // ValidCard$ → valid_card filter for non-Exploited modes.
         if let Ok(filter) = translate_filter(filter_str) {
             trigger.valid_card = Some(filter);
         }
@@ -200,7 +239,14 @@ mod tests {
     use super::*;
     use crate::database::forge::loader::parse_params;
     use crate::database::forge::types::ForgeAbilityLine;
-    use crate::types::ability::TargetFilter;
+    use crate::game::trigger_matchers::{test_trigger_source_context, trigger_matcher};
+    use crate::game::zones::{create_object, move_to_zone};
+    use crate::types::ability::{ControllerRef, TargetFilter, TypedFilter};
+    use crate::types::card_type::CoreType;
+    use crate::types::events::GameEvent;
+    use crate::types::game_state::GameState;
+    use crate::types::identifiers::CardId;
+    use crate::types::player::PlayerId;
 
     fn make_resolver(svars: &[(&str, &str)]) -> SvarResolver<'static> {
         let map: HashMap<String, String> = svars
@@ -259,5 +305,155 @@ mod tests {
 
         assert_eq!(trigger.mode, TriggerMode::Drawn);
         assert_eq!(trigger.trigger_zones, vec![Zone::Battlefield]);
+    }
+
+    fn translate_exploited(raw: &str) -> Result<TriggerDefinition, ForgeTranslateError> {
+        let line = ForgeAbilityLine {
+            raw: raw.to_string(),
+            params: parse_params(raw),
+        };
+        let mut resolver = make_resolver(&[("TrigDraw", "DB$ Draw | NumCards$ 1")]);
+        translate_trigger(&line, &mut resolver)
+    }
+
+    #[test]
+    fn exploited_roles_are_strict_and_lossless() {
+        let trigger = translate_exploited(
+            "Mode$ Exploited | ValidSource$ Creature.YouCtrl | ValidCard$ Creature.OppCtrl | Execute$ TrigDraw",
+        )
+        .unwrap();
+        assert_eq!(
+            trigger.valid_source,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You)
+            ))
+        );
+        assert_eq!(
+            trigger.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::Opponent)
+            ))
+        );
+        assert!(trigger.execute.is_some());
+
+        let omitted = translate_exploited("Mode$ Exploited | Execute$ TrigDraw").unwrap();
+        assert_eq!(omitted.valid_source, Some(TargetFilter::Any));
+        assert_eq!(omitted.valid_card, None);
+
+        for invalid in [
+            "ValidSource$ ",
+            "ValidSource$ Creature.!token",
+            "ValidSource$ Creature.YouOwn",
+            "ValidSource$ Creature.YouCtrl.OppCtrl",
+            "ValidSource$ Creature,Card.Self",
+            "ValidCard$ Creature.nonHuman",
+            "ValidCard$ Creature.Unknown",
+            "InvertValidSource$ True",
+            "InvertValidCard$ True",
+        ] {
+            let raw = format!("Mode$ Exploited | {invalid} | Execute$ TrigDraw");
+            assert!(translate_exploited(&raw).is_err(), "accepted {raw}");
+        }
+    }
+
+    #[test]
+    fn translated_exploited_roles_reach_the_registered_matcher() {
+        let trigger = translate_exploited(
+            "Mode$ Exploited | ValidSource$ Creature.YouCtrl | ValidCard$ Creature.OppCtrl | Execute$ TrigDraw",
+        )
+        .unwrap();
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Observer".to_string(),
+            Zone::Battlefield,
+        );
+        let actor = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Exploiter".to_string(),
+            Zone::Battlefield,
+        );
+        let victim = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Victim".to_string(),
+            Zone::Battlefield,
+        );
+        let friendly_victim = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Friendly Victim".to_string(),
+            Zone::Battlefield,
+        );
+        for object_id in [actor, victim, friendly_victim] {
+            let object = state.objects.get_mut(&object_id).unwrap();
+            object.card_types.core_types.push(CoreType::Creature);
+            object.base_card_types = object.card_types.clone();
+        }
+
+        let mut zone_events = Vec::new();
+        move_to_zone(&mut state, victim, Zone::Graveyard, &mut zone_events);
+        let record = zone_events
+            .iter()
+            .find_map(|event| match event {
+                GameEvent::ZoneChanged { record, .. } => Some(record.clone()),
+                _ => None,
+            })
+            .expect("the production move captured the victim record");
+        let event = GameEvent::CreatureExploited {
+            exploiter: actor,
+            sacrificed: victim,
+            record,
+        };
+        let matcher = trigger_matcher(TriggerMode::Exploited)
+            .expect("Exploited has a registered runtime matcher");
+
+        assert!(matcher(
+            &event,
+            &trigger,
+            &test_trigger_source_context(&state, source),
+            &state,
+        ));
+
+        state.objects.get_mut(&actor).unwrap().controller = PlayerId(1);
+        assert!(!matcher(
+            &event,
+            &trigger,
+            &test_trigger_source_context(&state, source),
+            &state,
+        ));
+
+        state.objects.get_mut(&actor).unwrap().controller = PlayerId(0);
+        let mut friendly_zone_events = Vec::new();
+        move_to_zone(
+            &mut state,
+            friendly_victim,
+            Zone::Graveyard,
+            &mut friendly_zone_events,
+        );
+        let friendly_record = friendly_zone_events
+            .iter()
+            .find_map(|event| match event {
+                GameEvent::ZoneChanged { record, .. } => Some(record.clone()),
+                _ => None,
+            })
+            .expect("the production move captured the friendly victim record");
+        let friendly_event = GameEvent::CreatureExploited {
+            exploiter: actor,
+            sacrificed: friendly_victim,
+            record: friendly_record,
+        };
+        assert!(!matcher(
+            &friendly_event,
+            &trigger,
+            &test_trigger_source_context(&state, source),
+            &state,
+        ));
     }
 }

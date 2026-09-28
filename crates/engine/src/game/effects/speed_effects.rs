@@ -312,31 +312,42 @@ pub(crate) fn players_for_filter(
         }
         // CR 402.1 / 119.1 / 122.1f / 404.1: "each [player class] whose [scalar
         // attr] [comparator] [value]" — candidates satisfying both `relation`
-        // and the per-candidate scalar comparison. `attr` is read directly off
-        // each candidate; `value` is the controller-relative threshold,
-        // resolved once.
+        // and the per-candidate scalar comparison. `attr` is read for each
+        // candidate; `value` keeps the ability controller and binds
+        // `scoped_player` to that candidate.
         PlayerFilter::PlayerAttribute {
             relation,
             attr,
             comparator,
             value,
-        } => {
-            let threshold =
-                crate::game::quantity::resolve_quantity(state, value, controller, source_id);
-            state
-                .players
-                .iter()
-                .filter(|player| !player.is_eliminated)
-                .filter(|player| {
-                    crate::game::players::matches_relation(state, player.id, controller, *relation)
-                        && crate::game::effects::candidate_player_scalar_with_state(
-                            state, player, controller, attr,
-                        )
-                        .is_some_and(|lhs| comparator.evaluate(lhs, threshold))
-                })
-                .map(|player| player.id)
-                .collect()
-        }
+        } => state
+            .players
+            .iter()
+            .filter(|player| !player.is_eliminated)
+            .filter(|player| {
+                crate::game::players::matches_relation(state, player.id, controller, *relation) && {
+                    let threshold = crate::game::quantity::resolve_quantity_with_ctx(
+                        state,
+                        value,
+                        controller,
+                        crate::game::quantity::QuantityContext {
+                            entering: None,
+                            source: source_id,
+                            trigger_source: None,
+                            recipient: None,
+                            scoped_player: Some(player.id),
+                            damage_source: None,
+                            event_amount: None,
+                        },
+                    );
+                    crate::game::effects::candidate_player_scalar_with_state(
+                        state, player, controller, attr,
+                    )
+                    .is_some_and(|lhs| comparator.evaluate(lhs, threshold))
+                }
+            })
+            .map(|player| player.id)
+            .collect(),
         // CR 608.2c + CR 608.2h + CR 109.4: "each [player class] who
         // controlled/owned a [filter] this way" — candidates satisfying both
         // `relation` and possession of a member of the most recent tracked
@@ -433,10 +444,50 @@ pub fn resolve_change_speed(
 mod tests {
     use super::*;
     use crate::types::ability::{
-        Comparator, PlayerRelation, PlayerScope, QuantityExpr, QuantityRef, TargetRef,
+        Comparator, PlayerRelation, PlayerScope, QuantityExpr, QuantityRef, RoundingMode, TargetRef,
     };
     use crate::types::format::FormatConfig;
     use crate::types::identifiers::ObjectId;
+
+    #[test]
+    fn player_attribute_starting_life_threshold_binds_each_speed_recipient() {
+        // CR 103.4 + CR 904.5 + CR 119.1: P1 has a 40-life baseline;
+        // both hero seats have a 20-life baseline.
+        let mut format = FormatConfig::archenemy();
+        format.archenemy_player = Some(PlayerId(1));
+        let mut state = GameState::new(format, 3, 42);
+        state.players[1].life = 15;
+        state.players[2].life = 15;
+        let filter = PlayerFilter::PlayerAttribute {
+            relation: PlayerRelation::Opponent,
+            attr: Box::new(QuantityRef::LifeTotal {
+                player: PlayerScope::ScopedPlayer,
+            }),
+            comparator: Comparator::LT,
+            value: Box::new(QuantityExpr::DivideRounded {
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::StartingLifeTotal {
+                        player: PlayerScope::ScopedPlayer,
+                    },
+                }),
+                divisor: 2,
+                rounding: RoundingMode::Down,
+            }),
+        };
+        let ability = ResolvedAbility::new(
+            Effect::StartYourEngines {
+                player_scope: filter.clone(),
+            },
+            Vec::<TargetRef>::new(),
+            ObjectId(900),
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve_start(&mut state, &ability, &mut events).unwrap();
+        assert_eq!(state.players[1].speed, Some(1));
+        assert_eq!(state.players[2].speed, None);
+    }
 
     /// CR 119.1 + CR 810.9a: `players_for_filter` with a `PlayerAttribute`
     /// life-total predicate reads each candidate's TEAM total through the

@@ -1,4 +1,12 @@
-import type { AttackTarget, GameObject, GameState, ObjectId } from "../adapter/types";
+import type {
+  AttackerInfo,
+  AttackTarget,
+  BlockRequirementInfo,
+  CombatRequirement,
+  GameObject,
+  GameState,
+  ObjectId,
+} from "../adapter/types";
 import { groupByName } from "../viewmodel/battlefieldProps";
 
 /**
@@ -273,4 +281,223 @@ export function evenSplit(count: number, buckets: number): number[] {
   const base = Math.floor(total / buckets);
   const remainder = total % buckets;
   return Array.from({ length: buckets }, (_, i) => base + (i < remainder ? 1 : 0));
+}
+
+/**
+ * A stack of the pending blocker's legal candidate attackers that are
+ * interchangeable for that blocker: every rule-relevant axis is identical, so
+ * a single count stepper can stand in for a #1..#N list. The axes:
+ * CR 509.1a (the attack target — blocking the one on a planeswalker is a
+ * different choice than blocking the one on the defending player);
+ * CR 509.1b/CR 702.111b (the minimum-blocker count another static or Menace
+ * imposes on the attacker); CR 509.1c (a requirement carried by either
+ * combatant — the pending blocker's own "block X if able", or the attacker's
+ * "must be blocked" static); CR 702.22c (band membership — a member of one
+ * band is not interchangeable with a bandless member or a member of a
+ * different band). Legality itself is not an axis: the caller already
+ * filters to `valid_block_targets[pendingBlocker]` before stacking.
+ */
+export interface BlockTargetStack {
+  /** Stable key for the stack (the lowest member id, stringified). */
+  key: string;
+  /** Member object ids, sorted ascending for deterministic stepper moves. */
+  ids: ObjectId[];
+  /** Convenience for `ids.length`. */
+  count: number;
+  /** CR 509.1a: the attack target shared by every member of this stack. */
+  attackTarget: AttackTarget;
+  /** Other blockers (never the pending one) directly assigned to every
+   *  member of this stack, ascending. A double block onto an already-blocked
+   *  attacker is a different choice than a fresh block (CR 702.111b menace
+   *  needs two or more on the SAME attacker). */
+  otherBlockerIds: ObjectId[];
+  /** CR 509.1b / CR 702.111b: the minimum-blocker count this stack's members
+   *  require, 0 when none applies. */
+  minBlockers: number;
+  /** CR 509.1c: the pending blocker's own "block this creature if able"
+   *  requirement names every member of this stack. */
+  mustBlock: boolean;
+  /** CR 509.1c: every member of this stack carries a "must be blocked"
+   *  static that the pending blocker's block would obey. */
+  mustBeBlocked: boolean;
+  /** CR 702.22c: the band every member of this stack shares, or `null` when
+   *  none of them is banded. */
+  bandId: number | null;
+  /** Members of this stack already assigned to the pending blocker,
+   *  ascending — kept in their stack rather than split out, so growing or
+   *  shrinking the count can find them. */
+  assignedIds: ObjectId[];
+  /** The most of this stack's members the pending blocker may hold directly,
+   *  from its published block capacity minus its direct assignments outside
+   *  this stack (`partitionBlockTargets`'s `blockCapacities` option); `ids.length`
+   *  when its capacity is absent or `null` (any number). Bounds the stepper's
+   *  `max`. No band-specific ceiling. */
+  maxAssignable: number;
+}
+
+/**
+ * Maps each attacker's object id to every blocker directly UI-assigned to
+ * it, ascending; an attacker no blocker is assigned to is absent. Band blocks
+ * are not previewed here — the engine applies them when it processes the
+ * declaration (`combat.rs::propagate_banding_block_state`, called from
+ * `combat.rs::declare_blockers_for_player`).
+ */
+export function blockersByAttacker(
+  blockerAssignments: ReadonlyMap<ObjectId, ReadonlySet<ObjectId>>,
+): ReadonlyMap<ObjectId, readonly ObjectId[]> {
+  const byId = new Map<ObjectId, ObjectId[]>();
+  for (const [blockerId, attackerIds] of blockerAssignments) {
+    for (const attackerId of attackerIds) {
+      const bucket = byId.get(attackerId);
+      if (bucket) bucket.push(blockerId);
+      else byId.set(attackerId, [blockerId]);
+    }
+  }
+  const result = new Map<ObjectId, readonly ObjectId[]>();
+  for (const [attackerId, blockerIds] of byId) {
+    result.set(attackerId, blockerIds.sort((a, b) => a - b));
+  }
+  return result;
+}
+
+/**
+ * Split the pending blocker's legal candidate attackers into
+ * {@link BlockTargetStack}s. Every input is engine-provided or UI-assigned
+ * state; no legality is (re)computed here (CLAUDE.md: the frontend is a
+ * display layer).
+ */
+export function partitionBlockTargets(
+  candidateIds: ObjectId[],
+  pendingBlocker: ObjectId,
+  {
+    attackers,
+    blockerAssignments,
+    blockRequirements,
+    blockerConstraints,
+    mustBeBlockedTargets,
+    blockCapacities,
+  }: {
+    attackers: AttackerInfo[] | undefined;
+    blockerAssignments: ReadonlyMap<ObjectId, ReadonlySet<ObjectId>>;
+    blockRequirements: Record<string, BlockRequirementInfo> | undefined;
+    blockerConstraints: Record<string, CombatRequirement> | undefined;
+    mustBeBlockedTargets: Record<string, ObjectId[]> | undefined;
+    blockCapacities: Record<string, number | null> | undefined;
+  },
+): BlockTargetStack[] {
+  const attackTargetById = new Map<ObjectId, AttackTarget>();
+  const bandIdById = new Map<ObjectId, number | null>();
+  for (const attacker of attackers ?? []) {
+    attackTargetById.set(attacker.object_id, attacker.attack_target);
+    bandIdById.set(attacker.object_id, attacker.band_id ?? null);
+  }
+  const directBlockers = blockersByAttacker(blockerAssignments);
+  const pendingConstraint = blockerConstraints?.[pendingBlocker];
+  const mustBlockIds = new Set(
+    pendingConstraint?.kind === "MustBlock" ? pendingConstraint.attackers ?? [] : [],
+  );
+  const mustBeBlockedIds = new Set(mustBeBlockedTargets?.[pendingBlocker] ?? []);
+  const pendingAssignments = blockerAssignments.get(pendingBlocker);
+  const capacity = blockCapacities?.[pendingBlocker];
+
+  interface Bucket {
+    ids: ObjectId[];
+    attackTarget: AttackTarget;
+    otherBlockerIds: ObjectId[];
+    minBlockers: number;
+    mustBlock: boolean;
+    mustBeBlocked: boolean;
+    bandId: number | null;
+    assignedIds: ObjectId[];
+  }
+  const buckets = new Map<string, Bucket>();
+
+  for (const id of [...candidateIds].sort((a, b) => a - b)) {
+    const attackTarget = attackTargetById.get(id);
+    // Every candidate is drawn from `valid_block_targets[pendingBlocker]`,
+    // which only ever names an attacker the engine also reports in
+    // `combat.attackers` — a missing record means the two payloads disagree,
+    // and this stack cannot label the member, so it is dropped defensively
+    // rather than guessing a target.
+    if (!attackTarget) continue;
+    const isAssigned = pendingAssignments?.has(id) ?? false;
+    const otherBlockerIds = (directBlockers.get(id) ?? []).filter(
+      (blockerId) => blockerId !== pendingBlocker,
+    );
+    const minBlockers = blockRequirements?.[id]?.count ?? 0;
+    const mustBlock = mustBlockIds.has(id);
+    const mustBeBlocked = mustBeBlockedIds.has(id);
+    const bandId = bandIdById.get(id) ?? null;
+    const signature = [
+      attackTargetKey(attackTarget),
+      otherBlockerIds.join(","),
+      minBlockers,
+      mustBlock,
+      mustBeBlocked,
+      bandId,
+    ].join("|");
+
+    const bucket = buckets.get(signature);
+    if (bucket) {
+      bucket.ids.push(id);
+      if (isAssigned) bucket.assignedIds.push(id);
+    } else {
+      buckets.set(signature, {
+        ids: [id],
+        attackTarget,
+        otherBlockerIds,
+        minBlockers,
+        mustBlock,
+        mustBeBlocked,
+        bandId,
+        assignedIds: isAssigned ? [id] : [],
+      });
+    }
+  }
+
+  return Array.from(buckets.values())
+    .map((bucket) => {
+      // The most of this stack the pending blocker may hold directly: its
+      // published capacity (`null`/absent = any number) minus its direct
+      // assignments OUTSIDE this stack. No band-specific ceiling.
+      const outside = (pendingAssignments?.size ?? 0) - bucket.assignedIds.length;
+      const maxAssignable =
+        capacity == null ? bucket.ids.length : Math.min(bucket.ids.length, Math.max(0, capacity - outside));
+      return {
+        key: String(bucket.ids[0]),
+        ids: bucket.ids,
+        count: bucket.ids.length,
+        attackTarget: bucket.attackTarget,
+        otherBlockerIds: bucket.otherBlockerIds,
+        minBlockers: bucket.minBlockers,
+        mustBlock: bucket.mustBlock,
+        mustBeBlocked: bucket.mustBeBlocked,
+        bandId: bucket.bandId,
+        assignedIds: bucket.assignedIds,
+        maxAssignable,
+      };
+    })
+    .sort((a, b) => a.ids[0] - b.ids[0]);
+}
+
+/**
+ * Deterministic grow/shrink for one {@link BlockTargetStack} (mirrors
+ * {@link AttackTargetPicker}'s `lowestUnassigned` / `highestOnTarget`):
+ * growing claims the lowest-id members not yet assigned to the pending
+ * blocker, up to `stack.maxAssignable` and never past `stack.assignedIds`
+ * (so an over-capacity stack a mutation elsewhere over-assigned can still
+ * shrink); shrinking releases the highest-id already-assigned members and is
+ * never bounded by `maxAssignable`. Returns the full set of this stack's
+ * members that should be assigned to the pending blocker once the count
+ * becomes `n`.
+ */
+export function blockTargetSelection(stack: BlockTargetStack, n: number): ObjectId[] {
+  const requested = Math.max(0, Math.min(n, stack.ids.length));
+  if (requested <= stack.assignedIds.length) {
+    return stack.assignedIds.slice(0, requested);
+  }
+  const target = Math.max(stack.assignedIds.length, Math.min(requested, stack.maxAssignable));
+  const assignedSet = new Set(stack.assignedIds);
+  const unassigned = stack.ids.filter((id) => !assignedSet.has(id));
+  return [...stack.assignedIds, ...unassigned.slice(0, target - stack.assignedIds.length)];
 }

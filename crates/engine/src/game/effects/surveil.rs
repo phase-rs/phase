@@ -20,7 +20,10 @@ pub fn resolve(
 ) -> Result<(), EffectError> {
     let (surveil_num, surveil_player): (usize, _) = match &ability.effect {
         Effect::Surveil { count, target } => (
-            resolve_quantity_with_targets(state, count, ability) as usize,
+            // CR 107.1b + CR 701.25c: a negative instructed count is clamped to
+            // 0, matching scry.rs::resolve, so it never counts as an
+            // instructed surveil below.
+            resolve_quantity_with_targets(state, count, ability).max(0) as usize,
             // CR 121.1 + CR 615.5 + CR 609.7: see draw.rs for rationale —
             // context-ref filters resolve via state slots, not controller.
             super::resolve_player_for_context_ref(state, ability, target),
@@ -36,7 +39,7 @@ pub fn resolve(
 
     let count = surveil_num.min(player.library.len());
     // CR 701.25c: If a player is instructed to surveil 0, no surveil event occurs.
-    if count == 0 {
+    if surveil_num == 0 {
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
@@ -52,6 +55,17 @@ pub fn resolve(
         scry_bottom_count: None,
         scry_top_count: None,
     });
+
+    // CR 701.25a + CR 701.25d: with no cards to look at the surveil still
+    // completes, so the event above stands; there is nothing to choose.
+    if count == 0 {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+            subject: None,
+        });
+        return Ok(());
+    }
 
     let cards: Vec<_> = player
         .library
@@ -242,8 +256,12 @@ mod tests {
         assert!(state.players[0].graveyard.is_empty());
     }
 
+    /// CR 701.25d: an instructed surveil against an empty library still
+    /// completes the surveil (no `SurveilChoice` is offered, since there is
+    /// nothing to choose), and publishes a `PlayerPerformedAction::Surveil`
+    /// event, so "whenever you surveil" triggers.
     #[test]
-    fn test_surveil_with_empty_library_does_nothing() {
+    fn test_surveil_with_empty_library_still_surveils_without_prompt() {
         let mut state = GameState::new_two_player(42);
         assert!(state.players[0].library.is_empty());
 
@@ -253,5 +271,77 @@ mod tests {
         let result = resolve(&mut state, &ability, &mut events);
         assert!(result.is_ok());
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::PlayerPerformedAction {
+                player_id: PlayerId(0),
+                action: PlayerActionKind::Surveil,
+                ..
+            }
+        )));
+    }
+
+    /// CR 701.25c: an instructed surveil of 0 is not a surveil event at all.
+    #[test]
+    fn test_surveil_zero_emits_no_surveil_event() {
+        let mut state = GameState::new_two_player(42);
+        for i in 0..5 {
+            create_object(
+                &mut state,
+                CardId(i + 1),
+                PlayerId(0),
+                format!("Card {i}"),
+                Zone::Library,
+            );
+        }
+
+        let ability = make_surveil_ability(0);
+        let mut events = Vec::new();
+
+        let result = resolve(&mut state, &ability, &mut events);
+        assert!(result.is_ok());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            GameEvent::PlayerPerformedAction {
+                action: PlayerActionKind::Surveil,
+                ..
+            }
+        )));
+    }
+
+    /// CR 107.1b: a negative instructed count (e.g. from `X - 2` bottoming
+    /// out below 0) is clamped to 0 by `resolve`'s `.max(0)`, so it behaves
+    /// exactly like an instructed surveil of 0 (CR 701.25c) — no event, no
+    /// prompt, no library change — even though the library is non-empty.
+    #[test]
+    fn test_surveil_negative_count_emits_no_surveil_event() {
+        let mut state = GameState::new_two_player(42);
+        for i in 0..5 {
+            create_object(
+                &mut state,
+                CardId(i + 1),
+                PlayerId(0),
+                format!("Card {i}"),
+                Zone::Library,
+            );
+        }
+        let library_before: Vec<ObjectId> = state.players[0].library.iter().copied().collect();
+
+        let ability = make_surveil_ability(-3);
+        let mut events = Vec::new();
+
+        let result = resolve(&mut state, &ability, &mut events);
+        assert!(result.is_ok());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            GameEvent::PlayerPerformedAction {
+                action: PlayerActionKind::Surveil,
+                ..
+            }
+        )));
+        let library_after: Vec<ObjectId> = state.players[0].library.iter().copied().collect();
+        assert_eq!(library_after, library_before);
     }
 }

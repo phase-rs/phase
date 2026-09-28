@@ -23,6 +23,8 @@
 //!   and are not draft-tuned (evasion somewhat under-weighted, vigilance over-weighted
 //!   relative to a real pick order). A draft-tuned `DraftWeights::learned()` is future work.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 use engine::types::ability::PtValue;
@@ -189,6 +191,57 @@ pub fn evaluate_draft_card_default(face: &CardFace) -> f64 {
 /// draft pick value and the deck-builder manabase agree on what "fixing" means.
 pub fn produced_color_count(face: &CardFace) -> usize {
     crate::mana_colors::land_produced_color_types(&face.card_type.subtypes, &face.abilities).len()
+}
+
+/// The 1-2 most common colors across a group of cards' color lists — the single
+/// authority for "which colors is this pile of cards in".
+///
+/// `color_lists` is one entry per card (a card's `colors`, which is empty for a
+/// colorless card). Returns an empty vec when there are fewer than
+/// `min_samples` cards, i.e. when there is no meaningful read yet.
+///
+/// Two callers today: `draft-wasm::bot_ai::color_preference` (the pick-and-pass
+/// bot's color discipline, `min_samples = 3`) and the Winston valuation layer's
+/// late color ramp ([`crate::winston_eval`]).
+///
+/// # Ties are broken alphabetically — a deliberate behavior change
+///
+/// The comparator is a **total order**: count descending, then color name
+/// ascending. The lifted body sorted on count alone, over `HashMap` iteration
+/// order, which Rust randomizes per map instance — so colors tied on count came
+/// out in an arbitrary order and the answer varied between identical calls.
+/// MEASURED before the tiebreak: a four-way tie produced **12 distinct answers
+/// over 2000 draws**; a realistic partial tie (W=3 clear, U=2/B=2 tied) produced
+/// **2**. With the tiebreak, both collapse to exactly **1**.
+///
+/// This *changes* an existing shipped behavior: the W=3/U=2/B=2 pool used to be
+/// a coin flip between `["W", "U"]` and `["W", "B"]` and is now pinned to
+/// `["W", "B"]`. `bot_ai::bot_pick` inherits that change, and it is the point —
+/// "the same inputs produce the same pick" was not true before.
+///
+/// Pinned by `dominant_colors_is_total_on_ties`.
+pub fn dominant_colors(color_lists: &[&[String]], min_samples: usize) -> Vec<String> {
+    if color_lists.len() < min_samples {
+        return Vec::new();
+    }
+
+    let mut counts: HashMap<&str, u32> = HashMap::new();
+    for colors in color_lists {
+        for color in colors.iter() {
+            *counts.entry(color.as_str()).or_insert(0) += 1;
+        }
+    }
+
+    let mut sorted: Vec<(&str, u32)> = counts.into_iter().collect();
+    // Total order: most-played first, then alphabetical. The second key is what
+    // makes the result a function of the input rather than of map iteration order.
+    sorted.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+
+    sorted
+        .iter()
+        .take(2)
+        .map(|(color, _)| (*color).to_string())
+        .collect()
 }
 
 /// Extract a fixed power/toughness value, ignoring `*` / variable / derived stats.
@@ -370,6 +423,73 @@ mod tests {
         let mono = land_with_subtypes(&["Forest"]);
         assert_eq!(produced_color_count(&mono), 1);
         assert_eq!(evaluate_draft_card_default(&mono), 0.0);
+    }
+
+    fn color_lists(cards: &[&[&str]]) -> Vec<Vec<String>> {
+        cards
+            .iter()
+            .map(|c| c.iter().map(|s| s.to_string()).collect())
+            .collect()
+    }
+
+    /// Repeatedly evaluating the same pool must give the same answer. The
+    /// comparator sorts over `HashMap` iteration order, which Rust randomizes per
+    /// map instance, so a count-only comparator leaves tied colors in an
+    /// arbitrary order. MEASURED without the `.then_with(..)` tiebreak: 12
+    /// distinct answers on the four-way tie, 2 on the partial tie.
+    #[test]
+    fn dominant_colors_is_total_on_ties() {
+        let four_way = color_lists(&[&["W"], &["U"], &["B"], &["R"]]);
+        let partial = color_lists(&[&["W"], &["W"], &["W"], &["U"], &["U"], &["B"], &["B"]]);
+        // Positive control: a strictly ordered pool has no tie to break, so this
+        // leg is stable with or without the fix — it proves the instrument is
+        // measuring ties and not just noise.
+        let strict = color_lists(&[&["W"], &["W"], &["W"], &["U"], &["U"], &["B"]]);
+
+        for (label, pool, expected) in [
+            (
+                "four-way tie",
+                &four_way,
+                vec!["B".to_string(), "R".to_string()],
+            ),
+            (
+                "partial tie",
+                &partial,
+                vec!["W".to_string(), "B".to_string()],
+            ),
+            (
+                "strict order",
+                &strict,
+                vec!["W".to_string(), "U".to_string()],
+            ),
+        ] {
+            let borrowed: Vec<&[String]> = pool.iter().map(|c| c.as_slice()).collect();
+            let mut seen = std::collections::BTreeSet::new();
+            for _ in 0..2000 {
+                seen.insert(dominant_colors(&borrowed, 3));
+            }
+            assert_eq!(
+                seen.len(),
+                1,
+                "{label}: dominant_colors must be a function of its input, got {seen:?}"
+            );
+            // The pinned answer, so the tiebreak's DIRECTION is covered too: the
+            // partial tie used to be a coin flip between ["W","U"] and ["W","B"].
+            assert_eq!(seen.into_iter().next().unwrap(), expected, "{label}");
+        }
+    }
+
+    #[test]
+    fn dominant_colors_needs_min_samples() {
+        let pool = color_lists(&[&["W"], &["W"]]);
+        let borrowed: Vec<&[String]> = pool.iter().map(|c| c.as_slice()).collect();
+        assert!(dominant_colors(&borrowed, 3).is_empty());
+        assert_eq!(dominant_colors(&borrowed, 2), vec!["W".to_string()]);
+
+        // An all-colorless pool has samples but no colors.
+        let colorless = color_lists(&[&[], &[], &[]]);
+        let borrowed: Vec<&[String]> = colorless.iter().map(|c| c.as_slice()).collect();
+        assert!(dominant_colors(&borrowed, 3).is_empty());
     }
 
     #[test]

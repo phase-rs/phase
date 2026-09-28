@@ -87,13 +87,26 @@ pub(crate) fn resolve_fight_fighters(
     // two distinct object slots; otherwise fall through untouched, protecting
     // incumbent single-fighter `Fight{ParentTarget}` cards (time to feed,
     // ezuri's predation, joust, …) whose root has <2 object slots (slot 1 → None).
+    //
+    // The DECLARED slots decide the shape; the live slot authority decides
+    // participation. CR 701.14b: "If one or both creatures are illegal targets
+    // for a resolving spell or ability that instructs them to fight, neither of
+    // them fights or deals damage" — so a declared pair with an illegal (CR
+    // 608.2b) or departed (CR 400.7) fighter is no fight, never a fall-through
+    // to the single-fighter shape below.
     if object_targets.len() < 2 {
         if let (Some(TargetRef::Object(a)), Some(TargetRef::Object(b))) = (
             crate::game::targeting::resolve_parent_slot_from_root(state, ability, 0),
             crate::game::targeting::resolve_parent_slot_from_root(state, ability, 1),
         ) {
             if a != b {
-                return Ok(Some((a, b)));
+                let slot_is_live = |index| {
+                    crate::game::targeting::resolve_live_parent_slot_from_root(
+                        state, ability, index,
+                    )
+                    .is_some()
+                };
+                return Ok((slot_is_live(0) && slot_is_live(1)).then_some((a, b)));
             }
         }
     }

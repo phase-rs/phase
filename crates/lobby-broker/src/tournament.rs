@@ -41,6 +41,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 
 use engine::types::format::GameFormat;
+pub use engine::types::match_config::MatchType;
 
 use crate::env::BrokerEnv;
 
@@ -131,6 +132,64 @@ pub struct MintedCredential {
     pub expires_at_ms: u64,
 }
 
+/// The result of [`TournamentCredential::renew`]. `Minted` and `Replayed` both
+/// carry the secret to relay to the holder; they are kept distinct so the
+/// caller (and tests) can tell a fresh rotation from an idempotent lost-reply
+/// recovery, even though the broker relays either identically.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RenewOutcome {
+    /// A fresh secret was minted; the authority advanced. Reached only by
+    /// presenting the live current secret.
+    Minted(MintedCredential),
+    /// The last rotation was replayed: the already-committed current secret is
+    /// returned unchanged. Reached by presenting that rotation's superseded
+    /// secret together with its nonce.
+    Replayed(MintedCredential),
+    /// The presented secret matched but the credential has expired.
+    Expired,
+    /// The presented secret is neither the current secret nor a replayable
+    /// superseded-secret + nonce pair.
+    Mismatch,
+}
+
+/// The read-only classification [`TournamentCredential::renew_kind`] returns:
+/// what a renewal *would* do, with no minted secret and no mutation. Distinct
+/// from [`RenewOutcome`] because a probe cannot (and must not) mint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenewKind {
+    /// `presented` is the live current secret: a renewal would mint.
+    Mintable,
+    /// `presented`+`nonce` match the last rotation: a renewal would replay.
+    Replayable,
+    /// `presented` is recognised (current, or the replay pair) but expired.
+    Expired,
+    /// `presented` is not recognised.
+    Mismatch,
+}
+
+/// The record of the LAST rotation, kept so a lost renewal reply can be
+/// recovered by an idempotent REPLAY rather than by minting a second credential.
+///
+/// When [`TournamentCredential::renew`] rotates the current secret to a fresh
+/// one, it records the secret it *superseded* alongside the client-minted
+/// `nonce` that drove the rotation. If that rotation's reply is lost, the client
+/// retries with the SAME `nonce` and the SAME (now-superseded) secret; the
+/// broker recognises the pair and returns the already-committed current secret
+/// again — no second mint, no change of authority.
+///
+/// **This is what makes recovery safe against takeover.** A superseded secret
+/// can NEVER mint a new primary; it can only replay the one rotation it was the
+/// input to, and only when accompanied by that rotation's nonce. A holder of a
+/// merely-stolen superseded secret (without the nonce, or with a fresh one)
+/// gets [`CredentialVerdict::Mismatch`] — it cannot obtain a fresh credential
+/// and cannot invalidate the legitimate holder's current one. The nonce is
+/// compared in constant time, like the secret.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RotationRecord {
+    superseded_secret: String,
+    nonce: String,
+}
+
 /// One tournament bearer credential: the secret, and the instant it stops
 /// being accepted.
 ///
@@ -141,23 +200,32 @@ pub struct MintedCredential {
 /// injected [`BrokerEnv`] clock, never `SystemTime`, so the identical logic
 /// runs in the native shell and the Durable Object.
 ///
-/// **Both fields are private and neither has an accessor.** The plaintext
-/// secret and the expiry leave this type exactly once, in the
-/// [`MintedCredential`] that [`Self::mint`] returns; afterwards the only
-/// question anyone may ask is [`Self::verdict`] (or its
-/// [`Self::accepts`] shorthand). That is what makes this a single authority
-/// rather than a struct with a policy bolted beside it: no call site can spell
-/// a plaintext `==` against the secret, and none can forget the expiry
-/// conjunct.
+/// **All fields are private and none has an accessor.** The plaintext secret
+/// and the expiry leave this type exactly twice — in the [`MintedCredential`]
+/// that [`Self::mint`] and [`Self::renew`] return; afterwards the only question
+/// anyone may ask is [`Self::verdict`] (or its [`Self::accepts`] shorthand).
+/// That is what makes this a single authority rather than a struct with a policy
+/// bolted beside it: no call site can spell a plaintext `==` against the secret,
+/// and none can forget the expiry conjunct.
 ///
 /// **The expiry boundary is EXCLUSIVE.** [`Self::accepts`] is `true` while
 /// `now_ms < expires_at_ms` and `false` at `now_ms == expires_at_ms`: the
 /// instant named by `expires_at_ms` is the first instant the credential is
 /// refused, not the last it is accepted.
+///
+/// **Only the current secret authorizes.** [`Self::verdict`] accepts the current
+/// secret alone. A superseded secret is NOT accepted for actions; its sole
+/// remaining power is to REPLAY the one rotation it fed, via [`Self::renew`] with
+/// the matching nonce — see [`RotationRecord`]. That is what makes a lost-reply
+/// recovery safe: it can never become a fresh authority.
 #[derive(Debug, Clone, Eq, Serialize, Deserialize)]
 pub struct TournamentCredential {
     secret: String,
     expires_at_ms: u64,
+    /// The last rotation's record, enabling idempotent replay of a lost renewal
+    /// reply. `None` until the first [`Self::renew`] rotation; overwritten by
+    /// each subsequent one (only the most recent rotation is replayable).
+    last_rotation: Option<RotationRecord>,
 }
 
 impl TournamentCredential {
@@ -174,12 +242,116 @@ impl TournamentCredential {
             Self {
                 secret: secret.clone(),
                 expires_at_ms,
+                last_rotation: None,
             },
             MintedCredential {
                 secret,
                 expires_at_ms,
             },
         )
+    }
+
+    /// Renew the credential, either MINTING a fresh secret (when `presented` is
+    /// the live current secret) or idempotently REPLAYING the last rotation (when
+    /// `presented` is the secret that rotation superseded and `nonce` matches it).
+    ///
+    /// The two paths are what make a lost renewal reply recoverable WITHOUT
+    /// letting a superseded secret become a fresh authority:
+    ///
+    /// - **Mint** — `presented` is the current secret and not expired. A new
+    ///   secret is minted, the outgoing secret is recorded in [`RotationRecord`]
+    ///   beside `nonce`, and the credential advances. Returns
+    ///   [`RenewOutcome::Minted`]. This is the only path that changes the
+    ///   authority, and it requires the CURRENT secret.
+    /// - **Replay** — `presented` matches the recorded superseded secret AND
+    ///   `nonce` matches the recorded nonce. The already-committed current secret
+    ///   is returned unchanged ([`RenewOutcome::Replayed`]); nothing is minted and
+    ///   the authority does not move. This is the retry a client runs when its
+    ///   first rotation's reply was lost: same nonce, same (now-superseded) token,
+    ///   same secret back.
+    /// - Anything else — a superseded secret with a wrong/absent nonce, an
+    ///   unrelated secret, or an expired credential — mints nothing and returns
+    ///   [`RenewOutcome::Mismatch`]/[`RenewOutcome::Expired`]. A merely-stolen
+    ///   superseded secret therefore can neither mint nor receive a credential.
+    ///
+    /// Both secret and nonce are compared in constant time.
+    pub fn renew(&mut self, presented: &str, nonce: &str, env: &impl BrokerEnv) -> RenewOutcome {
+        let now_ms = env.now_ms();
+        match self.renew_kind(presented, nonce, now_ms) {
+            // Mint path: only the live current secret rotates the authority.
+            RenewKind::Mintable => {
+                let secret = env.new_token();
+                let expires_at_ms = now_ms + TOURNAMENT_CREDENTIAL_TTL_MS;
+                let superseded = std::mem::replace(&mut self.secret, secret.clone());
+                self.expires_at_ms = expires_at_ms;
+                // Only a NON-EMPTY nonce yields a replayable record. An empty
+                // nonce (an omitted/`#[serde(default)]` field, or a nonce-less
+                // client) mints but records nothing — otherwise the record would
+                // be `(superseded, "")` and anyone holding the superseded secret
+                // could recover the new one by omitting the nonce, which is the
+                // very takeover the nonce exists to prevent. A prior record is
+                // cleared so a superseded secret cannot replay across this mint.
+                self.last_rotation = if nonce.is_empty() {
+                    None
+                } else {
+                    Some(RotationRecord {
+                        superseded_secret: superseded,
+                        nonce: nonce.to_owned(),
+                    })
+                };
+                RenewOutcome::Minted(MintedCredential {
+                    secret,
+                    expires_at_ms,
+                })
+            }
+            // Replay path: the superseded input to the last rotation, with its
+            // nonce, recovers the already-committed current secret. No mint, no
+            // advance — the returned secret IS the current one.
+            RenewKind::Replayable => RenewOutcome::Replayed(MintedCredential {
+                secret: self.secret.clone(),
+                expires_at_ms: self.expires_at_ms,
+            }),
+            RenewKind::Expired => RenewOutcome::Expired,
+            RenewKind::Mismatch => RenewOutcome::Mismatch,
+        }
+    }
+
+    /// Read-only classification of what [`Self::renew`] would do for
+    /// `(presented, nonce)` at `now_ms`, WITHOUT minting or mutating.
+    ///
+    /// Its reason for existing is the player-credential scan in
+    /// [`TournamentManager::renew_credential`]: resolving which entrant owns a
+    /// presented token needs a read-only probe before taking the `&mut` borrow to
+    /// actually renew, and — critically — a REPLAY presents a superseded secret,
+    /// which [`Self::verdict`] reports as [`CredentialVerdict::Mismatch`], so the
+    /// scan cannot use `verdict` alone or it would fail to attribute a lost-reply
+    /// retry to its owner. Both secret and nonce are compared in constant time.
+    pub fn renew_kind(&self, presented: &str, nonce: &str, now_ms: u64) -> RenewKind {
+        match self.verdict(presented, now_ms) {
+            CredentialVerdict::Accepted => return RenewKind::Mintable,
+            CredentialVerdict::Expired => return RenewKind::Expired,
+            // Not the current secret — consider the replay record.
+            CredentialVerdict::Mismatch => {}
+        }
+        // An empty nonce never replays. A non-empty-nonce mint is the only thing
+        // that records a replay record (see `renew`), so `record.nonce` is always
+        // non-empty; this guard is the belt-and-suspenders half that makes the
+        // "empty nonce cannot recover a bearer" invariant hold at BOTH the record
+        // and the match, independent of how the record was written.
+        if !nonce.is_empty() {
+            if let Some(record) = &self.last_rotation {
+                if constant_time_eq(record.superseded_secret.as_bytes(), presented.as_bytes())
+                    && constant_time_eq(record.nonce.as_bytes(), nonce.as_bytes())
+                {
+                    return if now_ms >= self.expires_at_ms {
+                        RenewKind::Expired
+                    } else {
+                        RenewKind::Replayable
+                    };
+                }
+            }
+        }
+        RenewKind::Mismatch
     }
 
     /// Compare `presented` against the stored secret and the expiry, in that
@@ -202,6 +374,9 @@ impl TournamentCredential {
         if self.secret.is_empty() || presented.is_empty() {
             return CredentialVerdict::Mismatch;
         }
+        // Only the CURRENT secret authorizes. A superseded secret is never
+        // accepted here — its sole residual power is an idempotent replay through
+        // [`Self::renew`] with the matching nonce, which mints nothing.
         if !constant_time_eq(self.secret.as_bytes(), presented.as_bytes()) {
             return CredentialVerdict::Mismatch;
         }
@@ -233,6 +408,7 @@ impl TournamentCredential {
         Self {
             secret: secret.into(),
             expires_at_ms,
+            last_rotation: None,
         }
     }
 }
@@ -246,6 +422,8 @@ impl TournamentCredential {
 /// so the derive would exist whether or not anyone meant it to.
 impl PartialEq for TournamentCredential {
     fn eq(&self, other: &Self) -> bool {
+        // Equality is over the current secret and its expiry — a credential's
+        // identity — not the transient replay record beside it.
         self.expires_at_ms == other.expires_at_ms
             && constant_time_eq(self.secret.as_bytes(), other.secret.as_bytes())
     }
@@ -723,6 +901,20 @@ pub struct TournamentPlayer {
     pub dropped: bool,
 }
 
+/// The match structure an event runs at a given arity when the organizer names
+/// none. Head-to-head defaults to best-of-three (MTR §2.1); pods default to
+/// best-of-one, because MSTR pods are single-game — and [`MatchType::Bo3`] is
+/// inherently 2-player besides. An organizer may override head-to-head to
+/// [`MatchType::Bo1`] (e.g. a single-game single-elimination event), but a `Bo3`
+/// override at any other arity is rejected at create time.
+pub fn default_match_type(arity: MatchArity) -> MatchType {
+    if arity == MatchArity::HEAD_TO_HEAD {
+        MatchType::Bo3
+    } else {
+        MatchType::Bo1
+    }
+}
+
 /// Fields a caller supplies when creating a tournament. A request struct
 /// rather than a long positional argument list, matching
 /// [`crate::lobby::RegisterGameRequest`]'s precedent in this crate.
@@ -749,6 +941,10 @@ pub struct CreateTournamentRequest {
     /// enforces no deck legality and never touches `GameState`). `None` names
     /// no format.
     pub format: Option<GameFormat>,
+    /// The match structure (Bo1 / Bo3). `None` resolves to
+    /// [`default_match_type`] for the arity. An explicit `Bo3` at an arity other
+    /// than head-to-head is rejected before this request is built.
+    pub match_type: Option<MatchType>,
 }
 
 /// One tournament's durable record.
@@ -800,6 +996,12 @@ pub struct TournamentMeta {
     /// Display metadata only: the tournament enforces no deck legality and
     /// never touches `GameState`. Surfaced on [`crate::protocol::TournamentSummary::format`].
     pub format: Option<GameFormat>,
+    /// The RESOLVED match structure (Bo1 / Bo3) — the organizer's choice or the
+    /// arity default ([`default_match_type`]), fixed at creation. Governs the
+    /// reported outcome shape in [`validate_match_result`] (Bo1 ⇒ single winner,
+    /// empty `game_wins`; Bo3 ⇒ the completed 2-of-3 tally). Bo3 only ever holds
+    /// at head-to-head. Surfaced on [`crate::protocol::TournamentSummary::match_type`].
+    pub match_type: MatchType,
     pub current_round: u32,
     pub status: TournamentStatus,
     pub players: Vec<TournamentPlayer>,
@@ -1179,7 +1381,18 @@ fn player_records(meta: &TournamentMeta) -> HashMap<String, PlayerRecord> {
                     } else {
                         scoring.loss_points()
                     });
-                    if !game_wins.is_empty() {
+                    if game_wins.is_empty() {
+                        // MTR §3.1: a single-game result (a Bo1 event or a pod —
+                        // both validated to carry an empty `game_wins`) is still
+                        // one played game. Record it as 1-0 for the winner and
+                        // 0-1 for every other seated player, so the winner earns
+                        // a real game-win percentage instead of collapsing to the
+                        // `1 / win_points` floor the way an unplayed record does.
+                        record.games_played += 1;
+                        if winner == key {
+                            record.game_wins += 1;
+                        }
+                    } else {
                         record.game_wins += u32::from(game_wins.get(key).copied().unwrap_or(0));
                         record.games_played +=
                             game_wins.values().map(|w| u32::from(*w)).sum::<u32>();
@@ -1318,10 +1531,18 @@ impl TournamentMeta {
 /// targets. [`PairingOutcome::Bye`] and [`PairingOutcome::Forfeit`] are
 /// server-assigned and never reach this function: the reporting path only ever
 /// carries a [`PodOutcome`].
+///
+/// This owns the outcome-SHAPE rules (winner membership, dropped-player guard,
+/// and the per-`MatchType` game-win tally). The orthogonal bracket-advancement
+/// rule — a single-elimination pairing may not be reported as a draw, because
+/// [`TournamentPairing::winner`] is `None` for a draw and the bracket could not
+/// advance — is enforced by the caller [`TournamentManager::report_result`],
+/// which is the layer that knows the event's [`BracketShape`].
 pub fn validate_match_result(
     pairing: &TournamentPairing,
     result: &PodOutcome,
     players: &[TournamentPlayer],
+    match_type: MatchType,
 ) -> Result<(), String> {
     match result {
         // MSTR: all seated players draw together.
@@ -1339,35 +1560,54 @@ pub fn validate_match_result(
                     "Winner {winner} has dropped and cannot be credited a win"
                 ));
             }
-            if pairing.players.len() == 2 {
-                // HEAD_TO_HEAD: require exactly the two participant keys with
-                // a legal completed-Bo3 tally. An empty or single-key map is a
-                // hard rejection, not a silently-skipped check.
-                let (a, b) = (&pairing.players[0], &pairing.players[1]);
-                if game_wins.len() != 2 || !game_wins.contains_key(a) || !game_wins.contains_key(b)
-                {
-                    return Err(
-                        "Head-to-head result must report game wins for exactly both players"
-                            .to_string(),
-                    );
+            // The expected outcome shape is keyed on the event's match type, not
+            // on arity: a `Bo1` head-to-head event reports a single game exactly
+            // like a pod does, and `Bo3` only ever holds at head-to-head (pods
+            // are single-game per MSTR; `Bo3` is inherently 2-player, and an
+            // explicit `Bo3` at a larger arity is rejected at create time).
+            match match_type {
+                MatchType::Bo3 => {
+                    // Require exactly the two participant keys with a legal
+                    // completed-Bo3 tally. Bo3 implies head-to-head; a non-pair
+                    // pairing here is a caller error, not a silently-skipped check.
+                    if pairing.players.len() != 2 {
+                        return Err(
+                            "Best-of-three is head-to-head only; a pod match is single-game"
+                                .to_string(),
+                        );
+                    }
+                    let (a, b) = (&pairing.players[0], &pairing.players[1]);
+                    if game_wins.len() != 2
+                        || !game_wins.contains_key(a)
+                        || !game_wins.contains_key(b)
+                    {
+                        return Err(
+                            "Head-to-head Bo3 result must report game wins for exactly both players"
+                                .to_string(),
+                        );
+                    }
+                    let (wa, wb) = (game_wins[a], game_wins[b]);
+                    // Legal completed best-of-three tallies only: someone reaches
+                    // 2, the other has 0 or 1. Rejects 0-0/1-0 (unfinished), 2-2,
+                    // 3-anything.
+                    if !matches!((wa, wb), (2, 0) | (2, 1) | (0, 2) | (1, 2)) {
+                        return Err(format!("Illegal Bo3 game-win tally {wa}-{wb}"));
+                    }
+                    let expected = if wa > wb { a } else { b };
+                    if winner != expected {
+                        return Err("Winner must match the player with more game wins".to_string());
+                    }
                 }
-                let (wa, wb) = (game_wins[a], game_wins[b]);
-                // Legal completed best-of-three tallies only: someone reaches
-                // 2, the other has 0 or 1. Rejects 0-0/1-0 (unfinished), 2-2,
-                // 3-anything.
-                if !matches!((wa, wb), (2, 0) | (2, 1) | (0, 2) | (1, 2)) {
-                    return Err(format!("Illegal Bo3 game-win tally {wa}-{wb}"));
+                MatchType::Bo1 => {
+                    // A single game — every pod, and a head-to-head Bo1 event.
+                    // One winner, no per-game tally to report.
+                    if !game_wins.is_empty() {
+                        return Err(
+                            "Single-game result (Bo1 / pod) carries no game_wins - it must be empty"
+                                .to_string(),
+                        );
+                    }
                 }
-                let expected = if wa > wb { a } else { b };
-                if winner != expected {
-                    return Err("Winner must match the player with more game wins".to_string());
-                }
-            } else if !game_wins.is_empty() {
-                // Pod (arity > 2): MSTR pods are single-game, so a client
-                // attaching game-win data has no value for it to mean.
-                return Err(
-                    "Pod results are single-game per MSTR - game_wins must be empty".to_string(),
-                );
             }
             Ok(())
         }
@@ -1878,6 +2118,20 @@ impl TournamentManager {
         if req.total_rounds == Some(0) {
             return Err("total_rounds override must be at least 1".to_string());
         }
+        // CR: best-of-three is inherently 2-player; MSTR pods are single-game.
+        // An explicit Bo3 at any arity other than head-to-head is a contradiction
+        // the organizer cannot see the outcome of, rejected at the boundary like
+        // the single-elimination gate above. `None` and `Bo1` are fine at every
+        // arity; the resolve below fills a `None`.
+        if req.match_type == Some(MatchType::Bo3) && req.arity != MatchArity::HEAD_TO_HEAD {
+            return Err(format!(
+                "Best-of-three is head-to-head only (pods are single-game); got arity {}",
+                req.arity.get()
+            ));
+        }
+        let match_type = req
+            .match_type
+            .unwrap_or_else(|| default_match_type(req.arity));
         let now = env.now_ms() / 1000;
         let (organizer_token, minted) = TournamentCredential::mint(env);
         self.tournaments.insert(
@@ -1895,6 +2149,7 @@ impl TournamentManager {
                 resolved_total_rounds: None,
                 plus_rounds: req.plus_rounds,
                 format: req.format,
+                match_type,
                 current_round: 0,
                 status: TournamentStatus::Registration,
                 players: Vec::new(),
@@ -1939,15 +2194,19 @@ impl TournamentManager {
         Ok(minted)
     }
 
-    /// Rotate one credential: refuse `presented` unless it is currently
-    /// accepted, then replace it with a freshly minted secret and return that.
+    /// Renew one credential: either MINT a fresh secret from the presented
+    /// current one, or idempotently REPLAY the last rotation when `presented` is
+    /// that rotation's superseded secret and `nonce` matches. Delegates the
+    /// decision to [`TournamentCredential::renew`] / [`TournamentCredential::renew_kind`].
     ///
-    /// **Rotation, not extension.** Re-minting the secret bounds a stolen
-    /// credential even against a thief who keeps renewing, because the
-    /// legitimate holder's next renewal locks the thief out — and vice versa,
-    /// which turns silent indefinite shared access into a detectable,
-    /// reportable failure. Extending the expiry in place would give a thief
-    /// exactly the indefinite access this whole mechanism exists to bound.
+    /// **Recoverable, but never a takeover.** A minting rotation requires the
+    /// live CURRENT secret; presenting a superseded secret can only replay the
+    /// one rotation it fed (returning the already-committed current secret,
+    /// minting nothing) and only with that rotation's nonce. So a lost renewal
+    /// reply is recovered by the client retrying with the same token+nonce, while
+    /// a holder of a merely-stolen superseded secret can neither mint a new
+    /// credential nor obtain the current one — the legitimate holder's authority
+    /// stays put. The client mints `nonce`; see the client renew path.
     ///
     /// `role` is the [`TournamentRole`] axis rather than two sibling methods,
     /// per "parameterize, don't proliferate".
@@ -1972,43 +2231,33 @@ impl TournamentManager {
         code: &str,
         role: TournamentRole,
         presented: &str,
+        nonce: &str,
         env: &impl BrokerEnv,
     ) -> Result<MintedCredential, String> {
         let now_ms = env.now_ms();
-        let (credential, minted) = TournamentCredential::mint(env);
         let meta = self.meta_mut(code)?;
-        match role {
-            TournamentRole::Organizer => {
-                match meta.organizer_token.verdict(presented, now_ms) {
-                    CredentialVerdict::Accepted => {}
-                    CredentialVerdict::Expired => {
-                        return Err(format!(
-                            "Organizer credential for tournament {code} has expired and can no longer be renewed"
-                        ))
-                    }
-                    CredentialVerdict::Mismatch => {
-                        return Err(format!("Invalid organizer token for tournament {code}"))
-                    }
-                }
-                meta.organizer_token = credential;
-            }
+        let outcome = match role {
+            TournamentRole::Organizer => meta.organizer_token.renew(presented, nonce, env),
             TournamentRole::Player => {
-                // The scan resolves the token to its owner rather than merely
-                // testing it, exactly as the broker's player authority does:
-                // "some valid token exists" is the check that would let one
-                // entrant rotate another's credential.
+                // Resolve which entrant owns the presented token BEFORE taking the
+                // &mut borrow to renew it. The probe recognises both a current
+                // secret (a fresh rotation) and a superseded-secret + nonce pair
+                // (a lost-reply replay), so a retry is attributed to its owner
+                // rather than read as a mismatch. Resolving to an owner — not just
+                // "some valid token exists" — is what stops one entrant renewing
+                // another's credential.
                 let mut expired = false;
-                let player = meta.players.iter_mut().find(|p| {
-                    match p.player_token.verdict(presented, now_ms) {
-                        CredentialVerdict::Accepted => true,
-                        CredentialVerdict::Expired => {
+                let idx = meta.players.iter().position(|p| {
+                    match p.player_token.renew_kind(presented, nonce, now_ms) {
+                        RenewKind::Mintable | RenewKind::Replayable => true,
+                        RenewKind::Expired => {
                             expired = true;
                             false
                         }
-                        CredentialVerdict::Mismatch => false,
+                        RenewKind::Mismatch => false,
                     }
                 });
-                let Some(player) = player else {
+                let Some(idx) = idx else {
                     return Err(if expired {
                         format!(
                             "Player credential for tournament {code} has expired and can no longer be renewed"
@@ -2017,13 +2266,29 @@ impl TournamentManager {
                         format!("Invalid player token for tournament {code}")
                     });
                 };
-                if player.dropped {
+                if meta.players[idx].dropped {
                     return Err(format!("Player has dropped from tournament {code}"));
                 }
-                player.player_token = credential;
+                meta.players[idx].player_token.renew(presented, nonce, env)
             }
+        };
+        match outcome {
+            RenewOutcome::Minted(minted) | RenewOutcome::Replayed(minted) => Ok(minted),
+            RenewOutcome::Expired => Err(match role {
+                TournamentRole::Organizer => format!(
+                    "Organizer credential for tournament {code} has expired and can no longer be renewed"
+                ),
+                TournamentRole::Player => format!(
+                    "Player credential for tournament {code} has expired and can no longer be renewed"
+                ),
+            }),
+            RenewOutcome::Mismatch => Err(match role {
+                TournamentRole::Organizer => {
+                    format!("Invalid organizer token for tournament {code}")
+                }
+                TournamentRole::Player => format!("Invalid player token for tournament {code}"),
+            }),
         }
-        Ok(minted)
     }
 
     /// Generates the next round's pairings and returns their ids.
@@ -2212,7 +2477,26 @@ impl TournamentManager {
                 ))
             }
         }
-        validate_match_result(&meta.pairings[index], &outcome, &meta.players)?;
+        validate_match_result(
+            &meta.pairings[index],
+            &outcome,
+            &meta.players,
+            meta.match_type,
+        )?;
+        // A single-elimination bracket advances by seeding the next round from
+        // this round's winners, and `TournamentPairing::winner()` is `None` for
+        // a draw — so a drawn elimination pairing would resolve with no one to
+        // advance, stalling the bracket. MTR single-elimination matches are
+        // always played to a winner, so reject a draw here rather than accept a
+        // result the bracket cannot use. Swiss and pods keep draws (a Swiss draw
+        // is a legal 1-point-each result; `validate_match_result` owns the
+        // outcome-shape rules, this owns the bracket-advancement rule).
+        if meta.bracket == BracketShape::SingleElimination && matches!(outcome, PodOutcome::Draw) {
+            return Err(format!(
+                "Pairing {pairing_id} is in a single-elimination bracket and cannot be reported \
+                 as a draw - it must produce a winner to advance"
+            ));
+        }
         meta.pairings[index].outcome = Some(PairingOutcome::Reported(outcome));
         meta.last_activity_at = now;
         Ok(())
@@ -2478,6 +2762,7 @@ mod tests {
                 total_rounds: None,
                 plus_rounds: None,
                 format: None,
+                match_type: None,
             },
             env,
         )
@@ -2516,6 +2801,7 @@ mod tests {
                 total_rounds: Some(total_rounds),
                 plus_rounds: None,
                 format: None,
+                match_type: None,
             },
             env,
         )
@@ -2769,6 +3055,7 @@ mod tests {
                     total_rounds: Some(4),
                     plus_rounds: None,
                     format: None,
+                    match_type: None,
                 },
                 &env,
             )
@@ -2809,6 +3096,7 @@ mod tests {
                     total_rounds: None,
                     plus_rounds: None,
                     format: None,
+                    match_type: None,
                 },
                 &env,
             )
@@ -2845,6 +3133,7 @@ mod tests {
                 total_rounds: None,
                 plus_rounds: None,
                 format: None,
+                match_type: None,
             };
             assert!(
                 mgr.create_tournament(&format!("SE{seats}"), request, &env)
@@ -2864,6 +3153,7 @@ mod tests {
                     total_rounds: None,
                     plus_rounds: None,
                     format: None,
+                    match_type: None,
                 },
                 &env,
             )
@@ -2879,6 +3169,7 @@ mod tests {
                     total_rounds: None,
                     plus_rounds: None,
                     format: None,
+                    match_type: None,
                 },
                 &env,
             )
@@ -3449,46 +3740,86 @@ mod tests {
 
         // Illegal shapes.
         assert!(
-            validate_match_result(&pairing, &decisive("a", HashMap::new()), &players).is_err(),
+            validate_match_result(
+                &pairing,
+                &decisive("a", HashMap::new()),
+                &players,
+                MatchType::Bo3
+            )
+            .is_err(),
             "empty game_wins must be rejected"
         );
         assert!(validate_match_result(
             &pairing,
             &decisive("a", HashMap::from([("a".to_string(), 2u8)])),
-            &players
+            &players,
+            MatchType::Bo3,
         )
         .is_err());
-        assert!(
-            validate_match_result(&pairing, &decisive("a", bo3("a", 1, "b", 0)), &players).is_err()
-        );
-        assert!(
-            validate_match_result(&pairing, &decisive("a", bo3("a", 0, "b", 0)), &players).is_err()
-        );
-        assert!(
-            validate_match_result(&pairing, &decisive("a", bo3("a", 2, "b", 2)), &players).is_err()
-        );
-        assert!(
-            validate_match_result(&pairing, &decisive("a", bo3("a", 3, "b", 0)), &players).is_err()
-        );
+        assert!(validate_match_result(
+            &pairing,
+            &decisive("a", bo3("a", 1, "b", 0)),
+            &players,
+            MatchType::Bo3
+        )
+        .is_err());
+        assert!(validate_match_result(
+            &pairing,
+            &decisive("a", bo3("a", 0, "b", 0)),
+            &players,
+            MatchType::Bo3
+        )
+        .is_err());
+        assert!(validate_match_result(
+            &pairing,
+            &decisive("a", bo3("a", 2, "b", 2)),
+            &players,
+            MatchType::Bo3
+        )
+        .is_err());
+        assert!(validate_match_result(
+            &pairing,
+            &decisive("a", bo3("a", 3, "b", 0)),
+            &players,
+            MatchType::Bo3
+        )
+        .is_err());
         // Right tally, wrong winner named.
-        assert!(
-            validate_match_result(&pairing, &decisive("b", bo3("a", 2, "b", 1)), &players).is_err()
-        );
+        assert!(validate_match_result(
+            &pairing,
+            &decisive("b", bo3("a", 2, "b", 1)),
+            &players,
+            MatchType::Bo3
+        )
+        .is_err());
         // A key that is not in the pairing at all.
-        assert!(
-            validate_match_result(&pairing, &decisive("c", bo3("a", 2, "b", 0)), &players).is_err()
-        );
-        assert!(
-            validate_match_result(&pairing, &decisive("a", bo3("a", 2, "c", 0)), &players).is_err()
-        );
+        assert!(validate_match_result(
+            &pairing,
+            &decisive("c", bo3("a", 2, "b", 0)),
+            &players,
+            MatchType::Bo3
+        )
+        .is_err());
+        assert!(validate_match_result(
+            &pairing,
+            &decisive("a", bo3("a", 2, "c", 0)),
+            &players,
+            MatchType::Bo3
+        )
+        .is_err());
 
         // The four legal completed tallies, with the correct winner.
         for (wa, wb, winner) in [(2u8, 0u8, "a"), (2, 1, "a"), (0, 2, "b"), (1, 2, "b")] {
-            validate_match_result(&pairing, &decisive(winner, bo3("a", wa, "b", wb)), &players)
-                .unwrap_or_else(|e| panic!("{wa}-{wb} to {winner} must validate: {e}"));
+            validate_match_result(
+                &pairing,
+                &decisive(winner, bo3("a", wa, "b", wb)),
+                &players,
+                MatchType::Bo3,
+            )
+            .unwrap_or_else(|e| panic!("{wa}-{wb} to {winner} must validate: {e}"));
         }
         // A draw never carries game wins and is always legal.
-        validate_match_result(&pairing, &PodOutcome::Draw, &players).expect("draw");
+        validate_match_result(&pairing, &PodOutcome::Draw, &players, MatchType::Bo3).expect("draw");
     }
 
     #[test]
@@ -3509,6 +3840,7 @@ mod tests {
                 game_wins: HashMap::new(),
             },
             &players,
+            MatchType::Bo1,
         )
         .expect("pod decisive with no game wins");
 
@@ -3519,8 +3851,55 @@ mod tests {
                 game_wins: HashMap::from([("c".to_string(), 1u8)]),
             },
             &players,
+            MatchType::Bo1,
         )
         .is_err());
+    }
+
+    #[test]
+    fn bo1_result_rejects_a_winner_outside_the_pairing() {
+        // The `pairing.players.contains(winner)` guard at the top of `Decisive`
+        // runs before the match-type branch, so a single-game (Bo1 / pod)
+        // result naming a player who never sat in the pairing is rejected
+        // exactly like a Bo3 one. There is no match-type-specific bypass: the
+        // Bo1 arm only checks the game-win tally, never re-opening membership.
+        let outsider = "z".to_string();
+        let empty = || PodOutcome::Decisive {
+            winner: outsider.clone(),
+            game_wins: HashMap::new(),
+        };
+
+        // Head-to-head Bo1.
+        let duel = head_to_head_pairing("a", "b");
+        let duel_players = undropped(&["a", "b", "z"]);
+        assert!(
+            validate_match_result(&duel, &empty(), &duel_players, MatchType::Bo1).is_err(),
+            "an outsider cannot be recorded as the Bo1 head-to-head winner"
+        );
+        // A seated member is still accepted at the same shape.
+        validate_match_result(
+            &duel,
+            &PodOutcome::Decisive {
+                winner: "a".to_string(),
+                game_wins: HashMap::new(),
+            },
+            &duel_players,
+            MatchType::Bo1,
+        )
+        .expect("a seated member is a valid Bo1 winner");
+
+        // Pod (also single-game, so also MatchType::Bo1).
+        let pod = TournamentPairing {
+            id: 0,
+            round: 1,
+            players: vec!["a".into(), "b".into(), "c".into(), "d".into()],
+            outcome: None,
+        };
+        let pod_players = undropped(&["a", "b", "c", "d", "z"]);
+        assert!(
+            validate_match_result(&pod, &empty(), &pod_players, MatchType::Bo1).is_err(),
+            "an outsider cannot be recorded as the single-game pod winner"
+        );
     }
 
     #[test]
@@ -3539,6 +3918,7 @@ mod tests {
                 game_wins: bo3("a", 2, "b", 0),
             },
             &players,
+            MatchType::Bo3,
         )
         .is_err());
         // The player who did not drop can still be credited.
@@ -3549,6 +3929,7 @@ mod tests {
                 game_wins: bo3("a", 0, "b", 2),
             },
             &players,
+            MatchType::Bo3,
         )
         .expect("undropped winner");
     }
@@ -3722,6 +4103,67 @@ mod tests {
         assert!(rows[0].match_points >= rows[3].match_points);
     }
 
+    #[test]
+    fn bo1_head_to_head_counts_the_single_game_in_game_win_percentage() {
+        // Regression (MTR §3.1): a Bo1 decisive result carries an empty
+        // `game_wins`, but the one game that was played still counts. Before the
+        // fix both players fell to the `1 / win_points` floor because
+        // `games_played` stayed 0; now the winner is 1-0 (100%) and the loser
+        // 0-1 (0%, floored). This is the single-game single-elimination path.
+        let env = FakeEnv::new();
+        let mut mgr = TournamentManager::new();
+        mgr.create_tournament(
+            "T",
+            CreateTournamentRequest {
+                name: "Single-Game Duel".to_string(),
+                arity: MatchArity::HEAD_TO_HEAD,
+                scoring: ScoringPolicy::default_for_arity(MatchArity::HEAD_TO_HEAD),
+                bracket: BracketShape::SingleElimination,
+                total_rounds: None,
+                plus_rounds: None,
+                format: None,
+                match_type: Some(MatchType::Bo1),
+            },
+            &env,
+        )
+        .expect("create Bo1 head-to-head");
+        join_n(&mut mgr, "T", 2, &env);
+        mgr.generate_pairings("T", &env).expect("round 1");
+
+        let pairing = mgr.get("T").expect("t").pairings[0].clone();
+        let (winner, loser) = (pairing.players[0].clone(), pairing.players[1].clone());
+        // A single-game report: no per-game tally, exactly as the Bo1 wire shape.
+        mgr.report_result(
+            "T",
+            pairing.id,
+            PodOutcome::Decisive {
+                winner: winner.clone(),
+                game_wins: HashMap::new(),
+            },
+            &env,
+        )
+        .expect("single-game report");
+
+        let rows = mgr.get("T").expect("t").standings();
+        let gwp = |player: &str| match standing_of(&rows, player).tiebreaks {
+            Tiebreaks::HeadToHead { game_win_pct, .. } => game_win_pct,
+            Tiebreaks::Multiplayer { .. } => panic!("head-to-head must select the MTR order"),
+        };
+        let floor = 1.0 / 3.0;
+        assert!(
+            (gwp(&winner) - 1.0).abs() < 1e-12,
+            "the Bo1 winner won the only game played"
+        );
+        assert!(
+            (gwp(&loser) - floor).abs() < 1e-12,
+            "the Bo1 loser is 0-1, floored — not the same value as the winner"
+        );
+        assert!(
+            gwp(&winner) > gwp(&loser),
+            "the winner must outrank the loser on game-win percentage"
+        );
+    }
+
     // -- single elimination ----------------------------------------------------
 
     #[test]
@@ -3792,6 +4234,77 @@ mod tests {
         );
         join_n(&mut solo, "SE1", SINGLE_ELIMINATION_MIN_PLAYERS - 1, &env);
         assert!(solo.generate_pairings("SE1", &env).is_err());
+    }
+
+    #[test]
+    fn single_elimination_rejects_a_draw_and_advances_the_reported_winner() {
+        // A draw has no winner (`TournamentPairing::winner()` is `None`), so a
+        // single-elimination bracket could never seed the next round from it.
+        // The draw report is refused and the pairing stays unresolved; a
+        // decisive report is accepted and advances the winner to round 2.
+        let env = FakeEnv::new();
+        let mut mgr = TournamentManager::new();
+        create(
+            &mut mgr,
+            "SE",
+            MatchArity::HEAD_TO_HEAD,
+            BracketShape::SingleElimination,
+            &env,
+        );
+        join_n(&mut mgr, "SE", 4, &env);
+        mgr.generate_pairings("SE", &env).expect("round 1");
+
+        let round_one: Vec<(PairingId, Vec<String>)> = mgr
+            .get("SE")
+            .expect("t")
+            .pairings
+            .iter()
+            .map(|p| (p.id, p.players.clone()))
+            .collect();
+        assert_eq!(round_one.len(), 2);
+
+        // A draw is refused for a single-elimination pairing, and the pairing is
+        // left unresolved so nothing can advance from it.
+        let first_id = round_one[0].0;
+        let err = mgr
+            .report_result("SE", first_id, PodOutcome::Draw, &env)
+            .expect_err("single-elimination cannot accept a draw");
+        assert!(err.contains("single-elimination"), "{err}");
+        assert!(mgr
+            .get("SE")
+            .expect("t")
+            .pairing(first_id)
+            .expect("p")
+            .outcome
+            .is_none());
+
+        // A decisive result is accepted; round 2 is seeded from the winners.
+        for (id, seats) in &round_one {
+            mgr.report_result(
+                "SE",
+                *id,
+                PodOutcome::Decisive {
+                    winner: seats[0].clone(),
+                    game_wins: bo3(&seats[0], 2, &seats[1], 0),
+                },
+                &env,
+            )
+            .expect("decisive report advances the bracket");
+        }
+        mgr.generate_pairings("SE", &env).expect("round 2");
+        let round_two: Vec<Vec<String>> = mgr
+            .get("SE")
+            .expect("t")
+            .pairings
+            .iter()
+            .filter(|p| p.round == 2)
+            .map(|p| p.players.clone())
+            .collect();
+        assert_eq!(
+            round_two,
+            vec![vec![round_one[0].1[0].clone(), round_one[1].1[0].clone()]],
+            "the two round-1 winners meet in round 2"
+        );
     }
 
     /// A 5/6/7-player single-elimination field — squarely inside MTR
@@ -4313,6 +4826,7 @@ mod tests {
                 total_rounds: None,
                 plus_rounds: Some(2),
                 format: None,
+                match_type: None,
             },
             &env,
         )
@@ -4352,6 +4866,7 @@ mod tests {
                 total_rounds: None,
                 plus_rounds: None,
                 format: Some(GameFormat::Commander),
+                match_type: None,
             },
             &env,
         )
@@ -4365,6 +4880,114 @@ mod tests {
             Some(GameFormat::Commander),
             "the From<&TournamentMeta> projection carries the label"
         );
+    }
+
+    #[test]
+    fn default_match_type_is_bo3_head_to_head_and_bo1_for_pods() {
+        assert_eq!(default_match_type(MatchArity::HEAD_TO_HEAD), MatchType::Bo3);
+        assert_eq!(
+            default_match_type(MatchArity::COMMANDER_POD),
+            MatchType::Bo1
+        );
+        assert_eq!(default_match_type(arity(8)), MatchType::Bo1);
+    }
+
+    /// The single-game path: a 2-player Bo1 match reports one winner and an
+    /// EMPTY `game_wins`, exactly like a pod — no completed-Bo3 tally required,
+    /// and a tally is rejected. This is what lets a single-game single-elim run.
+    #[test]
+    fn bo1_head_to_head_validates_a_single_game_result() {
+        let pairing = head_to_head_pairing("a", "b");
+        let players = undropped(&["a", "b"]);
+        validate_match_result(
+            &pairing,
+            &PodOutcome::Decisive {
+                winner: "a".to_string(),
+                game_wins: HashMap::new(),
+            },
+            &players,
+            MatchType::Bo1,
+        )
+        .expect("Bo1 head-to-head single-game result validates");
+        assert!(
+            validate_match_result(
+                &pairing,
+                &PodOutcome::Decisive {
+                    winner: "a".to_string(),
+                    game_wins: bo3("a", 2, "b", 0),
+                },
+                &players,
+                MatchType::Bo1,
+            )
+            .is_err(),
+            "a Bo3 tally is illegal under Bo1"
+        );
+    }
+
+    /// Create-time resolution of `match_type`: omitted resolves to the arity
+    /// default (preserving pre-8 behaviour), an explicit head-to-head Bo1 is
+    /// accepted (single-game single-elimination), and an explicit `Bo3` at pod
+    /// arity is rejected (Bo3 is inherently 2-player).
+    #[test]
+    fn create_resolves_match_type_and_rejects_bo3_at_pod_arity() {
+        let env = FakeEnv::new();
+        let mut mgr = TournamentManager::new();
+
+        let req = |arity: MatchArity, bracket, match_type| CreateTournamentRequest {
+            name: "T".to_string(),
+            arity,
+            scoring: ScoringPolicy::default_for_arity(arity),
+            bracket,
+            total_rounds: None,
+            plus_rounds: None,
+            format: None,
+            match_type,
+        };
+
+        // Omitted → Bo3 head-to-head (unchanged from before this feature).
+        mgr.create_tournament(
+            "HH",
+            req(MatchArity::HEAD_TO_HEAD, BracketShape::Swiss, None),
+            &env,
+        )
+        .expect("hh");
+        assert_eq!(mgr.get("HH").expect("hh").match_type, MatchType::Bo3);
+
+        // Explicit head-to-head Bo1 single-elimination bracket.
+        mgr.create_tournament(
+            "SE",
+            req(
+                MatchArity::HEAD_TO_HEAD,
+                BracketShape::SingleElimination,
+                Some(MatchType::Bo1),
+            ),
+            &env,
+        )
+        .expect("single-game SE");
+        assert_eq!(mgr.get("SE").expect("se").match_type, MatchType::Bo1);
+
+        // Omitted → Bo1 for a pod.
+        mgr.create_tournament(
+            "POD",
+            req(MatchArity::COMMANDER_POD, BracketShape::Swiss, None),
+            &env,
+        )
+        .expect("pod");
+        assert_eq!(mgr.get("POD").expect("pod").match_type, MatchType::Bo1);
+
+        // Explicit Bo3 at pod arity is a hard rejection.
+        let err = mgr
+            .create_tournament(
+                "BAD",
+                req(
+                    MatchArity::COMMANDER_POD,
+                    BracketShape::Swiss,
+                    Some(MatchType::Bo3),
+                ),
+                &env,
+            )
+            .expect_err("Bo3 at pod arity is rejected");
+        assert!(err.contains("head-to-head only"), "{err}");
     }
 
     /// The three resolution tiers, at the one point where they can disagree.
@@ -4668,6 +5291,7 @@ mod tests {
             resolved_total_rounds: Some(3),
             plus_rounds: None,
             format: None,
+            match_type: MatchType::Bo3,
             current_round: 1,
             status,
             players: undropped(&["a", "b"]),
@@ -4963,11 +5587,13 @@ mod tests {
         assert!(!credential.accepts("", env.now_ms()));
     }
 
-    /// V10, hostile. A rotated-away secret is refused afterwards even while it
-    /// is still inside its original TTL — rotation, not expiry, is what
-    /// invalidates it.
+    /// V10. Only the CURRENT secret authorizes an action. A rotated-away secret
+    /// stops being accepted the instant it is superseded — there is no overlap
+    /// window for actions; its sole residual power is an idempotent replay
+    /// through `renew` (covered separately). The freshly minted secret
+    /// authorizes in its place.
     #[test]
-    fn a_rotated_away_secret_is_refused_while_still_inside_its_original_ttl() {
+    fn a_rotated_away_secret_stops_authorizing_immediately() {
         let env = FakeEnv::new();
         let mut mgr = TournamentManager::new();
         let original = mgr
@@ -4981,13 +5607,14 @@ mod tests {
                     total_rounds: None,
                     plus_rounds: None,
                     format: None,
+                    match_type: None,
                 },
                 &env,
             )
             .expect("create");
 
         let rotated = mgr
-            .renew_credential("T", TournamentRole::Organizer, &original.secret, &env)
+            .renew_credential("T", TournamentRole::Organizer, &original.secret, "n1", &env)
             .expect("renew");
 
         let now = env.now_ms();
@@ -4996,16 +5623,22 @@ mod tests {
             "the fixture must still be inside the original TTL, or this proves nothing"
         );
         let stored = &mgr.get("T").expect("event").organizer_token;
-        assert!(
-            !stored.accepts(&original.secret, now),
-            "the presented secret must stop being accepted the instant it is rotated"
+
+        // The superseded secret no longer authorizes — instantly, not after any
+        // window. `verdict` accepts the current secret alone.
+        assert_eq!(
+            stored.verdict(&original.secret, now),
+            CredentialVerdict::Mismatch,
+            "a superseded secret must not authorize an action, even for an instant"
         );
+        // The freshly minted secret authorizes in its place.
         assert!(stored.accepts(&rotated.secret, now));
     }
 
-    /// V11. Renewal ROTATES: the presented secret is refused afterwards and the
-    /// returned one is accepted. Extension in place would leave both live,
-    /// which is exactly the indefinite shared access this mechanism bounds.
+    /// V11. Renewal from the CURRENT secret MINTS a NEW secret whose expiry is
+    /// re-derived from the clock, and that new secret authorizes. An
+    /// *already-expired* credential is refused — renewal recovers a live
+    /// credential, it does not resurrect a dead one.
     #[test]
     fn renewal_rotates_both_roles_and_refuses_an_already_expired_credential() {
         let env = FakeEnv::new();
@@ -5021,6 +5654,7 @@ mod tests {
                     total_rounds: None,
                     plus_rounds: None,
                     format: None,
+                    match_type: None,
                 },
                 &env,
             )
@@ -5037,7 +5671,7 @@ mod tests {
             (TournamentRole::Player, player.secret.clone()),
         ] {
             let fresh = mgr
-                .renew_credential("T", role, &presented, &env)
+                .renew_credential("T", role, &presented, "n1", &env)
                 .expect("renew");
             assert_ne!(fresh.secret, presented, "renewal must mint a NEW secret");
             assert!(
@@ -5046,12 +5680,8 @@ mod tests {
             );
             assert_eq!(fresh.expires_at_ms, now + TOURNAMENT_CREDENTIAL_TTL_MS);
 
-            // The presented secret is dead; only the returned one authorizes.
-            assert!(
-                mgr.renew_credential("T", role, &presented, &env).is_err(),
-                "the rotated-away secret must not renew again"
-            );
-            mgr.renew_credential("T", role, &fresh.secret, &env)
+            // The freshly returned (current) secret authorizes a further renewal.
+            mgr.renew_credential("T", role, &fresh.secret, "n2", &env)
                 .expect("the freshly returned secret still authorizes");
         }
 
@@ -5069,18 +5699,286 @@ mod tests {
                     total_rounds: None,
                     plus_rounds: None,
                     format: None,
+                    match_type: None,
                 },
                 &env,
             )
             .expect("create");
         env.advance_secs(TOURNAMENT_CREDENTIAL_TTL_MS / 1000);
         let err = mgr
-            .renew_credential("U", TournamentRole::Organizer, &stale.secret, &env)
+            .renew_credential("U", TournamentRole::Organizer, &stale.secret, "n1", &env)
             .expect_err("an expired credential cannot be renewed");
         assert!(
             err.contains("expired"),
             "expected the expiry message, got: {err}"
         );
+    }
+
+    /// V11, replay mechanics, at the type level. A mint from the current secret
+    /// records the superseded secret + nonce; presenting that pair again REPLAYS
+    /// the already-committed secret (no second mint), while a wrong/absent nonce
+    /// or an unrelated secret is a `Mismatch`. This is the whole recovery-without-
+    /// takeover contract, pinned independent of the manager.
+    #[test]
+    fn renew_mints_from_current_then_idempotently_replays_the_same_secret() {
+        let env = FakeEnv::new();
+        let (mut cred, first) = TournamentCredential::mint(&env);
+
+        // Minting rotation from the current secret.
+        let minted = match cred.renew(&first.secret, "nonce-1", &env) {
+            RenewOutcome::Minted(m) => m,
+            other => panic!("expected Minted, got {other:?}"),
+        };
+        assert_ne!(minted.secret, first.secret, "a mint produces a NEW secret");
+        let now = env.now_ms();
+
+        // The superseded secret no longer authorizes an action; the new one does.
+        assert_eq!(
+            cred.verdict(&first.secret, now),
+            CredentialVerdict::Mismatch
+        );
+        assert_eq!(
+            cred.verdict(&minted.secret, now),
+            CredentialVerdict::Accepted
+        );
+
+        // REPLAY: the superseded secret + the SAME nonce returns the
+        // already-committed secret, minting nothing.
+        match cred.renew(&first.secret, "nonce-1", &env) {
+            RenewOutcome::Replayed(m) => {
+                assert_eq!(
+                    m.secret, minted.secret,
+                    "replay returns the committed secret, not a fresh one"
+                );
+                assert_eq!(m.expires_at_ms, minted.expires_at_ms);
+            }
+            other => panic!("expected Replayed, got {other:?}"),
+        }
+        // The current secret is unchanged by the replay.
+        assert_eq!(
+            cred.verdict(&minted.secret, now),
+            CredentialVerdict::Accepted
+        );
+
+        // A superseded secret with a WRONG nonce can neither mint nor replay, and
+        // an unrelated secret is a mismatch regardless of nonce.
+        assert_eq!(
+            cred.renew(&first.secret, "wrong-nonce", &env),
+            RenewOutcome::Mismatch
+        );
+        assert_eq!(
+            cred.renew("never-issued", "nonce-1", &env),
+            RenewOutcome::Mismatch
+        );
+    }
+
+    /// Maintainer [HIGH] #2: an EMPTY nonce must never be replayable. An
+    /// omitted/`#[serde(default)]` nonce would otherwise record `(superseded, "")`
+    /// and let anyone holding the superseded secret recover the new one by
+    /// omitting the nonce. An empty-nonce rotation still mints, but records no
+    /// replay record, and an empty nonce never replays.
+    #[test]
+    fn an_empty_nonce_mints_but_leaves_nothing_replayable() {
+        let env = FakeEnv::new();
+        let (mut cred, first) = TournamentCredential::mint(&env);
+
+        // Minting with an EMPTY nonce succeeds (a nonce-less client can still
+        // rotate) but must leave no replayable record.
+        let minted = match cred.renew(&first.secret, "", &env) {
+            RenewOutcome::Minted(m) => m,
+            other => panic!("expected Minted, got {other:?}"),
+        };
+        let now = env.now_ms();
+
+        // The superseded secret with an empty nonce CANNOT replay — this is the
+        // takeover path the guard closes.
+        assert_eq!(
+            cred.renew(&first.secret, "", &env),
+            RenewOutcome::Mismatch,
+            "a superseded secret + empty nonce must not recover the new secret"
+        );
+        // Nor with any other nonce (no record was kept at all).
+        assert_eq!(
+            cred.renew(&first.secret, "guessed", &env),
+            RenewOutcome::Mismatch
+        );
+        // The minted secret is the sole authority.
+        assert_eq!(
+            cred.verdict(&minted.secret, now),
+            CredentialVerdict::Accepted
+        );
+        assert_eq!(
+            cred.verdict(&first.secret, now),
+            CredentialVerdict::Mismatch
+        );
+    }
+
+    /// The regression the maintainer's [HIGH] asked for: an accepted overlap
+    /// credential must NOT be able to mint or receive a fresh primary. After the
+    /// owner rotates A→B, a holder of the stale A — presenting a fresh nonce, as a
+    /// thief without the original rotation's nonce must — can neither mint a new
+    /// credential nor obtain B. B stays authoritative, and the owner can still
+    /// advance it. This is what the idempotent-replay redesign buys over the
+    /// earlier bounded-overlap model, which permitted exactly this takeover.
+    #[test]
+    fn a_stolen_superseded_secret_cannot_take_over_the_authority() {
+        let env = FakeEnv::new();
+        let mut mgr = TournamentManager::new();
+        let created = mgr
+            .create_tournament(
+                "T",
+                CreateTournamentRequest {
+                    name: "Test Event".to_string(),
+                    arity: MatchArity::HEAD_TO_HEAD,
+                    scoring: ScoringPolicy::default_for_arity(MatchArity::HEAD_TO_HEAD),
+                    bracket: BracketShape::Swiss,
+                    total_rounds: None,
+                    plus_rounds: None,
+                    format: None,
+                    match_type: None,
+                },
+                &env,
+            )
+            .expect("create");
+
+        // Owner rotates A → B with nonce N1; the reply is received, so B is the
+        // authority the owner holds. A is now a stale superseded secret.
+        let a = created.secret;
+        let b = mgr
+            .renew_credential("T", TournamentRole::Organizer, &a, "N1", &env)
+            .expect("owner rotates A -> B");
+        let now = env.now_ms();
+        assert!(mgr
+            .get("T")
+            .unwrap()
+            .organizer_token
+            .accepts(&b.secret, now));
+        assert!(
+            !mgr.get("T").unwrap().organizer_token.accepts(&a, now),
+            "the superseded secret stops authorizing"
+        );
+
+        // Attacker holds only the stale A. With a FRESH nonce (they never had
+        // N1) it can neither mint (A is not current) nor replay (nonce mismatch).
+        let err = mgr
+            .renew_credential("T", TournamentRole::Organizer, &a, "attacker-nonce", &env)
+            .expect_err("a stale superseded secret with a fresh nonce cannot renew");
+        assert!(
+            err.contains("Invalid"),
+            "expected an invalid-token refusal, got: {err}"
+        );
+
+        // B is untouched by the attempt, and the owner can still advance it —
+        // proving the authority never moved to the attacker.
+        assert!(mgr
+            .get("T")
+            .unwrap()
+            .organizer_token
+            .accepts(&b.secret, now));
+        let c = mgr
+            .renew_credential("T", TournamentRole::Organizer, &b.secret, "N2", &env)
+            .expect("owner rotates B -> C");
+        assert_ne!(c.secret, b.secret);
+        assert!(mgr
+            .get("T")
+            .unwrap()
+            .organizer_token
+            .accepts(&c.secret, env.now_ms()));
+    }
+
+    /// The regression the #8782 review asked for, at the server layer: a renewal
+    /// reply lost in transit must not strand the authority. The client retries
+    /// the rotation with the SAME (now-superseded) secret and the SAME nonce, and
+    /// the broker REPLAYS the already-committed secret rather than minting a
+    /// second one — so the holder recovers the exact authority the server holds,
+    /// with no fork and no strand. A retry with a different nonce is refused.
+    #[test]
+    fn a_lost_renewal_reply_is_recovered_by_replaying_the_same_nonce() {
+        let env = FakeEnv::new();
+        let mut mgr = TournamentManager::new();
+        let created = mgr
+            .create_tournament(
+                "T",
+                CreateTournamentRequest {
+                    name: "Test Event".to_string(),
+                    arity: MatchArity::HEAD_TO_HEAD,
+                    scoring: ScoringPolicy::default_for_arity(MatchArity::HEAD_TO_HEAD),
+                    bracket: BracketShape::Swiss,
+                    total_rounds: None,
+                    plus_rounds: None,
+                    format: None,
+                    match_type: None,
+                },
+                &env,
+            )
+            .expect("create");
+        let held = created.secret;
+
+        // Renew: the server commits a new secret, but the reply is LOST — the
+        // organizer never learns it and keeps holding `held` and its nonce `N`.
+        env.advance_secs(60);
+        let committed = mgr
+            .renew_credential("T", TournamentRole::Organizer, &held, "N", &env)
+            .expect("a live credential renews");
+
+        // The retry with the SAME (held, N) REPLAYS the committed secret rather
+        // than minting a second one — the holder recovers the real authority.
+        let recovered = mgr
+            .renew_credential("T", TournamentRole::Organizer, &held, "N", &env)
+            .expect("the retry replays the committed secret");
+        assert_eq!(
+            recovered.secret, committed.secret,
+            "replay recovers the SAME secret, not a fresh one"
+        );
+        assert_eq!(recovered.expires_at_ms, committed.expires_at_ms);
+        assert!(mgr
+            .get("T")
+            .unwrap()
+            .organizer_token
+            .accepts(&recovered.secret, env.now_ms()));
+
+        // A retry with a DIFFERENT nonce is refused: recovery is bound to the
+        // client's own nonce, not to mere possession of the superseded secret.
+        let err = mgr
+            .renew_credential("T", TournamentRole::Organizer, &held, "other-nonce", &env)
+            .expect_err("a different nonce cannot recover");
+        assert!(
+            err.contains("Invalid"),
+            "expected an invalid-token refusal, got: {err}"
+        );
+    }
+
+    /// The same replay recovery holds on the player path, which carries the
+    /// extra owner-scan and drop guard the organizer path lacks: the scan
+    /// attributes a superseded-secret + nonce retry to its owning entrant (a
+    /// replay presents a secret `verdict` alone would call a mismatch), so a
+    /// seated player whose renewal reply was lost recovers the committed secret.
+    #[test]
+    fn a_lost_renewal_reply_is_recovered_by_replay_on_the_player_path() {
+        let env = FakeEnv::new();
+        let mut mgr = swiss(4, 2, &env);
+        let joined = mgr.join_tournament("T", "p99", "Zoe", &env).expect("join");
+        let held = joined.secret;
+
+        // Renewal commits, reply lost — the player keeps `held` and its nonce.
+        env.advance_secs(60);
+        let committed = mgr
+            .renew_credential("T", TournamentRole::Player, &held, "N", &env)
+            .expect("a seated player renews");
+
+        // The retry with the same (held, N) replays the committed secret, and the
+        // scan still resolves it to this entrant even though `held` is superseded.
+        let recovered = mgr
+            .renew_credential("T", TournamentRole::Player, &held, "N", &env)
+            .expect("the retry replays the committed secret");
+        assert_eq!(recovered.secret, committed.secret);
+        let now = env.now_ms();
+        assert!(mgr
+            .get("T")
+            .unwrap()
+            .players
+            .iter()
+            .any(|p| p.player_token.accepts(&recovered.secret, now)));
     }
 
     /// A credential survives a realistic multi-day between-round gap. The former
@@ -5105,6 +6003,7 @@ mod tests {
                     total_rounds: None,
                     plus_rounds: None,
                     format: None,
+                    match_type: None,
                 },
                 &env,
             )
@@ -5122,7 +6021,7 @@ mod tests {
                 .accepts(&org.secret, now),
             "a day-old credential must still authorize a live event's actions",
         );
-        mgr.renew_credential("T", TournamentRole::Organizer, &org.secret, &env)
+        mgr.renew_credential("T", TournamentRole::Organizer, &org.secret, "n1", &env)
             .expect("a day-old credential must still be renewable");
     }
 
@@ -5137,12 +6036,12 @@ mod tests {
 
         // Reach-guard: it renews fine while the entrant is still seated.
         let fresh = mgr
-            .renew_credential("T", TournamentRole::Player, &joined.secret, &env)
+            .renew_credential("T", TournamentRole::Player, &joined.secret, "n1", &env)
             .expect("a seated entrant may rotate");
 
         mgr.drop_player("T", "p99", &env).expect("drop");
         let err = mgr
-            .renew_credential("T", TournamentRole::Player, &fresh.secret, &env)
+            .renew_credential("T", TournamentRole::Player, &fresh.secret, "n2", &env)
             .expect_err("a dropped entrant may not rotate");
         assert!(
             err.contains("dropped"),
@@ -5167,6 +6066,7 @@ mod tests {
                     total_rounds: None,
                     plus_rounds: None,
                     format: None,
+                    match_type: None,
                 },
                 &env,
             )
@@ -5174,7 +6074,7 @@ mod tests {
         let before = mgr.get("T").expect("event").last_activity_at;
 
         env.advance_secs(60);
-        mgr.renew_credential("T", TournamentRole::Organizer, &org.secret, &env)
+        mgr.renew_credential("T", TournamentRole::Organizer, &org.secret, "n1", &env)
             .expect("renew");
 
         assert_eq!(

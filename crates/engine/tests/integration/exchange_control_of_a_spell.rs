@@ -2790,13 +2790,13 @@ fn shifting_grift_artifactless_second_mode_is_rejected_by_both_slot_builders() {
 /// choose new targets for the spell".
 ///
 /// REVERT-FAILING (two directions):
-/// 1. At `bb28b0e8b` this row's first assertion fails — `current_targets.len()`
-///    is 2, not 4 — because `change_targets::resolve` read `stack_ability.targets`
-///    on the root only.
-/// 2. At BASE, before `bb28b0e8b`, this cast PANICS at `SelectModes` — the
-///    per-node target ownership that commit introduced is the precondition an
-///    address `(node, slot)` depends on, and this note is what guards it from
-///    being quietly undone.
+/// 1. Against a `change_targets::resolve` that reads `stack_ability.targets` on
+///    the root only, this row's first assertion fails — `current_targets.len()`
+///    is 2, not 4.
+/// 2. At BASE, before per-node target ownership existed, this cast PANICS at
+///    `SelectModes` — that ownership is the precondition an address
+///    `(node, slot)` depends on, and this note is what guards it from being
+///    quietly undone.
 #[test]
 fn chimera_retarget_of_a_two_mode_grift_offers_every_modes_targets() {
     let mut scenario = GameScenario::new();

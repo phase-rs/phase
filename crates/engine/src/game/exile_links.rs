@@ -1,8 +1,13 @@
 use serde::Serialize;
 
 use crate::types::ability::{Duration, ResolvedAbility};
-use crate::types::game_state::{ExileLink, ExileLinkKind, GameState};
+use crate::types::game_state::{
+    ExileLink, ExileLinkKind, ExiledStopInput, GameState, LibrarySearchDeliveryResume, LookGrant,
+    RepeatUntilStopWitness,
+};
 use crate::types::identifiers::ObjectId;
+use crate::types::player::PlayerId;
+use crate::types::zones::Zone;
 
 const LINKED_EXILE_CONSUMER_TAGS: &[&str] = &[
     "ExiledBySource",
@@ -70,6 +75,183 @@ pub(crate) fn push_tracked_by_source(
     push_with_kind(state, exiled_id, source_id, ExileLinkKind::TrackedBySource);
 }
 
+/// CR 406.3 + CR 702.75a: the player `grant` admits now to look at a card
+/// exiled by `source_id`.
+pub(crate) fn look_grant_admits(
+    state: &GameState,
+    source_id: ObjectId,
+    grant: LookGrant,
+    source_incarnation: u64,
+) -> Option<PlayerId> {
+    match grant {
+        LookGrant::SourceController => state
+            .objects
+            .get(&source_id)
+            .filter(|src| src.zone == Zone::Battlefield && src.incarnation == source_incarnation)
+            .map(|src| src.controller),
+        LookGrant::Player { .. } => None,
+    }
+}
+
+/// CR 406.3: Link a card just exiled face down to `source_id` with a look
+/// grant; the `instructed` player and whoever `grant` admits now may look.
+pub(crate) fn push_look_link(
+    state: &mut GameState,
+    exiled_id: ObjectId,
+    source_id: ObjectId,
+    grant: LookGrant,
+    instructed: PlayerId,
+) {
+    let source_incarnation = state
+        .objects
+        .get(&source_id)
+        .map_or(0, |src| src.incarnation);
+    let lookers = std::iter::once(instructed)
+        .chain(look_grant_admits(
+            state,
+            source_id,
+            grant,
+            source_incarnation,
+        ))
+        .collect();
+    push_with_kind(
+        state,
+        exiled_id,
+        source_id,
+        ExileLinkKind::HideawayLookable {
+            grant,
+            lookers,
+            source_incarnation,
+        },
+    );
+}
+
+/// CR 406.3 + CR 701.23a: the searcher looked at the card before exiling it
+/// face down, so they may keep looking at it.
+pub(crate) fn link_search_look(
+    state: &mut GameState,
+    exiled_id: ObjectId,
+    source_id: Option<ObjectId>,
+) {
+    // A scoped search names a set of searchers, not the one player a fixed grant needs.
+    let searcher = match &state.pending_library_search_delivery {
+        Some(LibrarySearchDeliveryResume::Standard { searcher, .. }) => Some(*searcher),
+        Some(LibrarySearchDeliveryResume::Scoped { .. }) | None => None,
+    };
+    let (Some(searcher), Some(source_id)) = (searcher, source_id) else {
+        return;
+    };
+    if !state
+        .objects
+        .get(&exiled_id)
+        .is_some_and(|obj| obj.zone == Zone::Exile && obj.face_down)
+    {
+        return;
+    }
+    push_look_link(
+        state,
+        exiled_id,
+        source_id,
+        LookGrant::Player { player: searcher },
+        searcher,
+    );
+}
+
+/// CR 400.7 + CR 607.2a: `source_id`'s links, skipping a look link made by an
+/// earlier incarnation of that object.
+pub(crate) fn live_links_for_source(
+    state: &GameState,
+    source_id: ObjectId,
+) -> impl Iterator<Item = &ExileLink> {
+    state.exile_links.iter().filter(move |link| {
+        link.source_id == source_id
+            && match &link.kind {
+                ExileLinkKind::HideawayLookable {
+                    source_incarnation, ..
+                } => state
+                    .objects
+                    .get(&source_id)
+                    .is_some_and(|src| src.incarnation == *source_incarnation),
+                // CR 400.7d + CR 400.7j: the object these links were made for may
+                // be a later incarnation of the one that made them.
+                ExileLinkKind::UntilSourceLeaves { .. }
+                | ExileLinkKind::UntilOpponentBecomesMonarch { .. }
+                | ExileLinkKind::TrackedBySource
+                | ExileLinkKind::ParadigmSource { .. }
+                | ExileLinkKind::Cipher
+                | ExileLinkKind::Haunt
+                | ExileLinkKind::CraftMaterial => true,
+            }
+    })
+}
+
+/// CR 406.3 + CR 613.1b: a source-controller look link latches its source's new
+/// controller, since a player once allowed to look may keep looking.
+pub(crate) fn latch_new_controllers(
+    state: &mut GameState,
+    prev_controllers: &[(ObjectId, PlayerId)],
+) {
+    let admitted: Vec<(usize, PlayerId)> = state
+        .exile_links
+        .iter()
+        .enumerate()
+        .filter_map(|(index, link)| {
+            let ExileLinkKind::HideawayLookable {
+                grant,
+                lookers,
+                source_incarnation,
+            } = &link.kind
+            else {
+                return None;
+            };
+            let (_, prev) = prev_controllers
+                .iter()
+                .find(|(id, _)| *id == link.source_id)?;
+            look_grant_admits(state, link.source_id, *grant, *source_incarnation)
+                .filter(|player| player != prev && !lookers.contains(player))
+                .map(|player| (index, player))
+        })
+        .collect();
+    for (index, player) in admitted {
+        if let ExileLinkKind::HideawayLookable { lookers, .. } = &mut state.exile_links[index].kind
+        {
+            lookers.insert(player);
+        }
+    }
+}
+
+/// CR 406.3 + CR 701.24a: a card that becomes part of a shuffled pile may be
+/// looked at only by whom its link's live rule admits now.
+pub(crate) fn reset_look_latches(state: &mut GameState, pile: &[ObjectId]) {
+    let resets: Vec<(usize, Option<PlayerId>)> = state
+        .exile_links
+        .iter()
+        .enumerate()
+        .filter_map(|(index, link)| {
+            let ExileLinkKind::HideawayLookable {
+                grant,
+                source_incarnation,
+                ..
+            } = &link.kind
+            else {
+                return None;
+            };
+            pile.contains(&link.exiled_id).then(|| {
+                (
+                    index,
+                    look_grant_admits(state, link.source_id, *grant, *source_incarnation),
+                )
+            })
+        })
+        .collect();
+    for (index, admitted) in resets {
+        if let ExileLinkKind::HideawayLookable { lookers, .. } = &mut state.exile_links[index].kind
+        {
+            *lookers = admitted.into_iter().collect();
+        }
+    }
+}
+
 /// CR 607.2a + CR 406.6: Record an exiled→source link with an explicit
 /// `ExileLinkKind`, deduped on the `(exiled_id, source_id)` pair (mirrors
 /// `push_tracked_by_source`, which delegates here for the plain tracked kind).
@@ -77,7 +259,7 @@ pub(crate) fn push_tracked_by_source(
 /// this is required when automatic linked-exile detection runs before a
 /// mechanic-specific continuation such as Hideaway concealment.
 /// Used by Hideaway (`ExileLinkKind::HideawayLookable`, CR 702.75a) to mark the
-/// exiled card as look-permitted for the source's controller while keeping it
+/// exiled card as look-permitted for the link's lookers while keeping it
 /// discoverable by the kind-agnostic `ExiledBySource` companion-ability filter.
 pub(crate) fn push_with_kind(
     state: &mut GameState,
@@ -145,6 +327,20 @@ pub(crate) fn push_exiled_with_source_this_turn(
     entry.push(exiled_id);
 }
 
+/// CR 406.6 + CR 607.2b + CR 608.2c: Record the player who performed the exile
+/// that put `exiled_id` into exile — the resolving instruction's acting player
+/// (its "that player" / "each player" subject when one is bound, otherwise the
+/// ability's controller). This is who "cards *they* exiled with ~" refers to,
+/// independent of who owns the card. A card that did not settle in exile (a
+/// replacement redirected it) gets no record.
+pub(crate) fn record_exiling_player(state: &mut GameState, exiled_id: ObjectId, player: PlayerId) {
+    if let Some(obj) = state.objects.get_mut(&exiled_id) {
+        if obj.zone == Zone::Exile {
+            obj.exiled_by = Some(player);
+        }
+    }
+}
+
 // CR 611.2a + CR 607.2a: Source-linked durations expire when that same source
 // exiles another card, whether stored as a play permission or a transient effect.
 fn expire_until_source_exiles_another_card_durations(state: &mut GameState, source_id: ObjectId) {
@@ -194,6 +390,73 @@ pub(crate) fn duplicate_name_among_exiled_by_source(
     names
         .windows(2)
         .any(|pair| pair[0].eq_ignore_ascii_case(pair[1]))
+}
+
+/// CR 104.4b + CR 607.2a: snapshot every input the `UntilStopConditions` stop
+/// predicates read for `source_id`.
+///
+/// Reads BOTH ledgers unconditionally — `state.cards_exiled_with_source_this_turn`
+/// (which `should_stop_repeat_until`'s put-to-hand half consults) and
+/// `state.exile_links` (which `duplicate_name_among_exiled_by_source`
+/// immediately above consults). Reading both regardless of which stop flags are
+/// set keeps the witness correct for every flag combination the grammar can
+/// produce, including a body that sets only one.
+///
+/// Objects absent from `state.objects` are skipped, mirroring the `filter_map`
+/// in `duplicate_name_among_exiled_by_source`; that is safe for the delta
+/// comparison because an id that disappears from `state.objects` changes the
+/// witness either way. Each ledger's rows are sorted and deduped by `ObjectId`
+/// so equality never depends on that ledger's insertion order.
+///
+/// ROWS ARE KEYED BY `(ledger, object_id)`, NOT BY `object_id` ALONE. The two
+/// stop predicates read the two ledgers SEPARATELY, so an object recorded in
+/// both contributes one row to EACH vec rather than one deduped row overall.
+/// Deduping the union would hold the witness byte-identical when a row is added
+/// to one ledger for an object the other ledger already holds — which really
+/// does move `duplicate_name_among_exiled_by_source`'s input — and would
+/// therefore stop a repeat that had advanced. That is a truncation, the unsafe
+/// direction to fail.
+pub(crate) fn repeat_until_stop_witness(
+    state: &GameState,
+    source_id: ObjectId,
+) -> RepeatUntilStopWitness {
+    let row = |exiled_id: ObjectId| {
+        state.objects.get(&exiled_id).map(|obj| ExiledStopInput {
+            object_id: exiled_id,
+            zone: obj.zone,
+            controller: obj.controller,
+            name: obj.name.clone(),
+        })
+    };
+    let sorted = |mut rows: Vec<ExiledStopInput>| {
+        rows.sort_unstable_by_key(|entry| entry.object_id);
+        rows.dedup_by_key(|entry| entry.object_id);
+        rows
+    };
+
+    let exiled_this_turn = sorted(
+        state
+            .cards_exiled_with_source_this_turn
+            .get(&source_id)
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter_map(row)
+            .collect(),
+    );
+    let linked = sorted(
+        state
+            .exile_links
+            .iter()
+            .filter(|link| link.source_id == source_id)
+            .map(|link| link.exiled_id)
+            .filter_map(row)
+            .collect(),
+    );
+    RepeatUntilStopWitness {
+        exiled_this_turn,
+        linked,
+    }
 }
 
 /// CR 607.2a: True when `card_id` shares a name with another card linked to
@@ -355,6 +618,7 @@ mod tests {
                 enters_with_counter: None,
                 enters_with_modifications: Vec::new(),
                 mana_spend_permission: None,
+                cast_cost_modifier: None,
             },
         );
         let play_grant = exiled(
@@ -372,7 +636,7 @@ mod tests {
                 card_filter: None,
                 single_use_group: None,
                 single_use: false,
-                cast_cost_raise: None,
+                cast_cost_modifier: None,
                 alt_ability_cost: None,
                 land_enter_tapped: EtbTapState::Unspecified,
             },
@@ -387,6 +651,7 @@ mod tests {
                 granted_to: Some(PlayerId(0)),
                 duration: Some(Duration::UntilSourceExilesAnotherCard),
                 source_id: Some(source),
+                cast_cost_modifier: None,
             },
         );
         let foreign = exiled(
@@ -404,6 +669,7 @@ mod tests {
                 enters_with_counter: None,
                 enters_with_modifications: Vec::new(),
                 mana_spend_permission: None,
+                cast_cost_modifier: None,
             },
         );
 
@@ -547,7 +813,7 @@ mod tests {
             card_filter: None,
             single_use_group: None,
             single_use: false,
-            cast_cost_raise: None,
+            cast_cost_modifier: None,
             alt_ability_cost: None,
             land_enter_tapped: EtbTapState::Unspecified,
             invalidation: None,
@@ -716,6 +982,8 @@ mod tests {
                 duration: None,
                 driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
                 mana_spend_permission: None,
+                additional_cost: None,
+                cast_cost_modifier: None,
             },
             vec![],
             ObjectId(1),
@@ -786,14 +1054,388 @@ mod tests {
         let source = ObjectId(20);
 
         push_with_kind(&mut state, exiled, source, ExileLinkKind::TrackedBySource);
-        push_with_kind(&mut state, exiled, source, ExileLinkKind::HideawayLookable);
+        push_with_kind(
+            &mut state,
+            exiled,
+            source,
+            ExileLinkKind::HideawayLookable {
+                grant: LookGrant::Player {
+                    player: PlayerId(0),
+                },
+                lookers: [PlayerId(0)].into(),
+                source_incarnation: 0,
+            },
+        );
         push_with_kind(&mut state, exiled, source, ExileLinkKind::TrackedBySource);
 
         assert_eq!(state.exile_links.len(), 1);
         assert!(matches!(
             state.exile_links[0].kind,
-            ExileLinkKind::HideawayLookable
+            ExileLinkKind::HideawayLookable { .. }
         ));
+    }
+
+    /// CR 607.2a + CR 104.4b: the progress witness is keyed on the resolving
+    /// ability's `source_id`, exactly like both stop predicates. A witness built
+    /// from the whole `exile_links` table instead of the source's slice would
+    /// let one source's exiling look like another source's progress.
+    ///
+    /// Hostile fixture: two live sources whose exile ledgers OVERLAP on a card
+    /// linked to both.
+    #[test]
+    fn repeat_until_stop_witness_is_scoped_to_its_source() {
+        use crate::game::zones::create_object;
+        use crate::types::identifiers::CardId;
+
+        let mut state = GameState::new_two_player(7);
+        let source_a = ObjectId(900);
+        let source_b = ObjectId(901);
+        let card_a = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Card A".to_string(),
+            Zone::Exile,
+        );
+        let card_b = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Card B".to_string(),
+            Zone::Exile,
+        );
+        let shared = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Shared Card".to_string(),
+            Zone::Exile,
+        );
+
+        push_tracked_by_source(&mut state, card_a, source_a);
+        push_tracked_by_source(&mut state, shared, source_a);
+        push_tracked_by_source(&mut state, card_b, source_b);
+        push_tracked_by_source(&mut state, shared, source_b);
+
+        let witness_a = repeat_until_stop_witness(&state, source_a);
+        let witness_b = repeat_until_stop_witness(&state, source_b);
+
+        // Positive reach-guard: both witnesses actually observed rows in both
+        // ledgers, so "they differ" is not two near-empty vectors compared
+        // vacuously.
+        assert_eq!(
+            (witness_a.exiled_this_turn.len(), witness_a.linked.len()),
+            (2, 2),
+            "source A witnesses exactly its own two cards in each ledger, got {witness_a:?}"
+        );
+        assert_eq!(
+            (witness_b.exiled_this_turn.len(), witness_b.linked.len()),
+            (2, 2),
+            "source B witnesses exactly its own two cards in each ledger, got {witness_b:?}"
+        );
+        assert_ne!(
+            witness_a, witness_b,
+            "two sources with different exile ledgers must not share a witness"
+        );
+
+        // Source A exiling one more card must leave B's witness byte-identical:
+        // A's progress is not B's progress.
+        let later = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Later Card".to_string(),
+            Zone::Exile,
+        );
+        push_tracked_by_source(&mut state, later, source_a);
+        assert_eq!(
+            repeat_until_stop_witness(&state, source_b),
+            witness_b,
+            "source A exiling a card must not move source B's witness"
+        );
+        assert_ne!(
+            repeat_until_stop_witness(&state, source_a),
+            witness_a,
+            "source A exiling a card must move source A's own witness"
+        );
+    }
+
+    /// CR 607.2a + CR 104.4b: witness equality must not depend on either
+    /// ledger's insertion order, an object recorded in BOTH ledgers contributes
+    /// one row to EACH ledger's vec, and an object recorded twice within ONE
+    /// ledger still contributes a single row there. `push_tracked_by_source`
+    /// never writes such a duplicate, but a restored snapshot's ledgers are not
+    /// validated for it, so the fixture writes one directly. A witness built by
+    /// concatenating `cards_exiled_with_source_this_turn` and `exile_links`
+    /// fails every half.
+    #[test]
+    fn repeat_until_stop_witness_is_order_independent_and_deduped() {
+        use crate::game::zones::create_object;
+        use crate::types::identifiers::CardId;
+
+        let source = ObjectId(900);
+        let stage = |link_order: [usize; 3]| {
+            let mut state = GameState::new_two_player(7);
+            let ids: Vec<ObjectId> = ["Alpha", "Beta", "Gamma"]
+                .iter()
+                .enumerate()
+                .map(|(idx, name)| {
+                    create_object(
+                        &mut state,
+                        CardId(idx as u64 + 1),
+                        PlayerId(0),
+                        (*name).to_string(),
+                        Zone::Exile,
+                    )
+                })
+                .collect();
+            for idx in link_order {
+                push_tracked_by_source(&mut state, ids[idx], source);
+            }
+            (state, ids)
+        };
+
+        let (mut forward, ids) = stage([0, 1, 2]);
+        let (reverse, reverse_ids) = stage([2, 1, 0]);
+        assert_eq!(
+            ids, reverse_ids,
+            "precondition: both stagings must allocate the same object ids"
+        );
+
+        // Intra-ledger duplicates, written directly because
+        // `push_tracked_by_source` dedups each `(exiled_id, source_id)` pair.
+        let duplicate_link = forward
+            .exile_links
+            .iter()
+            .find(|link| link.source_id == source && link.exiled_id == ids[0])
+            .cloned()
+            .expect("precondition: the first card is linked to the source");
+        forward.exile_links.push(duplicate_link);
+        forward
+            .cards_exiled_with_source_this_turn
+            .get_mut(&source)
+            .expect("precondition: the source has a per-turn ledger")
+            .push(ids[0]);
+
+        // Reach-guard: each card really is recorded in BOTH ledgers, and the
+        // first one twice in each, so the dedup path below is genuinely
+        // exercised.
+        assert_eq!(
+            forward
+                .exile_links
+                .iter()
+                .filter(|link| link.source_id == source)
+                .count(),
+            4,
+            "precondition: three cards linked to the source, one of them twice"
+        );
+        assert_eq!(
+            forward.cards_exiled_with_source_this_turn[&source].len(),
+            4,
+            "precondition: the per-turn ledger holds the same duplicate"
+        );
+
+        let forward_witness = repeat_until_stop_witness(&forward, source);
+        let reverse_witness = repeat_until_stop_witness(&reverse, source);
+
+        assert_eq!(
+            (
+                forward_witness.exiled_this_turn.len(),
+                forward_witness.linked.len()
+            ),
+            (3, 3),
+            "one row per distinct object PER LEDGER, not one per ledger entry, got {forward_witness:?}"
+        );
+        assert_eq!(
+            forward_witness, reverse_witness,
+            "witness equality must not depend on ledger insertion order"
+        );
+    }
+
+    /// CR 104.4b + CR 608.2c: the guard's real predicate is *the stop-predicate
+    /// inputs are unchanged*, not *the exiled set did not grow*. Both fields
+    /// that exist for that distinction are pinned here.
+    ///
+    /// Case 1 (`zone`): an already-exiled card moving to hand adds no ledger
+    /// row — a count-only or id-only witness cannot see it.
+    ///
+    /// Case 2 (`controller`) is the standing argument for
+    /// `ExiledStopInput::controller`, and it is built so that DELETING that
+    /// field makes this assertion fail: the card sits in `Zone::Hand` under a
+    /// player who is not the repeat's controller, so
+    /// `should_stop_repeat_until`'s second conjunct
+    /// (`obj.controller == ability.controller`) is false before and after, and
+    /// only `controller` changes. A card reaching a *different player's* hand
+    /// does NOT justify the field — `Zone` is player-agnostic
+    /// (`types/zones.rs` declares a bare `Hand`), so `zone` already sees that.
+    #[test]
+    fn repeat_until_stop_witness_tracks_zone_and_controller_of_exiled_cards() {
+        use crate::game::zones::create_object;
+        use crate::types::identifiers::CardId;
+
+        // ---- Case 1: zone, with the ledgers held constant. ----
+        let mut state = GameState::new_two_player(7);
+        let source = ObjectId(900);
+        let card = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Moved Card".to_string(),
+            Zone::Exile,
+        );
+        push_tracked_by_source(&mut state, card, source);
+
+        let before = repeat_until_stop_witness(&state, source);
+        assert_eq!(
+            (before.exiled_this_turn.len(), before.linked.len()),
+            (1, 1),
+            "reach-guard: the pre-move witness must be non-empty"
+        );
+
+        state.objects.get_mut(&card).expect("card exists").zone = Zone::Hand;
+        let after = repeat_until_stop_witness(&state, source);
+        assert_eq!(
+            (after.exiled_this_turn.len(), after.linked.len()),
+            (1, 1),
+            "precondition: the move added no ledger row — only the zone changed"
+        );
+        assert_ne!(
+            before, after,
+            "an exiled card changing zone must move the witness"
+        );
+
+        // ---- Case 2: controller, with zone AND name held constant. ----
+        // Three players so the post-change controller is a real seat.
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 3, 7);
+        let held = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Held Card".to_string(),
+            Zone::Hand,
+        );
+        push_tracked_by_source(&mut state, held, source);
+        state
+            .objects
+            .get_mut(&held)
+            .expect("card exists")
+            .controller = PlayerId(1);
+
+        let ability = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+
+        let before = repeat_until_stop_witness(&state, source);
+        assert_eq!(
+            (before.exiled_this_turn.len(), before.linked.len()),
+            (1, 1),
+            "reach-guard: the pre-change witness must be non-empty"
+        );
+        assert!(
+            !crate::game::effects::should_stop_repeat_until(&state, &ability, true, true),
+            "precondition: the card is in another player's hand, so the printed \
+             put-to-hand predicate is false"
+        );
+
+        state
+            .objects
+            .get_mut(&held)
+            .expect("card exists")
+            .controller = PlayerId(2);
+        let after = repeat_until_stop_witness(&state, source);
+        assert!(
+            !crate::game::effects::should_stop_repeat_until(&state, &ability, true, true),
+            "the printed predicate stays false across the control change — only \
+             the witness can observe it"
+        );
+        assert_eq!(
+            after.exiled_this_turn[0].zone, before.exiled_this_turn[0].zone,
+            "precondition: zone is held constant across the control change"
+        );
+        assert_eq!(
+            after.exiled_this_turn[0].name, before.exiled_this_turn[0].name,
+            "precondition: name is held constant across the control change"
+        );
+        assert_ne!(
+            before, after,
+            "a control change with the zone held constant must move the witness"
+        );
+    }
+
+    /// CR 607.2a + CR 104.4b: the witness keys its rows by `(ledger,
+    /// object_id)`, not by `object_id` alone.
+    ///
+    /// The two stop predicates read the two ledgers SEPARATELY:
+    /// `should_stop_repeat_until`'s put-to-hand half reads
+    /// `cards_exiled_with_source_this_turn`, while
+    /// `duplicate_name_among_exiled_by_source` builds its name list from
+    /// `exile_links`. So adding an `exile_links` row for an object the per-turn
+    /// ledger ALREADY holds really does move the duplicate-name predicate's
+    /// input — and a witness that deduped the UNION of the two ledgers by
+    /// `ObjectId` would be byte-identical across exactly that change, stopping a
+    /// repeat that had advanced. That is a truncation, the UNSAFE direction to
+    /// fail, which is why this row is pinned even though no body in today's pool
+    /// reaches it (Tainted Pact's `ExileTop` writes both ledgers together via
+    /// `push_with_kind`; the turn-ledger-only writers in `game/costs.rs` and
+    /// `game/engine_resolution_choices.rs` sit outside any
+    /// `UntilStopConditions` body).
+    #[test]
+    fn repeat_until_stop_witness_keys_rows_by_ledger_not_by_object_alone() {
+        use crate::game::zones::create_object;
+        use crate::types::identifiers::CardId;
+
+        let mut state = GameState::new_two_player(7);
+        let source = ObjectId(900);
+        let card = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Twice Recorded".to_string(),
+            Zone::Exile,
+        );
+
+        // Turn ledger only — the shape `game/costs.rs` and
+        // `game/engine_resolution_choices.rs` write.
+        push_exiled_with_source_this_turn(&mut state, card, source);
+        let before = repeat_until_stop_witness(&state, source);
+        assert_eq!(
+            (before.exiled_this_turn.len(), before.linked.len()),
+            (1, 0),
+            "reach-guard: the baseline really is turn-ledger-only, got {before:?}"
+        );
+        assert!(
+            !duplicate_name_among_exiled_by_source(&state, source),
+            "precondition: the duplicate-name predicate reads `exile_links`, \
+             which is still empty"
+        );
+
+        // Now add the SAME object to the other ledger.
+        push_with_kind(&mut state, card, source, ExileLinkKind::TrackedBySource);
+        let after = repeat_until_stop_witness(&state, source);
+        assert_eq!(
+            (after.exiled_this_turn.len(), after.linked.len()),
+            (1, 1),
+            "the new row lands in the `exile_links` vec, got {after:?}"
+        );
+
+        // This is the assertion a union-deduped witness fails: the union is
+        // unchanged (same single object), so only per-ledger keying sees it.
+        assert_eq!(
+            before.exiled_this_turn, after.exiled_this_turn,
+            "precondition: the union of the two ledgers is the SAME one object \
+             before and after — a witness deduping that union stays byte-identical"
+        );
+        assert_ne!(
+            before, after,
+            "a row added to one ledger for an object the other ledger already \
+             holds must move the witness"
+        );
     }
 
     /// CR 607.2b: `source_is_linked_exile_consumer` must detect a linked-exile

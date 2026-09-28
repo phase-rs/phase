@@ -142,7 +142,9 @@
       "distinctColorIdentity": "Asiento {{seat}} — comparte identidad de color con otro asiento.",
       "distinctCommander": "Asiento {{seat}} — comparte comandante con otro asiento."
     },
-    "podPreviewCount": "{{n}} mazos coinciden con la configuración actual del pod"
+    "podPreviewCount": "{{n}} mazos coinciden con la configuración actual del pod",
+    "brain": "Controlado por",
+    "brainEngine": "IA del motor"
   },
   "gameProvider": {
     "podSelectionRefused": {

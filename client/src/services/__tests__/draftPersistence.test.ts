@@ -17,6 +17,7 @@ vi.mock("idb-keyval", () => ({
 
 import {
   clearActiveDraftPod,
+  clearActiveDraftPodFor,
   clearActiveDraftPodIfCurrent,
   clearActiveDraftGuest,
   clearActiveDraftGuestIfCurrent,
@@ -44,6 +45,7 @@ import {
 } from "../draftPersistence";
 import { draftIntergameDigest } from "../intergameCommandLedger";
 import type { PersistedDraftHostSession } from "../draftPersistence";
+import { DRAFT_KINDS } from "../../adapter/draft-adapter";
 import {
   MAX_MATERIALIZED_VIRTUAL_BASICS,
   validateWorkspaceState,
@@ -112,6 +114,56 @@ describe("draftPersistence", () => {
       });
 
       await expect(loadDraftHostSession("bad-deadline")).resolves.toBeNull();
+    });
+
+    // V33. The guard that decides this is `isDraftKind`, and a hand-written
+    // enumeration inside it would compile unchanged after `DRAFT_KINDS` grew —
+    // TypeScript never checks a type-guard BODY against the union in its
+    // `value is` clause. The failure is silent: the snapshot is classified
+    // corrupt and discarded, and the host resumes into nothing. Pairing the
+    // new kind with Premier is what makes this discriminate a narrow guard
+    // from a broken loader.
+    it.each([["Winston"], ["Premier"]] as const)(
+      "survives load for a persisted %s host session",
+      async (kind) => {
+        const session: PersistedDraftHostSession = {
+          ...testSession,
+          persistenceId: `kind-${kind}`,
+          kind,
+          podSize: kind === "Winston" ? 2 : 8,
+        };
+        await saveDraftHostSession(session.persistenceId, session);
+
+        await expect(loadDraftHostSession(session.persistenceId)).resolves.toEqual({
+          ...session,
+          perSeatWorkspaceSnapshots: {},
+        });
+      },
+    );
+
+    // The derivation sibling of V33: the guard folds `DRAFT_KINDS`, so every
+    // kind the union admits EXCEPT the deliberately excluded `"Quick"` must
+    // load, and a kind the union does not admit must not. Asserting over the
+    // tuple rather than over a copied list is the point — a list here would
+    // reintroduce exactly the enumeration the repair removed.
+    it("admits every persistable kind the DraftKind tuple names, and nothing else", async () => {
+      for (const kind of DRAFT_KINDS) {
+        const persistenceId = `derived-${kind}`;
+        mockStore.set(`phase-draft-host:${persistenceId}`, { ...testSession, persistenceId, kind });
+        const loaded = await loadDraftHostSession(persistenceId);
+        if (kind === "Quick") {
+          expect(loaded, "Quick is the solo path and is never a persisted pod").toBeNull();
+        } else {
+          expect(loaded?.kind, `${kind} must survive resume`).toBe(kind);
+        }
+      }
+
+      mockStore.set("phase-draft-host:not-a-kind", {
+        ...testSession,
+        persistenceId: "not-a-kind",
+        kind: "Winstonian",
+      });
+      await expect(loadDraftHostSession("not-a-kind")).resolves.toBeNull();
     });
 
     it("returns null for non-existent session", async () => {
@@ -378,6 +430,30 @@ describe("draftPersistence", () => {
       expect(loaded?.pickCount).toBe(12);
     });
 
+    // The SECOND site of C.1's class: `isActiveDraftPodMeta` used to repeat
+    // the kind chain inline instead of calling `isDraftKind`. Its silent
+    // failure is the resume banner disappearing for a Winston pod, which no
+    // type error would have named.
+    it("keeps active resume metadata for every kind the DraftKind tuple names", () => {
+      for (const kind of DRAFT_KINDS) {
+        if (kind === "Quick") continue;
+        saveActiveDraftPod({
+          id: `active-${kind}`,
+          roomCode: "ABCDE",
+          kind,
+          podSize: kind === "Winston" ? 2 : 8,
+          hostDisplayName: "Alice",
+          tournamentFormat: "Swiss",
+          podPolicy: "Competitive",
+          phase: "drafting",
+          pickCount: 1,
+          updatedAt: Date.now(),
+        });
+
+        expect(loadActiveDraftPod()?.kind, `${kind} must survive resume`).toBe(kind);
+      }
+    });
+
     it("clears active host resume metadata", () => {
       saveActiveDraftPod({
         id: "test-draft-1",
@@ -429,6 +505,32 @@ describe("draftPersistence", () => {
       clearActiveDraftPodIfCurrent(older);
 
       expect(loadActiveDraftPod()).toMatchObject({ id: "new-draft", roomCode: "FGHJK" });
+    });
+
+    it("clears the active host locator only while it names the given pod", () => {
+      const meta = (id: string, updatedAt: number) => ({
+        id,
+        roomCode: "ABCDE",
+        kind: "Premier" as const,
+        podSize: 8,
+        hostDisplayName: "Alice",
+        tournamentFormat: "Swiss" as const,
+        podPolicy: "Competitive" as const,
+        phase: "drafting" as const,
+        pickCount: 1,
+        updatedAt,
+      });
+      saveActiveDraftPod(meta("newer-pod", Date.now()));
+      clearActiveDraftPodFor("left-pod");
+      expect(loadActiveDraftPod()).toMatchObject({ id: "newer-pod" });
+
+      clearActiveDraftPodFor("newer-pod");
+      expect(inspectActiveDraftPod()).toEqual({ type: "absent" });
+
+      saveActiveDraftPod(meta("left-pod", 1));
+      expect(inspectActiveDraftPod()).toMatchObject({ type: "invalid", capture: { id: "left-pod" } });
+      clearActiveDraftPodFor("left-pod");
+      expect(inspectActiveDraftPod()).toEqual({ type: "absent" });
     });
 
     it("classifies only live snapshot states as host-resumable", () => {

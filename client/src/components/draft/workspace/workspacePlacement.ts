@@ -152,7 +152,7 @@ export function normalizeWorkspaceForBoardGeometry(
       ? 0
       : Number.isInteger(placement.row) && placement.row >= 0 && placement.row < 2
         ? placement.row
-        : resolvedRow(instanceId, effective, poolGroups);
+        : resolveWorkspaceRow(instanceId, effective, poolGroups);
     const stackKey = `${placement.zone}:${column}:${row}`;
     destinations.set(instanceId, { zone: placement.zone, column, row });
     stacks.set(stackKey, [...(stacks.get(stackKey) ?? []), instanceId]);
@@ -443,7 +443,7 @@ function columnSetColor(column: number): DraftPoolGroupKind {
   return COLUMN_COLOR_ORDER[column] ?? "colorless";
 }
 
-function resolvedRow(
+export function resolveWorkspaceRow(
   instanceId: string,
   preferences: DraftBoardPreferences,
   groups: DraftPoolGroups,
@@ -625,7 +625,7 @@ export function rebuildWorkspaceZoneRows(
   let changed = false;
 
   for (const [instanceId, placement] of entries) {
-    const row = resolvedRow(instanceId, preferences, poolGroups);
+    const row = resolveWorkspaceRow(instanceId, preferences, poolGroups);
     const stackKey = `${placement.column}:${row}`;
     const order = nextOrders.get(stackKey) ?? 0;
     nextOrders.set(stackKey, order + 1);
@@ -779,19 +779,13 @@ export function appendWorkspaceInstanceToResolvedDestination(
   });
 }
 
-export function moveWorkspaceInstance(
-  state: DraftWorkspaceState,
-  pool: readonly DraftCardInstance[],
+export function normalizeWorkspaceMoveTarget(
+  instanceId: string,
   poolGroups: DraftPoolGroups,
   preferences: Readonly<Record<DraftZone, DraftBoardPreferences>>,
-  instanceId: string,
-  target: WorkspaceMoveTarget,
-): DraftWorkspaceState {
-  if (target.zone !== "deck" && target.zone !== "sideboard") return state;
-  const isKnown = pool.some((card) => card.instance_id === instanceId)
-    || state.virtualBasics.some((basic) => basic.instanceId === instanceId);
-  if (!isKnown || state.placements[instanceId] === undefined) return state;
-
+  target: Pick<WorkspaceMoveTarget, "zone" | "column" | "row">,
+): ResolvedWorkspaceDestination | null {
+  if (target.zone !== "deck" && target.zone !== "sideboard") return null;
   const destinationPreferences = clampedPreferences(
     preferences[target.zone],
     poolGroups.workspace_capabilities,
@@ -801,22 +795,38 @@ export function moveWorkspaceInstance(
     || target.column < 0
     || target.column >= destinationPreferences.columnCount
   ) {
-    return state;
+    return null;
   }
+  const row = target.row ?? resolveWorkspaceRow(instanceId, destinationPreferences, poolGroups);
+  const rowCount = destinationPreferences.rows === "two" ? 2 : 1;
+  if (!Number.isInteger(row) || row < 0 || row >= rowCount) return null;
+  return { zone: target.zone, column: target.column, row };
+}
 
-  const destinationRow = target.row ?? resolvedRow(instanceId, destinationPreferences, poolGroups);
-  const destinationRowCount = destinationPreferences.rows === "two" ? 2 : 1;
+export function moveWorkspaceInstance(
+  state: DraftWorkspaceState,
+  pool: readonly DraftCardInstance[],
+  poolGroups: DraftPoolGroups,
+  preferences: Readonly<Record<DraftZone, DraftBoardPreferences>>,
+  instanceId: string,
+  target: WorkspaceMoveTarget,
+): DraftWorkspaceState {
+  const isKnown = pool.some((card) => card.instance_id === instanceId)
+    || state.virtualBasics.some((basic) => basic.instanceId === instanceId);
+  if (!isKnown || state.placements[instanceId] === undefined) return state;
+  const destination = normalizeWorkspaceMoveTarget(instanceId, poolGroups, preferences, target);
+  if (destination === null) return state;
+  const source = state.placements[instanceId];
   if (
-    !Number.isInteger(destinationRow)
-    || destinationRow < 0
-    || destinationRow >= destinationRowCount
+    target.beforeInstanceId === null
+    && source.zone === destination.zone
+    && source.column === destination.column
+    && source.row === destination.row
   ) {
     return state;
   }
   return orderWorkspaceInstanceAtResolvedDestination(state, pool, instanceId, {
-    zone: target.zone,
-    column: target.column,
-    row: destinationRow,
+    ...destination,
     beforeInstanceId: target.beforeInstanceId,
   });
 }
@@ -1074,6 +1084,128 @@ export function resolveWorkspaceSortColumn(
   return 0;
 }
 
+/**
+ * Pool cards `workspace` holds no placement for — the ids `placeArrivingPoolCards`
+ * is meant to be given, asked BEFORE the reconcile that invents their defaults.
+ *
+ * Structural rather than a pool diff. A diff answers "which cards are new" only
+ * where there is an earlier pool to diff against, and the first view of a
+ * lifecycle — a reconnect, a resume, a restored session — has none. Both cases
+ * are the same question, because `reconcileWorkspaceState` is about to invent a
+ * default placement for exactly these ids and this is the list it will invent
+ * them for.
+ *
+ * A workspace carrying the player's own saved placements yields an empty list,
+ * so nothing they arranged is re-sorted.
+ *
+ * Pool cards only: a virtual basic lives in `virtualBasics` rather than `pool`,
+ * and `placeArrivingPoolCards` could not resolve a column for one anyway — it
+ * needs the `DraftCardInstance` the engine publishes.
+ */
+export function unplacedPoolIds(
+  workspace: DraftWorkspaceState,
+  pool: readonly DraftCardInstance[],
+): string[] {
+  return pool
+    .filter((card) => workspace.placements[card.instance_id] === undefined)
+    .map((card) => card.instance_id);
+}
+
+/**
+ * Place cards that ARRIVED in the pool into the columns the board's sort means.
+ *
+ * A pick that resolves a placement before it dispatches does not need this,
+ * because it knows which card it is picking. Three paths do not resolve one:
+ * a shared-stack `Take` collects a whole pile the engine chose the contents of;
+ * any view that arrives on its own — the host deciding for a timed-out seat, a
+ * reconnect, a guest's broadcast — carries cards the client never requested;
+ * and `PackDisplay.request` dispatches `pickCard`, `pickCardStep` and
+ * `pickCardWithDraftEffect` with no hint at all. `reconcileWorkspaceState` gives
+ * all of those the default placement, which is column 0, so a sorted board
+ * quietly stacks every new card in its first column no matter what the sort says.
+ *
+ * Threaded one card at a time rather than resolved in a batch: the column a card
+ * belongs in depends on what the board already holds (`resolveWorkspaceSortColumn`
+ * prefers a column already holding the group over an empty one reserved for it),
+ * so each placement has to be visible to the next. The same reason
+ * `autoPickCard` reduces its own hints one at a time.
+ *
+ * Cards with no placement at all are skipped rather than created:
+ * `reconcileWorkspaceState` owns which instances exist, and this owns only
+ * where the ones it just made go.
+ */
+export function placeArrivingPoolCards(
+  workspace: DraftWorkspaceState,
+  arrivingInstanceIds: readonly string[],
+  pool: readonly DraftCardInstance[],
+  poolGroups: DraftPoolGroups,
+  preferences: DraftBoardPreferences,
+): DraftWorkspaceState {
+  let next = workspace;
+  for (const instanceId of arrivingInstanceIds) {
+    const card = pool.find((entry) => entry.instance_id === instanceId);
+    if (card === undefined) continue;
+    const placement = next.placements[instanceId];
+    // Deck zone only. The caller passes ids the workspace had NO placement for
+    // before this reconcile, so a card the player has already moved is not in
+    // the list at all and this can never overrule a person; the zone test is
+    // the belt to that braces, and the one thing it catches on its own is a
+    // caller that widened the list to cards already in the sideboard.
+    if (placement === undefined || placement.zone !== "deck") continue;
+    const hint = resolveWorkspacePickPlacement(
+      card,
+      "deck",
+      pool,
+      poolGroups,
+      next,
+      preferences,
+    );
+    next = appendWorkspaceInstanceToResolvedDestination(next, pool, instanceId, {
+      zone: "deck",
+      column: hint.column,
+      row: hint.row ?? placement.row,
+    });
+  }
+  return next;
+}
+
+/**
+ * Which of the two rows a card belongs in, preferring the ENGINE's answer.
+ *
+ * `workspace_row_classification` is published for exactly this question, and
+ * `resolveWorkspaceRow` is the reader every other placement path already goes
+ * through (drag resolution, reconcile, the sort pass). A regex over the printed
+ * type line is a second opinion that disagrees wherever the two differ -- an
+ * artifact creature, a Vehicle the engine is treating as a creature, a
+ * changeling -- and it used to decide the row here for every card, including
+ * every card arriving on a path that resolved no placement of its own: every
+ * shared-stack pile take, every timeout broadcast.
+ *
+ * THE ONE CASE THE ENGINE CANNOT ANSWER. `handleConfirmPick` resolves a
+ * placement for a card taken from `current_pack`, which by definition is not in
+ * `pool` yet and therefore not in `pool_groups` either -- the classification is
+ * published for the POOL. For that card the absence of an id from
+ * `creature_instance_ids` means "not yet classified", not "not a creature", and
+ * reading it as the latter sends every picked creature to the spell row. So
+ * membership in `pool` is the test for whether the engine has an opinion at all,
+ * and only a card it has never seen falls back to the printed type line.
+ */
+function twoRowPlacementRow(
+  card: DraftCardInstance,
+  pool: readonly DraftCardInstance[],
+  poolGroups: DraftPoolGroups,
+  preferences: DraftBoardPreferences,
+): number {
+  const engineKnowsCard = pool.some((entry) => entry.instance_id === card.instance_id);
+  if (engineKnowsCard) {
+    // Through `resolveWorkspaceRow`, not a second copy of its body: it is the
+    // reader every other placement path already goes through, so a third row or
+    // a change to the classification reaches this path too.
+    return resolveWorkspaceRow(card.instance_id, { ...preferences, rows: "two" }, poolGroups);
+  }
+  return /\bcreature\b/i.test(card.type_line) ? 0 : 1;
+}
+
 export function resolveWorkspacePickPlacement(
   card: DraftCardInstance,
   zone: DraftZone,
@@ -1083,7 +1215,7 @@ export function resolveWorkspacePickPlacement(
   preferences: DraftBoardPreferences,
 ): { column: number; row?: number } {
   const row = preferences.rows === "two"
-    ? (/\bcreature\b/i.test(card.type_line) ? 0 : 1)
+    ? twoRowPlacementRow(card, pool, poolGroups, preferences)
     : undefined;
   const column = resolveWorkspaceSortColumn(
     card,
