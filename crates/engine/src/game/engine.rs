@@ -16539,6 +16539,7 @@ pub(super) fn begin_pending_trigger_target_selection(
 ///   non-stack play-land path; the picker reads the live used-set so concurrent
 ///   frequency-bounded permissions are handled correctly.
 /// - `Unlimited` (Crucible-of-Worlds-with-no-rider): no tracking.
+///
 /// CR 601.2a: the frequency spent is that of the grant that admitted the land
 /// (`casting::graveyard_land_play_frequency`, captured before the move), never
 /// another graveyard grant on the same source.
