@@ -20,16 +20,21 @@ export function groupStaggerPx(rowType: BattlefieldRowType): number {
 
 interface GroupRenderOptions {
   manualExpanded: boolean;
-  containsCommittedAttackerDuringBlockers: boolean;
+  containsBlockableAttackerDuringBlockers: boolean;
 }
 
 export function getGroupRenderMode(
   group: GroupedPermanent,
-  { manualExpanded, containsCommittedAttackerDuringBlockers }: GroupRenderOptions,
+  { manualExpanded, containsBlockableAttackerDuringBlockers }: GroupRenderOptions,
 ): GroupRenderMode {
   if (group.count <= 1) return "single";
-  if (manualExpanded || containsCommittedAttackerDuringBlockers) return "expanded";
+  if (manualExpanded) return "expanded";
+  // A pile at or above the threshold stays collapsed even while it contains a
+  // blockable attacker: its members are reached through the collapsed-group
+  // picker (GroupedPermanent.tsx::BlockTargetGroupControls) instead of a
+  // mount per member.
   if (group.count >= GROUP_COLLAPSE_THRESHOLD) return "collapsed";
+  if (containsBlockableAttackerDuringBlockers) return "expanded";
   return "staggered";
 }
 

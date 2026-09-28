@@ -400,6 +400,12 @@ export function clearActiveDraftGuestForHost(hostPeerId: string): void {
   if (current?.hostPeerId === hostPeerId) clearActiveDraftGuest();
 }
 
+/** Do not erase a newer pod's host locator when an older pod is ended. */
+export function clearActiveDraftPodFor(persistenceId: string): void {
+  const current = inspectActiveDraftPod();
+  if (current.type !== "absent" && current.capture?.id === persistenceId) clearActiveDraftPod();
+}
+
 /** Clears stale metadata only when it is still the record this caller read. */
 export function clearActiveDraftPodIfCurrent(capture: ActiveDraftPodMetaCapture): void {
   try {

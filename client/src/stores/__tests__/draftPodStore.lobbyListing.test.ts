@@ -153,7 +153,7 @@ import { DRAFT_PROTOCOL_VERSION } from "../../network/draftProtocol";
 import { PROTOCOL_VERSION, LOBBY_PROTOCOL_VERSION } from "../../adapter/ws-adapter";
 import { OFFICIAL_MULTIPLAYER_SERVER_URL } from "../../config/multiplayerServer";
 import { useDraftPodStore } from "../draftPodStore";
-import { DRAFT_OFFLINE_ERROR, useMultiplayerDraftStore } from "../multiplayerDraftStore";
+import { DRAFT_OFFLINE_ERROR, useMultiplayerDraftStore, type DraftSessionOpenOutcome } from "../multiplayerDraftStore";
 import { useMultiplayerStore } from "../multiplayerStore";
 import { useConnectivityStore } from "../connectivityStore";
 
@@ -388,7 +388,7 @@ describe("createPod lobby listing — production entry", () => {
   });
 
   it("closes the lobby connection when a newer pod replaces this one before it starts", async () => {
-    let firstResolved: boolean | undefined;
+    let firstResolved: DraftSessionOpenOutcome | undefined;
     useMultiplayerDraftStore.setState({
       hostDraft: (config) => {
         const first = realHostDraft(config);
@@ -409,7 +409,7 @@ describe("createPod lobby listing — production entry", () => {
     await vi.waitFor(() => expect(socketState.sockets.length).toBeGreaterThanOrEqual(1));
 
     await vi.waitFor(() => expect(initializeSpy).toHaveBeenCalledTimes(1));
-    expect(firstResolved).toBe(false);
+    expect(firstResolved).toEqual({ status: "superseded" });
 
     const firstSocket = socketState.sockets[0]!;
     expect(frames(firstSocket).some((f) => f.type === "CreateGameWithSettings")).toBe(false);

@@ -302,11 +302,9 @@
     "joinErrorCantJoinTitle": "このルームに参加できません",
     "titleLobby": "対戦に参加・作成",
     "titleHostSetup": "対戦の準備",
-    "titleDraftLobby": "ドラフトポッド",
     "titleDeckSelect": "デッキを選択",
     "descriptionLobby": "公開中の対戦を探す、コードで参加する、新しいルームを作ることができます。",
     "descriptionHostSetup": "開始前にフォーマットや公開範囲、時間設定を調整します。",
-    "descriptionDraftLobby": "プレイヤーがドラフトポッドに参加するのを待っています。",
     "descriptionDeckSelectFormat": "{{format}}用のデッキを選択してください。",
     "descriptionDeckSelect": "オンラインで使うデッキを選択してください。",
     "offlineUnavailableTitle": "オフライン中はマルチプレイヤーを利用できません。",
@@ -333,15 +331,6 @@
     "updateFailedTitle": "自動で更新できませんでした",
     "updateFailedMessage": "更新して最新バージョンを取得するか、このバージョンのまま続行してください。異なるバージョンのプレイヤーは同じゲームに参加できません。",
     "continueAnyway": "このまま続行"
-  },
-  "draftLobbyPanel": {
-    "draftPod": "ドラフトポッド",
-    "connecting": "ドラフトポッドに接続中…",
-    "connectionFailed": "接続に失敗しました。",
-    "playersJoined": "{{joined}}/{{total}}人が参加",
-    "seat": "座席{{number}}",
-    "draftInProgress": "ドラフト進行中です。ドラフト画面が自動的に開きます。",
-    "leaveDraft": "ドラフトを退出"
   },
   "deckLegalityChip": {
     "checking": "{{format}}でデッキを確認中…",
