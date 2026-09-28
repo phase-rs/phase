@@ -759,20 +759,22 @@ describe("collapsed attacker pile blocker-assignment picker (integration)", () =
     clickPermanent(container, 101);
 
     const blockedByGroup = () => groupWhere((label) => label.includes("Blocked by Grizzly Bears"));
-    const unblockedGroup = () =>
+    const plainGroup = () =>
       groupWhere(
-        (label) => label.startsWith("You") && label.includes("Unblocked") && !label.includes("Must be blocked"),
+        (label) => label.startsWith("You") && !label.includes("Blocked by") && !label.includes("Must be blocked"),
       );
     expect(within(blockedByGroup()).getByText("0 / 1")).toBeInTheDocument();
     // 101 "Runeclaw Bear" may block two (block_capacities), so its own
     // unblocked stack of 3 candidates reads a ceiling of 2, not its size.
-    expect(within(unblockedGroup()).getByText("0 / 2")).toBeInTheDocument();
+    expect(plainGroup().getAttribute("aria-label")).toContain("Unblocked");
+    expect(within(plainGroup()).getByText("0 / 2")).toBeInTheDocument();
 
-    fireEvent.click(within(unblockedGroup()).getByRole("button", { name: "+1" }));
-    fireEvent.click(within(unblockedGroup()).getByRole("button", { name: "+1" }));
-    expect(within(unblockedGroup()).getByText("2 / 2")).toBeInTheDocument();
-    fireEvent.click(within(unblockedGroup()).getByRole("button", { name: "-1" }));
-    expect(within(unblockedGroup()).getByText("1 / 2")).toBeInTheDocument();
+    fireEvent.click(within(plainGroup()).getByRole("button", { name: "+1" }));
+    fireEvent.click(within(plainGroup()).getByRole("button", { name: "+1" }));
+    expect(plainGroup().getAttribute("aria-label")).not.toContain("Unblocked");
+    expect(within(plainGroup()).getByText("2 / 2")).toBeInTheDocument();
+    fireEvent.click(within(plainGroup()).getByRole("button", { name: "-1" }));
+    expect(within(plainGroup()).getByText("1 / 2")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /Confirm Blockers/ }));
     expect(dispatchAction).toHaveBeenLastCalledWith({
@@ -790,13 +792,13 @@ describe("collapsed attacker pile blocker-assignment picker (integration)", () =
       data: { assignments: [[100, 14], [101, 11], [101, 14]] },
     });
 
-    // 101 has now spent its whole capacity (11, 14), so its unblocked stack's
+    // 101 has now spent its whole capacity (11, 14), so its plain stack's
     // remaining member (12, 13) reads a ceiling of exactly its one assignment.
-    expect(within(unblockedGroup()).getByText("1 / 1")).toBeInTheDocument();
-    expect(within(unblockedGroup()).getByRole("button", { name: "+1" })).toBeDisabled();
+    expect(within(plainGroup()).getByText("1 / 1")).toBeInTheDocument();
+    expect(within(plainGroup()).getByRole("button", { name: "+1" })).toBeDisabled();
 
-    // The blocked-count badge reflects both now-assigned pile members (11, 14).
-    expect(screen.getByText("blk 2")).toBeInTheDocument();
+    // The badge reflects both pile members with direct block selections (11, 14).
+    expect(screen.getByText("block targets 2")).toBeInTheDocument();
   });
 
   it("assigns a blocker-side must-block requirement (no must-be-blocked axis)", () => {
@@ -884,8 +886,8 @@ describe("collapsed attacker pile blocker-assignment picker (integration)", () =
     fireEvent.click(within(bandStackFor101).getByRole("button", { name: "+1" }));
     fireEvent.click(screen.getByRole("button", { name: "Confirm Blockers (1)" }));
 
-    // The pile's badge counts only the one direct assignment (14); 15 has none.
-    expect(screen.getByText("blk 1")).toBeInTheDocument();
+    // The pile's badge counts only the one direct block target (14); 15 has none.
+    expect(screen.getByText("block targets 1")).toBeInTheDocument();
 
     // Blocker 100's picker shows 14 and 15 in two separate stacks (each keeps
     // its own direct assignments), both still carrying the "Band 1" chip.
@@ -894,11 +896,12 @@ describe("collapsed attacker pile blocker-assignment picker (integration)", () =
     const blockedGroup = groupWhere(
       (label) => label.includes("Band 1") && label.includes("Blocked by Runeclaw Bear"),
     );
-    const unblockedGroup = groupWhere(
-      (label) => label.includes("Band 1") && label.includes("Unblocked") && !label.includes("Blocked by"),
+    const neutralGroup = groupWhere(
+      (label) => label.includes("Band 1") && !label.includes("Blocked by"),
     );
     expect(within(blockedGroup).getByText("0 / 1")).toBeInTheDocument();
-    expect(within(unblockedGroup).getByText("0 / 1")).toBeInTheDocument();
+    expect(neutralGroup.getAttribute("aria-label")).not.toContain("Unblocked");
+    expect(within(neutralGroup).getByText("0 / 1")).toBeInTheDocument();
 
     fireEvent.click(within(blockedGroup).getByRole("button", { name: "All" }));
     fireEvent.click(screen.getByRole("button", { name: /Confirm Blockers/ }));
@@ -910,11 +913,12 @@ describe("collapsed attacker pile blocker-assignment picker (integration)", () =
     expect(within(groupWhere((label) => label.includes("Blocked by Runeclaw Bear"))).getByText(
       "1 / 1",
     )).toBeInTheDocument();
-    const stillUnblocked = groupWhere((label) => label.includes("Unblocked"));
-    expect(within(stillUnblocked).getByText("0 / 0")).toBeInTheDocument();
-    expect(within(stillUnblocked).getByRole("button", { name: "+1" })).toBeDisabled();
+    const stillNeutral = groupWhere((label) => label.includes("Band 1") && !label.includes("Blocked by"));
+    expect(stillNeutral.getAttribute("aria-label")).not.toContain("Unblocked");
+    expect(within(stillNeutral).getByText("0 / 0")).toBeInTheDocument();
+    expect(within(stillNeutral).getByRole("button", { name: "+1" })).toBeDisabled();
 
-    expect(screen.getByText("blk 1")).toBeInTheDocument();
+    expect(screen.getByText("block targets 1")).toBeInTheDocument();
   });
 
   it("keeps a band's ordinal stable across different pending blockers instead of renumbering per picker (CR 702.22c)", () => {
@@ -958,14 +962,16 @@ describe("collapsed attacker pile blocker-assignment picker (integration)", () =
     clickPermanent(container, 101);
     fireEvent.click(screen.getByRole("button", { name: "Choose Scute Swarm token" }));
 
-    const unblockedGroup = groupWhere(
-      (label) => label.startsWith("You") && label.includes("Unblocked") && !label.includes("Must be blocked"),
+    const plainGroup = groupWhere(
+      (label) => label.startsWith("You") && !label.includes("Blocked by") && !label.includes("Must be blocked"),
     );
-    expect(within(unblockedGroup).getByText("0 / 1")).toBeInTheDocument();
+    expect(plainGroup.getAttribute("aria-label")).toContain("Unblocked");
+    expect(within(plainGroup).getByText("0 / 1")).toBeInTheDocument();
 
-    fireEvent.click(within(unblockedGroup).getByRole("button", { name: "All" }));
-    expect(within(unblockedGroup).getByText("1 / 1")).toBeInTheDocument();
-    expect(within(unblockedGroup).getByRole("button", { name: "+1" })).toBeDisabled();
+    fireEvent.click(within(plainGroup).getByRole("button", { name: "All" }));
+    expect(plainGroup.getAttribute("aria-label")).not.toContain("Unblocked");
+    expect(within(plainGroup).getByText("1 / 1")).toBeInTheDocument();
+    expect(within(plainGroup).getByRole("button", { name: "+1" })).toBeDisabled();
 
     fireEvent.click(screen.getByRole("button", { name: "Confirm Blockers (1)" }));
     expect(dispatchAction).toHaveBeenLastCalledWith({
@@ -1005,10 +1011,10 @@ describe("collapsed attacker pile blocker-assignment picker (integration)", () =
     const stack = groupWhere(() => true);
     expect(within(stack).getByText("1 / 1")).toBeInTheDocument();
     expect(within(stack).getByRole("button", { name: "+1" })).toBeDisabled();
-    expect(stack.getAttribute("aria-label")).toContain("Unblocked");
+    expect(stack.getAttribute("aria-label")).not.toContain("Unblocked");
 
     // The pile's badge counts only the direct pick (14).
-    expect(screen.getByText("blk 1")).toBeInTheDocument();
+    expect(screen.getByText("block targets 1")).toBeInTheDocument();
 
     fireEvent.click(within(stack).getByRole("button", { name: "-1" }));
     expect(screen.getAllByRole("group")).toHaveLength(1);

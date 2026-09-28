@@ -214,9 +214,9 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
     () => blockersByAttacker(blockerAssignments),
     [blockerAssignments],
   );
-  // Members already assigned at least one blocker, so a defender can see block
-  // progress on a collapsed attacking pile without expanding it.
-  const blockedAttackerCount = combatMode === "blockers"
+  // Distinct pile members with a direct blocker selection. A band-mate can
+  // also be blocked by the engine without a direct selection here (CR 702.22h).
+  const directBlockTargetCount = combatMode === "blockers"
     ? group.ids.filter((id) => directBlockers.has(id)).length
     : 0;
   const canOpenPicker = pickerContext != null;
@@ -320,7 +320,7 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
         )}
         <CollapsedGroupBadges
           assignedBlockerCount={assignedBlockerCount}
-          blockedAttackerCount={blockedAttackerCount}
+          directBlockTargetCount={directBlockTargetCount}
           committedAttackerCount={committedAttackerCount}
           eligibleCount={pickerContext?.eligibleIds.length ?? 0}
           selectedAttackerCount={selectedAttackerCount}
@@ -403,7 +403,7 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
 
 interface CollapsedGroupBadgesProps {
   assignedBlockerCount: number;
-  blockedAttackerCount: number;
+  directBlockTargetCount: number;
   committedAttackerCount: number;
   eligibleCount: number;
   selectedAttackerCount: number;
@@ -412,7 +412,7 @@ interface CollapsedGroupBadgesProps {
 
 function CollapsedGroupBadges({
   assignedBlockerCount,
-  blockedAttackerCount,
+  directBlockTargetCount,
   committedAttackerCount,
   eligibleCount,
   selectedAttackerCount,
@@ -432,9 +432,9 @@ function CollapsedGroupBadges({
           {t("permanent.attackingCount", { count: committedAttackerCount })}
         </span>
       )}
-      {blockedAttackerCount > 0 && (
+      {directBlockTargetCount > 0 && (
         <span className="rounded bg-sky-600 px-1.5 py-0.5 text-[10px] font-bold leading-none text-white shadow">
-          {t("permanent.blockedCount", { count: blockedAttackerCount })}
+          {t("permanent.directBlockTargetCount", { count: directBlockTargetCount })}
         </span>
       )}
       {actionCount > 0 && (
@@ -852,7 +852,14 @@ function BlockTargetGroupControls({
             }),
           );
         }
-        if (stack.otherBlockerIds.length === 0) {
+        // Without a band, no direct selection means this attacker is
+        // unblocked. A banded attacker may be blocked through a band-mate,
+        // which this direct-selection picker deliberately does not derive.
+        if (
+          stack.bandId === null &&
+          stack.assignedIds.length === 0 &&
+          stack.otherBlockerIds.length === 0
+        ) {
           labelParts.push(t("permanent.unblocked"));
         }
         const label = labelParts.join(" · ");

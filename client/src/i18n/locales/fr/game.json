@@ -311,7 +311,7 @@
     "eligibleCount": "{{count}} légal(es)",
     "attackingCount": "att {{count}}",
     "selectedCount": "sél {{count}}",
-    "blockedCount": "blq {{count}}",
+    "directBlockTargetCount": "cibles de blocage {{count}}",
     "blockingWith": "Bloque avec {{name}}",
     "blockedBy": "Bloqué par {{names}}",
     "unblocked": "Non bloqué",

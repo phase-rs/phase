@@ -316,7 +316,7 @@
     "eligibleCount": "適正{{count}}",
     "attackingCount": "攻撃 {{count}}",
     "selectedCount": "選択 {{count}}",
-    "blockedCount": "ブロック済 {{count}}",
+    "directBlockTargetCount": "ブロック対象 {{count}}",
     "blockingWith": "{{name}}でブロック中",
     "blockedBy": "{{names}}にブロックされている",
     "unblocked": "ブロックされていない",
