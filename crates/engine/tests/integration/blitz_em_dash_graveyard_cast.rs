@@ -28,16 +28,16 @@ use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
-const SABIN: &str = "Double strike\nBlitz\u{2014}{2}{R}{R}, Discard a card. (If you cast this spell for its blitz cost, it gains haste and \"When this creature dies, draw a card.\" Sacrifice it at the beginning of the next end step.)\nYou may cast this card from your graveyard using its blitz ability.";
+pub(crate) const SABIN: &str = "Double strike\nBlitz\u{2014}{2}{R}{R}, Discard a card. (If you cast this spell for its blitz cost, it gains haste and \"When this creature dies, draw a card.\" Sacrifice it at the beginning of the next end step.)\nYou may cast this card from your graveyard using its blitz ability.";
 
 const UNDERDOG: &str = "Blitz\u{2014}{2}{B}{B}, Pay 2 life. (If you cast this spell for its blitz cost, it gains haste and \"When this creature dies, draw a card.\" Sacrifice it at the beginning of the next end step.)\nYou may cast this card from your graveyard using its blitz ability.";
 
-const CALDAIA: &str = "Whenever this creature or another creature you control with mana value 4 or greater dies, create two 1/1 green and white Citizen creature tokens.\nBlitz {2}{G} (If you cast this spell for its blitz cost, it gains haste and \"When this creature dies, draw a card.\" Sacrifice it at the beginning of the next end step.)";
+pub(crate) const CALDAIA: &str = "Whenever this creature or another creature you control with mana value 4 or greater dies, create two 1/1 green and white Citizen creature tokens.\nBlitz {2}{G} (If you cast this spell for its blitz cost, it gains haste and \"When this creature dies, draw a card.\" Sacrifice it at the beginning of the next end step.)";
 
 /// Fill the active player's pool with 8 mana of one color — enough to pay any
 /// cost in these tests, so an over-charge shows up as a pool delta rather than
 /// as an affordability failure.
-fn fill_mana(runner: &mut GameRunner, mana: ManaType) {
+pub(crate) fn fill_mana(runner: &mut GameRunner, mana: ManaType) {
     let dummy = ObjectId(0);
     let pool = &mut runner.state_mut().players[0].mana_pool;
     for _ in 0..8 {
@@ -45,7 +45,7 @@ fn fill_mana(runner: &mut GameRunner, mana: ManaType) {
     }
 }
 
-fn blitz_keyword(parsed: &engine::parser::oracle::ParsedAbilities) -> Keyword {
+pub(crate) fn blitz_keyword(parsed: &engine::parser::oracle::ParsedAbilities) -> Keyword {
     parsed
         .extracted_keywords
         .iter()
@@ -358,13 +358,13 @@ fn space_form_blitz_alone_does_not_allow_graveyard_cast() {
     );
 }
 
-const MULDROTHA: &str = "During each of your turns, you may play a land and cast a permanent spell of each permanent type from your graveyard. (If a card has multiple permanent types, choose one as you play it.)";
+pub(crate) const MULDROTHA: &str = "During each of your turns, you may play a land and cast a permanent spell of each permanent type from your graveyard. (If a card has multiple permanent types, choose one as you play it.)";
 
-const LEONARDO: &str = "Sneak {2}{W}{W}\nDouble strike\nDuring your turn, you may cast creature spells with power or toughness 1 or less from your graveyard. If you cast a spell this way, that creature enters with a finality counter on it. (If a creature with a finality counter on it would die, exile it instead.)";
+pub(crate) const LEONARDO: &str = "Sneak {2}{W}{W}\nDouble strike\nDuring your turn, you may cast creature spells with power or toughness 1 or less from your graveyard. If you cast a spell this way, that creature enters with a finality counter on it. (If a creature with a finality counter on it would die, exile it instead.)";
 
 /// Put a permanent on P0's battlefield carrying every static its Oracle text
 /// parses to, so the graveyard permission under test is the parser's own.
-fn add_permission_source(
+pub(crate) fn add_permission_source(
     scenario: &mut GameScenario,
     name: &str,
     oracle: &str,
@@ -395,7 +395,7 @@ fn add_permission_source(
     source.id()
 }
 
-fn caldaia_blitz() -> Keyword {
+pub(crate) fn caldaia_blitz() -> Keyword {
     blitz_keyword(&parse_oracle_text(
         CALDAIA,
         "Caldaia Guardian",
@@ -405,7 +405,10 @@ fn caldaia_blitz() -> Keyword {
     ))
 }
 
-fn cast_from_graveyard(runner: &mut GameRunner, id: ObjectId) -> Result<WaitingFor, String> {
+pub(crate) fn cast_from_graveyard(
+    runner: &mut GameRunner,
+    id: ObjectId,
+) -> Result<WaitingFor, String> {
     let card_id = runner.state().objects[&id].card_id;
     runner
         .act(GameAction::CastSpell {
@@ -567,9 +570,9 @@ fn blitz_from_graveyard_keeps_the_permissions_enters_with_counter_rider() {
     );
 }
 
-const RIVETEERS_DECOY: &str = "This creature must be blocked if able.\nBlitz {3}{G} (If you cast this spell for its blitz cost, it gains haste and \"When this creature dies, draw a card.\" Sacrifice it at the beginning of the next end step.)";
+pub(crate) const RIVETEERS_DECOY: &str = "This creature must be blocked if able.\nBlitz {3}{G} (If you cast this spell for its blitz cost, it gains haste and \"When this creature dies, draw a card.\" Sacrifice it at the beginning of the next end step.)";
 
-const BOON_SATYR: &str = "Flash\nBestow {3}{G}{G} (If you cast this card for its bestow cost, it's an Aura spell with enchant creature. It becomes a creature again if it's not attached.)\nEnchanted creature gets +4/+2.";
+pub(crate) const BOON_SATYR: &str = "Flash\nBestow {3}{G}{G} (If you cast this card for its bestow cost, it's an Aura spell with enchant creature. It becomes a creature again if it's not attached.)\nEnchanted creature gets +4/+2.";
 
 /// CR 601.2a + CR 110.4 + CR 702.103b: the fix applies to every alternative
 /// cost that is the card's own, not only Blitz. Bestow is the other one that can
@@ -665,7 +668,7 @@ fn bestow_from_graveyard_under_muldrotha_spends_its_enchantment_slot() {
 /// the cast: take the alternative at the two-way question or pick it from the
 /// casting menu, enchant the first legal creature, and pay each offered cost.
 /// Asserts the spell reaches the stack.
-fn complete_alternative(
+pub(crate) fn complete_alternative(
     runner: &mut GameRunner,
     id: ObjectId,
     keyword: engine::types::game_state::AlternativeCastKeyword,
@@ -710,175 +713,14 @@ fn complete_alternative(
     );
 }
 
-/// Whether casting `id` from the graveyard offers its `keyword` alternative
-/// cost, judged on a copy of the game so nothing is committed: the cast either
-/// asks the two-way alternative-cost question or lists the method in its
-/// casting menu.
-fn alternative_offered(
-    runner: &GameRunner,
-    id: ObjectId,
-    keyword: engine::types::game_state::AlternativeCastKeyword,
-) -> bool {
-    let variant = match keyword {
-        engine::types::game_state::AlternativeCastKeyword::Blitz => "Blitz",
-        engine::types::game_state::AlternativeCastKeyword::Bestow => "Bestow",
-        other => panic!("not a graveyard rider: {other:?}"),
-    };
-    let mut probe = GameRunner::from_state(runner.state().clone());
-    match cast_from_graveyard(&mut probe, id) {
-        Ok(WaitingFor::AlternativeCastChoice {
-            keyword: offered, ..
-        }) => offered == keyword,
-        Ok(WaitingFor::CastingVariantChoice { options, .. }) => options
-            .iter()
-            .any(|option| format!("{:?}", option.variant) == variant),
-        _ => false,
-    }
-}
-
-/// CR 601.2a + CR 601.2b: when several permissions admit a graveyard cast, the
-/// player announces which one they use (Muldrotha, 2020-11-10 ruling). Until
-/// that announcement is modeled, a Blitz cast that two or more permissions
-/// admit is not offered: the engine won't choose for the player.
-///
-/// Leonardo is unlimited but gives the creature a finality counter; Muldrotha
-/// spends its creature slot. The blitz is not offered, while the printed cast
-/// still is. Each permission alone, on the same board with the same Riveteers
-/// Decoy (3/1, so Leonardo's "power or toughness 1 or less" admits it), offers
-/// the blitz and completes it (the reach controls).
-#[test]
-fn blitz_between_two_non_dominant_permissions_is_not_offered() {
-    let decoy_blitz = blitz_keyword(&parse_oracle_text(
-        RIVETEERS_DECOY,
-        "Riveteers Decoy",
-        &["Blitz".into()],
-        &["Creature".into()],
-        &["Human".into(), "Warrior".into()],
-    ));
-    let board = |with_muldrotha: bool, with_leonardo: bool| {
-        let mut scenario = GameScenario::new();
-        scenario.at_phase(Phase::PreCombatMain);
-        if with_muldrotha {
-            add_permission_source(
-                &mut scenario,
-                "Muldrotha, the Gravetide",
-                MULDROTHA,
-                &["Elemental", "Avatar"],
-            );
-        }
-        if with_leonardo {
-            add_permission_source(
-                &mut scenario,
-                "Leonardo, Sewer Samurai",
-                LEONARDO,
-                &["Mutant", "Ninja", "Turtle", "Samurai"],
-            );
-        }
-        let decoy = scenario
-            .add_creature_to_graveyard(P0, "Riveteers Decoy", 3, 1)
-            .with_mana_cost(ManaCost::Cost {
-                generic: 1,
-                shards: vec![ManaCostShard::Green],
-            })
-            .with_keyword(decoy_blitz.clone())
-            .id();
-        let mut runner = scenario.build();
-        fill_mana(&mut runner, ManaType::Green);
-        (runner, decoy)
-    };
-    let blitz = engine::types::game_state::AlternativeCastKeyword::Blitz;
-    for (muldrotha, leonardo) in [(true, false), (false, true)] {
-        let (mut control, decoy) = board(muldrotha, leonardo);
-        complete_alternative(&mut control, decoy, blitz);
-        assert_eq!(
-            control.state().players[0].mana_pool.total(),
-            4,
-            "reach (muldrotha {muldrotha}, leonardo {leonardo}): blitz's {{3}}{{G}} is paid"
-        );
-    }
-
-    let (mut runner, decoy) = board(true, true);
-    assert!(
-        !alternative_offered(
-            &runner,
-            decoy,
-            engine::types::game_state::AlternativeCastKeyword::Blitz
-        ),
-        "two eligible permissions: the blitz must not be offered"
-    );
-    assert!(
-        offered_cast(&runner, decoy).is_some(),
-        "the printed cast is still offered"
-    );
-    let waiting = cast_from_graveyard(&mut runner, decoy).expect("the printed cast is legal");
-    assert!(
-        !matches!(waiting, WaitingFor::AlternativeCastChoice { .. }),
-        "no blitz choice is asked, got {waiting:?}"
-    );
-    assert_eq!(runner.state().objects[&decoy].zone, Zone::Stack);
-    assert_eq!(
-        runner.state().players[0].mana_pool.total(),
-        6,
-        "the printed {{1}}{{G}} is paid, not blitz's {{3}}{{G}}"
-    );
-}
-
-/// The same between two BOUNDED permissions: Muldrotha's creature slot against
-/// Exploration Broodship's once-per-turn slot and land sacrifice. The blitz is
-/// not offered, while each permission alone offers it.
-#[test]
-fn blitz_between_two_bounded_permissions_is_not_offered() {
-    let board = |with_muldrotha: bool, with_broodship: bool| {
-        let mut scenario = GameScenario::new();
-        scenario.at_phase(Phase::PreCombatMain);
-        if with_broodship {
-            add_exploration_broodship(&mut scenario, BROODSHIP_STATIONED);
-        }
-        if with_muldrotha {
-            add_permission_source(
-                &mut scenario,
-                "Muldrotha, the Gravetide",
-                MULDROTHA,
-                &["Elemental", "Avatar"],
-            );
-        }
-        scenario.add_basic_land(P0, ManaColor::Green);
-        let guardian = scenario
-            .add_creature_to_graveyard(P0, "Caldaia Guardian", 4, 3)
-            .with_mana_cost(ManaCost::Cost {
-                generic: 3,
-                shards: vec![ManaCostShard::Green],
-            })
-            .with_keyword(caldaia_blitz())
-            .id();
-        let mut runner = scenario.build();
-        engine::game::layers::flush_layers(runner.state_mut());
-        fill_mana(&mut runner, ManaType::Green);
-        (runner, guardian)
-    };
-    let blitz = engine::types::game_state::AlternativeCastKeyword::Blitz;
-    for (muldrotha, broodship) in [(true, false), (false, true)] {
-        let (runner, guardian) = board(muldrotha, broodship);
-        assert!(
-            alternative_offered(&runner, guardian, blitz),
-            "reach: one permission alone (muldrotha {muldrotha}, broodship {broodship}) offers the blitz"
-        );
-    }
-    let (runner, guardian) = board(true, true);
-    assert!(
-        !alternative_offered(&runner, guardian, blitz),
-        "two bounded permissions: the blitz must not be offered"
-    );
-    assert!(
-        offered_cast(&runner, guardian).is_some(),
-        "the printed cast is still offered"
-    );
-}
-
 /// Sabin, Master Monk in the graveyard, with any of: its own "using its blitz
 /// ability" permission, Muldrotha, and Exploration Broodship (stationed). A
 /// card to discard for blitz, a land for Broodship, and red mana.
-fn sabin_permission_board(own: bool, muldrotha: bool, broodship: bool) -> (GameRunner, ObjectId) {
+pub(crate) fn sabin_permission_board(
+    own: bool,
+    muldrotha: bool,
+    broodship: bool,
+) -> (GameRunner, ObjectId) {
     let parsed = parse_oracle_text(
         SABIN,
         "Sabin, Master Monk",
@@ -923,113 +765,16 @@ fn sabin_permission_board(own: bool, muldrotha: bool, broodship: bool) -> (GameR
     (runner, sabin)
 }
 
-/// CR 601.2a + CR 601.2b: the player announces which permission they use even
-/// when one looks dominant: a player may deliberately spend Muldrotha's slot.
-/// So Sabin's own "using its blitz ability" permission beside Muldrotha (the
-/// common board), or beside Muldrotha and Exploration Broodship, does not offer
-/// the blitz until that announcement is modeled. Each permission alone, on the
-/// same board, offers the blitz and completes it (the reach controls).
-#[test]
-fn blitz_beside_sabins_own_permission_and_another_is_not_offered() {
-    let blitz = engine::types::game_state::AlternativeCastKeyword::Blitz;
-    for (own, muldrotha, broodship) in [
-        (true, false, false),
-        (false, true, false),
-        (false, false, true),
-    ] {
-        let (mut control, sabin) = sabin_permission_board(own, muldrotha, broodship);
-        complete_alternative(&mut control, sabin, blitz);
-        assert_eq!(
-            control.state().players[0].hand.len(),
-            0,
-            "reach (own {own}, muldrotha {muldrotha}, broodship {broodship}): blitz's discard is paid"
-        );
-    }
-    for (muldrotha, broodship) in [(true, false), (true, true)] {
-        let (runner, sabin) = sabin_permission_board(true, muldrotha, broodship);
-        assert!(
-            !alternative_offered(&runner, sabin, blitz),
-            "Sabin's own permission beside muldrotha {muldrotha} / broodship {broodship}: the blitz must not be offered"
-        );
-    }
-}
-
-/// The Bestow sibling: a graveyard Boon Satyr between Muldrotha and Exploration
-/// Broodship, both able to authorize the bestowed (enchantment) spell. Bestow
-/// is not offered, while each permission alone, on the same board with the same
-/// Satyr, offers the bestow and completes it (the reach controls).
-#[test]
-fn bestow_between_two_bounded_permissions_is_not_offered() {
-    let board = |with_muldrotha: bool, with_broodship: bool| {
-        let mut scenario = GameScenario::new();
-        scenario.at_phase(Phase::PreCombatMain);
-        if with_broodship {
-            add_exploration_broodship(&mut scenario, BROODSHIP_STATIONED);
-        }
-        if with_muldrotha {
-            add_permission_source(
-                &mut scenario,
-                "Muldrotha, the Gravetide",
-                MULDROTHA,
-                &["Elemental", "Avatar"],
-            );
-        }
-        scenario.add_creature(P0, "Grizzly Bears", 2, 2);
-        scenario.add_basic_land(P0, ManaColor::Green);
-        let mut builder = scenario.add_creature_to_graveyard(P0, "Boon Satyr", 4, 2);
-        builder.with_mana_cost(ManaCost::Cost {
-            generic: 1,
-            shards: vec![ManaCostShard::Green, ManaCostShard::Green],
-        });
-        builder.with_subtypes(vec!["Satyr"]);
-        builder.from_oracle_text_with_keywords(&["Flash", "Bestow"], BOON_SATYR);
-        let satyr = builder.id();
-        let mut runner = scenario.build();
-        {
-            let obj = runner.state_mut().objects.get_mut(&satyr).unwrap();
-            for types in [
-                &mut obj.card_types.core_types,
-                &mut obj.base_card_types.core_types,
-            ] {
-                if !types.contains(&CoreType::Enchantment) {
-                    types.push(CoreType::Enchantment);
-                }
-            }
-        }
-        engine::game::layers::flush_layers(runner.state_mut());
-        fill_mana(&mut runner, ManaType::Green);
-        (runner, satyr)
-    };
-    let bestow = engine::types::game_state::AlternativeCastKeyword::Bestow;
-    for (muldrotha, broodship) in [(true, false), (false, true)] {
-        let (mut control, satyr) = board(muldrotha, broodship);
-        complete_alternative(&mut control, satyr, bestow);
-        assert!(
-            control.state().objects[&satyr].bestow_form.is_some(),
-            "reach (muldrotha {muldrotha}, broodship {broodship}): cast bestowed"
-        );
-    }
-    let (runner, satyr) = board(true, true);
-    assert!(
-        !alternative_offered(&runner, satyr, bestow),
-        "two bounded permissions: the bestow must not be offered"
-    );
-    assert!(
-        offered_cast(&runner, satyr).is_some(),
-        "the printed cast is still offered"
-    );
-}
-
 const EXPLORATION_BROODSHIP: &str = "Station (Tap another creature you control: Put charge counters equal to its power on this Spacecraft. Station only as a sorcery. It's an artifact creature at 8+.)\n3+ | You may play an additional land on each of your turns.\n8+ | Flying\nOnce during each of your turns, you may cast a permanent spell from your graveyard by sacrificing a land in addition to paying its other costs.";
 
-const ENCROACHING_MYCOSYNTH: &str = "Nonland permanents you control are artifacts in addition to their other types. The same is true for permanent spells you control and nonland permanent cards you own that aren't on the battlefield.";
+pub(crate) const ENCROACHING_MYCOSYNTH: &str = "Nonland permanents you control are artifacts in addition to their other types. The same is true for permanent spells you control and nonland permanent cards you own that aren't on the battlefield.";
 
 /// Put Exploration Broodship on P0's battlefield as the Spacecraft it is, with
 /// `charge` charge counters. CR 721.2a: its graveyard permission is printed in
 /// the 8+ striation, so it functions only with 8 or more charge counters. The
 /// subtype must be set before the Oracle text is parsed, so the parser sees a
 /// Spacecraft and gates the striation. Flush layers after `build()`.
-fn add_exploration_broodship(scenario: &mut GameScenario, charge: u32) -> ObjectId {
+pub(crate) fn add_exploration_broodship(scenario: &mut GameScenario, charge: u32) -> ObjectId {
     let broodship = scenario
         .add_artifact_from_oracle(P0, "Exploration Broodship", EXPLORATION_BROODSHIP)
         .with_subtypes(vec!["Spacecraft"])
@@ -1044,11 +789,11 @@ fn add_exploration_broodship(scenario: &mut GameScenario, charge: u32) -> Object
 }
 
 /// Charge counters that switch on Exploration Broodship's graveyard permission.
-const BROODSHIP_STATIONED: u32 = 8;
+pub(crate) const BROODSHIP_STATIONED: u32 = 8;
 
 /// Answer every `PayCost` prompt with the first card it offers, until priority
 /// returns or a prompt this helper does not handle comes up.
-fn pay_offered_costs(runner: &mut GameRunner) {
+pub(crate) fn pay_offered_costs(runner: &mut GameRunner) {
     for _ in 0..4 {
         let choice = match &runner.state().waiting_for {
             WaitingFor::PayCost { choices, .. } => choices.first().copied(),
@@ -1068,8 +813,7 @@ fn pay_offered_costs(runner: &mut GameRunner) {
 /// Sabin's own "using its blitz ability" permission is the only one. A
 /// permission that is present but admits nothing must not charge its rider:
 /// Broodship's "by sacrificing a land" is NOT paid. (Two permissions admitting
-/// the same rider cast is refused outright; see
-/// `blitz_beside_sabins_own_permission_and_another_is_not_offered`.)
+/// the same rider cast are announced; see `graveyard_permission_announcement`.)
 #[test]
 fn blitz_charges_only_the_elected_permissions_extra_cost() {
     let parsed = parse_oracle_text(
@@ -1177,9 +921,9 @@ fn blitz_under_broodship_alone_charges_its_land_sacrifice() {
 }
 
 /// Muldrotha, Encroaching Mycosynth and a graveyard Boon Satyr: a board where
-/// a card cast for its own alternative cost would need a permanent-type slot
-/// choice the engine can't prompt for yet.
-fn mycosynth_muldrotha_board(scenario: &mut GameScenario) -> ObjectId {
+/// a card cast for its own alternative cost announces a permanent-type slot
+/// (a bestowed Satyr is an artifact and an enchantment spell).
+pub(crate) fn mycosynth_muldrotha_board(scenario: &mut GameScenario) -> ObjectId {
     scenario.at_phase(Phase::PreCombatMain);
     add_permission_source(
         scenario,
@@ -1196,81 +940,6 @@ fn mycosynth_muldrotha_board(scenario: &mut GameScenario) -> ObjectId {
     builder.with_subtypes(vec!["Satyr"]);
     builder.from_oracle_text_with_keywords(&["Flash", "Bestow"], BOON_SATYR);
     builder.id()
-}
-
-/// CR 110.4 + CR 702.103b + CR 118.9b: under Encroaching Mycosynth a bestowed
-/// Boon Satyr is an artifact AND an enchantment spell, so Muldrotha offers two
-/// slots and the player would have to choose one. That choice has no prompt on
-/// the alternative-cost path yet, so bestow is not offered through Muldrotha,
-/// rather than finalizing a cast that spends no slot (or tripping the
-/// finalize-time slot assertion). Bestow is optional, though, so Muldrotha's
-/// ordinary creature cast is still legal and goes to the existing slot prompt.
-#[test]
-fn bestow_needing_a_permanent_type_choice_leaves_the_printed_cast() {
-    let mut scenario = GameScenario::new();
-    let satyr = mycosynth_muldrotha_board(&mut scenario);
-    let mut runner = scenario.build();
-    // Boon Satyr is an Enchantment Creature. The graveyard builder seeds only
-    // Creature, so add Enchantment to both the current and base type lines.
-    {
-        let obj = runner.state_mut().objects.get_mut(&satyr).unwrap();
-        for types in [
-            &mut obj.card_types.core_types,
-            &mut obj.base_card_types.core_types,
-        ] {
-            if !types.contains(&CoreType::Enchantment) {
-                types.push(CoreType::Enchantment);
-            }
-        }
-    }
-    engine::game::layers::flush_layers(runner.state_mut());
-    fill_mana(&mut runner, ManaType::Green);
-
-    // Positive reach guard: Mycosynth really made the graveyard card an artifact,
-    // which is what gives the bestowed spell its second slot.
-    assert!(
-        runner.state().objects[&satyr]
-            .card_types
-            .core_types
-            .contains(&CoreType::Artifact),
-        "Encroaching Mycosynth must make the graveyard Satyr an artifact, types: {:?}",
-        runner.state().objects[&satyr].card_types.core_types
-    );
-
-    let waiting = cast_from_graveyard(&mut runner, satyr)
-        .expect("Muldrotha's printed creature cast is legal, so the cast must go ahead");
-    match &waiting {
-        WaitingFor::ChoosePermanentTypeSlot {
-            available_slots, ..
-        } => {
-            for slot in [
-                CoreType::Artifact,
-                CoreType::Creature,
-                CoreType::Enchantment,
-            ] {
-                assert!(
-                    available_slots.contains(&slot),
-                    "the printed Artifact Enchantment Creature cast offers every slot, \
-                     missing {slot:?} in {available_slots:?}"
-                );
-            }
-        }
-        other => panic!(
-            "bestow can't be used through Muldrotha here, so the printed cast must go \
-             to the existing slot prompt, not {other:?}"
-        ),
-    }
-    assert!(
-        runner.state().stack.is_empty(),
-        "nothing is on the stack yet"
-    );
-    let obj = &runner.state().objects[&satyr];
-    assert_eq!(obj.zone, Zone::Graveyard);
-    assert!(
-        obj.card_types.core_types.contains(&CoreType::Creature),
-        "no bestow form was applied, so the card keeps its creature type, types: {:?}",
-        obj.card_types.core_types
-    );
 }
 
 /// CR 110.4 + CR 118.9b: choosing the printed cast over bestow, from the
@@ -1398,113 +1067,6 @@ fn bestow_blocked_by_a_spent_slot_still_leaves_the_printed_cast() {
             .contains(&(muldrotha, CoreType::Creature)),
         "the printed cast must spend Muldrotha's creature slot, used: {:?}",
         runner.state().graveyard_cast_permissions_used_per_type
-    );
-}
-
-/// CR 110.4 + CR 118.9b: the Blitz counterpart of the test above. Under
-/// Encroaching Mycosynth Sabin is an artifact creature card, so its printed cast
-/// through Muldrotha has two slots. Sabin's own rider still admits blitz, so the
-/// choice is offered, and declining blitz goes to the slot prompt.
-#[test]
-fn blitz_declined_from_graveyard_takes_the_slot_prompt() {
-    let parsed = parse_oracle_text(
-        SABIN,
-        "Sabin, Master Monk",
-        &[],
-        &["Legendary".into(), "Creature".into()],
-        &["Human".into(), "Noble".into(), "Monk".into()],
-    );
-    let own_rider = parsed
-        .statics
-        .first()
-        .expect("graveyard-cast permission static must parse")
-        .clone();
-
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    add_permission_source(
-        &mut scenario,
-        "Muldrotha, the Gravetide",
-        MULDROTHA,
-        &["Elemental", "Avatar"],
-    );
-    scenario.add_artifact_from_oracle(P0, "Encroaching Mycosynth", ENCROACHING_MYCOSYNTH);
-    let sabin = scenario
-        .add_creature_to_graveyard(P0, "Sabin, Master Monk", 4, 3)
-        .with_static_definition(own_rider)
-        .with_mana_cost(ManaCost::Cost {
-            generic: 4,
-            shards: vec![ManaCostShard::Red],
-        })
-        .with_keyword(blitz_keyword(&parsed))
-        .id();
-    scenario.add_card_to_hand(P0, "Filler Card");
-    let mut runner = scenario.build();
-    engine::game::layers::flush_layers(runner.state_mut());
-    fill_mana(&mut runner, ManaType::Red);
-
-    let waiting = cast_from_graveyard(&mut runner, sabin).expect("graveyard cast must be legal");
-    assert!(
-        matches!(waiting, WaitingFor::AlternativeCastChoice { .. }),
-        "expected the blitz choice, got {waiting:?}"
-    );
-    let waiting = runner
-        .act(GameAction::ChooseAlternativeCast {
-            choice: AlternativeCastDecision::Normal,
-        })
-        .expect("choosing the printed cast must be legal")
-        .waiting_for;
-    assert!(
-        matches!(
-            &waiting,
-            WaitingFor::ChoosePermanentTypeSlot { available_slots, .. }
-                if available_slots.contains(&CoreType::Artifact)
-                    && available_slots.contains(&CoreType::Creature)
-        ),
-        "the printed artifact creature cast must go to the slot prompt, got {waiting:?}"
-    );
-}
-
-/// CR 110.4: the Blitz counterpart. Under Encroaching Mycosynth, Caldaia Guardian
-/// is an artifact creature, so a blitz cast under Muldrotha would need the
-/// slot choice too. Blitz is therefore not offered through Muldrotha, and the
-/// printed-cost cast goes to the existing permanent-type slot prompt instead.
-#[test]
-fn blitz_needing_a_permanent_type_choice_is_not_offered() {
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    add_permission_source(
-        &mut scenario,
-        "Muldrotha, the Gravetide",
-        MULDROTHA,
-        &["Elemental", "Avatar"],
-    );
-    scenario.add_artifact_from_oracle(P0, "Encroaching Mycosynth", ENCROACHING_MYCOSYNTH);
-    let guardian = scenario
-        .add_creature_to_graveyard(P0, "Caldaia Guardian", 4, 3)
-        .with_mana_cost(ManaCost::Cost {
-            generic: 3,
-            shards: vec![ManaCostShard::Green],
-        })
-        .with_keyword(caldaia_blitz())
-        .id();
-    let mut runner = scenario.build();
-    engine::game::layers::flush_layers(runner.state_mut());
-    fill_mana(&mut runner, ManaType::Green);
-    assert!(
-        runner.state().objects[&guardian]
-            .card_types
-            .core_types
-            .contains(&CoreType::Artifact),
-        "Encroaching Mycosynth must make the graveyard Caldaia an artifact creature"
-    );
-
-    let waiting = cast_from_graveyard(&mut runner, guardian)
-        .expect("the printed-cost graveyard cast must still be legal");
-    assert!(
-        matches!(waiting, WaitingFor::ChoosePermanentTypeSlot { .. }),
-        "blitz must not be offered through Muldrotha here, so the printed cast \
-         goes to the slot prompt, got {waiting:?}"
     );
 }
 
@@ -2079,7 +1641,7 @@ fn a_resolution_created_permission_without_a_rider_adds_no_counter() {
 }
 
 /// Put exactly `count` mana of one color in the active player's pool.
-fn add_mana(runner: &mut GameRunner, mana: ManaType, count: usize) {
+pub(crate) fn add_mana(runner: &mut GameRunner, mana: ManaType, count: usize) {
     let dummy = ObjectId(0);
     let pool = &mut runner.state_mut().players[0].mana_pool;
     for _ in 0..count {
@@ -2088,7 +1650,7 @@ fn add_mana(runner: &mut GameRunner, mana: ManaType, count: usize) {
 }
 
 /// The `CastSpell` action `legal_actions` offers for `id`, if any.
-fn offered_cast(runner: &GameRunner, id: ObjectId) -> Option<GameAction> {
+pub(crate) fn offered_cast(runner: &GameRunner, id: ObjectId) -> Option<GameAction> {
     engine::ai_support::legal_actions(runner.state())
         .into_iter()
         .find(
@@ -2487,11 +2049,11 @@ use engine::types::statics::{CastFrequency, StaticMode};
 
 const UNDERWORLD_BREACH: &str = "Each nonland card in your graveyard has escape. The escape cost is equal to the card's mana cost plus exile three other cards from your graveyard. (You may cast cards from your graveyard for their escape cost.)\nAt the beginning of the end step, sacrifice this enchantment.";
 
-const LURRUS: &str = "Lifelink\nOnce during each of your turns, you may cast a permanent spell with mana value 2 or less from your graveyard.";
+pub(crate) const LURRUS: &str = "Lifelink\nOnce during each of your turns, you may cast a permanent spell with mana value 2 or less from your graveyard.";
 
 /// A creature-card graveyard permission built directly: `frequency`, the
 /// casting method it requires, and any extra card-selection properties.
-fn creature_permission(
+pub(crate) fn creature_permission(
     frequency: CastFrequency,
     required_cast_keyword: Option<KeywordKind>,
     selection: Vec<FilterProp>,
@@ -2509,14 +2071,18 @@ fn creature_permission(
     .affected(TargetFilter::Typed(filter))
 }
 
-fn add_permission_host(scenario: &mut GameScenario, name: &str, def: StaticDefinition) -> ObjectId {
+pub(crate) fn add_permission_host(
+    scenario: &mut GameScenario,
+    name: &str,
+    def: StaticDefinition,
+) -> ObjectId {
     scenario
         .add_creature(P0, name, 1, 1)
         .with_static_definition(def)
         .id()
 }
 
-fn add_bears_to_graveyard(scenario: &mut GameScenario, name: &str) -> ObjectId {
+pub(crate) fn add_bears_to_graveyard(scenario: &mut GameScenario, name: &str) -> ObjectId {
     scenario
         .add_creature_to_graveyard(P0, name, 2, 2)
         .with_mana_cost(ManaCost::Cost {
@@ -2607,81 +2173,6 @@ fn blitz_is_not_cast_through_a_permission_requiring_another_method() {
     );
     assert!(cast_from_graveyard(&mut runner, sabin).is_err());
     assert_eq!(runner.state().objects[&sabin].zone, Zone::Graveyard);
-}
-
-/// CR 601.2a: between method-open permissions, the printed cast prefers a
-/// strictly dominant one (unlimited, no rider). Muldrotha is scanned before an
-/// unlimited creature permission, and the printed cast spends no Muldrotha slot.
-#[test]
-fn printed_cast_prefers_a_strictly_dominant_open_permission() {
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    add_permission_source(
-        &mut scenario,
-        "Muldrotha, the Gravetide",
-        MULDROTHA,
-        &["Elemental", "Avatar"],
-    );
-    add_permission_host(
-        &mut scenario,
-        "Open Permission",
-        creature_permission(CastFrequency::Unlimited, None, vec![]),
-    );
-    let bears = add_bears_to_graveyard(&mut scenario, "Grizzly Bears");
-    let mut runner = scenario.build();
-    add_mana(&mut runner, ManaType::Green, 2);
-
-    cast_from_graveyard(&mut runner, bears).expect("the printed cast is legal");
-    assert_eq!(runner.state().objects[&bears].zone, Zone::Stack);
-    assert!(
-        runner
-            .state()
-            .graveyard_cast_permissions_used_per_type
-            .is_empty(),
-        "the unlimited permission authorizes it, so Muldrotha's slot stays free, used: {:?}",
-        runner.state().graveyard_cast_permissions_used_per_type
-    );
-}
-
-/// CR 601.2a: two bounded open permissions (Muldrotha and Lurrus) are a real
-/// choice the player would announce, which the engine does not model. The
-/// printed cast takes the first in source order, a documented policy: this test
-/// pins it rather than claiming it is the rules result.
-#[test]
-fn competing_bounded_open_permissions_follow_source_order() {
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    let muldrotha = add_permission_source(
-        &mut scenario,
-        "Muldrotha, the Gravetide",
-        MULDROTHA,
-        &["Elemental", "Avatar"],
-    );
-    let lurrus = add_permission_source(
-        &mut scenario,
-        "Lurrus of the Dream-Den",
-        LURRUS,
-        &["Cat", "Nightmare"],
-    );
-    let bears = add_bears_to_graveyard(&mut scenario, "Grizzly Bears");
-    let mut runner = scenario.build();
-    add_mana(&mut runner, ManaType::Green, 2);
-
-    cast_from_graveyard(&mut runner, bears).expect("the printed cast is legal");
-    assert!(
-        runner
-            .state()
-            .graveyard_cast_permissions_used_per_type
-            .contains(&(muldrotha, CoreType::Creature)),
-        "the first bounded permission (Muldrotha) is spent"
-    );
-    assert!(
-        !runner
-            .state()
-            .graveyard_cast_permissions_used
-            .contains(&lurrus),
-        "Lurrus's once-per-turn slot is left unspent"
-    );
 }
 
 /// Negative control: a keyword that only SELECTS cards stays a selector. A
@@ -2839,6 +2330,7 @@ fn a_printed_option_through_a_blitz_only_permission_is_refused() {
             shards: vec![ManaCostShard::Black],
         },
         additional_cost: None,
+        authority: None,
     });
     let stale = options.len() - 1;
     runner.state_mut().waiting_for = WaitingFor::CastingVariantChoice {

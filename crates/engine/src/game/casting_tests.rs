@@ -2659,6 +2659,7 @@ fn ordinary_cast_preparation_accepts_only_current_face() {
         CastingVariant::Normal,
         CastingVariantFace::Current,
         CastingMode::Actual,
+        None,
     )
     .expect("ordinary casts must accept their explicit Current face");
     assert_eq!(current.prepared.casting_variant, CastingVariant::Normal);
@@ -2672,6 +2673,7 @@ fn ordinary_cast_preparation_accepts_only_current_face() {
                 CastingVariant::Normal,
                 face,
                 CastingMode::Actual,
+                None,
             )
             .is_err(),
             "ordinary casts must reject the split-only {face:?} selector"
@@ -14741,6 +14743,7 @@ fn x_cost_alt_cost_max_and_charge_derive_from_alt_base() {
         spell,
         CastingVariant::Overload,
         crate::types::game_state::CastingVariantFace::Current,
+        None,
         CastPaymentMode::Auto,
         &mut events,
     )
@@ -49132,6 +49135,7 @@ fn exile_static_any_color_is_bound_to_elected_source() {
             frequency: CastFrequency::Unlimited,
         },
         crate::types::game_state::CastingVariantFace::Current,
+        None,
         CastPaymentMode::Auto,
         &mut denied_events,
     );
@@ -49149,6 +49153,7 @@ fn exile_static_any_color_is_bound_to_elected_source() {
             frequency: CastFrequency::Unlimited,
         },
         crate::types::game_state::CastingVariantFace::Current,
+        None,
         CastPaymentMode::Auto,
         &mut allowed_events,
     )

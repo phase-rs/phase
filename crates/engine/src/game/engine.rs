@@ -11755,6 +11755,7 @@ fn apply_non_priority_pass_action(
                 source,
                 payment_mode,
                 available_slots,
+                permission,
             },
             GameAction::ChoosePermanentTypeSlot { slot },
         ) => {
@@ -11775,6 +11776,7 @@ fn apply_non_priority_pass_action(
                     *card_id,
                     *source,
                     slot,
+                    permission.as_ref(),
                     *payment_mode,
                     &mut events,
                 )?
@@ -16953,6 +16955,7 @@ fn handle_play_land(
                             source,
                             payment_mode: crate::types::game_state::CastPaymentMode::Auto,
                             available_slots: slots,
+                            permission: None,
                         });
                     }
                 }

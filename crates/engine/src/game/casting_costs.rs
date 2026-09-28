@@ -7202,7 +7202,8 @@ fn record_graveyard_rider_authority(
             "No graveyard permission admits this alternative-cost cast".to_string(),
         )
     })?;
-    ability.context.graveyard_permission_authority = Some(authority);
+    ability.context.graveyard_permission_authority = Some(authority.variant);
+    ability.context.graveyard_permission_latch = Some(authority.latch);
     Ok(())
 }
 
@@ -7223,18 +7224,27 @@ fn combined_imposed_additional_cast_cost(
     // (Valgavoth) is handled separately in the alt-cost block — it zeroes the
     // mana cost — and must NOT be folded in here.
     //
-    // CR 601.2a: a graveyard rider cast reads the rider of the permission it
+    // CR 601.2a + CR 601.2f: a graveyard cast pays the extra cost of the
+    // permission it was announced under, as latched when it was announced
+    // (`SpellContext::graveyard_permission_latch`), even if that permission's
+    // source has left since. A cast that latched none reads the permission it
     // committed to (`SpellContext::graveyard_permission_authority`).
-    imposed_costs.extend(cast_permission_additional_extra_cost(
-        state,
-        player,
-        object_id,
-        ability
-            .context
-            .graveyard_permission_authority
-            .unwrap_or(casting_variant),
-        casting_permission_index,
-    ));
+    match &ability.context.graveyard_permission_latch {
+        Some(latch) => imposed_costs.extend(latch.extra_cost.as_ref().and_then(|extra| {
+            matches!(extra.mode, crate::types::statics::CastCostMode::Additional)
+                .then(|| extra.cost.clone())
+        })),
+        None => imposed_costs.extend(cast_permission_additional_extra_cost(
+            state,
+            player,
+            object_id,
+            ability
+                .context
+                .graveyard_permission_authority
+                .unwrap_or(casting_variant),
+            casting_permission_index,
+        )),
+    }
     match imposed_costs.len() {
         0 => None,
         1 => imposed_costs.into_iter().next(),
@@ -11420,6 +11430,9 @@ fn finalize_cast_with_phyrexian_choices_inner(
     // here for the same reason as `alt_cost_grant_source`: the placeholder
     // branch below may drop the ability.
     let recorded_graveyard_authority = ability.context.graveyard_permission_authority;
+    // CR 601.2b + CR 614.1c: the announced permission's terms, latched as the
+    // cast was announced; captured with the authority for the same reason.
+    let graveyard_permission_latch = ability.context.graveyard_permission_latch.clone();
     let is_placeholder = matches!(
         ability.effect,
         crate::types::ability::Effect::Unimplemented { .. }
@@ -11532,6 +11545,10 @@ fn finalize_cast_with_phyrexian_choices_inner(
     // cast already names its authority in `casting_variant`, either as
     // `GraveyardPermission` or as a keyword route that is its own authority
     // (flashback, escape, …), so it is left alone.
+    //
+    // CR 601.2a + CR 601.2b: a printed-cost `GraveyardPermission` cast spends
+    // the authority recorded as it was announced too, the same one its
+    // `casting_variant` names.
     let permission_authority = if source_zone == Zone::Graveyard
         && casting_variant.is_independent_alternative_cost_rider()
     {
@@ -11540,9 +11557,29 @@ fn finalize_cast_with_phyrexian_choices_inner(
                 "No graveyard permission was recorded for this alternative-cost cast".to_string(),
             )
         })?
+    } else if source_zone == Zone::Graveyard
+        && matches!(casting_variant, CastingVariant::GraveyardPermission { .. })
+    {
+        recorded_graveyard_authority.unwrap_or(casting_variant)
     } else {
         casting_variant
     };
+    // CR 110.4 + CR 601.2a: a per-type permission spends the slot announced
+    // for the cast. One that reaches finalization without a slot was never
+    // announced; refuse it rather than spend no slot or guess one (the action
+    // boundary rolls the whole cast back).
+    if matches!(
+        permission_authority,
+        CastingVariant::GraveyardPermission {
+            frequency: crate::types::statics::CastFrequency::OncePerTurnPerPermanentType,
+            slot_type: None,
+            ..
+        }
+    ) {
+        return Err(EngineError::ActionNotAllowed(
+            "graveyard permission slot not announced".to_string(),
+        ));
+    }
     // CR 601.2a + CR 611.2a: Capture the tracked-set group of a
     // single-use `PlayFromExile` grant authorizing this cast BEFORE the object
     // leaves its source zone for the stack.
@@ -11654,11 +11691,20 @@ fn finalize_cast_with_phyrexian_choices_inner(
     // Samurai) is carried on the static's `enters_with_counter` field. The
     // authorizing source is embedded in `casting_variant`; register the pending
     // ETB counter on the same object so it enters carrying the counter.
-    let static_perm_etb_counter = super::casting::selected_static_permission_enters_with_counter(
-        state,
-        player,
-        &permission_authority,
-    );
+    //
+    // CR 601.2b + CR 614.1c: a graveyard cast applies the counter of the
+    // permission it was announced under, as latched then: the grant's source
+    // "doesn't need to stay under your control throughout that process"
+    // (Intrepid Paleontologist ruling), so a source sacrificed mid-payment
+    // still gives its counter. A cast that latched none reads it now.
+    let static_perm_etb_counter = match &graveyard_permission_latch {
+        Some(latch) => latch.enters_with_counter.clone(),
+        None => super::casting::selected_static_permission_enters_with_counter(
+            state,
+            player,
+            &permission_authority,
+        ),
+    };
     if let Some(counter_type) = static_perm_etb_counter {
         state
             .pending_etb_counters
