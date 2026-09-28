@@ -857,6 +857,7 @@ mod issue_7470_hidden_strings_optional_frame_leak;
 mod issue_7539_debug_turn_face_up;
 mod issue_782_nested_composite_library_exile_tier;
 mod issue_782_thought_lash_exile_top_activation_cost;
+mod issue_782_tier1_settles_before_library_aggregate;
 mod issue_787_once_upon_a_time;
 mod issue_7884_king_of_the_oathbreakers;
 mod issue_788_unexpectedly_absent;
