@@ -2272,6 +2272,12 @@
     "dontAskAgain": "Dieses Spiel nicht mehr fragen",
     "dontAskAgainForSameCard": "Diese Entscheidung für jede Kopie dieser Karte in diesem Spiel verwenden"
   },
+  "keywordDetail": {
+    "selfManaCost": "seine Manakosten",
+    "selfManaValue": "sein Manawert",
+    "manaCostReduced": "seine Manakosten, verringert um {{reduction}}",
+    "spliceOnto": "auf {{subtype}} {{cost}}"
+  },
   "resolutionOptionalPayment": {
     "title": "Optionale Zahlung wählen",
     "pay": "{{cost}} bezahlen",

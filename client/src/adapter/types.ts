@@ -1040,7 +1040,8 @@ export type ManaCost =
   | { type: "NoCost" }
   | { type: "Cost"; shards: ManaCostShard[]; generic: number }
   | { type: "SelfManaCost" }
-  | { type: "SelfManaValue" };
+  | { type: "SelfManaValue" }
+  | { type: "SelfManaCostReduced"; reduction: number };
 
 /**
  * CR 107.4: one mana-cost component, serialized as its Rust enum variant name

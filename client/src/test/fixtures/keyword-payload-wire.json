@@ -1,0 +1,1086 @@
+{
+  "parsed_ward": {
+    "Ward—{1}, Get a poison counter.": {
+      "Ward": {
+        "data": [
+          {
+            "data": {
+              "generic": 1,
+              "shards": [],
+              "type": "Cost"
+            },
+            "type": "Mana"
+          },
+          {
+            "data": {
+              "count": 1,
+              "counter_kind": "Poison"
+            },
+            "type": "GetPlayerCounters"
+          }
+        ],
+        "type": "Compound"
+      }
+    },
+    "Ward—{2}, Pay 2 life.": {
+      "Ward": {
+        "data": [
+          {
+            "data": {
+              "generic": 2,
+              "shards": [],
+              "type": "Cost"
+            },
+            "type": "Mana"
+          },
+          {
+            "data": 2,
+            "type": "PayLife"
+          }
+        ],
+        "type": "Compound"
+      }
+    },
+    "Ward—{2}, Pay life equal to this creature's power.": {
+      "Ward": {
+        "data": [
+          {
+            "data": {
+              "generic": 2,
+              "shards": [],
+              "type": "Cost"
+            },
+            "type": "Mana"
+          },
+          {
+            "type": "PayLifeEqualToPower"
+          }
+        ],
+        "type": "Compound"
+      }
+    }
+  },
+  "samples": [
+    {
+      "HexproofFrom": {
+        "data": "multicolored",
+        "type": "Quality"
+      }
+    },
+    {
+      "Afflict": 3
+    },
+    {
+      "StartingIntensity": 3
+    },
+    {
+      "Dredge": 3
+    },
+    {
+      "Modular": 3
+    },
+    {
+      "Renown": 3
+    },
+    {
+      "Fabricate": 3
+    },
+    {
+      "Annihilator": 3
+    },
+    {
+      "Bushido": 3
+    },
+    {
+      "Frenzy": 3
+    },
+    {
+      "Tribute": 3
+    },
+    {
+      "Unearth": {
+        "generic": 2,
+        "shards": [
+          "Red"
+        ],
+        "type": "Cost"
+      }
+    },
+    {
+      "Afterlife": 3
+    },
+    {
+      "Enchant": {
+        "type": "SelfRef"
+      }
+    },
+    {
+      "EtbCounter": {
+        "count": 3,
+        "counter_type": "P1P1"
+      }
+    },
+    {
+      "Reconfigure": {
+        "generic": 2,
+        "shards": [
+          "Red"
+        ],
+        "type": "Cost"
+      }
+    },
+    {
+      "Bestow": {
+        "data": {
+          "amount": {
+            "type": "Fixed",
+            "value": 3
+          },
+          "type": "PayLife"
+        },
+        "type": "NonMana"
+      }
+    },
+    {
+      "Embalm": {
+        "data": {
+          "amount": {
+            "type": "Fixed",
+            "value": 3
+          },
+          "type": "PayLife"
+        },
+        "type": "NonMana"
+      }
+    },
+    {
+      "Eternalize": {
+        "data": {
+          "amount": {
+            "type": "Fixed",
+            "value": 3
+          },
+          "type": "PayLife"
+        },
+        "type": "NonMana"
+      }
+    },
+    {
+      "Fading": 3
+    },
+    {
+      "Vanishing": 3
+    },
+    {
+      "Protection": "Multicolored"
+    },
+    {
+      "Kicker": {
+        "generic": 2,
+        "shards": [
+          "Red"
+        ],
+        "type": "Cost"
+      }
+    },
+    {
+      "Cycling": {
+        "data": {
+          "amount": {
+            "type": "Fixed",
+            "value": 3
+          },
+          "type": "PayLife"
+        },
+        "type": "NonMana"
+      }
+    },
+    {
+      "Flashback": {
+        "data": {
+          "amount": {
+            "type": "Fixed",
+            "value": 3
+          },
+          "type": "PayLife"
+        },
+        "type": "NonMana"
+      }
+    },
+    {
+      "Ward": {
+        "data": 3,
+        "type": "PayLife"
+      }
+    },
+    {
+      "Equip": {
+        "generic": 2,
+        "shards": [
+          "Red"
+        ],
+        "type": "Cost"
+      }
+    },
+    {
+      "Landwalk": "Island"
+    },
+    {
+      "Rampage": 3
+    },
+    {
+      "Absorb": 3
+    },
+    {
+      "Crew": {
+        "once_per_turn": {
+          "type": "OnlyOnceEachTurn"
+        },
+        "power": 3
+      }
+    },
+    {
+      "Partner": {
+        "data": "Pir",
+        "type": "With"
+      }
+    },
+    {
+      "Companion": {
+        "data": 3,
+        "type": "MinManaValue"
+      }
+    },
+    {
+      "Ninjutsu": {
+        "generic": 2,
+        "shards": [
+          "Red"
+        ],
+        "type": "Cost"
+      }
+    },
+    {
+      "CommanderNinjutsu": {
+        "generic": 2,
+        "shards": [
+          "Red"
+        ],
+        "type": "Cost"
+      }
+    },
+    {
+      "Prowl": {
+        "generic": 2,
+        "shards": [
+          "Red"
+        ],
+        "type": "Cost"
+      }
+    },
+    {
+      "Morph": {
+        "generic": 2,
+        "shards": [
+          "Red"
+        ],
+        "type": "Cost"
+      }
+    },
+    {
+      "Megamorph": {
+        "generic": 2,
+        "shards": [
+          "Red"
+        ],
+        "type": "Cost"
+      }
+    },
+    {
+      "Mayhem": {
+        "generic": 2,
+        "shards": [
+          "Red"
+        ],
+        "type": "Cost"
+      }
+    },
+    {
+      "Madness": {
+        "generic": 2,
+        "shards": [
+          "Red"
+        ],
+        "type": "Cost"
+      }
+    },
+    {
+      "Miracle": {
+        "generic": 2,
+        "shards": [
+          "Red"
+        ],
+        "type": "Cost"
+      }
+    },
+    {
+      "Dash": {
+        "generic": 2,
+        "shards": [
+          "Red"
+        ],
+        "type": "Cost"
+      }
+    },
+    {
+      "Emerge": {
+        "mana_cost": {
+          "generic": 2,
+          "shards": [
+            "Red"
+          ],
+          "type": "Cost"
+        },
+        "sacrifice_filter": {
+          "controller": null,
+          "properties": [],
+          "type": "Typed",
+          "type_filters": [
+            "Artifact"
+          ]
+        }
+      }
+    },
+    {
+      "Escape": {
+        "data": {
+          "amount": {
+            "type": "Fixed",
+            "value": 3
+          },
+          "type": "PayLife"
+        },
+        "type": "NonMana"
+      }
+    },
+    {
+      "Harmonize": {
+        "generic": 2,
+        "shards": [
+          "Red"
+        ],
+        "type": "Cost"
+      }
+    },
+    {
+      "Evoke": {
+        "data": {
+          "amount": {
+            "type": "Fixed",
+            "value": 3
+          },
+          "type": "PayLife"
+        },
+        "type": "NonMana"
+      }
+    },
+    {
+      "Foretell": {
+        "generic": 2,
+        "shards": [
+          "Red"
+        ],
+        "type": "Cost"
+      }
+    },
+    {
+      "Mutate": {
+        "generic": 2,
+        "shards": [
+          "Red"
+        ],
+        "type": "Cost"
+      }
+    },
+    {
+      "Disturb": {
+        "generic": 2,
+        "shards": [
+          "Red"
+        ],
+        "type": "Cost"
+      }
+    },
+    {
+      "Disguise": {
+        "cost": {
+          "generic": 2,
+          "shards": [
+            "Red"
+          ],
+          "type": "Cost"
+        },
+        "reduction": {
+          "amount_per": 1,
+          "count": {
+            "type": "Fixed",
+            "value": 1
+          }
+        }
+      }
+    },
+    {
+      "Blitz": {
+        "data": {
+          "amount": {
+            "type": "Fixed",
+            "value": 3
+          },
+          "type": "PayLife"
+        },
+        "type": "NonMana"
+      }
+    },
+    {
+      "Overload": {
+        "generic": 2,
+        "shards": [
+          "Red"
+        ],
+        "type": "Cost"
+      }
+    },
+    {
+      "Spectacle": {
+        "generic": 2,
+        "shards": [
+          "Red"
+        ],
+        "type": "Cost"
+      }
+    },
+    {
+      "Surge": {
+        "generic": 2,
+        "shards": [
+          "Red"
+        ],
+        "type": "Cost"
+      }
+    },
+    {
+      "Encore": {
+        "generic": 2,
+        "shards": [
+          "Red"
+        ],
+        "type": "Cost"
+      }
+    },
+    {
+      "Buyback": {
+        "data": {
+          "amount": {
+            "type": "Fixed",
+            "value": 3
+          },
+          "type": "PayLife"
+        },
+        "type": "NonMana"
+      }
+    },
+    {
+      "Casualty": 3
+    },
+    {
+      "Echo": {
+        "data": {
+          "amount": {
+            "type": "Fixed",
+            "value": 3
+          },
+          "type": "PayLife"
+        },
+        "type": "NonMana"
+      }
+    },
+    {
+      "Entwine": {
+        "generic": 2,
+        "shards": [
+          "Red"
+        ],
+        "type": "Cost"
+      }
+    },
+    {
+      "Outlast": {
+        "generic": 2,
+        "shards": [
+          "Red"
+        ],
+        "type": "Cost"
+      }
+    },
+    {
+      "Scavenge": {
+        "generic": 2,
+        "shards": [
+          "Red"
+        ],
+        "type": "Cost"
+      }
+    },
+    {
+      "Reinforce": {
+        "cost": {
+          "generic": 2,
+          "shards": [
+            "Green"
+          ],
+          "type": "Cost"
+        },
+        "count": 3
+      }
+    },
+    {
+      "Fortify": {
+        "generic": 2,
+        "shards": [
+          "Red"
+        ],
+        "type": "Cost"
+      }
+    },
+    {
+      "Prototype": {
+        "cost": {
+          "generic": 1,
+          "shards": [
+            "Blue"
+          ],
+          "type": "Cost"
+        },
+        "power": 2,
+        "toughness": 3
+      }
+    },
+    {
+      "Plot": {
+        "generic": 2,
+        "shards": [
+          "Red"
+        ],
+        "type": "Cost"
+      }
+    },
+    {
+      "Craft": {
+        "cost": {
+          "generic": 3,
+          "shards": [
+            "Black"
+          ],
+          "type": "Cost"
+        },
+        "count": {
+          "count": 2,
+          "type": "Exactly"
+        },
+        "materials": {
+          "controller": null,
+          "properties": [],
+          "type": "Typed",
+          "type_filters": [
+            "Artifact"
+          ]
+        }
+      }
+    },
+    {
+      "Offspring": {
+        "generic": 2,
+        "shards": [
+          "Red"
+        ],
+        "type": "Cost"
+      }
+    },
+    {
+      "Impending": {
+        "cost": {
+          "generic": 2,
+          "shards": [
+            "White"
+          ],
+          "type": "Cost"
+        },
+        "counters": 4
+      }
+    },
+    {
+      "LevelUp": {
+        "generic": 2,
+        "shards": [
+          "Red"
+        ],
+        "type": "Cost"
+      }
+    },
+    {
+      "Affinity": {
+        "controller": null,
+        "properties": [],
+        "type_filters": []
+      }
+    },
+    {
+      "CumulativeUpkeep": {
+        "effect": {
+          "count": {
+            "type": "Fixed",
+            "value": 1
+          },
+          "counter_type": "M1M1",
+          "target": {
+            "type": "SelfRef"
+          },
+          "type": "PutCounter"
+        },
+        "type": "EffectCost"
+      }
+    },
+    {
+      "BandsWithOther": "Legend"
+    },
+    {
+      "Hideaway": 2
+    },
+    {
+      "Ripple": 4
+    },
+    {
+      "Suspend": {
+        "cost": {
+          "generic": 1,
+          "shards": [
+            "Red"
+          ],
+          "type": "Cost"
+        },
+        "count": 2
+      }
+    },
+    {
+      "Warp": {
+        "generic": 2,
+        "shards": [
+          "Red"
+        ],
+        "type": "Cost"
+      }
+    },
+    {
+      "Sneak": {
+        "generic": 2,
+        "shards": [
+          "Red"
+        ],
+        "type": "Cost"
+      }
+    },
+    {
+      "WebSlinging": {
+        "generic": 2,
+        "shards": [
+          "Red"
+        ],
+        "type": "Cost"
+      }
+    },
+    {
+      "Mobilize": {
+        "type": "Fixed",
+        "value": 3
+      }
+    },
+    {
+      "Gift": {
+        "type": "TappedFish"
+      }
+    },
+    {
+      "Discover": 3
+    },
+    {
+      "Poisonous": 3
+    },
+    {
+      "Bloodthirst": {
+        "type": "X"
+      }
+    },
+    {
+      "Amplify": 3
+    },
+    {
+      "Graft": 3
+    },
+    {
+      "Devour": {
+        "n": 3,
+        "quality": "Artifact"
+      }
+    },
+    {
+      "Toxic": 3
+    },
+    {
+      "Saddle": 3
+    },
+    {
+      "Teamwork": 3
+    },
+    {
+      "Soulshift": 3
+    },
+    {
+      "Backup": 3
+    },
+    {
+      "Squad": {
+        "generic": 2,
+        "shards": [
+          "Red"
+        ],
+        "type": "Cost"
+      }
+    },
+    {
+      "Typecycling": {
+        "cost": {
+          "generic": 2,
+          "shards": [],
+          "type": "Cost"
+        },
+        "subtype": "Plains"
+      }
+    },
+    {
+      "Firebending": {
+        "type": "Fixed",
+        "value": 3
+      }
+    },
+    {
+      "Splice": {
+        "cost": {
+          "generic": 1,
+          "shards": [
+            "Blue"
+          ],
+          "type": "Cost"
+        },
+        "subtype": "Arcane"
+      }
+    },
+    {
+      "Champion": "Elf"
+    },
+    {
+      "Transmute": {
+        "generic": 2,
+        "shards": [
+          "Red"
+        ],
+        "type": "Cost"
+      }
+    },
+    {
+      "Transfigure": {
+        "generic": 2,
+        "shards": [
+          "Red"
+        ],
+        "type": "Cost"
+      }
+    },
+    {
+      "Escalate": {
+        "amount": {
+          "type": "Fixed",
+          "value": 3
+        },
+        "type": "PayLife"
+      }
+    },
+    {
+      "Recover": {
+        "generic": 2,
+        "shards": [
+          "Red"
+        ],
+        "type": "Cost"
+      }
+    },
+    {
+      "Cleave": {
+        "generic": 2,
+        "shards": [
+          "Red"
+        ],
+        "type": "Cost"
+      }
+    },
+    {
+      "Replicate": {
+        "generic": 2,
+        "shards": [
+          "Red"
+        ],
+        "type": "Cost"
+      }
+    },
+    {
+      "Awaken": {
+        "cost": {
+          "generic": 5,
+          "shards": [
+            "White",
+            "White",
+            "White"
+          ],
+          "type": "Cost"
+        },
+        "count": 4
+      }
+    },
+    {
+      "MoreThanMeetsTheEye": {
+        "generic": 2,
+        "shards": [
+          "Red"
+        ],
+        "type": "Cost"
+      }
+    },
+    {
+      "Freerunning": {
+        "generic": 2,
+        "shards": [
+          "Red"
+        ],
+        "type": "Cost"
+      }
+    },
+    {
+      "Specialize": {
+        "generic": 2,
+        "shards": [
+          "Red"
+        ],
+        "type": "Cost"
+      }
+    },
+    {
+      "Offering": "Fox"
+    },
+    {
+      "Unknown": "Xyzzy"
+    },
+    {
+      "Foretell": {
+        "reduction": 2,
+        "type": "SelfManaCostReduced"
+      }
+    },
+    {
+      "Bestow": {
+        "data": {
+          "generic": 3,
+          "shards": [
+            "Green",
+            "Green"
+          ],
+          "type": "Cost"
+        },
+        "type": "Mana"
+      }
+    },
+    {
+      "Embalm": {
+        "data": {
+          "generic": 3,
+          "shards": [
+            "White"
+          ],
+          "type": "Cost"
+        },
+        "type": "Mana"
+      }
+    },
+    {
+      "Eternalize": {
+        "data": {
+          "generic": 4,
+          "shards": [
+            "Black",
+            "Black"
+          ],
+          "type": "Cost"
+        },
+        "type": "Mana"
+      }
+    },
+    {
+      "Cycling": {
+        "data": {
+          "generic": 2,
+          "shards": [],
+          "type": "Cost"
+        },
+        "type": "Mana"
+      }
+    },
+    {
+      "Flashback": {
+        "data": {
+          "generic": 1,
+          "shards": [
+            "Blue"
+          ],
+          "type": "Cost"
+        },
+        "type": "Mana"
+      }
+    },
+    {
+      "Escape": {
+        "data": {
+          "generic": 2,
+          "shards": [
+            "Black"
+          ],
+          "type": "Cost"
+        },
+        "type": "Mana"
+      }
+    },
+    {
+      "Evoke": {
+        "data": {
+          "generic": 2,
+          "shards": [
+            "Blue"
+          ],
+          "type": "Cost"
+        },
+        "type": "Mana"
+      }
+    },
+    {
+      "Buyback": {
+        "data": {
+          "generic": 3,
+          "shards": [],
+          "type": "Cost"
+        },
+        "type": "Mana"
+      }
+    },
+    {
+      "Echo": {
+        "data": {
+          "generic": 1,
+          "shards": [
+            "Red"
+          ],
+          "type": "Cost"
+        },
+        "type": "Mana"
+      }
+    },
+    {
+      "Blitz": {
+        "data": {
+          "generic": 2,
+          "shards": [
+            "Red"
+          ],
+          "type": "Cost"
+        },
+        "type": "Mana"
+      }
+    },
+    {
+      "Disguise": {
+        "generic": 1,
+        "shards": [
+          "WhiteBlue"
+        ],
+        "type": "Cost"
+      }
+    },
+    {
+      "Ward": {
+        "data": {
+          "generic": 2,
+          "shards": [],
+          "type": "Cost"
+        },
+        "type": "Mana"
+      }
+    },
+    {
+      "Ward": {
+        "data": {
+          "generic": 4,
+          "shards": [],
+          "type": "Cost"
+        },
+        "type": "Waterbend"
+      }
+    },
+    {
+      "Ward": {
+        "data": [
+          {
+            "data": {
+              "generic": 2,
+              "shards": [],
+              "type": "Cost"
+            },
+            "type": "Mana"
+          },
+          {
+            "data": 2,
+            "type": "PayLife"
+          }
+        ],
+        "type": "Compound"
+      }
+    },
+    {
+      "CumulativeUpkeep": {
+        "cost": {
+          "generic": 1,
+          "shards": [],
+          "type": "Cost"
+        },
+        "type": "Mana"
+      }
+    },
+    {
+      "Escalate": {
+        "cost": {
+          "generic": 1,
+          "shards": [
+            "Red"
+          ],
+          "type": "Cost"
+        },
+        "type": "Mana"
+      }
+    }
+  ]
+}
