@@ -805,6 +805,168 @@ pub(super) fn restore_continuation_trigger_firing(
     }
 }
 
+pub(crate) fn settle_forwarded_zone_result(
+    state: &mut GameState,
+    group: &crate::types::game_state::LogicalZoneChangeGroup,
+) {
+    let Some(marker) = state
+        .active_ability_continuation()
+        .and_then(|pending| pending.chain.context.pending_forwarded_zone_result.clone())
+    else {
+        return;
+    };
+    if marker.group != Some(group.logical_group_id) {
+        return;
+    }
+    let Some(selected) = marker.selected else {
+        return;
+    };
+    let result = forwarded_zone_result_from_events(
+        state,
+        Some(&selected),
+        group
+            .all_origin_occurrences
+            .iter()
+            .map(|occurrence| &occurrence.event),
+    );
+    bind_completed_forwarded_zone_result(state, result);
+}
+
+fn forwards_battlefield_move(ability: &ResolvedAbility) -> bool {
+    ability.forward_result
+        && matches!(
+            ability.effect,
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                ..
+            }
+        )
+}
+
+fn forwarded_zone_result_from_events<'a>(
+    state: &GameState,
+    selected: Option<&[crate::types::identifiers::ObjectIncarnationRef]>,
+    events: impl Iterator<Item = &'a GameEvent>,
+) -> ForwardedResultContext {
+    let arrivals: Vec<_> = events
+        .filter_map(|event| {
+            let GameEvent::ZoneChanged {
+                object_id,
+                to: Zone::Battlefield,
+                record,
+                ..
+            } = event
+            else {
+                return None;
+            };
+            if let Some(selected) = selected {
+                let source = record.trigger_source_context()?.identity.reference;
+                if !selected.contains(&source) {
+                    return None;
+                }
+            }
+            let entered = crate::types::identifiers::ObjectIncarnationRef::of(
+                *object_id,
+                record.entered_incarnation?,
+            );
+            (entered.is_current(state) && state.objects[object_id].zone == Zone::Battlefield)
+                .then_some(entered)
+        })
+        .collect();
+    ForwardedResultContext {
+        targets: arrivals
+            .iter()
+            .map(|pin| TargetRef::Object(pin.object_id))
+            .collect(),
+        object_incarnations: arrivals,
+    }
+}
+
+fn bind_forwarded_zone_result(child: &mut ResolvedAbility, result: ForwardedResultContext) {
+    let first = result.object_incarnations.first().copied();
+    child.context.pending_forwarded_zone_result = None;
+    child.context.forwarded_result_context = Some(Box::new(result));
+    if let Some(first) = first {
+        if !matches!(child.effect, Effect::CreateDelayedTrigger { .. })
+            && !copy_spell_self_ref_keeps_resolving_spell_source(child)
+        {
+            child.source_id = first.object_id;
+        }
+        bind_forwarded_result_targets_for_legacy_effect(child);
+    }
+}
+
+fn bind_completed_forwarded_zone_result(state: &mut GameState, result: ForwardedResultContext) {
+    if let Some(frame) = state.active_ability_continuation_frame_mut() {
+        bind_forwarded_zone_result(&mut frame.pending.chain, result);
+    }
+}
+
+/// CR 608.2c: an accepted optional move settles its rider from its own event slice.
+fn park_forwarded_zone_result_on_active_continuation(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    producer_events: &[GameEvent],
+) {
+    if !forwards_battlefield_move(ability) {
+        return;
+    }
+    let result = forwarded_zone_result_from_events(state, None, producer_events.iter());
+    let pending = (result.object_incarnations.is_empty()
+        && waits_for_resolution_choice(&state.waiting_for))
+    .then(|| crate::types::ability::PendingForwardedZoneResult {
+        producer: ability.source_id,
+        selected: state
+            .pending_zone_change_delivery_from_replacement()
+            .map(|delivery| vec![delivery.member]),
+        group: None,
+    });
+    let Some(frame) = state.active_ability_continuation_frame_mut() else {
+        return;
+    };
+    match pending {
+        Some(marker) => frame.pending.chain.context.pending_forwarded_zone_result = Some(marker),
+        None => bind_forwarded_zone_result(&mut frame.pending.chain, result),
+    }
+}
+
+/// CR 616.1: settle a single replacement-paused move from its own terminal delivery slice.
+pub(crate) fn settle_replaced_forwarded_zone_delivery(
+    state: &mut GameState,
+    member: crate::types::identifiers::ObjectIncarnationRef,
+    delivery_events: &[GameEvent],
+) {
+    let owns_delivery = state
+        .active_ability_continuation()
+        .and_then(|pending| pending.chain.context.pending_forwarded_zone_result.as_ref())
+        .is_some_and(|marker| {
+            marker.group.is_none() && marker.selected.as_deref() == Some(&[member][..])
+        });
+    if owns_delivery {
+        let result =
+            forwarded_zone_result_from_events(state, Some(&[member]), delivery_events.iter());
+        bind_completed_forwarded_zone_result(state, result);
+    }
+}
+
+pub(crate) fn settle_empty_forwarded_zone_result(state: &mut GameState, producer: ObjectId) {
+    if let Some(frame) = state.active_ability_continuation_frame_mut() {
+        let child = &mut frame.pending.chain;
+        if child
+            .context
+            .pending_forwarded_zone_result
+            .as_ref()
+            .is_some_and(|marker| marker.producer == producer)
+        {
+            child.context.pending_forwarded_zone_result = None;
+            child.context.forwarded_result_context = Some(Box::new(ForwardedResultContext {
+                targets: Vec::new(),
+                object_incarnations: Vec::new(),
+            }));
+        }
+    }
+}
+
 pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec<GameEvent>) {
     counters::drain_pending_counter_moves(state, events);
     counters::drain_pending_counter_removals(state, events);
@@ -918,8 +1080,24 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
         let trigger_snapshot = trigger_context
             .as_ref()
             .map(|ctx| super::triggers::push_resolving_trigger_context(state, ctx));
+        let mut chain = chain;
+        // An unsettled moved-object referent must never fall back to the original source.
+        if chain.context.pending_forwarded_zone_result.take().is_some() {
+            chain.context.forwarded_result_context = Some(Box::new(ForwardedResultContext {
+                targets: Vec::new(),
+                object_incarnations: Vec::new(),
+            }));
+        }
         if !player_scope_queue_end {
-            let _ = resolve_ability_chain(state, &chain, events, 1);
+            if bound_result_is_empty(&chain)
+                && ability_chain_depends_on_missing_forward_result(&chain)
+            {
+                if let Some(remaining) = without_missing_forward_result_dependencies(&chain) {
+                    let _ = resolve_ability_chain(state, &remaining, events, 1);
+                }
+            } else {
+                let _ = resolve_ability_chain(state, &chain, events, 1);
+            }
         }
         if let Some(scope) = state.resolving_player_scope_linked_exile.as_ref() {
             mark_exile_choice_tracks_by_source(state, scope.source_id);
@@ -1892,6 +2070,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
         let _ = state
             .take_active_change_zone_frame()
             .expect("settled ChangeZone must consume the active owner once");
+        settle_forwarded_zone_result(state, &logical_zone_change_group);
         if let Some(count) = moved_count {
             state.last_effect_count = Some(count);
             if let Some(cause) = this_way_cause_for_zone(destination) {
@@ -3847,6 +4026,7 @@ pub(super) fn resolve_optional_effect_decision(
             state
                 .player_actions_this_way
                 .insert((ability.controller, PlayerActionKind::AcceptedOptionalEffect));
+            let producer_events_start = events.len();
             resolve_ability_chain(state, &ability, events, depth)?;
             // CR 608.2c: When an optional effect's prompt suspended the parent
             // chain, the "If you do" sibling continuation was stashed BEFORE the
@@ -3861,6 +4041,11 @@ pub(super) fn resolve_optional_effect_decision(
                     .chain
                     .set_optional_effect_performed_recursive(true);
             }
+            park_forwarded_zone_result_on_active_continuation(
+                state,
+                &ability,
+                &events[producer_events_start..],
+            );
         }
         AutoMayChoice::Decline => {
             if let Some(branch) = optional_decline_branch(&ability) {
@@ -15204,17 +15389,6 @@ fn resolve_chain_body(
             // fixed `Mana { cost }` BEFORE entering the prompt — the runtime
             // payment site only handles static AbilityCost variants.
             let resolved_cost = resolved_unless_cost(state, ability, &unless_pay.cost);
-            // CR 118.5 + CR 118.12a: Zero-mana unless cost short-circuit.
-            // Pre-fold (2026-05-09 audit) the counter and tax/trigger paths
-            // had divergent behavior here:
-            //   - The counter-specific resolver treated `{0}` as "the
-            //     spell-controller paid; the spell survives" (per CR 118.5,
-            //     "players can always pay 0"). This matches the player's
-            //     real-world choice to always pay 0.
-            //   - The generic tax-trigger path fell through and executed the
-            //     effect anyway (no opt-out offered).
-            // The fold preserves both behaviors verbatim to keep this batch
-            // strictly architectural; harmonizing them is tracked separately.
             // CR 118.6 + CR 202.1b: A cost based on the mana cost of an object
             // that has no mana cost (lands, tokens, other costless permanents)
             // is UNPAYABLE — attempting to pay it is an illegal action. No
@@ -15224,30 +15398,16 @@ fn resolve_chain_body(
             // the two must stay distinct: `ManaCost::NoCost != ManaCost::zero()`.
             if matches!(&resolved_cost, AbilityCost::Mana { cost } if *cost == ManaCost::NoCost) {
                 // Unpayable: fall through to execute the effect unconditionally.
-            } else if matches!(&resolved_cost, AbilityCost::Mana { cost } if *cost == ManaCost::zero())
+            } else if matches!(ability.effect, Effect::Counter { .. })
+                && matches!(&resolved_cost, AbilityCost::Mana { cost } if *cost == ManaCost::zero())
             {
-                if matches!(ability.effect, Effect::Counter { .. }) {
-                    // Counter is prevented — spell survives.
-                    events.push(GameEvent::EffectResolved {
-                        kind: EffectKind::Counter,
-                        source_id: ability.source_id,
-                        subject: None,
-                    });
-                    return Ok(());
-                }
-                // Non-counter unless-modified effects: pre-fold behavior was
-                // to fall through and execute the effect.
-                // CR 614.17b: "If an event can't happen, a player can't choose to pay a cost
-                // that includes that event." The CR 118.12a poll's HEAD is the first payer for
-                // whom paying this cost does NOT require an impossible event; when nobody
-                // qualifies, control falls out of this chain and the unless-effect resolves,
-                // exactly as the CR 118.6 unpayable-cost branch in this same chain already does.
-                //
-                // CR 614.17a: only the HEAD is filtered. `remaining` receives the untouched
-                // POSITIONAL tail from the head onward, never a re-derived list, so a
-                // prohibition that lifts mid-window cannot have silently removed a LATER payer
-                // from the poll — `finish_unless_payment` re-asks the question live at each
-                // re-emit. (Payers ahead of the head were asked and could not choose to pay.)
+                // CR 118.5: players can always pay {0}, so the counter is prevented.
+                events.push(GameEvent::EffectResolved {
+                    kind: EffectKind::Counter,
+                    source_id: ability.source_id,
+                    subject: None,
+                });
+                return Ok(());
             } else if let Some((&payer, remaining_payers)) = unless_payers
                 .iter()
                 .position(|p| {
@@ -17143,6 +17303,25 @@ fn resolve_chain_body(
                 effect_context_object.as_ref(),
                 state,
             );
+            if forwards_battlefield_move(ability) {
+                let result =
+                    forwarded_zone_result_from_events(state, None, events[events_before..].iter());
+                if result.object_incarnations.is_empty() {
+                    sub_clone.context.pending_forwarded_zone_result =
+                        Some(crate::types::ability::PendingForwardedZoneResult {
+                            producer: ability.source_id,
+                            selected: state
+                                .pending_zone_change_delivery_from_replacement()
+                                .map(|delivery| vec![delivery.member]),
+                            group: state
+                                .active_change_zone_frame()
+                                .and_then(|frame| frame.pending.as_ref())
+                                .map(|pending| pending.logical_zone_change_group.logical_group_id),
+                        });
+                } else {
+                    bind_forwarded_zone_result(&mut sub_clone, result);
+                }
+            }
             prepend_to_pending_continuation(state, sub_clone);
             // CR 701.57c + CR 608.2h: an unconditional Discover follow-up stashed
             // here still binds the hit card as its referent (no-op otherwise).
@@ -17788,15 +17967,10 @@ fn resolved_unless_cost(
         // as an UNPAYABLE cost; the dedicated unpayable branch in `resolve_chain_body` handles
         // it (kept distinct from the `{0}` "always payable" short-circuit).
         AbilityCost::Mana {
-            cost: ManaCost::SelfManaCost,
-        } => {
-            let cost = state
-                .objects
-                .get(&ability.source_id)
-                .map(|obj| obj.mana_cost.clone())
-                .unwrap_or(ManaCost::NoCost);
-            AbilityCost::Mana { cost }
-        }
+            cost: mana @ (ManaCost::SelfManaCost | ManaCost::SelfManaCostReduced { .. }),
+        } => AbilityCost::Mana {
+            cost: crate::game::keywords::resolve_keyword_mana_cost(state, ability.source_id, mana),
+        },
         other => other.clone(),
     }
 }

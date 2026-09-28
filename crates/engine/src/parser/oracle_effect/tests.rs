@@ -53385,6 +53385,52 @@ fn attach_just_moved_negative_aura_graft_attachment_stays_parent_target() {
 }
 
 /// CR 608.2c: Emperor of Bones class — a ChangeZone-to-Battlefield
+#[test]
+fn flash_put_creature_forwards_reduced_cost_sacrifice() {
+    let def = parse_effect_chain(
+        "You may put a creature card from your hand onto the battlefield. If you do, sacrifice it unless you pay its mana cost reduced by {2}.",
+        AbilityKind::Spell,
+    );
+    let mut node = &def;
+    while !matches!(
+        &*node.effect,
+        Effect::ChangeZone {
+            destination: Zone::Battlefield,
+            ..
+        }
+    ) {
+        node = node
+            .sub_ability
+            .as_deref()
+            .expect("Flash must put a creature onto the battlefield");
+    }
+    assert!(
+        node.forward_result,
+        "Flash must forward its selected creature: {def:?}"
+    );
+    let child = node
+        .sub_ability
+        .as_deref()
+        .expect("Flash must continue after the put");
+    assert!(
+        matches!(&*child.effect, Effect::Sacrifice { .. }),
+        "Flash must sacrifice that creature: {def:?}"
+    );
+    assert!(
+        matches!(
+            &child.unless_pay,
+            Some(UnlessPayModifier {
+                cost: AbilityCost::Mana {
+                    cost: ManaCost::SelfManaCostReduced { reduction: 2 },
+                },
+                ..
+            })
+        ),
+        "Flash must offer the creature's reduced mana cost: {def:?}"
+    );
+}
+
+/// CR 608.2c: Emperor of Bones class — a ChangeZone-to-Battlefield
 /// followed by sibling clauses that anaphorically reference the just-
 /// moved card ("it gains haste. sacrifice it ...") must mark
 /// `forward_result: true` on the ChangeZone parent so the runtime
