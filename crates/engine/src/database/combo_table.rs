@@ -12,6 +12,7 @@ use smallvec::SmallVec;
 use thiserror::Error;
 
 use crate::analysis::ResourceAxis;
+use crate::database::CardDatabase;
 use crate::game::bracket_estimate::BracketAxis;
 use crate::game::deck_loading::PlayerDeckList;
 
@@ -400,41 +401,69 @@ pub fn combo_cardinality(entry: &ComboEntry, commanders: &BTreeSet<String>) -> C
     }
 }
 
-/// Pure and deterministic combo detection over Commander-family deck sections.
-pub fn detect_combos(deck: &PlayerDeckList, table: &ComboTable) -> Vec<ComboMatch> {
-    // Keep this exhaustive so new deck sections must be explicitly classified.
-    let PlayerDeckList {
-        commander,
-        main_deck,
-        companion,
-        signature_spell,
-        sideboard,
-        attraction_deck,
-        planar_deck,
-        scheme_deck,
-        contraption_deck,
-        sticker_sheets,
-        bracket_tier: _,
-        combo_declaration: _,
-    } = deck;
-    let _ = (
-        sideboard,
-        attraction_deck,
-        planar_deck,
-        scheme_deck,
-        contraption_deck,
-        sticker_sheets,
-    );
+/// Resolved card identities used by every combo-table pass over one deck.
+pub(crate) struct ResolvedComboDeck {
+    pub(crate) commanders: BTreeSet<String>,
+    pub(crate) deck_keys: BTreeSet<String>,
+}
 
-    let commanders: BTreeSet<String> = commander.iter().map(|name| name.to_lowercase()).collect();
-    let deck_keys: BTreeSet<String> = commander
-        .iter()
-        .chain(main_deck)
-        .chain(companion)
-        .chain(signature_spell)
-        .map(|name| name.to_lowercase())
-        .collect();
-    let candidate_indices: BTreeSet<u32> = deck_keys
+impl ResolvedComboDeck {
+    pub(crate) fn new(deck: &PlayerDeckList, db: &CardDatabase) -> Self {
+        // Keep this exhaustive so new deck sections must be explicitly classified.
+        let PlayerDeckList {
+            commander,
+            main_deck,
+            companion,
+            signature_spell,
+            sideboard,
+            attraction_deck,
+            planar_deck,
+            scheme_deck,
+            contraption_deck,
+            sticker_sheets,
+            bracket_tier: _,
+            combo_declaration: _,
+        } = deck;
+        let _ = (
+            sideboard,
+            attraction_deck,
+            planar_deck,
+            scheme_deck,
+            contraption_deck,
+            sticker_sheets,
+        );
+
+        let commanders = commander.iter().map(|name| db.lookup_key(name)).collect();
+        let deck_keys = commander
+            .iter()
+            .chain(main_deck)
+            .chain(companion)
+            .chain(signature_spell)
+            .map(|name| db.lookup_key(name))
+            .collect();
+        Self {
+            commanders,
+            deck_keys,
+        }
+    }
+}
+
+/// Pure and deterministic combo detection over Commander-family deck sections.
+pub fn detect_combos(
+    deck: &PlayerDeckList,
+    db: &CardDatabase,
+    table: &ComboTable,
+) -> Vec<ComboMatch> {
+    let resolved = ResolvedComboDeck::new(deck, db);
+    detect_combos_for_resolved(table, &resolved)
+}
+
+pub(crate) fn detect_combos_for_resolved(
+    table: &ComboTable,
+    resolved: &ResolvedComboDeck,
+) -> Vec<ComboMatch> {
+    let candidate_indices: BTreeSet<u32> = resolved
+        .deck_keys
         .iter()
         .flat_map(|key| table.entries_for(key).iter().copied())
         .collect();
@@ -446,11 +475,11 @@ pub fn detect_combos(deck: &PlayerDeckList, table: &ComboTable) -> Vec<ComboMatc
             entry
                 .pieces
                 .iter()
-                .all(|piece| deck_keys.contains(&piece.key))
+                .all(|piece| resolved.deck_keys.contains(&piece.key))
                 .then(|| ComboMatch {
                     pieces: entry.pieces.clone(),
                     relevance: entry.relevance,
-                    cardinality: combo_cardinality(entry, &commanders),
+                    cardinality: combo_cardinality(entry, &resolved.commanders),
                     assemble_cost: entry.assemble_cost,
                     popularity: entry.popularity,
                     outcomes: entry.outcomes.clone(),
