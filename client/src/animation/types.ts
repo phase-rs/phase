@@ -2,6 +2,12 @@ import type { GameEvent } from "../adapter/types";
 
 export type VfxQuality = "full" | "reduced" | "minimal";
 
+/** Card-animation style, independent of {@link VfxQuality}. `"webgl"` is the
+ *  New style: WebGL card effects drawn on the shared overlay. `"classic"` is the
+ *  pre-overlay DOM/framer-motion animations, the same path the New style falls
+ *  back to when WebGL is unavailable. */
+export type CardAnimationStyle = "webgl" | "classic";
+
 /** Continuous animation-speed multiplier. `0` short-circuits the wait entirely
  *  (the legacy "instant" mode). Values above 1 slow things down; below 1 speed
  *  things up. The slider in settings exposes this directly. */

@@ -15,6 +15,7 @@ describe("preferencesStore", () => {
         logDockSide: "right",
         boardBackground: "auto-wubrg",
         vfxQuality: "full",
+        cardAnimationStyle: "webgl",
         animationSpeedMultiplier: 1.0,
         showCardPreviewFooter: true,
         draftDoubleClickConfirmPick: true,
@@ -54,6 +55,7 @@ describe("preferencesStore", () => {
     expect(state.priorityPassingMode).toBe("Standard");
     expect(state.experimentalTournamentsEnabled).toBe(false);
     expect(state.draftDoubleClickConfirmPick).toBe(true);
+    expect(usePreferencesStore.getInitialState().cardAnimationStyle).toBe("webgl");
   });
 
   it("setAiSeatDifficulty updates the target seat", () => {
@@ -121,6 +123,15 @@ describe("preferencesStore", () => {
 
     expect(usePreferencesStore.getState().experimentalTournamentsEnabled).toBe(true);
     expect(JSON.parse(localStorage.getItem("phase-preferences")!).state.experimentalTournamentsEnabled).toBe(true);
+  });
+
+  it("persists the card animation style preference", () => {
+    act(() => {
+      usePreferencesStore.getState().setCardAnimationStyle("classic");
+    });
+
+    expect(usePreferencesStore.getState().cardAnimationStyle).toBe("classic");
+    expect(JSON.parse(localStorage.getItem("phase-preferences")!).state.cardAnimationStyle).toBe("classic");
   });
 
   it("updates the multiplayer split-layout nudge dismissal independently", () => {
@@ -192,6 +203,22 @@ describe("preferencesStore", () => {
       usePreferencesStore.getState().setVfxQuality("minimal");
     });
 
+    expect(usePreferencesStore.getState().vfxQuality).toBe("minimal");
+  });
+
+  it("keeps the card animation style independent of VFX quality", () => {
+    act(() => {
+      usePreferencesStore.getState().setVfxQuality("minimal");
+    });
+
+    expect(usePreferencesStore.getState().vfxQuality).toBe("minimal");
+    expect(usePreferencesStore.getState().cardAnimationStyle).toBe("webgl");
+
+    act(() => {
+      usePreferencesStore.getState().setCardAnimationStyle("classic");
+    });
+
+    expect(usePreferencesStore.getState().cardAnimationStyle).toBe("classic");
     expect(usePreferencesStore.getState().vfxQuality).toBe("minimal");
   });
 
@@ -276,6 +303,7 @@ describe("preferencesStore", () => {
       usePreferencesStore.getState().setPacingMultiplier("combat", 1.5);
       usePreferencesStore.getState().setPriorityPassingMode("SkipLowUseWindows");
       usePreferencesStore.getState().setDraftDoubleClickConfirmPick(false);
+      usePreferencesStore.getState().setCardAnimationStyle("classic");
     });
 
     act(() => {
@@ -288,6 +316,7 @@ describe("preferencesStore", () => {
     expect(state.pacingMultipliers).toEqual({ effects: 1.0, combat: 1.0, banners: 1.0 });
     expect(state.priorityPassingMode).toBe("Standard");
     expect(state.draftDoubleClickConfirmPick).toBe(true);
+    expect(state.cardAnimationStyle).toBe("webgl");
   });
 
   it("existing preferences are unchanged after setting animation prefs", () => {
@@ -749,5 +778,38 @@ describe("preferencesStore", () => {
     });
 
     expect(usePreferencesStore.getState().draftDoubleClickConfirmPick).toBe(true);
+  });
+
+  it("v35 → v36 migration gives existing stores the New card animations", () => {
+    localStorage.setItem(
+      "phase-preferences",
+      JSON.stringify({
+        state: { cardSize: "large" },
+        version: 35,
+      }),
+    );
+
+    act(() => {
+      usePreferencesStore.persist.rehydrate();
+    });
+
+    expect(usePreferencesStore.getState().cardSize).toBe("large");
+    expect(usePreferencesStore.getState().cardAnimationStyle).toBe("webgl");
+  });
+
+  it("hydrates a stored Classic card animation style", () => {
+    localStorage.setItem(
+      "phase-preferences",
+      JSON.stringify({
+        state: { cardAnimationStyle: "classic" },
+        version: 36,
+      }),
+    );
+
+    act(() => {
+      usePreferencesStore.persist.rehydrate();
+    });
+
+    expect(usePreferencesStore.getState().cardAnimationStyle).toBe("classic");
   });
 });

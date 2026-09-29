@@ -76,6 +76,7 @@
   "visual": {
     "title": "Grafica",
     "vfxQuality": "Qualità VFX",
+    "cardAnimationStyle": "Animazioni delle carte",
     "keywordStrip": "Striscia parole chiave",
     "showKeywords": "Mostra le parole chiave sulle carte sul campo di battaglia",
     "opponentHoverPreview": "Anteprima al passaggio sull'avversario",
@@ -122,6 +123,10 @@
       "full": "Completa",
       "reduced": "Ridotta",
       "minimal": "Minima"
+    },
+    "cardAnimationStyleOptions": {
+      "webgl": "Nuove",
+      "classic": "Classiche"
     }
   },
   "flexLayout": {

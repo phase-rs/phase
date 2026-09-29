@@ -17,6 +17,7 @@ import {
   PACING_MAX,
   PACING_MIN,
   defaultPacingMultipliers,
+  type CardAnimationStyle,
   type PacingCategory,
   type VfxQuality,
 } from "../animation/types";
@@ -282,6 +283,7 @@ function buildDefaultPreferences(): PreferencesState {
     boardBackground: "auto-wubrg",
     customBackgroundUrl: "",
     vfxQuality: "full",
+    cardAnimationStyle: "webgl",
     animationSpeedMultiplier: ANIMATION_SPEED_DEFAULT,
     pacingMultipliers: defaultPacingMultipliers(),
     phaseStops: [],
@@ -348,6 +350,8 @@ interface PreferencesState {
   boardBackground: BoardBackground;
   customBackgroundUrl: string;
   vfxQuality: VfxQuality;
+  /** New (`"webgl"`) or Classic card animations. Independent of `vfxQuality`. */
+  cardAnimationStyle: CardAnimationStyle;
   /** Continuous global animation-speed multiplier. `0` = instant (skip waits).
    *  `1` = neutral. Higher = slower playback. Multiplies every per-category
    *  duration after pacingMultipliers is applied. */
@@ -465,6 +469,7 @@ interface PreferencesActions {
   setBoardBackground: (bg: BoardBackground) => void;
   setCustomBackgroundUrl: (url: string) => void;
   setVfxQuality: (quality: VfxQuality) => void;
+  setCardAnimationStyle: (style: CardAnimationStyle) => void;
   setAnimationSpeedMultiplier: (multiplier: number) => void;
   setPacingMultiplier: (category: PacingCategory, multiplier: number) => void;
   /** Reset every pacing slider (animation speed + per-category) back to 1.0×. */
@@ -612,6 +617,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       setBoardBackground: (bg) => set({ boardBackground: bg }),
       setCustomBackgroundUrl: (url) => set({ customBackgroundUrl: url.trim() }),
       setVfxQuality: (quality) => set({ vfxQuality: quality }),
+      setCardAnimationStyle: (style) => set({ cardAnimationStyle: style }),
       setAnimationSpeedMultiplier: (multiplier) =>
         set({ animationSpeedMultiplier: clamp(multiplier, ANIMATION_SPEED_MIN, ANIMATION_SPEED_MAX) }),
       setPacingMultiplier: (category, multiplier) =>
@@ -825,7 +831,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
     }),
     {
       name: "phase-preferences",
-      version: 35,
+      version: 36,
       // v0 → v1: flat aiDifficulty + aiDeckName become aiSeats[0].
       // v1 → v2: discrete animationSpeed/combatPacing enums become numeric
       //          animationSpeedMultiplier/combatPacingMultiplier.
@@ -911,6 +917,9 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       // v34 → v35: Add experimentalTournamentsEnabled. Existing users retain
       //          the hidden-by-default navigation because the shallow merge
       //          supplies false.
+      // v35 → v36: Add cardAnimationStyle. Existing users get "webgl" (the New
+      //          card animations) through the shallow merge, the same as fresh
+      //          stores, so no migrate block is needed.
       migrate: (persisted: unknown, version: number) => {
         if (!persisted || typeof persisted !== "object") return persisted;
         let migrated = persisted as Record<string, unknown>;

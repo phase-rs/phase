@@ -76,6 +76,7 @@
   "visual": {
     "title": "Grafika",
     "vfxQuality": "Jakość efektów wizualnych",
+    "cardAnimationStyle": "Animacje kart",
     "keywordStrip": "Pasek słów kluczowych",
     "showKeywords": "Pokaż słowa kluczowe na kartach na polu bitwy",
     "opponentHoverPreview": "Podgląd po najechaniu na przeciwnika",
@@ -122,6 +123,10 @@
       "full": "Pełna",
       "reduced": "Zredukowana",
       "minimal": "Minimalna"
+    },
+    "cardAnimationStyleOptions": {
+      "webgl": "Nowe",
+      "classic": "Klasyczne"
     }
   },
   "flexLayout": {

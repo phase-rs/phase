@@ -76,6 +76,7 @@
   "visual": {
     "title": "Visuel",
     "vfxQuality": "Qualité des effets visuels",
+    "cardAnimationStyle": "Animations des cartes",
     "keywordStrip": "Bandeau de mots-clés",
     "showKeywords": "Afficher les mots-clés sur les cartes du champ de bataille",
     "opponentHoverPreview": "Aperçu au survol de l'adversaire",
@@ -122,6 +123,10 @@
       "full": "Complète",
       "reduced": "Réduite",
       "minimal": "Minimale"
+    },
+    "cardAnimationStyleOptions": {
+      "webgl": "Nouvelles",
+      "classic": "Classiques"
     }
   },
   "flexLayout": {

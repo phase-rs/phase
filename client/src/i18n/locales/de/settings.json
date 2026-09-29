@@ -76,6 +76,7 @@
   "visual": {
     "title": "Grafik",
     "vfxQuality": "VFX-Qualität",
+    "cardAnimationStyle": "Kartenanimationen",
     "keywordStrip": "Schlüsselwortleiste",
     "showKeywords": "Schlüsselwörter auf Schlachtfeldkarten anzeigen",
     "opponentHoverPreview": "Gegner-Hover-Vorschau",
@@ -122,6 +123,10 @@
       "full": "Voll",
       "reduced": "Reduziert",
       "minimal": "Minimal"
+    },
+    "cardAnimationStyleOptions": {
+      "webgl": "Neu",
+      "classic": "Klassisch"
     }
   },
   "flexLayout": {
