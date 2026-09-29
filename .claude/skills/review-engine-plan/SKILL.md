@@ -146,7 +146,7 @@ Check **only** Sizing consistency against the plan body (check 12's substance, n
 
 ## Review Loop
 
-Return every gap to the caller. Standalone, require a revised full plan and re-review the entire revised plan with fresh context until a round returns clean. In the engine-implementer pipeline, return each result to the orchestrator, whose [run limits](../engine-implementer/SKILL.md#run-limits) decide what happens next from your tags; switching modes or phases does not reset that history.
+Return every gap to the caller. Standalone, require a revised full plan and re-review the entire revised plan with fresh context until a round returns no behavior gap. A round whose gaps are all wording or other text fixes, each with its replacement text, is closed by applying them, with no further review. In the engine-implementer pipeline, return each result to the orchestrator, whose [run limits](../engine-implementer/SKILL.md#run-limits) decide what happens next from your tags; switching modes or phases does not reset that history.
 
 ## Output
 
