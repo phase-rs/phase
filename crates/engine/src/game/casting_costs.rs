@@ -8953,6 +8953,11 @@ fn pay_additional_cost_with_source(
             let count =
                 super::quantity::resolve_quantity_with_targets(state, &count, &pending.ability)
                     .max(0) as usize;
+            // CR 107.3a + CR 601.2h: a zero discard count is already paid;
+            // continue with the remaining costs without requesting a selection.
+            if count == 0 {
+                return finish_pending_cost_or_cast(state, player, pending, events);
+            }
             // CR 601.2b: Discard requires interactive card selection — return a WaitingFor.
             let eligible = super::casting::find_eligible_discard_targets(
                 state,

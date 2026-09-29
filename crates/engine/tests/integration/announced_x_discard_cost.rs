@@ -11,8 +11,11 @@
 //! Dreams, CR 701.9b), and an activation cost (Gix, Yawgmoth Praetor).
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::types::ability::{
+    AbilityCost, AdditionalCost, CardSelectionMode, DiscardSelfScope, QuantityExpr,
+};
 use engine::types::actions::GameAction;
-use engine::types::game_state::{CastPaymentMode, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -55,6 +58,107 @@ fn hand_cards(scenario: &mut GameScenario, names: &[&str]) -> Vec<ObjectId> {
         .iter()
         .map(|name| scenario.add_card_to_hand(P0, name))
         .collect()
+}
+
+#[test]
+fn zero_announced_x_commits_without_a_discard_selection() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let dreams = scenario
+        .add_spell_to_hand_from_oracle(P0, "Sickening Dreams", false, SICKENING_DREAMS)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 1,
+        })
+        .id();
+    let kept = scenario.add_card_to_hand(P0, "Kept");
+    scenario.with_mana_pool(P0, pool(&[ManaType::Black, ManaType::Colorless]));
+    let mut runner = scenario.build();
+
+    assert_eq!(offered_x_max(&mut runner, dreams), 1);
+    runner
+        .act(GameAction::ChooseX { value: 0 })
+        .expect("announce zero X");
+
+    // CR 107.3a + CR 601.2h: announcing zero completes the discard cost.
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(runner.state().stack.len(), 1);
+    assert_eq!(runner.state().stack[0].source_id, dreams);
+    assert!(matches!(
+        runner.state().stack[0].kind,
+        StackEntryKind::Spell { .. }
+    ));
+    assert_eq!(runner.state().objects[&kept].zone, Zone::Hand);
+    assert!(runner.state().players[P0.0 as usize].mana_pool.is_empty());
+}
+
+#[test]
+fn zero_fixed_discard_continues_with_life_and_mana_costs() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Composite Cost Spell", false, "You gain 1 life.")
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 0,
+        })
+        .with_additional_cost(AdditionalCost::Required(AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Discard {
+                    count: QuantityExpr::Fixed { value: 0 },
+                    filter: None,
+                    selection: CardSelectionMode::Chosen,
+                    self_scope: DiscardSelfScope::FromHand,
+                },
+                AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                },
+            ],
+        }))
+        .id();
+    let kept = scenario.add_card_to_hand(P0, "Kept");
+    scenario.with_mana_pool(P0, pool(&[ManaType::Black]));
+    let mut runner = scenario.build();
+    let mut immediate = GameRunner::from_state(runner.state().clone());
+    let life_before = immediate.state().players[P0.0 as usize].life;
+    immediate
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id: immediate.state().objects[&spell].card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast with a zero discard followed by a life cost");
+
+    // CR 601.2h: skipping the zero selection still pays every remaining cost.
+    assert!(matches!(
+        immediate.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(immediate.state().stack.len(), 1);
+    assert_eq!(immediate.state().stack[0].source_id, spell);
+    assert!(matches!(
+        immediate.state().stack[0].kind,
+        StackEntryKind::Spell { .. }
+    ));
+    assert_eq!(
+        immediate.state().players[P0.0 as usize].life,
+        life_before - 2
+    );
+    assert!(immediate.state().players[P0.0 as usize]
+        .mana_pool
+        .is_empty());
+    assert_eq!(immediate.state().objects[&kept].zone, Zone::Hand);
+
+    let outcome = runner.cast(spell).resolve();
+
+    outcome.assert_life_delta(P0, -1);
+    outcome.assert_zone(&[kept], Zone::Hand);
+    outcome.assert_zone(&[spell], Zone::Graveyard);
+    assert!(outcome.state().players[P0.0 as usize].mana_pool.is_empty());
 }
 
 #[test]
@@ -147,6 +251,32 @@ fn mana_x_pay_life_is_capped_by_mana() {
     let mut runner = scenario.build();
 
     assert_eq!(offered_x_max(&mut runner, bond), 1);
+}
+
+#[test]
+fn mana_x_pay_life_pays_and_resolves_the_announced_x() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bond = scenario
+        .add_spell_to_hand_from_oracle(P0, "Bond of Agony", false, BOND_OF_AGONY)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::Black],
+            generic: 0,
+        })
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        pool(&[ManaType::Black, ManaType::Colorless, ManaType::Colorless]),
+    );
+    let mut runner = scenario.build();
+
+    let outcome = runner.cast(bond).x(2).resolve();
+
+    // CR 107.3a + CR 601.2h: the additional cost and spell use the announced X.
+    outcome.assert_life_delta(P0, -2);
+    outcome.assert_life_delta(P1, -2);
+    outcome.assert_zone(&[bond], Zone::Graveyard);
+    assert!(outcome.state().players[P0.0 as usize].mana_pool.is_empty());
 }
 
 #[test]
