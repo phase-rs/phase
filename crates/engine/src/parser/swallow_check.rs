@@ -3191,11 +3191,12 @@ fn def_tree_co_scoped_parent_target_iteration_count(
 /// ("As ~ enters or is turned face up") counts as the max over the unit's
 /// replacement roots. Neither the item id (each split definition is its own
 /// item) nor structural equality (split halves may differ) can identify the
-/// splits; the unit can. Fail-loud: per category max ≤ Σ distinct ≤ Σ all, so
-/// this errs only when one unit carries two separately printed triggered
-/// abilities (or replacement effects) that each hold an iteration (CR 113.2c's
-/// keyword-line exception), which surfaces as a visible `DynamicQty` gap, never
-/// a silent swallow.
+/// splits; the unit can. Per category the max never exceeds the sum, so it
+/// under-counts (a visible `DynamicQty` gap) when one unit carries two
+/// separately printed triggered abilities (or replacement effects) that each
+/// hold an iteration (CR 113.2c's keyword-line exception). It stays silent,
+/// within the one-line granularity `AuditUnit` accepts, when split roots of one
+/// ability diverge and only some of them carry every printed iteration.
 fn co_scoped_parent_target_iteration_count(parsed: &ParsedAbilities, pop: &PlayerFilter) -> usize {
     let count =
         |def: &AbilityDefinition| def_tree_co_scoped_parent_target_iteration_count(def, pop);
