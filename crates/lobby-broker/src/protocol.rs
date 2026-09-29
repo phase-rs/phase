@@ -69,7 +69,10 @@ pub struct TournamentRequestId(pub u64);
 ///      Blast). A paused continuation carries the verdict across a `GameState`
 ///      round trip. The same bump carries the CR 701.20a reveal lease:
 ///      `ResolvedInformationLifetime::UntilStackObjectLeaves` and the
-///      `GameState.stack_bound_reveals` map. A v91 peer cannot parse the new
+///      `GameState.stack_bound_reveals` map, with its presentation in the new
+///      `DerivedViews.stack_revealed_cards` (viewer projections carry no lease
+///      map; CR 401.2 keeps a revealed library card's position hidden). A v91
+///      peer cannot parse the new
 ///      tags and would drop the field, minting a reflexive trigger the rules
 ///      forbid. Full-game peers and P2P move in lockstep (wire 74); lobby
 ///      messages are unchanged.

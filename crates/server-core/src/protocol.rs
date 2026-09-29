@@ -3322,7 +3322,8 @@ mod tests {
     /// `ParentTargetMissingReason::RevealUntil`, and `EffectOutcomeSignal` gains
     /// `RevealUntilMatched`, and the CR 701.20a reveal lease adds
     /// `ResolvedInformationLifetime::UntilStackObjectLeaves` plus
-    /// `GameState.stack_bound_reveals` (CR 701.20a + CR 603.12); a v91 peer cannot parse
+    /// `GameState.stack_bound_reveals` (CR 701.20a + CR 603.12), presented through
+    /// `DerivedViews.stack_revealed_cards`; a v91 peer cannot parse
     /// the tags and would drop a paused reveal-until whiff's verdict, so it must
     /// be refused before it receives v92 state.
     /// `PendingManaAbility` now carries required `chosen_counter_counts`

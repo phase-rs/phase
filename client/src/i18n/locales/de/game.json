@@ -808,6 +808,7 @@
     "titleTargets": "Ziele: {{targets}}",
     "titlePaid": "Bezahlt: {{paid}}",
     "titleContext": "Kontext: {{context}}",
+    "revealedCards": "Aufgedeckt: {{cards}}",
     "paidXValue": "X={{value}}",
     "paidManaSpent": "{{amount}} Mana",
     "paidColorsSpent": "{{count}} Farben",

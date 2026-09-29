@@ -846,6 +846,7 @@
     "titleTargets": "対象: {{targets}}",
     "titlePaid": "支払い: {{paid}}",
     "titleContext": "文脈: {{context}}",
+    "revealedCards": "公開中: {{cards}}",
     "paidXValue": "X={{value}}",
     "paidManaSpent": "{{amount}}マナ",
     "paidColorsSpent": "{{count}}色",

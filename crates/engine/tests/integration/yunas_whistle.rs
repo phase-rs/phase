@@ -57,8 +57,26 @@ fn fixture_with(
     library: &[LibCard],
     extras: &[(engine::types::player::PlayerId, &str, &str)],
 ) -> Fixture {
+    fixture_shifted(name, oracle, own_creature, library, extras, 0)
+}
+
+/// As [`fixture_with`], after first putting `id_shift` inert lands into P1's
+/// library, which shifts every later object id by `id_shift`.
+fn fixture_shifted(
+    name: &str,
+    oracle: &str,
+    own_creature: bool,
+    library: &[LibCard],
+    extras: &[(engine::types::player::PlayerId, &str, &str)],
+    id_shift: usize,
+) -> Fixture {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
+    for _ in 0..id_shift {
+        scenario
+            .add_spell_to_library_top(P1, "Filler", false)
+            .as_land();
+    }
     let bear = own_creature.then(|| scenario.add_creature(P0, "Bear", 2, 2).id());
     // A second creature P0 controls, so the reflexive's single legal target is
     // never auto-selected and the target prompt is observable.
@@ -754,6 +772,17 @@ fn name_seen_by(
         .clone()
 }
 
+/// The engine-authored, unindexed "revealed" presentation a seated viewer
+/// receives: stack entry → card names.
+fn stack_revealed_seen_by(
+    state: &GameState,
+    viewer: engine::types::player::PlayerId,
+) -> std::collections::BTreeMap<ObjectId, Vec<String>> {
+    let projected = engine::game::visibility::filter_state_for_viewer(state, viewer);
+    engine::game::derived_views::derive_filtered_views(state, &projected, Some(viewer))
+        .stack_revealed_cards
+}
+
 fn reflexive_entries(state: &GameState) -> Vec<ObjectId> {
     state
         .stack
@@ -844,6 +873,103 @@ fn whistle_hit_stays_public_until_its_reflexive_resolves() {
         "the owner still sees it"
     );
     assert!(runner.state().stack_bound_reveals.is_empty());
+}
+
+/// The non-library control for the CR 401.2 redactions: Whistle's hit is in a
+/// hand, whose order is not hidden, so while its reflexive waits every carrier
+/// keeps pairing it with its id for the opponent. The misses, bottomed at
+/// random, lose their ids from the reveal event.
+#[test]
+fn whistle_hand_hit_keeps_its_id_in_every_viewer_carrier() {
+    use engine::types::events::GameEvent;
+    let Fixture {
+        mut runner,
+        spell,
+        bear,
+        library,
+        ..
+    } = fixture(
+        "Yuna's Whistle",
+        YUNAS_WHISTLE,
+        true,
+        &[
+            LibCard::Land("Forest"),
+            LibCard::Creature("Library Beast", ManaCost::generic(4)),
+        ],
+    );
+    let (miss, hit) = (library[0], library[1]);
+    let mut steps = Vec::new();
+    runner.cast(spell).commit();
+    while !matches!(
+        runner.state().waiting_for,
+        WaitingFor::TriggerTargetSelection { .. }
+    ) {
+        act_logged(&mut runner, &mut steps, GameAction::PassPriority);
+    }
+    act_logged(
+        &mut runner,
+        &mut steps,
+        GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(bear.unwrap())),
+        },
+    );
+    assert_eq!(zone(runner.state(), hit), Zone::Hand, "reach guard");
+    assert_eq!(zone(runner.state(), miss), Zone::Library, "reach guard");
+
+    let events: Vec<GameEvent> = steps
+        .iter()
+        .flat_map(|step| {
+            engine::game::visibility::filter_events_for_viewer(&step.events, &step.state, P1)
+        })
+        .collect();
+    let (card_ids, card_names) = events
+        .iter()
+        .find_map(|event| match event {
+            GameEvent::CardsRevealed {
+                card_ids,
+                card_names,
+                ..
+            } => Some((card_ids.clone(), card_names.clone())),
+            _ => None,
+        })
+        .expect("reach guard: the reveal event reached P1");
+    assert_eq!(card_names, vec!["Forest", "Library Beast"]);
+    assert_eq!(
+        card_ids,
+        vec![hit],
+        "the hand hit keeps its id; the randomly bottomed miss loses its id"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved { subject: Some(subject), .. }
+                if subject.identity.object_id == hit
+        )),
+        "the hand hit's EffectResolved subject is kept"
+    );
+
+    let projected = engine::game::visibility::filter_state_for_viewer(runner.state(), P1);
+    assert_eq!(projected.objects[&hit].name, "Library Beast");
+    let reflexive = reflexive_entries(runner.state())[0];
+    let ability_context = projected
+        .stack
+        .iter()
+        .find(|entry| entry.id == reflexive)
+        .and_then(|entry| match &entry.kind {
+            StackEntryKind::TriggeredAbility { ability, .. } => {
+                ability.effect_context_object.as_ref().map(|s| s.object_id)
+            }
+            _ => None,
+        });
+    assert_eq!(
+        ability_context,
+        Some(hit),
+        "the public hand referent keeps its effect-context snapshot"
+    );
+    assert_eq!(
+        stack_revealed_seen_by(runner.state(), P1),
+        [(reflexive, vec!["Library Beast".to_string()])].into()
+    );
 }
 
 #[test]
@@ -1017,42 +1143,315 @@ fn discarding_the_hit_ends_its_lease_live_and_on_cold_replay() {
     );
 }
 
-#[test]
-fn calibrated_blast_hit_is_public_on_the_library_bottom_while_its_reflexive_waits() {
+/// One wire transition: the events and log a client receives for an action,
+/// filtered against the state right after it (as the server does).
+struct Step {
+    events: Vec<engine::types::events::GameEvent>,
+    logs: Vec<engine::types::log::GameLogEntry>,
+    state: GameState,
+}
+
+fn act_logged(runner: &mut GameRunner, steps: &mut Vec<Step>, action: GameAction) {
+    let result = runner.act(action).expect("action applies");
+    steps.push(Step {
+        events: result.events,
+        logs: result.log_entries,
+        state: runner.state().clone(),
+    });
+}
+
+/// A wire id for a spectator: not a seat, so the event filter treats it as an
+/// unseated audience.
+const SPECTATOR: engine::types::player::PlayerId = engine::types::player::PlayerId(99);
+
+/// The actual transport shape a viewer holds after `steps`: the current
+/// projected state and its derived views, plus every event and log entry it
+/// was sent along the way (a hostile client keeps them all). `None` is the
+/// unseated audience.
+fn transport_payload(
+    state: &GameState,
+    steps: &[Step],
+    viewer: Option<engine::types::player::PlayerId>,
+) -> serde_json::Value {
+    use engine::game::visibility::{
+        filter_events_for_viewer, filter_state_for_unseated_viewer, filter_state_for_viewer,
+    };
+    let projected = match viewer {
+        Some(viewer) => filter_state_for_viewer(state, viewer),
+        None => filter_state_for_unseated_viewer(state),
+    };
+    let derived = engine::game::derived_views::derive_filtered_views(state, &projected, viewer);
+    let events: Vec<_> = steps
+        .iter()
+        .flat_map(|step| {
+            filter_events_for_viewer(&step.events, &step.state, viewer.unwrap_or(SPECTATOR))
+        })
+        .collect();
+    let logs: Vec<_> = steps.iter().flat_map(|step| step.logs.clone()).collect();
+    serde_json::json!({
+        "state": projected,
+        "derived": derived,
+        "events": events,
+        "logs": logs,
+    })
+}
+
+/// Every path in `value` that carries `id` as a number or a map key. Numeric
+/// map keys are normalized (`<ID>` for `id`, `<K>` for any other), so paths
+/// from two boards whose object ids differ by a constant shift line up.
+fn id_paths(value: &serde_json::Value, id: u64, path: &str, out: &mut Vec<String>) {
+    match value {
+        serde_json::Value::Number(n) if n.as_u64() == Some(id) => out.push(path.to_string()),
+        serde_json::Value::Array(items) => {
+            for (index, item) in items.iter().enumerate() {
+                id_paths(item, id, &format!("{path}[{index}]"), out);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (key, item) in map {
+                let child = match key.parse::<u64>() {
+                    Ok(key) if key == id => {
+                        out.push(format!("{path}.<ID>#key"));
+                        format!("{path}.<ID>")
+                    }
+                    Ok(_) => format!("{path}.<K>"),
+                    Err(_) => format!("{path}.{key}"),
+                };
+                id_paths(item, id, &child, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Every path in `value` whose string contains `name`.
+fn name_paths(value: &serde_json::Value, name: &str, path: &str, out: &mut Vec<String>) {
+    match value {
+        serde_json::Value::String(text) if text.contains(name) => out.push(path.to_string()),
+        serde_json::Value::Array(items) => {
+            for (index, item) in items.iter().enumerate() {
+                name_paths(item, name, &format!("{path}[{index}]"), out);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (key, item) in map {
+                name_paths(item, name, &format!("{path}.{key}"), out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// CR 401.2 + CR 701.20a: the secrecy check over one viewer's payload, taken
+/// on the same board built twice with object ids shifted by a constant (so a
+/// number that merely equals the hit's id by coincidence is not mistaken for
+/// a carrier). The hit's object id may appear only as the redacted object
+/// itself and its slot in its owner's library; its name may appear only in
+/// the unindexed public carriers. Returns whether the name reached
+/// `derived.stack_revealed_cards`.
+fn assert_hit_unlocatable(
+    board: &BlastBoard,
+    shifted: &BlastBoard,
+    viewer: Option<engine::types::player::PlayerId>,
+    label: &str,
+) -> bool {
+    let payload = transport_payload(board.runner.state(), &board.steps, viewer);
+    let shifted_payload = transport_payload(shifted.runner.state(), &shifted.steps, viewer);
+    let mut ids = Vec::new();
+    id_paths(&payload, board.hit.0, "", &mut ids);
+    let mut shifted_ids = Vec::new();
+    id_paths(&shifted_payload, shifted.hit.0, "", &mut shifted_ids);
+    let carriers: Vec<_> = ids
+        .iter()
+        .filter(|path| shifted_ids.contains(path))
+        .collect();
+    let leaks: Vec<_> = carriers
+        .iter()
+        .filter(|path| {
+            !path.starts_with(".state.objects.<ID>")
+                && !path.starts_with(".state.players[0].library[")
+        })
+        .collect();
+    assert!(leaks.is_empty(), "{label}: the hit's id leaks at {leaks:?}");
+    assert!(
+        carriers
+            .iter()
+            .any(|path| path.starts_with(".state.players[0].library[")),
+        "{label}: reach guard: the hit is in the projected library ({carriers:?})"
+    );
+
+    let mut names = Vec::new();
+    name_paths(&payload, "Three Drop", "", &mut names);
+    let unsafe_names: Vec<_> = names
+        .iter()
+        .filter(|path| {
+            !path.starts_with(".derived.stack_revealed_cards")
+                && !(path.starts_with(".events[") && path.contains(".card_names["))
+                && !path.starts_with(".logs[")
+        })
+        .collect();
+    assert!(
+        unsafe_names.is_empty(),
+        "{label}: the hit's name leaks at {unsafe_names:?}"
+    );
+
+    // The post-bottom library order alone must not place the hit: its projected
+    // object is indistinguishable from a hidden miss but for the id itself.
+    let strip = |id: ObjectId| {
+        let mut object = payload["state"]["objects"][id.0.to_string()].clone();
+        object
+            .as_object_mut()
+            .expect("projected object")
+            .remove("id");
+        object
+    };
+    assert_eq!(
+        strip(board.hit),
+        strip(board.miss),
+        "{label}: the hit's projected object differs from a hidden miss"
+    );
+
+    names
+        .iter()
+        .any(|path| path.starts_with(".derived.stack_revealed_cards"))
+}
+
+struct BlastBoard {
+    runner: GameRunner,
+    steps: Vec<Step>,
+    hit: ObjectId,
+    miss: ObjectId,
+}
+
+/// Calibrated Blast over Forest, Forest, Three Drop (MV 3), Island: the reveal
+/// bottoms the two Forests and the hit in a random order under the unrevealed
+/// Island, and the reflexive (targeting P1) waits on the stack.
+fn blast_board(id_shift: usize) -> BlastBoard {
     let Fixture {
         mut runner,
         spell,
         library,
         ..
-    } = fixture(
+    } = fixture_shifted(
         "Calibrated Blast",
         CALIBRATED_BLAST,
         false,
         &[
             LibCard::Land("Forest"),
+            LibCard::Land("Forest"),
             LibCard::Sorcery("Three Drop", ManaCost::generic(3)),
-            LibCard::Land("Neighbour"),
+            LibCard::Land("Island"),
         ],
+        &[],
+        id_shift,
     );
-    let (hit, neighbour) = (library[1], library[2]);
+    let (miss, hit) = (library[0], library[2]);
+    let mut steps = Vec::new();
     runner.cast(spell).commit();
-    assert!(pass_until_prompt_or_empty(&mut runner));
-    choose(&mut runner, TargetRef::Player(P1));
-    runner.act(GameAction::PassPriority).unwrap();
-    assert_eq!(
-        zone(runner.state(), hit),
-        Zone::Library,
-        "reach guard: bottomed"
+    while !matches!(
+        runner.state().waiting_for,
+        WaitingFor::TriggerTargetSelection { .. }
+    ) {
+        act_logged(&mut runner, &mut steps, GameAction::PassPriority);
+    }
+    act_logged(
+        &mut runner,
+        &mut steps,
+        GameAction::ChooseTarget {
+            target: Some(TargetRef::Player(P1)),
+        },
     );
-    assert_eq!(name_seen_by(runner.state(), P1, hit), "Three Drop");
+    let st = runner.state();
+    assert_eq!(zone(st, hit), Zone::Library, "reach guard: bottomed");
     assert_eq!(
-        name_seen_by(runner.state(), P1, neighbour),
-        HIDDEN,
-        "unrevealed library stays redacted"
+        st.players[0].library.front().copied(),
+        Some(library[3]),
+        "reach guard: the unrevealed Island is on top"
     );
-    runner.act(GameAction::PassPriority).unwrap();
-    assert!(runner.state().stack.is_empty());
-    assert_eq!(name_seen_by(runner.state(), P1, hit), HIDDEN);
+    assert_eq!(
+        reflexive_entries(st).len(),
+        1,
+        "reach guard: reflexive live"
+    );
+    assert!(
+        st.holds_stack_bound_reveal(hit),
+        "reach guard: the authoritative lease exists"
+    );
+    assert!(
+        st.last_revealed_ids.contains(&hit),
+        "reach guard: the authoritative reveal ledger names the hit"
+    );
+    BlastBoard {
+        runner,
+        steps,
+        hit,
+        miss,
+    }
+}
+
+fn resolve_blast_reflexive(board: &mut BlastBoard) {
+    act_logged(
+        &mut board.runner,
+        &mut board.steps,
+        GameAction::PassPriority,
+    );
+    act_logged(
+        &mut board.runner,
+        &mut board.steps,
+        GameAction::PassPriority,
+    );
+    assert!(board.runner.state().stack.is_empty());
+    assert_eq!(
+        board.runner.state().players[1].life,
+        17,
+        "reach guard: the reflexive resolved for 3"
+    );
+}
+
+const VIEWERS: [(Option<engine::types::player::PlayerId>, &str); 3] =
+    [(Some(P0), "P0"), (Some(P1), "P1"), (None, "unseated")];
+
+/// CR 701.20a + CR 401.2: Calibrated Blast's hit goes to the library bottom
+/// "in a random order" among the misses while its reflexive waits. Its identity
+/// is public for the reflexive's lifetime, but no viewer (the owner included)
+/// can tie that identity to an object id or library position, in any carrier of
+/// the transport payload, before or after the reflexive leaves the stack.
+#[test]
+fn calibrated_blast_hit_is_public_but_unlocatable_in_every_viewer_payload() {
+    let mut board = blast_board(0);
+    let mut shifted = blast_board(7);
+    assert_eq!(
+        shifted.hit.0,
+        board.hit.0 + 7,
+        "reach guard: the shifted board's ids differ"
+    );
+    for (viewer, label) in VIEWERS {
+        assert!(
+            assert_hit_unlocatable(&board, &shifted, viewer, label),
+            "{label}: the identity is public while the reflexive waits"
+        );
+        let payload = transport_payload(board.runner.state(), &board.steps, viewer);
+        assert!(
+            payload["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|event| event["type"] == "CardsRevealed"
+                    && event["data"]["card_names"]
+                        .as_array()
+                        .is_some_and(|names| names.len() == 3)),
+            "{label}: reach guard: the reveal event reached the viewer"
+        );
+    }
+
+    resolve_blast_reflexive(&mut board);
+    resolve_blast_reflexive(&mut shifted);
+    for (viewer, label) in VIEWERS {
+        assert!(
+            !assert_hit_unlocatable(&board, &shifted, viewer, label),
+            "{label}: the presentation ends with the lease"
+        );
+    }
 }
 
 /// Two Calibrated Blasts on a one-card library reveal the SAME occurrence (a
@@ -1101,16 +1500,34 @@ fn two_blasts_on_one_card() -> (GameRunner, ObjectId, Vec<ObjectId>, Vec<ObjectI
 
 #[test]
 fn overlapping_reveal_leases_release_independently_top_first() {
-    let (mut runner, hit, _, _) = two_blasts_on_one_card();
+    let (mut runner, hit, entries, _) = two_blasts_on_one_card();
+    assert_eq!(
+        stack_revealed_seen_by(runner.state(), P1),
+        entries
+            .iter()
+            .map(|entry| (*entry, vec!["Three Drop".to_string()]))
+            .collect(),
+        "both reflexives present the revealed card"
+    );
     pass_once_each(&mut runner);
-    assert_eq!(reflexive_entries(runner.state()).len(), 1, "R2 resolved");
+    assert_eq!(
+        reflexive_entries(runner.state()),
+        vec![entries[0]],
+        "R2 resolved"
+    );
+    assert_eq!(
+        stack_revealed_seen_by(runner.state(), P1),
+        [(entries[0], vec!["Three Drop".to_string()])].into(),
+        "R1 still holds it"
+    );
     assert_eq!(
         name_seen_by(runner.state(), P1, hit),
-        "Three Drop",
-        "R1 still holds it"
+        HIDDEN,
+        "CR 401.2: the library object itself stays unlocatable"
     );
     pass_once_each(&mut runner);
     assert!(runner.state().stack.is_empty());
+    assert!(stack_revealed_seen_by(runner.state(), P1).is_empty());
     assert_eq!(name_seen_by(runner.state(), P1, hit), HIDDEN);
     assert_eq!(
         runner.state().players[1].life,
@@ -1131,12 +1548,14 @@ fn overlapping_reveal_leases_release_independently_bottom_first() {
         "R1 countered"
     );
     assert_eq!(
-        name_seen_by(runner.state(), P1, hit),
-        "Three Drop",
+        stack_revealed_seen_by(runner.state(), P1),
+        [(entries[1], vec!["Three Drop".to_string()])].into(),
         "R2 still holds it"
     );
+    assert_eq!(name_seen_by(runner.state(), P1, hit), HIDDEN);
     pass_once_each(&mut runner);
     assert!(runner.state().stack.is_empty());
+    assert!(stack_revealed_seen_by(runner.state(), P1).is_empty());
     assert_eq!(name_seen_by(runner.state(), P1, hit), HIDDEN);
 }
 

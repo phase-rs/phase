@@ -215,7 +215,8 @@ export class NativeEngineVersionMismatchError extends Error {
  *      the reveal-until whiff verdict read by the new
  *      EffectOutcomeSignal.RevealUntilMatched reflexive guard on resume, plus
  *      the CR 701.20a reveal lease (ResolvedInformationLifetime
- *      UntilStackObjectLeaves and GameState.stack_bound_reveals). A v91
+ *      UntilStackObjectLeaves and GameState.stack_bound_reveals, presented
+ *      through the new DerivedViews.stack_revealed_cards). A v91
  *      peer cannot parse the new tags; the exact-match handshake
  *      refuses the pairing. P2P moves in lockstep (wire 74); lobby messages
  *      are unchanged.
