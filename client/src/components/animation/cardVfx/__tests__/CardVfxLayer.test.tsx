@@ -3,19 +3,22 @@ import { createRef, StrictMode } from "react";
 import type { Mesh, Object3D, Scene, ShaderMaterial, Texture } from "three";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { useCardImage } from "../../../../hooks/useCardImage.ts";
+import { useCardBackImage, useCardImage } from "../../../../hooks/useCardImage.ts";
+import { CARD_BACK_URL } from "../../../../services/scryfall.ts";
+import { assetKey, catalogRoot, packId } from "../../../../services/visualPacks/types.ts";
 import { useAnimationStore } from "../../../../stores/animationStore.ts";
 import { useGameStore } from "../../../../stores/gameStore.ts";
 import type { AnimationImageSnapshot } from "../../ResolvedAnimationImage.tsx";
-import { ABANDON_FADE_MS, RESOLVE_FLIGHT_MS, SETTLE_MS } from "../cardFlight.ts";
+import { ABANDON_FADE_MS, CAST_FLIGHT_MS, RESOLVE_FLIGHT_MS, SETTLE_MS } from "../cardFlight.ts";
 import type { CardFlightRoute, CardFlightSpec } from "../cardFlightSpecs.ts";
 import {
   CARD_FLIGHT_FACE_READY_MAX_MS,
   CardVfxLayer,
   type CardVfxLayerHandle,
+  corsOnlySrc,
   PIXEL_RATIO_CAP,
 } from "../CardVfxLayer.tsx";
-import { SCENE_EFFECT_KINDS } from "../cardVfxScene.ts";
+import { type CardVfxScene, SCENE_EFFECT_KINDS } from "../cardVfxScene.ts";
 
 interface RecordedChild {
   name: string;
@@ -95,8 +98,21 @@ vi.mock("../../../../hooks/useCardImage.ts", () => ({
     isRotated: false,
     isFlip: false,
   })),
-  useCardBackImage: () => ({ src: "back.png", isLoading: false, advanceFailedSource: vi.fn() }),
+  // Lazy: the factory is hoisted above `DEFAULT_BACK`.
+  useCardBackImage: vi.fn(() => DEFAULT_BACK),
 }));
+
+const advanceFailedSource = vi.fn();
+const INSTALLED_BACK = {
+  kind: "installed",
+  src: "back.png",
+  assetKey: assetKey("asset:v1:card_back:W10"),
+  packId: packId("core"),
+  catalogRoot: catalogRoot("a".repeat(64)),
+} as const;
+// An installed source passes through `corsOnlySrc` unchanged, so `loadBack()`
+// finds `img[src="back.png"]`.
+const DEFAULT_BACK = { src: "back.png", isLoading: false, source: INSTALLED_BACK, advanceFailedSource };
 
 const X = 7;
 const Y = 8;
@@ -129,6 +145,32 @@ function anchor(attributes: Record<string, string>, left = 40, top = 600) {
   el.getBoundingClientRect = () => new DOMRect(left, top, CARD_W, CARD_H);
   document.body.appendChild(el);
   return el;
+}
+
+/** Stubs `el`'s layout box: happy-dom reports zero for every node. */
+function stubBox(el: HTMLElement, width: number, height: number) {
+  Object.defineProperty(el, "offsetWidth", { configurable: true, value: width });
+  Object.defineProperty(el, "offsetHeight", { configurable: true, value: height });
+}
+
+/** An `<img>` with a stubbed layout box and `complete` flag, added to `parent`.
+ *  A face fills its node (63 × 88); a pip is 4 × 4. */
+function addImg(parent: HTMLElement, width: number, height: number, complete: boolean) {
+  const img = document.createElement("img");
+  stubBox(img, width, height);
+  Object.defineProperty(img, "complete", { configurable: true, get: () => complete });
+  parent.appendChild(img);
+  return img;
+}
+
+const addFace = (parent: HTMLElement) => addImg(parent, CARD_W, CARD_H, true);
+const addPip = (parent: HTMLElement) => addImg(parent, 4, 4, true);
+
+/** What a surface renders while its face loads: a `<div>` with no `<img>`. */
+function addPulse(parent: HTMLElement) {
+  const pulse = document.createElement("div");
+  parent.appendChild(pulse);
+  return pulse;
 }
 
 const handCard = (objectId: number) =>
@@ -214,6 +256,9 @@ beforeEach(() => {
   Object.assign(gl, { attempts: 0, constructed: 0, throwOnCreate: false, holdCompile: false });
   gl.releaseCompile.length = 0;
   gl.calls.length = 0;
+  // The file's `afterEach` does not reset a `vi.fn`'s implementation, so an
+  // overridden back source would leak into every later test.
+  vi.mocked(useCardBackImage).mockReturnValue(DEFAULT_BACK);
   vi.spyOn(HTMLImageElement.prototype, "decode").mockResolvedValue(undefined);
   unveilSpy = vi.spyOn(useAnimationStore.getState(), "unveilFlight");
 });
@@ -522,8 +567,8 @@ describe("CardVfxLayer present contract", () => {
     expect(rafSpy.mock.calls.length).toBeGreaterThan(whileActive);
     expect(canvas().style.visibility).toBe("visible");
 
-    // The own node appears; the flight lands and ends.
-    anchor({ "data-stack-entry": String(X) }, 700, 200);
+    // The own node appears with its face already loaded; the flight lands and ends.
+    addFace(anchor({ "data-stack-entry": String(X) }, 700, 200));
     await advance(RESOLVE_FLIGHT_MS + 10 * FRAME_MS);
     expect(veiled(X)).toBe(false);
     const idle = rafSpy.mock.calls.length;
@@ -601,6 +646,178 @@ describe("CardVfxLayer present contract", () => {
     expect(veiled(X)).toBe(false);
     expect(unveilSpy).toHaveBeenCalledTimes(1);
     expect(unveilSpy).toHaveBeenCalledWith(X);
+  });
+
+  it("V3-1n (iii): a released card stays drawn until the destination shows its face", async () => {
+    const { present } = await readyLayer();
+    anchor({ "data-stack-entry": String(X) }, 700, 200);
+    present(spec(X, RESOLVE));
+    await frames(1);
+    // The destination renders a pulse where its face will be, beside a
+    // complete pip: only the face-sized image counts.
+    const permanent = anchor({ "data-permanent-card": String(X) }, 300, 400);
+    const pulse = addPulse(permanent);
+    addPip(permanent);
+    act(() => {
+      useGameStore.setState({ engineCommitEpoch: useGameStore.getState().engineCommitEpoch + 1 });
+    });
+
+    await advance(RESOLVE_FLIGHT_MS + SETTLE_MS + 5 * FRAME_MS);
+    expect(unveilSpy).toHaveBeenCalledTimes(1);
+    expect(unveilSpy).toHaveBeenCalledWith(X);
+    for (let i = 0; i < 3; i += 1) {
+      await frames(1);
+      expect(hasVisible(last(calls("render")) as RendererCall, "card-flight")).toBe(true);
+    }
+
+    // The face arrives, as the surface renders it once its source resolves.
+    pulse.remove();
+    addFace(permanent);
+    await frames(2);
+    expect(hasVisible(last(calls("render")) as RendererCall, "card-flight")).toBe(false);
+    expect(canvas().style.visibility).toBe("hidden");
+  });
+
+  it("V3-1q: the back is requested under a CORS-only URL, and an installed back is left alone", async () => {
+    const R = CARD_BACK_URL;
+    const rewritten = new URL(corsOnlySrc({ kind: "remote", src: R }));
+    expect(rewritten.searchParams.get("cors")).toBe("1");
+    expect(rewritten.origin).toBe(new URL(R).origin);
+    expect(rewritten.pathname).toBe(new URL(R).pathname);
+    expect(rewritten.toString()).not.toBe(R);
+    const withQuery = new URL(corsOnlySrc({ kind: "remote", src: `${R}?v=2` }));
+    expect(withQuery.searchParams.get("v")).toBe("2");
+    expect(withQuery.searchParams.get("cors")).toBe("1");
+    expect(corsOnlySrc({ ...INSTALLED_BACK, src: "blob:pack-back" })).toBe("blob:pack-back");
+
+    const source = { kind: "remote", src: R } as const;
+    vi.mocked(useCardBackImage).mockReturnValue({ src: R, isLoading: false, source, advanceFailedSource });
+    await renderLayer();
+    const sources = [...document.querySelectorAll("img")].map((img) => img.getAttribute("src"));
+    expect(sources).toContain(corsOnlySrc(source));
+    expect(sources).not.toContain(R);
+    expect(document.querySelector(`img[src="${corsOnlySrc(source)}"]`)?.getAttribute("crossorigin")).toBe(
+      "anonymous",
+    );
+  });
+
+  it("V3-1p: a failed back advances the ladder with its own URL; with no back, flips run Classic and other flights run GL", async () => {
+    const R = CARD_BACK_URL;
+    const source = { kind: "remote", src: R } as const;
+    vi.mocked(useCardBackImage).mockReturnValue({ src: R, isLoading: false, source, advanceFailedSource });
+    const failed = await renderLayer();
+    const back = document.querySelector<HTMLImageElement>(`img[src="${corsOnlySrc(source)}"]`);
+    if (!back) throw new Error("no back loader");
+    fireEvent.error(back);
+    expect(advanceFailedSource).toHaveBeenCalledTimes(1);
+    expect(advanceFailedSource).toHaveBeenCalledWith(R);
+    failed.unmount();
+
+    // The ladder is exhausted: the loader settles `null` and init runs.
+    vi.mocked(useCardBackImage).mockReturnValue({ src: null, isLoading: false, source: null, advanceFailedSource });
+    const { present } = await renderLayer();
+    present(spec(99, CAST));
+    await frames(1);
+    await advance(1);
+    expect(gl.constructed).toBe(1);
+
+    handCard(X);
+    const flip = present(spec(X, CAST, { startFace: null, endFace: face(X) }));
+    expect(flip).toHaveBeenCalledTimes(1);
+    expect(veiled(X)).toBe(false);
+    // A flight that needs no back still flies.
+    handCard(Y);
+    const still = present(spec(Y, CAST, { startFace: face(Y, "Grizzly Bears"), endFace: face(Y, "Grizzly Bears") }));
+    const loader = faceLoader("Grizzly Bears");
+    await act(async () => {
+      if (loader) fireEvent.load(loader);
+    });
+    expect(veiled(Y)).toBe(true);
+    expect(still).not.toHaveBeenCalled();
+  });
+
+  it("V3-1p: with the remote back loaded, a flip flight runs GL", async () => {
+    const source = { kind: "remote", src: CARD_BACK_URL } as const;
+    vi.mocked(useCardBackImage).mockReturnValue({
+      src: CARD_BACK_URL,
+      isLoading: false,
+      source,
+      advanceFailedSource,
+    });
+    const { present } = await renderLayer();
+    present(spec(99, CAST));
+    const back = document.querySelector<HTMLImageElement>(`img[src="${corsOnlySrc(source)}"]`);
+    if (!back) throw new Error("no back loader");
+    fireEvent.load(back);
+    await frames(1);
+    await advance(1);
+    expect(gl.constructed).toBe(1);
+
+    handCard(X);
+    const flip = present(spec(X, CAST, { startFace: null, endFace: face(X) }));
+    const loader = faceLoader();
+    await act(async () => {
+      if (loader) fireEvent.load(loader);
+    });
+    expect(flip).not.toHaveBeenCalled();
+    expect(veiled(X)).toBe(true);
+    await frames(1);
+    expect(flightRenders().length).toBeGreaterThan(0);
+  });
+
+  /** A ready layer with a cast of X released onto a stack entry whose art is
+   *  still loading: a pulse beside a complete pip, so the cast's card is
+   *  revealing. Returns the scene runtime its `warmUp` received. */
+  async function revealingCast() {
+    const warmUp = vi.spyOn(SCENE_EFFECT_KINDS[0], "warmUp");
+    const layer = await readyLayer();
+    // The scene runtime is the `host` init lends to each effect kind's warm-up.
+    const scene = warmUp.mock.calls[0]?.[0] as unknown as CardVfxScene | undefined;
+    handCard(X);
+    layer.present(spec(X, CAST));
+    const entry = anchor({ "data-stack-entry": String(X) }, 700, 200);
+    addPulse(entry);
+    addPip(entry);
+    await advance(CAST_FLIGHT_MS + 5 * FRAME_MS);
+    expect(unveilSpy).toHaveBeenCalledWith(X);
+    await frames(2);
+    // The hold is live: the card is still drawn over the loading entry.
+    expect(hasVisible(last(calls("render")) as RendererCall, "card-flight")).toBe(true);
+    if (!scene) throw new Error("no scene");
+    return { ...layer, scene };
+  }
+
+  it("V3-1r: a GL resolution replaces a revealing cast with exactly one card", async () => {
+    const { present, scene } = await revealingCast();
+    expect(scene.hasFlight(X)).toBe(false);
+
+    const classic = present(spec(X, RESOLVE));
+    await frames(1);
+
+    const flights = last(flightRenders())?.children?.filter((child) => child.name === "card-flight" && child.visible);
+    expect(flights).toHaveLength(1);
+    expect(veiled(X)).toBe(true);
+    expect(classic).not.toHaveBeenCalled();
+    expect(scene.hasFlight(X)).toBe(true);
+  });
+
+  it("V3-1u: a Classic resolution ends a revealing cast's card, but not before its face deadline", async () => {
+    const { present } = await revealingCast();
+    const deadline = Math.min(CARD_FLIGHT_FACE_READY_MAX_MS, 0.3 * 500);
+
+    // The face never fires `load`, so this present waits for its deadline.
+    const classic = present(spec(X, RESOLVE, { startFace: null, endFace: face(X) }));
+    await advance(deadline - 1);
+    expect(classic).not.toHaveBeenCalled();
+    expect(hasVisible(last(calls("render")) as RendererCall, "card-flight")).toBe(true);
+
+    await advance(1);
+    expect(classic).toHaveBeenCalledTimes(1);
+    const afterClassic = gl.calls.length;
+    await frames(2);
+    expect(gl.calls.slice(afterClassic).some((call) => hasVisible(call, "card-flight"))).toBe(false);
+    expect(canvas().style.visibility).toBe("hidden");
+    expect(veiled(X)).toBe(false);
   });
 
   it("V3-1o: a StrictMode mount → unmount → mount still initialises one renderer and presents GL", async () => {

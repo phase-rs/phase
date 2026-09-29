@@ -43,6 +43,14 @@ export const HOLD_RISE_FRACTION = 0.5;
 /** An own node that moved less than this since the previous frame is stationary. */
 export const LAND_STATIONARY_PX = 0.5;
 export const LAND_STATIONARY_WAIT_MAX_MS = 300;
+/** An own node whose accumulated opacity changed less than this since the
+ *  previous frame is stationary in opacity; a fall past it during a reveal
+ *  means the node is fading out. */
+export const LAND_STATIONARY_OPACITY = 0.002;
+/** After release, the card stays drawn on its node for at most this long while
+ *  the node's face image loads. Not scaled by pace: image fetch and decode
+ *  latency does not change with animation speed. */
+export const LAND_REVEAL_WAIT_MAX_MS = 400;
 export const CARD_FLIGHT_MAX_AWAIT_MS = 4000;
 export const ABANDON_FADE_MS = 150;
 export const LANDING_CROSSFADE_MS = 150;
@@ -344,6 +352,9 @@ export interface CardFlight extends SceneEffect {
   readonly objectId: ObjectId;
   /** The pose last drawn, where a handoff continues from. */
   currentState(): FlightState;
+  /** True from the release frame on (revealing or fading), false while the
+   *  card is still flying or settling. */
+  isReleased(): boolean;
 }
 
 type AimKey = HTMLElement | "remembered" | "hold";
@@ -362,7 +373,9 @@ type FlightPhase =
   | { kind: "flying" }
   | { kind: "settling"; startMs: number; frame: FlightFrame }
   | { kind: "fading"; startMs: number; durationMs: number; frame: FlightFrame }
-  | { kind: "released" };
+  // Released and unveiled, but still drawn opaque on the own node until its
+  // face image has settled; `then` says how the card leaves.
+  | { kind: "revealing"; sinceMs: number; then: "dispose" | "crossfade"; baseOpacity: number | null };
 
 class CardFlightEffect implements CardFlight {
   readonly objectId: ObjectId;
@@ -378,7 +391,7 @@ class CardFlightEffect implements CardFlight {
   private leg: Leg | null = null;
   private absentAfterCommit = 0;
   private arrivedMs: number | null = null;
-  private previousAim: { key: AimKey; pose: CardPose } | null = null;
+  private previousAim: { key: AimKey; pose: CardPose; opacity: number | null } | null = null;
 
   constructor(
     private readonly host: EffectHost,
@@ -407,12 +420,23 @@ class CardFlightEffect implements CardFlight {
     return this.state;
   }
 
+  isReleased(): boolean {
+    switch (this.phase.kind) {
+      case "flying":
+      case "settling":
+        return false;
+      case "fading":
+      case "revealing":
+        return true;
+    }
+  }
+
   update(nowMs: number): boolean {
     this.flightStartMs ??= nowMs;
     const { pace } = this.params;
     switch (this.phase.kind) {
-      case "released":
-        return false;
+      case "revealing":
+        return this.reveal(nowMs, this.phase);
       case "fading": {
         const alpha = 1 - (nowMs - this.phase.startMs) / this.phase.durationMs;
         if (alpha <= 0) return false;
@@ -422,7 +446,7 @@ class CardFlightEffect implements CardFlight {
       case "settling": {
         const s = Math.min((nowMs - this.phase.startMs) / (SETTLE_MS * pace), 1);
         this.draw(this.phase.frame, 1 - SETTLE_SQUASH * Math.sin(Math.PI * s), 1);
-        if (s >= 1) this.release("land", { kind: "released" });
+        if (s >= 1) this.release("land", { kind: "revealing", sinceMs: nowMs, then: "dispose", baseOpacity: null });
         return true;
       }
       case "flying":
@@ -450,7 +474,8 @@ class CardFlightEffect implements CardFlight {
     this.draw(frame, 1, 1);
 
     const previous = this.previousAim;
-    this.previousAim = aim.kind === "hold" ? null : { key, pose: aim.pose };
+    this.previousAim =
+      aim.kind === "hold" ? null : { key, pose: aim.pose, opacity: aim.kind === "own" ? aim.opacity : null };
 
     // The queue never waits: once the engine has committed, a destination that
     // still has no own node is abandoned, and so is any flight past its bound.
@@ -474,8 +499,12 @@ class CardFlightEffect implements CardFlight {
       return true;
     }
     this.arrivedMs ??= nowMs;
+    // A provisional previous aim carries no opacity, so it gives no baseline.
     const stationary =
-      (previous?.key === key && poseMoved(previous.pose, aim.pose) < LAND_STATIONARY_PX) ||
+      (previous?.key === key &&
+        previous.opacity !== null &&
+        poseMoved(previous.pose, aim.pose) < LAND_STATIONARY_PX &&
+        Math.abs(previous.opacity - aim.opacity) < LAND_STATIONARY_OPACITY) ||
       nowMs - this.arrivedMs >= LAND_STATIONARY_WAIT_MAX_MS * pace;
     if (stationary) this.land(nowMs, aim.pose, frame);
     return true;
@@ -485,13 +514,8 @@ class CardFlightEffect implements CardFlight {
     const fullCard = Math.abs(slot.w / slot.h - CARD_ASPECT) <= FULL_CARD_ASPECT_TOLERANCE;
     if (!fullCard) {
       // The GL card cannot cover a differently shaped slot, so it releases
-      // the slot at once and fades out over it.
-      this.release("land", {
-        kind: "fading",
-        startMs: nowMs,
-        durationMs: LANDING_CROSSFADE_MS * this.params.pace,
-        frame,
-      });
+      // the slot at once and, once the slot shows its face, fades out over it.
+      this.release("land", { kind: "revealing", sinceMs: nowMs, then: "crossfade", baseOpacity: null });
       return;
     }
     switch (this.profile.curve) {
@@ -499,10 +523,42 @@ class CardFlightEffect implements CardFlight {
         this.phase = { kind: "settling", startMs: nowMs, frame };
         return;
       case "panel":
-        // Drawn this frame on the slot; disposed the next, a one-frame overlap
-        // of identical pixels.
-        this.release("land", { kind: "released" });
+        // Released now; the card stays drawn on the slot until it shows its face.
+        this.release("land", { kind: "revealing", sinceMs: nowMs, then: "dispose", baseOpacity: null });
         return;
+    }
+  }
+
+  // The release frame is not evaluated here: its DOM still shows the
+  // pre-unveil content, since React applies the store update after the frame.
+  private reveal(nowMs: number, phase: Extract<FlightPhase, { kind: "revealing" }>): boolean {
+    const aim = this.params.aim(this.host.canvasOrigin());
+    if (aim.kind !== "own") return false;
+    // At t = 1 every leg term that depends on its start is zero, so the
+    // endpoint is the same whatever `from` is; the card sits on the node's pose.
+    const frame = flightPose(this.profile.curve, 1, this.state, fitCardAspect(aim.pose), this.targetFlip);
+    this.state = frame;
+    this.draw(frame, 1, 1);
+    // The first revealing frame's opacity is the baseline: the node was
+    // stationary in opacity at release, so a later fall means it is fading out.
+    const baseOpacity = phase.baseOpacity ?? aim.opacity;
+    this.phase = { ...phase, baseOpacity };
+    const ended =
+      aim.faceImagesSettled ||
+      aim.opacity < baseOpacity - LAND_STATIONARY_OPACITY ||
+      nowMs - phase.sinceMs >= LAND_REVEAL_WAIT_MAX_MS;
+    if (!ended) return true;
+    switch (phase.then) {
+      case "dispose":
+        return false;
+      case "crossfade":
+        this.phase = {
+          kind: "fading",
+          startMs: nowMs,
+          durationMs: LANDING_CROSSFADE_MS * this.params.pace,
+          frame,
+        };
+        return true;
     }
   }
 

@@ -3,7 +3,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import { objectAnchorSelector } from "../../../../utils/objectAnchorSelector.ts";
 import {
   castSourceElement,
+  faceImagesSettled,
   measureCardPose,
+  measureSurface,
   ownNode,
   provisionalNode,
   resolveAim,
@@ -133,5 +135,78 @@ describe("zone-scoped anchors", () => {
     expect(pose.w).toBeCloseTo(60 * 1.5, 6);
     expect(pose.h).toBeCloseTo(80 * 1.5, 6);
     expect(pose.angleDeg).toBeCloseTo(30, 2);
+  });
+});
+
+/** An `<img>` in `parent` with a stubbed layout box and `complete` flag. */
+function mountImg(parent: HTMLElement, width: number, height: number, complete: boolean) {
+  const img = document.createElement("img");
+  Object.defineProperty(img, "offsetWidth", { configurable: true, value: width });
+  Object.defineProperty(img, "offsetHeight", { configurable: true, value: height });
+  Object.defineProperty(img, "complete", { configurable: true, get: () => complete });
+  parent.appendChild(img);
+  return img;
+}
+
+describe("surface measurement", () => {
+  it("V3-5f: opacity is the product over the node and its ancestors, and own aims carry it", () => {
+    const parent = mount({}, null);
+    parent.style.opacity = "0.5";
+    const node = mount({ "data-stack-entry": String(X) }, { left: 0, top: 0, width: 63, height: 88 }, parent);
+    node.style.opacity = "0.8";
+
+    const surface = measureSurface(node, ORIGIN);
+    expect(surface.opacity).toBeCloseTo(0.4, 9);
+    expect(surface.pose).toEqual(measureCardPose(node, ORIGIN));
+
+    // An unstyled chain reads 1: happy-dom computes an empty opacity for
+    // <body> and <html>, which is the initial value.
+    const plain = mount({ "data-permanent-card": String(X) });
+    expect(measureSurface(plain, ORIGIN).opacity).toBe(1);
+
+    const own = resolveAim({ kind: "cast" }, X, ORIGIN, null);
+    expect(own).toMatchObject({ kind: "own", el: node, faceImagesSettled: false });
+    expect(own.kind === "own" && own.opacity).toBeCloseTo(0.4, 9);
+    // A provisional aim carries neither field.
+    node.removeAttribute("data-stack-entry");
+    mount({ "data-stack-entry": "9" });
+    const provisional = resolveAim({ kind: "cast" }, X, ORIGIN, null);
+    expect(provisional.kind).toBe("provisional");
+    expect(provisional).not.toHaveProperty("opacity");
+    expect(provisional).not.toHaveProperty("faceImagesSettled");
+  });
+
+  it("V3-5g: only face-sized images count towards a settled face", () => {
+    const node = mount({}, { left: 0, top: 0, width: 63, height: 88 });
+
+    // (d) No image at all is not settled.
+    expect(faceImagesSettled(node)).toBe(false);
+    // (a) A pulse <div> beside a complete pip is not settled.
+    node.appendChild(document.createElement("div"));
+    mountImg(node, 4, 4, true);
+    expect(faceImagesSettled(node)).toBe(false);
+    // (b) A complete face beside an incomplete pip is settled.
+    mountImg(node, 63, 88, true);
+    mountImg(node, 4, 4, false);
+    expect(faceImagesSettled(node)).toBe(true);
+  });
+
+  it("V3-5g: the smallest art-crop face, and several faces", () => {
+    // (c) The art-crop geometry: a 58.7 × 44 node with a 44.7 × 24 face.
+    const artCrop = mount({}, { left: 0, top: 0, width: 58.7, height: 44 });
+    const art = mountImg(artCrop, 44.7, 24, true);
+    expect(faceImagesSettled(artCrop)).toBe(true);
+    art.remove();
+    mountImg(artCrop, 44.7, 24, false);
+    expect(faceImagesSettled(artCrop)).toBe(false);
+
+    // (e) Every face must be complete.
+    const node = mount({}, { left: 0, top: 0, width: 63, height: 88 });
+    mountImg(node, 63, 88, true);
+    const second = mountImg(node, 63, 88, false);
+    expect(faceImagesSettled(node)).toBe(false);
+    second.remove();
+    mountImg(node, 63, 88, true);
+    expect(faceImagesSettled(node)).toBe(true);
   });
 });

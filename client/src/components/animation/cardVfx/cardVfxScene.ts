@@ -86,6 +86,9 @@ export interface CardVfxScene {
   /** Starts a flight, handing off from the object's active flight if it has
    *  one. Returns false when there is neither a source nor an active flight. */
   startCardFlight(request: CardFlightRequest): boolean;
+  /** Silently disposes the object's flight if it has released (is revealing or
+   *  fading). A later presentation of the object supersedes its landing. */
+  dropReleasedFlight(objectId: ObjectId): void;
   add(effect: SceneEffect): void;
   dispose(): void;
 }
@@ -192,6 +195,9 @@ class CardVfxSceneRuntime implements CardVfxScene, EffectHost {
       if (effect.update(nowMs)) continue;
       this.active.delete(effect);
       effect.dispose(false);
+      for (const [objectId, flight] of this.flights) {
+        if (flight === effect) this.flights.delete(objectId);
+      }
     }
     this.renderer.render(this.scene, this.camera);
     // Render only while something runs: an idle overlay requests no frame.
@@ -234,16 +240,30 @@ class CardVfxSceneRuntime implements CardVfxScene, EffectHost {
   }
 
   hasFlight(objectId: ObjectId) {
-    return this.flights.has(objectId);
+    return this.flights.get(objectId)?.isReleased() === false;
+  }
+
+  dropReleasedFlight(objectId: ObjectId) {
+    const flight = this.flights.get(objectId);
+    if (!flight?.isReleased()) return;
+    this.active.delete(flight);
+    // Already released and unveiled: nothing to complete.
+    flight.dispose(true);
+    this.flights.delete(objectId);
   }
 
   startCardFlight(request: CardFlightRequest): boolean {
     const { objectId } = request;
     const previous = this.flights.get(objectId);
-    const from = previous?.currentState() ?? (request.from && restingState(request.from, request.flip));
+    // An unreleased flight hands off from where its card is; a released one
+    // (revealing or fading) is over, so the new flight starts from the source.
+    const from =
+      previous && !previous.isReleased()
+        ? previous.currentState()
+        : request.from && restingState(request.from, request.flip);
     if (!from) return false;
     if (previous) {
-      // One object, one flight: the new leg starts where the old card is.
+      // One object, one flight.
       this.active.delete(previous);
       previous.dispose(true);
     }
@@ -251,10 +271,7 @@ class CardVfxSceneRuntime implements CardVfxScene, EffectHost {
       ...request,
       from,
       back: this.backTexture,
-      onRelease: (reason) => {
-        if (this.flights.get(objectId) === flight) this.flights.delete(objectId);
-        request.onRelease(reason);
-      },
+      onRelease: request.onRelease,
     });
     this.flights.set(objectId, flight);
     this.add(flight);

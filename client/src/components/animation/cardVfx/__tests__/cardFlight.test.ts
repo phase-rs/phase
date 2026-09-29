@@ -13,7 +13,9 @@ import {
   type FlightCurve,
   type FlightRelease,
   HOLD_RISE_FRACTION,
+  LAND_REVEAL_WAIT_MAX_MS,
   LAND_STATIONARY_WAIT_MAX_MS,
+  LANDING_CROSSFADE_MS,
   RESOLVE_FLIGHT_MS,
   restingState,
   SETTLE_MS,
@@ -46,7 +48,7 @@ function host(): EffectHost {
 }
 
 function own(pose: CardPose): Aim {
-  return { kind: "own", el: document.createElement("div"), pose };
+  return { kind: "own", el: document.createElement("div"), pose, opacity: 1, faceImagesSettled: true };
 }
 
 interface Harness {
@@ -174,16 +176,23 @@ describe("card flight effect", () => {
     let kind: "provisional" | "own" = "provisional";
     const slot = { ...TO, w: CARD_W, h: CARD_H };
     const harness = fly({ kind: "resolveToGraveyard", ownerId: 1 }, {
-      aim: () => ({ kind, el: pile, pose: { ...slot } }),
+      aim: () =>
+        kind === "own"
+          ? { kind, el: pile, pose: { ...slot }, opacity: 1, faceImagesSettled: true }
+          : { kind, el: pile, pose: { ...slot } },
     });
     let ms = 0;
     for (; ms <= RESOLVE_FLIGHT_MS + LAND_STATIONARY_WAIT_MAX_MS + 4 * FRAME_MS; ms += FRAME_MS) harness.frame(ms);
     expect(harness.releases).toEqual([]);
     expect(harness.flight.currentState().x).toBeCloseTo(slot.x, 6);
 
-    // The pile now lists the object: the same node is its own node.
+    // The pile now lists the object: the same node is its own node. A
+    // provisional aim carries no opacity, so the first own frame has no
+    // baseline and the card lands on the next one.
     kind = "own";
     harness.frame(ms);
+    expect(harness.releases).toEqual([]);
+    harness.frame(ms + FRAME_MS);
     expect(harness.releases).toEqual(["land"]);
   });
 
@@ -249,7 +258,7 @@ describe("card flight effect", () => {
     const harness = fly({ kind: "cast" }, {
       aim: () => {
         if (moving) target.x += 10;
-        return { kind: "own", el, pose: { ...target } };
+        return { kind: "own", el, pose: { ...target }, opacity: 1, faceImagesSettled: true };
       },
     });
     let ms = 0;
@@ -267,7 +276,7 @@ describe("card flight effect", () => {
     const second = fly({ kind: "cast" }, {
       aim: () => {
         drifting.x += 10;
-        return { kind: "own", el, pose: { ...drifting } };
+        return { kind: "own", el, pose: { ...drifting }, opacity: 1, faceImagesSettled: true };
       },
       pace,
     });
@@ -293,15 +302,186 @@ describe("card flight effect", () => {
     expect(card.alpha()).toBe(1);
     expect(card.frame(RESOLVE_FLIGHT_MS + SETTLE_MS + FRAME_MS)).toBe(false);
 
-    const squareSlot = own({ ...TO, w: 100, h: 100 });
-    const square = fly({ kind: "resolveToBattlefield" }, { aim: () => squareSlot });
+    // Any other shape releases at once; the card stays opaque until the slot
+    // shows its face, then fades out over it.
+    const state = { settled: false };
+    const squareEl = document.createElement("div");
+    const square = fly({ kind: "resolveToBattlefield" }, {
+      aim: () => ({
+        kind: "own",
+        el: squareEl,
+        pose: { ...TO, w: 100, h: 100 },
+        opacity: 1,
+        faceImagesSettled: state.settled,
+      }),
+    });
     square.frame(0);
     square.frame(RESOLVE_FLIGHT_MS);
     expect(square.releases).toEqual(["land"]);
-    square.frame(RESOLVE_FLIGHT_MS + ABANDON_FADE_MS / 2);
+    expect(square.alpha()).toBe(1);
+    for (let i = 1; i <= 3; i += 1) {
+      expect(square.frame(RESOLVE_FLIGHT_MS + i * FRAME_MS)).toBe(true);
+      expect(square.alpha()).toBe(1);
+    }
+    state.settled = true;
+    const settledMs = RESOLVE_FLIGHT_MS + 4 * FRAME_MS;
+    expect(square.frame(settledMs)).toBe(true);
+    expect(square.alpha()).toBe(1);
+    expect(square.frame(settledMs + LANDING_CROSSFADE_MS / 2)).toBe(true);
     expect(square.alpha()).toBeCloseTo(0.5, 2);
+    expect(square.frame(settledMs + LANDING_CROSSFADE_MS)).toBe(false);
     // The GL card keeps the card aspect inside the square slot.
     const { w, h } = square.flight.currentState();
     expect(w / h).toBeCloseTo(CARD_ASPECT, 6);
+  });
+  it("V3-6e: an own node's opacity joins the stationary test", () => {
+    const el = document.createElement("div");
+    const slot = { ...TO, w: CARD_W, h: CARD_H };
+    const state = { opacity: 0.5, step: 0.013 };
+    const ownAim = (): Aim => {
+      state.opacity += state.step;
+      return { kind: "own", el, pose: { ...slot }, opacity: state.opacity, faceImagesSettled: true };
+    };
+    // Geometry is still but the opacity is rising: an entrance tail, no release.
+    const rising = fly({ kind: "cast" }, { aim: ownAim });
+    let ms = 0;
+    for (; ms <= CAST_FLIGHT_MS + 3 * FRAME_MS; ms += FRAME_MS) rising.frame(ms);
+    expect(rising.releases).toEqual([]);
+    // Once it stops changing, it lands on that frame.
+    state.step = 0;
+    rising.frame(ms);
+    expect(rising.releases).toEqual(["land"]);
+
+    // A steady translucent node lands on its first stationary frame.
+    const steady = fly({ kind: "cast" }, {
+      aim: () => ({ kind: "own", el, pose: { ...slot }, opacity: 0.5, faceImagesSettled: true }),
+    });
+    let landedAt: number | null = null;
+    for (let t = 0; t < 2 * CAST_FLIGHT_MS && landedAt === null; t += FRAME_MS) {
+      steady.frame(t);
+      if (steady.releases.length > 0) landedAt = t;
+    }
+    expect(landedAt).toBe(Math.ceil(CAST_FLIGHT_MS / FRAME_MS) * FRAME_MS);
+
+    // An opacity that never stops changing: the wait bound lands it anyway.
+    let drift = 0.3;
+    const changing = fly({ kind: "cast" }, {
+      aim: () => {
+        drift += 0.01;
+        return { kind: "own", el, pose: { ...slot }, opacity: drift, faceImagesSettled: true };
+      },
+    });
+    for (let t = 0; t < CAST_FLIGHT_MS; t += FRAME_MS) changing.frame(t);
+    changing.frame(CAST_FLIGHT_MS);
+    changing.frame(CAST_FLIGHT_MS + LAND_STATIONARY_WAIT_MAX_MS - 1);
+    expect(changing.releases).toEqual([]);
+    changing.frame(CAST_FLIGHT_MS + LAND_STATIONARY_WAIT_MAX_MS);
+    expect(changing.releases).toEqual(["land"]);
+  });
+});
+
+/** Flies onto a shared own-node state until the land release and returns the
+ *  harness, the release frame's time and the state the aim reads. */
+function landOn(route: CardFlightRoute, slot: CardPose, { pace = 1 }: { pace?: number } = {}) {
+  const state = { pose: slot, opacity: 1, settled: true, present: true };
+  const el = document.createElement("div");
+  const harness = fly(route, {
+    aim: () =>
+      state.present
+        ? { kind: "own", el, pose: { ...state.pose }, opacity: state.opacity, faceImagesSettled: state.settled }
+        : { kind: "hold" },
+    pace,
+  });
+  let ms = 0;
+  while (harness.releases.length === 0) {
+    harness.frame(ms);
+    if (harness.releases.length > 0) break;
+    ms += FRAME_MS;
+    expect(ms).toBeLessThan(5000);
+  }
+  return { harness, state, releasedAt: ms };
+}
+
+const CARD_SLOT: CardPose = { ...TO, w: CARD_W, h: CARD_H };
+const SQUARE_SLOT: CardPose = { ...TO, w: 100, h: 100 };
+
+describe("card flight reveal hold", () => {
+  it.each<CardFlightRoute>([{ kind: "cast" }, { kind: "resolveToBattlefield" }])(
+    "V3-6g: the %o profile keeps drawing the card opaque until the face settles",
+    (route) => {
+      const { harness, state, releasedAt } = landOn(route, CARD_SLOT);
+      // The release frame reads the pre-unveil content; then the face is a pulse.
+      state.settled = false;
+      for (let i = 1; i <= 3; i += 1) {
+        expect(harness.frame(releasedAt + i * FRAME_MS)).toBe(true);
+        expect(harness.alpha()).toBe(1);
+        const { x, y } = harness.flight.currentState();
+        expect(x).toBeCloseTo(CARD_SLOT.x, 6);
+        expect(y).toBeCloseTo(CARD_SLOT.y, 6);
+      }
+      state.settled = true;
+      expect(harness.frame(releasedAt + 4 * FRAME_MS)).toBe(false);
+    },
+  );
+
+  it("V3-6g: a node already settled after release disposes on the first frame after it", () => {
+    const { harness, releasedAt } = landOn({ kind: "cast" }, CARD_SLOT);
+    expect(harness.frame(releasedAt + FRAME_MS)).toBe(false);
+  });
+
+  it.each([1, 1.5])("V3-6h: an unsettled face is held for the fixed bound at pace %d", (pace) => {
+    const { harness, state, releasedAt } = landOn({ kind: "cast" }, CARD_SLOT, { pace });
+    state.settled = false;
+    expect(harness.frame(releasedAt + LAND_REVEAL_WAIT_MAX_MS - 1)).toBe(true);
+    expect(harness.frame(releasedAt + LAND_REVEAL_WAIT_MAX_MS)).toBe(false);
+
+    const square = landOn({ kind: "cast" }, SQUARE_SLOT, { pace });
+    square.state.settled = false;
+    expect(square.harness.frame(square.releasedAt + LAND_REVEAL_WAIT_MAX_MS - 1)).toBe(true);
+    expect(square.harness.alpha()).toBe(1);
+    // The bound starts the cross-fade rather than ending the card.
+    expect(square.harness.frame(square.releasedAt + LAND_REVEAL_WAIT_MAX_MS)).toBe(true);
+    expect(square.harness.alpha()).toBe(1);
+    const fadeMs = LANDING_CROSSFADE_MS * pace;
+    expect(square.harness.frame(square.releasedAt + LAND_REVEAL_WAIT_MAX_MS + fadeMs / 2)).toBe(true);
+    expect(square.harness.alpha()).toBeCloseTo(0.5, 2);
+    expect(square.harness.frame(square.releasedAt + LAND_REVEAL_WAIT_MAX_MS + fadeMs)).toBe(false);
+  });
+
+  it("V3-6i: the card follows a moving node during the hold and leaves when the node is gone", () => {
+    const { harness, state, releasedAt } = landOn({ kind: "cast" }, CARD_SLOT);
+    state.settled = false;
+    state.pose = { ...CARD_SLOT, x: CARD_SLOT.x + 10 };
+    expect(harness.frame(releasedAt + FRAME_MS)).toBe(true);
+    expect(harness.flight.currentState().x).toBeCloseTo(CARD_SLOT.x + 10, 6);
+    state.present = false;
+    expect(harness.frame(releasedAt + 2 * FRAME_MS)).toBe(false);
+  });
+
+  it("V3-6j: a node that fades out ends the hold, measured against the first revealing frame", () => {
+    const run = (route: CardFlightRoute, slot: CardPose, releaseOpacity: number, opacities: number[]) => {
+      const { harness, state, releasedAt } = landOn(route, slot);
+      state.opacity = releaseOpacity;
+      state.settled = false;
+      const results = opacities.map((opacity, i) => {
+        state.opacity = opacity;
+        return harness.frame(releasedAt + (i + 1) * FRAME_MS);
+      });
+      return { harness, results, releasedAt };
+    };
+    // A fall ends the hold on the frame it happens.
+    expect(run({ kind: "cast" }, CARD_SLOT, 1, [1, 1, 0.95]).results).toEqual([true, true, false]);
+    // The cross-fade path enters its fade on that frame.
+    const fading = run({ kind: "cast" }, SQUARE_SLOT, 1, [1, 1, 0.95]);
+    expect(fading.results).toEqual([true, true, true]);
+    expect(fading.harness.frame(fading.releasedAt + 3 * FRAME_MS + LANDING_CROSSFADE_MS / 2)).toBe(true);
+    expect(fading.harness.alpha()).toBeCloseTo(0.5, 2);
+    // A steady node, a rising tail and a fall below the bound keep the hold.
+    expect(run({ kind: "cast" }, CARD_SLOT, 0.5, [0.5, 0.5, 0.5, 0.5]).results).toEqual([true, true, true, true]);
+    expect(run({ kind: "cast" }, CARD_SLOT, 0.96, [0.96, 0.98, 1]).results).toEqual([true, true, true]);
+    expect(run({ kind: "cast" }, CARD_SLOT, 1, [1, 0.999]).results).toEqual([true, true]);
+    // A slow fade, each frame below the bound, still ends it once the total fall
+    // passes the bound from the first revealing frame's opacity.
+    expect(run({ kind: "cast" }, CARD_SLOT, 1, [0.9985, 0.997, 0.9955]).results).toEqual([true, true, false]);
   });
 });

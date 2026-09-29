@@ -20,6 +20,7 @@ import type { Texture } from "three";
 
 import type { ObjectId } from "../../../adapter/types.ts";
 import { useCardBackImage } from "../../../hooks/useCardImage.ts";
+import type { CardImageSource } from "../../../services/visualPacks/types.ts";
 import { useAnimationStore } from "../../../stores/animationStore.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { type AnimationImageSnapshot, ResolvedAnimationImage } from "../ResolvedAnimationImage.tsx";
@@ -229,8 +230,16 @@ class CardVfxController {
     };
   }
 
-  private presentReady(scene: CardVfxScene, spec: CardFlightSpec, classic: () => void) {
+  private presentReady(scene: CardVfxScene, spec: CardFlightSpec, presentClassic: () => void) {
     const { objectId } = spec;
+    // A Classic presentation supersedes X's earlier landing, so it ends that
+    // flight's reveal first. Dropping at the top of `presentReady` instead would
+    // expose the unloaded own node while a GL flight waits for its face; on the
+    // GL path `startCardFlight` disposes the released flight as the new one starts.
+    const classic = () => {
+      scene.dropReleasedFlight(objectId);
+      presentClassic();
+    };
     const pending = this.pending.get(objectId);
     if (pending) {
       this.join(scene, pending, spec, classic);
@@ -376,23 +385,39 @@ const CANVAS_STYLE: CSSProperties = {
   visibility: "hidden",
 };
 
-/** Loads the card back the DOM shows and reports it once: the loaded image,
- *  or `null` when every source failed. */
+export const CORS_ONLY_SEARCH_PARAM = "cors";
+
+/** The URL the layer requests for a card back. The app's plain `<img>`s of a
+ *  remote back's URL leave a response without CORS headers in the HTTP cache,
+ *  which a CORS request for the same URL would reuse and fail on. A remote back
+ *  is therefore requested under a query parameter no other code requests, and
+ *  the CDN serves the same bytes with CORS headers. Installed pack sources are
+ *  local and pass through unchanged. */
+export function corsOnlySrc(source: Extract<CardImageSource, { src: string }>): string {
+  if (source.kind !== "remote") return source.src;
+  const url = new URL(source.src);
+  url.searchParams.set(CORS_ONLY_SEARCH_PARAM, "1");
+  return url.toString();
+}
+
+/** Loads the card back the DOM shows, through `corsOnlySrc`, and reports it
+ *  once: the loaded image, or `null` when every source failed. */
 function CardBackLoader({ onSettled }: { onSettled: (image: HTMLImageElement | null) => void }) {
-  const { src, isLoading, advanceFailedSource } = useCardBackImage();
+  const { src, source, isLoading, advanceFailedSource } = useCardBackImage();
 
   useEffect(() => {
     if (!isLoading && !src) onSettled(null);
   }, [isLoading, onSettled, src]);
 
-  if (!src) return null;
+  if (!source || source.kind === "fallback") return null;
   return (
     <img
-      src={src}
+      src={corsOnlySrc(source)}
       alt=""
       crossOrigin="anonymous"
       onLoad={(event) => onSettled(event.currentTarget)}
-      onError={() => advanceFailedSource?.(src)}
+      // The ladder advances on the source's own URL, not the rewritten one.
+      onError={() => advanceFailedSource?.(source.src)}
     />
   );
 }
