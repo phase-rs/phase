@@ -644,7 +644,7 @@ fn p0_token_ids(runner: &GameRunner) -> Vec<ObjectId> {
         .collect()
 }
 
-/// With both copies on the battlefield and no player yet given priority again: both
+/// With both copies on the battlefield: both
 /// have haste, the resolution stack is empty, and one delayed trigger names and pins
 /// exactly the two copies (CR 603.7c).
 fn assert_copies_hasted_and_named_by_one_delayed_trigger(runner: &GameRunner) {
