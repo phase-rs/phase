@@ -68,7 +68,7 @@ import {
   isBundledDeck,
 } from "./deckHelpers";
 import { BASIC_LAND_NAMES } from "../../constants/game";
-import { BracketEstimateChip } from "../deck-builder/BracketEstimateChip";
+import { BracketEstimateChip, ManualBracketChip } from "../deck-builder/BracketEstimateChip";
 import { MenuSelect } from "../ui/MenuSelect";
 import { TextPromptDialog } from "../ui/TextPromptDialog";
 import { useBracketEstimate } from "../../hooks/useBracketEstimate";
@@ -213,7 +213,10 @@ export function StatusBadge({ label, active }: { label: string; active: boolean 
 }
 
 /** Inner component so the hook is always called unconditionally (Rules of Hooks).
- * Returns null for non-Commander decks — the hook handles that check. */
+ * Returns null for non-Commander decks — the hook handles that check.
+ * A human-declared tag overrides the engine estimate (same effective-bracket
+ * rule as the AI catalog's `resolveBracket`): tagged decks show the declared
+ * chip, untagged decks fall back to the estimate. */
 function BracketChipForDeck({ candidate }: { candidate: DeckCatalogCandidate }) {
   const { estimate } = useBracketEstimate({
     deck: candidate.deck,
@@ -221,6 +224,9 @@ function BracketChipForDeck({ candidate }: { candidate: DeckCatalogCandidate }) 
     format: candidate.knownFormat,
     adapter: getSharedAdapter(),
   });
+  if (candidate.bracket != null) {
+    return <ManualBracketChip bracket={candidate.bracket} />;
+  }
   return <BracketEstimateChip tier={estimate?.tier ?? null} />;
 }
 

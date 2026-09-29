@@ -278,7 +278,9 @@
     "dataVersion": "Données : {{version}}",
     "aboutBrackets": "À propos des paliers ↗",
     "estimatedChip": "Estimé : B{{tier}}",
-    "estimatedChipFull": "Palier estimé : B{{tier}} {{label}}"
+    "estimatedChipFull": "Palier estimé : B{{tier}} {{label}}",
+    "manualChip": "B{{tier}}",
+    "manualChipFull": "Palier déclaré : B{{tier}} {{label}}"
   },
   "bracketPicker": {
     "ariaLabel": "Palier du deck",

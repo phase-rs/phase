@@ -31,9 +31,27 @@ describe("BracketAuditPanel", () => {
     expect(screen.queryByText(/mismatch/i)).not.toBeInTheDocument();
   });
 
-  it("shows the mismatch chip when manual differs from estimate", () => {
+  it("shows the mismatch chip when manual under-reports the estimate", () => {
     render(<BracketAuditPanel estimate={estimate} manualBracket={2} onCardClick={() => {}} />);
     expect(screen.getByText(/mismatch/i)).toBeInTheDocument();
+  });
+
+  it("hides the mismatch chip when manual declares above the estimate", () => {
+    // The estimate is a floor: a pilot calling a B3 estimate B4 is expected.
+    render(<BracketAuditPanel estimate={estimate} manualBracket={4} onCardClick={() => {}} />);
+    expect(screen.queryByText(/mismatch/i)).not.toBeInTheDocument();
+  });
+
+  it("hides the mismatch chip for a B1 tag on a B2-floor estimate", () => {
+    const coreEstimate: BracketEstimate = {
+      ...estimate,
+      tier: "core",
+      axes: { game_changers: 0, mass_land_denial: 0, extra_turns: 0, efficient_tutors: 1 },
+      axis_caps_at_tier: { game_changers: 0, mass_land_denial: 0, extra_turns: 0, efficient_tutors: 2 },
+      contributing: { game_changers: [], mass_land_denial: [], extra_turns: [], efficient_tutors: ["Demonic Tutor"] },
+    };
+    render(<BracketAuditPanel estimate={coreEstimate} manualBracket={1} onCardClick={() => {}} />);
+    expect(screen.queryByText(/mismatch/i)).not.toBeInTheDocument();
   });
 
   it("expands to show per-axis breakdown", () => {
