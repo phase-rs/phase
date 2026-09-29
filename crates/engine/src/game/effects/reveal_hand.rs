@@ -83,6 +83,22 @@ pub fn resolve(
             TargetRef::Player(pid) => Some(*pid),
             _ => None,
         })
+        // CR 608.2c + CR 109.4 + CR 108.3: a possessive-shift subject ("target
+        // spell's/creature's controller|owner reveals their hand" — Denied!,
+        // Friendly Fire) names the targeted object's controller/owner as the
+        // player whose hand is revealed (CR 701.20a). The parent's object
+        // target is inherited, so there is no `TargetRef::Player` above; resolve
+        // the anaphor through the shared effect-player authority (the same
+        // `parent_target_controller` / `parent_target_owner` reads
+        // `resolve_player_for_context_ref` makes for Draw/Discard/Mill). Its
+        // `Option` result keeps an unresolvable referent fail-closed
+        // (`MissingParam`) instead of defaulting to the caster's hand.
+        .or_else(|| match &target {
+            TargetFilter::ParentTargetController | TargetFilter::ParentTargetOwner => {
+                crate::game::targeting::resolve_effect_player_ref(state, ability, &target)
+            }
+            _ => None,
+        })
         // CR 608.2d + CR 608.2c: "an opponent" is a choice the controller
         // announces while resolving the effect. For the as-enters look-at-hand
         // class (Anointed Peacekeeper, Sorcerous Spyglass), the parser's as-enters

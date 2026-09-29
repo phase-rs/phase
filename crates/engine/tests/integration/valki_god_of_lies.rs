@@ -2065,3 +2065,177 @@ fn card_that_left_exile_not_playable_via_emblem() {
     add_pool(&mut fx.runner, P0, &[ManaType::Green, ManaType::Green]);
     assert!(can_cast(&fx.runner, P0, fx.creature));
 }
+
+// ── Possessive-shift hand reveal: "target <x>'s controller|owner reveals their hand" ──
+//
+// CR 608.2c + CR 109.4 + CR 108.3: in "target <filter>'s controller/owner
+// reveals their hand" the spell targets the object, and the player whose hand
+// is revealed (CR 701.20a) is that object's controller/owner — never the
+// caster. The parser binds the reveal's player to `ParentTargetController` /
+// `ParentTargetOwner`; these tests pin that `RevealHand` resolves those
+// anaphors from the inherited object target.
+
+/// Verbatim Oracle text (Scryfall).
+const DENIED: &str = "Choose a card name, then target spell's controller reveals their hand. If a card with the chosen name is revealed this way, counter that spell.";
+/// Grammar fixtures (not cards) for the controller and owner shifts.
+const CONTROLLER_REVEALS: &str = "Target creature's controller reveals their hand.";
+const OWNER_REVEALS: &str = "Target creature's owner reveals their hand.";
+
+/// A {U} instant for P0 with verbatim/grammar `oracle`, P0's pool funded, one
+/// card in each player's hand (so a wrong-player reveal would be observable).
+fn possessive_reveal_scenario(
+    oracle: &str,
+    name: &str,
+) -> (GameScenario, ObjectId, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(P0, vec![mana(ManaType::Blue)]);
+    let mut spell = scenario.add_spell_to_hand_from_oracle(P0, name, true, oracle);
+    spell.with_mana_cost(ManaCost::Cost {
+        shards: vec![ManaCostShard::Blue],
+        generic: 0,
+    });
+    let spell = spell.id();
+    let p0_card = add_hand_creature(&mut scenario, P0, "Caster Card", 2, 2, 2);
+    let p1_card = add_hand_creature(&mut scenario, P1, "Opponent Card", 2, 2, 2);
+    (scenario, spell, p0_card, p1_card)
+}
+
+/// The card ids revealed for `player` across `events`.
+fn revealed_cards_of(events: &[GameEvent], player: PlayerId) -> Vec<ObjectId> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            GameEvent::CardsRevealed {
+                player: p,
+                card_ids,
+                ..
+            } if *p == player => Some(card_ids.clone()),
+            _ => None,
+        })
+        .flatten()
+        .collect()
+}
+
+/// CR 608.2c + CR 109.4 + CR 701.20a: "Target creature's controller reveals
+/// their hand." targeting an opponent's creature reveals that opponent's hand,
+/// not the caster's. Reverting the `ParentTargetController` resolution in
+/// `reveal_hand::resolve` makes the reveal fail (`MissingParam`) — no
+/// `CardsRevealed` for P1.
+#[test]
+fn target_creatures_controller_reveals_their_hand() {
+    let (mut scenario, spell, p0_card, p1_card) =
+        possessive_reveal_scenario(CONTROLLER_REVEALS, "Controller Reveal");
+    let creature = scenario.add_creature(P1, "Opponent Bear", 2, 2).id();
+    let mut runner = scenario.build();
+
+    let outcome = runner.cast(spell).target_object(creature).resolve();
+    let events = outcome.events();
+
+    assert_eq!(
+        revealed_players(events),
+        vec![P1],
+        "exactly the targeted creature's controller reveals: {events:#?}"
+    );
+    assert_eq!(revealed_cards_of(events, P1), vec![p1_card]);
+    assert!(revealed_cards_of(events, P0).is_empty());
+    assert_eq!(
+        runner.state().players[P0.0 as usize]
+            .hand
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![p0_card],
+        "reach-guard: the caster held a card that a wrong-player reveal would show"
+    );
+}
+
+/// CR 608.2c + CR 108.3 + CR 701.20a: "Target creature's owner reveals their
+/// hand." targeting a creature P1 owns but P0 controls reveals the OWNER's (P1)
+/// hand — not the controller's (P0, the caster). The controller/owner split
+/// makes the fixture discriminate owner from controller.
+#[test]
+fn target_creatures_owner_reveals_their_hand_even_when_stolen() {
+    let (mut scenario, spell, _p0_card, p1_card) =
+        possessive_reveal_scenario(OWNER_REVEALS, "Owner Reveal");
+    let stolen = scenario
+        .add_creature(P1, "Stolen Bear", 2, 2)
+        .controlled_by(P0)
+        .id();
+    let mut runner = scenario.build();
+    assert_eq!(runner.state().objects[&stolen].owner, P1);
+    assert_eq!(
+        runner.state().objects[&stolen].controller,
+        P0,
+        "reach-guard: owner and controller differ"
+    );
+
+    let outcome = runner.cast(spell).target_object(stolen).resolve();
+    let events = outcome.events();
+
+    assert_eq!(
+        revealed_players(events),
+        vec![P1],
+        "exactly the targeted creature's owner reveals: {events:#?}"
+    );
+    assert_eq!(revealed_cards_of(events, P1), vec![p1_card]);
+    assert!(revealed_cards_of(events, P0).is_empty());
+}
+
+/// CR 608.2c + CR 109.4 + CR 701.20a: Denied! (verbatim) targeting an
+/// opponent's spell reveals that spell's controller's hand. The counter clause
+/// is a separate, unsupported gap and is deliberately NOT asserted here.
+#[test]
+fn denied_reveals_target_spells_controllers_hand() {
+    let (scenario, denied, _p0_card, p1_card) = possessive_reveal_scenario(DENIED, "Denied!");
+    let mut runner = scenario.build();
+    // CR 201.4: the chosen name must be a real card name; seed the name pool
+    // (mirrors `anointed_peacekeeper_chosen_opponent`). What the counter
+    // clause does with this name is out of scope here (unsupported gap).
+    runner.state_mut().all_card_names = std::sync::Arc::from(["Lightning Bolt".to_string()]);
+
+    // An opponent's instant on the stack (mirrors `counter_spell_zone_redirect`).
+    let opponent_spell = engine::game::zones::create_object(
+        runner.state_mut(),
+        engine::types::identifiers::CardId(7701),
+        P1,
+        "Shock".to_string(),
+        Zone::Stack,
+    );
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&opponent_spell)
+        .expect("opponent spell")
+        .card_types
+        .core_types = vec![engine::types::card_type::CoreType::Instant];
+    runner
+        .state_mut()
+        .stack
+        .push_back(engine::types::game_state::StackEntry {
+            id: opponent_spell,
+            source_id: opponent_spell,
+            controller: P1,
+            kind: StackEntryKind::Spell {
+                card_id: engine::types::identifiers::CardId(7701),
+                ability: None,
+                casting_variant: engine::types::game_state::CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+
+    let outcome = runner
+        .cast(denied)
+        .target_object(opponent_spell)
+        .choose_option("Lightning Bolt")
+        .resolve();
+    let events = outcome.events();
+
+    assert_eq!(
+        revealed_players(events),
+        vec![P1],
+        "Denied! reveals exactly the targeted spell's controller's hand: {events:#?}"
+    );
+    assert_eq!(revealed_cards_of(events, P1), vec![p1_card]);
+    assert!(revealed_cards_of(events, P0).is_empty());
+}
