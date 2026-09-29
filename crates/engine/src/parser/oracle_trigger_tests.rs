@@ -72,6 +72,30 @@ fn trigger_chain_effects(trigger: &TriggerDefinition) -> Vec<&Effect> {
         .collect()
 }
 
+/// The trigger's ability chain, head first, following `sub_ability` links.
+fn trigger_chain_abilities(trigger: &TriggerDefinition) -> Vec<&AbilityDefinition> {
+    std::iter::successors(trigger.execute.as_deref(), |def| def.sub_ability.as_deref()).collect()
+}
+
+fn assert_owner_relative_loss_scope(ability: &AbilityDefinition) {
+    assert!(matches!(
+        ability.effect.as_ref(),
+        Effect::LoseLife {
+            amount: QuantityExpr::Fixed { value: 1 }
+                | QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount
+                },
+            ..
+        }
+    ));
+    assert_eq!(
+        ability.player_scope,
+        Some(PlayerFilter::AllExcept {
+            exclude: Box::new(PlayerFilter::ParentObjectTargetOwner)
+        })
+    );
+}
+
 /// CR 108.3 + CR 119.3 + CR 121.1 + CR 603.2 + CR 603.10a + CR 608.2c: a dies
 /// trigger body can bind "each other player" to the departed object's owner
 /// antecedent from the immediately previous clause.
@@ -110,6 +134,90 @@ fn dies_trigger_owner_subject_anchors_each_other_player_scope() {
         Some(PlayerFilter::AllExcept {
             exclude: Box::new(PlayerFilter::ParentObjectTargetOwner)
         })
+    );
+}
+
+/// CR 108.3 + CR 608.2c: After phase 3 extracts the intervening-if head, the
+/// remaining Goat-shaped body must still bind "each other player" to the owner
+/// subject immediately preceding it.
+#[test]
+fn goat_post_extraction_body_owner_subject_anchors_each_other_player_scope() {
+    let trigger = parse_trigger_line(
+        "When this creature dies, its owner draws that many cards and each other player loses that much life.",
+        "Oft-Nabbed Goat",
+    );
+
+    assert_eq!(trigger.mode, TriggerMode::ChangesZone);
+    assert_eq!(trigger.origin, Some(Zone::Battlefield));
+    assert_eq!(trigger.destination, Some(Zone::Graveyard));
+    let execute = trigger.execute.as_deref().expect("dies trigger body");
+    assert_no_unimplemented(execute);
+
+    let Effect::Draw { target, count } = execute.effect.as_ref() else {
+        panic!("expected owner draw head, got {:?}", execute.effect);
+    };
+    assert_eq!(*target, TargetFilter::ParentTargetOwner);
+    assert_eq!(
+        *count,
+        QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount
+        }
+    );
+
+    let lose = execute
+        .sub_ability
+        .as_deref()
+        .expect("loss clause follows owner draw");
+    assert_owner_relative_loss_scope(lose);
+}
+
+/// SHAPE / coverage-honesty — real Oft-Nabbed Goat keeps the deferred
+/// intervening-if gap visible while binding the following "each other player"
+/// clause to the printed owner antecedent rather than the generic opponent path.
+#[test]
+fn real_oft_nabbed_goat_keeps_owner_relative_loss_with_deferred_condition_gap() {
+    let parsed = parse_oracle_text(
+        "{1}: Draw a card. Gain control of this creature and put a -1/-1 counter on it. Only your opponents may activate this ability and only as a sorcery.\nWhen this creature dies, if it had one or more -1/-1 counters on it, its owner draws that many cards and each other player loses that much life.",
+        "Oft-Nabbed Goat",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+
+    assert!(
+        parsed.parse_warnings.iter().any(|warning| matches!(
+            warning,
+            OracleDiagnostic::SwallowedClause { detector, .. } if detector == "Condition_If"
+        )),
+        "real Goat must remain coverage-red for the deferred HadCounters gate: {:?}",
+        parsed.parse_warnings
+    );
+
+    let mut trigger = None;
+    for candidate in &parsed.triggers {
+        if candidate.mode == TriggerMode::ChangesZone
+            && candidate.origin == Some(Zone::Battlefield)
+            && candidate.destination == Some(Zone::Graveyard)
+        {
+            trigger = Some(candidate);
+            break;
+        }
+    }
+    let trigger = trigger.expect("real Goat dies trigger");
+    let mut loss = None;
+    for ability in trigger_chain_abilities(trigger) {
+        if matches!(ability.effect.as_ref(), Effect::LoseLife { .. }) {
+            loss = Some(ability);
+            break;
+        }
+    }
+    let loss = loss.expect("real Goat loss clause remains production-visible");
+
+    assert_owner_relative_loss_scope(loss);
+    assert_ne!(
+        loss.player_scope,
+        Some(PlayerFilter::Opponent),
+        "owner-relative Goat clause must not fall through to controller-relative Opponent"
     );
 }
 

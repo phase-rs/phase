@@ -25254,6 +25254,25 @@ fn strip_owner_relative_each_other_player_subject(text: &str) -> Option<&str> {
     .map(|(_, rest)| rest)
 }
 
+/// CR 603.4 + CR 608.2c + CR 108.3: Phase 1 deliberately leaves unsupported
+/// intervening-if text represented by the existing `Condition_If` diagnostic,
+/// but the following conjunct still needs the English owner antecedent for
+/// "each other player". Detect only that antecedent; do not strip or model the
+/// condition here.
+fn deferred_leading_condition_has_parent_target_owner_subject(
+    text: &str,
+    ctx: &ParseContext,
+) -> bool {
+    let Some((_condition_fragment, body)) = conditions::split_leading_conditional(text) else {
+        return false;
+    };
+    let mut probe_ctx = ctx.clone_throwaway();
+    matches!(
+        subject::parse_leading_subject_application(&body, &mut probe_ctx),
+        Some(application) if application.affected == TargetFilter::ParentTargetOwner
+    )
+}
+
 /// CR 701.16a + CR 400.7: Parse a "for each <filter> <cause> this way" SUFFIX
 /// (lowercased predicate text) into a `repeat_for` count for a count-less effect
 /// like `Effect::Investigate`. Routes the tail through the shared
@@ -40017,6 +40036,8 @@ pub(crate) fn parse_effect_chain_ir(
             chain_parent_target_controller_scope = None;
         }
         let leading_subject_application = subject::parse_leading_subject_application(&text, ctx);
+        let deferred_leading_owner_subject = leading_subject_application.is_none()
+            && deferred_leading_condition_has_parent_target_owner_subject(&text, ctx);
         // CR 608.2c + CR 109.5: A chained clause whose explicit subject is the caster
         // ("you"/"you may") switches the acting player back to the ability controller
         // (CR 109.5: "you"/"your" refer to the object's controller). A non-caster
@@ -41744,7 +41765,8 @@ pub(crate) fn parse_effect_chain_ir(
         if matches!(
             leading_subject_application.as_ref(),
             Some(app) if app.affected == TargetFilter::ParentTargetOwner
-        ) {
+        ) || deferred_leading_owner_subject
+        {
             chain_parent_target_owner_scope = Some(PlayerFilter::AllExcept {
                 exclude: Box::new(PlayerFilter::ParentObjectTargetOwner),
             });
