@@ -18626,9 +18626,12 @@ fn continue_with_prepared(
         .as_ref()
         .and_then(|a| a.distribute.clone());
     if ability_target_legality_needs_chosen_x(&resolved, prepared_distribute.as_ref()) {
-        if let Some(required_cost) =
-            casting_costs::required_additional_cost_can_declare_x(state, player, prepared.object_id)
-        {
+        if let Some(required_cost) = casting_costs::required_additional_cost_can_declare_x(
+            state,
+            player,
+            prepared.object_id,
+            prepared.casting_variant,
+        ) {
             return casting_costs::begin_required_cost_before_targets(
                 state,
                 player,
@@ -19463,7 +19466,13 @@ fn spell_has_legal_targets_in_flushed_state(
         return true;
     }
     ability_target_legality_needs_chosen_x(&resolved, ability_def.distribute.as_ref())
-        && (casting_costs::required_additional_cost_can_declare_x(state, player, obj.id).is_some()
+        && (casting_costs::required_additional_cost_can_declare_x(
+            state,
+            player,
+            obj.id,
+            CastingVariant::Normal,
+        )
+        .is_some()
             || casting_costs::cost_has_x(&obj.mana_cost))
 }
 
@@ -23390,7 +23399,14 @@ pub(crate) fn resolve_non_self_discard_requirement_with_ability(
     let Some((count, filter, _selection)) = find_non_self_discard(cost) else {
         return Ok(None);
     };
-    let count = super::quantity::resolve_quantity(state, count, player, source_id).max(0) as usize;
+    // CR 107.3a + CR 601.2h: an announced X ("Discard X cards:" — Gix,
+    // Yawgmoth Praetor) lives on the ability; resolving without it reads X as 0.
+    let count = ability
+        .map_or_else(
+            || super::quantity::resolve_quantity(state, count, player, source_id),
+            |ability| super::quantity::resolve_quantity_with_targets(state, count, ability),
+        )
+        .max(0) as usize;
     // CR 601.2h + CR 701.9a: A resolved zero-card discard is paid by doing nothing — never
     // surface a dead selection prompt for it.
     if count == 0 {

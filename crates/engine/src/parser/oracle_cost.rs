@@ -1038,6 +1038,26 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         // phrase. Ordered before the plain `parse_number` arm so "two creature
         // cards" is not swallowed as an untyped count.
         if let Some((count, after_count)) = parse_count_expr(&rest_lower) {
+            // CR 107.3a + CR 601.2b: "Discard X cards" (Restless Dreams,
+            // Firestorm) — X is announced while casting, so it must stay a
+            // variable. The plain `parse_number` arm below reads "x" as a
+            // literal 0, which erased the cost and the X the spell's targets
+            // depend on.
+            if count.contains_x()
+                && all_consuming(alt((
+                    tag::<_, _, nom::error::Error<&str>>("cards"),
+                    tag("card"),
+                )))
+                .parse(after_count.trim())
+                .is_ok()
+            {
+                return AbilityCost::Discard {
+                    count,
+                    filter: None,
+                    selection: crate::types::ability::CardSelectionMode::Chosen,
+                    self_scope: crate::types::ability::DiscardSelfScope::FromHand,
+                };
+            }
             if let Some(filter) = parse_discard_card_filter(after_count.trim_start()) {
                 return AbilityCost::Discard {
                     count,

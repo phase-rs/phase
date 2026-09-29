@@ -6688,6 +6688,21 @@ fn concretize_chosen_x_cost(cost: &AbilityCost, chosen_x: u32) -> AbilityCost {
                 value: chosen_x as i32,
             },
         },
+        // CR 107.3a + CR 601.2h: once X is announced, "discard X cards"
+        // (Restless Dreams) discards exactly that many cards.
+        AbilityCost::Discard {
+            count,
+            filter,
+            selection,
+            self_scope,
+        } if count.contains_x() => AbilityCost::Discard {
+            count: QuantityExpr::Fixed {
+                value: chosen_x as i32,
+            },
+            filter: filter.clone(),
+            selection: *selection,
+            self_scope: *self_scope,
+        },
         AbilityCost::Composite { costs } => AbilityCost::Composite {
             costs: costs
                 .iter()
@@ -7098,11 +7113,25 @@ pub(super) fn begin_optional_cost_before_targets(
 }
 
 /// CR 601.2b: X in a variable additional cost is announced before later target choices.
+/// CR 702.34a: a flashback cast pays the flashback cost instead of the mana
+/// cost, so an X that only its non-mana part defines ("Flashback—{R}{R},
+/// Discard X cards" — Conflagrate) is announced from that part.
 pub(super) fn required_additional_cost_can_declare_x(
     state: &GameState,
     player: PlayerId,
     object_id: ObjectId,
+    casting_variant: CastingVariant,
 ) -> Option<AbilityCost> {
+    if casting_variant == CastingVariant::Flashback {
+        let flashback_cost = super::keywords::effective_flashback_cost(state, object_id);
+        if let (_, Some(residual)) =
+            super::casting::split_flashback_cost_components(flashback_cost.as_ref())
+        {
+            if additional_cost_x_max(state, player, object_id, &residual).is_some() {
+                return Some(residual);
+            }
+        }
+    }
     let Some(AdditionalCost::Required(cost)) = state
         .objects
         .get(&object_id)
@@ -9675,6 +9704,25 @@ fn additional_cost_x_max(
                 .max()
                 .unwrap_or(0),
         ),
+        // CR 107.3a + CR 601.2b: X in an additional "discard X cards" cost
+        // (Restless Dreams, Firestorm) is announced before later target
+        // choices, capped by the hand cards that can pay it.
+        AbilityCost::Discard {
+            count,
+            filter,
+            self_scope,
+            ..
+        } if count.contains_x() && !self_scope.is_source_card() => Some(
+            super::casting::find_eligible_discard_targets(
+                state,
+                player,
+                source_id,
+                filter.as_ref(),
+            )
+            .len()
+            .try_into()
+            .unwrap_or(u32::MAX),
+        ),
         AbilityCost::Sacrifice(cost)
             if cost.requirement == SacrificeRequirement::Count { count: u32::MAX } =>
         {
@@ -9789,6 +9837,9 @@ fn cost_needs_activation_x_announcement(cost: &AbilityCost) -> bool {
     match cost {
         AbilityCost::RemoveCounter { count, .. } => is_chosen_remove_counter_cost_count(*count),
         AbilityCost::PayEnergy { amount } => amount.contains_x(),
+        // CR 107.3a + CR 602.2b: "Discard X cards:" (Gix, Yawgmoth Praetor)
+        // announces X while activating, like a variable energy amount.
+        AbilityCost::Discard { count, .. } if count.contains_x() => true,
         AbilityCost::Discard {
             filter: Some(filter),
             ..

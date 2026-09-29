@@ -19,10 +19,10 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | 2 | Dropped intervening-if / gating condition (condition: null) | 582 | oracle_nom/condition.rs parse_inner_condition — trigger/static parsers must delegate condition extraction here |
 | 3 | Anaphor bound to wrong referent | 403 | oracle_quantity.rs context-ref resolution + game/ability_utils.rs forward_result wiring |
 | 4 | Conjoined / chained second effect clause dropped | 385 | oracle.rs effect-chain composition — split on 'and'/'then'/sentence boundaries and build sub_ability chain |
-| 5 | Dropped 'for each' / dynamic count collapsed to Fixed | 332 | oracle_quantity.rs parse_for_each_clause / parse_quantity_ref — thread ForEach/ObjectCount into the effect count field |
+| 5 | Dropped 'for each' / dynamic count collapsed to Fixed | 329 | oracle_quantity.rs parse_for_each_clause / parse_quantity_ref — thread ForEach/ObjectCount into the effect count field |
 | 6 | Disjunctive (or-list) collapsed to first branch | 226 | oracle_nom/filter.rs + oracle_target.rs — build TargetFilter::Or across all alt() branches |
 | 7 | Wrong / dropped zone parameters on zone-change effect | 208 | game/zones.rs + oracle parser zone routing — derive correct origin/destination/owner from Oracle |
-| 8 | Additional / alternative casting cost dropped | 208 | oracle_cost.rs — parse additional/alternative cost clauses into Spell.cost / AdditionalCost |
+| 8 | Additional / alternative casting cost dropped | 205 | oracle_cost.rs — parse additional/alternative cost clauses into Spell.cost / AdditionalCost |
 | 9 | Wrong player/controller scope (You where Opponent/Scoped/Target/Defending needed) | 182 | oracle parser ControllerRef binding — resolve scoped/defending/iterated player refs instead of defaulting to You |
 | 10 | Trigger event/mode unrecognized → Unknown | 167 | oracle_trigger.rs — add typed TriggerMode variants for the unrecognized event classes |
 | 11 | Replacement / prevention / 'instead' effect mis-modeled | 152 | add-replacement-effect: route 'would … instead' into replacements[]; preserve damage_source/target filters |
@@ -2197,7 +2197,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 5. Dropped 'for each' / dynamic count collapsed to Fixed  (332 cards)
+### 5. Dropped 'for each' / dynamic count collapsed to Fixed  (329 cards)
 
 **Signature.** Effect quantity (count/amount/P-T) parses as Fixed(1)/constant instead of a dynamic QuantityExpr::Ref over a 'for each X' / 'that many' / 'equal to' clause; the multiplier is dropped.
 
@@ -2207,7 +2207,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 - A-Earthquake Dragon
 - A-Thornmantle Striker
-- Abandon Hope
 - Abuelo's Awakening
 - Aegis Sculptor
 - Agatha of the Vile Cauldron
@@ -2270,7 +2269,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Colorless Ultimatum
 - Commander's Insight
 - Concert Kaboomist
-- Conflagrate
 - Consuming Tide
 - Contagion Dispenser
 - Covetous Elegy
@@ -2513,7 +2511,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Valakut Awakening
 - Valiant Changeling
 - Vengeful Archon
-- Vengeful Dreams
 - Vile Redeemer
 - Villainous Wealth
 - Vision Quest
@@ -2998,7 +2995,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 8. Additional / alternative casting cost dropped  (208 cards)
+### 8. Additional / alternative casting cost dropped  (205 cards)
 
 **Signature.** Spell ability cost is null; an 'As an additional cost' / 'rather than pay its mana cost' / pitch / disjunctive cost clause is not parsed onto the ability.
 
@@ -3069,7 +3066,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Final Strike
 - Final Vengeance
 - Fireblast
-- Firestorm
 - Flawless Maneuver
 - Fling
 - Fodder Launch
@@ -3155,7 +3151,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Relentless Skaabs
 - Renewal
 - Reshape
-- Restless Dreams
 - Reverent Mantra
 - Ricochet Trap
 - Ritual of the Machine
@@ -3167,7 +3162,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Savage Order
 - Scapegoat
 - Scarscale Ritual
-- Scorched Earth
 - Seize the Spoils
 - Sephara, Sky's Blade
 - Shared Discovery
