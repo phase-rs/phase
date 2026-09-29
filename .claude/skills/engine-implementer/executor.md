@@ -64,6 +64,12 @@ Return to the orchestrator (do NOT improvise) when:
 - The work no longer fits existing architecture.
 - Verification needs new or repaired machinery. Return the missing evidence and the existing-tool alternative.
 - You'd need to add a sibling enum variant where parameterization is the right answer (CLAUDE.md "Parameterize, don't proliferate").
+- A parity or preservation row's reference reading is wrong for the card, whether you found it or a reviewer (codex, CodeRabbit) did. Don't fix the reference in this candidate, and don't make the row pass by matching the defect. Return:
+  - the card's derived reading;
+  - the measured reference;
+  - the rows affected;
+  - the smallest fix site you can see.
+  The orchestrator takes the [defective-reference route](SKILL.md#defective-reference-route).
 
 A "stop and return" is success, not failure. Bandaids that ship are far worse than a clean handback.
 

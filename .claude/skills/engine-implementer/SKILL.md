@@ -92,6 +92,20 @@ Argue from the open item and the prediction record only. Work already spent is n
 
 **At a stop**, report the original goal, completed product work, open items, each loop's round tags and prediction record, and the smallest next action as an expansion case. When behavior findings stayed at or above their prior count across three or more of the layers types / parser / resolver / targeting / frontend / AI / tests, say so and propose a smaller scope or a decomposition ([chartered.md](chartered.md)). No new phase or charter continues the same work without an accepted case. Required checks and clean final review still govern acceptance, and stops take precedence over the decomposition and text-round routes below.
 
+### Defective-reference route
+
+A parity or preservation row takes its expected value from another reading: the prompted route, base, or a sibling route. When that reference is wrong for the card, the defect exists before this work. It can surface in the planner's Reference Readings, in plan review, in an executor stop-and-return, or in any implementation-review finding (codex and CodeRabbit included). The route is fixed, so it is **not a stop and needs no expansion case under any budget**. Shipping the dependent work on the defective reading would be wrong behavior for the card class, which the decline path already refuses. Asking the user would only offer a choice between stopping and this route.
+
+1. **Record** the card, the reading derived from its Oracle text and the CR, the measured reference, and the affected rows in the phase-fit record.
+2. **Fix the reference first**, as its own unit ahead of the dependent work.
+   - It runs the full pipeline (plan, review, implement, review) under fresh loop counts, with tests red at base and its own PR on `origin/main`.
+   - Cover the defect's class (every route that drops the same value), not only the row that exposed it.
+   - In a chartered run, add it as a fix phase before the dependent phase ([chartered.md](chartered.md#the-charter)).
+3. **Hold the dependent work.** Keep its worktree and uncommitted changes. Don't commit or ship it on the defective reading.
+4. **Resume** once the fix lands: rebase the dependent work, re-measure the affected rows, and make them assert the derived reading.
+
+If the fix-first unit itself sizes above one unit (Sizing T1), or the dependent work cannot be held, it is an ordinary stop with an expansion case.
+
 ## Phase-fit gate (Step 1a)
 
 **Unit anchor:** one *unit* = one coherent mechanic/behavior implementable by a single skill-checklist pass (e.g. one `/add-engine-effect` traversal), regardless of how many lockstep layers that pass touches. A routine interactive effect wiring types/parser/resolver/frontend/AI is **one unit** — the gate must not trip on it.
