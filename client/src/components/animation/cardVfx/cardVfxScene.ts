@@ -18,7 +18,7 @@ import {
   WebGLRenderer,
 } from "three";
 
-import type { ObjectId } from "../../../adapter/types.ts";
+import type { ManaColor, ObjectId } from "../../../adapter/types.ts";
 import type { CardPose } from "./cardAnchors.ts";
 import {
   type CardFlight,
@@ -28,6 +28,7 @@ import {
   createPlaceholderTexture,
   restingState,
 } from "./cardFlight.ts";
+import { createLandingDust, landingDustKind } from "./landingDust.ts";
 
 /** One running effect. `update` draws a frame and returns whether it is still
  *  running; `dispose(silent)` frees it, and a silent dispose fires no
@@ -55,7 +56,7 @@ export interface SceneEffectKind {
   warmUp(host: EffectHost): Object3D[];
 }
 
-export const SCENE_EFFECT_KINDS: readonly SceneEffectKind[] = [cardFlightKind];
+export const SCENE_EFFECT_KINDS: readonly SceneEffectKind[] = [cardFlightKind, landingDustKind];
 
 const CAMERA_FOV_DEG = 28;
 
@@ -72,9 +73,11 @@ export function fitPixelCamera(camera: PerspectiveCamera, w: number, h: number):
 }
 
 /** A card flight to start. `from` is the measured source; `null` continues the
- *  object's unreleased flight. */
+ *  object's unreleased flight. `landingColors` tints the dust a battlefield
+ *  landing kicks up at `full`; `null` is plain dust. */
 export interface CardFlightRequest extends Omit<CardFlightParams, "from" | "back"> {
   from: CardPose | null;
+  landingColors: readonly ManaColor[] | null;
 }
 
 export interface CardVfxScene {
@@ -125,6 +128,7 @@ class CardVfxSceneRuntime implements CardVfxScene, EffectHost {
   private readonly flights = new Map<ObjectId, CardFlight>();
   private readonly resizeObserver: ResizeObserver;
   private warmUpObjects: Object3D[] | null = null;
+  private pixelRatio = 1;
   private origin: DOMRectReadOnly;
   private raf = 0;
   private sizeDirty = true;
@@ -228,6 +232,7 @@ class CardVfxSceneRuntime implements CardVfxScene, EffectHost {
   }
 
   setPixelRatio(ratio: number) {
+    this.pixelRatio = ratio;
     this.renderer.setPixelRatio(ratio);
   }
 
@@ -269,11 +274,19 @@ class CardVfxSceneRuntime implements CardVfxScene, EffectHost {
       this.active.delete(previous);
       previous.dispose(true);
     }
+    const { landingColors, ...params } = request;
     const flight = createCardFlight(this, {
-      ...request,
+      ...params,
       from,
       back: this.backTexture,
-      onRelease: request.onRelease,
+      onRelease: (reason) => {
+        if (reason === "land" && request.route.kind === "resolveToBattlefield" && request.tier === "full") {
+          this.add(
+            createLandingDust(this, flight.currentState(), landingColors, request.pace, this.pixelRatio),
+          );
+        }
+        request.onRelease(reason);
+      },
     });
     this.flights.set(objectId, flight);
     this.add(flight);

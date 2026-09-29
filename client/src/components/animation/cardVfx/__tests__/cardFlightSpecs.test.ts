@@ -82,6 +82,16 @@ describe("cardFlightSpecFor", () => {
     expect(bothHidden).toMatchObject({ route: { kind: "cast" }, startFace: null, endFace: null });
   });
 
+  it("V4-3: the landing tint takes the engine's colours, and a hidden face gets none", () => {
+    const pre = stateWith(visible(card.params({ zone: "Stack" }).build()));
+    const green = stateWith(visible(card.params({ color: ["Green", "White"] }).onBattlefield().build()));
+    expect(cardFlightSpecFor(zoneChanged("Stack", "Battlefield"), context(pre, green))?.endColors)
+      .toEqual(["Green", "White"]);
+
+    const facedown = stateWith(hidden(card.params({ color: ["Green"] }).onBattlefield().build()));
+    expect(cardFlightSpecFor(zoneChanged("Stack", "Battlefield"), context(pre, facedown))?.endColors).toBeNull();
+  });
+
   it("V3-4e: land plays, other zone moves and other events have no flight", () => {
     const pre = stateWith(visible(card.inHand().build()));
     const post = stateWith(visible(card.onBattlefield().build()));

@@ -130,7 +130,7 @@ function spec(
   faces: Pick<CardFlightSpec, "startFace" | "endFace"> = { startFace: null, endFace: null },
   owningStepMs = 500,
 ): CardFlightSpec {
-  return { objectId, route, ...faces, pace: 1, owningStepMs };
+  return { objectId, route, ...faces, endColors: null, pace: 1, owningStepMs };
 }
 
 const CAST: CardFlightRoute = { kind: "cast" };
@@ -648,6 +648,50 @@ describe("CardVfxLayer present contract", () => {
     expect(unveilSpy).toHaveBeenCalledWith(X);
   });
 
+  it.each([
+    ["full", true],
+    ["reduced", false],
+  ] as const)("V4-1: a battlefield landing at tier %s kicks up dust: %s", async (tier, dusty) => {
+    const { present } = await readyLayer({ tier });
+    anchor({ "data-stack-entry": String(X) }, 700, 200);
+    present(spec(X, RESOLVE));
+    await frames(1);
+    addFace(anchor({ "data-permanent-card": String(X) }, 300, 400));
+    act(() => {
+      useGameStore.setState({ engineCommitEpoch: useGameStore.getState().engineCommitEpoch + 1 });
+    });
+    await advance(RESOLVE_FLIGHT_MS + SETTLE_MS + 5 * FRAME_MS);
+    expect(veiled(X)).toBe(false);
+
+    const dustRenders = calls("render").filter((call) => hasVisible(call, "landing-dust"));
+    expect(dustRenders.length > 0).toBe(dusty);
+    // One landing, one dust cloud; it clears itself and the loop goes idle.
+    for (const call of dustRenders) {
+      expect(call.children?.filter((child) => child.name === "landing-dust")).toHaveLength(1);
+    }
+    await advance(1000);
+    expect(hasVisible(last(calls("render")) as RendererCall, "landing-dust")).toBe(false);
+    expect(canvas().style.visibility).toBe("hidden");
+  });
+
+  it("V4-2: casts and graveyard landings kick up no dust", async () => {
+    const { present } = await readyLayer();
+    handCard(X);
+    present(spec(X, CAST));
+    await frames(3);
+    addFace(anchor({ "data-stack-entry": String(X) }, 700, 200));
+    await advance(CAST_FLIGHT_MS + 10 * FRAME_MS);
+    expect(veiled(X)).toBe(false);
+
+    addFace(anchor({ "data-graveyard-pile": "0", "data-grouped-ids": String(Y) }, 40, 700));
+    anchor({ "data-stack-entry": String(Y) }, 700, 200);
+    present(spec(Y, { kind: "resolveToGraveyard", ownerId: 0 }));
+    await advance(RESOLVE_FLIGHT_MS + SETTLE_MS + 10 * FRAME_MS);
+    expect(veiled(Y)).toBe(false);
+
+    expect(calls("render").some((call) => hasVisible(call, "landing-dust"))).toBe(false);
+  });
+
   it("V3-1n (iii): a released card stays drawn until the destination shows its face", async () => {
     const { present } = await readyLayer();
     anchor({ "data-stack-entry": String(X) }, 700, 200);
@@ -675,6 +719,8 @@ describe("CardVfxLayer present contract", () => {
     addFace(permanent);
     await frames(2);
     expect(hasVisible(last(calls("render")) as RendererCall, "card-flight")).toBe(false);
+    // The landing dust outlives the card; the overlay hides once it clears.
+    await advance(1000);
     expect(canvas().style.visibility).toBe("hidden");
   });
 

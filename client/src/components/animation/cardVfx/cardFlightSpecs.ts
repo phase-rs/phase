@@ -1,4 +1,4 @@
-import type { GameState, ObjectId, PlayerId } from "../../../adapter/types.ts";
+import type { GameState, ManaColor, ObjectId, PlayerId } from "../../../adapter/types.ts";
 import type { AnimationEvent } from "../../../animation/types.ts";
 import {
   type AnimationImageSnapshot,
@@ -20,6 +20,9 @@ export interface CardFlightSpec {
   startFace: AnimationImageSnapshot | null;
   /** The face the viewer may see after the event; `null` shows the card back. */
   endFace: AnimationImageSnapshot | null;
+  /** The engine's colours for the card after the event, or `null` when the
+   *  viewer may not see its face. */
+  endColors: readonly ManaColor[] | null;
   /** The animation-speed multiplier every flight duration is scaled by. */
   pace: number;
   /** The owning step's scaled duration, which bounds face readiness. */
@@ -71,10 +74,13 @@ export function cardFlightSpecFor(
   const routed = routedObjectFor(event, post);
   if (!routed) return null;
   const { objectId } = routed;
+  const endObject = post?.objects[objectId];
+  const endFace = visibleAnimationImageSnapshot(endObject);
   return {
     ...routed,
     startFace: visibleAnimationImageSnapshot(pre?.objects[objectId]),
-    endFace: visibleAnimationImageSnapshot(post?.objects[objectId]),
+    endFace,
+    endColors: endFace && endObject ? endObject.color : null,
     pace,
     owningStepMs,
   };

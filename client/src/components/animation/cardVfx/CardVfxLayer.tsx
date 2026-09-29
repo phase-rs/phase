@@ -322,6 +322,7 @@ class CardVfxController {
       flip: flipFor(spec),
       pace: spec.pace,
       tier: this.tier,
+      landingColors: spec.endColors,
       aim: (origin) => this.aim(route, objectId, origin),
       commitEpoch: () => useGameStore.getState().engineCommitEpoch,
       onRelease: () => this.unveil(objectId),
