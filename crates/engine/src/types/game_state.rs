@@ -21054,13 +21054,16 @@ declare_game_state! {
     /// recently resolved `Dig`/`ChooseFromZone`/`RevealHand` reveal-choice/
     /// `ExileTop` came up with nothing (empty library, no eligible card, an
     /// empty reveal-choice set, or no card exiled respectively; `ExileTop`
-    /// since issue #8798) — distinct from "none of those has run
+    /// since issue #8798; a `RevealUntil` that revealed no matching card) — distinct from "none of those has run
     /// in this chain link," which is `None`. This is a brief, transient
     /// relay: `effects::apply_parent_chain_context` reads and immediately
     /// clears it at the very next parent->child hand-off (whatever that
     /// child turns out to be), copying it onto that ONE child's typed
-    /// `ResolvedAbility::parent_target_missing_reason` field. Nothing else
-    /// reads this flag directly — in particular, the shared
+    /// `ResolvedAbility::parent_target_missing_reason` field. The only other
+    /// reader is the same hop's inline `WhenYouDo` creation gate
+    /// (`effects::reflexive_occurrence_voided_by_parent`), which peeks without
+    /// clearing immediately before that hand-off — in
+    /// particular, the shared
     /// `resolved_targets` chokepoint does not, so an empty Dig/ChooseFromZone/
     /// RevealHand can never affect any `ParentTarget` consumer beyond its own
     /// immediate sub_ability (e.g. Avenging Angel's unrelated LTB self-return

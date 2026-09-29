@@ -60,6 +60,15 @@ pub struct TournamentRequestId(pub u64);
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
+/// 91 — `ResolvedAbility.parent_target_missing_reason` is now serialized
+///      (`#[serde(default, skip_serializing_if = "Option::is_none")]`, it was
+///      `#[serde(skip)]`) and `ParentTargetMissingReason` gains `RevealUntil`
+///      (CR 701.20a + CR 603.12: a reveal-until that revealed no matching card,
+///      read by the `WhenYouDo` reflexive gate — Yuna's Whistle, Calibrated
+///      Blast). A paused continuation carries the verdict across a `GameState`
+///      round trip; a v90 peer cannot parse the new tag and would drop the
+///      field, minting a reflexive trigger the rules forbid. Full-game peers and
+///      P2P move in lockstep (wire 73); lobby messages are unchanged.
 /// 90 — `FormatConfig` gained `allow_experimental_dungeons`, the per-session
 ///      capability flag behind the experimental dungeon pool (Baldur's Gate
 ///      Wilderness joins the normal venture options and the initiative choice
@@ -747,7 +756,7 @@ pub struct TournamentRequestId(pub u64);
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 90;
+pub const PROTOCOL_VERSION: u32 = 91;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -1988,7 +1997,7 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 90);
+        assert_eq!(PROTOCOL_VERSION, 91);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which refuses an older full-game peer that cannot preserve the exact

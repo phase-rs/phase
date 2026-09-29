@@ -3318,6 +3318,10 @@ mod tests {
         }
     }
 
+    /// `ResolvedAbility.parent_target_missing_reason` is serialized and gains
+    /// `ParentTargetMissingReason::RevealUntil` (CR 701.20a + CR 603.12); a v90
+    /// peer cannot parse the tag and would drop a paused reveal-until whiff's
+    /// verdict, so it must be refused before it receives v91 state.
     /// `FormatConfig` gained `allow_experimental_dungeons`; a v89 peer fails
     /// the flag closed to `false` and runs the game without the experimental
     /// dungeon pool the host chose, so it must be refused before it receives
@@ -3336,8 +3340,8 @@ mod tests {
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_90_for_experimental_dungeon_pool() {
-        assert_eq!(PROTOCOL_VERSION, 90);
+    fn protocol_version_is_91_for_reveal_until_reflexive_verdict() {
+        assert_eq!(PROTOCOL_VERSION, 91);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3348,7 +3352,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_90_for_experimental_dungeon_pool` stays
+    /// `protocol_version_is_91_for_reveal_until_reflexive_verdict` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

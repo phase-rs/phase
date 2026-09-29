@@ -32360,6 +32360,58 @@ pub enum ParentTargetMissingReason {
     /// an offerable option (CR 608.2d) nor a license for the generic
     /// source fallback, which would move the resolving spell itself.
     ExileTop,
+    /// CR 701.20a + CR 603.12: an `Effect::RevealUntil` exhausted the library
+    /// without revealing any card matching its until-filter, so no matching
+    /// card was revealed "this way" and nothing is bound as "that card".
+    /// Consulted by the `ParentTarget` `ChangeZone` no-op guard and the
+    /// optional-effect feasibility probe (as every reason is), and — unlike
+    /// the other reasons — by the `WhenYouDo` reflexive creation gate: a
+    /// "When you reveal a <filter> card this way" trigger event did not occur
+    /// (see [`ParentTargetMissingReason::voids_reflexive_occurrence`]).
+    RevealUntil,
+}
+
+impl ParentTargetMissingReason {
+    /// CR 603.12: whether this hand-off records that the parent's witnessed
+    /// event did NOT occur, so a `WhenYouDo` reflexive riding it must not
+    /// trigger. Only a reveal-until whiff qualifies: the reflexive's trigger
+    /// event ("when you reveal a creature card this way") is exactly the
+    /// reveal-until's until-condition. The other producers keep their
+    /// historical reflexive behaviour. Exhaustive, no wildcard.
+    pub fn voids_reflexive_occurrence(self) -> bool {
+        match self {
+            ParentTargetMissingReason::RevealUntil => true,
+            ParentTargetMissingReason::Dig
+            | ParentTargetMissingReason::ChooseFromZone
+            | ParentTargetMissingReason::RevealHandChoice
+            | ParentTargetMissingReason::ExileTop => false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod parent_target_missing_reason_tests {
+    use super::ParentTargetMissingReason;
+
+    #[test]
+    fn only_a_reveal_until_whiff_voids_a_reflexive_occurrence() {
+        assert!(ParentTargetMissingReason::RevealUntil.voids_reflexive_occurrence());
+        for reason in [
+            ParentTargetMissingReason::Dig,
+            ParentTargetMissingReason::ChooseFromZone,
+            ParentTargetMissingReason::RevealHandChoice,
+            ParentTargetMissingReason::ExileTop,
+        ] {
+            assert!(!reason.voids_reflexive_occurrence(), "{reason:?}");
+        }
+    }
+
+    #[test]
+    fn reveal_until_reason_round_trips_through_json() {
+        let json = serde_json::to_string(&Some(ParentTargetMissingReason::RevealUntil)).unwrap();
+        let back: Option<ParentTargetMissingReason> = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, Some(ParentTargetMissingReason::RevealUntil));
+    }
 }
 
 /// CR 608.2c: what a chain split — a `player_scope` fan-out, or a multi-target
@@ -32927,13 +32979,18 @@ pub struct ResolvedAbility {
     /// CR 401.5 + CR 608.2c (issue #1365) + CR 609.3 + issue #4950
     /// (Thoughtseize): Stamped ONLY by `effects::apply_parent_chain_context`
     /// at the exact moment this ability is handed off as the immediate
-    /// sub_ability of a `Dig`/`ChooseFromZone`/`RevealHand` reveal-choice that
+    /// sub_ability of a `Dig`/`ChooseFromZone`/`RevealHand` reveal-choice/
+    /// `ExileTop`/`RevealUntil` that
     /// came up with nothing (empty library, no eligible card to choose, or an
     /// empty reveal-choice eligible set respectively) — never set any other
     /// way, so it cannot be confused with a stale value from an unrelated
     /// resolution. See [`ParentTargetMissingReason`] for what each variant
     /// gates and who consults it.
-    #[serde(skip)]
+    ///
+    /// Serialized: a child parked on a paused continuation carries this across
+    /// a `GameState` round trip (reconnect, persistence, P2P resume), where the
+    /// `WhenYouDo` gate and the `ParentTarget` guards still read it on resume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_target_missing_reason: Option<ParentTargetMissingReason>,
 }
 

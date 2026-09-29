@@ -210,6 +210,12 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 91 — ResolvedAbility.parent_target_missing_reason is serialized and
+ *      ParentTargetMissingReason gains RevealUntil (CR 701.20a + CR 603.12),
+ *      the reveal-until whiff verdict a paused WhenYouDo reflexive reads on
+ *      resume. A v90 peer cannot parse the tag; the exact-match handshake
+ *      refuses the pairing. P2P moves in lockstep (wire 73); lobby messages
+ *      are unchanged.
  * 90 — FormatConfig gains `allow_experimental_dungeons`, the per-session
  *      capability flag behind the experimental dungeon pool. A v89 peer
  *      parses a v90 GameState but runs the game without the host's pool;
@@ -610,7 +616,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 90;
+export const PROTOCOL_VERSION = 91;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
