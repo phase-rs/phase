@@ -10715,6 +10715,17 @@ pub(crate) fn parse_where_x_quantity_expression(where_x_expression: &str) -> Opt
         // binding would fall back to `None` and the bug would survive.
         return parse_event_context_quantity(expression);
     }
+    // CR 608.2c + CR 202.3: the prepositional twin, "the mana value of that
+    // card" (Yuna's Whistle) — the same demonstrative, non-target referent as
+    // the possessive above, so it binds the same `ObjectScope::Demonstrative`
+    // (the effect-context object: e.g. a reveal-until hit's pre-move LKI).
+    if is_mana_value_of_that_card_where_x(expression_lower.as_str()) {
+        return Some(QuantityExpr::Ref {
+            qty: QuantityRef::ObjectManaValue {
+                scope: ObjectScope::Demonstrative,
+            },
+        });
+    }
     // CDA-quantity classification takes precedence: it is the more specific
     // where-X interpreter (object counts, "that spell's mana value",
     // "the number of age counters on this enchantment", etc.).
@@ -10787,6 +10798,20 @@ fn is_that_card_mana_value_where_x(expression_lower: &str) -> bool {
     all_consuming(preceded(
         tag::<_, _, OracleError<'_>>("that card's "),
         alt((tag("mana value"), tag("converted mana cost"))),
+    ))
+    .parse(expression_lower)
+    .is_ok()
+}
+
+/// CR 608.2c + CR 202.3: Match EXACTLY `the mana value of that card` (or the
+/// `converted mana cost` synonym) — the prepositional form of
+/// [`is_that_card_mana_value_where_x`], with the same literal-`card`-only and
+/// mana-value-only restrictions.
+pub(super) fn is_mana_value_of_that_card_where_x(expression_lower: &str) -> bool {
+    all_consuming((
+        tag::<_, _, OracleError<'_>>("the "),
+        alt((tag("mana value"), tag("converted mana cost"))),
+        tag(" of that card"),
     ))
     .parse(expression_lower)
     .is_ok()

@@ -58,6 +58,7 @@ fn optional_effect_frame(state: &GameState) -> ResolutionFrame {
         trigger_event: None,
         trigger_events: Vec::new(),
         trigger_match_count: None,
+        return_result_occurrence: None,
     })
 }
 
@@ -166,6 +167,7 @@ fn optional_effect_frame_cannot_survive_into_search_choice_parent_insertion() {
             trigger_event: None,
             trigger_events: Vec::new(),
             trigger_match_count: None,
+            return_result_occurrence: None,
         }));
     state.waiting_for = WaitingFor::SearchChoice {
         player: PlayerId(0),

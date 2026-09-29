@@ -137,8 +137,6 @@ pub fn resolve(
         // to the designated card, not its copy.
         copy_obj.is_commander = false;
         copy_obj.signature_spell = None;
-        copy_obj.additional_cost_payment_count = 0;
-        copy_obj.kickers_paid.clear();
         // CR 707.10: A copy of a spell is put on the stack; it is not cast.
         // Inherit no cast-from-zone provenance — otherwise "if this spell was
         // cast from a graveyard" riders (Sevinne's Reclamation, issue #3283)
@@ -160,9 +158,10 @@ pub fn resolve(
 
     // CR 707.10: The copy has the same characteristics as the original, but its
     // identity is distinct.
-    //   - Reset additional_cost_paid + kickers_paid so any "if its [additional]
-    //     cost was paid" triggers (Offspring ETB, Casualty) do not fire for the
-    //     copy — the copy is placed on the stack, not cast.
+    //   - CR 707.10 copies the announced additional and alternative cost
+    //     decisions. A copy is not cast, so cast-only triggers still require
+    //     the original SpellCast event; an entry trigger such as Offspring
+    //     reads the copied decision on the resulting permanent.
     //   - Spell copies are new spell objects, so update internal source_id
     //     references throughout the spell ability chain to copy_id. Ability
     //     copies keep the original ability source (CR 707.10b), so their
@@ -179,17 +178,13 @@ pub fn resolve(
             } => {
                 set_resolved_source_recursive(a, copy_id);
                 clear_cast_from_zone_recursive(a);
-                a.context.additional_cost_paid = false;
-                a.context.alternative_mana_cost_paid = false;
                 // CR 707.10: a copy of a spell isn't cast, so it must never
                 // consume a once-per-turn CastWithAlternativeCost grant's slot.
                 a.context.alt_cost_grant_source = None;
-                // CR 707.10: nor spend a graveyard permission, or apply its
-                // "enters with a counter" rider.
+                // CR 707.10: a graveyard cast permission authorizes the original
+                // cast only; the copy cannot consume it or inherit its ETB rider.
                 a.context.graveyard_permission_authority = None;
                 a.context.graveyard_permission_latch = None;
-                a.context.additional_cost_payment_count = 0;
-                a.context.kickers_paid.clear();
             }
             StackEntryKind::Spell { ability: None, .. } => {}
             StackEntryKind::ActivatedAbility { ability, .. } => {
@@ -2267,7 +2262,7 @@ mod tests {
     }
 
     #[test]
-    fn copy_spell_resets_additional_cost_payment_history() {
+    fn copy_spell_preserves_cost_decisions_but_not_cast_provenance() {
         let mut state = GameState::new_two_player(42);
 
         let mut original_ability = ResolvedAbility::new(
@@ -2288,7 +2283,10 @@ mod tests {
             PlayerId(0),
         );
         original_ability.context.additional_cost_paid = true;
+        original_ability.context.alternative_mana_cost_paid = true;
+        original_ability.context.alt_cost_grant_source = Some(ObjectId(99));
         original_ability.context.additional_cost_payment_count = 2;
+        original_ability.context.kickers_paid = vec![crate::types::ability::KickerVariant::First];
         push_spell(
             &mut state,
             ObjectId(10),
@@ -2301,6 +2299,7 @@ mod tests {
         {
             let obj = state.objects.get_mut(&ObjectId(10)).unwrap();
             obj.additional_cost_payment_count = 2;
+            obj.kickers_paid = vec![crate::types::ability::KickerVariant::First];
         }
 
         let copy_ability = ResolvedAbility::new(
@@ -2321,12 +2320,27 @@ mod tests {
 
         let copy_id = state.stack.back().expect("copy on stack").id;
         assert_eq!(
-            state.objects[&copy_id].additional_cost_payment_count, 0,
-            "a spell copy was not cast, so it must not retain Squad payment history"
+            state.objects[&copy_id].additional_cost_payment_count, 2,
+            "the count-bearing Squad choice is copied"
         );
+        assert_eq!(state.objects[&copy_id].kickers_paid.len(), 1);
         let copy_context = state.stack.back().and_then(StackEntry::ability).unwrap();
-        assert!(!copy_context.context.additional_cost_paid);
-        assert_eq!(copy_context.context.additional_cost_payment_count, 0);
+        assert!(copy_context.context.additional_cost_paid);
+        assert!(copy_context.context.alternative_mana_cost_paid);
+        assert_eq!(copy_context.context.additional_cost_payment_count, 2);
+        assert_eq!(copy_context.context.kickers_paid.len(), 1);
+        assert!(copy_context.context.alt_cost_grant_source.is_none());
+        assert_eq!(
+            state
+                .stack
+                .front()
+                .and_then(StackEntry::ability)
+                .unwrap()
+                .context
+                .alt_cost_grant_source,
+            Some(ObjectId(99)),
+            "the original cast retains its own grant provenance"
+        );
     }
 
     #[test]

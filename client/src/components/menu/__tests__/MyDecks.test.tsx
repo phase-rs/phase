@@ -133,6 +133,32 @@ describe("MyDecks", () => {
     vi.unstubAllGlobals();
   });
 
+  it("shows a saved manual bracket only for Commander-family decks", async () => {
+    localStorage.setItem(STORAGE_KEY_PREFIX + "Standard Bracket", JSON.stringify({
+      main: [{ name: "Island", count: 60 }],
+      sideboard: [],
+      format: "Standard",
+      bracket: 3,
+    }));
+    localStorage.setItem(STORAGE_KEY_PREFIX + "Commander Bracket", JSON.stringify({
+      main: [{ name: "Island", count: 99 }],
+      sideboard: [],
+      commander: ["Test Commander"],
+      format: "Commander",
+      bracket: 3,
+    }));
+    vi.mocked(evaluateDeckCompatibilityBatch).mockResolvedValue({});
+
+    render(<MyDecks mode="manage" activeDeckName={null} />);
+
+    const standardTile = (await screen.findByText("Standard Bracket")).closest<HTMLElement>("[role='button']");
+    const commanderTile = (await screen.findByText("Commander Bracket")).closest<HTMLElement>("[role='button']");
+    expect(standardTile).not.toBeNull();
+    expect(commanderTile).not.toBeNull();
+    expect(within(standardTile!).queryByLabelText("Declared bracket: B3 Upgraded")).not.toBeInTheDocument();
+    expect(within(commanderTile!).getByLabelText("Declared bracket: B3 Upgraded")).toBeInTheDocument();
+  });
+
   it("keeps cached subscriptions usable while offline and re-enables refresh on reconnect", async () => {
     const feedDeck = {
       name: "Offline Feed Deck",

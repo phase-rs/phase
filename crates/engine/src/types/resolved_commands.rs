@@ -736,6 +736,42 @@ pub enum ResolvedInformationLifetime {
     /// CR 400.7: The published fact belongs to this object incarnation and
     /// expires when that object changes zones.
     UntilZoneChange,
+    /// CR 701.20a: "If revealing a card causes a triggered ability to trigger,
+    /// the card remains revealed until that triggered ability leaves the
+    /// stack." A per-stack-entry public lease on one exact occurrence. Each
+    /// entry owns its own lease row (`GameState::stack_bound_reveals`), so
+    /// overlapping leases on one occurrence release independently. The lease
+    /// also ends if the occurrence changes zones first (CR 400.7).
+    UntilStackObjectLeaves { stack_entry: ObjectId },
+}
+
+/// CR 701.20a + CR 400.7: the single authority for which audience may carry
+/// which reveal lifetime. Shared by live application
+/// (`GameState::apply_information_edit`) and serialized-journal validation
+/// (`information_command_is_invalid`), so the two can never disagree.
+pub(crate) fn information_audience_lifetime_is_valid(
+    audience: ResolvedInformationAudience,
+    lifetime: ResolvedInformationLifetime,
+) -> bool {
+    match (audience, lifetime) {
+        (
+            ResolvedInformationAudience::Controller(_),
+            ResolvedInformationLifetime::UntilActionBoundary,
+        )
+        | (ResolvedInformationAudience::Public, ResolvedInformationLifetime::UntilZoneChange)
+        | (
+            ResolvedInformationAudience::Public,
+            ResolvedInformationLifetime::UntilStackObjectLeaves { .. },
+        ) => true,
+        (
+            ResolvedInformationAudience::Controller(_),
+            ResolvedInformationLifetime::UntilZoneChange
+            | ResolvedInformationLifetime::UntilStackObjectLeaves { .. },
+        )
+        | (ResolvedInformationAudience::Public, ResolvedInformationLifetime::UntilActionBoundary) => {
+            false
+        }
+    }
 }
 
 /// The final information-boundary transition for exact object occurrences.
@@ -3218,16 +3254,7 @@ fn object_counter_edit_is_empty(edit: &ResolvedObjectCounterEdit) -> bool {
 }
 
 fn information_command_is_invalid(command: &ResolvedInformationCommand) -> bool {
-    let valid_lifetime = matches!(
-        (command.audience, command.lifetime),
-        (
-            ResolvedInformationAudience::Controller(_),
-            ResolvedInformationLifetime::UntilActionBoundary
-        ) | (
-            ResolvedInformationAudience::Public,
-            ResolvedInformationLifetime::UntilZoneChange
-        )
-    );
+    let valid_lifetime = information_audience_lifetime_is_valid(command.audience, command.lifetime);
     let mut object_ids = HashSet::new();
     command.occurrences.is_empty()
         || !valid_lifetime

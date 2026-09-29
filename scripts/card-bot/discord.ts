@@ -231,7 +231,7 @@ interface RequestOptions {
  * for an empty one.
  */
 async function discordRequest(
-  method: "PATCH" | "POST" | "PUT",
+  method: "DELETE" | "PATCH" | "POST" | "PUT",
   url: string,
   body: unknown,
   label: string,
@@ -327,6 +327,8 @@ export interface MessageApi {
   /** Replaces the message with `body`; "gone" when it no longer exists (e.g. a
    *  moderator deleted it). */
   edit(channelId: string, messageId: string, body: object): Promise<"edited" | "gone">;
+  /** Deletes the message; one that no longer exists counts as deleted. */
+  delete(channelId: string, messageId: string): Promise<void>;
 }
 
 export function botMessageApi(botToken: string): MessageApi {
@@ -344,6 +346,15 @@ export function botMessageApi(botToken: string): MessageApi {
         { botToken, allow: [404] },
       );
       return message === null ? "gone" : "edited";
+    },
+    async delete(channelId, messageId) {
+      await discordRequest(
+        "DELETE",
+        `${API}/channels/${channelId}/messages/${messageId}`,
+        undefined,
+        "deleteMessage",
+        { botToken, allow: [404] },
+      );
     },
   };
 }

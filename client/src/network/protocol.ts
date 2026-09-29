@@ -106,6 +106,16 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
+ *  74 — game_setup and state_update carry GameState, whose paused
+ *       continuations now serialize ResolvedAbility.parent_target_missing_reason
+ *       including the new RevealUntil reason (a reveal-until whiff), whose
+ *       conditions may carry EffectOutcomeSignal.RevealUntilMatched, and which
+ *       carries the CR 701.20a stack-bound reveal leases. A v73
+ *       peer cannot parse the tags and would drop the verdict, so first contact
+ *       rejects the skew. Bumped in lockstep with full-game protocol 92.
+ *  73 — GameState retypes PendingManaAbility.chosen_counter_count to the
+ *       required chosen_counter_counts array (#9207). Bumped with full-game
+ *       protocol 91 so first contact rejects the incompatible state shape.
  *  72 — game_setup and state_update carry GameState, whose FormatConfig gains
  *       allow_experimental_dungeons, the per-session flag behind the
  *       experimental dungeon pool. A v71 peer would fail the flag closed and
@@ -472,7 +482,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 72 as const;
+export const WIRE_PROTOCOL_VERSION = 74 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

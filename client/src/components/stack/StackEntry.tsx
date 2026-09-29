@@ -68,6 +68,10 @@ export function StackEntry({ entry, choiceObjectId = entry.id, groupedObjectIds,
   const waitingFor = useGameStore((s) => s.waitingFor);
   const canActForWaitingState = useCanActForWaitingState();
   const pendingCast = useGameStore((s) => s.gameState?.pending_cast);
+  // CR 701.20a: engine-authored names of the cards this entry keeps revealed.
+  const revealedCards = useGameStore(
+    (s) => s.gameState?.derived?.stack_revealed_cards?.[entry.id],
+  );
   const inspectObject = useUiStore((s) => s.inspectObject);
 
   const setPreviewSticky = useUiStore((s) => s.setPreviewSticky);
@@ -180,6 +184,10 @@ export function StackEntry({ entry, choiceObjectId = entry.id, groupedObjectIds,
   const stormCopyCount = details?.provenance?.type === "Storm"
     ? details.provenance.data.copy_count
     : undefined;
+  const revealedLabel =
+    revealedCards && revealedCards.length > 0
+      ? t("stack.revealedCards", { cards: revealedCards.join(", ") })
+      : undefined;
   // The engine computes the live controller (CR 112.2 + CR 613.1b); `??` is this
   // file's own established structural fallback for a prop the sole production
   // caller always supplies (`details?.source_name`, `details?.kind_label`,
@@ -366,7 +374,7 @@ export function StackEntry({ entry, choiceObjectId = entry.id, groupedObjectIds,
         </section>
       )}
 
-      {(stormCopyCount !== undefined || targetLabels.length > 0 || paidLabels.length > 0 || contextLabels.length > 0) && (
+      {(stormCopyCount !== undefined || revealedLabel !== undefined || targetLabels.length > 0 || paidLabels.length > 0 || contextLabels.length > 0) && (
         <div className="absolute left-1 right-1 top-5 flex flex-wrap gap-1">
           {stormCopyCount !== undefined && (
             <span
@@ -374,6 +382,15 @@ export function StackEntry({ entry, choiceObjectId = entry.id, groupedObjectIds,
               title={t("storm.copies", { count: stormCopyCount })}
             >
               {t("storm.copies", { count: stormCopyCount })}
+            </span>
+          )}
+          {revealedLabel !== undefined && (
+            <span
+              data-testid="stack-revealed-cards"
+              className="max-w-full truncate rounded bg-emerald-950/90 px-1.5 py-0.5 text-[8px] font-semibold text-emerald-100 shadow"
+              title={revealedLabel}
+            >
+              {revealedLabel}
             </span>
           )}
           {targetLabels.slice(0, 2).map((label) => (
