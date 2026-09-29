@@ -4610,6 +4610,8 @@ export const AdapterErrorCode = {
    * string comparisons are unaffected.
    */
   ACTION_REJECTED: "ACTION_REJECTED",
+  /** The Action frame was definitely not handed to the WebSocket. */
+  ACTION_NOT_SENT: "ACTION_NOT_SENT",
   STALE_ACTION: "STALE_ACTION",
 } as const;
 
