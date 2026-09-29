@@ -74285,6 +74285,432 @@ fn exile_all_but_edge_with_unbound_player_does_not_exile_permanents() {
     );
 }
 
+// --- Shared trailing "equal to <quantity>" across coordinated amount-elided verbs ---
+// CR 608.2c: "you gain life and draw cards equal to its power" — the trailing
+// "equal to" postmodifier binds to every conjunct.
+
+/// Verbatim Oracle text of Lifeblood Hydra (Scryfall + MTGJSON).
+const LIFEBLOOD_HYDRA_ORACLE: &str = "Trample\nThis creature enters with X +1/+1 counters on it.\nWhen this creature dies, you gain life and draw cards equal to its power.";
+
+/// Collects the `Effect`s of a `sub_ability` chain in resolution order.
+fn shared_equal_to_chain_effects(def: &AbilityDefinition) -> Vec<Effect> {
+    let mut effects = vec![(*def.effect).clone()];
+    let mut link = def.sub_ability.as_deref();
+    while let Some(next) = link {
+        effects.push((*next.effect).clone());
+        link = next.sub_ability.as_deref();
+    }
+    effects
+}
+
+fn anaphoric_power_qty() -> QuantityExpr {
+    QuantityExpr::Ref {
+        qty: QuantityRef::Power {
+            scope: ObjectScope::Anaphoric,
+        },
+    }
+}
+
+/// T0 (CR 608.2c): the chunker keeps a shared-tail compound as ONE chunk,
+/// including a three-conjunct run; amount-bearing or card-noun conjuncts that
+/// do not share the tail still split at the bare " and ".
+#[test]
+fn shared_equal_to_quantity_compound_stays_one_chunk() {
+    use super::sequence::split_clause_sequence;
+    let chunk_texts = |text: &str| -> Vec<String> {
+        split_clause_sequence(text)
+            .into_iter()
+            .map(|c| c.text)
+            .collect()
+    };
+
+    let lifeblood = chunk_texts("you gain life and draw cards equal to its power.");
+    assert_eq!(
+        lifeblood,
+        vec!["you gain life and draw cards equal to its power".to_string()],
+        "shared-tail compound must stay one chunk"
+    );
+    let three = chunk_texts("gain life and draw cards and mill cards equal to its power.");
+    assert_eq!(
+        three.len(),
+        1,
+        "three-conjunct run stays one chunk: {three:?}"
+    );
+
+    // Negatives, each with the positive above as reach-guard: the bare-and
+    // split still fires when the conjuncts do not share an "equal to" tail.
+    let own_amount = chunk_texts("you gain 3 life and draw a card.");
+    assert_eq!(own_amount.len(), 2, "{own_amount:?}");
+    let card_noun = chunk_texts("you gain life and draw a card.");
+    assert_eq!(card_noun.len(), 2, "{card_noun:?}");
+    // A different subject is not admitted (tight subject guard).
+    let other_subject = chunk_texts("they gain life and draw cards equal to its power.");
+    assert_eq!(other_subject.len(), 2, "{other_subject:?}");
+}
+
+/// T1 (CR 608.2c + CR 608.2h): Lifeblood Hydra's verbatim dies trigger lowers
+/// to GainLife → Draw, both carrying the SAME "its power" quantity and the
+/// controller as recipient, with no `Unimplemented` anywhere on the card.
+#[test]
+fn lifeblood_hydra_dies_trigger_gains_and_draws_equal_to_its_power() {
+    let parsed = crate::parser::parse_oracle_text(
+        LIFEBLOOD_HYDRA_ORACLE,
+        "Lifeblood Hydra",
+        &["Trample".to_string()],
+        &["Creature".to_string()],
+        &["Hydra".to_string()],
+    );
+    assert!(
+        !ability_or_trigger_has_unimplemented(&parsed),
+        "no Unimplemented on Lifeblood Hydra: {parsed:?}"
+    );
+    let execute = parsed
+        .triggers
+        .iter()
+        .find_map(|t| t.execute.as_deref())
+        .expect("dies trigger has an execute body");
+    let effects = shared_equal_to_chain_effects(execute);
+    let [Effect::GainLife { amount, player }, Effect::Draw { count, target }] = effects.as_slice()
+    else {
+        panic!("expected GainLife -> Draw, got {effects:?}");
+    };
+    assert_eq!(amount, &anaphoric_power_qty(), "gain amount is its power");
+    assert_eq!(count, amount, "draw count is the SAME shared quantity");
+    assert_eq!(player, &TargetFilter::Controller);
+    assert_eq!(target, &TargetFilter::Controller);
+}
+
+/// T2: printed order is preserved for the reverse permutation (Eventide's
+/// Shadow shape): Draw → LoseLife, both with the shared quantity.
+#[test]
+fn shared_equal_to_quantity_draw_then_lose_life() {
+    let def = parse_effect_chain(
+        "You draw cards and lose life equal to its power.",
+        AbilityKind::Spell,
+    );
+    let effects = shared_equal_to_chain_effects(&def);
+    let [Effect::Draw { count, target }, Effect::LoseLife {
+        amount,
+        target: lose_target,
+    }] = effects.as_slice()
+    else {
+        panic!("expected Draw -> LoseLife, got {effects:?}");
+    };
+    assert_eq!(count, &anaphoric_power_qty());
+    assert_eq!(amount, count);
+    assert_eq!(target, &TargetFilter::Controller);
+    // The explicit "you" subject binds the loss to the controller, exactly
+    // like the single-clause "you lose life equal to …" (inject_subject_target).
+    assert_eq!(lose_target, &Some(TargetFilter::Controller));
+
+    // Bare imperative (no subject): the numeric-imperative lowering default.
+    let bare = parse_effect_chain(
+        "draw cards and lose life equal to its power.",
+        AbilityKind::Spell,
+    );
+    let bare_effects = shared_equal_to_chain_effects(&bare);
+    let [Effect::Draw { .. }, Effect::LoseLife { target: None, .. }] = bare_effects.as_slice()
+    else {
+        panic!("expected Draw -> LoseLife {{ target: None }}, got {bare_effects:?}");
+    };
+}
+
+/// T3: a three-conjunct run lowers to a three-link chain, one shared quantity.
+#[test]
+fn shared_equal_to_quantity_three_conjuncts() {
+    let def = parse_effect_chain(
+        "gain life and draw cards and mill cards equal to its power.",
+        AbilityKind::Spell,
+    );
+    let effects = shared_equal_to_chain_effects(&def);
+    let [Effect::GainLife { amount, .. }, Effect::Draw { count, .. }, Effect::Mill {
+        count: mill_count,
+        destination: Zone::Graveyard,
+        ..
+    }] = effects.as_slice()
+    else {
+        panic!("expected GainLife -> Draw -> Mill, got {effects:?}");
+    };
+    let q = anaphoric_power_qty();
+    assert_eq!((amount, count, mill_count), (&q, &q, &q));
+}
+
+/// T4: a conjunct with its own amount does not borrow the tail — the gain is
+/// Fixed 3 and only the draw reads its power.
+#[test]
+fn shared_equal_to_quantity_does_not_override_explicit_amount() {
+    let def = parse_effect_chain(
+        "You gain 3 life and draw cards equal to its power.",
+        AbilityKind::Spell,
+    );
+    let effects = shared_equal_to_chain_effects(&def);
+    let [Effect::GainLife { amount, .. }, Effect::Draw { count, .. }] = effects.as_slice() else {
+        panic!("expected GainLife -> Draw, got {effects:?}");
+    };
+    assert_eq!(amount, &QuantityExpr::Fixed { value: 3 });
+    assert_eq!(count, &anaphoric_power_qty());
+}
+
+/// T5: an unparseable shared quantity stays honestly `Unimplemented` (the
+/// distributor declines rather than guessing). Reach-guard: T2 proves the same
+/// shape with a parseable quantity lowers fully.
+#[test]
+fn shared_equal_to_quantity_unparseable_qty_stays_unimplemented() {
+    let positive = parse_effect_chain(
+        "You draw cards and lose life equal to its power.",
+        AbilityKind::Spell,
+    );
+    assert_eq!(chain_unimplemented_count(&positive), 0, "reach-guard");
+    for text in [
+        "You draw cards and lose life equal to the frobnication of the widget.",
+        "You gain life and draw cards equal to the frobnication of the widget.",
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        assert!(
+            chain_has_unimplemented(&def),
+            "{text}: unparseable quantity must stay Unimplemented, got {def:?}"
+        );
+    }
+}
+
+/// CR 608.2c: Eventide's Shadow's verbatim second sentence shares a "this
+/// way" look-back (`PreviousEffectAmount`). Each conjunct re-stamps the
+/// previous-effect result, so the distributor must decline instead of cloning
+/// that quantity into a chained conjunct; the clause stays Unimplemented.
+/// Reach-guard: T2 proves the same Draw → LoseLife shape lowers fully when
+/// the shared quantity is not resolution-local.
+#[test]
+fn shared_equal_to_quantity_declines_previous_effect_look_back() {
+    let positive = parse_effect_chain(
+        "You draw cards and lose life equal to its power.",
+        AbilityKind::Spell,
+    );
+    assert_eq!(
+        shared_equal_to_chain_effects(&positive).len(),
+        2,
+        "reach-guard: parseable shared quantity lowers to a two-link chain"
+    );
+    assert_eq!(chain_unimplemented_count(&positive), 0, "reach-guard");
+
+    let reads_previous = |effect: &Effect| {
+        let mut hit = false;
+        effect.for_each_quantity_expr(&mut |qty| {
+            hit |= qty.any_ref(&mut |r| matches!(r, QuantityRef::PreviousEffectAmount { .. }));
+        });
+        hit
+    };
+    for text in [
+        "You draw cards and lose life equal to the number of counters removed this way.",
+        "Remove any number of counters from among permanents on the battlefield. You draw cards and lose life equal to the number of counters removed this way.",
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        let effects = shared_equal_to_chain_effects(&def);
+        assert!(
+            !effects.windows(2).any(|pair| matches!(
+                pair,
+                [draw @ Effect::Draw { .. }, lose @ Effect::LoseLife { .. }]
+                    if reads_previous(draw) && reads_previous(lose)
+            )),
+            "{text}: must not chain Draw -> LoseLife sharing a previous-effect quantity, got {effects:?}"
+        );
+        assert!(
+            chain_has_unimplemented(&def),
+            "{text}: declined compound stays Unimplemented, got {def:?}"
+        );
+    }
+}
+
+/// CR 608.2c + CR 608.2h: "the number of cards a player discarded this way"
+/// lowers to the unfiltered chain `TrackedSetSize`. A conjunct's zone changes
+/// (Mill) extend that tracked set, so cloning it into a chained Draw would read
+/// the discard PLUS the mill. The distributor must decline; the clause stays
+/// Unimplemented. Reach-guard: the single-verb form reads `TrackedSetSize`,
+/// and the same Mill -> Draw shape with a non-look-back quantity distributes.
+#[test]
+fn shared_equal_to_quantity_declines_tracked_set_look_back() {
+    let reads_tracked_set = |effect: &Effect| {
+        let mut hit = false;
+        effect.for_each_quantity_expr(&mut |qty| {
+            hit |= qty.any_ref(&mut |r| {
+                matches!(
+                    r,
+                    QuantityRef::TrackedSetSize | QuantityRef::FilteredTrackedSetSize { .. }
+                )
+            });
+        });
+        hit
+    };
+
+    let single = parse_effect_chain(
+        "You mill cards equal to the number of cards a player discarded this way.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        shared_equal_to_chain_effects(&single)
+            .iter()
+            .any(reads_tracked_set),
+        "reach-guard: the phrase lowers to a tracked-set quantity, got {single:?}"
+    );
+    let positive = parse_effect_chain(
+        "You mill cards and draw cards equal to its power.",
+        AbilityKind::Spell,
+    );
+    assert_eq!(
+        shared_equal_to_chain_effects(&positive).len(),
+        2,
+        "reach-guard: non-look-back shared quantity distributes"
+    );
+    assert_eq!(chain_unimplemented_count(&positive), 0, "reach-guard");
+
+    let text = "You discard three cards. You mill cards and draw cards equal to the number of cards a player discarded this way.";
+    let def = parse_effect_chain(text, AbilityKind::Spell);
+    let effects = shared_equal_to_chain_effects(&def);
+    assert!(
+        !effects.windows(2).any(|pair| matches!(
+            pair,
+            [mill @ Effect::Mill { .. }, draw @ Effect::Draw { .. }]
+                if reads_tracked_set(mill) && reads_tracked_set(draw)
+        )),
+        "must not chain Mill -> Draw sharing a tracked-set quantity, got {effects:?}"
+    );
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::Discard { .. }, Effect::Unimplemented { .. }]
+        ),
+        "preceding Discard survives and the whole Mill/Draw compound is declined, got {effects:?}"
+    );
+}
+
+/// CR 608.2c + CR 608.2h: a DECLINED shared-tail compound must lower as one
+/// honest `Unimplemented` for every verb order — never a partial effect. The
+/// chunker guard holds the compound as one chunk, so when the distributor
+/// declines a chain-local quantity a later single-verb handler (gain-life /
+/// lose-life "equal to") would otherwise accept only the head conjunct and
+/// silently drop the rest.
+#[test]
+fn shared_equal_to_quantity_declined_compound_never_lowers_partially() {
+    let positive = parse_effect_chain(
+        "You gain life and draw cards equal to its power.",
+        AbilityKind::Spell,
+    );
+    assert_eq!(chain_unimplemented_count(&positive), 0, "reach-guard");
+    assert_eq!(
+        shared_equal_to_chain_effects(&positive).len(),
+        2,
+        "reach-guard"
+    );
+
+    let verbs = ["gain life", "lose life", "draw cards", "mill cards"];
+    let quantities = [
+        "the number of creatures dealt damage this way",
+        "the damage dealt this way",
+        "the number of counters removed this way",
+    ];
+    for first in verbs {
+        for second in verbs {
+            if first == second {
+                continue;
+            }
+            for quantity in quantities {
+                let text = format!("You {first} and {second} equal to {quantity}.");
+                let def = parse_effect_chain(&text, AbilityKind::Spell);
+                let effects = shared_equal_to_chain_effects(&def);
+                assert!(
+                    chain_has_unimplemented(&def),
+                    "{text}: declined compound must stay Unimplemented, got {effects:?}"
+                );
+                assert!(
+                    effects
+                        .iter()
+                        .all(|effect| matches!(effect, Effect::Unimplemented { .. })),
+                    "{text}: no partial lowering of a declined compound, got {effects:?}"
+                );
+            }
+        }
+    }
+
+    let text = "Deal 3 damage to target creature. You gain life and draw cards equal to the damage dealt this way.";
+    let def = parse_effect_chain(text, AbilityKind::Spell);
+    let effects = shared_equal_to_chain_effects(&def);
+    assert!(
+        chain_has_unimplemented(&def)
+            && !effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::GainLife { .. } | Effect::Draw { .. })),
+        "{text}: no partial GainLife/Draw, got {effects:?}"
+    );
+}
+
+/// CR 608.2c + CR 608.2h: `PlayerCount { PerformedActionThisWay(Draw) }` reads a
+/// ledger that a Draw conjunct itself appends to, so it is chain-local: the
+/// distributor must decline instead of sharing it (the count would grow 1 -> 2).
+/// Reach-guard: the single-verb form reads the ledger.
+#[test]
+fn shared_equal_to_quantity_declines_performed_action_ledger() {
+    let reads_ledger = |effect: &Effect| {
+        let mut hit = false;
+        effect.for_each_quantity_expr(&mut |qty| {
+            hit |= qty.any_ref(&mut |r| {
+                matches!(
+                    r,
+                    QuantityRef::PlayerCount {
+                        filter: PlayerFilter::PerformedActionThisWay { .. }
+                    }
+                )
+            });
+        });
+        hit
+    };
+    let single = parse_effect_chain(
+        "You gain life equal to the number of players who drew a card this way.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        shared_equal_to_chain_effects(&single)
+            .iter()
+            .any(reads_ledger),
+        "reach-guard: phrase lowers to PerformedActionThisWay count, got {single:?}"
+    );
+
+    let text = "Each opponent draws a card. You draw cards and gain life equal to the number of players who drew a card this way.";
+    let def = parse_effect_chain(text, AbilityKind::Spell);
+    let effects = shared_equal_to_chain_effects(&def);
+    assert!(
+        !effects.windows(2).any(|pair| matches!(
+            pair,
+            [draw @ Effect::Draw { .. }, gain @ Effect::GainLife { .. }]
+                if reads_ledger(draw) && reads_ledger(gain)
+        )),
+        "must not chain Draw -> GainLife sharing a ledger count, got {effects:?}"
+    );
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::Draw { .. }, Effect::Unimplemented { .. }]
+        ),
+        "preceding opponent Draw survives and the whole Draw/GainLife compound is declined, got {effects:?}"
+    );
+}
+
+/// T6: Blim's third-person, subject-scoped "each player loses life and
+/// discards cards equal to …" is deferred and keeps its `Unimplemented`
+/// (paired positive: T1 on Lifeblood Hydra).
+#[test]
+fn shared_equal_to_quantity_blim_subject_scoped_form_is_deferred() {
+    let parsed = crate::parser::parse_oracle_text(
+        "Flying\nWhenever Blim deals combat damage to a player, that player gains control of target permanent you control. Then each player loses life and discards cards equal to the number of permanents they control but don't own.",
+        "Blim, Comedic Genius",
+        &["Flying".to_string()],
+        &["Creature".to_string()],
+        &["Imp".to_string()],
+    );
+    assert!(
+        ability_or_trigger_has_unimplemented(&parsed),
+        "Blim's per-player compound stays Unimplemented (deferred): {parsed:?}"
+    );
+}
+
 /// CR 608.2d + CR 613.4c — SelfRef subject (Brightling, Endling, Greater
 /// Morphling, Shorecrasher Elemental, Multiform Wonder all print this clause).
 ///
