@@ -1569,7 +1569,7 @@ export class WebSocketAdapter implements EngineAdapter {
     // A client-supplied actor here would provide zero additional safety and
     // only creates a spoofing surface if it were ever put on the wire.
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      throw new AdapterError("WS_ERROR", "WebSocket not connected", false);
+      throw new AdapterError(AdapterErrorCode.ACTION_NOT_SENT, "WebSocket not connected", false);
     }
 
     this.emit({ type: "actionPendingChanged", pending: true });
@@ -1582,7 +1582,7 @@ export class WebSocketAdapter implements EngineAdapter {
         this.pendingResolve = null;
         this.pendingReject = null;
         this.emit({ type: "actionPendingChanged", pending: false });
-        reject(new AdapterError("WS_CLOSED", "Failed to send action", true));
+        reject(new AdapterError(AdapterErrorCode.ACTION_NOT_SENT, "Failed to send action", true));
       }
     });
   }
