@@ -4418,6 +4418,10 @@ fn collect_pending_triggers_with_collection(
     // CR 603.2c: Track which batched triggers (source_id, trig_idx) have already
     // fired in this pass so "one or more" triggers fire at most once per batch.
     let mut batched_this_pass: HashSet<(ObjectId, usize)> = HashSet::new();
+    // CR 726.2: the initiative steal is "whenever ONE OR MORE creatures a
+    // player controls deal combat damage", so each damaging player steals at
+    // most once per pass no matter how many of their creatures connect.
+    let mut initiative_stolen_this_pass: HashSet<PlayerId> = HashSet::new();
     let off_zone_trigger_sources = if events.is_empty() {
         Vec::new()
     } else {
@@ -6284,7 +6288,9 @@ fn collect_pending_triggers_with_collection(
             if state.initiative == Some(*target_player) {
                 if let Some(attacker) = state.objects.get(source_id) {
                     let new_holder = attacker.controller;
-                    if new_holder != *target_player {
+                    if new_holder != *target_player
+                        && initiative_stolen_this_pass.insert(new_holder)
+                    {
                         let source_context = trigger_source_context_for_latch(state, attacker);
                         let mut take_init = ResolvedAbility::new(
                             Effect::TakeTheInitiative,
