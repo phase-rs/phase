@@ -5,11 +5,9 @@
 //! The estimate is a **floor**, not an exact tier: a deck with no Game
 //! Changers still estimates B2 even if its pilot would call it B3 — only
 //! the pilot can declare upward. B1 (Exhibition) and B5 (cEDH) are
-//! manual self-declarations the estimator never returns: B1's card
-//! criteria are nearly identical to B2's (both ban Game Changers, Mass
-//! Land Denial, and Extra Turns; they differ only in efficient-tutor
-//! allowance), so a card-list estimator cannot distinguish an Exhibition
-//! deck from a Core one, and cEDH is a mindset, not a card list.
+//! manual self-declarations the estimator never returns: Exhibition depends
+//! on the pilot's theme and intended play experience, which card counts
+//! cannot establish; cEDH reflects participation in the competitive metagame.
 //!
 //! Pure: no game state, no I/O, no randomness. Same `(deck, db)` →
 //! identical `BracketEstimate`.
