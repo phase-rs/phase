@@ -28,6 +28,7 @@ use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use crate::types::replacements::ReplacementEvent;
 use crate::types::statics::{CastFrequency, StaticMode};
+use crate::types::zones::Zone;
 
 /// CR 608.2c: Karona's scoped upkeep player is the grammatical subject of the
 /// immediately following conjugated control clause, so it receives control of
@@ -69,6 +70,47 @@ fn trigger_chain_effects(trigger: &TriggerDefinition) -> Vec<&Effect> {
     std::iter::successors(trigger.execute.as_deref(), |def| def.sub_ability.as_deref())
         .map(|def| def.effect.as_ref())
         .collect()
+}
+
+/// CR 108.3 + CR 119.3 + CR 121.1 + CR 603.2 + CR 603.10a + CR 608.2c: a dies
+/// trigger body can bind "each other player" to the departed object's owner
+/// antecedent from the immediately previous clause.
+#[test]
+fn dies_trigger_owner_subject_anchors_each_other_player_scope() {
+    let trigger = parse_trigger_line(
+        "When this creature dies, its owner draws a card and each other player loses 1 life.",
+        "Synthetic Owner Anchor",
+    );
+
+    assert_eq!(trigger.mode, TriggerMode::ChangesZone);
+    assert_eq!(trigger.origin, Some(Zone::Battlefield));
+    assert_eq!(trigger.destination, Some(Zone::Graveyard));
+    let execute = trigger.execute.as_deref().expect("dies trigger body");
+    assert_no_unimplemented(execute);
+
+    let Effect::Draw { target, count } = execute.effect.as_ref() else {
+        panic!("expected owner draw head, got {:?}", execute.effect);
+    };
+    assert_eq!(*target, TargetFilter::ParentTargetOwner);
+    assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+
+    let lose = execute
+        .sub_ability
+        .as_deref()
+        .expect("loss clause follows owner draw");
+    assert!(matches!(
+        lose.effect.as_ref(),
+        Effect::LoseLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            ..
+        }
+    ));
+    assert_eq!(
+        lose.player_scope,
+        Some(PlayerFilter::AllExcept {
+            exclude: Box::new(PlayerFilter::ParentObjectTargetOwner)
+        })
+    );
 }
 
 const GUT_TRUE_SOUL_ZEALOT_ORACLE: &str = "Whenever you attack, you may sacrifice another creature or an artifact. If you do, create a 4/1 black Skeleton creature token with menace that's tapped and attacking. (It can't be blocked except by two or more creatures.)\nChoose a Background (You can have a Background as a second commander.)";

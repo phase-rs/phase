@@ -2868,17 +2868,24 @@ fn starts_targeted_pt_conjunct_lower(s: &str) -> OracleResult<'_, ()> {
 }
 
 /// CR 102.2 + CR 119.3 + CR 121.1 + CR 608.2c: a second "each opponent"/"each
-/// player" clause joined by a bare " and " is a fresh player-scoped clause start
+/// player"/"each other player" clause joined by a bare " and " is a fresh player-scoped clause start
 /// (Slitherwisp "you draw a card and each opponent loses 1 life"; Curry Favor;
 /// Disinformation Campaign; Bad Deal; Clockwork Fox). Without this arm the
 /// conjunct is swallowed by the first effect and the player-scoped half is
 /// dropped. The discriminator is a conjugated player-action verb immediately
-/// after the "each opponent "/"each player " subject — a bare-noun continuation
+/// after the "each opponent "/"each player "/"each other player " subject — a bare-noun continuation
 /// (Goblin Chainwhirler's "... and each creature you control") has no such verb
-/// and is left un-split, preserving the single DamageAll. Player-scope sibling of
+/// and is left un-split, preserving the single DamageAll. This only detects a
+/// fresh player-scoped clause; owner-relative "other" semantics are applied later
+/// by effect-chain antecedent logic. Player-scope sibling of
 /// `starts_target_continuous_clause_lower`.
 fn starts_each_player_predicate_clause_lower(s: &str) -> OracleResult<'_, ()> {
-    let (rest, _) = alt((tag("each opponent "), tag("each player "))).parse(s)?;
+    let (rest, _) = alt((
+        tag("each opponent "),
+        tag("each player "),
+        tag("each other player "),
+    ))
+    .parse(s)?;
     value(
         (),
         alt((
