@@ -108,8 +108,9 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * Bumps to date:
  *  74 — game_setup and state_update carry GameState, whose paused
  *       continuations now serialize ResolvedAbility.parent_target_missing_reason
- *       including the new RevealUntil reason (a reveal-until whiff). A v73
- *       peer cannot parse the tag and would drop the verdict, so first contact
+ *       including the new RevealUntil reason (a reveal-until whiff), and whose
+ *       conditions may carry EffectOutcomeSignal.RevealUntilMatched. A v73
+ *       peer cannot parse the tags and would drop the verdict, so first contact
  *       rejects the skew. Bumped in lockstep with full-game protocol 92.
  *  73 — GameState retypes PendingManaAbility.chosen_counter_count to the
  *       required chosen_counter_counts array (#9207). Bumped with full-game

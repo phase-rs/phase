@@ -26862,6 +26862,17 @@ pub enum EffectOutcomeSignal {
     /// happened (impossible commit per CR 609.3, empty hand) the source
     /// `SpellContext::guess_outcome` is `None` and NEITHER polarity fires.
     Guessed { outcome: GuessOutcome },
+    /// CR 701.20a + CR 603.12: the immediately preceding reveal-until met its
+    /// until-condition — it revealed a card matching its until-filter. Guards
+    /// the "When you reveal a <filter> card this way" reflexive (Yuna's
+    /// Whistle, Calibrated Blast), whose trigger event is exactly that
+    /// until-condition. Read from the reveal-until's own one-hop verdict
+    /// (`ParentTargetMissingReason::RevealUntil` on a whiff): peeked on the
+    /// state slot at the inline creation gate, and carried on the child for a
+    /// resumed root or the materialized stack object (stable: the pending
+    /// trigger takes the slot at materialization). A generic "When you do"
+    /// after a reveal-until carries no such guard.
+    RevealUntilMatched,
 }
 
 /// CR 602.2a + CR 608.2c: which per-turn tally of a single printed ability
@@ -27630,7 +27641,9 @@ impl AbilityCondition {
             } => true,
             AbilityCondition::EffectOutcome {
                 signal:
-                    EffectOutcomeSignal::CurrentScopeSucceeded | EffectOutcomeSignal::Guessed { .. },
+                    EffectOutcomeSignal::CurrentScopeSucceeded
+                    | EffectOutcomeSignal::Guessed { .. }
+                    | EffectOutcomeSignal::RevealUntilMatched,
             } => false,
             AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
             | AbilityCondition::AdditionalCostPaidInstead
@@ -32466,47 +32479,15 @@ pub enum ParentTargetMissingReason {
     /// without revealing any card matching its until-filter, so no matching
     /// card was revealed "this way" and nothing is bound as "that card".
     /// Consulted by the `ParentTarget` `ChangeZone` no-op guard and the
-    /// optional-effect feasibility probe (as every reason is), and — unlike
-    /// the other reasons — by the `WhenYouDo` reflexive creation gate: a
-    /// "When you reveal a <filter> card this way" trigger event did not occur
-    /// (see [`ParentTargetMissingReason::voids_reflexive_occurrence`]).
+    /// optional-effect feasibility probe (as every reason is), and by the
+    /// `EffectOutcomeSignal::RevealUntilMatched` guard of a "When you reveal a
+    /// <filter> card this way" reflexive: that trigger event did not occur.
     RevealUntil,
-}
-
-impl ParentTargetMissingReason {
-    /// CR 603.12: whether this hand-off records that the parent's witnessed
-    /// event did NOT occur, so a `WhenYouDo` reflexive riding it must not
-    /// trigger. Only a reveal-until whiff qualifies: the reflexive's trigger
-    /// event ("when you reveal a creature card this way") is exactly the
-    /// reveal-until's until-condition. The other producers keep their
-    /// historical reflexive behaviour. Exhaustive, no wildcard.
-    pub fn voids_reflexive_occurrence(self) -> bool {
-        match self {
-            ParentTargetMissingReason::RevealUntil => true,
-            ParentTargetMissingReason::Dig
-            | ParentTargetMissingReason::ChooseFromZone
-            | ParentTargetMissingReason::RevealHandChoice
-            | ParentTargetMissingReason::ExileTop => false,
-        }
-    }
 }
 
 #[cfg(test)]
 mod parent_target_missing_reason_tests {
     use super::ParentTargetMissingReason;
-
-    #[test]
-    fn only_a_reveal_until_whiff_voids_a_reflexive_occurrence() {
-        assert!(ParentTargetMissingReason::RevealUntil.voids_reflexive_occurrence());
-        for reason in [
-            ParentTargetMissingReason::Dig,
-            ParentTargetMissingReason::ChooseFromZone,
-            ParentTargetMissingReason::RevealHandChoice,
-            ParentTargetMissingReason::ExileTop,
-        ] {
-            assert!(!reason.voids_reflexive_occurrence(), "{reason:?}");
-        }
-    }
 
     #[test]
     fn reveal_until_reason_round_trips_through_json() {

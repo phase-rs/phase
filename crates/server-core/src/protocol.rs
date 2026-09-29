@@ -3319,9 +3319,10 @@ mod tests {
     }
 
     /// `ResolvedAbility.parent_target_missing_reason` is serialized and gains
-    /// `ParentTargetMissingReason::RevealUntil` (CR 701.20a + CR 603.12); a v91
-    /// peer cannot parse the tag and would drop a paused reveal-until whiff's
-    /// verdict, so it must be refused before it receives v92 state.
+    /// `ParentTargetMissingReason::RevealUntil`, and `EffectOutcomeSignal` gains
+    /// `RevealUntilMatched` (CR 701.20a + CR 603.12); a v91 peer cannot parse
+    /// the tags and would drop a paused reveal-until whiff's verdict, so it must
+    /// be refused before it receives v92 state.
     /// `PendingManaAbility` now carries required `chosen_counter_counts`
     /// instead of `chosen_counter_count` (#9207); v90 state cannot decode as
     /// v91 state, so it must be refused before state delivery.

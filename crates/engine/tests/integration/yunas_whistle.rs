@@ -625,3 +625,86 @@ fn tunnel_vision_whiff_is_unchanged_by_the_reveal_until_reason() {
         st.waiting_for
     );
 }
+
+/// A generic "When you do" after a reveal-until carries no reveal-until-hit
+/// guard: the instruction was performed even when no matching card was
+/// revealed, so a whiff still triggers it (base behaviour). The Whistle and
+/// Calibrated Blast whiff tests above are the guarded counterparts.
+const REVEAL_THEN_WHEN_YOU_DO: &str = "Reveal cards from the top of your library until you reveal a creature card. When you do, draw a card.";
+
+fn hand_after_generic_when_you_do(library: &[LibCard]) -> (usize, usize) {
+    let Fixture {
+        mut runner, spell, ..
+    } = fixture("Probe", REVEAL_THEN_WHEN_YOU_DO, false, library);
+    runner.cast(spell).commit();
+    let revealed_before = runner.state().players[0].hand.len();
+    pass_until_prompt_or_empty(&mut runner);
+    assert!(runner.state().stack.is_empty());
+    (revealed_before, runner.state().players[0].hand.len())
+}
+
+#[test]
+fn generic_when_you_do_after_a_reveal_until_whiff_still_triggers() {
+    // Whiff: no card to hand, one draw.
+    let (before, after) = hand_after_generic_when_you_do(&[
+        LibCard::Land("Forest"),
+        LibCard::Land("Island"),
+        LibCard::Land("Swamp"),
+    ]);
+    assert_eq!(after, before + 1, "the reflexive draw fired after a whiff");
+    // Hit control: the creature to hand plus the draw.
+    let (before, after) = hand_after_generic_when_you_do(&[
+        LibCard::Land("Forest"),
+        LibCard::Creature("Beast", ManaCost::generic(2)),
+        LibCard::Land("Swamp"),
+    ]);
+    assert_eq!(after, before + 2);
+}
+
+const CAIT_SITH: &str = "Lucky Slots — At the beginning of combat on your turn, scry 1, then exile the top card of your library. You may play that card this turn. When you exile a card this way, target creature you control gets +X/+0 until end of turn, where X is that card's mana value.";
+
+/// CR 603.12 (Cait Sith's 2025-06-06 ruling): its reflexive's target timing is
+/// not modeled, so the clause is honestly unsupported. Production combat
+/// trigger: no target is announced with the trigger (no early prompt), and no
+/// pump lands, while the trigger itself still scries and exiles.
+#[test]
+fn cait_sith_announces_no_target_with_its_combat_trigger() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(P0, "Cait Sith, Fortune Teller", 2, 2, CAIT_SITH);
+    let bear = scenario.add_creature(P0, "Bear", 2, 2).id();
+    let top = scenario
+        .add_spell_to_library_top(P0, "Three Drop", false)
+        .with_mana_cost(ManaCost::generic(3))
+        .id();
+    let mut runner = scenario.build();
+    let mut saw_scry = false;
+    for _ in 0..16 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::TriggerTargetSelection { .. } => {
+                panic!("no target may be announced with Cait Sith's trigger")
+            }
+            WaitingFor::ScryChoice { .. } => {
+                saw_scry = true;
+                runner
+                    .act(GameAction::SelectCards { cards: vec![] })
+                    .expect("keep the scried card on top");
+            }
+            WaitingFor::Priority { .. } => {
+                if runner.state().phase == Phase::DeclareAttackers {
+                    break;
+                }
+                runner.act(GameAction::PassPriority).expect("pass");
+            }
+            _ => break,
+        }
+    }
+    let st = runner.state();
+    assert!(saw_scry, "reach guard: the combat trigger resolved");
+    assert_eq!(
+        zone(st, top),
+        Zone::Exile,
+        "reach guard: the top card was exiled"
+    );
+    assert_eq!(st.objects[&bear].power, Some(2), "no pump");
+}

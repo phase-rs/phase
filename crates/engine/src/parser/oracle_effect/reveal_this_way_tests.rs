@@ -40,6 +40,14 @@ fn nonland() -> TargetFilter {
     )
 }
 
+/// The reveal gate's lowered condition: the CR 603.12 creation gate plus the
+/// reveal-until-hit guard.
+fn reveal_gate_condition() -> AbilityCondition {
+    AbilityCondition::when_you_do_with_guard(AbilityCondition::EffectOutcome {
+        signal: EffectOutcomeSignal::RevealUntilMatched,
+    })
+}
+
 fn gate_sub(def: &AbilityDefinition) -> &AbilityDefinition {
     def.sub_ability
         .as_deref()
@@ -65,7 +73,7 @@ fn gate_and_parent_filters_come_from_one_producer_for_both_verbatim_cards() {
         assert_eq!(g, expected, "{name}: gate filter G");
         assert_eq!(
             gate_sub(&def).condition,
-            Some(AbilityCondition::WhenYouDo),
+            Some(reveal_gate_condition()),
             "{name}: the reveal gate must lower to the CR 603.12 creation gate"
         );
     }
@@ -80,7 +88,7 @@ fn gate_and_parent_filters_come_from_one_producer_for_both_verbatim_cards() {
 fn yunas_whistle_lowers_to_a_reflexive_counter_placement_on_the_revealed_mana_value() {
     let def = spell(YUNAS_WHISTLE, "Yuna's Whistle");
     let sub = gate_sub(&def);
-    assert_eq!(sub.condition, Some(AbilityCondition::WhenYouDo));
+    assert_eq!(sub.condition, Some(reveal_gate_condition()));
     let Effect::PutCounter {
         counter_type,
         count,
@@ -116,7 +124,7 @@ fn calibrated_blast_keeps_its_reveal_gate_as_a_reflexive_trigger() {
     let def = spell(CALIBRATED_BLAST, "Calibrated Blast");
     let sub = gate_sub(&def);
     assert!(matches!(sub.effect.as_ref(), Effect::DealDamage { .. }));
-    assert_eq!(sub.condition, Some(AbilityCondition::WhenYouDo));
+    assert_eq!(sub.condition, Some(reveal_gate_condition()));
 }
 
 fn gate_outcome(text: &str) -> AbilityDefinition {
@@ -138,10 +146,7 @@ fn reveal_gate_fails_closed_unless_it_restates_the_parent_until_condition() {
     let control = gate_outcome(&format!(
         "{REVEAL_UNTIL_CREATURE_HEAD}When you reveal a creature card this way, you gain 2 life."
     ));
-    assert_eq!(
-        gate_sub(&control).condition,
-        Some(AbilityCondition::WhenYouDo)
-    );
+    assert_eq!(gate_sub(&control).condition, Some(reveal_gate_condition()));
     assert!(!is_reveal_gate_gap(&control));
 
     // Filter mismatch.
@@ -184,18 +189,41 @@ fn reveal_gate_fails_closed_unless_it_restates_the_parent_until_condition() {
     assert!(is_reveal_gate_gap(&two), "{two:?}");
 }
 
+const CAIT_SITH_TRIGGER: &str = "Lucky Slots — At the beginning of combat on your turn, scry 1, then exile the top card of your library. You may play that card this turn. When you exile a card this way, target creature you control gets +X/+0 until end of turn, where X is that card's mana value.";
+
+fn trigger_json(text: &str, name: &str) -> serde_json::Value {
+    let parsed = parse_oracle_text(text, name, &[], &["Creature".to_string()], &[]);
+    serde_json::to_value(&parsed.triggers).unwrap()
+}
+
+#[test]
+fn unmodeled_zone_change_reflexive_with_a_where_x_referent_fails_closed() {
+    // Cait Sith, Fortune Teller (verbatim): the where-X referent no longer
+    // misbinds the pump to the exiled card, and because the "When you exile …
+    // this way" reflexive's own target timing is not modeled, the clause is
+    // honestly unsupported instead of announcing its target with the trigger.
+    let json = trigger_json(CAIT_SITH_TRIGGER, "Cait Sith, Fortune Teller");
+    let mut gaps = Vec::new();
+    collect_effects(&json, "Unimplemented", &mut gaps);
+    assert!(
+        gaps.iter()
+            .any(|gap| gap["name"] == "zone_change_reflexive_target_timing"),
+        "{json}"
+    );
+    let mut pumps = Vec::new();
+    collect_effects(&json, "Pump", &mut pumps);
+    assert!(pumps.is_empty(), "no misbound pump survives: {json}");
+}
+
 #[test]
 fn where_x_definition_referent_does_not_rebind_an_explicit_recipient() {
-    // Cait Sith, Fortune Teller (verbatim trigger text): the "that card" in the
-    // where-X definition names the exiled card, never the pump's recipient.
-    let parsed = parse_oracle_text(
-        "Lucky Slots — At the beginning of combat on your turn, scry 1, then exile the top card of your library. You may play that card this turn. When you exile a card this way, target creature you control gets +X/+0 until end of turn, where X is that card's mana value.",
-        "Cait Sith, Fortune Teller",
-        &[],
-        &["Creature".to_string()],
-        &[],
+    // Adjacent control for the strict-fail: the same clause under an "If …
+    // this way" gate (a resolution-time condition, no reflexive timing) keeps
+    // its explicit recipient; the where-X still binds the exiled card.
+    let json = trigger_json(
+        "At the beginning of combat on your turn, exile the top card of your library. If you exiled a card this way, target creature you control gets +X/+0 until end of turn, where X is that card's mana value.",
+        "Probe",
     );
-    let json = serde_json::to_value(&parsed.triggers).unwrap();
     let mut pumps = Vec::new();
     collect_effects(&json, "Pump", &mut pumps);
     assert_eq!(pumps.len(), 1, "reach guard: exactly one pump: {json}");

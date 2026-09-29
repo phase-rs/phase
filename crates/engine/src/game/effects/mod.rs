@@ -6524,7 +6524,10 @@ fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> b
                     // CR 608.2d: a `Guessed` gate is a positive guess-outcome
                     // branch, not an optional-decline alternative — declining an
                     // optional effect never selects it.
-                    | EffectOutcomeSignal::Guessed { .. },
+                    | EffectOutcomeSignal::Guessed { .. }
+                    // CR 701.20a: a reveal-until-hit guard is not an
+                    // optional-decline alternative either.
+                    | EffectOutcomeSignal::RevealUntilMatched,
             },
         ) => false,
     }
@@ -9170,45 +9173,61 @@ fn when_you_do_mandatory_parent_did_nothing(
         && !mandatory_parent_effect_performed(&parent.effect, parent_events)
 }
 
-/// CR 603.12: the inline half of the reflexive-occurrence verdict. The parent
-/// that just resolved published its own one-hop outcome on
+/// CR 603.12 + CR 701.20a: the inline half of the reveal-until-hit guard. The
+/// reveal-until that just resolved published its own one-hop verdict on
 /// `state.last_parent_target_missing_reason` (the slot its immediate child
-/// takes at the hand-off); a verdict that voids the witnessed event means the
-/// `WhenYouDo` reflexive riding it did not trigger. Read-only: the child's
-/// `apply_parent_chain_context` still takes the slot. The resumed-root half is
-/// the `WhenYouDo` arm of `evaluate_condition`, which reads the same verdict
-/// after the hand-off stamped it onto the deferred child.
+/// takes at the hand-off). Only a reflexive that carries the
+/// `EffectOutcomeSignal::RevealUntilMatched` guard is voided by a whiff; a
+/// generic "When you do" after a reveal-until is not. Read-only: the child's
+/// `apply_parent_chain_context` still takes the slot. The resumed-root and
+/// stack halves are the guard's own `evaluate_condition` arm, which reads the
+/// same verdict after the hand-off stamped it onto the child.
 fn reflexive_occurrence_voided_by_parent(
     condition: &AbilityCondition,
     parent_verdict: Option<crate::types::ability::ParentTargetMissingReason>,
 ) -> bool {
-    condition.has_when_you_do_marker()
-        && parent_verdict.is_some_and(|reason| reason.voids_reflexive_occurrence())
+    condition_has_reveal_until_matched_guard(condition)
+        && parent_verdict == Some(crate::types::ability::ParentTargetMissingReason::RevealUntil)
+}
+
+/// Whether the root condition carries the reveal-until-hit guard, alone or as a
+/// member of the flat root `And` built by `when_you_do_with_guard`.
+fn condition_has_reveal_until_matched_guard(condition: &AbilityCondition) -> bool {
+    let is_guard = |condition: &AbilityCondition| {
+        matches!(
+            condition,
+            AbilityCondition::EffectOutcome {
+                signal: EffectOutcomeSignal::RevealUntilMatched,
+            }
+        )
+    };
+    match condition {
+        AbilityCondition::And { conditions } => conditions.iter().any(is_guard),
+        condition => is_guard(condition),
+    }
 }
 
 #[cfg(test)]
 mod reflexive_occurrence_verdict_tests {
     use super::reflexive_occurrence_voided_by_parent;
-    use crate::types::ability::{AbilityCondition, ParentTargetMissingReason};
+    use crate::types::ability::{AbilityCondition, EffectOutcomeSignal, ParentTargetMissingReason};
 
     #[test]
-    fn only_when_you_do_over_a_reveal_until_whiff_is_voided() {
-        let reveal = Some(ParentTargetMissingReason::RevealUntil);
-        assert!(reflexive_occurrence_voided_by_parent(
-            &AbilityCondition::WhenYouDo,
-            reveal
-        ));
+    fn only_the_reveal_until_hit_guard_is_voided_by_a_whiff() {
+        let guard = AbilityCondition::when_you_do_with_guard(AbilityCondition::EffectOutcome {
+            signal: EffectOutcomeSignal::RevealUntilMatched,
+        });
+        let whiff = Some(ParentTargetMissingReason::RevealUntil);
+        assert!(reflexive_occurrence_voided_by_parent(&guard, whiff));
+        assert!(!reflexive_occurrence_voided_by_parent(&guard, None));
         assert!(!reflexive_occurrence_voided_by_parent(
-            &AbilityCondition::effect_performed(),
-            reveal
-        ));
-        assert!(!reflexive_occurrence_voided_by_parent(
-            &AbilityCondition::WhenYouDo,
+            &guard,
             Some(ParentTargetMissingReason::Dig)
         ));
+        // A generic "When you do" after a reveal-until whiff is not voided.
         assert!(!reflexive_occurrence_voided_by_parent(
             &AbilityCondition::WhenYouDo,
-            None
+            whiff
         ));
     }
 }
@@ -18984,6 +19003,17 @@ pub(crate) fn evaluate_condition(
         AbilityCondition::EffectOutcome {
             signal: EffectOutcomeSignal::Guessed { outcome },
         } => ability.context.guess_outcome == Some(*outcome),
+        // CR 701.20a + CR 603.12: "When you reveal a <filter> card this way" —
+        // the reveal-until's own one-hop verdict, carried on this node by the
+        // parent->child hand-off (a resumed deferred reflexive, or the
+        // materialized stack object). The inline creation gate reads the same
+        // verdict before that hand-off via `reflexive_occurrence_voided_by_parent`.
+        AbilityCondition::EffectOutcome {
+            signal: EffectOutcomeSignal::RevealUntilMatched,
+        } => {
+            ability.parent_target_missing_reason
+                != Some(crate::types::ability::ParentTargetMissingReason::RevealUntil)
+        }
         AbilityCondition::EventOutcomeWon => state
             .current_trigger_event
             .as_ref()
@@ -19028,14 +19058,7 @@ pub(crate) fn evaluate_condition(
                 ability.effect,
                 Effect::PayCost { .. } | Effect::Discard { .. } | Effect::DiscardCard { .. }
             ) && state.cost_payment_failed_flag;
-            // CR 603.12 + CR 701.20a: a reflexive deferred behind its paused
-            // parent and resumed as its own root carries that parent's one-hop
-            // verdict; a reveal-until that revealed no matching card never
-            // produced the "when you reveal … this way" trigger event.
-            let witnessed_event_voided = ability
-                .parent_target_missing_reason
-                .is_some_and(|reason| reason.voids_reflexive_occurrence());
-            !optional_action_not_taken && !payment_failed && !witnessed_event_voided
+            !optional_action_not_taken && !payment_failed
         }
         // CR 601.2a + CR 707.10: "was cast (from [zone])" — check cast origin.
         // `zone: None` = cast from any origin; a copy or put-into-play object has

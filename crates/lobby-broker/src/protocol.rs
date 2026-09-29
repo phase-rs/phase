@@ -63,10 +63,11 @@ pub struct TournamentRequestId(pub u64);
 /// 92 — `ResolvedAbility.parent_target_missing_reason` is now serialized
 ///      (`#[serde(default, skip_serializing_if = "Option::is_none")]`, it was
 ///      `#[serde(skip)]`) and `ParentTargetMissingReason` gains `RevealUntil`
-///      (CR 701.20a + CR 603.12: a reveal-until that revealed no matching card,
-///      read by the `WhenYouDo` reflexive gate — Yuna's Whistle, Calibrated
+///      (CR 701.20a + CR 603.12: a reveal-until that revealed no matching card),
+///      read by the new `EffectOutcomeSignal::RevealUntilMatched` guard of the
+///      "When you reveal … this way" reflexive (Yuna's Whistle, Calibrated
 ///      Blast). A paused continuation carries the verdict across a `GameState`
-///      round trip; a v91 peer cannot parse the new tag and would drop the
+///      round trip; a v91 peer cannot parse the new tags and would drop the
 ///      field, minting a reflexive trigger the rules forbid. Full-game peers and
 ///      P2P move in lockstep (wire 74); lobby messages are unchanged.
 /// 91 — `PendingManaAbility::chosen_counter_count: Option<u32>` is retyped to

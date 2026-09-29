@@ -911,6 +911,14 @@ fn rewrite_cost_paid_exiled_reflexive_for_effect_exile_parent(
     condition
 }
 
+/// CR 603.12: a zone-change "this way" gate (`ZoneChangedThisWay`) that is not a
+/// `WhenYouDo` reflexive — the "When you discard/exile/sacrifice … this way"
+/// family whose separate-trigger target timing is not yet modeled.
+fn is_unmodeled_zone_change_reflexive_gate(condition: &AbilityCondition) -> bool {
+    !condition.has_when_you_do_marker()
+        && matches!(condition, AbilityCondition::ZoneChangedThisWay { .. })
+}
+
 /// CR 603.12 + CR 701.20a: the outcome of owning a leading
 /// "When you reveal … this way, <body>" head.
 enum RevealThisWayGate {
@@ -918,7 +926,8 @@ enum RevealThisWayGate {
     NotOwned,
     /// The head restates the immediately preceding reveal-until's
     /// until-condition, so it names that instruction's own event: a CR 603.12
-    /// reflexive trigger (`WhenYouDo`) whose body is `remainder`.
+    /// reflexive trigger (`WhenYouDo` + `RevealUntilMatched` guard) whose body
+    /// is `remainder`.
     Reflexive { remainder: String },
     /// The head is present but its trigger event is not the preceding
     /// reveal-until's until-condition (different filter, plural quantifier,
@@ -939,9 +948,10 @@ fn parse_when_you_reveal_this_way_head(input: &str) -> OracleResult<'_, &str> {
 /// … When you reveal a creature card this way, <body>" (Yuna's Whistle,
 /// Calibrated Blast). The "when" head is a reflexive trigger whose event is the
 /// preceding reveal-until's until-condition being met, so it lowers to the
-/// `WhenYouDo` creation gate; the runtime reads that reveal's own one-hop
-/// verdict (`ParentTargetMissingReason::RevealUntil`) to decide whether the
-/// event occurred.
+/// `WhenYouDo` creation gate guarded by `EffectOutcomeSignal::RevealUntilMatched`;
+/// the guard reads that reveal's own one-hop verdict
+/// (`ParentTargetMissingReason::RevealUntil`) to decide whether the event
+/// occurred.
 ///
 /// The gate's filter is produced by the SAME two functions that built the
 /// parent's until-filter (`parse_reveal_until_active_filter_text` +
@@ -39067,7 +39077,18 @@ pub(crate) fn parse_effect_chain_ir(
             None
         };
         let (if_you_do, text, deferred_when_you_do_guard) = if let Some(remainder) = reveal_gate {
-            (Some(AbilityCondition::WhenYouDo), remainder, None)
+            // CR 603.12 + CR 701.20a: the reflexive's trigger event is the
+            // reveal-until's until-condition, so its creation gate carries the
+            // reveal-until-hit guard (a generic "When you do" does not).
+            (
+                Some(AbilityCondition::when_you_do_with_guard(
+                    AbilityCondition::EffectOutcome {
+                        signal: EffectOutcomeSignal::RevealUntilMatched,
+                    },
+                )),
+                remainder,
+                None,
+            )
         } else if condition.is_none() {
             match strip_if_you_do_conditional_with_context(&text, ctx) {
                 conditions::ReflexiveConditionalStrip::Parsed {
@@ -40832,6 +40853,35 @@ pub(crate) fn parse_effect_chain_ir(
             .0
             .lower
             .to_string();
+        // CR 603.12: a "When you <verb> … this way, <target clause>, where X is
+        // that card's …" reflexive gated on the zone-change ledger
+        // (`ZoneChangedThisWay`, no `WhenYouDo` marker) is not modeled as a
+        // separate reflexive trigger: its target would be announced with the
+        // enclosing ability, before the event (Cait Sith, Fortune Teller's
+        // 2025-06-06 ruling says otherwise). Before the where-X referent was kept
+        // out of recipient detection, that referent silently misbound the
+        // target; now that the explicit target binds, fail the clause closed so
+        // coverage does not claim the ruling's timing.
+        let where_x_referent_was_the_only_anaphor = has_anaphoric_reference(&text_lower)
+            && !has_anaphoric_reference(&recipient_anaphor_lower);
+        let normalized_lower = normalized_text.to_lowercase();
+        let reflexive_when_head = tag::<_, _, OracleError<'_>>("when ")
+            .parse(normalized_lower.as_str())
+            .is_ok();
+        if where_x_referent_was_the_only_anaphor
+            && reflexive_when_head
+            && condition
+                .as_ref()
+                .is_some_and(is_unmodeled_zone_change_reflexive_gate)
+        {
+            unimplemented_clause(
+                &mut builder,
+                "zone_change_reflexive_target_timing",
+                normalized_text,
+                chunk.boundary_after,
+            );
+            continue;
+        }
         let typed_trigger_subject = ctx_has_typed_trigger_subject(ctx);
         // CR 109.5 + CR 608.2c: A compound-subject distribution chunk ("~ and
         // that creature each ...") has already had an explicit recipient bound
