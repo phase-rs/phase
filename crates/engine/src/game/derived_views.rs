@@ -19,7 +19,10 @@ use crate::analysis::resource::ResourceAxis;
 use crate::game::ability_utils::flatten_targets_in_chain;
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::{AttachTarget, DisplaySource};
-use crate::game::stack::{effective_stack_ability, stack_display_groups, StackDisplayGroup};
+use crate::game::stack::{
+    effective_stack_ability, stack_display_groups, stack_display_groups_revealing,
+    stack_revealed_card_names, StackDisplayGroup,
+};
 use crate::types::ability::{
     ContinuousModification, Duration, GameRestriction, KeywordAction, ProhibitedActivity,
     RestrictionExpiry, RestrictionPlayerScope, TargetFilter, TargetRef,
@@ -34,7 +37,7 @@ use crate::types::game_state::{
     CastingVariant, CombatDamageSubStep, GameState, StackEntry, StackEntryKind, StackPaidSnapshot,
     SyntheticTriggerProvenance, WaitingFor,
 };
-use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
+use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 use crate::types::layers::Layer;
 use crate::types::mana::ManaCost;
@@ -1547,7 +1550,7 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
         views.stack_display_groups = stack_display_groups(state);
         views.stack_entry_details = stack_entry_details(state);
     }
-    views.stack_revealed_cards = stack_revealed_cards(state);
+    views.stack_revealed_cards = stack_revealed_card_names(state);
 
     // CR 303.4 + CR 702.5: Walk the battlefield once and bucket Player-host
     // attachments by their host PlayerId. Object-host attachments are skipped
@@ -2173,31 +2176,14 @@ pub fn derive_filtered_views(
     // combat records unrelated to rendering.
     views.blocker_assignment_pairs = blocker_assignment_pairs(authoritative_state);
     // CR 701.20a: the viewer copy carries no lease map (it is a position
-    // channel), so the public presentation is rebuilt from rules state.
-    views.stack_revealed_cards = stack_revealed_cards(authoritative_state);
+    // channel), so the public presentation is rebuilt from rules state, and
+    // the stack grouping keeps entries with different reveals apart.
+    views.stack_revealed_cards = stack_revealed_card_names(authoritative_state);
+    if !filtered_state.stack.is_empty() {
+        views.stack_display_groups =
+            stack_display_groups_revealing(filtered_state, &views.stack_revealed_cards);
+    }
     views
-}
-
-/// CR 701.20a: for each stack entry holding stack-bound reveal leases, the
-/// names of the leased occurrences that are still current (CR 400.7: a lease
-/// on an occurrence that has since changed zones names nothing).
-fn stack_revealed_cards(state: &GameState) -> BTreeMap<ObjectId, Vec<String>> {
-    state
-        .stack_bound_reveals
-        .iter()
-        .filter_map(|(entry, occurrences)| {
-            let names: Vec<String> = occurrences
-                .iter()
-                .filter_map(|occurrence| {
-                    state.objects.get(&occurrence.object_id).and_then(|object| {
-                        (ObjectIncarnationRef::from_object(object) == *occurrence)
-                            .then(|| object.name.clone())
-                    })
-                })
-                .collect();
-            (!names.is_empty()).then_some((*entry, names))
-        })
-        .collect()
 }
 
 /// CR 702.40a: Storm counts each other spell cast before it this turn. A

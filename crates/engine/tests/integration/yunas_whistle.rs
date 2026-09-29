@@ -783,6 +783,19 @@ fn stack_revealed_seen_by(
         .stack_revealed_cards
 }
 
+/// The stack display groups a seated viewer receives, as member-id lists.
+fn stack_groups_seen_by(
+    state: &GameState,
+    viewer: engine::types::player::PlayerId,
+) -> Vec<Vec<ObjectId>> {
+    let projected = engine::game::visibility::filter_state_for_viewer(state, viewer);
+    engine::game::derived_views::derive_filtered_views(state, &projected, Some(viewer))
+        .stack_display_groups
+        .into_iter()
+        .map(|group| group.member_ids)
+        .collect()
+}
+
 fn reflexive_entries(state: &GameState) -> Vec<ObjectId> {
     state
         .stack
@@ -1502,6 +1515,11 @@ fn two_blasts_on_one_card() -> (GameRunner, ObjectId, Vec<ObjectId>, Vec<ObjectI
 fn overlapping_reveal_leases_release_independently_top_first() {
     let (mut runner, hit, entries, _) = two_blasts_on_one_card();
     assert_eq!(
+        stack_groups_seen_by(runner.state(), P1),
+        vec![entries.clone()],
+        "the same revealed card and target: one ×2 group"
+    );
+    assert_eq!(
         stack_revealed_seen_by(runner.state(), P1),
         entries
             .iter()
@@ -1557,6 +1575,76 @@ fn overlapping_reveal_leases_release_independently_bottom_first() {
     assert!(runner.state().stack.is_empty());
     assert!(stack_revealed_seen_by(runner.state(), P1).is_empty());
     assert_eq!(name_seen_by(runner.state(), P1, hit), HIDDEN);
+}
+
+/// CR 701.20a: two Calibrated Blast reflexives with the same target but
+/// different revealed cards are not the same thing twice. The stack display
+/// keeps them apart, so each entry's public reveal (and its different damage)
+/// stays visible.
+#[test]
+fn reflexives_revealing_different_cards_do_not_coalesce_on_the_stack() {
+    let Fixture {
+        mut runner,
+        spell,
+        library,
+        extras,
+        ..
+    } = fixture_with(
+        "Calibrated Blast",
+        CALIBRATED_BLAST,
+        false,
+        &[
+            LibCard::Sorcery("Two Drop", ManaCost::generic(2)),
+            LibCard::Sorcery("Three Drop", ManaCost::generic(3)),
+        ],
+        &[(P0, "Calibrated Blast", CALIBRATED_BLAST)],
+    );
+    runner.cast(spell).commit();
+    assert!(pass_until_prompt_or_empty(&mut runner));
+    choose(&mut runner, TargetRef::Player(P1));
+    runner.cast(extras[0]).commit();
+    assert!(
+        pass_until_prompt_or_empty(&mut runner),
+        "second reflexive prompt"
+    );
+    choose(&mut runner, TargetRef::Player(P1));
+    let entries = reflexive_entries(runner.state());
+    assert_eq!(entries.len(), 2, "reach guard: R1 and R2 both live");
+    assert_eq!(
+        runner.state().stack_bound_reveals[&entries[0]][0].object_id,
+        library[0],
+        "reach guard: R1 revealed Two Drop"
+    );
+    assert_eq!(
+        runner.state().stack_bound_reveals[&entries[1]][0].object_id,
+        library[1],
+        "reach guard: R2 revealed Three Drop"
+    );
+
+    for viewer in [P0, P1] {
+        assert_eq!(
+            stack_revealed_seen_by(runner.state(), viewer),
+            [
+                (entries[0], vec!["Two Drop".to_string()]),
+                (entries[1], vec!["Three Drop".to_string()]),
+            ]
+            .into(),
+            "both reveals are published"
+        );
+        assert_eq!(
+            stack_groups_seen_by(runner.state(), viewer),
+            vec![vec![entries[0]], vec![entries[1]]],
+            "different reveals do not coalesce"
+        );
+    }
+
+    pass_until_prompt_or_empty(&mut runner);
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(
+        runner.state().players[1].life,
+        15,
+        "reach guard: 3 + 2 damage"
+    );
 }
 
 #[test]
