@@ -266,11 +266,12 @@ pub fn guard_client_message_before_dispatch(
         ClientMessage::SubmitTournamentDeck {
             code,
             player_token,
-            deck: _,
+            deck,
             request_id: _,
         } => validate_submit_tournament_deck_fields(SubmitTournamentDeckFields {
             code,
             player_token,
+            deck,
         }),
         ClientMessage::DropFromTournament {
             code,
@@ -552,11 +553,12 @@ pub fn guard_broker_projection_inbound(msg: &ClientMessage) -> Result<(), String
         ClientMessage::SubmitTournamentDeck {
             code,
             player_token,
-            deck: _,
+            deck,
             request_id: _,
         } => validate_submit_tournament_deck_fields(SubmitTournamentDeckFields {
             code,
             player_token,
+            deck,
         }),
         ClientMessage::DropFromTournament {
             code,
