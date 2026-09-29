@@ -16021,10 +16021,15 @@ fn parse_reassemble_contraption_imperative(
 /// an optional trailing `" and (add|subtract) {quantity}"` modifier that the
 /// resolver applies to the natural roll before result-table lookup.
 ///
+/// This is the single authority for the die-roll header grammar, reached from
+/// both the chain dispatch and the line-initial die-table dispatch: a
+/// non-empty tail that is not a recognized add/subtract modifier refuses the
+/// whole header (CR 706.2).
+///
 /// Returns `(sides, modifier)` on success. The modifier is `None` when the
 /// remainder is empty or only contains trailing punctuation; otherwise the
 /// remainder must shape as a recognized add/subtract clause.
-fn try_parse_roll_die_with_modifier(
+pub(crate) fn try_parse_roll_die_with_modifier(
     lower: &str,
 ) -> Option<(u8, Option<crate::types::ability::DieRollModifier>)> {
     let (sides, rest) = try_parse_roll_die_sides_with_rest(lower)?;
