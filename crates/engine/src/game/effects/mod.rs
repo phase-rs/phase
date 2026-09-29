@@ -17828,14 +17828,18 @@ fn resolve_chain_body(
                 }
                 _ => None,
             };
-            if sub_clone.reads_return_result.is_some()
+            if (sub_clone.reads_return_result.is_some()
+                || state
+                    .resolution_stack
+                    .copy_token_at_child_boundary(child_stack_start))
                 && state.resolution_stack.capture_child_boundary() > child_stack_start
             {
-                // CR 608.2c: the reader follows the complete producer action.
-                // A replacement post-effect may have parked a continuation
-                // beneath the producer's batch frame, so insert this reader
-                // outside the whole child stack, at the boundary captured
-                // before resolving the producer.
+                // CR 608.2c: the rest of the chain follows the complete producer action,
+                // so insert it outside the whole child stack, at the boundary captured
+                // before resolving the producer. A named-result reader needs this because
+                // a replacement post-effect may have parked a continuation beneath the
+                // producer's batch frame; a copy-token producer parks its own batch owner
+                // at that boundary.
                 let mut pending = PendingContinuation::new(Box::new(sub_clone), state);
                 pending.pending_return_result_producer = pending_return_result_producer;
                 state
@@ -17843,7 +17847,7 @@ fn resolve_chain_body(
                         pending,
                         child_stack_start,
                     )
-                    .expect("named result reader must remain outside its producer's child stack");
+                    .expect("continuation must remain outside its producer's child stack");
             } else {
                 prepend_to_pending_continuation_with_producer(
                     state,

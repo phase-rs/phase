@@ -1,8 +1,3 @@
-//! Counts written as X ("create X tokens that are copies of", "flip X coins",
-//! "roll X dice") read the X announced while casting (CR 601.2b + CR 107.3a), and a
-//! delayed "sacrifice them" acts on the tokens it named when it was created
-//! (CR 603.7c).
-//!
 //! Regression for phase-rs/phase#7729: Doppelgang resolved and created nothing, and
 //! Devastating Onslaught cast with X=4 targeting Aerid Konstrari created no copies.
 
@@ -11,9 +6,11 @@ use std::collections::BTreeMap;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
+use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
+use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
@@ -66,6 +63,22 @@ const RIONYA_FIRE_DANCER: &str = "At the beginning of combat on your turn, creat
 are copies of another target creature you control, where X is one plus the number of instant \
 and sorcery spells you've cast this turn. They gain haste. Exile them at the beginning of the \
 next end step.";
+
+const ADAPTIVE_AUTOMATON: &str =
+    "As this creature enters, choose a creature type.\nThis creature is \
+the chosen type in addition to its other types.\nOther creatures you control of the chosen type \
+get +1/+1.";
+
+const QUICKSILVER_GARGANTUAN: &str = "You may have this creature enter as a copy of any creature \
+on the battlefield, except it's 7/7.";
+
+const FAITHFUL_WATCHDOG: &str = "Vigilance\nThis creature enters with three +1/+1 counters on it.";
+
+const HARDENED_SCALES: &str = "If one or more +1/+1 counters would be put on a creature you \
+control, that many plus one +1/+1 counters are put on it instead.";
+
+const CORPSEJACK_MENACE: &str = "If one or more +1/+1 counters would be put on a creature you \
+control, twice that many +1/+1 counters are put on it instead.";
 
 const OPT: &str = "Scry 1. (Look at the top card of your library. You may put that card on the \
 bottom.)\nDraw a card.";
@@ -588,4 +601,165 @@ fn fire_lord_sozin_reflexive_cap_reads_the_x_that_was_paid() {
         );
     }
     assert_eq!(state.objects[&grave_4].zone, Zone::Graveyard);
+}
+
+/// Answers each prompt a copy's entry raises until none is pending, and returns how
+/// many were answered. `copy_target` is the permanent an enter-as-a-copy choice picks.
+fn answer_copy_entry_prompts(runner: &mut GameRunner, copy_target: Option<ObjectId>) -> usize {
+    let mut answered = 0;
+    loop {
+        let action = match runner.state().waiting_for.clone() {
+            WaitingFor::NamedChoice { options, .. } => GameAction::ChooseOption {
+                choice: options
+                    .first()
+                    .cloned()
+                    .expect("a creature-type choice offers options"),
+            },
+            WaitingFor::ReplacementChoice { .. } => GameAction::ChooseReplacement { index: 0 },
+            WaitingFor::CopyTargetChoice { valid_targets, .. } => GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(
+                    copy_target
+                        .filter(|target| valid_targets.contains(target))
+                        .expect("the copy choice offers the planted permanent"),
+                )),
+            },
+            _ => return answered,
+        };
+        runner
+            .act(action)
+            .expect("the entry prompt accepts this answer");
+        answered += 1;
+        assert!(answered < 20, "entry prompts must not repeat without end");
+    }
+}
+
+/// The tokens P0 controls on the battlefield.
+fn p0_token_ids(runner: &GameRunner) -> Vec<ObjectId> {
+    let state = runner.state();
+    state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| state.objects[id].is_token && state.objects[id].controller == P0)
+        .collect()
+}
+
+/// With both copies on the battlefield and no player yet given priority again: both
+/// have haste, the resolution stack is empty, and one delayed trigger names and pins
+/// exactly the two copies (CR 603.7c).
+fn assert_copies_hasted_and_named_by_one_delayed_trigger(runner: &GameRunner) {
+    let state = runner.state();
+    let copies = p0_token_ids(runner);
+    assert_eq!(copies.len(), 2, "X=2 creates two copies");
+    assert!(
+        state.resolution_stack.is_empty(),
+        "the spell's instructions finish before any priority pass, left {:?}",
+        state
+            .resolution_stack
+            .iter()
+            .map(|frame| frame.kind())
+            .collect::<Vec<_>>()
+    );
+    for id in &copies {
+        assert!(
+            state.objects[id].has_keyword(&Keyword::Haste),
+            "\"those tokens gain haste\" reaches every copy"
+        );
+    }
+    assert_eq!(state.delayed_triggers.len(), 1);
+    let delayed = &state.delayed_triggers[0].ability;
+    let mut named: Vec<ObjectId> = delayed
+        .targets
+        .iter()
+        .map(|target| match target {
+            TargetRef::Object(id) => *id,
+            other => panic!("the delayed sacrifice names objects, got {other:?}"),
+        })
+        .collect();
+    named.sort();
+    let mut expected = copies;
+    expected.sort();
+    assert_eq!(named, expected, "\"sacrifice them\" names every copy");
+    assert_eq!(delayed.target_incarnations.len(), 2);
+}
+
+fn assert_copies_are_sacrificed_and_the_original_stays(
+    runner: &mut GameRunner,
+    original: ObjectId,
+) {
+    runner.advance_to_end_step();
+    runner.advance_until_stack_empty();
+    assert_eq!(
+        p0_token_ids(runner).len(),
+        0,
+        "the end-step sacrifice takes every copy"
+    );
+    assert!(runner.state().battlefield.contains(&original));
+}
+
+#[test]
+fn devastating_onslaught_on_a_creature_with_an_as_enters_choice_hastes_and_sacrifices_every_copy() {
+    let (mut runner, spell, automaton) = devastating_onslaught_scenario(|scenario| {
+        scenario
+            .add_creature_from_oracle(P0, "Adaptive Automaton", 2, 2, ADAPTIVE_AUTOMATON)
+            .id()
+    });
+
+    let _ = runner.cast(spell).x(2).target_object(automaton).resolve();
+    let prompts = answer_copy_entry_prompts(&mut runner, None);
+
+    assert_eq!(prompts, 2, "each copy asks for its creature type");
+    assert_copies_hasted_and_named_by_one_delayed_trigger(&runner);
+    assert_copies_are_sacrificed_and_the_original_stays(&mut runner, automaton);
+}
+
+#[test]
+fn devastating_onslaught_on_an_enter_as_a_copy_creature_hastes_and_sacrifices_every_copy() {
+    let (mut runner, spell, gargantuan) = devastating_onslaught_scenario(|scenario| {
+        scenario.add_creature(P0, "Grizzly Bears", 2, 2);
+        scenario
+            .add_creature_from_oracle(P0, "Quicksilver Gargantuan", 7, 7, QUICKSILVER_GARGANTUAN)
+            .id()
+    });
+    let bears = runner
+        .state()
+        .battlefield
+        .iter()
+        .copied()
+        .find(|id| runner.state().objects[id].name == "Grizzly Bears")
+        .expect("Grizzly Bears is planted on the battlefield");
+
+    let _ = runner.cast(spell).x(2).target_object(gargantuan).resolve();
+    let prompts = answer_copy_entry_prompts(&mut runner, Some(bears));
+
+    assert_eq!(
+        prompts, 4,
+        "each copy asks whether to enter as a copy, then which permanent"
+    );
+    assert_copies_hasted_and_named_by_one_delayed_trigger(&runner);
+    assert_copies_are_sacrificed_and_the_original_stays(&mut runner, gargantuan);
+}
+
+#[test]
+fn devastating_onslaught_on_a_creature_entering_with_counters_under_two_replacements_hastes_and_sacrifices_every_copy(
+) {
+    let (mut runner, spell, watchdog) = devastating_onslaught_scenario(|scenario| {
+        scenario.add_enchantment_from_oracle(P0, "Hardened Scales", HARDENED_SCALES);
+        scenario.add_creature_from_oracle(P0, "Corpsejack Menace", 4, 4, CORPSEJACK_MENACE);
+        let watchdog = scenario
+            .add_creature_from_oracle(P0, "Faithful Watchdog", 0, 0, FAITHFUL_WATCHDOG)
+            .id();
+        scenario.with_counter(watchdog, CounterType::Plus1Plus1, 3);
+        watchdog
+    });
+
+    let _ = runner.cast(spell).x(2).target_object(watchdog).resolve();
+    let prompts = answer_copy_entry_prompts(&mut runner, None);
+
+    assert_eq!(
+        prompts, 2,
+        "each copy asks which counter replacement applies first (CR 616.1)"
+    );
+    assert_copies_hasted_and_named_by_one_delayed_trigger(&runner);
+    assert_copies_are_sacrificed_and_the_original_stays(&mut runner, watchdog);
 }

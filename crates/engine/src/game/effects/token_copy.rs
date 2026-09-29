@@ -289,6 +289,15 @@ pub(crate) fn drain_pending_copy_token_resolution(
         return;
     };
     drain_copy_token_resolution(state, pending, events);
+    // CR 608.2c + CR 117.3b: a continuation left directly beneath the consumed
+    // owner resumes now, before any player receives priority.
+    if matches!(
+        state.waiting_for,
+        crate::types::game_state::WaitingFor::Priority { .. }
+    ) && state.active_ability_continuation().is_some()
+    {
+        super::drain_pending_continuation(state, events);
+    }
 }
 
 fn drain_copy_token_resolution(
