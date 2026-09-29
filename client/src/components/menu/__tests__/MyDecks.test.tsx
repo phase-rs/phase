@@ -151,8 +151,8 @@ describe("MyDecks", () => {
 
     render(<MyDecks mode="manage" activeDeckName={null} />);
 
-    const standardTile = (await screen.findByText("Standard Bracket")).closest("[role='button']");
-    const commanderTile = (await screen.findByText("Commander Bracket")).closest("[role='button']");
+    const standardTile = (await screen.findByText("Standard Bracket")).closest<HTMLElement>("[role='button']");
+    const commanderTile = (await screen.findByText("Commander Bracket")).closest<HTMLElement>("[role='button']");
     expect(standardTile).not.toBeNull();
     expect(commanderTile).not.toBeNull();
     expect(within(standardTile!).queryByLabelText("Declared bracket: B3 Upgraded")).not.toBeInTheDocument();
