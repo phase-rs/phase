@@ -5,9 +5,9 @@ use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, tag_no_case, take_until, take_while1};
 use nom::character::complete::{anychar, char, multispace0, multispace1};
-use nom::combinator::{all_consuming, eof, map_opt, opt, peek, recognize, rest, value};
+use nom::combinator::{all_consuming, cond, eof, map_opt, opt, peek, recognize, rest, value};
 use nom::multi::{many_till, separated_list1};
-use nom::sequence::{pair, preceded, terminated};
+use nom::sequence::{delimited, pair, preceded, terminated};
 use nom::Parser;
 
 use super::oracle_effect::become_copy_except::parse_except_clause;
@@ -48,10 +48,10 @@ use crate::types::ability::{
     DamageTargetPlayerScope, DieRollIgnoreRule, DrawReplacementScope, Duration, Effect,
     EffectScope, FilterProp, LibraryInstructionActor, LibraryPosition, ManaModification,
     ManaReplacementScope, ManaSpendPermission, PermissionGrantee, PlayerFilter, PreventionAmount,
-    PreventionFormula, QuantityExpr, QuantityModification, QuantityRef, RedirectionLifetime,
-    ReplacementChoiceAuthority, ReplacementCondition, ReplacementDefinition, ReplacementMode,
-    ReplacementPlayerScope, SourceExclusion, StaticCondition, StaticDefinition, TapStateChange,
-    TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
+    PreventionFormula, PreventionScope, QuantityExpr, QuantityModification, QuantityRef,
+    RedirectionLifetime, ReplacementChoiceAuthority, ReplacementCondition, ReplacementDefinition,
+    ReplacementMode, ReplacementPlayerScope, SourceExclusion, StaticCondition, StaticDefinition,
+    TapStateChange, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
 };
 use crate::types::ability::{CardPlayMode, CastingPermission};
 use crate::types::card_type::Supertype;
@@ -7284,9 +7284,10 @@ fn damage_target_filter_to_prevent_target(filter: Option<&DamageTargetFilter>) -
 /// heuristic. Returns `None` (fall-through) when the prefix or grammar fails.
 ///
 /// `ctx.in_trigger` is read only by the `parse_oneshot_target_source_prevent`
-/// sub-branch (the "that creature" subject form is a target-source anaphor that
-/// must not fire inside a trigger body, where "that creature" resolves to the
-/// triggering creature's event context instead).
+/// sub-branch, and gates only its "that creature" subject form: that anaphor is
+/// a target-source capture outside a trigger body, but inside one it resolves
+/// to the triggering creature's event context instead. A declared "target
+/// creature" subject is admitted in any ability body (Ria Ivor).
 pub(crate) fn parse_oneshot_damage_replacement(
     norm_lower: &str,
     ctx: &ParseContext,
@@ -7323,9 +7324,13 @@ pub(crate) fn parse_oneshot_damage_replacement(
     // (or the non-trigger anaphor "that creature"), so the prevention must carry
     // the chosen creature as the damage source (CR 609.7a capture) with a typed
     // CR 609.7b recheck leaf. Tried before the generic "would deal ... this
-    // turn" gate so the target subject is claimed here; on subject mismatch it
-    // returns `None` and falls through to the existing generic branch below
-    // (byte-for-byte unchanged).
+    // turn" gate so the target subject is claimed here. The declared-target
+    // subject is accepted in any ability body (spell, activated, triggered). The
+    // branch returns `None` only on a subject mismatch, which falls through to
+    // the existing generic branch below (byte-for-byte unchanged). Once the
+    // subject is proven and the result is a complete prevention, an unsupported
+    // scope/recipient tail becomes `Effect::unimplemented` rather than falling
+    // through to the generic branch below.
     if let Some(effect) = parse_oneshot_target_source_prevent(norm_lower, ctx) {
         return Some(effect);
     }
@@ -7491,6 +7496,48 @@ fn is_complete_oneshot_prevention_result(input: &str) -> bool {
     .is_ok()
 }
 
+/// CR 510.2 + CR 120.1: Parse the scope/recipient tail of a source-scoped
+/// one-shot prevention's would-deal clause — the text after "would deal" and
+/// before the "this turn" / "this combat" window: "[combat] damage [to
+/// <recipient>]". "combat damage" narrows the shield to combat damage (CR 510.2
+/// deals it simultaneously in the combat damage step); the optional recipient
+/// phrase is a typed recipient domain (CR 120.1). All-consuming: any
+/// unrecognized recipient text ("to target creature") is an `Err`.
+fn parse_oneshot_prevent_damage_tail(
+    input: &str,
+) -> OracleResult<'_, (PreventionScope, Option<DamageTargetFilter>)> {
+    all_consuming(delimited(
+        multispace0,
+        pair(
+            alt((
+                value(PreventionScope::CombatDamage, tag("combat damage")),
+                value(PreventionScope::AllDamage, tag("damage")),
+            )),
+            opt(preceded(char(' '), parse_damage_target_phrase)),
+        ),
+        multispace0,
+    ))
+    .parse(input)
+}
+
+/// CR 615.1a + CR 120.1: None means the recipient scope is unsupported for a source-scoped one-shot prevention (no in-corpus card); the caller lowers it to `Effect::unimplemented` — it never falls through to the generic branch.
+fn oneshot_source_prevent_recipient(
+    recipient: Option<&DamageTargetFilter>,
+) -> Option<TargetFilter> {
+    match recipient {
+        None => Some(TargetFilter::Any),
+        Some(DamageTargetFilter::Player { player }) => match player {
+            DamageTargetPlayerScope::Any => Some(TargetFilter::Player),
+            DamageTargetPlayerScope::Controller => Some(TargetFilter::Controller),
+            DamageTargetPlayerScope::Opponent
+            | DamageTargetPlayerScope::SourceChosenPlayer
+            | DamageTargetPlayerScope::Specific(_) => None,
+        },
+        Some(DamageTargetFilter::CreatureOnly) => None,
+        Some(DamageTargetFilter::PlayerOrPermanentsControlledBy { .. }) => None,
+    }
+}
+
 /// CR 615.1a + CR 614.1a + CR 115.1 + CR 609.7a + CR 609.7b: Parse the
 /// Awe-Strike-class one-shot TARGET-SOURCE prevention —
 ///
@@ -7498,31 +7545,33 @@ fn is_complete_oneshot_prevention_result(input: &str) -> bool {
 ///    damage."  (Awe Strike)
 ///
 /// The subject of the "would deal" clause is a DECLARED TARGET ("target
-/// creature", "another target creature", "other target creature") or the
+/// creature", "another target creature", "other target creature") — admitted
+/// in any ability body, including a trigger body (Ria Ivor) — or the
 /// non-trigger anaphor "that creature". The prevention is source-scoped: the
 /// chosen creature is captured as the damage source (CR 609.7a `ParentTargetSlot`
 /// sentinel, concretized to `SpecificObject` at resolution) with a typed
-/// CR 609.7b recheck leaf (`Typed(creature)`), and the recipient slot stays
-/// `Any` (CR 115.1: the target slot is hosted by the source-filter `And`).
+/// CR 609.7b recheck leaf (`Typed(creature)`; CR 115.1: the target slot is
+/// hosted by the source-filter `And`). The optional recipient phrase ("to you",
+/// "to one or more players") is a SCOPE carried in `target`, never a target.
 ///
 /// Pure nom combinators — the subject is isolated with `peek(take_until(...))`
 /// after the `tag("the next time ")` prefix, the declared-target prefix is
 /// matched with the shared `parse_declared_target_prefix` building block, the
-/// noun phrase resolves through `parse_target`, and the duration ("this turn" /
-/// "this combat") via `parse_duration`. Returns `None` (fall-through) when the
-/// subject is not a declared-target / that-creature form, so the generic
-/// one-shot branch below claims the sentence unchanged (CoP:Red's "a red source
-/// of your choice", Desperate Gambit's "it", ...).
+/// noun phrase resolves through `parse_target`, the duration ("this turn" /
+/// "this combat") via `parse_duration`, and the scope/recipient tail via
+/// `parse_oneshot_prevent_damage_tail`.
+///
+/// Two distinct decline outcomes:
+/// 1. Subject mismatch — the subject is not a declared-target form or the
+///    non-trigger "that creature": returns `None` (fall-through), so the
+///    generic one-shot branch claims the sentence unchanged (CoP:Red's "a red
+///    source of your choice", Desperate Gambit's "it", Impulsive Maneuvers'
+///    trigger-body "that creature", ...).
+/// 2. Unsupported tail, subject proven — the result is a complete prevention
+///    but the scope/recipient tail does not parse or names an unsupported
+///    recipient: returns `Some(Effect::unimplemented(..))`, an honest gap that
+///    never falls through to the generic branch's unscoped, source-less shield.
 fn parse_oneshot_target_source_prevent(norm_lower: &str, ctx: &ParseContext) -> Option<Effect> {
-    // CR 603.1: inside a trigger body "that creature" is an event-context
-    // anaphor resolved by the trigger machinery, not a target-source capture —
-    // the Awe Strike class of target-source prevention only exists in
-    // spell/activated-ability bodies. Ria Ivor (trigger body) and Impulsive
-    // Maneuvers (activated body) both keep their fall-through shapes.
-    if ctx.in_trigger {
-        return None;
-    }
-
     // CR 614.1a: "the next time " prefix + the subject slice before "would deal".
     let (after_prefix, _) = preceded(
         tag::<_, _, OracleError<'_>>("the next time "),
@@ -7557,7 +7606,14 @@ fn parse_oneshot_target_source_prevent(norm_lower: &str, ctx: &ParseContext) -> 
         } else {
             (TargetFilter::Any, Some(rest))
         }
-    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that creature").parse(subject) {
+    }
+    // CR 608.2c: inside a trigger body "that creature" refers back to the object named by the trigger condition, not a target-source capture — only the declared-target arm ("target creature", CR 115.1) is admitted there (Ria Ivor).
+    else if let Ok((rest, Some(_))) = cond(
+        !ctx.in_trigger,
+        tag::<_, _, OracleError<'_>>("that creature"),
+    )
+    .parse(subject)
+    {
         // CR 608.2c: "that creature" in a NON-trigger context is an anaphor
         // to the chosen target creature (Dazzling Reflection). The typed
         // `Typed(creature)` leaf is emitted DIRECTLY rather than routed
@@ -7611,21 +7667,27 @@ fn parse_oneshot_target_source_prevent(norm_lower: &str, ctx: &ParseContext) -> 
         None => return None,
     };
 
-    // CR 506.2: "combat damage" narrows the scope to combat damage only.
-    let scope = if nom_primitives::scan_contains(would_clause, "combat damage") {
-        crate::types::ability::PreventionScope::CombatDamage
-    } else {
-        crate::types::ability::PreventionScope::AllDamage
+    // CR 615.1a + CR 120.1: the subject is a proven declared-target source and the
+    // result is a complete prevention, so an unrecognized scope/recipient tail must
+    // not fall through to the generic branch (which would emit an unscoped,
+    // source-less shield). Keep it an honest parser gap.
+    let fail_closed = || Some(Effect::unimplemented("prevent", norm_lower));
+    let Ok((_, (_, tail))) = nom_primitives::split_once_on(would_clause, "would deal") else {
+        return fail_closed();
+    };
+    let Ok((_, (scope, recipient))) = parse_oneshot_prevent_damage_tail(tail) else {
+        return fail_closed();
+    };
+    let Some(target) = oneshot_source_prevent_recipient(recipient.as_ref()) else {
+        return fail_closed();
     };
 
+    // CR 615.8: "the next time a specific source would deal damage" prevents that source's next damage instance only.
     Some(Effect::PreventDamage {
         amount: PreventionAmount::All,
         amount_dynamic: None,
-        // CR 115.1: the target slot is hosted by `damage_source_filter`'s `And`
-        // (`ParentTargetSlot { 0 }` captures the chosen creature, CR 609.7a);
-        // `Any` here means "no additional recipient scope" and is not consulted
-        // on the source-scoped prevent path.
-        target: TargetFilter::Any,
+        // CR 115.10a + CR 120.1: the recipient phrase ("to one or more players") is a SCOPE, not a target — the only declared target is the source (hosted by damage_source_filter's And, CR 115.1).
+        target,
         scope,
         damage_source_filter: Some(TargetFilter::And {
             filters: vec![
@@ -9074,7 +9136,13 @@ fn parse_damage_target_phrase(
         ),
         value(
             damage_target_any_player(),
-            alt((tag("to a player"), tag("to that player"), tag("to players"))),
+            alt((
+                tag("to a player"),
+                tag("to that player"),
+                tag("to players"),
+                // CR 120.1: "one or more players" is the player recipient domain (Ria Ivor).
+                tag("to one or more players"),
+            )),
         ),
     ))
     .parse(input)
@@ -23466,6 +23534,15 @@ mod tests {
             ));
         }
 
+        // CR 120.1: "to one or more players" is the player recipient domain
+        // (Ria Ivor), the same scope as the existing "to players" arm.
+        for phrase in ["to one or more players", "to players"] {
+            let (rest, filter) =
+                parse_damage_target_phrase(phrase).expect("the player-domain phrase must parse");
+            assert_eq!(filter, damage_target_any_player(), "{phrase}");
+            assert!(rest.is_empty(), "{phrase} must be fully consumed");
+        }
+
         // The space-separated spelling reaches the same shared authority.
         let (rest, filter) = parse_damage_target_phrase("to you and other permanents you control")
             .expect("the conjunct arm must match the space-separated spelling");
@@ -27867,11 +27944,17 @@ mod snapshot_tests {
         .expect("combat-scoped target-source prevention must parse");
         match effect {
             Effect::PreventDamage {
+                target,
                 scope,
                 damage_source_filter,
                 prevention_duration,
                 ..
             } => {
+                assert_eq!(
+                    target,
+                    TargetFilter::Player,
+                    "CR 120.1: 'to one or more players' is the player recipient scope"
+                );
                 assert_eq!(scope, crate::types::ability::PreventionScope::CombatDamage);
                 assert_eq!(
                     prevention_duration,
@@ -27967,23 +28050,38 @@ mod snapshot_tests {
 
     /// Ria Ivor, Bane of Bladehold — the one-shot prevention lives in a
     /// TRIGGER body ("At the beginning of combat on your turn, the next time
-    /// target creature would deal combat damage ... prevent that damage. If
-    /// damage is prevented this way, create ..."). Inside a trigger, the new
-    /// target-source branch must NOT claim it (the `ctx.in_trigger` gate):
-    /// the prevention sentence stays an honest `Unimplemented` gap and the
-    /// rider stays a `SequentialSibling`. Reverting the gate mis-parses the
-    /// trigger body's "target creature" as a spell-side declared target.
+    /// target creature would deal combat damage to one or more players this
+    /// combat, prevent that damage. If damage is prevented this way, create ...").
+    /// The declared "target creature" subject is admitted inside a trigger body
+    /// (only the "that creature" anaphor is trigger-gated, CR 608.2c), so the
+    /// sentence lowers to the source-scoped one-shot `PreventDamage` with the
+    /// player recipient SCOPE (CR 120.1), and the CR 615.5 rider folds as a
+    /// `ContinuationStep` reading the prevented amount. Reverting the branch
+    /// change leaves the prevention an `Unimplemented` gap and the rider a
+    /// `SequentialSibling`.
     #[test]
-    fn ria_ivor_trigger_body_keeps_fall_through_shapes() {
-        use crate::types::ability::SubAbilityLink;
+    fn ria_ivor_trigger_body_lowers_recipient_scoped_target_source_prevention() {
+        use crate::types::ability::{AbilityDefinition, SubAbilityLink};
         use crate::types::triggers::TriggerMode;
+
+        fn chain_has_unimplemented(def: &AbilityDefinition) -> bool {
+            matches!(&*def.effect, Effect::Unimplemented { .. })
+                || def
+                    .sub_ability
+                    .as_deref()
+                    .is_some_and(chain_has_unimplemented)
+                || def
+                    .else_ability
+                    .as_deref()
+                    .is_some_and(chain_has_unimplemented)
+        }
 
         let parsed = parse_oracle_text(
             "At the beginning of combat on your turn, the next time target creature would deal combat damage to one or more players this combat, prevent that damage. If damage is prevented this way, create that many 1/1 colorless Phyrexian Mite artifact creature tokens with toxic 1 and \"This token can't block.\"",
             "Ria Ivor, Bane of Bladehold",
             &[],
             &["Creature".to_string()],
-            &["Phyrexian".to_string(), "Human".to_string(), "Soldier".to_string()],
+            &["Phyrexian".to_string(), "Knight".to_string()],
         );
         let trigger = parsed
             .triggers
@@ -27991,23 +28089,180 @@ mod snapshot_tests {
             .find(|t| t.mode == TriggerMode::Phase)
             .expect("beginning-of-combat trigger must exist");
         let body = trigger.execute.as_deref().expect("trigger body");
-        // Reach guard: the prevention sentence IS parsed by the chain (as an
-        // honest Unimplemented gap, not dropped).
-        assert!(
-            matches!(&*body.effect, Effect::Unimplemented { .. }),
-            "the trigger-body prevention sentence must stay an honest Unimplemented gap, got {:?}",
-            body.effect
-        );
-        // The rider is an independent sibling, not a folded shield rider.
+        match &*body.effect {
+            Effect::PreventDamage {
+                target,
+                scope,
+                damage_source_filter,
+                prevention_duration,
+                ..
+            } => {
+                assert_eq!(
+                    damage_source_filter,
+                    &Some(TargetFilter::And {
+                        filters: vec![
+                            TargetFilter::ParentTargetSlot { index: 0 },
+                            TargetFilter::Typed(TypedFilter::creature()),
+                        ],
+                    }),
+                    "CR 609.7a: the declared target creature is the captured damage source"
+                );
+                assert_eq!(
+                    target,
+                    &TargetFilter::Player,
+                    "CR 120.1: 'to one or more players' is the player recipient scope"
+                );
+                assert_eq!(scope, &crate::types::ability::PreventionScope::CombatDamage);
+                assert_eq!(
+                    prevention_duration,
+                    &Some(Duration::UntilEndOfCombat),
+                    "CR 511.2: 'this combat' expires at end of combat"
+                );
+            }
+            other => panic!("expected PreventDamage, got {other:?}"),
+        }
+        let rider = body
+            .sub_ability
+            .as_deref()
+            .expect("the rider must be chained");
         assert_eq!(
-            body.sub_ability.as_ref().map(|s| s.sub_link),
-            Some(SubAbilityLink::SequentialSibling),
-            "the rider must stay a SequentialSibling in a trigger body"
+            rider.sub_link,
+            SubAbilityLink::ContinuationStep,
+            "CR 615.5: the 'prevented this way' rider folds onto the shield"
         );
-        assert!(matches!(
-            body.sub_ability.as_ref().map(|s| s.effect.as_ref()),
-            Some(Effect::Token { .. })
-        ));
+        match &*rider.effect {
+            Effect::Token { count, .. } => assert_eq!(
+                count,
+                &QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount
+                },
+                "'that many' reads the prevented amount"
+            ),
+            other => panic!("expected Token rider, got {other:?}"),
+        }
+        assert!(
+            !chain_has_unimplemented(body),
+            "no Unimplemented node may remain in the trigger chain: {body:?}"
+        );
+    }
+
+    /// CR 608.2c: `ctx.in_trigger` gates ONLY the "that creature" anaphor. The
+    /// declared "target creature" subject lowers inside a trigger body (reach
+    /// guard); Impulsive Maneuvers' trigger-body "that creature" declines
+    /// (`None`, subject mismatch) and the same text outside a trigger lowers.
+    /// The `None` row discriminates the `Some(_)` pattern on `cond`: matching a
+    /// bare `Ok((rest, _))` would admit every subject inside a trigger.
+    #[test]
+    fn trigger_context_gates_only_that_creature_anaphor() {
+        let source_scoped = Some(TargetFilter::And {
+            filters: vec![
+                TargetFilter::ParentTargetSlot { index: 0 },
+                TargetFilter::Typed(TypedFilter::creature()),
+            ],
+        });
+        let trigger_ctx = ParseContext {
+            in_trigger: true,
+            ..Default::default()
+        };
+
+        let declared = parse_oneshot_target_source_prevent(
+            "the next time target creature would deal combat damage this turn, prevent that damage",
+            &trigger_ctx,
+        );
+        assert!(
+            matches!(
+                &declared,
+                Some(Effect::PreventDamage { damage_source_filter, .. })
+                    if *damage_source_filter == source_scoped
+            ),
+            "reach guard: a declared target subject must lower inside a trigger body, got {declared:?}"
+        );
+
+        const IMPULSIVE: &str =
+            "the next time that creature would deal combat damage this turn, prevent that damage";
+        assert_eq!(
+            parse_oneshot_target_source_prevent(IMPULSIVE, &trigger_ctx),
+            None,
+            "inside a trigger body 'that creature' is not a target-source capture"
+        );
+        let outside = parse_oneshot_target_source_prevent(IMPULSIVE, &ParseContext::default());
+        assert!(
+            matches!(
+                &outside,
+                Some(Effect::PreventDamage { damage_source_filter, .. })
+                    if *damage_source_filter == source_scoped
+            ),
+            "outside a trigger body 'that creature' lowers as the anaphor, got {outside:?}"
+        );
+    }
+
+    /// CR 615.1a + CR 120.1: once the declared-target subject is proven and the
+    /// result is a complete prevention, the scope/recipient tail either lowers
+    /// (no recipient → `Any`, "to you" → `Controller`) or fails CLOSED to
+    /// `Effect::Unimplemented` — never a fall-through to the generic branch,
+    /// which would emit the source-less blanket shield
+    /// (`PreventDamage { damage_source_filter: None, .. }`).
+    #[test]
+    fn target_source_prevent_recipient_scope_fails_closed() {
+        let source_scoped = Some(TargetFilter::And {
+            filters: vec![
+                TargetFilter::ParentTargetSlot { index: 0 },
+                TargetFilter::Typed(TypedFilter::creature()),
+            ],
+        });
+        let ctx = ParseContext::default();
+
+        // Positive reach guard: "to you" → Controller scope.
+        match parse_oneshot_damage_replacement(
+            "the next time target creature would deal damage to you this turn, prevent that damage",
+            &ctx,
+        ) {
+            Some(Effect::PreventDamage {
+                target,
+                damage_source_filter,
+                ..
+            }) => {
+                assert_eq!(target, TargetFilter::Controller);
+                assert_eq!(damage_source_filter, source_scoped);
+            }
+            other => panic!("expected PreventDamage, got {other:?}"),
+        }
+
+        // Positive reach guard: Awe Strike, no recipient → Any, all damage.
+        match parse_oneshot_damage_replacement(
+            "the next time target creature would deal damage this turn, prevent that damage",
+            &ctx,
+        ) {
+            Some(Effect::PreventDamage {
+                target,
+                scope,
+                damage_source_filter,
+                ..
+            }) => {
+                assert_eq!(target, TargetFilter::Any);
+                assert_eq!(scope, crate::types::ability::PreventionScope::AllDamage);
+                assert_eq!(damage_source_filter, source_scoped);
+            }
+            other => panic!("expected PreventDamage, got {other:?}"),
+        }
+
+        for text in [
+            // Bridge-None arm: parses as Player{Opponent}, unsupported here.
+            "the next time target creature would deal damage to an opponent this turn, prevent that damage",
+            // Tail-parse-Err arm: "to target creature" is not a recipient phrase.
+            "the next time target creature would deal damage to target creature this turn, prevent that damage",
+        ] {
+            let effect = parse_oneshot_damage_replacement(text, &ctx)
+                .unwrap_or_else(|| panic!("{text:?} must fail closed, not decline"));
+            assert!(
+                matches!(effect, Effect::Unimplemented { .. }),
+                "{text:?} must lower to an honest Unimplemented gap, got {effect:?}"
+            );
+            assert!(
+                !matches!(effect, Effect::PreventDamage { .. }),
+                "{text:?} must never become a PreventDamage shield, got {effect:?}"
+            );
+        }
     }
 
     /// Circle of Protection: Red — verbatim. The "a red source of your choice"

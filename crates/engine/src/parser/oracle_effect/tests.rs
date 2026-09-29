@@ -42024,7 +42024,8 @@ fn chain_position_windowed_graveyard_redirect_lowers() {
 // `oracle_replacement`'s own rows still cover its grammar.
 //
 // The venue-P companion `guard_ownership::v10_*` was already withdrawn for a different
-// reason (it would have fired on Ria Ivor, whose shield merely failed to parse).
+// reason (it would have fired on Ria Ivor, whose shield did not parse when V10 was
+// withdrawn).
 
 /// The `Event` conjunct on `is_ownership_candidate` (and on `guard_owner`'s O1a arm) is
 /// load-bearing: an O1a rider SHAPE under a STATE guard is not an ownership candidate.

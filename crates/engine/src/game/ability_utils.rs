@@ -2865,7 +2865,7 @@ pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -
 /// Returns `None` for recipient-scoped or `ChosenDamageSource`/`IsChosenColor`
 /// ("by …" Arachnogenesis) prevents, so those are NOT diverted into a source
 /// target slot.
-fn damage_replacement_source_slot_filter(effect: &Effect) -> Option<&TargetFilter> {
+pub(crate) fn damage_replacement_source_slot_filter(effect: &Effect) -> Option<&TargetFilter> {
     let source_filter = match effect {
         Effect::PreventDamage {
             damage_source_filter,

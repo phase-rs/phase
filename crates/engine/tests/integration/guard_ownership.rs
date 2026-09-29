@@ -675,16 +675,17 @@ fn v9_o2_is_an_ancestor_test_so_the_second_rider_survives() {
 // a CR 608.2c back-reference, and back-references read STATE by construction — so under
 // the amended rule the resolver always clears it and this row's gap never fires.
 //
-// That is the right outcome, and Ria Ivor is the measured witness. Its rider is
-// `"If damage is prevented this way, create …"`, and its prevention sentence does NOT
-// parse at base: `oracle_replacement`'s own snapshot row
-// `ria_ivor_trigger_body_keeps_fall_through_shapes` documents that "the prevention
-// sentence stays an honest `Unimplemented` gap and the rider stays a `SequentialSibling`".
-// So the ancestor test finds no shield, and a V10-shaped rule gaps the `Token` body that
-// base emits correctly — deleting a correct instruction to punish an UNRELATED parse gap.
-// A CR 615.5 gap rule would first have to distinguish "no shield printed" from "the
-// printed shield did not parse"; no such rule exists here, so the row goes rather than the
-// behaviour.
+// That is the right outcome. Ria Ivor was the measured witness when V10 was withdrawn:
+// its rider is `"If damage is prevented this way, create …"`, and at that time its
+// prevention sentence did NOT parse — it was an honest `Unimplemented` gap and the rider a
+// `SequentialSibling`. So the ancestor test found no shield, and a V10-shaped rule would
+// have gapped the `Token` body that base emitted correctly — deleting a correct
+// instruction to punish an UNRELATED parse gap. Ria's shield now parses and its rider
+// folds as a `ContinuationStep` (`oracle_replacement`'s
+// `ria_ivor_trigger_body_lowers_recipient_scoped_target_source_prevention`), but the
+// withdrawal argument stands independently of that witness: a CR 615.5 gap rule would
+// first have to distinguish "no shield printed" from "the printed shield did not parse";
+// no such rule exists here, so the row goes rather than the behaviour.
 //
 // Its venue-C companion V10c (in `parser/oracle_effect/tests.rs`) is WITHDRAWN with it. V10c
 // asserted that the seam DEFERS a CR 615.5 "prevented this way" rider, i.e. that
