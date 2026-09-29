@@ -808,6 +808,7 @@
     "titleTargets": "Objetivos: {{targets}}",
     "titlePaid": "Pagado: {{paid}}",
     "titleContext": "Contexto: {{context}}",
+    "revealedCards": "Revelada: {{cards}}",
     "paidXValue": "X={{value}}",
     "paidManaSpent": "{{amount}} de maná",
     "paidColorsSpent": "{{count}} colores",
@@ -1384,6 +1385,7 @@
       "target": "Objetivo",
       "return": "Devolver",
       "discard": "Descartar",
+      "reveal": "Mostrar",
       "evidence": "Prueba",
       "manifest": "Manifestar",
       "untap": "Enderezar",
@@ -2297,7 +2299,8 @@
       "zoneExile": "el exilio",
       "zoneHand": "tu mano",
       "discard": "Descarta {{count}} {{cards}}",
-      "exile": "Exilia {{count}} {{cards}} de {{zone}}"
+      "exile": "Exilia {{count}} {{cards}} de {{zone}}",
+      "reveal": "Muestra {{count}} {{cards}} de {{zone}}"
     }
   },
   "topOrBottom": {

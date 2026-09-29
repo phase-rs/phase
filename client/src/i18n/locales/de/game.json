@@ -808,6 +808,7 @@
     "titleTargets": "Ziele: {{targets}}",
     "titlePaid": "Bezahlt: {{paid}}",
     "titleContext": "Kontext: {{context}}",
+    "revealedCards": "Aufgedeckt: {{cards}}",
     "paidXValue": "X={{value}}",
     "paidManaSpent": "{{amount}} Mana",
     "paidColorsSpent": "{{count}} Farben",
@@ -1384,6 +1385,7 @@
       "target": "Ziel",
       "return": "Zurückgeben",
       "discard": "Abwerfen",
+      "reveal": "Vorzeigen",
       "evidence": "Beweise",
       "manifest": "Manifestieren",
       "untap": "Enttappen",
@@ -2297,7 +2299,8 @@
       "zoneExile": "dem Exil",
       "zoneHand": "deiner Hand",
       "discard": "Wirf {{count}} {{cards}} ab",
-      "exile": "Schicke {{count}} {{cards}} aus {{zone}} ins Exil"
+      "exile": "Schicke {{count}} {{cards}} aus {{zone}} ins Exil",
+      "reveal": "Zeige {{count}} {{cards}} aus {{zone}} vor"
     }
   },
   "topOrBottom": {

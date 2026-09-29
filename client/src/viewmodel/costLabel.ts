@@ -354,6 +354,15 @@ export function formatKnownCost(cost: SerializedCost): string | null {
         zone: formatZone(cost.zone),
       });
     }
+    case "Reveal": {
+      const count = formatQuantity(cost.count, 1);
+      const cards = formatFilteredCard(cost.filter, quantityIsPlural(cost.count));
+      return i18n.t("game:resolutionOptionalPayment.cost.reveal", {
+        count,
+        cards,
+        zone: formatZone(cost.zone),
+      });
+    }
     case "Blight": return `Blight ${cost.count ?? 1}`;
     case "CollectEvidence":
       return `Collect evidence ${cost.amount ?? 0}`;

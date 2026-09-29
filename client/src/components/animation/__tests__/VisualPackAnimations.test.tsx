@@ -555,6 +555,39 @@ describe("visual-pack animation consumers", () => {
     ).toEqual(["revealed-80.png", "revealed-81.png"]);
   });
 
+  it("fans a CardsRevealed step by name when the engine withheld the ids", () => {
+    // CR 401.2: the engine drops the ids of revealed cards that now sit in a
+    // library at a hidden position and keeps their names; the fan still shows
+    // every revealed card, from the names alone.
+    vi.useFakeTimers();
+    for (const name of ["Forest", "Three Drop"]) {
+      imageMock.results.set(name, {
+        src: `${name}.png`,
+        isLoading: false,
+        isRotated: false,
+        isFlip: false,
+      });
+    }
+    seedOverlay(
+      state([]),
+      state([]),
+      step({
+        type: "CardsRevealed",
+        data: {
+          player: 0,
+          card_ids: [],
+          card_names: ["Forest", "Three Drop"],
+        },
+      }),
+    );
+    render(<AnimationOverlay containerRef={containerRef} />);
+    expect(
+      screen
+        .getAllByAltText(/^(Forest|Three Drop)$/)
+        .map((image) => image.getAttribute("src")),
+    ).toEqual(["Forest.png", "Three Drop.png"]);
+  });
+
   it("filters hidden reveal identity before resolving two public small snapshots", () => {
     const publicA = visibleObject({
       id: 60,

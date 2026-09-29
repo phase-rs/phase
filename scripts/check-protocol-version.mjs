@@ -52,7 +52,9 @@ const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
 // +18: the v89 graveyard cast-method requirement and permission announcement.
 // +19: the v90 FormatConfig.allow_experimental_dungeons capability flag.
 // +20: the v91 PendingManaAbility chosen-counter count retype.
-const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 20;
+// +21: the v92 serialized ParentTargetMissingReason carrier and its
+// RevealUntil reveal-until whiff verdict.
+const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 21;
 // The LOBBY message-set version, not derived from the full-game number above.
 // The classifier below refuses an expression only on the SOURCE constants; this
 // script never reads itself, so its own EXPECTED_* must stay literals.
@@ -95,7 +97,8 @@ const PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION = 54;
 // requirement and permission announcement.
 // +18: wire 72 moves with full-game v90 for the experimental-dungeon capability flag.
 // +19: wire 73 moves with full-game v91 for the counter-count retype.
-const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 19;
+// +20: wire 74 moves with full-game v92 for the serialized reveal-until verdict.
+const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 20;
 // The P2P DRAFT wire version. A FIFTH independent surface, and the one this
 // script previously did not read at all: `DRAFT_PROTOCOL_VERSION` is an
 // EXACT-MATCH first-contact gate (p2p-draft-host.ts / p2p-draft-guest.ts refuse

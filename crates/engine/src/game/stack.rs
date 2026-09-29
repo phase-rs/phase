@@ -15,7 +15,7 @@ use crate::types::game_state::{
     StackEntry, StackEntryKind, StackPaidSnapshot, StackResolutionPolicy, TriggerSourceContext,
     WaitingFor,
 };
-use crate::types::identifiers::{ObjectId, TriggerFiring};
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef, TriggerFiring};
 use crate::types::player::PlayerId;
 use crate::types::resolved_commands::{
     ResolvedStackEntryFinalizeCommand, ResolvedStackEntryFinalizeReplayInvariantError,
@@ -25,6 +25,7 @@ use crate::types::resolved_commands::{
     ResolvedUncommittedTriggerRemovalReplayInvariantError,
 };
 use crate::types::zones::Zone;
+use std::collections::BTreeMap;
 
 use super::ability_utils::{
     build_target_slots, flatten_specified_targets_in_chain, flatten_targets_in_chain,
@@ -537,6 +538,11 @@ fn remove_stack_entry_at_unobserved(
             cause,
         })
         .expect("resolved stack removal must have a live journal cause");
+    // CR 701.20a: a triggered ability caused by revealing a card keeps that
+    // card revealed only until it leaves the stack — resolved, countered,
+    // fizzled, or drained. The release is its own journaled information edit,
+    // so replay applies it after this removal without re-deriving it.
+    state.release_stack_bound_reveals(entry.id);
 
     Some(PoppedStackEntry {
         entry,
@@ -731,6 +737,11 @@ pub(super) fn pop_uncommitted_pending_trigger_entry(
         .resolved_rules_journal
         .record_uncommitted_trigger_removal(command)
         .expect("resolved uncommitted trigger removal must have a live journal cause");
+    // CR 603.3d + CR 701.20a: only an ability actually removed from the stack
+    // ends its reveal lease; a cursor consumed without a pop leaves nothing.
+    if let Some(removed) = removed.as_ref() {
+        state.release_stack_bound_reveals(removed.entry.id);
+    }
     if let Some(firing) = removed.and_then(|removed| removed.trigger_firing) {
         super::lifecycle::record_delayed_terminal(firing, disposition);
     }
@@ -5143,6 +5154,40 @@ pub struct StackDisplayGroup {
 /// adjacent entries preserves the actual resolution order for cases like
 /// stacked triggers from different sources interleaving.
 pub fn stack_display_groups(state: &GameState) -> Vec<StackDisplayGroup> {
+    stack_display_groups_revealing(state, &stack_revealed_card_names(state))
+}
+
+/// CR 701.20a: for each stack entry holding stack-bound reveal leases, the
+/// names of the leased occurrences that are still current (CR 400.7: a lease
+/// on an occurrence that has since changed zones names nothing). This is the
+/// public, unindexed presentation of the lease map; read it from rules state.
+pub(crate) fn stack_revealed_card_names(state: &GameState) -> BTreeMap<ObjectId, Vec<String>> {
+    state
+        .stack_bound_reveals
+        .iter()
+        .filter_map(|(entry, occurrences)| {
+            let names: Vec<String> = occurrences
+                .iter()
+                .filter_map(|occurrence| {
+                    state.objects.get(&occurrence.object_id).and_then(|object| {
+                        (ObjectIncarnationRef::from_object(object) == *occurrence)
+                            .then(|| object.name.clone())
+                    })
+                })
+                .collect();
+            (!names.is_empty()).then_some((*entry, names))
+        })
+        .collect()
+}
+
+/// [`stack_display_groups`] over a viewer projection, with the public reveal
+/// presentation (`revealed`, built from rules state because a projection
+/// carries no lease map) as part of each entry's grouping signature: two
+/// entries that keep different cards revealed are not the same thing twice.
+pub fn stack_display_groups_revealing(
+    state: &GameState,
+    revealed: &BTreeMap<ObjectId, Vec<String>>,
+) -> Vec<StackDisplayGroup> {
     let mut out: Vec<StackDisplayGroup> = Vec::new();
     // Track the previous entry's key alongside the output vector so we can
     // decide "merge or push" in O(1) per entry instead of re-scanning the
@@ -5171,7 +5216,7 @@ pub fn stack_display_groups(state: &GameState) -> Vec<StackDisplayGroup> {
             last_key = None;
             continue;
         }
-        let key = group_key(state, entry);
+        let key = group_key(state, entry, revealed);
         if last_key.as_ref() == Some(&key) {
             let last = out.last_mut().unwrap();
             last.count += 1;
@@ -5198,6 +5243,8 @@ struct StackGroupKey {
     paid: Option<StackPaidSnapshot>,
     is_pending: bool,
     provenance: Option<crate::types::game_state::SyntheticTriggerProvenance>,
+    /// CR 701.20a: the public names of the cards this entry keeps revealed.
+    revealed: Vec<String>,
 }
 
 /// Grouping signature for `stack_display_groups`. Two entries coalesce iff
@@ -5205,7 +5252,11 @@ struct StackGroupKey {
 /// visually-identical triggers that fire against different targets (e.g.
 /// N copies of "target player loses 1 life" picking different players)
 /// remain separate — coalescing them would misrepresent the resolution.
-fn group_key(state: &GameState, entry: &StackEntry) -> StackGroupKey {
+fn group_key(
+    state: &GameState,
+    entry: &StackEntry,
+    revealed: &BTreeMap<ObjectId, Vec<String>>,
+) -> StackGroupKey {
     let source_name = state
         .objects
         .get(&entry.source_id)
@@ -5246,6 +5297,7 @@ fn group_key(state: &GameState, entry: &StackEntry) -> StackGroupKey {
         paid,
         is_pending: effective_ability.is_pending,
         provenance,
+        revealed: revealed.get(&entry.id).cloned().unwrap_or_default(),
     }
 }
 
@@ -15378,5 +15430,91 @@ mod tests {
             exile_moves, 1,
             "flashback must be exiled exactly once — RIP must not double-apply on a stack→exile move"
         );
+    }
+}
+
+#[cfg(test)]
+mod stack_bound_reveal_release_tests {
+    //! CR 603.3d + CR 701.20a: the uncommitted-trigger pop releases the popped
+    //! entry's reveal lease, and only when it actually popped.
+    use super::pop_uncommitted_pending_trigger_entry;
+    use crate::game::zones::create_object;
+    use crate::types::ability::{Effect, ResolvedAbility, TargetFilter};
+    use crate::types::game_state::{GameState, StackEntry, StackEntryKind};
+    use crate::types::identifiers::{CardId, ObjectId, TriggerFiring};
+    use crate::types::player::PlayerId;
+    use crate::types::zones::Zone;
+
+    fn trigger_entry(state: &mut GameState, source: ObjectId) -> ObjectId {
+        let entry_id = ObjectId(state.next_object_id);
+        state.next_object_id += 1;
+        state.stack.push_back(StackEntry {
+            id: entry_id,
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: source,
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::GainLife {
+                        amount: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                        player: TargetFilter::Controller,
+                    },
+                    vec![],
+                    source,
+                    PlayerId(0),
+                )),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: "Source".to_string(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        });
+        state
+            .stack_trigger_firings
+            .insert(entry_id, TriggerFiring::Ordinary);
+        entry_id
+    }
+
+    #[test]
+    fn the_603_3d_pop_releases_the_popped_entry_lease_only() {
+        let mut state = GameState::new_two_player(3);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".into(),
+            Zone::Battlefield,
+        );
+        let card = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Leased".into(),
+            Zone::Hand,
+        );
+        let entry = trigger_entry(&mut state, source);
+        state.grant_stack_bound_reveal(entry, &[card]);
+        assert!(state.holds_stack_bound_reveal(card), "reach guard: leased");
+
+        // A cursor that does not name the top entry consumes without popping.
+        state.pending_trigger_entry = Some(ObjectId(99_999));
+        pop_uncommitted_pending_trigger_entry(
+            &mut state,
+            crate::game::lifecycle::DelayedTerminalDisposition::NoLegalChoice,
+        );
+        assert!(state.holds_stack_bound_reveal(card), "no pop, no release");
+
+        state.pending_trigger_entry = Some(entry);
+        state.pending_trigger_firing = Some(TriggerFiring::Ordinary);
+        pop_uncommitted_pending_trigger_entry(
+            &mut state,
+            crate::game::lifecycle::DelayedTerminalDisposition::NoLegalChoice,
+        );
+        assert!(state.stack.is_empty(), "reach guard: popped");
+        assert!(!state.holds_stack_bound_reveal(card));
+        assert!(state.stack_bound_reveals.is_empty());
     }
 }
