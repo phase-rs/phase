@@ -92,7 +92,7 @@ fn zero_announced_x_commits_without_a_discard_selection() {
         StackEntryKind::Spell { .. }
     ));
     assert_eq!(runner.state().objects[&kept].zone, Zone::Hand);
-    assert!(runner.state().players[P0.0 as usize].mana_pool.is_empty());
+    assert_eq!(runner.state().players[P0.0 as usize].mana_pool.total(), 0);
 }
 
 #[test]
@@ -148,9 +148,10 @@ fn zero_fixed_discard_continues_with_life_and_mana_costs() {
         immediate.state().players[P0.0 as usize].life,
         life_before - 2
     );
-    assert!(immediate.state().players[P0.0 as usize]
-        .mana_pool
-        .is_empty());
+    assert_eq!(
+        immediate.state().players[P0.0 as usize].mana_pool.total(),
+        0
+    );
     assert_eq!(immediate.state().objects[&kept].zone, Zone::Hand);
 
     let outcome = runner.cast(spell).resolve();
@@ -158,7 +159,7 @@ fn zero_fixed_discard_continues_with_life_and_mana_costs() {
     outcome.assert_life_delta(P0, -1);
     outcome.assert_zone(&[kept], Zone::Hand);
     outcome.assert_zone(&[spell], Zone::Graveyard);
-    assert!(outcome.state().players[P0.0 as usize].mana_pool.is_empty());
+    assert_eq!(outcome.state().players[P0.0 as usize].mana_pool.total(), 0);
 }
 
 #[test]
@@ -276,7 +277,7 @@ fn mana_x_pay_life_pays_and_resolves_the_announced_x() {
     outcome.assert_life_delta(P0, -2);
     outcome.assert_life_delta(P1, -2);
     outcome.assert_zone(&[bond], Zone::Graveyard);
-    assert!(outcome.state().players[P0.0 as usize].mana_pool.is_empty());
+    assert_eq!(outcome.state().players[P0.0 as usize].mana_pool.total(), 0);
 }
 
 #[test]
