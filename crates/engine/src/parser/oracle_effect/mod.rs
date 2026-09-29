@@ -34592,7 +34592,7 @@ enum ConsumerBinding {
 ///   one referent per iteration.
 /// - After an unscoped reveal, the consumer must carry no repeat.
 ///
-/// Anything else is `Declined` and left untouched (strict-failure posture).
+/// Anything else is `Declined`; the caller replaces the consumer with an honest gap.
 fn bind_revealed_this_way_consumer(
     effect: &mut Effect,
     repeat_for: &mut Option<QuantityExpr>,
@@ -41634,20 +41634,14 @@ pub(crate) fn parse_effect_chain_ir(
                 ) == ConsumerActor::Other
             {
                 followup_continuation = None;
-                match binding {
-                    // CR 608.2c: "from it" names the reveal choice; declined, it
-                    // binds nothing, and the choice it describes belongs to a
-                    // player other than the controller, which `RevealHand` cannot
-                    // represent (it has no chooser). Honest gap — never a stray
-                    // card-parking reveal.
-                    RevealChoiceBinding::FromIt => {
-                        clause.effect =
-                            Effect::unimplemented("non_controller_reveal_choice", normalized_text);
-                    }
-                    // The consumer keeps its parsed effect (never a card-parking
-                    // reveal); the per-player rule below still guards it.
-                    RevealChoiceBinding::RevealedThisWay => {}
-                }
+                // CR 608.2c + CR 109.5: a consumer addressed to a player other
+                // than the controller names a reveal choice that player makes
+                // ("from it") or a card chosen from the revealed hand ("revealed
+                // this way"); `RevealHand` has no chooser for it, so the consumer
+                // binds nothing. Honest gap — never a raw-filter zone move or a
+                // card-parking reveal.
+                clause.effect =
+                    Effect::unimplemented("non_controller_reveal_choice", normalized_text);
             }
         }
         // CR 608.2c + CR 109.5: a clause that itself runs per player makes its own
@@ -41684,6 +41678,12 @@ pub(crate) fn parse_effect_chain_ir(
             ) == ConsumerBinding::Declined
         {
             followup_continuation = None;
+            // CR 608.2c: the consumer names a card chosen from the revealed hand,
+            // but its shape (population, repeat, or verb) cannot be re-bound to
+            // that choice. Keeping the parsed effect would act on its raw filter —
+            // a card other than one revealed this way — so the consumer is an
+            // honest gap.
+            clause.effect = Effect::unimplemented("unbound_revealed_this_way", normalized_text);
         }
 
         // Build a temporary def for intrinsic continuation detection and cascade check.

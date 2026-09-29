@@ -256,10 +256,15 @@ pub fn handle_activate_loyalty(
     // CR 602.2 + CR 601.2c (capture L): the activation's journal facts, now,
     // before its targets are chosen and before any loyalty is paid. Interactive
     // targets add theirs at target settlement; automatic ones just below.
+    // CR 602.2a: provenance too.
     resolved.ability_index = Some(ability_index);
-    resolved.activation_record =
-        super::casting::capture_activation_record(state, player, pw_id, ability_index, &resolved)
-            .map(Box::new);
+    super::casting::record_activation_announcement(
+        state,
+        player,
+        pw_id,
+        ability_index,
+        &mut resolved,
+    );
 
     // CR 602.2b + CR 601.2c: Targets are announced before costs are paid.
     // If this ability requires targets, prompt for selection first.

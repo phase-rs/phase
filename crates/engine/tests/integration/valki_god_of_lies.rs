@@ -644,9 +644,10 @@ fn kitesail_freebooter_bounced_before_etb_resolves_reveals_but_exiles_nothing() 
         revealed_players(&events).contains(&P1),
         "reach-guard: P1's hand is still revealed"
     );
-    assert!(
-        prompts.len() <= 1,
-        "at most the one choice from P1's hand: {prompts:?}"
+    assert_eq!(
+        prompts,
+        vec![(P0, vec![p1_divination])],
+        "exactly the one choice from P1's hand, offering its noncreature, nonland card"
     );
     assert_eq!(zone(&runner, p1_divination), Zone::Hand);
     assert_eq!(zone(&runner, p1_bear), Zone::Hand);
@@ -1120,9 +1121,7 @@ fn valki_real_card_export_has_no_unimplemented() {
     use engine::game::scenario_db::GameScenarioDbExt;
     use engine::types::ability::{PlayerFilter, TargetFilter, ZoneChoiceCandidateSource};
 
-    let Some(db) = crate::support::shared_card_db() else {
-        return;
-    };
+    let db = fixture_db();
     let mut scenario = GameScenario::new();
     let valki = scenario.add_real_card(P0, "Valki, God of Lies", Zone::Hand, db);
     let runner = scenario.build();
@@ -1347,6 +1346,8 @@ fn activate_tibalt(runner: &mut GameRunner, tibalt: ObjectId, index: usize) {
 /// to the Tibalt object that entered. Tibalt enters with 5 loyalty.
 #[test]
 fn tibalt_back_face_cast_creates_one_emblem_owned_by_caster() {
+    use engine::game::game_object::LinkedAbilitySource;
+    use engine::types::ability::CharacteristicSetRef;
     use engine::types::identifiers::ObjectIncarnationRef;
     use engine::types::statics::{
         CastFrequency, ExileCardPool, ExileCastCost, ExileCastGrantee, ExileCastTiming, StaticMode,
@@ -1400,10 +1401,14 @@ fn tibalt_back_face_cast_creates_one_emblem_owned_by_caster() {
         }
     );
     assert!(permission.active_zones.contains(&Zone::Command));
-    // CR 607.1d: the latched creator is the Tibalt object now on the battlefield.
+    // CR 607.1d + CR 607.5: the latched creator is the Tibalt object now on
+    // the battlefield, paired through its own printed abilities.
     assert_eq!(
         emblem.linked_ability_source,
-        Some(ObjectIncarnationRef::from_object(object))
+        Some(LinkedAbilitySource {
+            creator: ObjectIncarnationRef::from_object(object),
+            characteristic_set: CharacteristicSetRef::Own,
+        })
     );
 
     // CR 603.6d: nothing but the spell itself was put on the stack — the
@@ -1858,10 +1863,12 @@ fn new_tibalt_object_does_not_extend_old_emblem() {
     let new_emblem = *emblems.iter().find(|id| **id != old_emblem).unwrap();
     let old_creator = fx.runner.state().objects[&old_emblem]
         .linked_ability_source
-        .unwrap();
+        .unwrap()
+        .creator;
     let new_creator = fx.runner.state().objects[&new_emblem]
         .linked_ability_source
-        .unwrap();
+        .unwrap()
+        .creator;
     assert_eq!(
         old_creator.object_id, new_creator.object_id,
         "same storage id"
@@ -2238,4 +2245,439 @@ fn denied_reveals_target_spells_controllers_hand() {
     );
     assert_eq!(revealed_cards_of(events, P1), vec![p1_card]);
     assert!(revealed_cards_of(events, P0).is_empty());
+}
+
+// ── CR 607.1 + CR 607.5: the emblem pairs only with the printed supplier ──
+//
+// "Cards exiled with Tibalt" on the emblem (CR 607.1d) refers only to cards
+// exiled by Tibalt's own activated or triggered abilities that instruct exile
+// (CR 607.2a) — "and not by any other ability" (CR 607.1). An ability Tibalt
+// gained in layer 6 (CR 613.1f), or one it acquired from a later copy effect
+// (CR 607.5: linked only to the abilities acquired from that same effect), is
+// a different ability and never feeds the emblem.
+
+/// Verbatim Oracle text of a grant helper ("Planeswalkers you control have
+/// \"{1}: Exile target card from a graveyard.\"").
+const GRANT_GRAVEYARD_EXILE: &str =
+    "Planeswalkers you control have \"{1}: Exile target card from a graveyard.\"";
+/// Verbatim Oracle text of the granted / copied exile ability.
+const EXILE_CARD_FROM_GRAVEYARD: &str = "{1}: Exile target card from a graveyard.";
+/// Verbatim Oracle text of a sacrifice-cost exile helper.
+const SACRIFICE_ARTIFACT_EXILE: &str =
+    "{1}, Sacrifice an artifact: Exile target card from a graveyard.";
+/// Verbatim Oracle text of a modal activated helper.
+const MODAL_LIFE: &str = "{T}: Choose one —\n• You gain 1 life.\n• You lose 1 life.";
+
+/// Index of the granted ability on Tibalt: after its three printed loyalty
+/// abilities (CR 613.1f: layer 6 appends it).
+const TIBALT_GRANTED: usize = 3;
+
+/// A {2} creature card named `name` in P1's graveyard.
+fn add_graveyard_creature(scenario: &mut GameScenario, name: &str) -> ObjectId {
+    let mut card = scenario.add_creature_to_graveyard(P1, name, 2, 2);
+    card.with_mana_cost(generic_cost(2));
+    card.id()
+}
+
+/// A {2} creature named `name` on P1's battlefield.
+fn add_opponent_creature(scenario: &mut GameScenario, name: &str) -> ObjectId {
+    let mut card = scenario.add_creature(P1, name, 2, 2);
+    card.with_mana_cost(generic_cost(2));
+    card.id()
+}
+
+/// P0 can cast `card` with two colorless mana (the emblem's any-color
+/// concession is irrelevant for a generic cost).
+fn funded_can_cast(runner: &mut GameRunner, card: ObjectId) -> bool {
+    add_pool(runner, P0, &[ManaType::Colorless, ManaType::Colorless]);
+    can_cast(runner, P0, card)
+}
+
+/// CR 607.1 + CR 607.1d + CR 607.2a + CR 613.1f: two exile abilities on one
+/// Tibalt — a granted "{1}: Exile target card from a graveyard." and the
+/// printed −3. Only the printed supplier feeds the emblem.
+#[test]
+fn tibalt_granted_exile_ability_does_not_feed_emblem() {
+    let mut ids = None;
+    let (mut runner, tibalt) = tibalt_scenario(P0, |scenario| {
+        scenario.add_artifact_from_oracle(P0, "Grant Relic", GRANT_GRAVEYARD_EXILE);
+        let grave = add_graveyard_creature(scenario, "Grave Bear");
+        let victim = add_opponent_creature(scenario, "Opp Bear");
+        ids = Some((grave, victim));
+    });
+    let (grave, victim) = ids.unwrap();
+    cast_tibalt(&mut runner, tibalt);
+    let emblem = the_emblem_of(&runner, P0);
+    // Granted-slot reach: three printed loyalty abilities plus the grant.
+    assert_eq!(
+        runner.state().objects[&tibalt].abilities.len(),
+        TIBALT_GRANTED + 1
+    );
+
+    add_pool(&mut runner, P0, &[ManaType::Colorless]);
+    runner
+        .activate(tibalt, TIBALT_GRANTED)
+        .target_object(grave)
+        .resolve();
+    assert_eq!(
+        zone(&runner, grave),
+        Zone::Exile,
+        "reach: the grant exiled it"
+    );
+    assert!(linked(&runner, grave, tibalt), "reach: Tibalt's own link");
+    assert!(
+        !linked(&runner, grave, emblem),
+        "a granted ability is not the emblem's paired supplier"
+    );
+    assert!(!funded_can_cast(&mut runner, grave));
+
+    // Positive twin: the printed −3 on the same Tibalt feeds the emblem.
+    runner
+        .activate(tibalt, TIBALT_MINUS_THREE)
+        .target_object(victim)
+        .resolve();
+    assert_eq!(zone(&runner, victim), Zone::Exile);
+    assert!(linked(&runner, victim, emblem));
+    assert!(funded_can_cast(&mut runner, victim));
+}
+
+/// Answer an activation's announcement prompts (mode 0, the first offered
+/// target, mana from the pool) until it is on the stack, then return the
+/// provenance its stack entry carries — before it resolves.
+fn announced_provenance(
+    runner: &mut GameRunner,
+    source: ObjectId,
+    ability_index: usize,
+    target: Option<ObjectId>,
+) -> Option<engine::types::ability::AbilityProvenance> {
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index,
+        })
+        .expect("activation is accepted");
+    for _ in 0..8 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::AbilityModeChoice { .. } => {
+                runner
+                    .act(GameAction::SelectModes { indices: vec![0] })
+                    .expect("mode 0");
+            }
+            WaitingFor::TargetSelection { .. } => {
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(target.expect("a target"))),
+                    })
+                    .expect("target");
+            }
+            WaitingFor::ManaPayment { .. } => {
+                runner.act(GameAction::PassPriority).expect("pay");
+            }
+            WaitingFor::Priority { .. } => break,
+            other => panic!("unexpected prompt {other:?}"),
+        }
+    }
+    let entry = runner
+        .state()
+        .stack
+        .last()
+        .expect("the ability is on the stack");
+    assert_eq!(entry.source_id, source, "reach: this activation is on top");
+    entry
+        .ability()
+        .expect("an activated ability")
+        .context
+        .source_ability_provenance
+}
+
+/// CR 602.2a + CR 607.1 + CR 613.1f: every activated path binds the
+/// activated slot's provenance at announcement and carries it to the stack
+/// entry — the loyalty fast path, the general casting path for a granted
+/// ability, and the modal path.
+#[test]
+fn tibalt_activation_announcement_records_ability_provenance() {
+    use engine::types::ability::{AbilityProvenance, CharacteristicSetRef};
+    let own = Some(AbilityProvenance::Characteristic(CharacteristicSetRef::Own));
+
+    // Loyalty fast path: Tibalt's printed +2.
+    let (mut runner, tibalt) = tibalt_scenario(P0, |_| {});
+    cast_tibalt(&mut runner, tibalt);
+    assert_eq!(
+        announced_provenance(&mut runner, tibalt, TIBALT_PLUS_TWO, None),
+        own
+    );
+
+    // General casting path: the granted graveyard exile.
+    let mut grave = None;
+    let (mut runner, tibalt) = tibalt_scenario(P0, |scenario| {
+        scenario.add_artifact_from_oracle(P0, "Grant Relic", GRANT_GRAVEYARD_EXILE);
+        grave = Some(add_graveyard_creature(scenario, "Grave Bear"));
+    });
+    cast_tibalt(&mut runner, tibalt);
+    add_pool(&mut runner, P0, &[ManaType::Colorless]);
+    assert_eq!(
+        announced_provenance(&mut runner, tibalt, TIBALT_GRANTED, grave),
+        Some(AbilityProvenance::Granted)
+    );
+
+    // Modal path: a printed modal activated ability.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let relic = scenario
+        .add_artifact_from_oracle(P0, "Mode Relic", MODAL_LIFE)
+        .id();
+    let mut runner = scenario.build();
+    assert_eq!(announced_provenance(&mut runner, relic, 0, None), own);
+}
+
+/// CR 607.5 + CR 613.1a: a copy effect installed later on the same Tibalt
+/// incarnation gives it a different ability set — the copied exile ability is
+/// not the emblem's supplier, although the same incarnation's printed −3 was.
+#[test]
+fn tibalt_later_copy_effect_exile_does_not_feed_emblem() {
+    use engine::types::ability::{
+        CharacteristicSetRef, ContinuousModification, CopyEffectInstanceRef, Duration, TargetFilter,
+    };
+
+    let mut ids = None;
+    let (mut runner, tibalt) = tibalt_scenario(P0, |scenario| {
+        let donor = scenario
+            .add_artifact_from_oracle(P0, "Relic Donor", EXILE_CARD_FROM_GRAVEYARD)
+            .id();
+        let victim = add_opponent_creature(scenario, "Opp Bear");
+        let grave = add_graveyard_creature(scenario, "Grave Bear");
+        ids = Some((donor, victim, grave));
+    });
+    let (donor, victim, grave) = ids.unwrap();
+    cast_tibalt(&mut runner, tibalt);
+    let emblem = the_emblem_of(&runner, P0);
+
+    // Positive twin first: this incarnation's printed −3 feeds the emblem.
+    runner
+        .activate(tibalt, TIBALT_MINUS_THREE)
+        .target_object(victim)
+        .resolve();
+    assert!(linked(&runner, victim, emblem));
+
+    // Copy effect D: Tibalt becomes a copy of the donor (CR 707.2).
+    let values =
+        engine::game::printed_cards::intrinsic_copiable_values(&runner.state().objects[&donor]);
+    let copy_id = runner.state_mut().add_transient_continuous_effect(
+        tibalt,
+        P0,
+        Duration::Permanent,
+        TargetFilter::SpecificObject { id: tibalt },
+        vec![ContinuousModification::CopyValues {
+            values: Box::new(values),
+            display_source: engine::game::game_object::DisplaySource::Card,
+            printed_ref: None,
+            token_image_ref: None,
+        }],
+        None,
+    );
+    engine::game::layers::mark_layers_full(runner.state_mut());
+    engine::game::layers::flush_layers(runner.state_mut());
+    let object = &runner.state().objects[&tibalt];
+    assert_eq!(object.name, "Relic Donor", "reach: the copy applied");
+    assert_eq!(object.abilities.len(), 1);
+    let copy = CopyEffectInstanceRef {
+        continuous_effect_id: copy_id,
+        modification_index: 0,
+    };
+    assert_eq!(object.layer1_copy_effect, Some(copy));
+    assert_eq!(
+        object.characteristic_set(),
+        CharacteristicSetRef::Copied(copy)
+    );
+    assert_eq!(
+        runner.state().objects[&emblem]
+            .linked_ability_source
+            .map(|link| link.characteristic_set),
+        Some(CharacteristicSetRef::Own),
+        "the emblem stays paired with the printed set"
+    );
+
+    add_pool(&mut runner, P0, &[ManaType::Colorless]);
+    runner.activate(tibalt, 0).target_object(grave).resolve();
+    assert_eq!(
+        zone(&runner, grave),
+        Zone::Exile,
+        "reach: the copied ability exiled it"
+    );
+    assert!(linked(&runner, grave, tibalt), "reach: Tibalt's own link");
+    assert!(
+        !linked(&runner, grave, emblem),
+        "D's ability is linked only to D's abilities (CR 607.5)"
+    );
+    assert!(!funded_can_cast(&mut runner, grave));
+    assert!(
+        funded_can_cast(&mut runner, victim),
+        "the −3 card stays playable"
+    );
+}
+
+/// CR 602.2a + CR 607.1: which ability was activated is fixed at
+/// announcement. A granted exile ability announced while an ability-removing
+/// effect hid Tibalt's printed abilities stays granted even though paying its
+/// sacrifice cost ends that effect and restores the printed abilities before
+/// it reaches the stack.
+#[test]
+fn tibalt_granted_ability_provenance_is_fixed_at_announcement() {
+    use engine::types::ability::{ContinuousModification, Duration, TargetFilter};
+
+    let mut ids = None;
+    let (mut runner, tibalt) = tibalt_scenario(P0, |scenario| {
+        let trinket = scenario
+            .add_artifact_from_oracle(P0, "Brass Trinket", "")
+            .id();
+        let warden = scenario
+            .add_creature_from_oracle(P0, "Grave Warden", 1, 1, SACRIFICE_ARTIFACT_EXILE)
+            .id();
+        let grave = add_graveyard_creature(scenario, "Grave Bear");
+        ids = Some((trinket, warden, grave));
+    });
+    let (trinket, warden, grave) = ids.unwrap();
+    cast_tibalt(&mut runner, tibalt);
+    let emblem = the_emblem_of(&runner, P0);
+
+    let granted = runner.state().objects[&warden].abilities[0].clone();
+    let state = runner.state_mut();
+    state.add_transient_continuous_effect(
+        trinket,
+        P0,
+        Duration::UntilHostLeavesPlay,
+        TargetFilter::SpecificObject { id: tibalt },
+        vec![ContinuousModification::RemoveAllAbilities],
+        None,
+    );
+    state.add_transient_continuous_effect(
+        warden,
+        P0,
+        Duration::Permanent,
+        TargetFilter::SpecificObject { id: tibalt },
+        vec![ContinuousModification::GrantAbility {
+            definition: Box::new(granted.clone()),
+        }],
+        None,
+    );
+    engine::game::layers::mark_layers_full(runner.state_mut());
+    engine::game::layers::flush_layers(runner.state_mut());
+    assert_eq!(
+        runner.state().objects[&tibalt].abilities.as_slice(),
+        &[granted],
+        "reach: only the grant is live at announcement"
+    );
+
+    add_pool(&mut runner, P0, &[ManaType::Colorless]);
+    runner
+        .activate(tibalt, 0)
+        .target_object(grave)
+        .pay_with(&[trinket])
+        .resolve();
+    assert_eq!(zone(&runner, trinket), Zone::Graveyard, "reach: sacrificed");
+    assert_eq!(
+        zone(&runner, grave),
+        Zone::Exile,
+        "reach: the grant exiled it"
+    );
+    assert!(linked(&runner, grave, tibalt), "reach: Tibalt's own link");
+    assert_eq!(
+        runner.state().objects[&tibalt].abilities.len(),
+        TIBALT_GRANTED + 1,
+        "reach: the removal ended, so slot 0 is the printed +2 again"
+    );
+    assert!(!linked(&runner, grave, emblem));
+    assert!(!funded_can_cast(&mut runner, grave));
+}
+
+// ── CR 114.4: command-zone emblem permission sources ──
+
+/// Stage `card` as exiled with `emblem` by `exiler` (the link and exiling
+/// player the exile resolver writes, CR 406.6 + CR 607.1d).
+fn stage_exiled_with_emblem(
+    runner: &mut GameRunner,
+    card: ObjectId,
+    emblem: ObjectId,
+    exiler: PlayerId,
+) {
+    let state = runner.state_mut();
+    state.exile_links.push(ExileLink {
+        exiled_id: card,
+        source_id: emblem,
+        kind: ExileLinkKind::TrackedBySource,
+    });
+    state.objects.get_mut(&card).unwrap().exiled_by = Some(exiler);
+}
+
+/// An emblem owned by P0 whose exile-play permission addresses `grantee`.
+fn grant_permission_emblem(
+    runner: &mut GameRunner,
+    grantee: engine::types::statics::ExileCastGrantee,
+) -> ObjectId {
+    use engine::types::ability::{CardPlayMode, StaticDefinition, TargetFilter};
+    use engine::types::statics::{
+        CastFrequency, ExileCardPool, ExileCastCost, ExileCastTiming, StaticMode,
+    };
+
+    engine::game::effects::create_emblem::grant_emblem(
+        runner.state_mut(),
+        P0,
+        vec![StaticDefinition::new(StaticMode::ExileCastPermission {
+            frequency: CastFrequency::Unlimited,
+            play_mode: CardPlayMode::Play,
+            cost: ExileCastCost::PayNormalCost,
+            pool: ExileCardPool::Persistent,
+            timing: ExileCastTiming::AnyTime,
+            mana_spend_permission: None,
+            grants_flash: false,
+            extra_cost: None,
+            enters_with_counter: None,
+            grantee,
+        })
+        .affected(TargetFilter::Any)],
+        Vec::new(),
+        Vec::new(),
+    )
+}
+
+/// CR 114.4 + CR 114.2: an emblem's abilities function for every player they
+/// address. An "each player may play cards they exiled with it" emblem owned by
+/// P0 lets P1 cast the card P1 exiled with it — not the one P0 exiled — while
+/// a "you may" emblem addresses only its owner and controller.
+#[test]
+fn emblem_each_player_grant_reaches_non_owner() {
+    use engine::game::casting::spell_objects_available_to_cast;
+    use engine::types::statics::ExileCastGrantee;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let by_p1 = scenario.add_spell_to_exile(P0, "Exiled By P1", true).id();
+    let by_p0 = scenario.add_spell_to_exile(P1, "Exiled By P0", true).id();
+    let mut runner = scenario.build();
+    let emblem = grant_permission_emblem(&mut runner, ExileCastGrantee::EachPlayerOwnExiles);
+    stage_exiled_with_emblem(&mut runner, by_p1, emblem, P1);
+    stage_exiled_with_emblem(&mut runner, by_p0, emblem, P0);
+
+    let p1_castable = spell_objects_available_to_cast(runner.state(), P1);
+    let p0_castable = spell_objects_available_to_cast(runner.state(), P0);
+    assert!(
+        p1_castable.contains(&by_p1),
+        "P1 exiled it with P0's emblem, so the emblem lets P1 cast it"
+    );
+    assert!(!p1_castable.contains(&by_p0));
+    assert!(
+        p0_castable.contains(&by_p0),
+        "reach: the own-exiles gate admits P0's"
+    );
+    assert!(!p0_castable.contains(&by_p1));
+
+    // Hostile twin: a "you may" emblem addresses only its controller (= owner).
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let card = scenario.add_spell_to_exile(P1, "Exiled By P1", true).id();
+    let mut runner = scenario.build();
+    let emblem = grant_permission_emblem(&mut runner, ExileCastGrantee::SourceController);
+    stage_exiled_with_emblem(&mut runner, card, emblem, P1);
+    assert!(!spell_objects_available_to_cast(runner.state(), P1).contains(&card));
+    assert!(spell_objects_available_to_cast(runner.state(), P0).contains(&card));
 }

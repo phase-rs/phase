@@ -9375,6 +9375,94 @@ mod tests {
             );
         }
 
+        /// CR 607.1: a triggered ability's provenance is derived from
+        /// its definition occurrence when read, never latched into its
+        /// `SpellContext` — so printed gain-life triggers carrying a definition
+        /// ref, put on the stack through the production authority, still batch.
+        #[test]
+        fn fixed_controller_gain_life_printed_triggers_with_definition_ref_still_batch() {
+            use crate::types::ability::{
+                SpellContext, TriggerBaseSetInstanceRef, TriggerDefinitionOccurrenceRef,
+                TriggerDefinitionRef,
+            };
+            use crate::types::identifiers::ObjectIncarnationRef;
+
+            fn push_printed_gain_life_trigger(
+                state: &mut GameState,
+                source: ObjectId,
+                trigger_event: GameEvent,
+            ) {
+                let entry_id = ObjectId(state.next_object_id);
+                state.next_object_id += 1;
+                let mut ability = ResolvedAbility::new(
+                    fixed_controller_gain_life_effect(),
+                    vec![],
+                    source,
+                    PlayerId(0),
+                );
+                ability.description = Some("you gain 1 life".to_string());
+                ability.ability_index = Some(0);
+                ability.trigger_definition_ref = Some(TriggerDefinitionRef {
+                    source: ObjectIncarnationRef::from_object(&state.objects[&source]),
+                    occurrence: TriggerDefinitionOccurrenceRef::Printed {
+                        base_set: TriggerBaseSetInstanceRef::INITIAL,
+                        printed_index: 0,
+                    },
+                });
+                let entry = StackEntry {
+                    id: entry_id,
+                    source_id: source,
+                    controller: PlayerId(0),
+                    kind: StackEntryKind::TriggeredAbility {
+                        source_id: source,
+                        ability: Box::new(ability),
+                        condition: None,
+                        trigger_event: Some(trigger_event),
+                        description: Some(
+                            "Whenever a creature enters, you gain 1 life.".to_string(),
+                        ),
+                        source_name: state.objects[&source].name.clone(),
+                        subject_match_count: None,
+                        die_result: None,
+                        provenance: None,
+                    },
+                };
+                let mut events = Vec::new();
+                super::super::push_to_stack(state, entry, &mut events);
+            }
+
+            crate::game::perf_counters::reset();
+            let mut state = setup();
+            let source_a = add_self_counter_source(&mut state, "Bogwater Lumaret A");
+            let source_b = add_self_counter_source(&mut state, "Bogwater Lumaret B");
+            let etb = life_event(PlayerId(0), 0);
+            push_printed_gain_life_trigger(&mut state, source_a, etb.clone());
+            push_printed_gain_life_trigger(&mut state, source_b, etb.clone());
+            push_printed_gain_life_trigger(&mut state, source_b, etb);
+
+            for entry in &state.stack {
+                let ability = entry.ability().expect("a triggered ability");
+                // Reach: the production stamps ran and the occurrence is attributable.
+                assert!(ability.trigger_definition_ref.is_some());
+                assert!(ability.source_incarnation.is_some());
+                assert!(ability.source_ability_provenance().is_some());
+                assert_eq!(ability.context, SpellContext::default(), "no latch");
+            }
+            assert_eq!(fixed_controller_gain_life_run_len(&state), Some(3));
+
+            let life_before = state.players[0].life;
+            let mut events = Vec::new();
+            let consumed = resolve_next_committed(&mut state, &mut events);
+
+            assert_eq!(consumed, 3);
+            assert_eq!(state.players[0].life, life_before + 3);
+            assert!(state.stack.is_empty());
+            assert_eq!(
+                crate::game::perf_counters::snapshot().stack_batched_entries,
+                3
+            );
+        }
+
         #[test]
         fn fixed_controller_gain_life_batch_refuses_when_life_gained_observer_fires() {
             crate::game::perf_counters::reset();

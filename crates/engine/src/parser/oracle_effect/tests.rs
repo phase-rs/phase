@@ -74580,8 +74580,8 @@ fn valki_x_shape_choose_linked_creature_with_mana_value_x() {
 
 /// My Wish Is Your Command's "choose a … card revealed this way" is one
 /// choice across every revealed hand with no matching per-player quantifier, so
-/// the binding declines and the scheme's choose/cast clause keeps its base
-/// shape; no reveal parks a card choice.
+/// the binding declines and the choose clause is an honest
+/// `unbound_revealed_this_way` gap (CR 608.2c); no reveal parks a card choice.
 #[test]
 fn my_wish_is_your_command_revealed_this_way_choice_is_declined() {
     let parsed = parse_named_face(
@@ -74603,7 +74603,7 @@ fn my_wish_is_your_command_revealed_this_way_choice_is_declined() {
     assert!(nodes.iter().all(|node| !parks_reveal_choice(node)));
     assert_json_eq(
         root.sub_ability.as_deref().expect("choose/cast clause"),
-        r#"{"kind":"Spell","effect":{"type":"Unimplemented","name":"unparsed_verb_arguments","description":"choose a noncreature, nonland card revealed this way"},"cost":null,"sub_ability":{"kind":"Spell","effect":{"type":"CastFromZone","target":{"type":"ParentTarget"},"without_paying_mana_cost":true,"mode":"Cast","driver":"DuringResolution"},"cost":null,"sub_ability":null,"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"target_choice_timing":"Resolution","forward_result":false},"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":true,"forward_result":false,"sub_link":"SequentialSibling"}"#,
+        r#"{"kind":"Spell","effect":{"type":"Unimplemented","name":"unbound_revealed_this_way","description":"You may choose a noncreature, nonland card revealed this way"},"cost":null,"sub_ability":{"kind":"Spell","effect":{"type":"CastFromZone","target":{"type":"ParentTarget"},"without_paying_mana_cost":true,"mode":"Cast","driver":"DuringResolution"},"cost":null,"sub_ability":null,"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"target_choice_timing":"Resolution","forward_result":false},"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":true,"forward_result":false,"sub_link":"SequentialSibling"}"#,
         "My Wish Is Your Command's choose/cast clause",
     );
 }
@@ -74785,8 +74785,45 @@ fn per_player_own_reveal_choice_declines_to_a_gap() {
     assert!(non_controller_gaps(execute).is_empty());
 }
 
-/// A "revealed this way" consumer whose "For each <population>," names a
-/// different population than the reveal's scope is declined.
+/// Assert that no node of `root`'s chain is an executable zone move and that
+/// exactly one node is the `gap` gap describing `consumer`.
+fn assert_consumer_is_a_gap(root: &AbilityDefinition, gap: &str, consumer: &str) {
+    let nodes = chain_nodes(root);
+    assert!(
+        nodes
+            .iter()
+            .all(|node| !matches!(&*node.effect, Effect::ChangeZone { .. })),
+        "no executable zone move survives: {root:#?}"
+    );
+    let gaps: Vec<_> = nodes
+        .iter()
+        .filter(|node| unimplemented_name(node) == Some(gap))
+        .collect();
+    assert_eq!(gaps.len(), 1, "exactly one {gap} gap: {root:#?}");
+    assert_eq!(gaps[0].effect.unimplemented_description(), Some(consumer));
+}
+
+/// Reach guard: the `RevealedThisWay` arm claims `consumer` after `root`'s
+/// reveal, so the binder or the actor gate — not a missed arm — decided.
+fn assert_revealed_this_way_arm_claims(root: &AbilityDefinition, consumer: &str) {
+    assert!(matches!(
+        super::sequence::parse_followup_continuation_ast_with_search_destination(
+            consumer,
+            &root.effect,
+            &mut ParseContext::default(),
+            false,
+        ),
+        Some(ContinuationAst::RevealHandFilter {
+            binding: RevealChoiceBinding::RevealedThisWay,
+            ..
+        })
+    ));
+}
+
+/// CR 608.2c: a "revealed this way" consumer whose "For each <population>,"
+/// names a different population than the reveal's scope cannot be re-bound
+/// to the card chosen from the revealed hand, so it is an honest gap — never
+/// a zone move of any creature card by its raw filter.
 #[test]
 fn revealed_this_way_population_mismatch_is_declined() {
     let root = parse_effect_chain(
@@ -74795,28 +74832,14 @@ fn revealed_this_way_population_mismatch_is_declined() {
     );
     let nodes = chain_nodes(&root);
     assert!(nodes.len() >= 2, "reach-guard");
+    assert_revealed_this_way_arm_claims(&root, "exile a creature card they revealed this way");
     assert!(nodes.iter().all(|node| !parks_reveal_choice(node)));
-    assert!(non_controller_gaps(&root).is_empty());
-    let exile = nodes
-        .iter()
-        .find(|node| matches!(&*node.effect, Effect::ChangeZone { .. }))
-        .expect("exile clause");
-    // Declined: the consumer keeps its own parsed object and its own
-    // "For each player," population; it is never re-bound to the reveal's
-    // per-opponent iteration. Provenance: the expected node is the
-    // pre-change parse of this same text (`parse_effect_chain` JSON) —
-    // `player_scope: All`, no `repeat_for`, target `Typed[Creature]`, not
-    // `ParentTarget` — so the decline path leaves the base shape untouched.
-    assert_eq!(
-        exile.effect.target_filter(),
-        Some(&TargetFilter::Typed(TypedFilter::creature()))
-    );
-    assert_eq!(exile.player_scope, Some(PlayerFilter::All));
-    assert_eq!(exile.repeat_for, None);
-    assert_json_eq(
-        *exile,
-        r#"{"kind":"Spell","effect":{"type":"ChangeZone","origin":null,"destination":"Exile","target":{"type":"Typed","type_filters":["Creature"],"controller":null,"properties":[]},"owner_library":false,"enter_transformed":false,"enter_tapped":false,"enters_attacking":false},"cost":null,"sub_ability":null,"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"target_choice_timing":"Resolution","forward_result":false,"player_scope":{"type":"All"},"sub_link":"SequentialSibling"}"#,
-        "the declined consumer",
+    // "For each player," peels into the consumer's own `player_scope`, so the
+    // consumer-actor gate (not the binder) is the seam that declines it.
+    assert_consumer_is_a_gap(
+        &root,
+        "non_controller_reveal_choice",
+        "For each player, exile a creature card they revealed this way",
     );
 
     // Paired positive: the matching population binds (Valki's shape).
@@ -74837,8 +74860,9 @@ fn revealed_this_way_population_mismatch_is_declined() {
     assert_eq!(sub.repeat_for, None);
 }
 
-/// A consumer that names a non-controller actor ("they exile …") is
-/// declined by the consumer-actor gate.
+/// CR 608.2c + CR 109.5: a consumer that names a non-controller actor
+/// ("they exile …") is declined by the consumer-actor gate and becomes an
+/// honest gap — never a raw-filter zone move.
 #[test]
 fn revealed_this_way_consumer_with_non_controller_subject_is_declined() {
     let root = parse_effect_chain(
@@ -74847,28 +74871,106 @@ fn revealed_this_way_consumer_with_non_controller_subject_is_declined() {
     );
     let nodes = chain_nodes(&root);
     assert!(nodes.len() >= 2, "reach-guard: {root:#?}");
-    // Reach-guard: the `RevealedThisWay` arm claims the consumer text.
-    assert!(matches!(
-        super::sequence::parse_followup_continuation_ast_with_search_destination(
-            "they exile a creature card they revealed this way",
-            &root.effect,
-            &mut ParseContext::default(),
-            false,
-        ),
-        Some(ContinuationAst::RevealHandFilter {
-            binding: RevealChoiceBinding::RevealedThisWay,
-            ..
-        })
-    ));
+    assert_revealed_this_way_arm_claims(&root, "they exile a creature card they revealed this way");
     assert!(
         nodes.iter().all(|node| !parks_reveal_choice(node)),
         "{root:#?}"
     );
-    // No zone move was re-bound to the chosen card.
-    assert!(nodes
+    assert_consumer_is_a_gap(
+        &root,
+        "non_controller_reveal_choice",
+        "For each opponent, they exile a creature card they revealed this way",
+    );
+}
+
+/// CR 608.2c: after an unscoped (single-player) reveal, a "For each
+/// opponent," repeat names a population the reveal never had, so the
+/// consumer is a gap. Paired positive: without the repeat it binds.
+#[test]
+fn revealed_this_way_repeat_after_unscoped_reveal_is_a_gap() {
+    let root = parse_effect_chain(
+        "Target opponent reveals their hand. For each opponent, exile a creature card they revealed this way.",
+        AbilityKind::Spell,
+    );
+    assert!(chain_nodes(&root).len() >= 2, "reach-guard: {root:#?}");
+    assert_revealed_this_way_arm_claims(&root, "exile a creature card they revealed this way");
+    assert_consumer_is_a_gap(
+        &root,
+        "unbound_revealed_this_way",
+        "For each opponent, exile a creature card they revealed this way",
+    );
+
+    let bound = parse_effect_chain(
+        "Target opponent reveals their hand. Exile a creature card they revealed this way.",
+        AbilityKind::Spell,
+    );
+    let sub = bound.sub_ability.as_deref().expect("consumer");
+    assert!(matches!(
+        &*sub.effect,
+        Effect::ChangeZone {
+            target: TargetFilter::ParentTarget,
+            ..
+        }
+    ));
+}
+
+/// CR 608.2c: a consumer whose verb is not an origin-less zone move cannot
+/// be re-bound to the chosen card, so it is a gap rather than an action on
+/// any card matching its raw filter.
+#[test]
+fn revealed_this_way_non_zone_move_consumer_is_a_gap() {
+    // Provenance of the red-on-revert claim: the pre-change parse of this text
+    // (`parse_effect_chain` JSON) left the consumer executable as
+    // `{"type":"Discard","count":{"type":"Fixed","value":1},"target":{"type":"Controller"}}`
+    // — a discard from the controller's own hand, not of a revealed card.
+    let root = parse_effect_chain(
+        "Target opponent reveals their hand. Discard a creature card they revealed this way.",
+        AbilityKind::Spell,
+    );
+    let nodes = chain_nodes(&root);
+    assert!(nodes.len() >= 2, "reach-guard: {root:#?}");
+    assert_revealed_this_way_arm_claims(&root, "discard a creature card they revealed this way");
+    let gaps: Vec<_> = nodes
         .iter()
-        .filter(|node| matches!(&*node.effect, Effect::ChangeZone { .. }))
-        .all(|node| node.effect.target_filter() != Some(&TargetFilter::ParentTarget)));
+        .filter(|node| unimplemented_name(node) == Some("unbound_revealed_this_way"))
+        .collect();
+    assert_eq!(gaps.len(), 1, "{root:#?}");
+    assert_eq!(
+        gaps[0].effect.unimplemented_description(),
+        Some("Discard a creature card they revealed this way")
+    );
+    assert!(
+        nodes
+            .iter()
+            .all(|node| unimplemented_name(node).is_some() || std::ptr::eq(*node, &root)),
+        "only the reveal is executable: {root:#?}"
+    );
+}
+
+/// CR 608.2c + CR 608.2d: "Each opponent chooses a creature card they
+/// revealed this way" is a choice made by each opponent, which `RevealHand`
+/// cannot represent — an honest gap, never a controller-chosen parked reveal.
+/// Paired positive: a controller-addressed consumer parks the choice.
+#[test]
+fn revealed_this_way_choice_by_other_player_is_a_gap() {
+    let root = parse_effect_chain(
+        "Each opponent reveals their hand. Each opponent chooses a creature card they revealed this way.",
+        AbilityKind::Spell,
+    );
+    let nodes = chain_nodes(&root);
+    assert!(nodes.len() >= 2, "reach-guard: {root:#?}");
+    assert_revealed_this_way_arm_claims(&root, "chooses a creature card they revealed this way");
+    assert!(
+        nodes.iter().all(|node| !parks_reveal_choice(node)),
+        "{root:#?}"
+    );
+    let gaps = non_controller_gaps(&root);
+    assert_eq!(gaps.len(), 1, "{root:#?}");
+
+    let controller = parse_effect_chain(YOU_CHOOSE_FROM_IT, AbilityKind::Spell);
+    assert!(chain_nodes(&controller)
+        .iter()
+        .any(|node| parks_reveal_choice(node)));
 }
 
 /// The unscoped building block — a single-player reveal followed by an

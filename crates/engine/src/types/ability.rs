@@ -28103,6 +28103,13 @@ pub struct SpellContext {
     /// `targeting::triggering_spell`. `None` for a non-spell-cast trigger.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub triggering_spell: Option<ObjectIncarnationRef>,
+    /// CR 602.2a + CR 607.1 + CR 613.1f: provenance of the activated ability this
+    /// stack object came from on its source, bound at announcement
+    /// (`casting::record_activation_announcement`). Never set for triggered
+    /// abilities — theirs is read from `trigger_definition_ref` — so trigger
+    /// batch-run context equality is unaffected. Not redacted from viewer states.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_ability_provenance: Option<AbilityProvenance>,
 }
 
 impl SpellContext {
@@ -29535,6 +29542,30 @@ pub struct CopyEffectInstanceRef {
     pub modification_index: usize,
 }
 
+/// CR 607.1 + CR 607.5 + CR 613.1a: the copiable-value set that supplied an
+/// object's characteristic abilities. Abilities acquired from one copy effect
+/// are linked only to one another (CR 607.5); the object's own printed
+/// abilities form the `Own` set (CR 607.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum CharacteristicSetRef {
+    /// No copy effect applies in layer 1.
+    #[default]
+    Own,
+    /// The exact winning layer-1 copy effect (CR 707.2 + CR 707.9a).
+    Copied(CopyEffectInstanceRef),
+}
+
+/// CR 607.1 + CR 613.1f: whether a functioning ability is one of its
+/// object's characteristic abilities (of the given copiable set) or one it
+/// gained in layer 6. CR 607.1 links only the former; CR 607.1a self-grants are conservatively treated as the latter (fail closed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum AbilityProvenance {
+    Characteristic(CharacteristicSetRef),
+    Granted,
+}
+
 /// Payload-free identity of the continuous-effect occurrence which produced a
 /// Layer-6 trigger candidate.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -29627,6 +29658,35 @@ pub enum TriggerDefinitionOccurrenceRef {
     /// validation rejects it from an observable game state.
     #[serde(skip_serializing, skip_deserializing)]
     Unmaterialized,
+}
+
+impl TriggerDefinitionOccurrenceRef {
+    /// CR 607.1 + CR 607.5 + CR 613.1f: whether this trigger occurrence is one
+    /// of its object's characteristic abilities (and of which copiable set) or
+    /// one it gained in layer 6. `None` when the occurrence carries no
+    /// attributable set.
+    pub fn provenance(&self) -> Option<AbilityProvenance> {
+        match self {
+            Self::Printed { .. } => {
+                Some(AbilityProvenance::Characteristic(CharacteristicSetRef::Own))
+            }
+            // CR 607.5 + CR 707.9a: acquired as a copiable value of this copy effect.
+            Self::CopiedValue { copy_effect, .. } => Some(AbilityProvenance::Characteristic(
+                CharacteristicSetRef::Copied(*copy_effect),
+            )),
+            // CR 613.1f: layer-6 grant instances.
+            Self::KeywordCompanion { .. } | Self::Granted { .. } | Self::ExpandedGrant { .. } => {
+                Some(AbilityProvenance::Granted)
+            }
+            // CR 607.5 + CR 707.9a pair a retained ability with its copy effect,
+            // but this occurrence carries only a recipient-local grant instance,
+            // not that effect's `CopyEffectInstanceRef` — fail closed (no
+            // emblem-linked card is in this class).
+            Self::CopyRetained { .. } => None,
+            // Never observable at runtime.
+            Self::Unmaterialized => None,
+        }
+    }
 }
 
 /// Exact identity of a trigger definition that functions on one object
@@ -33831,6 +33891,33 @@ impl ResolvedAbility {
             else_branch.set_source_transformation_count_recursive(count);
         }
     }
+
+    /// CR 602.2a + CR 607.1: Propagate the announced activated ability's
+    /// provenance through every branch of the ability.
+    pub fn set_source_ability_provenance_recursive(
+        &mut self,
+        provenance: Option<AbilityProvenance>,
+    ) {
+        self.context.source_ability_provenance = provenance;
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.set_source_ability_provenance_recursive(provenance);
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.set_source_ability_provenance_recursive(provenance);
+        }
+    }
+
+    /// CR 607.1 + CR 113.7a: single read authority for the provenance of the
+    /// ability this stack object came from on its source — the activated fact
+    /// latched at announcement, else the trigger definition occurrence it was
+    /// created from. `None` when neither is attributable.
+    pub fn source_ability_provenance(&self) -> Option<AbilityProvenance> {
+        self.context.source_ability_provenance.or_else(|| {
+            self.trigger_definition_ref
+                .as_ref()
+                .and_then(|definition| definition.occurrence.provenance())
+        })
+    }
     /// CR 400.7: True when the triggered source matches the object in its captured
     /// `expected_zone` at the captured incarnation.
     fn source_is_current_via_zone_match(
@@ -34813,6 +34900,102 @@ mod tests {
     use super::*;
     use crate::types::mana::ZoneSpendPolarity;
     use crate::types::zones::Zone;
+
+    /// CR 607.1 + CR 607.5 + CR 613.1f: every trigger occurrence classifies
+    /// exhaustively — printed and copied-value occurrences are characteristic
+    /// of their copiable set, layer-6 grants are granted, and occurrences with
+    /// no attributable set are `None`. `ResolvedAbility::source_ability_provenance`
+    /// prefers the announcement latch, then the trigger occurrence.
+    #[test]
+    fn ability_provenance_classifies_occurrences_and_prefers_the_latch() {
+        let copy = CopyEffectInstanceRef {
+            continuous_effect_id: 3,
+            modification_index: 1,
+        };
+        let grant = TriggerGrantInstanceRef(2);
+        let printed = TriggerDefinitionOccurrenceRef::Printed {
+            base_set: TriggerBaseSetInstanceRef::INITIAL,
+            printed_index: 0,
+        };
+        let cases = [
+            (
+                printed.clone(),
+                Some(AbilityProvenance::Characteristic(CharacteristicSetRef::Own)),
+            ),
+            (
+                TriggerDefinitionOccurrenceRef::CopiedValue {
+                    copy_effect: copy,
+                    copied_slot: 0,
+                    printed_origin: None,
+                },
+                Some(AbilityProvenance::Characteristic(
+                    CharacteristicSetRef::Copied(copy),
+                )),
+            ),
+            (
+                TriggerDefinitionOccurrenceRef::KeywordCompanion {
+                    grant_instance: grant,
+                    companion_index: 0,
+                },
+                Some(AbilityProvenance::Granted),
+            ),
+            (
+                TriggerDefinitionOccurrenceRef::Granted {
+                    grant_instance: grant,
+                },
+                Some(AbilityProvenance::Granted),
+            ),
+            (
+                TriggerDefinitionOccurrenceRef::ExpandedGrant {
+                    grant_instance: grant,
+                    provider: Box::new(TriggerDefinitionRef {
+                        source: ObjectIncarnationRef::of(ObjectId(1), 0),
+                        occurrence: printed.clone(),
+                    }),
+                    provider_output_index: 0,
+                },
+                Some(AbilityProvenance::Granted),
+            ),
+            (
+                TriggerDefinitionOccurrenceRef::CopyRetained {
+                    grant_instance: grant,
+                    source_base_set: TriggerBaseSetInstanceRef::INITIAL,
+                    source_printed_index: 0,
+                },
+                None,
+            ),
+            (TriggerDefinitionOccurrenceRef::Unmaterialized, None),
+        ];
+        for (occurrence, expected) in &cases {
+            assert_eq!(occurrence.provenance(), *expected, "{occurrence:?}");
+        }
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            crate::types::player::PlayerId(0),
+        );
+        assert_eq!(ability.source_ability_provenance(), None, "neither");
+        ability.trigger_definition_ref = Some(TriggerDefinitionRef {
+            source: ObjectIncarnationRef::of(ObjectId(1), 0),
+            occurrence: printed,
+        });
+        assert_eq!(
+            ability.source_ability_provenance(),
+            Some(AbilityProvenance::Characteristic(CharacteristicSetRef::Own)),
+            "the trigger occurrence answers"
+        );
+        ability.set_source_ability_provenance_recursive(Some(AbilityProvenance::Granted));
+        assert_eq!(
+            ability.source_ability_provenance(),
+            Some(AbilityProvenance::Granted),
+            "the announcement latch wins"
+        );
+    }
 
     /// Issue #8485: `origin` and `source_object` are additive and wire-compatible.
     ///
