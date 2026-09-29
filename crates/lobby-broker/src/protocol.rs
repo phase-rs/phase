@@ -67,9 +67,12 @@ pub struct TournamentRequestId(pub u64);
 ///      read by the new `EffectOutcomeSignal::RevealUntilMatched` guard of the
 ///      "When you reveal … this way" reflexive (Yuna's Whistle, Calibrated
 ///      Blast). A paused continuation carries the verdict across a `GameState`
-///      round trip; a v91 peer cannot parse the new tags and would drop the
-///      field, minting a reflexive trigger the rules forbid. Full-game peers and
-///      P2P move in lockstep (wire 74); lobby messages are unchanged.
+///      round trip. The same bump carries the CR 701.20a reveal lease:
+///      `ResolvedInformationLifetime::UntilStackObjectLeaves` and the
+///      `GameState.stack_bound_reveals` map. A v91 peer cannot parse the new
+///      tags and would drop the field, minting a reflexive trigger the rules
+///      forbid. Full-game peers and P2P move in lockstep (wire 74); lobby
+///      messages are unchanged.
 /// 91 — `PendingManaAbility::chosen_counter_count: Option<u32>` is retyped to
 ///      `chosen_counter_counts: Vec<u32>` (#9207), preserving each announced
 ///      amount for a composite `RemoveCounter` cost. The field is required,

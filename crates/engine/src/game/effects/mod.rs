@@ -9192,7 +9192,7 @@ fn reflexive_occurrence_voided_by_parent(
 
 /// Whether the root condition carries the reveal-until-hit guard, alone or as a
 /// member of the flat root `And` built by `when_you_do_with_guard`.
-fn condition_has_reveal_until_matched_guard(condition: &AbilityCondition) -> bool {
+pub(crate) fn condition_has_reveal_until_matched_guard(condition: &AbilityCondition) -> bool {
     let is_guard = |condition: &AbilityCondition| {
         matches!(
             condition,

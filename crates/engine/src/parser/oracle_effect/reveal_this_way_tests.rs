@@ -283,3 +283,59 @@ fn where_x_mana_value_of_that_card_binds_the_demonstrative_referent() {
         demonstrative
     );
 }
+
+fn where_x_gap_present(json: &serde_json::Value) -> bool {
+    let mut gaps = Vec::new();
+    collect_effects(json, "Unimplemented", &mut gaps);
+    gaps.iter().any(|gap| gap["name"] == "where_x_binding")
+}
+
+#[test]
+fn kami_war_o_kagachi_where_x_has_no_proven_producer() {
+    // The Kami War // O-Kagachi Made Manifest (back face, verbatim): "that card"
+    // is the defending player's graveyard choice, which is still unimplemented,
+    // so its where-X must stay an honest gap rather than a self-referential pump.
+    let json = trigger_json(
+        "O-Kagachi Made Manifest is all colors.\nFlying, trample\nWhenever this creature attacks, defending player chooses a nonland card in your graveyard. Return that card to your hand. This creature gets +X/+0 until end of turn, where X is the mana value of that card.",
+        "O-Kagachi Made Manifest",
+    );
+    assert!(where_x_gap_present(&json), "{json}");
+    let mut pumps = Vec::new();
+    collect_effects(&json, "Pump", &mut pumps);
+    assert!(pumps.is_empty(), "no unfounded pump: {json}");
+}
+
+#[test]
+fn where_x_that_card_after_a_non_card_producer_stays_unsupported() {
+    let def = spell(
+        "Gain 3 life. Target creature gets +X/+0 until end of turn, where X is the mana value of that card.",
+        "Probe",
+    );
+    assert!(
+        matches!(def.effect.as_ref(), Effect::GainLife { .. }),
+        "reach guard: the life gain parses: {def:?}"
+    );
+    let json = serde_json::to_value(&def).unwrap();
+    assert!(where_x_gap_present(&json), "{json}");
+}
+
+#[test]
+fn where_x_that_card_after_a_multi_hit_reveal_until_stays_unsupported() {
+    let def = spell(
+        "Reveal cards from the top of your library until you reveal two creature cards. Put those cards into your hand and the rest on the bottom of your library in a random order. Target creature gets +X/+0 until end of turn, where X is the mana value of that card.",
+        "Probe",
+    );
+    assert!(
+        matches!(
+            def.effect.as_ref(),
+            Effect::RevealUntil {
+                count: QuantityExpr::Fixed { value: 2 },
+                ..
+            }
+        ),
+        "reach guard: the parent is a count-2 reveal-until: {:?}",
+        def.effect
+    );
+    let json = serde_json::to_value(&def).unwrap();
+    assert!(where_x_gap_present(&json), "{json}");
+}

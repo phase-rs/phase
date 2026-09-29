@@ -40,10 +40,23 @@ struct Fixture {
     bear: Option<ObjectId>,
     opp_bear: ObjectId,
     library: Vec<ObjectId>,
+    /// Extra instants added to hands, in the order given to `fixture_with`.
+    extras: Vec<ObjectId>,
 }
 
 /// `library` lists cards TOP FIRST.
 fn fixture(name: &str, oracle: &str, own_creature: bool, library: &[LibCard]) -> Fixture {
+    fixture_with(name, oracle, own_creature, library, &[])
+}
+
+/// As [`fixture`], plus extra instants `(owner, name, oracle)` in hand.
+fn fixture_with(
+    name: &str,
+    oracle: &str,
+    own_creature: bool,
+    library: &[LibCard],
+    extras: &[(engine::types::player::PlayerId, &str, &str)],
+) -> Fixture {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let bear = own_creature.then(|| scenario.add_creature(P0, "Bear", 2, 2).id());
@@ -56,6 +69,14 @@ fn fixture(name: &str, oracle: &str, own_creature: bool, library: &[LibCard]) ->
     let spell = scenario
         .add_spell_to_hand_from_oracle(P0, name, true, oracle)
         .id();
+    let extras = extras
+        .iter()
+        .map(|(owner, extra_name, extra_oracle)| {
+            scenario
+                .add_spell_to_hand_from_oracle(*owner, extra_name, true, extra_oracle)
+                .id()
+        })
+        .collect();
     let mut ids = Vec::new();
     for card in library.iter().rev() {
         let id = match card {
@@ -82,6 +103,7 @@ fn fixture(name: &str, oracle: &str, own_creature: bool, library: &[LibCard]) ->
         bear,
         opp_bear,
         library: ids,
+        extras,
     }
 }
 
@@ -160,6 +182,7 @@ fn whistle_reflexive_targets_after_reveal_and_uses_revealed_mana_value() {
         bear,
         opp_bear,
         library,
+        ..
     } = fixture(
         "Yuna's Whistle",
         YUNAS_WHISTLE,
@@ -707,4 +730,462 @@ fn cait_sith_announces_no_target_with_its_combat_trigger() {
         "reach guard: the top card was exiled"
     );
     assert_eq!(st.objects[&bear].power, Some(2), "no pump");
+}
+
+// ---------------------------------------------------------------------------
+// CR 701.20a: "If revealing a card causes a triggered ability to trigger, the
+// card remains revealed until that triggered ability leaves the stack."
+// ---------------------------------------------------------------------------
+
+const STIFLE: &str = "Counter target activated or triggered ability.";
+const THRILL_OF_POSSIBILITY: &str =
+    "As an additional cost to cast this spell, discard a card.\nDraw two cards.";
+const COPY_TRIGGER: &str =
+    "Copy target triggered ability you control. You may choose new targets for the copy.";
+const HIDDEN: &str = "Hidden Card";
+
+fn name_seen_by(
+    state: &GameState,
+    viewer: engine::types::player::PlayerId,
+    id: ObjectId,
+) -> String {
+    engine::game::visibility::filter_state_for_viewer(state, viewer).objects[&id]
+        .name
+        .clone()
+}
+
+fn reflexive_entries(state: &GameState) -> Vec<ObjectId> {
+    state
+        .stack
+        .iter()
+        .filter(|entry| matches!(entry.kind, StackEntryKind::TriggeredAbility { .. }))
+        .map(|entry| entry.id)
+        .collect()
+}
+
+fn pass_once_each(runner: &mut GameRunner) {
+    runner.act(GameAction::PassPriority).expect("P0 passes");
+    runner.act(GameAction::PassPriority).expect("P1 passes");
+}
+
+/// Whistle with its reflexive on the stack, P0's Bear chosen, P0 holding
+/// priority. Library: Forest, Library Beast (MV 4), then three spares.
+fn whistle_with_reflexive_on_stack(
+    extras: &[(engine::types::player::PlayerId, &str, &str)],
+) -> (GameRunner, ObjectId, ObjectId, Vec<ObjectId>) {
+    let Fixture {
+        mut runner,
+        spell,
+        bear,
+        library,
+        extras,
+        ..
+    } = fixture_with(
+        "Yuna's Whistle",
+        YUNAS_WHISTLE,
+        true,
+        &[
+            LibCard::Land("Forest"),
+            LibCard::Creature("Library Beast", ManaCost::generic(4)),
+            LibCard::Land("Spare A"),
+            LibCard::Land("Spare B"),
+            LibCard::Land("Spare C"),
+        ],
+        extras,
+    );
+    let bear = bear.unwrap();
+    runner.cast(spell).commit();
+    assert!(pass_until_prompt_or_empty(&mut runner));
+    let hit = library[1];
+    assert_eq!(
+        zone(runner.state(), hit),
+        Zone::Hand,
+        "reach guard: hit in hand"
+    );
+    assert_eq!(
+        name_seen_by(runner.state(), P1, hit),
+        "Library Beast",
+        "the opponent sees the hit at target selection"
+    );
+    choose(&mut runner, TargetRef::Object(bear));
+    assert_eq!(
+        runner.state().stack_bound_reveals.len(),
+        1,
+        "reach guard: one lease"
+    );
+    (runner, hit, bear, extras)
+}
+
+#[test]
+fn whistle_hit_stays_public_until_its_reflexive_resolves() {
+    let (mut runner, hit, bear, _) = whistle_with_reflexive_on_stack(&[]);
+    runner.act(GameAction::PassPriority).unwrap();
+    assert!(matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P1));
+    assert_eq!(
+        name_seen_by(runner.state(), P1, hit),
+        "Library Beast",
+        "P1 sees the revealed card while the reflexive is on the stack"
+    );
+    runner.act(GameAction::PassPriority).unwrap();
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(
+        p1p1(runner.state(), bear),
+        4,
+        "reach guard: the reflexive resolved"
+    );
+    assert_eq!(
+        name_seen_by(runner.state(), P1, hit),
+        HIDDEN,
+        "hidden once it left the stack"
+    );
+    assert_eq!(
+        name_seen_by(runner.state(), P0, hit),
+        "Library Beast",
+        "the owner still sees it"
+    );
+    assert!(runner.state().stack_bound_reveals.is_empty());
+}
+
+#[test]
+fn whistle_hit_stays_public_across_a_state_round_trip_mid_trigger() {
+    let (mut runner, hit, _, _) = whistle_with_reflexive_on_stack(&[]);
+    round_trip(&mut runner);
+    assert_eq!(name_seen_by(runner.state(), P1, hit), "Library Beast");
+    pass_once_each(&mut runner);
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(name_seen_by(runner.state(), P1, hit), HIDDEN);
+}
+
+#[test]
+fn whistle_hit_is_hidden_after_its_reflexive_is_countered() {
+    let (mut runner, hit, bear, extras) =
+        whistle_with_reflexive_on_stack(&[(P1, "Stifle", STIFLE)]);
+    let reflexive = reflexive_entries(runner.state())[0];
+    runner.act(GameAction::PassPriority).unwrap();
+    runner.cast(extras[0]).target_object(reflexive).commit();
+    assert_eq!(
+        name_seen_by(runner.state(), P1, hit),
+        "Library Beast",
+        "still on the stack"
+    );
+    pass_until_prompt_or_empty(&mut runner);
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(
+        p1p1(runner.state(), bear),
+        0,
+        "reach guard: the reflexive was countered"
+    );
+    assert_eq!(name_seen_by(runner.state(), P1, hit), HIDDEN);
+    assert!(runner.state().stack_bound_reveals.is_empty());
+}
+
+#[test]
+fn whistle_hit_is_hidden_when_its_reflexive_has_no_legal_target() {
+    let Fixture {
+        mut runner,
+        spell,
+        library,
+        ..
+    } = fixture(
+        "Yuna's Whistle",
+        YUNAS_WHISTLE,
+        false,
+        &[
+            LibCard::Land("Forest"),
+            LibCard::Creature("Library Beast", ManaCost::generic(3)),
+        ],
+    );
+    runner.cast(spell).commit();
+    assert!(!pass_until_prompt_or_empty(&mut runner));
+    assert_eq!(zone(runner.state(), library[1]), Zone::Hand, "reach guard");
+    assert_eq!(name_seen_by(runner.state(), P1, library[1]), HIDDEN);
+    assert!(runner.state().stack_bound_reveals.is_empty());
+}
+
+#[test]
+fn a_copy_of_the_reflexive_does_not_extend_the_reveal() {
+    let (mut runner, hit, bear, extras) =
+        whistle_with_reflexive_on_stack(&[(P0, "Resonance", COPY_TRIGGER)]);
+    let original = reflexive_entries(runner.state())[0];
+    runner.cast(extras[0]).target_object(original).commit();
+    // Resolve the copy spell; the copy of the reflexive goes on the stack.
+    pass_once_each(&mut runner);
+    while matches!(
+        runner.state().waiting_for,
+        WaitingFor::TriggerTargetSelection { .. }
+    ) || !matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+    {
+        // Keep the copy's target (Bear) if it offers a retarget prompt.
+        if runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(bear)),
+            })
+            .is_err()
+        {
+            break;
+        }
+    }
+    assert_eq!(
+        reflexive_entries(runner.state()).len(),
+        2,
+        "reach guard: copy + original"
+    );
+    assert_eq!(
+        runner.state().stack_bound_reveals.len(),
+        1,
+        "only the original owns a lease"
+    );
+    pass_once_each(&mut runner);
+    assert_eq!(
+        reflexive_entries(runner.state()),
+        vec![original],
+        "the copy resolved first"
+    );
+    assert_eq!(
+        name_seen_by(runner.state(), P1, hit),
+        "Library Beast",
+        "original still on the stack"
+    );
+    pass_once_each(&mut runner);
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(
+        p1p1(runner.state(), bear),
+        8,
+        "reach guard: copy and original both resolved"
+    );
+    assert_eq!(name_seen_by(runner.state(), P1, hit), HIDDEN);
+}
+
+/// CR 400.7 + CR 701.20a: the hit is discarded (as Thrill of Possibility's
+/// additional cost) while its reflexive is on the stack. The lease ends live,
+/// and a cold replay of the journaled zone change from the pre-cast state ends
+/// it identically.
+#[test]
+fn discarding_the_hit_ends_its_lease_live_and_on_cold_replay() {
+    use engine::game::zones::apply_resolved_zone_change;
+    use engine::types::resolved_commands::ResolvedRulesCommand;
+
+    let (mut runner, hit, bear, extras) =
+        whistle_with_reflexive_on_stack(&[(P0, "Thrill of Possibility", THRILL_OF_POSSIBILITY)]);
+    let pre_cast: GameState = runner.state().clone();
+    assert!(
+        pre_cast.holds_stack_bound_reveal(hit),
+        "reach guard: leased before"
+    );
+    runner.cast(extras[0]).pay_cost_with(&[hit]).commit();
+    assert_eq!(
+        zone(runner.state(), hit),
+        Zone::Graveyard,
+        "reach guard: discarded as a cost"
+    );
+    assert!(
+        runner.state().stack_bound_reveals.is_empty(),
+        "live: the lease ended"
+    );
+
+    let command = runner
+        .state()
+        .resolved_rules_journal
+        .entries()
+        .iter()
+        .filter_map(|entry| entry.command.as_ref())
+        .find_map(|command| match command {
+            ResolvedRulesCommand::ZoneChange(command)
+                if command.object.object_id == hit
+                    && command.from == Zone::Hand
+                    && command.to == Zone::Graveyard =>
+            {
+                Some(command.as_ref().clone())
+            }
+            _ => None,
+        })
+        .expect("the discard journals its zone command");
+    let mut replay = pre_cast;
+    apply_resolved_zone_change(&mut replay, &command).expect("hand → graveyard replays");
+    assert_eq!(
+        replay.stack_bound_reveals,
+        runner.state().stack_bound_reveals,
+        "cold replay ends the lease like the live path"
+    );
+
+    pass_until_prompt_or_empty(&mut runner);
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(
+        p1p1(runner.state(), bear),
+        4,
+        "X still reads the hit's mana value"
+    );
+}
+
+#[test]
+fn calibrated_blast_hit_is_public_on_the_library_bottom_while_its_reflexive_waits() {
+    let Fixture {
+        mut runner,
+        spell,
+        library,
+        ..
+    } = fixture(
+        "Calibrated Blast",
+        CALIBRATED_BLAST,
+        false,
+        &[
+            LibCard::Land("Forest"),
+            LibCard::Sorcery("Three Drop", ManaCost::generic(3)),
+            LibCard::Land("Neighbour"),
+        ],
+    );
+    let (hit, neighbour) = (library[1], library[2]);
+    runner.cast(spell).commit();
+    assert!(pass_until_prompt_or_empty(&mut runner));
+    choose(&mut runner, TargetRef::Player(P1));
+    runner.act(GameAction::PassPriority).unwrap();
+    assert_eq!(
+        zone(runner.state(), hit),
+        Zone::Library,
+        "reach guard: bottomed"
+    );
+    assert_eq!(name_seen_by(runner.state(), P1, hit), "Three Drop");
+    assert_eq!(
+        name_seen_by(runner.state(), P1, neighbour),
+        HIDDEN,
+        "unrevealed library stays redacted"
+    );
+    runner.act(GameAction::PassPriority).unwrap();
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(name_seen_by(runner.state(), P1, hit), HIDDEN);
+}
+
+/// Two Calibrated Blasts on a one-card library reveal the SAME occurrence (a
+/// library → library bottom move only reorders), so two live reflexives hold
+/// two leases on one occurrence. Releasing either keeps the card revealed
+/// until the other leaves the stack.
+fn two_blasts_on_one_card() -> (GameRunner, ObjectId, Vec<ObjectId>, Vec<ObjectId>) {
+    let Fixture {
+        mut runner,
+        spell,
+        library,
+        extras,
+        ..
+    } = fixture_with(
+        "Calibrated Blast",
+        CALIBRATED_BLAST,
+        false,
+        &[LibCard::Sorcery("Three Drop", ManaCost::generic(3))],
+        &[
+            (P0, "Calibrated Blast", CALIBRATED_BLAST),
+            (P1, "Stifle", STIFLE),
+        ],
+    );
+    let hit = library[0];
+    runner.cast(spell).commit();
+    assert!(pass_until_prompt_or_empty(&mut runner));
+    choose(&mut runner, TargetRef::Player(P1));
+    runner.cast(extras[0]).commit();
+    assert!(
+        pass_until_prompt_or_empty(&mut runner),
+        "second reflexive prompt"
+    );
+    choose(&mut runner, TargetRef::Player(P1));
+    let entries = reflexive_entries(runner.state());
+    assert_eq!(entries.len(), 2, "reach guard: R1 and R2 both live");
+    let rows: Vec<_> = entries
+        .iter()
+        .map(|entry| runner.state().stack_bound_reveals[entry].clone())
+        .collect();
+    assert_eq!(
+        rows[0], rows[1],
+        "both leases hold the identical occurrence"
+    );
+    (runner, hit, entries, extras)
+}
+
+#[test]
+fn overlapping_reveal_leases_release_independently_top_first() {
+    let (mut runner, hit, _, _) = two_blasts_on_one_card();
+    pass_once_each(&mut runner);
+    assert_eq!(reflexive_entries(runner.state()).len(), 1, "R2 resolved");
+    assert_eq!(
+        name_seen_by(runner.state(), P1, hit),
+        "Three Drop",
+        "R1 still holds it"
+    );
+    pass_once_each(&mut runner);
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(name_seen_by(runner.state(), P1, hit), HIDDEN);
+    assert_eq!(
+        runner.state().players[1].life,
+        14,
+        "reach guard: both dealt 3"
+    );
+}
+
+#[test]
+fn overlapping_reveal_leases_release_independently_bottom_first() {
+    let (mut runner, hit, entries, extras) = two_blasts_on_one_card();
+    runner.act(GameAction::PassPriority).unwrap();
+    runner.cast(extras[1]).target_object(entries[0]).commit();
+    pass_once_each(&mut runner);
+    assert_eq!(
+        reflexive_entries(runner.state()),
+        vec![entries[1]],
+        "R1 countered"
+    );
+    assert_eq!(
+        name_seen_by(runner.state(), P1, hit),
+        "Three Drop",
+        "R2 still holds it"
+    );
+    pass_once_each(&mut runner);
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(name_seen_by(runner.state(), P1, hit), HIDDEN);
+}
+
+#[test]
+fn every_opponent_sees_the_hit_in_a_three_player_game() {
+    let mut scenario = GameScenario::new_n_player(3, 11);
+    scenario.at_phase(Phase::PreCombatMain);
+    let bear = scenario.add_creature(P0, "Bear", 2, 2).id();
+    scenario.add_creature(P0, "Cub", 1, 1);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Yuna's Whistle", true, YUNAS_WHISTLE)
+        .id();
+    let hit = scenario
+        .add_spell_to_library_top(P0, "Library Beast", false)
+        .as_creature()
+        .with_mana_cost(ManaCost::generic(2))
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(spell).commit();
+    assert!(pass_until_prompt_or_empty(&mut runner));
+    choose(&mut runner, TargetRef::Object(bear));
+    let p2 = engine::types::player::PlayerId(2);
+    for viewer in [P1, p2] {
+        assert_eq!(name_seen_by(runner.state(), viewer, hit), "Library Beast");
+    }
+    pass_until_prompt_or_empty(&mut runner);
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(p1p1(runner.state(), bear), 2, "reach guard");
+    for viewer in [P1, p2] {
+        assert_eq!(name_seen_by(runner.state(), viewer, hit), HIDDEN);
+    }
+}
+
+#[test]
+fn a_debug_phase_jump_ends_every_lease() {
+    let (mut runner, hit, _, _) = whistle_with_reflexive_on_stack(&[]);
+    runner.state_mut().debug_mode = true;
+    runner
+        .act(GameAction::Debug(
+            engine::types::actions::DebugAction::SetPhase {
+                phase: Phase::PreCombatMain,
+                active_player: P0,
+            },
+        ))
+        .expect("debug phase jump");
+    assert!(
+        runner.state().stack.is_empty(),
+        "reach guard: the stack was cleared"
+    );
+    assert!(runner.state().stack_bound_reveals.is_empty());
+    assert_eq!(name_seen_by(runner.state(), P1, hit), HIDDEN);
 }

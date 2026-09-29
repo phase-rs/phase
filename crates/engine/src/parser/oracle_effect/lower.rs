@@ -10807,7 +10807,7 @@ fn is_that_card_mana_value_where_x(expression_lower: &str) -> bool {
 /// `converted mana cost` synonym) — the prepositional form of
 /// [`is_that_card_mana_value_where_x`], with the same literal-`card`-only and
 /// mana-value-only restrictions.
-fn is_mana_value_of_that_card_where_x(expression_lower: &str) -> bool {
+pub(super) fn is_mana_value_of_that_card_where_x(expression_lower: &str) -> bool {
     all_consuming((
         tag::<_, _, OracleError<'_>>("the "),
         alt((tag("mana value"), tag("converted mana cost"))),

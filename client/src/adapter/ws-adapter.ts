@@ -213,7 +213,9 @@ export class NativeEngineVersionMismatchError extends Error {
  * 92 — ResolvedAbility.parent_target_missing_reason is serialized and
  *      ParentTargetMissingReason gains RevealUntil (CR 701.20a + CR 603.12),
  *      the reveal-until whiff verdict read by the new
- *      EffectOutcomeSignal.RevealUntilMatched reflexive guard on resume. A v91
+ *      EffectOutcomeSignal.RevealUntilMatched reflexive guard on resume, plus
+ *      the CR 701.20a reveal lease (ResolvedInformationLifetime
+ *      UntilStackObjectLeaves and GameState.stack_bound_reveals). A v91
  *      peer cannot parse the new tags; the exact-match handshake
  *      refuses the pairing. P2P moves in lockstep (wire 74); lobby messages
  *      are unchanged.

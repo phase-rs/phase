@@ -885,6 +885,10 @@ pub(crate) fn identity_projection_for_viewer(
             || (state.revealed_cards.contains(&obj_id)
                 && !manifest_dread_cards.contains(&obj_id))
             || state.viewer_knows_card_identity(viewer, obj_id)
+            // CR 701.20a: a card whose reveal caused a triggered ability stays
+            // revealed until that ability leaves the stack — exact occurrence
+            // only, so ordinary library positions stay redacted.
+            || state.holds_stack_bound_reveal(obj_id)
             // CR 701.20e: own (or controlled-turn) library top under a
             // MayLookAtTopOfLibrary permission — see `look_top_visible` above.
             || look_top_visible.contains(&obj_id);
@@ -1051,6 +1055,8 @@ pub(crate) fn identity_projection_for_unseated_viewer(
     let mut projections = BTreeMap::new();
     let mut hide_if_private = |object_id: ObjectId| {
         let public = state.revealed_cards.contains(&object_id)
+            // CR 701.20a: stack-bound reveal lease (exact occurrence).
+            || state.holds_stack_bound_reveal(object_id)
             || state.objects.get(&object_id).is_some_and(|object| {
                 state.public_revealed_cards.contains(&object_id) && object.zone != Zone::Library
             });
@@ -1278,7 +1284,8 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
                             && projected_object.zone != base_object.zone;
                     let identity_already_known = viewer_knows(*object_id)
                         || state.revealed_cards.contains(object_id)
-                        || state.public_revealed_cards.contains(object_id);
+                        || state.public_revealed_cards.contains(object_id)
+                        || state.holds_stack_bound_reveal(*object_id);
                     (crossed_hidden_boundary
                         && !can_view_private_for_player(base_object.owner)
                         && !identity_already_known)
@@ -3321,6 +3328,9 @@ fn viewer_may_look_at_face_down(
 fn is_visible_revealed_card(state: &GameState, viewer: PlayerId, obj_id: ObjectId) -> bool {
     state.revealed_cards.contains(&obj_id)
         || state.viewer_knows_card_identity(viewer, obj_id)
+        // CR 701.20a: kept revealed while the triggered ability it caused is
+        // on the stack.
+        || state.holds_stack_bound_reveal(obj_id)
         || state.objects.get(&obj_id).is_some_and(|obj| {
             state.public_revealed_cards.contains(&obj_id) && obj.zone != Zone::Library
         })
