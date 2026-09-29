@@ -14,7 +14,7 @@ import {
   PROTOCOL_VERSION,
   WebSocketAdapter,
 } from "../ws-adapter";
-import { AdapterError, supportsMatchConcede, supportsServerRewind } from "../types";
+import { AdapterError, AdapterErrorCode, supportsMatchConcede, supportsServerRewind } from "../types";
 import type { FormatConfig, GameAction, GameState } from "../types";
 import type {
   InteractionChoiceId,
@@ -1868,7 +1868,25 @@ describe("WebSocketAdapter", () => {
       await expect(preview).resolves.toEqual([12]);
     });
 
-    it("rejects submitAction and clears pending state when the socket throws on send", async () => {
+    it.each(["missing", "closed"] as const)(
+      "classifies submitAction before send when the socket is %s",
+      async (socketState) => {
+        const internal = adapter as unknown as { ws: MockWebSocket | null };
+        const original = internal.ws;
+        if (socketState === "missing") internal.ws = null;
+        else ws.readyState = 3;
+        ws.send.mockClear();
+
+        await expect(
+          adapter.submitAction({ type: "PassPriority" }, 0),
+        ).rejects.toMatchObject({ code: AdapterErrorCode.ACTION_NOT_SENT });
+        expect(ws.send).not.toHaveBeenCalled();
+
+        internal.ws = original;
+      },
+    );
+
+    it("classifies a synchronous send failure as definitely not sent and clears pending state", async () => {
       const listener = vi.fn();
       adapter.onEvent(listener);
       ws.send.mockImplementationOnce(() => {
@@ -1877,7 +1895,7 @@ describe("WebSocketAdapter", () => {
 
       await expect(
         adapter.submitAction({ type: "PassPriority" }, 0),
-      ).rejects.toThrow();
+      ).rejects.toMatchObject({ code: AdapterErrorCode.ACTION_NOT_SENT });
 
       // The action was un-pended and an error surfaced, rather than the caller
       // hanging forever on a reply that will never come.
@@ -1946,7 +1964,12 @@ describe("WebSocketAdapter", () => {
       // against the unguarded close path and prove nothing.
       await expect(adapter.exportPersistenceState()).rejects.toThrow("Session identity rejected");
 
+      ws.send.mockClear();
       const pending = trackRejection(adapter.submitAction({ type: "PassPriority" }, 0));
+      expect(ws.send).toHaveBeenCalledWith(JSON.stringify({
+        type: "Action",
+        data: { action: { type: "PassPriority" } },
+      }));
       ws.dispatchSynthetic("close");
 
       expect(await pending()).toMatchObject({

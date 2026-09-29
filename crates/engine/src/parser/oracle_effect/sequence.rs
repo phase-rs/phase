@@ -1596,6 +1596,24 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                         ))
                         .parse(remainder_lower_for_loses.as_str())
                         .is_ok();
+                        // CR 608.2c: "you gain life and draw cards equal to its power"
+                        // (Lifeblood Hydra) — coordinated amount-elided verbs share ONE
+                        // trailing "equal to" postmodifier, so the " and " is internal
+                        // to a single instruction owned by
+                        // `try_parse_shared_equal_to_quantity_compound`. Same grammar
+                        // (`parse_equal_to_qty_conjuncts`) and same subject tightness as
+                        // the distributor: the chunk so far (reflexive connector
+                        // stripped, as for `compound_subject_each`) must be exactly
+                        // "[you ]<head>[ and <head>]*", and the remainder must continue
+                        // the head run up to " equal to ".
+                        let shared_equal_to_quantity_conjunct =
+                            all_consuming(super::parse_equal_to_qty_conjuncts)
+                                .parse(first_subject_token)
+                                .is_ok()
+                                && super::parse_equal_to_qty_verb_run(
+                                    remainder_lower_for_loses.as_str(),
+                                )
+                                .is_ok();
                         let suppress = (nom_primitives::scan_contains(&before_lower, "from among")
                         && !sacrifice_rest_remainder)
                         || is_inside_temporal_prefix(&before_lower)
@@ -1615,6 +1633,7 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                         || bare_becomes_continuation
                         || mass_exile_union_continuation
                         || loses_all_other_card_types_continuation
+                        || shared_equal_to_quantity_conjunct
                         || inside_prefix_comma_and_continuation;
                         if !suppress && starts_bare_and_clause(remainder_trimmed) {
                             push_clause_chunk(&mut chunks, before_and, Some(ClauseBoundary::Comma));
