@@ -12,10 +12,12 @@ use engine::types::game_state::{CastingVariant, StackEntry, StackEntryKind, Wait
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
 const GOAT_ORACLE: &str = "{1}: Draw a card. Gain control of this creature and put a -1/-1 counter on it. Only your opponents may activate this ability and only as a sorcery.\n\
 When this creature dies, if it had one or more -1/-1 counters on it, its owner draws that many cards and each other player loses that much life.";
+const VINDICATE_ORACLE: &str = "Destroy target permanent.";
 
 fn fund_generic(
     runner: &mut engine::game::scenario::GameRunner,
@@ -197,4 +199,41 @@ fn opponents_only_activation_parses_turn_timing_composition() {
             .contains(&ActivationRestriction::DuringYourTurn),
         "opponent permission must compose with DuringYourTurn"
     );
+}
+
+#[test]
+fn oft_nabbed_goat_owner_draws_and_each_other_player_loses_from_lki_counters() {
+    let p2 = PlayerId(2);
+    let mut scenario = GameScenario::new_n_player(3, 3289);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(
+        P0,
+        (0..3)
+            .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    scenario.add_card_to_library_top(P0, "Plains");
+    scenario.add_card_to_library_top(P0, "Island");
+
+    let goat = scenario
+        .add_creature_from_oracle(P0, "Oft-Nabbed Goat", 3, 3, GOAT_ORACLE)
+        .controlled_by(P1)
+        .id();
+    scenario.with_counter(goat, CounterType::Minus1Minus1, 2);
+    let destroy = scenario
+        .add_spell_to_hand_from_oracle(P0, "Vindicate", false, VINDICATE_ORACLE)
+        .id();
+
+    let mut runner = scenario.build();
+    let outcome = runner.cast(destroy).target_object(goat).resolve();
+
+    assert_eq!(
+        outcome.zone_of(goat),
+        Zone::Graveyard,
+        "reach-guard: Vindicate must destroy the Goat"
+    );
+    outcome.assert_hand_drawn(P0, 2);
+    outcome.assert_life_delta(P0, 0);
+    outcome.assert_life_delta(P1, -2);
+    outcome.assert_life_delta(p2, -2);
 }
