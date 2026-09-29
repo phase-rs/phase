@@ -2946,20 +2946,21 @@ pub fn filter_events_for_viewer(
     let hidden_search_viewers = hidden_search_audiences(state, events);
     // CR 400.2 + CR 401.2: computed once per batch, only when the batch can
     // carry a library occurrence's identity.
-    let hidden_library = events
-        .iter()
-        .any(|event| {
-            matches!(
-                event,
-                GameEvent::CardsRevealed { .. }
-                    | GameEvent::EffectResolved {
-                        subject: Some(_),
-                        ..
-                    }
-            )
-        })
-        .then(|| hidden_library_ids(state, (!spectator).then_some(viewer)))
-        .unwrap_or_default();
+    let carries_identity = events.iter().any(|event| {
+        matches!(
+            event,
+            GameEvent::CardsRevealed { .. }
+                | GameEvent::EffectResolved {
+                    subject: Some(_),
+                    ..
+                }
+        )
+    });
+    let hidden_library = if carries_identity {
+        hidden_library_ids(state, (!spectator).then_some(viewer))
+    } else {
+        HashSet::new()
+    };
     events
         .iter()
         .zip(hidden_search_viewers.iter())
@@ -3652,7 +3653,7 @@ fn redact_hidden_library_identity_carriers(
     // The lease map is rules bookkeeping, and its exact `ObjectIncarnationRef`
     // is a position handle; the presentation derived from it is the public
     // surface.
-    filtered.stack_bound_reveals = Default::default();
+    *filtered.stack_bound_reveals = Default::default();
     // Resolution bookkeeping written in reveal order (the same order as
     // `CardsRevealed.card_names`), so its ids join to the names. No client
     // reads it.
@@ -3730,13 +3731,11 @@ fn redact_hidden_library_identity_carriers(
         WaitingFor::RevealUntilBottomOrder {
             reveal_until_hit_snapshot,
             ..
-        } => {
-            if reveal_until_hit_snapshot
-                .as_ref()
-                .is_some_and(|snapshot| hidden_library.contains(&snapshot.identity.object_id))
-            {
-                *reveal_until_hit_snapshot = None;
-            }
+        } if reveal_until_hit_snapshot
+            .as_ref()
+            .is_some_and(|snapshot| hidden_library.contains(&snapshot.identity.object_id)) =>
+        {
+            *reveal_until_hit_snapshot = None;
         }
         _ => {}
     }
