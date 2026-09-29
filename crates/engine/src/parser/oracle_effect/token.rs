@@ -609,7 +609,7 @@ fn parse_token_description_with_context(
     // the X-binding step below can still resolve a variable count.
     let saved_where_x_expr: Option<String> =
         entry_clause.and_then(|(pos, _)| extract_token_where_x_expression(&text[pos..]));
-    let (text, enters_attacking, enters_tapped_attacking) = match entry_clause {
+    let (text, mut enters_attacking, enters_tapped_attacking) = match entry_clause {
         Some((len, tapped)) => (&text[..len], true, tapped),
         None => (text, false, false),
     };
@@ -652,6 +652,26 @@ fn parse_token_description_with_context(
     loop {
         let trimmed = rest.trim_start();
         let trimmed_lower = trimmed.to_lowercase();
+        // CR 508.4: a token created attacking, never declared as an attacker,
+        // via the LEADING-modifier surface form ("Create a tapped and attacking
+        // X/X green Dinosaur creature token...", Ghalta and Mavren / Pugnacious
+        // Pugilist / Maestros Diabolist) as opposed to the TRAILING "...that's
+        // tapped and attacking" form the `entry_clause` combinator above already
+        // handles. Mirrors `parse_copy_token_entry_modifiers`'s leading 3-way
+        // alt (token.rs:189-194) for the copy-token path. Longest alternative
+        // first: without this ordering (or without this arm at all) the bare
+        // "tapped " arm below consumes only the first word and strands
+        // "and attacking ..." unconsumed, which fails every downstream step
+        // (P/T, color, type) and drops the whole clause to
+        // `Effect::Unimplemented`.
+        if let Some((_, after)) = nom_on_lower(trimmed, &trimmed_lower, |i| {
+            value((), tag("tapped and attacking ")).parse(i)
+        }) {
+            tapped = true;
+            enters_attacking = true;
+            rest = after;
+            continue;
+        }
         if let Some((_, after)) = nom_on_lower(trimmed, &trimmed_lower, |i| {
             value((), tag("tapped ")).parse(i)
         }) {
@@ -662,6 +682,18 @@ fn parse_token_description_with_context(
         if let Some((_, after)) = nom_on_lower(trimmed, &trimmed_lower, |i| {
             value((), tag("untapped ")).parse(i)
         }) {
+            rest = after;
+            continue;
+        }
+        // CR 508.4: leading "attacking" without "tapped" — completes the same
+        // three-way flag pair `parse_copy_token_entry_modifiers` already exposes
+        // for copy tokens (its third alt arm, token.rs:192). No currently-
+        // unsupported non-copy card needs this arm alone, but the building
+        // block should not stop short of its sibling's coverage.
+        if let Some((_, after)) = nom_on_lower(trimmed, &trimmed_lower, |i| {
+            value((), tag("attacking ")).parse(i)
+        }) {
+            enters_attacking = true;
             rest = after;
             continue;
         }
@@ -3306,6 +3338,129 @@ mod tests {
             )),
             "expected quoted tap ability to become a granted activated ability: {modifications:?}",
         );
+    }
+
+    #[test]
+    fn ghalta_and_mavren_dinosaur_mode_shape() {
+        // CR 508.4: leading "tapped and attacking" modifier before the P/T,
+        // not the trailing "...that's tapped and attacking" form. Positive
+        // reach-guard: the `Some(..)` match itself — on unfixed code
+        // (missing leading-modifier arms) this returns `None` and the whole
+        // clause falls back to `Effect::Unimplemented`.
+        let txt = "Create a tapped and attacking X/X green Dinosaur creature token with trample, \
+            where X is the greatest power among other attacking creatures.";
+        let effect = try_parse_token(&txt.to_lowercase(), txt, &mut ParseContext::default())
+            .expect("expected Token effect, not None (leading-modifier loop must consume the full 'tapped and attacking' phrase)");
+        let Effect::Token {
+            tapped,
+            enters_attacking,
+            power,
+            toughness,
+            types,
+            keywords,
+            ..
+        } = effect
+        else {
+            panic!("expected Effect::Token, got {effect:?}");
+        };
+        assert!(
+            tapped,
+            "leading 'tapped and attacking' must set tapped=true"
+        );
+        assert!(
+            enters_attacking,
+            "leading 'tapped and attacking' must set enters_attacking=true"
+        );
+        let expected = crate::parser::oracle_quantity::parse_cda_quantity(
+            "the greatest power among other attacking creatures",
+        )
+        .expect("greatest-power-among-other-attacking-creatures quantity must parse");
+        let expected_pt = PtValue::Quantity(expected);
+        assert_eq!(
+            power,
+            expected_pt.clone(),
+            "X/X power must resolve to the greatest power among other attacking creatures"
+        );
+        assert_eq!(
+            toughness, expected_pt,
+            "X/X toughness must equal power's quantity expression"
+        );
+        assert!(
+            types.iter().any(|t| t == "Dinosaur"),
+            "types must include Dinosaur, got {types:?}"
+        );
+        assert!(
+            keywords.contains(&Keyword::Trample),
+            "token must have trample, got {keywords:?}"
+        );
+    }
+
+    #[test]
+    fn pugnacious_pugilist_devil_mode_shape() {
+        // Pugnacious Pugilist / Maestros Diabolist share this exact
+        // leading-modifier clause shape with Ghalta and Mavren's mode 1 —
+        // locks in the sibling-card coverage claim (cargo coverage, run
+        // separately, is the regression gate for those 2 cards by name).
+        let txt = "create a tapped and attacking 1/1 red Devil creature token with \
+            \"When ~ dies, it deals 1 damage to any target.\"";
+        let effect = try_parse_token(&txt.to_lowercase(), txt, &mut ParseContext::default())
+            .expect("expected Token effect, not None");
+        let Effect::Token {
+            tapped,
+            enters_attacking,
+            power,
+            toughness,
+            types,
+            ..
+        } = effect
+        else {
+            panic!("expected Effect::Token, got {effect:?}");
+        };
+        assert!(
+            tapped,
+            "leading 'tapped and attacking' must set tapped=true"
+        );
+        assert!(
+            enters_attacking,
+            "leading 'tapped and attacking' must set enters_attacking=true"
+        );
+        assert_eq!(power, PtValue::Fixed(1), "fixed 1/1 token power");
+        assert_eq!(toughness, PtValue::Fixed(1), "fixed 1/1 token toughness");
+        assert!(
+            types.iter().any(|t| t == "Devil"),
+            "types must include Devil, got {types:?}"
+        );
+    }
+
+    #[test]
+    fn leading_attacking_without_tapped_shape() {
+        // Building-block test (not a single card): the bare leading
+        // "attacking " arm completes the same three-way flag pair
+        // `parse_copy_token_entry_modifiers` already exposes for copy tokens
+        // (token.rs:192). No currently-unsupported non-copy card needs this
+        // arm alone; this proves the building block itself.
+        let txt = "create an attacking 4/4 green beast creature token";
+        let effect = try_parse_token(&txt.to_lowercase(), txt, &mut ParseContext::default())
+            .expect("expected Token effect, not None");
+        let Effect::Token {
+            tapped,
+            enters_attacking,
+            power,
+            toughness,
+            types,
+            ..
+        } = effect
+        else {
+            panic!("expected Effect::Token, got {effect:?}");
+        };
+        assert!(!tapped, "bare leading 'attacking' must NOT set tapped=true");
+        assert!(
+            enters_attacking,
+            "bare leading 'attacking' must set enters_attacking=true"
+        );
+        assert_eq!(power, PtValue::Fixed(4));
+        assert_eq!(toughness, PtValue::Fixed(4));
+        assert!(types.iter().any(|t| t == "Beast"), "got {types:?}");
     }
 
     #[test]
