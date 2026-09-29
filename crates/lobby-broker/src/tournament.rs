@@ -2704,6 +2704,14 @@ impl TournamentManager {
                 meta.status
             ));
         }
+        if meta.pairings.iter().any(|pairing| {
+            meta.hosted.contains_key(&pairing.id)
+                && pairing.players.iter().any(|key| key == player_key)
+        }) {
+            return Err(format!(
+                "Player {player_key} cannot change their deck after their pairing is hosted"
+            ));
+        }
         let player = meta
             .players
             .iter_mut()
@@ -4188,6 +4196,33 @@ mod tests {
             .find(|p| p.player_key == key(0))
             .and_then(|p| p.deck.clone());
         assert_eq!(stored, Some(deck_of("Mountain")));
+    }
+
+    #[test]
+    fn submit_deck_cannot_change_a_hosted_entrants_deck() {
+        let env = FakeEnv::new();
+        let mut mgr = swiss(2, 2, &env);
+        mgr.generate_pairings("T", &env).expect("round 1");
+        let id = mgr.get("T").expect("t").pairings[0].id;
+        mgr.submit_deck("T", &key(0), deck_of("Island"), &env)
+            .expect("initial deck");
+        mgr.begin_hosting("T", id, &env).expect("host");
+
+        assert!(mgr
+            .submit_deck("T", &key(0), deck_of("Mountain"), &env)
+            .is_err());
+        mgr.begin_hosting("T", id, &env).expect("rehost");
+        assert!(mgr
+            .submit_deck("T", &key(0), deck_of("Mountain"), &env)
+            .is_err());
+        let player = mgr
+            .get("T")
+            .expect("t")
+            .players
+            .iter()
+            .find(|p| p.player_key == key(0))
+            .expect("player");
+        assert_eq!(player.deck, Some(deck_of("Island")));
     }
 
     /// `submit_deck` refuses an unregistered player and a terminal tournament.

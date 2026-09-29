@@ -733,6 +733,68 @@ mod tests {
     }
 
     #[test]
+    fn submit_tournament_deck_bounds_every_supplementary_list() {
+        let cases = [
+            (
+                "companion",
+                DeckData {
+                    companion: vec!["Card".into(); 5],
+                    ..Default::default()
+                },
+            ),
+            (
+                "attraction_deck",
+                DeckData {
+                    attraction_deck: vec!["Card".into(); 201],
+                    ..Default::default()
+                },
+            ),
+            (
+                "contraption_deck",
+                DeckData {
+                    contraption_deck: vec!["Card".into(); 201],
+                    ..Default::default()
+                },
+            ),
+            (
+                "sticker_sheets",
+                DeckData {
+                    sticker_sheets: vec!["Card".into(); 201],
+                    ..Default::default()
+                },
+            ),
+            (
+                "signature_spell",
+                DeckData {
+                    signature_spell: vec!["Card".into(); 5],
+                    ..Default::default()
+                },
+            ),
+        ];
+        for (field, deck) in cases {
+            let err = guard_inbound(&M::SubmitTournamentDeck {
+                code: "T".into(),
+                player_token: "tok".into(),
+                deck,
+                request_id: None,
+            })
+            .unwrap_err();
+            assert!(err.contains(field), "{err}");
+        }
+
+        let mut invalid_name = empty_deck();
+        invalid_name.sticker_sheets = vec!["x".repeat(MAX_DECK_CARD_NAME_LEN + 1)];
+        let err = guard_inbound(&M::SubmitTournamentDeck {
+            code: "T".into(),
+            player_token: "tok".into(),
+            deck: invalid_name,
+            request_id: None,
+        })
+        .unwrap_err();
+        assert!(err.contains("sticker_sheets[0]"), "{err}");
+    }
+
+    #[test]
     fn token_bounds() {
         assert!(validate_token("f", "", MAX_TOKEN_LEN).is_ok());
         assert!(validate_token("f", &"x".repeat(MAX_TOKEN_LEN), MAX_TOKEN_LEN).is_ok());
