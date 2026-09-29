@@ -72,7 +72,7 @@ export function fitPixelCamera(camera: PerspectiveCamera, w: number, h: number):
 }
 
 /** A card flight to start. `from` is the measured source; `null` continues the
- *  object's active flight. */
+ *  object's unreleased flight. */
 export interface CardFlightRequest extends Omit<CardFlightParams, "from" | "back"> {
   from: CardPose | null;
 }
@@ -83,8 +83,10 @@ export interface CardVfxScene {
   uploadFace(image: HTMLImageElement): Texture;
   hasBack(): boolean;
   hasFlight(objectId: ObjectId): boolean;
-  /** Starts a flight, handing off from the object's active flight if it has
-   *  one. Returns false when there is neither a source nor an active flight. */
+  /** Starts a flight, handing off from the object's unreleased flight if it has
+   *  one; a released (revealing or fading) flight is disposed and the new one
+   *  starts from the source. Returns false when there is neither a source nor an
+   *  unreleased flight. */
   startCardFlight(request: CardFlightRequest): boolean;
   /** Silently disposes the object's flight if it has released (is revealing or
    *  fading). A later presentation of the object supersedes its landing. */

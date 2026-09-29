@@ -459,9 +459,8 @@ describe("card flight reveal hold", () => {
   });
 
   it("V3-6j: a node that fades out ends the hold, measured against the first revealing frame", () => {
-    const run = (route: CardFlightRoute, slot: CardPose, releaseOpacity: number, opacities: number[]) => {
+    const run = (route: CardFlightRoute, slot: CardPose, opacities: number[]) => {
       const { harness, state, releasedAt } = landOn(route, slot);
-      state.opacity = releaseOpacity;
       state.settled = false;
       const results = opacities.map((opacity, i) => {
         state.opacity = opacity;
@@ -470,18 +469,18 @@ describe("card flight reveal hold", () => {
       return { harness, results, releasedAt };
     };
     // A fall ends the hold on the frame it happens.
-    expect(run({ kind: "cast" }, CARD_SLOT, 1, [1, 1, 0.95]).results).toEqual([true, true, false]);
+    expect(run({ kind: "cast" }, CARD_SLOT, [1, 1, 0.95]).results).toEqual([true, true, false]);
     // The cross-fade path enters its fade on that frame.
-    const fading = run({ kind: "cast" }, SQUARE_SLOT, 1, [1, 1, 0.95]);
+    const fading = run({ kind: "cast" }, SQUARE_SLOT, [1, 1, 0.95]);
     expect(fading.results).toEqual([true, true, true]);
     expect(fading.harness.frame(fading.releasedAt + 3 * FRAME_MS + LANDING_CROSSFADE_MS / 2)).toBe(true);
     expect(fading.harness.alpha()).toBeCloseTo(0.5, 2);
     // A steady node, a rising tail and a fall below the bound keep the hold.
-    expect(run({ kind: "cast" }, CARD_SLOT, 0.5, [0.5, 0.5, 0.5, 0.5]).results).toEqual([true, true, true, true]);
-    expect(run({ kind: "cast" }, CARD_SLOT, 0.96, [0.96, 0.98, 1]).results).toEqual([true, true, true]);
-    expect(run({ kind: "cast" }, CARD_SLOT, 1, [1, 0.999]).results).toEqual([true, true]);
+    expect(run({ kind: "cast" }, CARD_SLOT, [0.5, 0.5, 0.5, 0.5]).results).toEqual([true, true, true, true]);
+    expect(run({ kind: "cast" }, CARD_SLOT, [0.96, 0.98, 1]).results).toEqual([true, true, true]);
+    expect(run({ kind: "cast" }, CARD_SLOT, [1, 0.999]).results).toEqual([true, true]);
     // A slow fade, each frame below the bound, still ends it once the total fall
     // passes the bound from the first revealing frame's opacity.
-    expect(run({ kind: "cast" }, CARD_SLOT, 1, [0.9985, 0.997, 0.9955]).results).toEqual([true, true, false]);
+    expect(run({ kind: "cast" }, CARD_SLOT, [0.9985, 0.997, 0.9955]).results).toEqual([true, true, false]);
   });
 });
