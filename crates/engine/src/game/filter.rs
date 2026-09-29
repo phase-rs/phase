@@ -6459,6 +6459,9 @@ fn object_matches_trigger_source(
     source_id: ObjectId,
     trigger_source: Option<&TriggerSourceContext>,
 ) -> bool {
+    // CR 400.7 + CR 608.2h: a live candidate matches only the source's exact
+    // incarnation in its expected zone. A latched source cannot identify a
+    // later object that reused the same storage id.
     trigger_source.map_or(object_id == source_id, |context| {
         matches!(
             context.source_read(state),

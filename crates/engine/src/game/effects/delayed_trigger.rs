@@ -852,9 +852,16 @@ fn parent_target_snapshot(state: &GameState, ability: &ResolvedAbility) -> Vec<T
     crate::game::targeting::parent_chain_referents(state, ability).unwrap_or_else(|| {
         crate::game::targeting::resolve_event_context_target(
             state,
-            &TargetFilter::TriggeringSource,
+            &TargetFilter::ParentTarget,
             ability.source_id,
         )
+        .or_else(|| {
+            crate::game::targeting::resolve_event_context_target(
+                state,
+                &TargetFilter::TriggeringSource,
+                ability.source_id,
+            )
+        })
         .map(|target| vec![target])
         .unwrap_or_default()
     })
@@ -2648,6 +2655,48 @@ mod tests {
         assert_eq!(
             state.delayed_triggers[0].ability.targets,
             vec![TargetRef::Object(dead_creature)]
+        );
+    }
+
+    /// CR 603.7c + CR 509.1 + CR 608.2c: When a blocking creature's trigger creates
+    /// a delayed trigger targeting `ParentTarget` ("destroy that creature at end of combat"),
+    /// `parent_target_snapshot` must snapshot the blocked attacking creature, not the
+    /// trigger source (the blocker itself).
+    #[test]
+    fn parent_target_snapshots_blocked_attacker_object() {
+        let mut state = GameState::new_two_player(42);
+        let blocker_asp = ObjectId(5);
+        let attacking_bear = ObjectId(10);
+        state.current_trigger_event = Some(GameEvent::BlockersDeclared {
+            assignments: vec![(blocker_asp, attacking_bear)],
+        });
+
+        let effect_def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Destroy {
+                target: TargetFilter::ParentTarget,
+                cant_regenerate: false,
+            },
+        );
+        let ability = ResolvedAbility::new(
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhase {
+                    phase: Phase::EndCombat,
+                },
+                effect: Box::new(effect_def),
+                uses_tracked_set: false,
+            },
+            vec![],
+            blocker_asp,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.delayed_triggers[0].ability.targets,
+            vec![TargetRef::Object(attacking_bear)]
         );
     }
 

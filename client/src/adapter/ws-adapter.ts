@@ -210,6 +210,9 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 91 — PendingManaAbility.chosen_counter_count is retyped to the required
+ *      chosen_counter_counts array (#9207). A v90 peer cannot deserialize
+ *      the new state. P2P moves in lockstep to wire 73.
  * 90 — FormatConfig gains `allow_experimental_dungeons`, the per-session
  *      capability flag behind the experimental dungeon pool. A v89 peer
  *      parses a v90 GameState but runs the game without the host's pool;
@@ -610,7 +613,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 90;
+export const PROTOCOL_VERSION = 91;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
