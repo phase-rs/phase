@@ -4559,6 +4559,677 @@ mod tests {
         runner.state.waiting_for.clone()
     }
 
+    #[test]
+    fn flash_chosen_creature_offers_its_reduced_mana_cost() {
+        use crate::types::mana::{ManaCost, ManaCostShard};
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let flash = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Flash",
+                false,
+                "You may put a creature card from your hand onto the battlefield. If you do, sacrifice it unless you pay its mana cost reduced by {2}.",
+            )
+            .id();
+        let decoy = scenario
+            .add_creature_to_hand(P0, "Decoy", 2, 2)
+            .with_mana_cost(ManaCost::generic(1))
+            .id();
+        let chosen = scenario
+            .add_creature_to_hand(P0, "Chosen", 4, 4)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Green],
+                generic: 4,
+            })
+            .id();
+        let mut runner = scenario.build();
+        let first = cast_free_sorcery_to_prompt(&mut runner, flash, None);
+        assert!(
+            matches!(first, WaitingFor::OptionalEffectChoice { .. }),
+            "{first:?}"
+        );
+        runner
+            .act(GameAction::DecideOptionalEffect { accept: true })
+            .expect("accept putting a creature");
+        match &runner.state().waiting_for {
+            WaitingFor::EffectZoneChoice { cards, .. } => {
+                assert!(cards.contains(&decoy) && cards.contains(&chosen));
+            }
+            other => panic!("expected hand-creature choice, got {other:?}"),
+        }
+        let continuation = runner
+            .state()
+            .active_ability_continuation()
+            .expect("Flash's sacrifice must be parked during hand selection");
+        assert!(
+            continuation.chain.context.optional_effect_performed,
+            "accepted optional put must reach its parked child: {continuation:?}"
+        );
+        assert!(
+            continuation
+                .chain
+                .context
+                .pending_forwarded_zone_result
+                .is_some(),
+            "Flash's parked child must retain the producing ChangeZone: {continuation:?}"
+        );
+        let choice_result = runner
+            .act(GameAction::SelectCards {
+                cards: vec![chosen],
+            })
+            .expect("select second creature");
+        assert_eq!(runner.state().objects[&chosen].zone, Zone::Battlefield);
+        assert_eq!(runner.state().objects[&decoy].zone, Zone::Hand);
+        match &runner.state().waiting_for {
+            WaitingFor::UnlessPayment { cost, .. } => assert_eq!(
+                cost,
+                &crate::types::ability::AbilityCost::Mana {
+                    cost: ManaCost::Cost {
+                        shards: vec![ManaCostShard::Green],
+                        generic: 2,
+                    },
+                }
+            ),
+            other => panic!(
+                "expected selected creature payment, got {other:?}; events: {:?}",
+                choice_result.events
+            ),
+        }
+        runner
+            .act(GameAction::PayUnlessCost { pay: false })
+            .expect("decline the selected creature's mana cost");
+        assert_eq!(runner.state().objects[&chosen].zone, Zone::Graveyard);
+        assert_eq!(runner.state().objects[&decoy].zone, Zone::Hand);
+    }
+
+    #[test]
+    fn flash_zero_mana_requires_an_answer_but_no_mana_cost_cannot_be_paid() {
+        use crate::types::mana::ManaCost;
+
+        for (cost, payment) in [
+            (ManaCost::generic(1), Some(true)),
+            (ManaCost::generic(1), Some(false)),
+            (ManaCost::NoCost, None),
+        ] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let flash = scenario
+                .add_spell_to_hand_from_oracle(
+                    P0,
+                    "Flash",
+                    false,
+                    "You may put a creature card from your hand onto the battlefield. If you do, sacrifice it unless you pay its mana cost reduced by {2}.",
+                )
+                .id();
+            let creature = scenario
+                .add_creature_to_hand(P0, "Creature", 2, 2)
+                .with_mana_cost(cost)
+                .id();
+            let mut runner = scenario.build();
+            assert!(matches!(
+                cast_free_sorcery_to_prompt(&mut runner, flash, None),
+                WaitingFor::OptionalEffectChoice { .. }
+            ));
+            runner
+                .act(GameAction::DecideOptionalEffect { accept: true })
+                .expect("accept putting the creature");
+            if matches!(
+                runner.state().waiting_for,
+                WaitingFor::EffectZoneChoice { .. }
+            ) {
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: vec![creature],
+                    })
+                    .expect("choose the only creature");
+            }
+            match payment {
+                Some(pay) => {
+                    assert!(
+                        matches!(
+                            &runner.state().waiting_for,
+                            WaitingFor::UnlessPayment {
+                                cost: crate::types::ability::AbilityCost::Mana { cost },
+                                ..
+                            } if *cost == ManaCost::zero()
+                        ),
+                        "payable zero requires an answer: {:?}",
+                        runner.state().waiting_for
+                    );
+                    runner
+                        .act(GameAction::PayUnlessCost { pay })
+                        .expect("answer zero cost");
+                    assert_eq!(
+                        runner.state().objects[&creature].zone,
+                        if pay {
+                            Zone::Battlefield
+                        } else {
+                            Zone::Graveyard
+                        }
+                    );
+                }
+                None => {
+                    assert_eq!(runner.state().objects[&creature].zone, Zone::Graveyard);
+                    assert!(matches!(
+                        runner.state().waiting_for,
+                        WaitingFor::Priority { .. }
+                    ));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn flash_paid_cost_preserves_selected_creature_and_spends_its_mana() {
+        use crate::types::mana::{ManaCost, ManaCostShard, ManaType};
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let flash = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Flash",
+                false,
+                "You may put a creature card from your hand onto the battlefield. If you do, sacrifice it unless you pay its mana cost reduced by {2}.",
+            )
+            .id();
+        let decoy = scenario.add_creature_to_hand(P0, "Decoy", 1, 1).id();
+        let creature = scenario
+            .add_creature_to_hand(P0, "Chosen", 4, 4)
+            .with_mana_cost(ManaCost::Cost {
+                generic: 4,
+                shards: vec![ManaCostShard::Green],
+            })
+            .id();
+        let mut runner = scenario.build();
+        cast_free_sorcery_to_prompt(&mut runner, flash, None);
+        runner
+            .act(GameAction::DecideOptionalEffect { accept: true })
+            .unwrap();
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![creature],
+            })
+            .unwrap();
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::UnlessPayment { .. }
+        ));
+        for mana in [ManaType::Green, ManaType::Colorless, ManaType::Colorless] {
+            runner
+                .state_mut()
+                .add_mana_to_pool(P0, ManaUnit::new(mana, flash, false, vec![]));
+        }
+        runner
+            .act(GameAction::PayUnlessCost { pay: true })
+            .expect("pay reduced cost");
+        assert_eq!(runner.state().objects[&creature].zone, Zone::Battlefield);
+        assert_eq!(runner.state().objects[&decoy].zone, Zone::Hand);
+        assert!(runner.state().players[0].mana_pool.mana.is_empty());
+    }
+
+    #[test]
+    fn flash_redirected_single_creature_has_no_sacrifice_referent() {
+        use crate::types::ability::ReplacementDefinition;
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let flash = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Flash",
+                false,
+                "You may put a creature card from your hand onto the battlefield. If you do, sacrifice it unless you pay its mana cost reduced by {2}.",
+            )
+            .id();
+        let creature = scenario
+            .add_creature_to_hand(P0, "Chosen", 3, 3)
+            .with_mana_cost(crate::types::mana::ManaCost::generic(3))
+            .id();
+        for destination in [Zone::Graveyard, Zone::Exile] {
+            let replacement = ReplacementDefinition::new(ReplacementEvent::Moved)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Database,
+                    move_zone_effect(None, destination, TargetFilter::SelfRef),
+                ))
+                .valid_card(TargetFilter::Any)
+                .destination_zone(Zone::Battlefield);
+            scenario
+                .add_creature(P1, "Redirect", 0, 1)
+                .with_replacement_definition(replacement);
+        }
+        let mut runner = scenario.build();
+        assert!(matches!(
+            cast_free_sorcery_to_prompt(&mut runner, flash, None),
+            WaitingFor::OptionalEffectChoice { .. }
+        ));
+        runner
+            .act(GameAction::DecideOptionalEffect { accept: true })
+            .unwrap();
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+        for _ in 0..4 {
+            if !matches!(
+                runner.state().waiting_for,
+                WaitingFor::ReplacementChoice { .. }
+            ) {
+                break;
+            }
+            runner
+                .act(GameAction::ChooseReplacement { index: 0 })
+                .unwrap();
+        }
+        assert_ne!(runner.state().objects[&creature].zone, Zone::Battlefield);
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+            "{:?}",
+            runner.state().waiting_for
+        );
+        assert!(runner.state().active_ability_continuation().is_none());
+    }
+
+    #[test]
+    fn flash_single_creature_enters_after_serialized_replacement_choice() {
+        use crate::types::ability::{EffectScope, ReplacementDefinition, TapStateChange};
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let flash = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Flash",
+                false,
+                "You may put a creature card from your hand onto the battlefield. If you do, sacrifice it unless you pay its mana cost reduced by {2}.",
+            )
+            .id();
+        let creature = scenario
+            .add_creature_to_hand(P0, "Chosen", 3, 3)
+            .with_mana_cost(crate::types::mana::ManaCost::generic(3))
+            .id();
+        for state_change in [TapStateChange::Tap, TapStateChange::Untap] {
+            let replacement = ReplacementDefinition::new(ReplacementEvent::Moved)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::SetTapState {
+                        target: TargetFilter::SelfRef,
+                        scope: EffectScope::Single,
+                        state: state_change,
+                    },
+                ))
+                .valid_card(TargetFilter::Any)
+                .destination_zone(Zone::Battlefield);
+            scenario
+                .add_creature(P1, "Entry Modifier", 0, 1)
+                .with_replacement_definition(replacement);
+        }
+        let mut runner = scenario.build();
+        cast_free_sorcery_to_prompt(&mut runner, flash, None);
+        runner
+            .act(GameAction::DecideOptionalEffect { accept: true })
+            .unwrap();
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+        let saved = serde_json::to_string(runner.state()).expect("serialize paused Flash");
+        let mut runner =
+            GameRunner::from_state(serde_json::from_str(&saved).expect("restore paused Flash"));
+        runner
+            .act(GameAction::ChooseReplacement { index: 0 })
+            .unwrap();
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ) {
+            assert!(
+                runner.state().resolution_stack.iter().any(|frame| {
+                    matches!(
+                        frame,
+                        crate::types::resolution::ResolutionFrame::AbilityContinuation(cont)
+                            if cont.pending.chain.context.pending_forwarded_zone_result.is_some()
+                    )
+                }),
+                "replacement re-pause must retain the exact Flash continuation"
+            );
+        }
+        for _ in 0..4 {
+            if !matches!(
+                runner.state().waiting_for,
+                WaitingFor::ReplacementChoice { .. }
+            ) {
+                break;
+            }
+            runner
+                .act(GameAction::ChooseReplacement { index: 0 })
+                .unwrap();
+        }
+        assert_eq!(runner.state().objects[&creature].zone, Zone::Battlefield);
+        assert!(
+            matches!(
+                &runner.state().waiting_for,
+                WaitingFor::UnlessPayment {
+                    cost: crate::types::ability::AbilityCost::Mana { cost },
+                    ..
+                } if *cost == crate::types::mana::ManaCost::generic(1)
+            ),
+            "{:?}",
+            runner.state().waiting_for
+        );
+        runner
+            .act(GameAction::PayUnlessCost { pay: false })
+            .unwrap();
+        assert_eq!(runner.state().objects[&creature].zone, Zone::Graveyard);
+    }
+
+    #[test]
+    fn flash_devour_child_choice_waits_for_entry_before_payment() {
+        use crate::types::ability::{ControllerRef, ReplacementDefinition, TypedFilter};
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let flash = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Flash",
+                false,
+                "You may put a creature card from your hand onto the battlefield. If you do, sacrifice it unless you pay its mana cost reduced by {2}.",
+            )
+            .id();
+        let victim = scenario.add_creature(P0, "Devour Victim", 1, 1).id();
+        let filter = TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You));
+        let devour = ReplacementDefinition {
+            event: ReplacementEvent::Moved,
+            execute: Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Sacrifice {
+                    target: filter.clone(),
+                    count: QuantityExpr::up_to(QuantityExpr::Ref {
+                        qty: crate::types::ability::QuantityRef::ObjectCount { filter },
+                    }),
+                    min_count: 0,
+                },
+            ))),
+            valid_card: Some(TargetFilter::SelfRef),
+            ..ReplacementDefinition::new(ReplacementEvent::Moved)
+        };
+        let creature = scenario
+            .add_creature_to_hand(P0, "Devour Creature", 3, 3)
+            .with_mana_cost(crate::types::mana::ManaCost::generic(3))
+            .with_replacement_definition(devour)
+            .id();
+        let mut runner = scenario.build();
+        cast_free_sorcery_to_prompt(&mut runner, flash, None);
+        runner
+            .act(GameAction::DecideOptionalEffect { accept: true })
+            .unwrap();
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::EffectZoneChoice { .. }
+        ));
+        let saved = serde_json::to_string(runner.state()).expect("serialize devour pause");
+        let mut runner = GameRunner::from_state(serde_json::from_str(&saved).unwrap());
+        runner
+            .act(GameAction::SelectCards { cards: vec![] })
+            .unwrap();
+        assert_eq!(runner.state().objects[&victim].zone, Zone::Battlefield);
+        assert_eq!(runner.state().objects[&creature].zone, Zone::Battlefield);
+        assert!(
+            matches!(
+                &runner.state().waiting_for,
+                WaitingFor::UnlessPayment {
+                    cost: crate::types::ability::AbilityCost::Mana { cost },
+                    ..
+                } if *cost == crate::types::mana::ManaCost::generic(1)
+            ),
+            "{:?}",
+            runner.state().waiting_for
+        );
+    }
+
+    #[test]
+    fn paused_forwarded_move_keeps_original_source_for_its_grant() {
+        use crate::types::ability::{
+            ContinuousModification, EffectScope, ReplacementDefinition, StaticDefinition,
+            TapStateChange,
+        };
+        use crate::types::keywords::Keyword;
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let producer = scenario.add_creature(P0, "Reanimator", 0, 1).id();
+        let creature = scenario.add_creature_to_hand(P0, "Returned", 3, 3).id();
+        for state_change in [TapStateChange::Tap, TapStateChange::Untap] {
+            let replacement = ReplacementDefinition::new(ReplacementEvent::Moved)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::SetTapState {
+                        target: TargetFilter::SelfRef,
+                        scope: EffectScope::Single,
+                        state: state_change,
+                    },
+                ))
+                .valid_card(TargetFilter::Any)
+                .destination_zone(Zone::Battlefield);
+            scenario
+                .add_creature(P1, "Entry Modifier", 0, 1)
+                .with_replacement_definition(replacement);
+        }
+        let mut runner = scenario.build();
+        let grant = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![StaticDefinition::continuous()
+                    .affected(TargetFilter::OriginalSource)
+                    .modifications(vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Flying,
+                    }])],
+                duration: None,
+                target: None,
+                end_cost: None,
+            },
+            vec![],
+            producer,
+            P0,
+        );
+        let mut put = ResolvedAbility::new(
+            move_zone_effect(Some(Zone::Hand), Zone::Battlefield, TargetFilter::Any),
+            vec![TargetRef::Object(creature)],
+            producer,
+            P0,
+        )
+        .sub_ability(grant);
+        put.forward_result = true;
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(runner.state_mut(), &put, &mut events, 0)
+            .expect("start the forwarded move");
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::ReplacementChoice { .. }
+            ),
+            "the move must pause for its replacement choice: {:?}",
+            runner.state().waiting_for
+        );
+        for _ in 0..4 {
+            if !matches!(
+                runner.state().waiting_for,
+                WaitingFor::ReplacementChoice { .. }
+            ) {
+                break;
+            }
+            runner
+                .act(GameAction::ChooseReplacement { index: 0 })
+                .unwrap();
+        }
+        assert_eq!(runner.state().objects[&creature].zone, Zone::Battlefield);
+        let flying_grants: Vec<_> = runner
+            .state()
+            .transient_continuous_effects
+            .iter()
+            .filter(|tce| {
+                tce.modifications.iter().any(|m| {
+                    matches!(
+                        m,
+                        ContinuousModification::AddKeyword {
+                            keyword: Keyword::Flying
+                        }
+                    )
+                })
+            })
+            .map(|tce| tce.affected.clone())
+            .collect();
+        assert_eq!(
+            flying_grants,
+            vec![TargetFilter::SpecificObject { id: producer }],
+            "OriginalSource must stay on the producer after a paused forwarded move"
+        );
+    }
+
+    #[test]
+    fn paused_multi_object_forwarded_move_binds_every_arrival() {
+        use crate::types::ability::{
+            ContinuousModification, EffectScope, ReplacementDefinition, StaticDefinition,
+            TapStateChange,
+        };
+        use crate::types::keywords::Keyword;
+        use crate::types::replacements::ReplacementEvent;
+
+        for only_second_pauses in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let producer = scenario.add_creature(P0, "Returner", 0, 1).id();
+            let first = scenario.add_creature_to_hand(P0, "First", 2, 2).id();
+            let second = scenario.add_creature_to_hand(P0, "Second", 3, 3).id();
+            let paused = if only_second_pauses {
+                TargetFilter::SpecificObject { id: second }
+            } else {
+                TargetFilter::Any
+            };
+            for state_change in [TapStateChange::Tap, TapStateChange::Untap] {
+                let replacement = ReplacementDefinition::new(ReplacementEvent::Moved)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::SetTapState {
+                            target: TargetFilter::SelfRef,
+                            scope: EffectScope::Single,
+                            state: state_change,
+                        },
+                    ))
+                    .valid_card(paused.clone())
+                    .destination_zone(Zone::Battlefield);
+                scenario
+                    .add_creature(P1, "Entry Modifier", 0, 1)
+                    .with_replacement_definition(replacement);
+            }
+            let mut runner = scenario.build();
+            let haste = ResolvedAbility::new(
+                Effect::GenericEffect {
+                    static_abilities: vec![StaticDefinition::continuous()
+                        .affected(TargetFilter::ParentTarget)
+                        .modifications(vec![ContinuousModification::AddKeyword {
+                            keyword: Keyword::Haste,
+                        }])],
+                    duration: None,
+                    target: Some(TargetFilter::ParentTarget),
+                    end_cost: None,
+                },
+                vec![],
+                producer,
+                P0,
+            );
+            let mut put = ResolvedAbility::new(
+                move_zone_effect(Some(Zone::Hand), Zone::Battlefield, TargetFilter::Any),
+                vec![TargetRef::Object(first), TargetRef::Object(second)],
+                producer,
+                P0,
+            )
+            .sub_ability(haste);
+            put.forward_result = true;
+            let mut events = Vec::new();
+            crate::game::effects::resolve_ability_chain(runner.state_mut(), &put, &mut events, 0)
+                .expect("start the forwarded move");
+            let mut replacement_choices = 0;
+            for _ in 0..8 {
+                if !matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::ReplacementChoice { .. }
+                ) {
+                    break;
+                }
+                replacement_choices += 1;
+                runner
+                    .act(GameAction::ChooseReplacement { index: 0 })
+                    .unwrap();
+            }
+            assert!(
+                replacement_choices >= if only_second_pauses { 1 } else { 2 },
+                "the move must pause for its replacement choice ({only_second_pauses})"
+            );
+            assert_eq!(runner.state().objects[&first].zone, Zone::Battlefield);
+            assert_eq!(runner.state().objects[&second].zone, Zone::Battlefield);
+            let hasted: std::collections::BTreeSet<_> = runner
+                .state()
+                .transient_continuous_effects
+                .iter()
+                .filter(|tce| {
+                    tce.modifications.iter().any(|m| {
+                        matches!(
+                            m,
+                            ContinuousModification::AddKeyword {
+                                keyword: Keyword::Haste
+                            }
+                        )
+                    })
+                })
+                .filter_map(|tce| match tce.affected {
+                    TargetFilter::SpecificObject { id } => Some(id),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                hasted,
+                [first, second].into_iter().collect(),
+                "the rider must bind every creature the paused move put onto the battlefield \
+             ({only_second_pauses})"
+            );
+        }
+    }
+
+    #[test]
+    fn flash_declining_put_keeps_the_creature_in_hand() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let flash = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Flash",
+                false,
+                "You may put a creature card from your hand onto the battlefield. If you do, sacrifice it unless you pay its mana cost reduced by {2}.",
+            )
+            .id();
+        let creature = scenario.add_creature_to_hand(P0, "Creature", 3, 3).id();
+        let mut runner = scenario.build();
+        assert!(matches!(
+            cast_free_sorcery_to_prompt(&mut runner, flash, None),
+            WaitingFor::OptionalEffectChoice { .. }
+        ));
+        runner
+            .act(GameAction::DecideOptionalEffect { accept: false })
+            .unwrap();
+        assert_eq!(runner.state().objects[&creature].zone, Zone::Hand);
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+    }
+
     /// CR 608.2d + CR 101.4 (issue #3236): "any player may sacrifice a land of
     /// their choice. If a player does, …" must offer EVERY player INCLUDING the
     /// controller, in APNAP order (active player first), and the controller —

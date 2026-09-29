@@ -10,9 +10,10 @@ use crate::types::events::GameEvent;
 #[cfg(test)]
 use crate::types::game_state::MayTriggerOrigin;
 use crate::types::game_state::{
-    AutoMayChoice, CastOfferKind, CastingVariant, ExileLink, ExileLinkKind, GameState,
-    MayTriggerAutoChoiceKey, PendingCounterPostAction, PendingSpellResolution, StackEntry,
-    StackEntryKind, StackPaidSnapshot, StackResolutionPolicy, TriggerSourceContext, WaitingFor,
+    AutoMayChoice, CastOfferKind, CastingVariant, DepartedStackSpell, ExileLink, ExileLinkKind,
+    GameState, MayTriggerAutoChoiceKey, PendingCounterPostAction, PendingSpellResolution,
+    StackEntry, StackEntryKind, StackPaidSnapshot, StackResolutionPolicy, TriggerSourceContext,
+    WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, TriggerFiring};
 use crate::types::player::PlayerId;
@@ -56,6 +57,10 @@ pub(super) fn finish_resolving_stack_entry(
 ) {
     let entry = state.resolving_stack_entry.take();
     let firing = state.resolving_trigger_firing.take();
+    // CR 608.2c: the resolving stack entry owns every nested instruction-result
+    // occurrence, including ones parked across replacement choices.
+    state.return_result_frames.clear();
+    state.active_return_result_occurrence = None;
     debug_assert!(
         firing.is_none()
             || entry
@@ -541,6 +546,38 @@ fn remove_stack_entry_at_unobserved(
     })
 }
 
+/// CR 608.2h + CR 707.2: Record a spell's stack entry and object as it last
+/// existed on the stack, before a non-resolving departure. Only for a spell
+/// entry (`StackEntryKind::Spell`) whose cast finished
+/// (`obj.cast_occurrence` is `Some` —
+/// `casting_costs.rs::stamp_cast_occurrence_on_stack_spell`); a rolled-back
+/// cast was never finalized and has no CR 707.2 choices to remember. Called
+/// from the zone-exit path
+/// (`zones.rs::apply_zone_exit_cleanup`, before the `cast_occurrence` clear
+/// that would make this guard vacuous) and `remove_nonresolving_stack_entry_at`
+/// below — a resolution pop (`pop_top_stack_entry`) calls neither.
+pub(crate) fn record_departed_stack_spell(state: &mut GameState, entry: &StackEntry) {
+    let StackEntryKind::Spell { .. } = &entry.kind else {
+        return;
+    };
+    let Some(obj) = state.objects.get(&entry.id) else {
+        return;
+    };
+    if obj.cast_occurrence.is_none() {
+        return;
+    }
+    let incarnation = obj.incarnation;
+    let record = DepartedStackSpell {
+        entry: entry.clone(),
+        object: Box::new(obj.clone()),
+    };
+    state
+        .departed_stack_spells
+        .entry(entry.id)
+        .or_default()
+        .insert(incarnation, record);
+}
+
 /// Removes a stack entry for a non-resolution reason and observes the exact
 /// firing only after the entry and side tables have been settled.
 pub(super) fn remove_nonresolving_stack_entry_at(
@@ -549,6 +586,7 @@ pub(super) fn remove_nonresolving_stack_entry_at(
     disposition: super::lifecycle::DelayedTerminalDisposition,
 ) -> Option<PoppedStackEntry> {
     let popped = remove_stack_entry_at_unobserved(state, index)?;
+    record_departed_stack_spell(state, &popped.entry);
     if let Some(firing) = popped.trigger_firing {
         super::lifecycle::record_delayed_terminal(firing, disposition);
     }
@@ -3732,6 +3770,10 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
     let ResolvedAbility {
         effect,
         targets,
+        declares_chosen_group,
+        reads_chosen_group,
+        declares_return_result,
+        reads_return_result,
         source_id: _,
         cast_occurrence,
         source_incarnation,
@@ -3805,6 +3847,10 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
 
     self_counter
         && targets.is_empty()
+        && declares_chosen_group.is_none()
+        && reads_chosen_group.is_none()
+        && declares_return_result.is_none()
+        && reads_return_result.is_none()
         && cast_occurrence.is_none()
         && source_incarnation.is_none()
         && trigger_source.is_none()
@@ -3965,6 +4011,10 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
     let ResolvedAbility {
         effect,
         targets,
+        declares_chosen_group,
+        reads_chosen_group,
+        declares_return_result,
+        reads_return_result,
         source_id: _,
         cast_occurrence,
         source_incarnation: _,
@@ -4037,6 +4087,10 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
 
     fixed_controller_gain_life
         && targets.is_empty()
+        && declares_chosen_group.is_none()
+        && reads_chosen_group.is_none()
+        && declares_return_result.is_none()
+        && reads_return_result.is_none()
         && cast_occurrence.is_none()
         && scoped_player.is_none()
         && matches!(kind, AbilityKind::Spell | AbilityKind::Database)
@@ -4178,6 +4232,10 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
     let ResolvedAbility {
         effect,
         targets,
+        declares_chosen_group,
+        reads_chosen_group,
+        declares_return_result,
+        reads_return_result,
         source_id: _,
         cast_occurrence,
         source_incarnation: _,
@@ -4254,6 +4312,10 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
 
     fixed_opponent_effect
         && targets.is_empty()
+        && declares_chosen_group.is_none()
+        && reads_chosen_group.is_none()
+        && declares_return_result.is_none()
+        && reads_return_result.is_none()
         && cast_occurrence.is_none()
         && scoped_player.is_none()
         && matches!(kind, AbilityKind::Spell | AbilityKind::Database)
@@ -4652,6 +4714,10 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
     let ResolvedAbility {
         effect: a_effect,
         targets: a_targets,
+        declares_chosen_group: a_declares_chosen_group,
+        reads_chosen_group: a_reads_chosen_group,
+        declares_return_result: a_declares_return_result,
+        reads_return_result: a_reads_return_result,
         source_id: _,
         cast_occurrence: _,
         source_incarnation: _,
@@ -4728,6 +4794,10 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
     let ResolvedAbility {
         effect: b_effect,
         targets: b_targets,
+        declares_chosen_group: b_declares_chosen_group,
+        reads_chosen_group: b_reads_chosen_group,
+        declares_return_result: b_declares_return_result,
+        reads_return_result: b_reads_return_result,
         source_id: _,
         cast_occurrence: _,
         source_incarnation: _,
@@ -4804,6 +4874,10 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
 
     a_effect == b_effect
         && a_targets == b_targets
+        && a_declares_chosen_group == b_declares_chosen_group
+        && a_reads_chosen_group == b_reads_chosen_group
+        && a_declares_return_result == b_declares_return_result
+        && a_reads_return_result == b_reads_return_result
         && a_force_block_attacker == b_force_block_attacker
         // CR 400.7 + CR 603.7c: two otherwise-identical abilities pinned to
         // DIFFERENT incarnations are not the same ability. Participating here
@@ -5530,6 +5604,23 @@ mod tests {
         assert!(!inert_trigger_abilities_eq_ignoring_provenance(
             &a,
             &same_shape_different_provenance
+        ));
+    }
+
+    #[test]
+    fn chosen_group_identity_prevents_inert_trigger_batch_equivalence() {
+        let mut first = ResolvedAbility::new(Effect::NoOp, Vec::new(), ObjectId(10), PlayerId(0));
+        first.declares_chosen_group = Some(crate::types::ability::ChosenGroupId(1));
+        let mut second = first.clone();
+        second.declares_chosen_group = Some(crate::types::ability::ChosenGroupId(2));
+        assert!(!inert_trigger_abilities_eq_ignoring_provenance(
+            &first, &second
+        ));
+
+        second.declares_chosen_group = first.declares_chosen_group;
+        second.reads_chosen_group = Some(crate::types::ability::ChosenGroupId(2));
+        assert!(!inert_trigger_abilities_eq_ignoring_provenance(
+            &first, &second
         ));
     }
 

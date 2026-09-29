@@ -5172,8 +5172,18 @@ export type BracketShape = "Swiss" | "SingleElimination";
  * `Bye` and `Forfeit` are server-assigned outcomes with nothing to report;
  * `Open` includes an already-`Reported` pairing, because re-reporting is how a
  * mistyped tally is corrected.
+ *
+ * `Hosted` marks a pairing played on a server-authoritative table (lobby
+ * protocol v14): its result is reported by the server on game-over, and a
+ * client `ReportMatchResult` is refused, so the UI hides the manual report
+ * affordance for it exactly as it does for `Bye`/`Forfeit`.
  */
-export type ReportGate = "Open" | "TournamentNotRunning" | "Bye" | "Forfeit";
+export type ReportGate =
+  | "Open"
+  | "TournamentNotRunning"
+  | "Bye"
+  | "Forfeit"
+  | "Hosted";
 
 /**
  * One tournament-scoped gated action, as an axis rather than sibling

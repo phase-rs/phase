@@ -16,8 +16,8 @@
 //! The fix is purely parser-composition — every runtime primitive
 //! (`ReplacementMode::Optional`, `Effect::Choose(CardPredicate)`,
 //! `Effect::RevealUntil`, `FilterProp::MatchesLastChosenCardPredicate`,
-//! controller-announced bottom placement via `WaitingFor::RevealUntilBottomOrder`)
-//! already exists.
+//! player-chosen bottom placement via `RevealUntilBottomOrder` and
+//! `SelectCards`) already exists.
 //!
 //! These tests drive the real engine pipeline through `GameAction`s:
 //! prompt the draw via `DebugAction::DrawCards`, accept the optional
@@ -113,8 +113,7 @@ fn library_card_names(
 /// "you may instead" replacement and choosing "Land" reveals cards from the
 /// top of the library until the first land is found. That land enters the
 /// hand; the non-land cards revealed before it go to the bottom of the
-/// library in the controller's announced order (CR 401.4). Hand size
-/// increases by exactly 1 — the
+/// library in the player's chosen order. Hand size increases by exactly 1 — the
 /// discriminating signal that the original draw event was replaced, NOT
 /// supplemented (the load-bearing +1-vs-+2 check).
 #[test]
@@ -126,7 +125,7 @@ fn abundance_accept_choose_land_puts_first_land_into_hand() {
     // Library top → bottom: Bear (nonland), Hill Giant (nonland), Forest (land),
     // Plains (land), Mountain (land). Choosing "Land" must reveal Bear and
     // Hill Giant (misses), then Forest (hit) — Forest enters hand, Bear and
-    // Hill Giant go to the library bottom in random order.
+    // Hill Giant go to the library bottom in the player's chosen order.
     let mut runner = scenario_with_abundance_and_library(
         db,
         &[
@@ -140,6 +139,27 @@ fn abundance_accept_choose_land_puts_first_land_into_hand() {
 
     let hand_before = runner.state().players[0].hand.len();
     let library_before = runner.state().players[0].library.len();
+    let abundance_sources = runner
+        .state()
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| {
+            let object = &runner.state().objects[id];
+            object.name == "Abundance" && object.controller == P0
+        })
+        .collect::<Vec<_>>();
+    let &[abundance_source] = abundance_sources.as_slice() else {
+        panic!("expected one P0-controlled Abundance, got {abundance_sources:?}");
+    };
+    let library_before_ids = runner.state().players[0]
+        .library
+        .iter()
+        .copied()
+        .collect::<Vec<_>>();
+    let &[bear, hill_giant, forest, plains, mountain] = library_before_ids.as_slice() else {
+        panic!("expected exactly five library cards, got {library_before_ids:?}");
+    };
 
     issue_single_draw(&mut runner);
 
@@ -162,33 +182,40 @@ fn abundance_accept_choose_land_puts_first_land_into_hand() {
         })
         .expect("choose Land");
 
-    // Drive any follow-up resolution (the chain may need a no-op tick). This
-    // parks on the CR 401.4 bottom-order prompt without answering it.
+    // Drive any follow-up resolution (the chain may need a no-op tick).
     runner.advance_until_stack_empty();
 
-    // CR 401.4 + CR 701.20a: "put all other cards revealed this way on the
-    // bottom of your library in any order" — with 2+ misses the controller
-    // announces the order. Submit the REVERSE of encounter order so the
-    // placement assertion below discriminates a honored submission from an
-    // arbitrary (e.g. preserved or random) bottom order.
-    let submitted: Vec<_> = match &runner.state().waiting_for {
-        WaitingFor::RevealUntilBottomOrder { player, cards, .. } => {
-            assert_eq!(*player, P0, "the controller announces the order");
-            assert_eq!(
-                cards.len(),
-                2,
-                "expected the two non-land misses, got {cards:?}"
-            );
-            cards.iter().rev().copied().collect()
+    // CR 401.4 + CR 608.2d: P0 chooses the revealed misses' library-bottom
+    // order while applying the effect; the hit and unrevealed cards are excluded.
+    match &runner.state().waiting_for {
+        WaitingFor::RevealUntilBottomOrder {
+            player,
+            source_id,
+            cards,
+            ..
+        } => {
+            assert_eq!(*player, P0);
+            assert_eq!(*source_id, abundance_source);
+            assert_eq!(cards, &[bear, hill_giant]);
         }
         other => panic!("expected RevealUntilBottomOrder, got {other:?}"),
-    };
+    }
+    let custom_order = vec![hill_giant, bear];
     runner
-        .act(GameAction::SelectCards { cards: submitted })
-        .expect("order the bottomed misses");
-
-    // Drive the follow-up resolution after the order is announced.
+        .act(GameAction::SelectCards {
+            cards: custom_order.clone(),
+        })
+        .expect("submit Abundance's chosen bottom order");
     runner.advance_until_stack_empty();
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "Abundance must finish at Priority, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        runner.state().stack.is_empty(),
+        "Abundance must finish with an empty stack"
+    );
 
     let hand_after_names = hand_card_names(runner.state(), P0);
     let library_after_names = library_card_names(runner.state(), P0);
@@ -213,25 +240,33 @@ fn abundance_accept_choose_land_puts_first_land_into_hand() {
         hand_after_names.contains(&"Forest".to_string()),
         "Forest must be in hand; got {hand_after_names:?}"
     );
+    assert!(runner.state().players[0].hand.contains(&forest));
 
     // Forest moved to hand; library loses exactly 1. The two non-land misses
     // (Grizzly Bears, Hill Giant) are relocated from the top to the bottom of
-    // the library in a random order.
+    // the library in the player's chosen order.
     assert_eq!(
         library_after,
         library_before - 1,
         "library loses exactly 1 card (Forest moved to hand); the revealed misses \
          are relocated within the library, not removed"
     );
-    // CR 401.4: the misses sit at the bottom in the exact order submitted above
-    // (reversed encounter order), bottom-most first.
-    let bottom_two: Vec<_> = library_after_names.iter().rev().take(2).cloned().collect();
+    let library_after_ids = runner.state().players[0]
+        .library
+        .iter()
+        .copied()
+        .collect::<Vec<_>>();
+    // CR 401.4 + CR 608.2d: the two misses retain the submitted order at the
+    // library bottom, deliberately reversing their encounter order.
     assert_eq!(
-        bottom_two,
-        vec!["Grizzly Bears".to_string(), "Hill Giant".to_string()],
-        "Grizzly Bears and Hill Giant must be at the bottom of the library in \
-         the submitted order (the two non-land misses revealed before Forest); \
-         got bottom_two={bottom_two:?}, library={library_after_names:?}"
+        library_after_ids,
+        vec![plains, mountain, hill_giant, bear],
+        "the full library must preserve unrevealed cards and the chosen bottom order"
+    );
+    assert_eq!(
+        &library_after_ids[library_after_ids.len() - custom_order.len()..],
+        custom_order.as_slice(),
+        "the forward bottom suffix must match the submitted permutation"
     );
 }
 

@@ -761,6 +761,10 @@ pub fn ability_definition_is_cast_stable_for_pre_cast(definition: &AbilityDefini
     let AbilityDefinition {
         kind: _,
         effect,
+        declares_chosen_group: _,
+        reads_chosen_group: _,
+        declares_return_result,
+        reads_return_result,
         cost,
         sub_ability,
         else_ability,
@@ -809,7 +813,9 @@ pub fn ability_definition_is_cast_stable_for_pre_cast(definition: &AbilityDefini
         face_down_in_exile: _,
     } = definition;
 
-    activation_mana_payment_restriction.is_none()
+    declares_return_result.is_none()
+        && reads_return_result.is_none()
+        && activation_mana_payment_restriction.is_none()
         && activator_filter.is_none()
         && activation_zone.is_none()
         && optional_player.is_none()
@@ -886,6 +892,10 @@ pub fn ability_definition_has_only_unbound_variable_quantities_for_pre_cast(
     let AbilityDefinition {
         kind: _,
         effect,
+        declares_chosen_group: _,
+        reads_chosen_group: _,
+        declares_return_result: None,
+        reads_return_result: None,
         cost,
         sub_ability: None,
         else_ability: None,

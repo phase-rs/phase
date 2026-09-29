@@ -27518,7 +27518,8 @@ fn jeleva_etb_each_player_exiles_top_x_resolves_to_mana_spent_to_cast() {
     // X is the amount of mana spent to cast ~` suffix substitutes the
     // bare `X` variable with the typed mana-spent quantity ref — without
     // this binding the trigger would have no chosen X and the count
-    // would default to 0 at resolution time. (#326)
+    // would default to 0 at resolution time. The subject-worded "each
+    // player exiles" makes each library's player the actor. (#326)
     let def = parse_effect_chain(
             "Each player exiles the top X cards of their library, where X is the amount of mana spent to cast ~.",
             AbilityKind::Spell,
@@ -27535,7 +27536,7 @@ fn jeleva_etb_each_player_exiles_top_x_resolves_to_mana_spent_to_cast() {
             },
         position: LibraryPosition::Top,
         face_down: false,
-        actor: crate::types::ability::LibraryInstructionActor::Controller,
+        actor: crate::types::ability::LibraryInstructionActor::LibraryPlayer,
     } = &*def.effect
     else {
         panic!(
@@ -53388,6 +53389,52 @@ fn attach_just_moved_negative_aura_graft_attachment_stays_parent_target() {
 }
 
 /// CR 608.2c: Emperor of Bones class — a ChangeZone-to-Battlefield
+#[test]
+fn flash_put_creature_forwards_reduced_cost_sacrifice() {
+    let def = parse_effect_chain(
+        "You may put a creature card from your hand onto the battlefield. If you do, sacrifice it unless you pay its mana cost reduced by {2}.",
+        AbilityKind::Spell,
+    );
+    let mut node = &def;
+    while !matches!(
+        &*node.effect,
+        Effect::ChangeZone {
+            destination: Zone::Battlefield,
+            ..
+        }
+    ) {
+        node = node
+            .sub_ability
+            .as_deref()
+            .expect("Flash must put a creature onto the battlefield");
+    }
+    assert!(
+        node.forward_result,
+        "Flash must forward its selected creature: {def:?}"
+    );
+    let child = node
+        .sub_ability
+        .as_deref()
+        .expect("Flash must continue after the put");
+    assert!(
+        matches!(&*child.effect, Effect::Sacrifice { .. }),
+        "Flash must sacrifice that creature: {def:?}"
+    );
+    assert!(
+        matches!(
+            &child.unless_pay,
+            Some(UnlessPayModifier {
+                cost: AbilityCost::Mana {
+                    cost: ManaCost::SelfManaCostReduced { reduction: 2 },
+                },
+                ..
+            })
+        ),
+        "Flash must offer the creature's reduced mana cost: {def:?}"
+    );
+}
+
+/// CR 608.2c: Emperor of Bones class — a ChangeZone-to-Battlefield
 /// followed by sibling clauses that anaphorically reference the just-
 /// moved card ("it gains haste. sacrifice it ...") must mark
 /// `forward_result: true` on the ChangeZone parent so the runtime
@@ -74187,6 +74234,158 @@ fn reveal_until_shared_card_qualifier_constrains_every_disjunct() {
         "{plargg:?}"
     );
     assert!(plargg.properties.contains(&three_or_less), "{plargg:?}");
+}
+#[test]
+fn doomsday_excruciator_each_player_exiles_all_but_bottom_six_cards() {
+    // CR 401.2 + CR 701.13a + CR 406.3: Exile from a library face down.
+    let def = parse_effect_chain(
+        "Each player exiles all but the bottom six cards of their library face down.",
+        AbilityKind::Spell,
+    );
+    assert_eq!(def.player_scope, Some(PlayerFilter::All));
+    let Effect::ExileTop {
+        player,
+        count,
+        position,
+        face_down,
+        actor,
+    } = &*def.effect
+    else {
+        panic!("expected ExileTop effect, got {:?}", def.effect);
+    };
+    assert_eq!(*player, TargetFilter::ScopedPlayer);
+    assert_eq!(*position, LibraryPosition::Top);
+    assert!(*face_down);
+    assert_eq!(
+        *actor,
+        crate::types::ability::LibraryInstructionActor::LibraryPlayer
+    );
+    assert_eq!(
+        *count,
+        QuantityExpr::Offset {
+            inner: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::ZoneCardCount {
+                    zone: ZoneRef::Library,
+                    card_types: vec![],
+                    filter: None,
+                    scope: CountScope::ScopedPlayer,
+                },
+            }),
+            offset: -6,
+        }
+    );
+}
+
+#[test]
+fn jace_reality_sculptor_exile_all_but_bottom_card_each_opponent() {
+    // CR 401.2 + CR 701.13a: Exile from each opponent's ordered library.
+    let def = parse_effect_chain(
+        "Exile all but the bottom card of each opponent's library.",
+        AbilityKind::Activated,
+    );
+    assert_eq!(def.player_scope, Some(PlayerFilter::Opponent));
+    let Effect::ExileTop {
+        player,
+        count,
+        position,
+        face_down,
+        actor,
+    } = &*def.effect
+    else {
+        panic!("expected ExileTop effect, got {:?}", def.effect);
+    };
+    assert_eq!(*player, TargetFilter::Controller);
+    assert_eq!(*position, LibraryPosition::Top);
+    assert!(!*face_down);
+    assert_eq!(
+        *actor,
+        crate::types::ability::LibraryInstructionActor::Controller
+    );
+    assert_eq!(
+        *count,
+        QuantityExpr::Offset {
+            inner: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::ZoneCardCount {
+                    zone: ZoneRef::Library,
+                    card_types: vec![],
+                    filter: None,
+                    scope: CountScope::ScopedPlayer,
+                },
+            }),
+            offset: -1,
+        }
+    );
+}
+
+#[test]
+fn controller_worded_each_player_library_exile_keeps_controller_as_actor() {
+    let def = parse_effect_chain(
+        "Exile all but the bottom card of each player's library.",
+        AbilityKind::Spell,
+    );
+    assert_eq!(def.player_scope, Some(PlayerFilter::All));
+    let Effect::ExileTop { player, actor, .. } = &*def.effect else {
+        panic!("expected ExileTop effect, got {:?}", def.effect);
+    };
+    assert_eq!(*player, TargetFilter::Controller);
+    assert_eq!(
+        *actor,
+        crate::types::ability::LibraryInstructionActor::Controller
+    );
+}
+
+#[test]
+fn nicol_bolas_exile_all_but_bottom_card_target_player() {
+    // CR 401.2 + CR 701.13a: Exile from the target player's ordered library.
+    let def = parse_effect_chain(
+        "Exile all but the bottom card of target player's library.",
+        AbilityKind::Activated,
+    );
+    let Effect::ExileTop {
+        player,
+        count,
+        position,
+        face_down,
+        actor,
+    } = &*def.effect
+    else {
+        panic!("expected ExileTop effect, got {:?}", def.effect);
+    };
+    assert_eq!(*player, TargetFilter::Player);
+    assert_eq!(*position, LibraryPosition::Top);
+    assert!(!*face_down);
+    assert_eq!(
+        *actor,
+        crate::types::ability::LibraryInstructionActor::Controller
+    );
+    assert_eq!(
+        *count,
+        QuantityExpr::Offset {
+            inner: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::TargetZoneCardCount {
+                    zone: ZoneRef::Library,
+                    scope: ControllerRef::TargetPlayer,
+                    binding: CountBinding::Anaphoric,
+                },
+            }),
+            offset: -1,
+        }
+    );
+}
+
+#[test]
+fn exile_all_but_edge_with_unbound_player_does_not_exile_permanents() {
+    // "That player" has no binding in this standalone clause. Its library
+    // cannot be counted through the current scoped player or the controller.
+    let def = parse_effect_chain(
+        "Exile all but the bottom card of that player's library.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(&*def.effect, Effect::Unimplemented { .. }),
+        "unbound library owner must remain unsupported: {:?}",
+        def.effect
+    );
 }
 
 // ── Valki, God of Lies: per-player reveal choices (CR 608.2c / 608.2d / 701.20a) ──

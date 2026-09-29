@@ -171,6 +171,20 @@ pub(crate) fn apply_zone_exit_cleanup(
     to: Zone,
     attachments: Vec<crate::types::game_state::AttachmentSnapshot>,
 ) {
+    // CR 608.2h + CR 707.2: record the spell's stack entry and object before
+    // any of this function's own reverts (`cast_occurrence` clear below,
+    // modal/face-down face swap further down) erase what "that spell" looked
+    // like while it was on the stack.
+    if from == Zone::Stack && to != Zone::Stack {
+        let departed_entry = state
+            .stack
+            .iter()
+            .find(|entry| entry.id == object_id)
+            .cloned();
+        if let Some(entry) = departed_entry {
+            super::stack::record_departed_stack_spell(state, &entry);
+        }
+    }
     // CR 400.7: An object that changes zones becomes a new object with no
     // memory of its previous existence. The information authority receives the
     // pre-move occurrence so the future Zone command can apply this same clear

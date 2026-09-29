@@ -170,8 +170,19 @@ describe("tournament wire type mirrors", () => {
 
   it("mirrors the v6 broker-owned affordance fields", () => {
     // report_gate arms 1:1 with the Rust `ReportGate` enum.
-    const gates: ReportGate[] = ["Open", "TournamentNotRunning", "Bye", "Forfeit"];
-    expect(gates).toHaveLength(4);
+    const gates: ReportGate[] = [
+      "Open",
+      "TournamentNotRunning",
+      "Bye",
+      "Forfeit",
+      "Hosted",
+    ];
+    expect(gates).toHaveLength(5);
+
+    // A hosted pairing arrives with report_gate "Hosted" (lobby v14): the UI
+    // treats it like Bye/Forfeit — no manual report affordance.
+    const hostedGate: ReportGate = "Hosted";
+    expect(JSON.parse(JSON.stringify(hostedGate))).toBe("Hosted");
 
     // open_actions is a `BTreeSet<TournamentAction>` — a JSON array on the wire.
     const actions: TournamentAction[] = ["StartRound", "EndTournament", "Drop"];

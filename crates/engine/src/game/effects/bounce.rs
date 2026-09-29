@@ -492,20 +492,49 @@ pub fn resolve_all(
     // CR 107.3a + CR 601.2b: Filter evaluation runs in the ability's
     // resolution context (controller, target slots already filled).
     let ctx = crate::game::filter::FilterContext::from_ability(ability);
-    let matching: Vec<_> = state
-        .battlefield
-        .iter()
-        .filter(|id| {
-            crate::game::filter::matches_target_filter(state, **id, &effective_filter, &ctx)
-        })
-        .copied()
-        .collect();
+    let matching: Vec<_> = if ability.reads_chosen_group.is_some() {
+        ability
+            .targets
+            .iter()
+            .filter_map(|target| match target {
+                TargetRef::Object(id)
+                    if state.battlefield.contains(id)
+                        && ability.target_pin_is_current(*id, state)
+                        && ability.selected_target_pin_is_current(*id, state)
+                        && crate::game::filter::matches_target_filter(
+                            state,
+                            *id,
+                            &effective_filter,
+                            &ctx,
+                        ) =>
+                {
+                    Some(*id)
+                }
+                _ => None,
+            })
+            .collect()
+    } else {
+        state
+            .battlefield
+            .iter()
+            .filter(|id| {
+                crate::game::filter::matches_target_filter(state, **id, &effective_filter, &ctx)
+            })
+            .copied()
+            .collect()
+    };
 
     if let Some(count_expr) = count_expr {
         let count = crate::game::quantity::resolve_quantity_with_targets(state, count_expr, ability)
             .max(0) as usize;
         if count == 0 {
             state.last_effect_count = Some(0);
+            if let Some(result_id) = ability.declares_return_result {
+                let occurrence = state.active_return_result_occurrence.ok_or_else(|| {
+                    EffectError::MissingParam("return result occurrence".to_string())
+                })?;
+                super::publish_return_result(state, occurrence, result_id, Vec::new())?;
+            }
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),
                 source_id: ability.source_id,
@@ -573,8 +602,21 @@ pub fn resolve_all(
         .iter()
         .map(|&obj_id| ZoneMoveRequest::effect(obj_id, destination, ability.source_id))
         .collect();
+    let completion = if let Some(result_id) = ability.declares_return_result {
+        Some(
+            crate::types::game_state::BatchCompletion::RecordInstructionZoneResult {
+                occurrence_id: state.active_return_result_occurrence.ok_or_else(|| {
+                    EffectError::MissingParam("return result occurrence".to_string())
+                })?,
+                result_id,
+                settled_records: None,
+            },
+        )
+    } else {
+        None
+    };
     if let BatchMoveResult::NeedsChoice =
-        zone_pipeline::move_objects_simultaneously(state, reqs, events)
+        zone_pipeline::move_objects_simultaneously_then(state, reqs, completion, events)
     {
         // CR 616.1: a redirect ordering choice paused mid-batch; the prompt is
         // parked and the tail stashed. Bail before `EffectResolved` so it is not

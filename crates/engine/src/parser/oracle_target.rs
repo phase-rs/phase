@@ -387,10 +387,10 @@ pub(crate) fn parse_target_with_disjunctive_restriction(text: &str) -> (TargetFi
     (filter, &rest[consumed..])
 }
 
-/// CR 205.2a + CR 601.2h: Fold a DETERMINER-led right conjunct onto an
+/// CR 205.2a + CR 701.21a: Fold a DETERMINER-led right conjunct onto an
 /// already-parsed left conjunct — "another creature or an artifact"
-/// (Mold Folk's `{1}, Sacrifice another creature or an artifact:`) and the
-/// mirror-image "an artifact or another creature" (Malevolent Noble).
+/// (Mold Folk's sacrifice cost and Gut's resolution-time sacrifice effect) and
+/// the mirror-image "an artifact or another creature" (Malevolent Noble).
 ///
 /// Takes `base` and `rest` rather than parsing the phrase itself, and that split
 /// is LOAD-BEARING, not a style choice. In this surface "another" scopes only the
@@ -400,7 +400,7 @@ pub(crate) fn parse_target_with_disjunctive_restriction(text: &str) -> (TargetFi
 /// sacrifice it to pay the cost of its activated ability"; Gut, True Soul Zealot
 /// (2022-06-10): "If Gut somehow becomes an artifact, you may sacrifice it to its
 /// own ability." Stamping `FilterProp::Another` onto the right leg would make an
-/// artifact-ified source unable to pay with itself: the sacrifice-cost path runs
+/// artifact-ified source unable to sacrifice itself: the sacrifice-choice path runs
 /// `find_eligible_sacrifice_targets` -> `matches_target_filter` ->
 /// `matches_filter_prop`, whose `Another` arm reduces to
 /// `!source_is_current_object(state, source, object_id)` here, because
@@ -443,10 +443,12 @@ pub(crate) fn parse_target_with_disjunctive_restriction(text: &str) -> (TargetFi
 /// The real reason is BLAST RADIUS. `parse_type_phrase_folding_with_ctx` is the shared
 /// entry point for target phrases, cost filters, trigger filters, keyword costs
 /// and condition subjects; widening it changes every one of those at once, and
-/// the pinning test above exists precisely to stop that happening casually. A
-/// COST, by contrast, has no verb to elide — the entire phrase is the filter — so
-/// its consumer can opt into the union reading on its own, and the measured
-/// effect stays the eight cost-position cards this change actually intends.
+/// the pinning test above exists precisely to stop that happening casually.
+/// A sacrifice cost or effect, by contrast, owns its noun phrase and can opt
+/// into this reading without guessing whether a subsequent verb was elided.
+/// This grammar is shared
+/// by the cost-position cards and resolution-time sacrifice effects without
+/// changing general-purpose target and condition parsing.
 /// The disambiguator is the consumer's intent, which is what a wrapper expresses
 /// and a widened branch cannot.
 /// Mirrors [`parse_target_with_disjunctive_restriction`] directly above: parse
@@ -468,9 +470,11 @@ pub(crate) fn fold_article_led_type_union(base: TargetFilter, rest: &str) -> (Ta
     // A right conjunct that carries no TYPE content is not treated as a union leg.
     // Deliberately stricter than `target_filter_has_meaningful_content`: a bare
     // "or a token" parses to `Typed{[], [Token]}`, which matches only tokens
-    // rather than every object, but it is a property-only leg the cost grammar
-    // has no corpus instance of, so this bails to today's behaviour rather than
-    // guessing. Widening to accept property-only legs needs its own measurement.
+    // rather than every object. Old Man Willow is a real property-only RHS
+    // instance, but this opt-in helper deliberately supports type-bearing RHS
+    // only. The sacrifice imperative must keep an unsupported token RHS red
+    // instead of discarding it. Accepting property-only legs needs its own
+    // measurement.
     let TargetFilter::Typed(ref right_typed) = right else {
         return (base, rest);
     };

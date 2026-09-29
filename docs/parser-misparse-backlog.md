@@ -2548,6 +2548,8 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 **Fix hint.** oracle_nom/filter.rs + oracle_target.rs — build TargetFilter::Or across all alt() branches
 
+**Known unsupported case.** Old Man Willow's "another creature or a token" has a property-only token alternative. The sacrifice parser keeps the complete phrase explicitly unsupported instead of emitting a truncated creature-only sacrifice. Token-RHS support and its reflexive follow-up remain deferred.
+
 <details><summary>Cards</summary>
 
 - A-Brinebound Gift
@@ -2644,7 +2646,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Golem Artisan
 - Greater Gargadon
 - Guru Pathik
-- Gut, True Soul Zealot
 - HYDRA Assault Robot
 - Hand of Vecna
 - Harsh Mentor
@@ -2692,6 +2693,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Neyith of the Dire Hunt
 - Nicol Bolas, God-Pharaoh
 - Oglor, Devoted Assistant
+- Old Man Willow
 - Omen of Fire
 - One with the Multiverse
 - Ornery Goblin

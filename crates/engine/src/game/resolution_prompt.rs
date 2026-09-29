@@ -583,6 +583,10 @@ pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
         distribution: _, // CR 601.2d concrete pre-assigned portions (announce-time)
         distribute: _, // CR 601.2d/603.3d unassigned division is an announce-time choice
         targets: _,   // concrete announced target refs (already resolved)
+        declares_chosen_group: _, // announce-time identity, no resolution prompt
+        reads_chosen_group: _, // bound selected targets, no new choice
+        declares_return_result: _, // publication itself does not prompt
+        reads_return_result: _, // consumes a settled value without a prompt
         source_id: _, // object id
         cast_occurrence: _, // finalized-cast provenance, no resolution-time choice
         source_incarnation: _, // self-transform epoch latch, no resolution-time choice

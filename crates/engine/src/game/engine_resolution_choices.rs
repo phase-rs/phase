@@ -6384,7 +6384,52 @@ pub(super) fn handle_resolution_choice(
                 ));
             }
 
+            // CR 608.2c: The selected BounceAll is still the producer of the
+            // delayed reader parked directly behind this validated prompt.
+            // Transfer its exact key before a replacement can install a child
+            // frame; a further pause gives the key to that zone iteration.
+            let pending_return_result_producer = state
+                .active_ability_continuation()
+                .and_then(|pending| pending.pending_return_result_producer);
+            if let Some((occurrence_id, result_id)) = pending_return_result_producer {
+                let current = state.active_ability_continuation().is_some_and(|pending| {
+                    matches!(effect_kind, EffectKind::BounceAll)
+                        && pending.chain.source_id == source_id
+                        && pending.return_result_occurrence == Some(occurrence_id)
+                        && crate::types::game_state::reads_return_result_id(
+                            &pending.chain,
+                            result_id,
+                        )
+                });
+                if !current {
+                    return Err(EngineError::InvalidAction(
+                        "Return-result producer does not own this zone choice".to_string(),
+                    ));
+                }
+                if !chosen.is_empty() {
+                    state
+                        .active_ability_continuation_frame_mut()
+                        .expect("validated return-result continuation remains active")
+                        .pending
+                        .pending_return_result_producer = None;
+                }
+            }
+
             if chosen.is_empty() {
+                if let Some((occurrence_id, result_id)) = pending_return_result_producer {
+                    effects::publish_return_result(state, occurrence_id, result_id, Vec::new())
+                        .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+                    state
+                        .active_ability_continuation_frame_mut()
+                        .expect("validated return-result continuation remains active")
+                        .pending
+                        .pending_return_result_producer = None;
+                }
+                if matches!(effect_kind, EffectKind::ChangeZone)
+                    && destination == Some(Zone::Battlefield)
+                {
+                    effects::settle_empty_forwarded_zone_result(state, source_id);
+                }
                 // Issue #423 audit: no cards chosen — this branch moves no
                 // objects and emits no battlefield-exit events, so no
                 // dies-trigger collection is needed.
@@ -6520,6 +6565,31 @@ pub(super) fn handle_resolution_choice(
                         )
                     })?;
                     let chosen_ids: Vec<_> = chosen.to_vec();
+                    if dest_zone == Zone::Battlefield {
+                        let selected = chosen_ids
+                            .iter()
+                            .filter_map(|id| {
+                                state.objects.get(id).map(
+                                    crate::types::identifiers::ObjectIncarnationRef::from_object,
+                                )
+                            })
+                            .collect();
+                        if let Some(marker) = state
+                            .active_ability_continuation_frame_mut()
+                            .and_then(|frame| {
+                                frame
+                                    .pending
+                                    .chain
+                                    .context
+                                    .pending_forwarded_zone_result
+                                    .as_mut()
+                            })
+                        {
+                            if marker.producer == source_id {
+                                marker.selected = Some(selected);
+                            }
+                        }
+                    }
                     let completion_cause = effects::this_way_cause_for_zone(dest_zone);
                     let tracks_player_action_completion = completion_cause.is_some_and(|cause| {
                         effects::active_player_action_completion_requires(state, source_id, cause)
@@ -6529,6 +6599,22 @@ pub(super) fn handle_resolution_choice(
                             state,
                             &chosen_ids,
                         );
+                    if let Some(marker) =
+                        state
+                            .active_ability_continuation_frame_mut()
+                            .and_then(|frame| {
+                                frame
+                                    .pending
+                                    .chain
+                                    .context
+                                    .pending_forwarded_zone_result
+                                    .as_mut()
+                            })
+                    {
+                        if marker.producer == source_id && marker.selected.is_some() {
+                            marker.group = Some(logical_zone_change_group.logical_group_id);
+                        }
+                    }
                     let logical_group_event_start = events.len();
                     for (i, card_id) in chosen_ids.iter().enumerate() {
                         let origin = state
@@ -6623,6 +6709,7 @@ pub(super) fn handle_resolution_choice(
                                 .expect("paused EffectZoneChoice retains its explicit delivery prefix");
                                 state.push_change_zone_iteration(
                                     crate::types::game_state::PendingChangeZoneIteration {
+                                        pending_return_result_producer,
                                         logical_zone_change_group,
                                         paused_current: anticipated_pause.map(|mut boundary| {
                                             boundary
@@ -6699,6 +6786,7 @@ pub(super) fn handle_resolution_choice(
                                 .expect("paused EffectZoneChoice retains its explicit delivery prefix");
                                 state.push_change_zone_iteration(
                                     crate::types::game_state::PendingChangeZoneIteration {
+                                        pending_return_result_producer,
                                         logical_zone_change_group,
                                         paused_current: Some(
                                             state
@@ -6771,6 +6859,18 @@ pub(super) fn handle_resolution_choice(
                         &mut events[logical_group_event_start..],
                     )
                     .expect("completed EffectZoneChoice owns every terminal member outcome");
+                    if let Some((occurrence_id, result_id)) = pending_return_result_producer {
+                        effects::publish_return_result(
+                            state,
+                            occurrence_id,
+                            result_id,
+                            crate::types::game_state::settled_logical_zone_change_records(
+                                &logical_zone_change_group,
+                            ),
+                        )
+                        .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+                    }
+                    effects::settle_forwarded_zone_result(state, &logical_zone_change_group);
                 }
                 EffectKind::Tap => {
                     for &card_id in &chosen {
@@ -7110,6 +7210,7 @@ pub(super) fn handle_resolution_choice(
                                 .expect("paused cost-payment zone move retains its explicit delivery prefix");
                                 state.push_change_zone_iteration(
                                     crate::types::game_state::PendingChangeZoneIteration {
+                                        pending_return_result_producer: None,
                                         logical_zone_change_group,
                                         paused_current: anticipated_pause.map(|mut boundary| {
                                             boundary
@@ -7160,6 +7261,7 @@ pub(super) fn handle_resolution_choice(
                                 .expect("paused cost-payment zone move retains its explicit delivery prefix");
                                 state.push_change_zone_iteration(
                                     crate::types::game_state::PendingChangeZoneIteration {
+                                        pending_return_result_producer: None,
                                         logical_zone_change_group,
                                         paused_current: Some(
                                             state
@@ -9276,6 +9378,16 @@ pub(crate) fn run_batch_completion(
 ) -> crate::game::zone_pipeline::BatchMoveResult {
     use crate::types::game_state::BatchCompletion;
     match completion {
+        BatchCompletion::RecordInstructionZoneResult {
+            occurrence_id,
+            result_id,
+            settled_records,
+        } => {
+            let records = settled_records.expect("zone result completion must be settled");
+            effects::publish_return_result(state, occurrence_id, result_id, records)
+                .expect("zone result completion publishes once into a live occurrence");
+            crate::game::zone_pipeline::BatchMoveResult::Done
+        }
         BatchCompletion::MilledDeliveryComplete { player_id, cards } => {
             effects::mill::complete_mill_delivery(state, player_id, cards, events)
         }

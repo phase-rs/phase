@@ -53,6 +53,7 @@ fn keyed_optional_effect_exposes_and_resolves_remember_choices() {
         trigger_event: None,
         trigger_events: Vec::new(),
         trigger_match_count: None,
+        return_result_occurrence: None,
     });
 
     let accept = GameAction::DecideOptionalEffectAndRemember {

@@ -641,6 +641,11 @@ export const LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION - 1;
  * PROTOCOL_VERSION moved twice for GameState-only changes and the derived lobby
  * window went disjoint from the deployed broker's.
  *
+ * 14 — PairingView.report_gate gains a `Hosted` arm (the Rust ReportGate enum's
+ *      new variant), the "a field's type changed" trigger. No broker emits it
+ *      until server-authoritative hosting is wired behind
+ *      MIN_LOBBY_PROTOCOL_FOR_HOSTED_MATCH (a later PR); mirrored in the
+ *      `ReportGate` union in types.ts so the wire type stays 1:1.
  * 13 — FormatConfig gains `allow_experimental_dungeons` (#[serde(default)]) —
  *      the "a lobby field is added" trigger — on its three lobby carriers:
  *      CreateGameWithSettings (client → broker), JoinTargetInfo and PeerInfo
@@ -767,7 +772,7 @@ export const LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION - 1;
  * 1 — Initial lobby-owned version, covering the lobby variant set unchanged
  *     since #1880.
  */
-export const LOBBY_PROTOCOL_VERSION = 13;
+export const LOBBY_PROTOCOL_VERSION = 14;
 
 /**
  * Lowest broker LOBBY_PROTOCOL_VERSION this client accepts.

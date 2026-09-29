@@ -18628,6 +18628,23 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
         return clause;
     }
 
+    // A recognized all-but-library head with an unsupported anaphoric owner
+    // must not fall into the broad "exile all" battlefield parser.
+    let lower = text.to_lowercase();
+    if tag::<_, _, OracleError<'_>>("exile all but the ")
+        .parse(lower.as_str())
+        .is_ok()
+    {
+        let gap = match imperative::try_parse_exile_all_but_edge(&lower, ctx) {
+            Some((tail, _)) if imperative::terminal_punctuation_only(tail) => None,
+            Some(_) => Some("exile_all_but_edge_suffix"),
+            None => Some("exile_all_but_edge_owner"),
+        };
+        if let Some(gap) = gap {
+            return parsed_clause(Effect::unimplemented(gap, text));
+        }
+    }
+
     // CR 608.2c: Compound damage actions: "~ deals 3 damage to any target and you gain 3 life"
     if let Some(clause) = try_split_damage_compound(text, ctx) {
         return clause;
@@ -19156,6 +19173,21 @@ fn try_parse_verb_and_target<'a>(
             })),
             rem,
         ));
+    }
+
+    // Exile all but bottom/top N cards: "exile all but the bottom six cards of their library"
+    if let Some((rem, ast)) = imperative::try_parse_exile_all_but_edge(lower, ctx) {
+        let original_rem = &text[text.len() - rem.len()..];
+        return Some((
+            TargetedImperativeAst::ZoneCounterProxy(Box::new(ast)),
+            original_rem,
+        ));
+    }
+    if tag::<_, _, OracleError<'_>>("exile all but the ")
+        .parse(lower)
+        .is_ok()
+    {
+        return None;
     }
 
     // Exile: infer origin zone from the primary target clause the target parser
@@ -24415,6 +24447,31 @@ fn lower_subject_predicate_ast(
                     player: affected,
                     count,
                 });
+            }
+            // CR 701.13a + CR 401.2: "<player> exiles all but the bottom/top [N] card(s) of their library [face down]"
+            // (Doomsday Excruciator: "each player exiles all but the bottom six cards of their library face down")
+            if tag::<_, _, OracleError<'_>>("exile all but the ")
+                .parse(pred_lower.as_str())
+                .is_ok()
+            {
+                let Some((rem, mut ast)) =
+                    imperative::try_parse_exile_all_but_edge(&pred_lower, ctx)
+                else {
+                    return parsed_clause(Effect::unimplemented("exile_all_but_edge_owner", text));
+                };
+                if !imperative::terminal_punctuation_only(rem) {
+                    return parsed_clause(Effect::unimplemented("exile_all_but_edge_suffix", text));
+                }
+                if let ZoneCounterImperativeAst::ExileTop {
+                    ref mut actor,
+                    ref mut player,
+                    ..
+                } = ast
+                {
+                    *actor = crate::types::ability::LibraryInstructionActor::LibraryPlayer;
+                    *player = affected.clone();
+                }
+                return parsed_clause(imperative::lower_zone_counter_ast(ast));
             }
             // CR 701.13a: "<player> exiles the top [N] card(s) of their library"
             if alt((tag::<_, _, OracleError<'_>>("exile "), tag("exiles ")))
@@ -38495,14 +38552,15 @@ pub(crate) fn parse_effect_chain_ir(
             }
         }
 
-        // CR 608.2c + CR 107.1c: "Repeat this process until … whichever comes
+        // CR 608.2c: "Repeat this process until … whichever comes
         // first" — auto-repeat loop with game-state stop predicates (Tainted Pact).
         if let Some(continuation) = try_parse_repeat_until_stop_conditions(&lower_check) {
             pending_repeat_until = Some(continuation);
+            builder.note_repeated_process_boundary();
             continue;
         }
 
-        // CR 608.2c + CR 107.1c: "Repeat this process" — a loop-continuation
+        // CR 608.2c: "Repeat this process" — a loop-continuation
         // directive that doesn't produce an independent effect. It is a
         // back-reference applying to the process (chain) built so far.
         //
@@ -38532,6 +38590,7 @@ pub(crate) fn parse_effect_chain_ir(
                 }
                 RepeatProcessOutcome::ConsumeOnly => {}
             }
+            builder.note_repeated_process_boundary();
             continue;
         }
 
@@ -39428,9 +39487,17 @@ pub(crate) fn parse_effect_chain_ir(
             // conditional strip ("a number of times equal to the difference").
             .or(difference_repeat)
             .or_else(|| pending_repeat_for.take());
-        let (player_scope, text) = match early_player_scope {
-            Some(scope) => (Some(scope), text),
-            None => super::clause_shell::peel_player_scope_subject(&text),
+        let (player_scope, text, subject_worded_exile) = match early_player_scope {
+            Some(scope) => (Some(scope), text, false),
+            None => {
+                let subject_worded = nom_on_lower(&text, &text.to_lowercase(), |i| {
+                    value((), tag("each ")).parse(i)
+                })
+                .is_some();
+                let (scope, stripped) = super::clause_shell::peel_player_scope_subject(&text);
+                let subject_worded_exile = subject_worded && scope.is_some();
+                (scope, stripped, subject_worded_exile)
+            }
         };
         let pending_player_scope_for_clause = pending_player_scope.take();
         let carried_player_scope = if player_scope.is_none()
@@ -40697,6 +40764,16 @@ pub(crate) fn parse_effect_chain_ir(
         // shape used by Evelyn/Jeleva-class effects: the resolver iterates the
         // players in scope and `Controller` reads the rebound per-player
         // controller.
+        // CR 608.2c: the scope peel deconjugates "each player exiles" to
+        // "exile", so the imperative parser cannot see who performs the action.
+        // Preserve the printed subject before the controller-worded library
+        // owner lift below. "Exile ... of each player's library" has no subject
+        // peel and keeps the spell's controller as its actor.
+        if subject_worded_exile {
+            if let Effect::ExileTop { actor, .. } = &mut clause.effect {
+                *actor = crate::types::ability::LibraryInstructionActor::LibraryPlayer;
+            }
+        }
         lift_distributive_exile_top_scope(&mut clause.effect, &mut player_scope);
         // CR 608.2c + CR 109.4: Fold a pending player-scope lifted from a
         // fieldless subject-predicate (`Effect::Investigate` — "That player

@@ -2,7 +2,9 @@ use crate::types::ability::{
     ControllerRef, FilterProp, ResolvedAbility, TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, StackEntry, StackEntryKind, TriggerSourceContext};
+use crate::types::game_state::{
+    DepartedStackSpell, GameState, StackEntry, StackEntryKind, TriggerSourceContext,
+};
 use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::keywords::{HexproofFilter, Keyword};
 use crate::types::player::PlayerId;
@@ -644,6 +646,63 @@ pub(crate) fn object_could_be_targeted_by_triggering_spell(
         slot.legal_targets
             .contains(&TargetRef::Object(candidate_id))
     })
+}
+
+/// CR 608.2h + CR 400.7: What a spell-cast trigger's "that spell" / self-cast
+/// "this spell" currently names, per [`triggering_spell`]. `Gone` is distinct
+/// from "no spell-cast event at all" (that case is `None` on the function's
+/// own return type) — it means the event names a spell with neither a live
+/// stack entry nor a departed-spell record.
+pub(crate) enum TriggeringSpell<'a> {
+    OnStack(&'a StackEntry),
+    Departed(&'a DepartedStackSpell),
+    Gone,
+}
+
+/// CR 608.2h + CR 400.7 + CR 601.2i: What a spell-cast trigger's "that spell"
+/// / self-cast "this spell" now names. `None` unless
+/// `state.current_trigger_event` is `GameEvent::SpellCast`; every consumer
+/// falls back to its own non-spell-cast path in that case. Layered like
+/// `triggering_spell_resolved_ability` beside it: live stack entry (at the
+/// pinned incarnation, when a pin exists) → the pinned or newest departed
+/// record → `Gone`.
+pub(crate) fn triggering_spell(state: &GameState) -> Option<TriggeringSpell<'_>> {
+    let GameEvent::SpellCast { object_id, .. } = state.current_trigger_event.as_ref()? else {
+        return None;
+    };
+    let object_id = *object_id;
+    // CR 601.2i: the pin bound when this trigger was put on the stack
+    // (`triggers.rs::triggering_spell_pin`), read from the resolving carrier
+    // — a flip branch (Krark) builds a fresh executing ability that does not
+    // itself carry the pin — and used only while it still names this event's
+    // spell.
+    let pin = state
+        .resolving_stack_entry
+        .as_ref()
+        .and_then(|entry| entry.ability())
+        .and_then(|ability| ability.context.triggering_spell)
+        .filter(|pin| pin.object_id == object_id);
+
+    let on_stack = state.objects.get(&object_id).is_some_and(|obj| {
+        obj.zone == Zone::Stack && pin.is_none_or(|pin| pin.incarnation == obj.incarnation)
+    });
+    if on_stack {
+        if let Some(entry) = state.stack.iter().rev().find(|entry| {
+            entry.id == object_id && matches!(entry.kind, StackEntryKind::Spell { .. })
+        }) {
+            return Some(TriggeringSpell::OnStack(entry));
+        }
+    }
+
+    let records = state.departed_stack_spells.get(&object_id);
+    let key = match pin {
+        Some(pin) => Some(pin.incarnation),
+        None => records.and_then(|records| records.keys().max().copied()),
+    };
+    match key.and_then(|key| records.and_then(|records| records.get(&key))) {
+        Some(record) => Some(TriggeringSpell::Departed(record)),
+        None => Some(TriggeringSpell::Gone),
+    }
 }
 
 /// CR 707.10a: Resolve the triggering spell's `ResolvedAbility` for legality

@@ -15,7 +15,7 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (mut condition, effect_def, uses_tracked_set) = match &ability.effect {
+    let (mut condition, mut effect_def, uses_tracked_set) = match &ability.effect {
         Effect::CreateDelayedTrigger {
             condition,
             effect,
@@ -284,6 +284,47 @@ pub fn resolve(
             return Ok(());
         };
         *entry = Some(*added);
+    }
+
+    // CR 608.2h + CR 603.7a: Freeze this instruction's replacement-settled
+    // result when the delayed ability is created. The later upkeep may see an
+    // entirely different battlefield, so the token body stores a fixed count.
+    if let Some((result_id, spec)) = &ability.reads_return_result {
+        let occurrence = state
+            .active_return_result_occurrence
+            .ok_or_else(|| EffectError::MissingParam("return result occurrence".to_string()))?;
+        let records = state
+            .return_result_frames
+            .get(&occurrence)
+            .and_then(|frame| frame.get(result_id))
+            .ok_or_else(|| EffectError::MissingParam("settled return result".to_string()))?;
+        if spec.recipient != crate::types::ability::ControllerRef::You {
+            return Err(EffectError::InvalidParam(
+                "unsupported return recipient".to_string(),
+            ));
+        }
+        let ctx = crate::game::filter::FilterContext::from_ability(ability);
+        let count = records
+            .iter()
+            .filter(|record| {
+                record.to_zone == spec.destination
+                    && record.owner == ability.controller
+                    && crate::game::filter::matches_target_filter_on_zone_change_record(
+                        state, record, &spec.noun, &ctx,
+                    )
+            })
+            .count();
+        let count = i32::try_from(count)
+            .map_err(|_| EffectError::InvalidParam("return result count overflow".to_string()))?;
+        let Effect::Token {
+            count: token_count, ..
+        } = effect_def.effect.as_mut()
+        else {
+            return Err(EffectError::InvalidParam(
+                "return reader has no token body".to_string(),
+            ));
+        };
+        *token_count = QuantityExpr::Fixed { value: count };
     }
 
     // CR 603.7c: Build the delayed trigger's resolved ability from the full

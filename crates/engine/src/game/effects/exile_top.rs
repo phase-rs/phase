@@ -44,9 +44,13 @@ pub fn resolve(
     // CR 608.2c: the player performing this exile — the controller unless the
     // instruction names its subject ("that player exiles that card"), who is
     // the player whose library it is. Rides each move request so the delivery
-    // that settles a card in exile records who exiled it (CR 406.6).
+    // that settles a card in exile records who followed the instruction (CR 608.2c).
+    // Under a distributive fan-out (player_scope), `ability.controller` rebinds to the
+    // iterating seat while `ability.original_controller` retains the printed controller (CR 109.5).
     let actor = match actor {
-        LibraryInstructionActor::Controller => ability.controller,
+        LibraryInstructionActor::Controller => {
+            ability.original_controller.unwrap_or(ability.controller)
+        }
         LibraryInstructionActor::LibraryPlayer => target_player,
     };
 
@@ -1046,7 +1050,7 @@ mod tests {
         state.objects[&top].exiled_by
     }
 
-    /// CR 608.2c + CR 406.6: a controller-worded exile ("exile the top card of
+    /// CR 608.2c: a controller-worded exile ("exile the top card of
     /// that player's library") is performed by the controller, even when a
     /// different affected player is scoped.
     #[test]
@@ -1057,13 +1061,52 @@ mod tests {
         );
     }
 
-    /// CR 608.2c + CR 406.6: a subject-worded exile ("that player exiles the top
+    /// CR 608.2c: a subject-worded exile ("that player exiles the top
     /// card of their library") is performed by the player whose library it is.
     #[test]
     fn exile_top_records_library_player_for_subject_worded_instruction() {
         assert_eq!(
             exiling_player_for_actor(LibraryInstructionActor::LibraryPlayer),
             Some(PlayerId(1))
+        );
+    }
+
+    /// CR 608.2c + CR 109.5: during distributive fan-out across opponents, the iterating
+    /// seat rebinds `ability.controller` to each opponent in turn, but `original_controller`
+    /// preserves the printed controller (CR 109.5). A controller-worded instruction must
+    /// record the original controller as the exiling player, not the rebound opponent.
+    #[test]
+    fn exile_top_records_original_controller_during_distributive_fanout() {
+        let mut state = GameState::new_two_player(42);
+        let top = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Top".to_string(),
+            Zone::Library,
+        );
+        let mut ability = ResolvedAbility::new(
+            Effect::ExileTop {
+                player: TargetFilter::Controller,
+                count: QuantityExpr::Fixed { value: 1 },
+                position: LibraryPosition::Top,
+                face_down: false,
+                actor: LibraryInstructionActor::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(1), // rebound to opponent
+        );
+        ability.original_controller = Some(PlayerId(0)); // printed controller
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.objects[&top].zone, Zone::Exile);
+        assert_eq!(
+            state.objects[&top].exiled_by,
+            Some(PlayerId(0)),
+            "exiled_by must be original_controller (P0), not rebound controller (P1)"
         );
     }
 }

@@ -432,6 +432,11 @@ fn handle_replacement_choice_inner(
                                 &events[delivery_start..],
                             ),
                         );
+                        effects::settle_replaced_forwarded_zone_delivery(
+                            state,
+                            paused.member,
+                            &events[delivery_start..],
+                        );
                     }
                     if let Some(provenance) = parked_sacrifice_provenance {
                         if provenance.object_id == object_id {
@@ -1465,6 +1470,7 @@ fn handle_replacement_choice_inner(
                     &[],
                     crate::types::game_state::ZoneMoveCompletion::Prevented,
                 );
+                effects::settle_replaced_forwarded_zone_delivery(state, paused.member, &[]);
             }
             // CR 616.1f + CR 701.50a: a full-substitution applier (the Leader,
             // Super-Genius connive replacement) can park its OWN interactive

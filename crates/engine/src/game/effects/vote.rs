@@ -830,6 +830,10 @@ mod tests {
         let token_def = AbilityDefinition::new(AbilityKind::Spell, Effect::Investigate); // simple stand-in
 
         let ability = ResolvedAbility {
+            declares_chosen_group: None,
+            reads_chosen_group: None,
+            declares_return_result: None,
+            reads_return_result: None,
             detached_remainder: crate::types::ability::DetachedRemainder::NoProducer,
             effect: Effect::Vote {
                 choices: vec!["evidence".to_string(), "bribery".to_string()],
@@ -950,6 +954,10 @@ mod tests {
             })
             .collect();
         ResolvedAbility {
+            declares_chosen_group: None,
+            reads_chosen_group: None,
+            declares_return_result: None,
+            reads_return_result: None,
             detached_remainder: crate::types::ability::DetachedRemainder::NoProducer,
             effect: Effect::Vote {
                 choices,
@@ -1406,6 +1414,10 @@ mod tests {
 
         // Build a ResolvedAbility from the parsed AbilityDefinition.
         let ability = ResolvedAbility {
+            declares_chosen_group: None,
+            reads_chosen_group: None,
+            declares_return_result: None,
+            reads_return_result: None,
             detached_remainder: crate::types::ability::DetachedRemainder::NoProducer,
             effect: (*parsed_def.effect).clone(),
             targets: vec![],
@@ -1575,6 +1587,10 @@ mod tests {
             })
             .collect();
         let ability = ResolvedAbility {
+            declares_chosen_group: None,
+            reads_chosen_group: None,
+            declares_return_result: None,
+            reads_return_result: None,
             detached_remainder: crate::types::ability::DetachedRemainder::NoProducer,
             effect: Effect::Vote {
                 choices: vec!["friend".to_string(), "foe".to_string()],

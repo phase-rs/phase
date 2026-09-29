@@ -8270,6 +8270,22 @@ fn event_attacker_from_trigger_event(
         .map(ObjectIncarnationRef::from_object)
 }
 
+/// CR 601.2i + CR 400.7: Bind the exact spell object and incarnation a
+/// spell-cast trigger's "that spell" / self-cast "this spell" names, at the
+/// moment the triggered ability is put on the stack. `None` for any trigger
+/// event other than `SpellCast`, or when its spell is no longer on the stack.
+/// Mirrors `event_attacker_from_trigger_event`'s shape.
+fn triggering_spell_pin(
+    state: &GameState,
+    trigger_event: Option<&GameEvent>,
+) -> Option<ObjectIncarnationRef> {
+    let GameEvent::SpellCast { object_id, .. } = trigger_event? else {
+        return None;
+    };
+    let obj = state.objects.get(object_id)?;
+    (obj.zone == Zone::Stack).then(|| ObjectIncarnationRef::from_object(obj))
+}
+
 /// CR 603.3 + CR 603.3c + CR 603.3d: Push a pending trigger to the stack with
 /// its event batch keyed by entry id. Returns the new entry's `ObjectId` so
 /// callers can stash it in `state.pending_trigger_entry` when the entry is
@@ -8506,6 +8522,7 @@ fn push_pending_trigger_to_stack_with_firing_and_duration_events(
     // narrowed attack-trigger event, not the triggered ability's source.
     let event_attacker = event_attacker_from_trigger_event(state, trigger_event.as_ref());
     ability.bind_force_block_attacker_recursive(event_attacker);
+    ability.context.triggering_spell = triggering_spell_pin(state, trigger_event.as_ref());
     seed_batched_attack_parent_targets(&mut ability, trigger_event.as_ref());
     seed_event_context_parent_targets(
         &mut ability,
@@ -8751,6 +8768,10 @@ fn assign_pending_trigger_entry_ability(
         state,
         trigger_event,
     ));
+    // CR 601.2i: the same replacement would otherwise discard the pin bound at
+    // push time (`push_pending_trigger_to_stack_with_firing_and_duration_events`)
+    // for "that spell" / self-cast "this spell".
+    assigned_ability.context.triggering_spell = triggering_spell_pin(state, trigger_event);
 
     let Some(entry) = state
         .stack
@@ -22564,6 +22585,7 @@ pub mod tests {
                 trigger_event: None,
                 trigger_events: Vec::new(),
                 trigger_match_count: None,
+                return_result_occurrence: None,
             }
         }
 
@@ -49125,3 +49147,89 @@ mod push_first_contract_tests;
 #[cfg(test)]
 #[path = "triggers_pr7_order_template_tests.rs"]
 mod pr7_order_template_tests;
+
+#[cfg(test)]
+mod pending_trigger_pin_reassignment_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::card_type::CoreType;
+    use crate::types::identifiers::{CardId, ObjectIncarnationRef};
+
+    /// CR 601.2i: re-assigning a pending trigger's ability
+    /// (`mutate_pending_trigger_entry` -> `assign_pending_trigger_entry_ability`)
+    /// must rebind `context.triggering_spell` from the entry's own `SpellCast`
+    /// trigger event, even when the replacement ability arrives unpinned — the
+    /// same replacement pattern `bind_force_block_attacker_recursive` already
+    /// gets at this seam for "that Wolf".
+    #[test]
+    fn pending_trigger_assignment_rebinds_triggering_spell_pin() {
+        let mut state = GameState::new_two_player(42);
+        let spell_card_id = CardId(state.next_object_id);
+        let spell_id = create_object(
+            &mut state,
+            spell_card_id,
+            PlayerId(0),
+            "Test Spell".to_string(),
+            Zone::Stack,
+        );
+        state
+            .objects
+            .get_mut(&spell_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Instant);
+
+        let entry_id = ObjectId(state.next_object_id);
+        state.next_object_id += 1;
+        state.stack.push_back(StackEntry {
+            id: entry_id,
+            source_id: spell_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: spell_id,
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::NoOp,
+                    vec![],
+                    spell_id,
+                    PlayerId(0),
+                )),
+                condition: None,
+                trigger_event: Some(GameEvent::SpellCast {
+                    controller: PlayerId(0),
+                    object_id: spell_id,
+                    card_id: spell_card_id,
+                    cast_mana_value: None,
+                }),
+                description: None,
+                source_name: String::new(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        });
+        state.pending_trigger_entry = Some(entry_id);
+
+        // Unpinned replacement — mirrors an ordinary target/mode construction
+        // step that clones from a fresh `PendingTrigger` rather than carrying
+        // the stack-push-time pin forward itself.
+        let unpinned_ability = ResolvedAbility::new(Effect::NoOp, vec![], spell_id, PlayerId(0));
+        assert!(
+            mutate_pending_trigger_entry(&mut state, &unpinned_ability),
+            "the entry must still be found on the stack"
+        );
+
+        let assigned_pin = state
+            .stack
+            .iter()
+            .find(|entry| entry.id == entry_id)
+            .and_then(|entry| entry.ability())
+            .and_then(|ability| ability.context.triggering_spell);
+        let expected = ObjectIncarnationRef::from_object(&state.objects[&spell_id]);
+        assert_eq!(
+            assigned_pin,
+            Some(expected),
+            "assigning an unpinned ability must rebind the pin from the entry's own trigger event"
+        );
+    }
+}

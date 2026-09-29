@@ -4476,6 +4476,23 @@ fn parse_unless_discard_cost_phrase(branch_text: &str) -> Option<AbilityCost> {
 /// (player-chosen). Those phrases stay unimplemented (Balduvian Horde class)
 /// until the unless-payment path preserves `CardSelectionMode::Random`.
 pub(crate) fn parse_unless_alt_cost(after_unless: &str) -> Option<AbilityCost> {
+    // CR 118.12 + CR 118.7a: "you pay its mana cost reduced by {N}" reduces only
+    // the generic component of the source's own mana cost.
+    if let Ok((_, (_, _, _, crate::types::mana::ManaCost::Cost { shards, generic }))) =
+        all_consuming((
+            tag::<_, _, OracleError<'_>>("you pay "),
+            nom::branch::alt((tag("its"), tag("~'s"))),
+            tag(" mana cost reduced by "),
+            nom_primitives::parse_mana_cost,
+        ))
+        .parse(after_unless.trim_end_matches('.').trim())
+    {
+        if shards.is_empty() {
+            return Some(AbilityCost::Mana {
+                cost: crate::types::mana::ManaCost::SelfManaCostReduced { reduction: generic },
+            });
+        }
+    }
     // CR 118.12 + CR 202.1: "you pay its mana cost" / "you pay ~'s mana cost" —
     // the unless cost is the ability source's OWN printed mana cost, which is
     // dynamic: it depends on the permanent the granting Aura is attached to

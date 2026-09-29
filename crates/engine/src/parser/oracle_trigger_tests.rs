@@ -71,6 +71,228 @@ fn trigger_chain_effects(trigger: &TriggerDefinition) -> Vec<&Effect> {
         .collect()
 }
 
+const GUT_TRUE_SOUL_ZEALOT_ORACLE: &str = "Whenever you attack, you may sacrifice another creature or an artifact. If you do, create a 4/1 black Skeleton creature token with menace that's tapped and attacking. (It can't be blocked except by two or more creatures.)\nChoose a Background (You can have a Background as a second commander.)";
+
+#[test]
+fn gut_attack_trigger_sacrifice_is_a_scoped_type_union() {
+    // CR 508.3d + CR 118.12: the optional sacrifice occurs on resolution of
+    // this "you attack" trigger, before its "If you do" token instruction.
+    let parsed = parse_oracle_text(
+        GUT_TRUE_SOUL_ZEALOT_ORACLE,
+        "Gut, True Soul Zealot",
+        &["Choose a background".to_string()],
+        &["Legendary".to_string(), "Creature".to_string()],
+        &["Goblin".to_string(), "Shaman".to_string()],
+    );
+    let trigger = parsed.triggers.first().expect("Gut's attack trigger");
+    assert_eq!(trigger.mode, TriggerMode::YouAttack);
+    let execute = trigger.execute.as_deref().expect("optional sacrifice");
+    assert!(execute.optional);
+    assert_no_unimplemented(execute);
+    let Effect::Sacrifice {
+        target: TargetFilter::Or { filters },
+        count: QuantityExpr::Fixed { value: 1 },
+        ..
+    } = execute.effect.as_ref()
+    else {
+        panic!("expected one sacrifice from type union: {execute:?}");
+    };
+    assert_eq!(filters.len(), 2);
+    for (leg, ty, another) in [
+        (&filters[0], TypeFilter::Creature, true),
+        (&filters[1], TypeFilter::Artifact, false),
+    ] {
+        let TargetFilter::Typed(typed) = leg else {
+            panic!("expected typed leg: {leg:?}");
+        };
+        assert!(typed.type_filters.contains(&ty), "{leg:?}");
+        assert_eq!(typed.controller, Some(ControllerRef::You));
+        assert_eq!(typed.properties.contains(&FilterProp::Another), another);
+    }
+    let followup = execute
+        .sub_ability
+        .as_deref()
+        .expect("If you do instruction");
+    assert_eq!(
+        followup.condition,
+        Some(AbilityCondition::effect_performed())
+    );
+    assert!(matches!(followup.effect.as_ref(), Effect::Token { .. }));
+    assert!(
+        !parsed.parse_warnings.iter().any(|warning| matches!(
+            warning,
+            OracleDiagnostic::SwallowedClause { description, .. }
+                if description.contains("sacrifice another creature or an artifact")
+        )),
+        "the supported sacrifice instruction must not be swallowed: {:?}",
+        parsed.parse_warnings
+    );
+}
+
+/// SHAPE — keep the real property-only alternative visible as unsupported.
+#[test]
+fn old_man_willow_token_rhs_remains_honestly_unsupported() {
+    let parsed = parse_oracle_text(
+        "Old Man Willow's power and toughness are each equal to the number of lands you control.\nWhenever Old Man Willow attacks, you may sacrifice another creature or a token. When you do, target creature an opponent controls gets -2/-2 until end of turn.",
+        "Old Man Willow",
+        &[],
+        &["Legendary".to_string(), "Creature".to_string()],
+        &["Treefolk".to_string()],
+    );
+    let trigger = parsed
+        .triggers
+        .first()
+        .expect("Willow's attack trigger reaches the production parser");
+    assert_eq!(trigger.mode, TriggerMode::Attacks);
+    assert_eq!(trigger.valid_card, Some(TargetFilter::SelfRef));
+    let effects = trigger_chain_effects(trigger);
+    assert!(
+        effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Unimplemented {
+                name,
+                description: Some(description),
+                ..
+            } if name == "unparsed_verb_arguments"
+                && description == "sacrifice another creature or a token"
+        )),
+        "the complete unsupported sacrifice must stay visible: {effects:?}"
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Sacrifice { .. })),
+        "Willow must not claim a truncated creature-only sacrifice: {effects:?}"
+    );
+
+    // CR 608.2c: Gut's independently determined alternatives scope "another"
+    // to the creature leg, and both legal types remain in the instruction.
+    let supported = parse_oracle_text(
+        GUT_TRUE_SOUL_ZEALOT_ORACLE,
+        "Gut, True Soul Zealot",
+        &["Choose a background".to_string()],
+        &["Legendary".to_string(), "Creature".to_string()],
+        &["Goblin".to_string(), "Shaman".to_string()],
+    );
+    let control = supported.triggers.first().expect("Gut positive control");
+    assert_eq!(control.mode, TriggerMode::YouAttack);
+    let sacrifice = control.execute.as_deref().expect("Gut sacrifice control");
+    assert!(sacrifice.optional);
+    assert_no_unimplemented(sacrifice);
+    let Effect::Sacrifice {
+        target: TargetFilter::Or { filters },
+        count: QuantityExpr::Fixed { value: 1 },
+        ..
+    } = sacrifice.effect.as_ref()
+    else {
+        panic!("Gut must retain its complete supported sacrifice: {sacrifice:?}");
+    };
+    assert_eq!(filters.len(), 2);
+    for (leg, ty, properties) in [
+        (&filters[0], TypeFilter::Creature, vec![FilterProp::Another]),
+        (&filters[1], TypeFilter::Artifact, vec![]),
+    ] {
+        let TargetFilter::Typed(typed) = leg else {
+            panic!("expected typed Gut control leg: {leg:?}");
+        };
+        assert_eq!(typed.type_filters, vec![ty]);
+        assert_eq!(typed.controller, Some(ControllerRef::You));
+        assert_eq!(typed.properties, properties);
+    }
+    let token = sacrifice.sub_ability.as_deref().expect("Gut token control");
+    assert_eq!(token.condition, Some(AbilityCondition::effect_performed()));
+    assert!(matches!(token.effect.as_ref(), Effect::Token { .. }));
+}
+
+#[test]
+fn attack_trigger_refuses_truncated_third_sacrifice_type() {
+    // A third independently determined type must remain visible as unsupported
+    // whether the first two types were folded here or by the base type grammar.
+    for phrase in [
+        "sacrifice another creature or an artifact or an enchantment",
+        "sacrifice another creature or an artifact or enchantment",
+        "sacrifice another creature or an artifact, or an enchantment",
+        "sacrifice another creature or artifact or an enchantment",
+        "sacrifice another creature or an artifact, enchantment",
+        "sacrifice another creature or an artifact, a Vehicle",
+    ] {
+        let oracle = format!(
+            "Whenever you attack, you may {phrase}. If you do, create a 4/1 black Skeleton creature token with menace that's tapped and attacking."
+        );
+        let parsed = parse_oracle_text(
+            &oracle,
+            "Synthetic Attack Sacrifice",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        let trigger = parsed
+            .triggers
+            .first()
+            .expect("attack trigger reached production parser");
+        assert_eq!(trigger.mode, TriggerMode::YouAttack);
+        let effects = trigger_chain_effects(trigger);
+        assert!(
+            effects.iter().any(|effect| matches!(
+                effect,
+                Effect::Unimplemented {
+                    description: Some(description),
+                    ..
+                } if description.contains(phrase)
+            )),
+            "{phrase}: unsupported clause must remain visible in coverage: {effects:?}"
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::Sacrifice { .. })),
+            "{phrase}: truncated sacrifice must not be marked supported: {effects:?}"
+        );
+    }
+}
+
+#[test]
+fn attack_trigger_supports_complete_articleless_sacrifice_union() {
+    let parsed = parse_oracle_text(
+        "Whenever you attack, you may sacrifice another creature or artifact. If you do, create a 4/1 black Skeleton creature token with menace that's tapped and attacking.",
+        "Synthetic Attack Sacrifice",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let trigger = parsed.triggers.first().expect("production attack trigger");
+    assert_eq!(trigger.mode, TriggerMode::YouAttack);
+    let sacrifice = trigger.execute.as_deref().expect("optional sacrifice");
+    assert!(sacrifice.optional);
+    assert_no_unimplemented(sacrifice);
+    let Effect::Sacrifice {
+        target: TargetFilter::Or { filters },
+        count: QuantityExpr::Fixed { value: 1 },
+        ..
+    } = sacrifice.effect.as_ref()
+    else {
+        panic!("expected one sacrifice from complete article-less union: {sacrifice:?}");
+    };
+    assert_eq!(filters.len(), 2);
+    for (leg, ty) in filters
+        .iter()
+        .zip([TypeFilter::Creature, TypeFilter::Artifact])
+    {
+        let TargetFilter::Typed(typed) = leg else {
+            panic!("expected typed sacrifice leg: {leg:?}");
+        };
+        assert!(typed.type_filters.contains(&ty), "{leg:?}");
+        assert_eq!(typed.controller, Some(ControllerRef::You));
+        assert!(typed.properties.contains(&FilterProp::Another), "{leg:?}");
+    }
+    let followup = sacrifice.sub_ability.as_deref().expect("If you do");
+    assert_eq!(
+        followup.condition,
+        Some(AbilityCondition::effect_performed())
+    );
+    assert!(matches!(followup.effect.as_ref(), Effect::Token { .. }));
+}
+
 /// CR 608.2c: the scoped phase player stated once governs a same-sentence
 /// conjugated "and" continuation — Seizan, Perverter of Truth's upkeep player
 /// draws the two cards, not the ability's controller.
@@ -16165,6 +16387,36 @@ fn trigger_unless_you_pay_its_mana_cost_is_self_mana_cost() {
         "\"pay its mana cost\" must lower to Mana{{SelfManaCost}}, got {:?}",
         unless.cost
     );
+}
+
+#[test]
+fn unless_pay_its_mana_cost_reduced_by_generic() {
+    for phrase in [
+        "you pay its mana cost reduced by {2}.",
+        "you pay ~'s mana cost reduced by {2}",
+    ] {
+        assert_eq!(
+            parse_unless_alt_cost(phrase),
+            Some(AbilityCost::Mana {
+                cost: crate::types::mana::ManaCost::SelfManaCostReduced { reduction: 2 },
+            }),
+            "{phrase}"
+        );
+    }
+    assert_eq!(
+        parse_unless_alt_cost("you pay ~'s mana cost"),
+        Some(AbilityCost::Mana {
+            cost: crate::types::mana::ManaCost::SelfManaCost,
+        })
+    );
+    for phrase in [
+        "you pay its mana cost reduced by {U}",
+        "you pay its mana cost reduced by {2}{U}",
+        "you pay its mana cost reduced by {2} more",
+        "you pay their mana cost reduced by {2}",
+    ] {
+        assert_eq!(parse_unless_alt_cost(phrase), None, "{phrase}");
+    }
 }
 
 // NO-REGRESSION: bare "unless you pay {2}" still routes through the
