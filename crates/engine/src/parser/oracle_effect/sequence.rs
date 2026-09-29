@@ -4691,9 +4691,10 @@ pub(super) fn apply_clause_continuation(
         // reveals their hand."), that instruction completes for every player
         // before the next begins, so the choice is the next instruction's own
         // co-scoped step: a card-parking `RevealHand` over the same player that
-        // adds no new reveal (the hand is still revealed, CR 701.20a) and starts
-        // that instruction (`SequentialSibling`). The printed controller chooses
-        // (`reveal_hand::resolve`). The binding only steers the chain builder's
+        // adds no new public reveal (the hand is still revealed, CR 701.20a) —
+        // it only privately shows the hand to the chooser (CR 701.20e) — and
+        // starts that instruction (`SequentialSibling`). The printed controller
+        // chooses (`reveal_hand::resolve`). The binding only steers the chain builder's
         // consumer rules; both bindings lower the same way.
         ContinuationAst::RevealHandFilter {
             card_filter,

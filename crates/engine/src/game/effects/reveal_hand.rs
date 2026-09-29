@@ -193,13 +193,13 @@ pub fn resolve(
             card_names,
         });
     } else {
-        // CR 701.20e: "Look at" privately shows the hand to the ability controller.
+        // CR 701.20e + CR 109.5: "Look at" privately shows the hand to the printed controller (the chooser) — inside a player-scope fan-out `controller` is the iterating player.
         state.remember_card_identities(
-            crate::game::turn_control::decision_audience_for_player(state, ability.controller),
+            crate::game::turn_control::decision_audience_for_player(state, chooser),
             &hand,
         );
         state.private_look_ids = hand.clone();
-        state.private_look_player = Some(ability.controller);
+        state.private_look_player = Some(chooser);
     }
 
     if !needs_reveal_choice {
@@ -346,6 +346,77 @@ mod tests {
         );
         // Positive twin: with no fan-out rebinding, the controller chooses.
         assert_eq!(run(None), PlayerId(1));
+    }
+
+    /// CR 701.20e + CR 109.5: a player-scoped "look at" choice step privately
+    /// shows the iterating player's hand to the printed controller (the
+    /// chooser), not to the iterating player that `controller` is rebound to.
+    #[test]
+    fn reveal_hand_scoped_look_is_shown_to_printed_controller() {
+        use crate::types::card_type::CoreType;
+
+        let run = |original_controller: Option<PlayerId>| {
+            let mut state = GameState::new_two_player(42);
+            let source = create_object(
+                &mut state,
+                CardId(10),
+                PlayerId(0),
+                "Look Source".to_string(),
+                Zone::Battlefield,
+            );
+            let creature = create_object(
+                &mut state,
+                CardId(11),
+                PlayerId(1),
+                "Opp Bear".to_string(),
+                Zone::Hand,
+            );
+            state
+                .objects
+                .get_mut(&creature)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+            let mut ability = ResolvedAbility::new(
+                Effect::RevealHand {
+                    target: TargetFilter::Controller,
+                    card_filter: TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
+                    count: None,
+                    selection: crate::types::ability::CardSelectionMode::Chosen,
+                    choice_optional: false,
+                    reveal: false,
+                },
+                vec![],
+                source,
+                PlayerId(1),
+            );
+            ability.original_controller = original_controller;
+            resolve(&mut state, &ability, &mut Vec::new()).expect("scoped look resolves");
+            // Reach guard: the look branch ran over the iterating player's hand
+            // and parked the choice.
+            let chooser = match &state.waiting_for {
+                WaitingFor::RevealChoice { player, cards, .. } => {
+                    assert_eq!(cards, &vec![creature]);
+                    *player
+                }
+                other => panic!("expected RevealChoice, got {other:?}"),
+            };
+            assert_eq!(
+                state.private_look_ids,
+                vec![creature],
+                "the iterating player's hand is looked at"
+            );
+            (chooser, state.private_look_player)
+        };
+
+        assert_eq!(
+            run(Some(PlayerId(0))),
+            (PlayerId(0), Some(PlayerId(0))),
+            "the printed controller chooses and privately sees the hand"
+        );
+        // Positive twin: with no fan-out rebinding, the controller looks.
+        assert_eq!(run(None), (PlayerId(1), Some(PlayerId(1))));
     }
 
     #[test]

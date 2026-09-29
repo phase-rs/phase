@@ -9548,7 +9548,7 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
             "evidence must expose the granted keyword"
         );
         let mut diagnostics = Vec::new();
-        super::detect_dynamic_qty(&cleaned, &cleaned, &evidence, &mut diagnostics);
+        super::detect_dynamic_qty(&cleaned, &cleaned, &granted, &evidence, &mut diagnostics);
         assert!(
             dynamic_qty_descriptions(&diagnostics).is_empty(),
             "a granted power-life Ward must not report DynamicQty: {diagnostics:?}"
@@ -9579,6 +9579,7 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
         super::detect_dynamic_qty(
             &cleaned,
             &cleaned,
+            &control,
             &control_evidence,
             &mut control_diagnostics,
         );
@@ -9621,7 +9622,7 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
             evidence.keywords()
         );
         let mut diagnostics = Vec::new();
-        super::detect_dynamic_qty(cleaned, cleaned, &evidence, &mut diagnostics);
+        super::detect_dynamic_qty(cleaned, cleaned, &parsed, &evidence, &mut diagnostics);
         assert_eq!(
             dynamic_qty_descriptions(&diagnostics).len(),
             1,
@@ -9702,7 +9703,7 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
             evidence.keywords()
         );
         let mut diagnostics = Vec::new();
-        super::detect_dynamic_qty(cleaned, cleaned, &evidence, &mut diagnostics);
+        super::detect_dynamic_qty(cleaned, cleaned, &compound, &evidence, &mut diagnostics);
         assert_eq!(
             dynamic_qty_descriptions(&diagnostics).len(),
             1,
@@ -9717,7 +9718,13 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
             WardCost::PayLifeEqualToPower,
         )]));
         let mut bare_diagnostics = Vec::new();
-        super::detect_dynamic_qty(cleaned, cleaned, &bare, &mut bare_diagnostics);
+        super::detect_dynamic_qty(
+            cleaned,
+            cleaned,
+            &parsed_with_keywords(vec![Keyword::Ward(WardCost::PayLifeEqualToPower)]),
+            &bare,
+            &mut bare_diagnostics,
+        );
         assert!(
             dynamic_qty_descriptions(&bare_diagnostics).is_empty(),
             "the bare spelling must stay silent: {bare_diagnostics:?}"
@@ -9742,7 +9749,7 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
         // evidence — one occurrence, one payment.
         let ward_only = "ward\u{2014}pay life equal to ~'s power.";
         let mut diagnostics = Vec::new();
-        super::detect_dynamic_qty(ward_only, ward_only, &evidence, &mut diagnostics);
+        super::detect_dynamic_qty(ward_only, ward_only, &parsed, &evidence, &mut diagnostics);
         assert!(
             dynamic_qty_descriptions(&diagnostics).is_empty(),
             "the ward-only text must stay silent: {diagnostics:?}"
@@ -9758,6 +9765,7 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
         super::detect_dynamic_qty(
             second_equal_to,
             second_equal_to,
+            &parsed,
             &evidence,
             &mut diagnostics,
         );
@@ -9775,6 +9783,7 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
         super::detect_dynamic_qty(
             second_number_of,
             second_number_of,
+            &parsed,
             &evidence,
             &mut diagnostics,
         );
@@ -9792,6 +9801,7 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
         super::detect_dynamic_qty(
             second_for_each,
             second_for_each,
+            &parsed,
             &evidence,
             &mut diagnostics,
         );
