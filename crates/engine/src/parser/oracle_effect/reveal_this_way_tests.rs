@@ -185,6 +185,53 @@ fn reveal_gate_fails_closed_unless_it_restates_the_parent_until_condition() {
 }
 
 #[test]
+fn where_x_definition_referent_does_not_rebind_an_explicit_recipient() {
+    // Cait Sith, Fortune Teller (verbatim trigger text): the "that card" in the
+    // where-X definition names the exiled card, never the pump's recipient.
+    let parsed = parse_oracle_text(
+        "Lucky Slots — At the beginning of combat on your turn, scry 1, then exile the top card of your library. You may play that card this turn. When you exile a card this way, target creature you control gets +X/+0 until end of turn, where X is that card's mana value.",
+        "Cait Sith, Fortune Teller",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let json = serde_json::to_value(&parsed.triggers).unwrap();
+    let mut pumps = Vec::new();
+    collect_effects(&json, "Pump", &mut pumps);
+    assert_eq!(pumps.len(), 1, "reach guard: exactly one pump: {json}");
+    assert_eq!(
+        pumps[0]["target"],
+        serde_json::to_value(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You)
+        ))
+        .unwrap()
+    );
+    assert_eq!(
+        pumps[0]["power"]["value"]["qty"]["scope"]["type"], "Demonstrative",
+        "the where-X still binds the exiled card"
+    );
+}
+
+fn collect_effects(value: &serde_json::Value, kind: &str, out: &mut Vec<serde_json::Value>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if map.get("type").and_then(|t| t.as_str()) == Some(kind) {
+                out.push(value.clone());
+            }
+            for child in map.values() {
+                collect_effects(child, kind, out);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for child in items {
+                collect_effects(child, kind, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[test]
 fn where_x_mana_value_of_that_card_binds_the_demonstrative_referent() {
     let demonstrative = Some(QuantityExpr::Ref {
         qty: QuantityRef::ObjectManaValue {
