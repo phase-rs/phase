@@ -1,0 +1,670 @@
+import { act, cleanup, fireEvent, render } from "@testing-library/react";
+import { createRef, StrictMode } from "react";
+import type { Mesh, Object3D, Scene, ShaderMaterial, Texture } from "three";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import { useCardImage } from "../../../../hooks/useCardImage.ts";
+import { useAnimationStore } from "../../../../stores/animationStore.ts";
+import { useGameStore } from "../../../../stores/gameStore.ts";
+import type { AnimationImageSnapshot } from "../../ResolvedAnimationImage.tsx";
+import { ABANDON_FADE_MS, RESOLVE_FLIGHT_MS, SETTLE_MS } from "../cardFlight.ts";
+import type { CardFlightRoute, CardFlightSpec } from "../cardFlightSpecs.ts";
+import {
+  CARD_FLIGHT_FACE_READY_MAX_MS,
+  CardVfxLayer,
+  type CardVfxLayerHandle,
+  PIXEL_RATIO_CAP,
+} from "../CardVfxLayer.tsx";
+import { SCENE_EFFECT_KINDS } from "../cardVfxScene.ts";
+
+interface RecordedChild {
+  name: string;
+  visible: boolean;
+  position: [number, number, number];
+  object: Object3D;
+}
+
+interface RendererCall {
+  method: "compileAsync" | "render" | "initTexture" | "setPixelRatio" | "dispose" | "forceContextLoss";
+  arg?: unknown;
+  children?: RecordedChild[];
+}
+
+// A recording stand-in for three's WebGLRenderer (the WebGL boundary): the
+// real scene and flight code run on top of it. Constructions are counted
+// apart from compile and render calls.
+const gl = vi.hoisted(() => ({
+  attempts: 0,
+  constructed: 0,
+  throwOnCreate: false,
+  holdCompile: false,
+  releaseCompile: [] as Array<() => void>,
+  calls: [] as RendererCall[],
+}));
+
+vi.mock("three", async (importOriginal) => {
+  const three = await importOriginal<typeof import("three")>();
+  const snapshot = (scene: Scene): RecordedChild[] =>
+    scene.children.map((object) => ({
+      name: object.name,
+      visible: object.visible,
+      position: object.position.toArray() as [number, number, number],
+      object,
+    }));
+  class FakeWebGLRenderer {
+    private readonly canvas: HTMLCanvasElement;
+    constructor({ canvas }: { canvas: HTMLCanvasElement }) {
+      gl.attempts += 1;
+      if (gl.throwOnCreate) throw new Error("Error creating WebGL context.");
+      gl.constructed += 1;
+      this.canvas = canvas;
+    }
+    setClearColor() {}
+    setSize() {}
+    setPixelRatio(ratio: number) {
+      gl.calls.push({ method: "setPixelRatio", arg: ratio });
+    }
+    initTexture(texture: Texture) {
+      gl.calls.push({ method: "initTexture", arg: texture });
+    }
+    compileAsync(scene: Scene) {
+      gl.calls.push({ method: "compileAsync", children: snapshot(scene) });
+      return new Promise<Scene>((resolve) => {
+        if (gl.holdCompile) gl.releaseCompile.push(() => resolve(scene));
+        else resolve(scene);
+      });
+    }
+    render(scene: Scene) {
+      gl.calls.push({ method: "render", children: snapshot(scene) });
+    }
+    dispose() {
+      gl.calls.push({ method: "dispose" });
+    }
+    forceContextLoss() {
+      gl.calls.push({ method: "forceContextLoss" });
+      this.canvas.dispatchEvent(new Event("webglcontextlost"));
+    }
+  }
+  return { ...three, WebGLRenderer: FakeWebGLRenderer };
+});
+
+vi.mock("../../../../hooks/useCardImage.ts", () => ({
+  useCardImage: vi.fn((name: string) => ({
+    src: `${name}.png`,
+    isLoading: false,
+    isRotated: false,
+    isFlip: false,
+  })),
+  useCardBackImage: () => ({ src: "back.png", isLoading: false, advanceFailedSource: vi.fn() }),
+}));
+
+const X = 7;
+const Y = 8;
+const FRAME_MS = 16;
+const CARD_W = 63;
+const CARD_H = 88;
+
+function face(objectId: number, cardName = "Llanowar Elves"): AnimationImageSnapshot {
+  return { objectId, cardName, faceIndex: 0, isToken: false };
+}
+
+function spec(
+  objectId: number,
+  route: CardFlightRoute,
+  faces: Pick<CardFlightSpec, "startFace" | "endFace"> = { startFace: null, endFace: null },
+  owningStepMs = 500,
+): CardFlightSpec {
+  return { objectId, route, ...faces, pace: 1, owningStepMs };
+}
+
+const CAST: CardFlightRoute = { kind: "cast" };
+const RESOLVE: CardFlightRoute = { kind: "resolveToBattlefield" };
+
+/** Adds a laid-out anchor node: happy-dom reports zero size for every node. */
+function anchor(attributes: Record<string, string>, left = 40, top = 600) {
+  const el = document.createElement("div");
+  for (const [name, value] of Object.entries(attributes)) el.setAttribute(name, value);
+  Object.defineProperty(el, "offsetWidth", { configurable: true, value: CARD_W });
+  Object.defineProperty(el, "offsetHeight", { configurable: true, value: CARD_H });
+  el.getBoundingClientRect = () => new DOMRect(left, top, CARD_W, CARD_H);
+  document.body.appendChild(el);
+  return el;
+}
+
+const handCard = (objectId: number) =>
+  anchor({ "data-hand-card": "", "data-object-id": String(objectId) });
+
+async function advance(ms: number) {
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(ms);
+  });
+}
+
+async function frames(count: number) {
+  await advance(count * FRAME_MS);
+}
+
+function last<T>(items: readonly T[]): T | undefined {
+  return items[items.length - 1];
+}
+
+function calls(method: RendererCall["method"]) {
+  return gl.calls.filter((call) => call.method === method);
+}
+
+const hasVisible = (call: RendererCall, name: string) =>
+  call.children?.some((child) => child.name === name && child.visible) ?? false;
+
+const flightRenders = () => calls("render").filter((call) => hasVisible(call, "card-flight"));
+
+function veiled(objectId: number) {
+  return useAnimationStore.getState().flightVeiledObjectIds.has(objectId);
+}
+
+function canvas() {
+  const element = document.querySelector<HTMLCanvasElement>("canvas[data-card-vfx]");
+  if (!element) throw new Error("no overlay canvas");
+  return element;
+}
+
+function loadBack() {
+  const back = document.querySelector<HTMLImageElement>('img[src="back.png"]');
+  if (!back) throw new Error("no back loader");
+  fireEvent.load(back);
+}
+
+function faceLoader(cardName = "Llanowar Elves") {
+  return document.querySelector<HTMLImageElement>(`img[src="${cardName}.png"]`);
+}
+
+async function renderLayer({ tier = "full", strict = false }: { tier?: "full" | "reduced"; strict?: boolean } = {}) {
+  const ref = createRef<CardVfxLayerHandle>();
+  const tree = <CardVfxLayer ref={ref} tier={tier} />;
+  const utils = render(strict ? <StrictMode>{tree}</StrictMode> : tree);
+  await act(async () => {
+    await vi.dynamicImportSettled();
+  });
+  const present = (flight: CardFlightSpec, classic: () => void = vi.fn()) => {
+    act(() => ref.current?.present(flight, classic));
+    return classic;
+  };
+  return { ref, present, ...utils };
+}
+
+/** Renders the layer and drives it through its first-effect init to ready. */
+async function readyLayer(options?: Parameters<typeof renderLayer>[0]) {
+  const layer = await renderLayer(options);
+  const first = layer.present(spec(99, CAST));
+  loadBack();
+  // The init frame posts the init task; the fake clock runs a zero-delay
+  // timer posted mid-tick 1 ms later.
+  await frames(1);
+  await advance(1);
+  expect(first).toHaveBeenCalledTimes(1);
+  expect(gl.constructed).toBe(1);
+  return layer;
+}
+
+let unveilSpy: ReturnType<typeof vi.spyOn>;
+
+beforeEach(() => {
+  vi.useFakeTimers({
+    toFake: ["setTimeout", "clearTimeout", "requestAnimationFrame", "cancelAnimationFrame", "performance"],
+  });
+  Object.assign(gl, { attempts: 0, constructed: 0, throwOnCreate: false, holdCompile: false });
+  gl.releaseCompile.length = 0;
+  gl.calls.length = 0;
+  vi.spyOn(HTMLImageElement.prototype, "decode").mockResolvedValue(undefined);
+  unveilSpy = vi.spyOn(useAnimationStore.getState(), "unveilFlight");
+});
+
+afterEach(() => {
+  cleanup();
+  document.body.replaceChildren();
+  useAnimationStore.getState().clearQueue();
+  useGameStore.getState().reset();
+  vi.clearAllMocks();
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+  vi.useRealTimers();
+});
+
+describe("CardVfxLayer present contract", () => {
+  it("V3-1a: before init, present runs Classic once, synchronously, and veils nothing", async () => {
+    const { present } = await renderLayer();
+    handCard(X);
+
+    const classic = present(spec(X, CAST));
+
+    expect(classic).toHaveBeenCalledTimes(1);
+    expect(useAnimationStore.getState().flightVeiledObjectIds.size).toBe(0);
+  });
+
+  it("V3-1b: init waits for the back image, then runs from a task the next frame posts; every present until ready is Classic", async () => {
+    const rafSpy = vi.spyOn(window, "requestAnimationFrame");
+    const { present } = await renderLayer();
+    handCard(X);
+
+    expect(present(spec(X, CAST))).toHaveBeenCalledTimes(1);
+    // Module loaded, back unsettled: no init frame yet.
+    expect(rafSpy).not.toHaveBeenCalled();
+
+    let initFrame: FrameRequestCallback | null = null;
+    rafSpy.mockImplementationOnce((callback) => {
+      initFrame = callback;
+      return 1;
+    });
+    loadBack();
+    expect(rafSpy).toHaveBeenCalledTimes(1);
+    expect(initFrame).not.toBeNull();
+
+    gl.holdCompile = true;
+    act(() => initFrame?.(0));
+    expect(gl.constructed).toBe(0);
+    await advance(0);
+    expect(gl.constructed).toBe(1);
+
+    expect(present(spec(X, CAST))).toHaveBeenCalledTimes(1);
+    expect(veiled(X)).toBe(false);
+
+    await act(async () => {
+      for (const release of gl.releaseCompile) release();
+    });
+    const gl3 = present(spec(X, CAST));
+    expect(gl3).not.toHaveBeenCalled();
+    expect(veiled(X)).toBe(true);
+  });
+
+  it("V3-1c: once ready, a present starts a GL flight and veils its object instead of running Classic", async () => {
+    const { present } = await readyLayer();
+    // No veil-aware source and no active flight: Classic, once, unveiled.
+    const unsourced = present(spec(X, CAST));
+    expect(unsourced).toHaveBeenCalledTimes(1);
+    expect(veiled(X)).toBe(false);
+    handCard(X);
+
+    const classic = present(spec(X, CAST));
+
+    expect(classic).not.toHaveBeenCalled();
+    expect(veiled(X)).toBe(true);
+    await frames(1);
+    expect(flightRenders().length).toBeGreaterThan(0);
+  });
+
+  it.each(["full", "reduced"] as const)(
+    "V3-1d: at tier %s, init compiles every registered effect kind's warm-up meshes, textured",
+    async (tier) => {
+      const warmUps = SCENE_EFFECT_KINDS.map((kind) => {
+        const returned: Object3D[] = [];
+        const original = kind.warmUp.bind(kind);
+        vi.spyOn(kind, "warmUp").mockImplementation((host) => {
+          const objects = original(host);
+          returned.push(...objects);
+          return objects;
+        });
+        return returned;
+      });
+
+      await readyLayer({ tier });
+
+      const [compile] = calls("compileAsync");
+      const compiled = compile.children?.map((child) => child.object) ?? [];
+      for (const returned of warmUps) {
+        expect(returned.length).toBeGreaterThan(0);
+        for (const object of returned) expect(compiled).toContain(object);
+      }
+      const names = compile.children?.map((child) => child.name);
+      expect(names).toEqual(expect.arrayContaining(["card-flight-warmup", "card-shadow-warmup"]));
+      const card = compiled.find((object) => object.name === "card-flight-warmup") as Mesh<never, ShaderMaterial>;
+      expect(card.material.uniforms.uFront.value).toMatchObject({ isTexture: true });
+      expect(card.material.uniforms.uBack.value).toMatchObject({ isTexture: true });
+    },
+  );
+
+  it("V3-1e: the back is uploaded once in init, before the warm-up frame, and never by a flight", async () => {
+    const { present } = await readyLayer();
+    const back = document.querySelector('img[src="back.png"]');
+    const backUploads = () =>
+      gl.calls.filter((call) => call.method === "initTexture" && (call.arg as Texture).image === back);
+
+    expect(backUploads()).toHaveLength(1);
+    const uploadAt = gl.calls.indexOf(backUploads()[0]);
+    const warmUpRenderAt = gl.calls.findIndex((call) => call.method === "render");
+    expect(uploadAt).toBeLessThan(warmUpRenderAt);
+
+    handCard(X);
+    present(spec(X, CAST));
+    await frames(2);
+    expect(flightRenders().length).toBeGreaterThan(0);
+    expect(backUploads()).toHaveLength(1);
+  });
+
+  it("V3-1f: a visible face is uploaded before the flight's first frame; a hidden one loads nothing", async () => {
+    const { present } = await readyLayer();
+    handCard(X);
+    const useCardImageCalls = vi.mocked(useCardImage).mock.calls.length;
+
+    // Both faces hidden: no loader, no face upload, no image lookup.
+    const hiddenUploads = calls("initTexture").length;
+    present(spec(X, CAST));
+    expect(faceLoader()).toBeNull();
+    await frames(2);
+    expect(calls("initTexture")).toHaveLength(hiddenUploads);
+    expect(vi.mocked(useCardImage).mock.calls).toHaveLength(useCardImageCalls);
+
+    handCard(Y);
+    const classic = present(spec(Y, CAST, { startFace: face(Y), endFace: face(Y) }));
+    const loader = faceLoader();
+    expect(loader).not.toBeNull();
+    await act(async () => {
+      if (loader) fireEvent.load(loader);
+    });
+    const faceUpload = gl.calls.findIndex(
+      (call) => call.method === "initTexture" && (call.arg as Texture).image === loader,
+    );
+    expect(faceUpload).toBeGreaterThanOrEqual(0);
+    const rendersBefore = gl.calls.length;
+    await frames(1);
+    const firstYRender = gl.calls.findIndex(
+      (call, index) =>
+        index >= rendersBefore &&
+        call.method === "render" &&
+        (call.children ?? []).filter((child) => child.name === "card-flight").length === 2,
+    );
+    expect(firstYRender).toBeGreaterThan(faceUpload);
+    expect(classic).not.toHaveBeenCalled();
+  });
+
+  it("V3-1g (i): a second present for a flying object hands off from its pose with no unveil between", async () => {
+    const { present } = await readyLayer();
+    handCard(X);
+    present(spec(X, CAST));
+    await frames(5);
+    const before = last(flightRenders());
+    const lastPose = before?.children?.find((child) => child.name === "card-flight")?.position;
+
+    // No stack entry exists yet: the resolution continues the active flight.
+    const classic = present(spec(X, RESOLVE));
+    expect(classic).not.toHaveBeenCalled();
+    await frames(1);
+
+    const after = last(flightRenders());
+    const flights = after?.children?.filter((child) => child.name === "card-flight") ?? [];
+    expect(flights).toHaveLength(1);
+    expect(flights[0].position[0]).toBeCloseTo(lastPose?.[0] ?? NaN, 6);
+    expect(flights[0].position[1]).toBeCloseTo(lastPose?.[1] ?? NaN, 6);
+    expect(flights[0].position[2]).toBeCloseTo(lastPose?.[2] ?? NaN, 6);
+    expect(unveilSpy).not.toHaveBeenCalled();
+    expect(veiled(X)).toBe(true);
+  });
+
+  it("V3-1g (ii): presents that join a pending start make one flight on load, or both run Classic in order at the deadline", async () => {
+    const { present } = await readyLayer();
+    handCard(X);
+    const faces = { startFace: face(X), endFace: face(X) };
+
+    const cast = present(spec(X, CAST, faces));
+    const resolve = present(spec(X, RESOLVE, faces));
+    const loader = faceLoader();
+    await act(async () => {
+      if (loader) fireEvent.load(loader);
+    });
+    await frames(1);
+    const flights = last(flightRenders())?.children?.filter((child) => child.name === "card-flight");
+    expect(flights).toHaveLength(1);
+    expect(cast).not.toHaveBeenCalled();
+    expect(resolve).not.toHaveBeenCalled();
+
+    handCard(Y);
+    const order: string[] = [];
+    present(spec(Y, CAST, { startFace: face(Y, "Grizzly Bears"), endFace: face(Y, "Grizzly Bears") }), () => order.push("cast"));
+    present(spec(Y, RESOLVE, { startFace: face(Y, "Grizzly Bears"), endFace: face(Y, "Grizzly Bears") }), () => order.push("resolve"));
+    await advance(CARD_FLIGHT_FACE_READY_MAX_MS);
+    expect(order).toEqual(["cast", "resolve"]);
+    expect(veiled(Y)).toBe(false);
+  });
+
+  it("V3-1h: a face that misses its deadline presents Classic once, and a late load starts nothing", async () => {
+    const { present } = await readyLayer();
+    handCard(X);
+    const owningStepMs = 300;
+    const deadline = Math.min(CARD_FLIGHT_FACE_READY_MAX_MS, 0.3 * owningStepMs);
+
+    const classic = present(spec(X, CAST, { startFace: face(X), endFace: face(X) }, owningStepMs));
+    const loader = faceLoader();
+    await advance(deadline - 1);
+    expect(classic).not.toHaveBeenCalled();
+    await advance(1);
+    expect(classic).toHaveBeenCalledTimes(1);
+    expect(veiled(X)).toBe(false);
+
+    await act(async () => {
+      if (loader) fireEvent.load(loader);
+    });
+    await frames(2);
+    expect(classic).toHaveBeenCalledTimes(1);
+    expect(veiled(X)).toBe(false);
+    expect(flightRenders()).toHaveLength(0);
+  });
+
+  it("V3-1i: a renderer that cannot be created leaves the layer Classic for good", async () => {
+    gl.throwOnCreate = true;
+    const { present } = await renderLayer();
+    handCard(X);
+    present(spec(99, CAST));
+    loadBack();
+    await frames(1);
+    await advance(1);
+    expect(gl.attempts).toBe(1);
+
+    for (let i = 0; i < 3; i += 1) {
+      expect(present(spec(X, CAST))).toHaveBeenCalledTimes(1);
+      await frames(1);
+    }
+    expect(gl.attempts).toBe(1);
+    expect(veiled(X)).toBe(false);
+  });
+
+  it("V3-1j: a lost context releases veils and presents Classic; a restore re-warms the same renderer", async () => {
+    const { present } = await readyLayer();
+    handCard(X);
+    present(spec(X, CAST));
+    await frames(2);
+    expect(veiled(X)).toBe(true);
+
+    act(() => {
+      canvas().dispatchEvent(new Event("webglcontextlost"));
+    });
+    expect(unveilSpy).toHaveBeenCalledWith(X);
+    expect(veiled(X)).toBe(false);
+    expect(present(spec(X, CAST))).toHaveBeenCalledTimes(1);
+
+    const callsBeforeRestore = gl.calls.length;
+    gl.holdCompile = true;
+    act(() => {
+      canvas().dispatchEvent(new Event("webglcontextrestored"));
+    });
+    const restored = gl.calls.slice(callsBeforeRestore);
+    expect(restored.map((call) => call.method)).toEqual(["initTexture", "compileAsync"]);
+    expect(present(spec(X, CAST))).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      for (const release of gl.releaseCompile) release();
+    });
+    const warmUpRender = gl.calls.slice(callsBeforeRestore).find((call) => call.method === "render");
+    const warmUpMeshes = warmUpRender?.children?.filter((child) => child.name.endsWith("-warmup")) ?? [];
+    expect(warmUpMeshes.length).toBeGreaterThan(0);
+    expect(warmUpMeshes.every((child) => child.visible)).toBe(true);
+
+    expect(present(spec(X, CAST))).not.toHaveBeenCalled();
+    expect(veiled(X)).toBe(true);
+    expect(gl.constructed).toBe(1);
+  });
+
+  it("V3-1k: many flights share the one renderer", async () => {
+    const { present } = await readyLayer();
+    for (let id = 10; id < 16; id += 1) {
+      handCard(id);
+      expect(present(spec(id, CAST))).not.toHaveBeenCalled();
+      await frames(3);
+    }
+    expect(gl.constructed).toBe(1);
+  });
+
+  it("V3-1l: the frame loop runs while a flight is active and stops, hidden, once it ends", async () => {
+    const { present } = await readyLayer();
+    handCard(X);
+    const rafSpy = vi.spyOn(window, "requestAnimationFrame");
+    present(spec(X, CAST));
+    await frames(3);
+    const whileActive = rafSpy.mock.calls.length;
+    await frames(1);
+    expect(rafSpy.mock.calls.length).toBeGreaterThan(whileActive);
+    expect(canvas().style.visibility).toBe("visible");
+
+    // The own node appears; the flight lands and ends.
+    anchor({ "data-stack-entry": String(X) }, 700, 200);
+    await advance(RESOLVE_FLIGHT_MS + 10 * FRAME_MS);
+    expect(veiled(X)).toBe(false);
+    const idle = rafSpy.mock.calls.length;
+    await frames(10);
+    expect(rafSpy.mock.calls.length).toBe(idle);
+    expect(canvas().style.visibility).toBe("hidden");
+  });
+
+  it("V3-1m: unmount runs each waiting Classic once, releases each veil once, and nothing after", async () => {
+    const { present, unmount } = await readyLayer();
+    handCard(X);
+    handCard(Y);
+    present(spec(X, CAST));
+    await frames(1);
+    const waiting = present(spec(Y, CAST, { startFace: face(Y), endFace: face(Y) }));
+    expect(veiled(X)).toBe(true);
+
+    unmount();
+
+    expect(waiting).toHaveBeenCalledTimes(1);
+    expect(unveilSpy).toHaveBeenCalledTimes(1);
+    expect(unveilSpy).toHaveBeenCalledWith(X);
+    expect(calls("dispose")).toHaveLength(1);
+    expect(calls("forceContextLoss")).toHaveLength(1);
+
+    await advance(CARD_FLIGHT_FACE_READY_MAX_MS + 10 * FRAME_MS);
+    expect(waiting).toHaveBeenCalledTimes(1);
+    expect(unveilSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("V3-1n (i): a resolution with no own node after the commit abandons: one unveil, then the GL card fades out", async () => {
+    const { present } = await readyLayer();
+    anchor({ "data-stack-entry": String(X) }, 700, 200);
+    present(spec(X, RESOLVE));
+    await frames(2);
+    expect(veiled(X)).toBe(true);
+
+    act(() => {
+      useGameStore.setState({ engineCommitEpoch: useGameStore.getState().engineCommitEpoch + 1 });
+    });
+    await frames(2);
+    expect(veiled(X)).toBe(false);
+    expect(unveilSpy).toHaveBeenCalledTimes(1);
+    expect(unveilSpy).toHaveBeenCalledWith(X);
+
+    const fadeStart = gl.calls.length;
+    await frames(2);
+    expect(gl.calls.slice(fadeStart).some((call) => call.method === "render" && hasVisible(call, "card-flight"))).toBe(true);
+    await advance(ABANDON_FADE_MS);
+    const afterFade = gl.calls.length;
+    await frames(3);
+    expect(gl.calls.slice(afterFade).some((call) => hasVisible(call, "card-flight"))).toBe(false);
+    expect(canvas().style.visibility).toBe("hidden");
+    expect(unveilSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("V3-1n (ii): a resolution onto its own card-shaped slot stays veiled until it lands and settles", async () => {
+    const { present } = await readyLayer();
+    anchor({ "data-stack-entry": String(X) }, 700, 200);
+    present(spec(X, RESOLVE));
+    await frames(1);
+    anchor({ "data-permanent-card": String(X) }, 300, 400);
+    act(() => {
+      useGameStore.setState({ engineCommitEpoch: useGameStore.getState().engineCommitEpoch + 1 });
+    });
+
+    await advance(RESOLVE_FLIGHT_MS / 2);
+    expect(veiled(X)).toBe(true);
+    // Past t = 1 (the leg's end) but inside the settle.
+    await advance(RESOLVE_FLIGHT_MS / 2 + 2 * FRAME_MS);
+    expect(veiled(X)).toBe(true);
+    expect(unveilSpy).not.toHaveBeenCalled();
+
+    await advance(SETTLE_MS + 3 * FRAME_MS);
+    expect(veiled(X)).toBe(false);
+    expect(unveilSpy).toHaveBeenCalledTimes(1);
+    expect(unveilSpy).toHaveBeenCalledWith(X);
+  });
+
+  it("V3-1o: a StrictMode mount → unmount → mount still initialises one renderer and presents GL", async () => {
+    const { present } = await readyLayer({ strict: true });
+    handCard(X);
+
+    const classic = present(spec(X, CAST));
+
+    expect(classic).not.toHaveBeenCalled();
+    expect(veiled(X)).toBe(true);
+    await frames(1);
+    expect(flightRenders().length).toBeGreaterThan(0);
+    expect(gl.constructed).toBe(1);
+  });
+});
+
+describe("CardVfxLayer tiers", () => {
+  function pointer(coarse: boolean) {
+    vi.stubGlobal("matchMedia", (query: string) => ({
+      matches: query === "(pointer: coarse)" && coarse,
+      media: query,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }));
+  }
+
+  it.each([
+    [false, "full", PIXEL_RATIO_CAP.fine],
+    [true, "full", PIXEL_RATIO_CAP.coarse],
+    [false, "reduced", PIXEL_RATIO_CAP.reduced],
+    [true, "reduced", PIXEL_RATIO_CAP.reduced],
+  ] as const)("V3-10a: coarse pointer %s at tier %s caps the pixel ratio at %s", async (coarse, tier, cap) => {
+    vi.stubGlobal("devicePixelRatio", 3);
+    pointer(coarse);
+
+    await readyLayer({ tier });
+
+    expect(last(calls("setPixelRatio"))?.arg).toBe(cap);
+    expect(PIXEL_RATIO_CAP.coarse).toBeLessThan(PIXEL_RATIO_CAP.fine);
+  });
+
+  it("V3-10a: a tier change re-applies the cap on the same renderer", async () => {
+    vi.stubGlobal("devicePixelRatio", 3);
+    pointer(false);
+    const { ref, rerender } = await readyLayer({ tier: "full" });
+    expect(last(calls("setPixelRatio"))?.arg).toBe(PIXEL_RATIO_CAP.fine);
+
+    rerender(<CardVfxLayer ref={ref} tier="reduced" />);
+
+    expect(last(calls("setPixelRatio"))?.arg).toBe(PIXEL_RATIO_CAP.reduced);
+    expect(gl.constructed).toBe(1);
+  });
+
+  it.each([
+    ["full", true],
+    ["reduced", false],
+  ] as const)("V3-10b: a flight at tier %s has a shadow: %s", async (tier, shadowed) => {
+    const { present } = await readyLayer({ tier });
+    handCard(X);
+    present(spec(X, CAST));
+    await frames(1);
+
+    const [first] = flightRenders();
+    expect(first).toBeDefined();
+    expect(hasVisible(first, "card-shadow")).toBe(shadowed);
+  });
+});

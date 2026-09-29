@@ -35,6 +35,8 @@ import {
   visibleAnimationImageSnapshot,
 } from "./ResolvedAnimationImage.tsx";
 import { applyScreenShake } from "./ScreenShake.tsx";
+import { CardVfxLayer, type CardVfxLayerHandle, cardVfxSupported } from "./cardVfx/CardVfxLayer.tsx";
+import { cardFlightSpecFor } from "./cardVfx/cardFlightSpecs.ts";
 
 
 interface ActiveFloat {
@@ -196,6 +198,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
   const advanceStep = useAnimationStore((s) => s.advanceStep);
   const getPosition = useAnimationStore((s) => s.getPosition);
   const particleRef = useRef<ParticleCanvasHandle>(null);
+  const cardVfxRef = useRef<CardVfxLayerHandle>(null);
   const stepTimeoutsRef = useRef<ReturnType<typeof setTimeout>[]>([]);
   const [activeFloats, setActiveFloats] = useState<ActiveFloat[]>([]);
   const [activeDeathClones, setActiveDeathClones] = useState<DeathClone[]>([]);
@@ -214,6 +217,14 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
   const vfxQuality = usePreferencesStore((s) => s.vfxQuality);
   const speedMultiplier = usePreferencesStore((s) => s.animationSpeedMultiplier);
   const reduceMotion = useReducedMotion();
+  const cardAnimationStyle = usePreferencesStore((s) => s.cardAnimationStyle);
+  // Style Classic, tier minimal, reduced motion and no WebGL 2 mount no layer,
+  // so every effect takes the Classic path and no three.js is loaded.
+  const cardVfxMounted =
+    cardAnimationStyle === "webgl" &&
+    vfxQuality !== "minimal" &&
+    !reduceMotion &&
+    cardVfxSupported();
 
   const getObjectRect = useCallback(
     (objectId: number): DOMRect | null =>
@@ -311,7 +322,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
     setPendingDeaths(current);
   }, [activeGeneration]);
 
-  const processEffect = useCallback(
+  const processClassicEffect = useCallback(
     (effect: StepEffect, stepEffects: StepEffect[], owningStepMs: number) => {
       const { event } = effect;
 
@@ -809,6 +820,26 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
     ],
   );
 
+  // Under the New style a mounted layer presents a card flight for the event,
+  // or runs the Classic effect instead; never both, never neither.
+  const processEffect = useCallback(
+    (effect: StepEffect, stepEffects: StepEffect[], owningStepMs: number) => {
+      const classic = () => processClassicEffect(effect, stepEffects, owningStepMs);
+      const layer = cardVfxRef.current;
+      const spec = layer
+        ? cardFlightSpecFor(effect.event, {
+            pre: useGameStore.getState().gameState,
+            post: useAnimationStore.getState().animationNewState,
+            pace: speedMultiplier,
+            owningStepMs,
+          })
+        : null;
+      if (layer && spec) layer.present(spec, classic);
+      else classic();
+    },
+    [processClassicEffect, speedMultiplier],
+  );
+
   // Process effects when activeStep changes, then advance after its duration
   useEffect(() => {
     if (!activeStep) return;
@@ -940,6 +971,9 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
           onComplete={() => handleCastArcComplete(arc.id)}
         />
       ))}
+
+      {/* Card flights (z-45), the New style's shared WebGL overlay */}
+      {cardVfxMounted && <CardVfxLayer ref={cardVfxRef} tier={vfxQuality} />}
 
       {/* Mill reveal animations (z-45) */}
       {activeMillReveals.map((mill) => (
