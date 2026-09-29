@@ -9,6 +9,7 @@ use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
 const AMBITIOUS_AUGMENTER: &str = "Increment (Whenever you cast a spell, if the amount of mana you spent is greater than this creature's power or toughness, put a +1/+1 counter on this creature.)\nWhen this creature dies, if it had one or more counters on it, create a 0/0 green and blue Fractal creature token, then put this creature's counters on that token.";
+const PARALLEL_LIVES: &str = "If an effect would create one or more tokens under your control, it creates twice that many of those tokens instead.";
 const VINDICATE: &str = "Destroy target permanent.";
 
 fn three_generic() -> Vec<ManaUnit> {
@@ -55,6 +56,26 @@ fn cast_vindicate_with_counters(counters: &[(CounterType, u32)]) -> (CastOutcome
     (outcome, augmenter)
 }
 
+fn cast_vindicate_with_parallel_lives(counters: &[(CounterType, u32)]) -> (CastOutcome, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(P0, three_generic());
+    scenario.add_enchantment_from_oracle(P0, "Parallel Lives", PARALLEL_LIVES);
+    let augmenter = scenario
+        .add_creature_from_oracle(P0, "Ambitious Augmenter", 1, 1, AMBITIOUS_AUGMENTER)
+        .id();
+    for (counter, count) in counters {
+        scenario.with_counter(augmenter, counter.clone(), *count);
+    }
+    let destroy = scenario
+        .add_spell_to_hand_from_oracle(P0, "Vindicate", false, VINDICATE)
+        .id();
+
+    let mut runner = scenario.build();
+    let outcome = runner.cast(destroy).target_object(augmenter).resolve();
+    (outcome, augmenter)
+}
+
 /// Positive: CR 122.8 moves the same number and kinds of counters from the
 /// departed creature's LKI to the token created earlier in the same ability.
 #[test]
@@ -86,6 +107,41 @@ fn ambitious_augmenter_moves_all_departed_counter_kinds_to_the_fractal() {
         1,
         "the Fractal gets the source's non-+1/+1 counters too"
     );
+}
+
+/// Positive: CR 614.1a lets Parallel Lives replace the token-creation count,
+/// and CR 122.8 puts the departed creature's counter kinds onto each created
+/// token named by "that token."
+#[test]
+fn ambitious_augmenter_doubled_fractals_each_get_departed_counter_kinds() {
+    let (outcome, augmenter) = cast_vindicate_with_parallel_lives(&[
+        (CounterType::Plus1Plus1, 2),
+        (CounterType::Generic("oil".to_string()), 1),
+    ]);
+
+    assert_eq!(
+        outcome.zone_of(augmenter),
+        Zone::Graveyard,
+        "reach-guard: Vindicate must destroy Ambitious Augmenter"
+    );
+    let fractals = fractal_tokens(&outcome);
+    assert_eq!(
+        fractals.len(),
+        2,
+        "Parallel Lives must double Ambitious Augmenter's Fractal token"
+    );
+    for fractal in fractals {
+        assert_eq!(
+            outcome.counters(fractal, CounterType::Plus1Plus1),
+            2,
+            "each Fractal gets the source's +1/+1 counters"
+        );
+        assert_eq!(
+            outcome.counters(fractal, CounterType::Generic("oil".to_string())),
+            1,
+            "each Fractal gets the source's non-+1/+1 counters too"
+        );
+    }
 }
 
 /// Negative (non-vacuous): CR 603.4 suppresses the intervening-if trigger when

@@ -2908,6 +2908,20 @@ fn resolve_counter_transfer_destinations(
         return vec![ability.source_id];
     }
 
+    if matches!(target_filter, TargetFilter::LastCreated) {
+        return crate::game::targeting::resolve_event_context_targets(
+            state,
+            target_filter,
+            ability.source_id,
+        )
+        .into_iter()
+        .filter_map(|target| match target {
+            TargetRef::Object(id) => Some(id),
+            TargetRef::Player(_) => None,
+        })
+        .collect();
+    }
+
     if let Some(TargetRef::Object(id)) = crate::game::targeting::resolve_event_context_target(
         state,
         target_filter,
