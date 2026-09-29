@@ -459,9 +459,10 @@ fn paused_hit_survives_a_state_round_trip_and_triggers() {
     assert_eq!(p1p1(runner.state(), bear), 3);
 }
 
-/// Instance binding: the verdict is written by THIS reveal after its own moves,
-/// so a stale verdict left by an earlier, unrelated reveal-until whiff cannot
-/// suppress this reveal's hit.
+/// Instance binding at the production entry: a stale whiff verdict left in the
+/// slot before this resolution cannot suppress this reveal's hit. (The depth-0
+/// resolution reset clears it first; the reveal's own hit-clear is pinned
+/// separately by `reveal_until::tests::verdict_is_this_reveals_own_outcome_*`.)
 #[test]
 fn a_stale_whiff_verdict_cannot_suppress_this_reveals_hit() {
     let Fixture {
