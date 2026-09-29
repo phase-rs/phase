@@ -1,5 +1,14 @@
 import type { GameEvent } from "../adapter/types";
 
+/** Visual effects tier.
+ *  - `full`: New-style card flights with a drop shadow, and landing dust when
+ *    a card lands on the battlefield. Pixel ratio is capped lower on touch
+ *    devices than on desktop.
+ *  - `reduced`: the same flights and paths, with no shadow or dust, at a pixel
+ *    ratio no higher than `full`'s touch cap.
+ *  - `minimal`: today's animations in either style; no overlay, canvas or
+ *    renderer is created.
+ *  Non-flight effects keep their own tier gates. */
 export type VfxQuality = "full" | "reduced" | "minimal";
 
 /** Card-animation style, independent of {@link VfxQuality}. `"webgl"` is the

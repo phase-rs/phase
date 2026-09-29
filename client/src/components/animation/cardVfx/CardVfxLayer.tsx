@@ -321,6 +321,7 @@ class CardVfxController {
       front,
       flip: flipFor(spec),
       pace: spec.pace,
+      delayMs: spec.delayMs,
       tier: this.tier,
       landingColors: spec.endColors,
       aim: (origin) => this.aim(route, objectId, origin),

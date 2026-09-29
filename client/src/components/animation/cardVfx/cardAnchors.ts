@@ -119,6 +119,10 @@ const castSourceSelectors = (id: ObjectId) => [
   `[data-graveyard-pile][data-grouped-ids~="${id}"]`,
   `[data-library-pile] [data-grouped-ids~="${id}"]`,
 ];
+const handCardSelectors = (id: ObjectId) => [
+  `[data-hand-card][data-object-id="${id}"]`,
+  `[data-opponent-hand-card="${id}"]`,
+];
 
 /** Where a cast flight starts: the card's veil-aware surface in a cast-source
  *  zone. `null` (a pending cast already on the stack, a command-zone cast, the
@@ -140,6 +144,8 @@ export function sourceElement(route: CardFlightRoute, id: ObjectId): HTMLElement
     case "resolveToBattlefield":
     case "resolveToGraveyard":
       return stackSourceElement(id);
+    case "draw":
+      return firstRendered(`[data-library-pile="${route.ownerId}"]`);
   }
 }
 
@@ -153,6 +159,8 @@ export function ownNode(route: CardFlightRoute, id: ObjectId): HTMLElement | nul
       return firstRenderedOf(permanentSelectors(id));
     case "resolveToGraveyard":
       return firstRendered(`[data-graveyard-pile="${route.ownerId}"][data-grouped-ids~="${id}"]`);
+    case "draw":
+      return firstRenderedOf(handCardSelectors(id));
   }
 }
 
@@ -162,6 +170,7 @@ export function provisionalNode(route: CardFlightRoute): HTMLElement | null {
     case "cast":
       return lastRendered("[data-stack-entry]");
     case "resolveToBattlefield":
+    case "draw":
       return null;
     case "resolveToGraveyard":
       return firstRendered(`[data-graveyard-pile="${route.ownerId}"]`);

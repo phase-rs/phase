@@ -74,6 +74,7 @@ function fly(
     back: effectHost.backTexture,
     flip: "none",
     pace,
+    delayMs: 0,
     tier: "full",
     aim,
     commitEpoch: epoch,

@@ -22,8 +22,13 @@ function hidden(object: GameObject): GameObject {
 
 const card = gameObjectFactory.withId(X).named("Llanowar Elves").creature(1, 1);
 
-function context(pre: GameState | null, post: GameState | null, pace = 1): CardFlightSpecContext {
-  return { pre, post, pace, owningStepMs: 500 };
+function context(
+  pre: GameState | null,
+  post: GameState | null,
+  pace = 1,
+  stepEvents: readonly AnimationEvent[] = [],
+): CardFlightSpecContext {
+  return { pre, post, pace, owningStepMs: 500, stepEvents };
 }
 
 const spellCast: AnimationEvent = {
@@ -92,6 +97,47 @@ describe("cardFlightSpecFor", () => {
     expect(cardFlightSpecFor(zoneChanged("Stack", "Battlefield"), context(pre, facedown))?.endColors).toBeNull();
   });
 
+  it("V5-1: a draw flies from the owner's library to their hand, face up only when the engine shows it", () => {
+    const pre = stateWith(hidden(card.params({ zone: "Library" }).build()));
+    const own = cardFlightSpecFor(zoneChanged("Library", "Hand"), context(pre, stateWith(visible(card.inHand().build()))));
+    expect(own).toMatchObject({ route: { kind: "draw", ownerId: 0 }, startFace: null, delayMs: 0 });
+    expect(own?.endFace).toMatchObject({ cardName: "Llanowar Elves" });
+
+    const opponentCard = gameObjectFactory.withId(X).named("Secret Draw").ownedBy(1);
+    const opponent = cardFlightSpecFor(
+      zoneChanged("Library", "Hand"),
+      context(pre, stateWith(hidden(opponentCard.inHand().build()))),
+    );
+    expect(opponent).toMatchObject({ route: { kind: "draw", ownerId: 1 }, startFace: null, endFace: null });
+    expect(JSON.stringify(opponent)).not.toContain("Secret Draw");
+
+    // A revealed library top starts face up, so the card does not turn over.
+    const revealed = stateWith(visible(card.params({ zone: "Library" }).build()));
+    const fromTop = cardFlightSpecFor(zoneChanged("Library", "Hand"), context(revealed, stateWith(visible(card.inHand().build()))));
+    expect(fromTop?.startFace).toMatchObject({ cardName: "Llanowar Elves" });
+
+    // No post object, no owner to route to.
+    expect(cardFlightSpecFor(zoneChanged("Library", "Hand"), context(pre, stateWith()))).toBeNull();
+  });
+
+  it.each([3, 7])("V5-2: %i draws in one step leave one after another inside the step's first half", (count) => {
+    const draws = Array.from({ length: count }, (_, i): AnimationEvent => ({
+      type: "ZoneChanged",
+      data: { object_id: 100 + i, from: "Library", to: "Hand" },
+    }));
+    // A non-draw zone change in the step does not take a stagger slot.
+    const stepEvents = [draws[0], zoneChanged("Stack", "Graveyard"), ...draws.slice(1)];
+    const post = stateWith(...draws.map((_, i) => visible(gameObjectFactory.withId(100 + i).inHand().build())));
+    for (const pace of [1, 2]) {
+      const delays = draws.map(
+        (draw) => cardFlightSpecFor(draw, context(null, post, pace, stepEvents))?.delayMs ?? Number.NaN,
+      );
+      expect(delays[0]).toBe(0);
+      for (let i = 1; i < count; i += 1) expect(delays[i]).toBeGreaterThan(delays[i - 1]);
+      expect(delays[count - 1]).toBeLessThanOrEqual(500 / 2);
+    }
+  });
+
   it("V3-4e: land plays, other zone moves and other events have no flight", () => {
     const pre = stateWith(visible(card.inHand().build()));
     const post = stateWith(visible(card.onBattlefield().build()));
@@ -99,7 +145,6 @@ describe("cardFlightSpecFor", () => {
 
     expect(cardFlightSpecFor(zoneChanged("Hand", "Battlefield"), ctx)).toBeNull();
     expect(cardFlightSpecFor(zoneChanged("Stack", "Exile"), ctx)).toBeNull();
-    expect(cardFlightSpecFor(zoneChanged("Library", "Hand"), ctx)).toBeNull();
     expect(cardFlightSpecFor({ type: "TokenCreated", data: { object_id: X, name: "Elf", source_id: 3 } }, ctx)).toBeNull();
     expect(
       cardFlightSpecFor(

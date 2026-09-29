@@ -10,7 +10,8 @@ import {
 export type CardFlightRoute =
   | { kind: "cast" }
   | { kind: "resolveToBattlefield" }
-  | { kind: "resolveToGraveyard"; ownerId: PlayerId };
+  | { kind: "resolveToGraveyard"; ownerId: PlayerId }
+  | { kind: "draw"; ownerId: PlayerId };
 
 export interface CardFlightSpec {
   objectId: ObjectId;
@@ -27,6 +28,9 @@ export interface CardFlightSpec {
   pace: number;
   /** The owning step's scaled duration, which bounds face readiness. */
   owningStepMs: number;
+  /** How long after the step starts this flight leaves: draws in one step
+   *  leave one after another, all inside the step's first half. */
+  delayMs: number;
 }
 
 export interface CardFlightSpecContext {
@@ -36,7 +40,12 @@ export interface CardFlightSpecContext {
   post: GameState | null;
   pace: number;
   owningStepMs: number;
+  /** Every event in the owning step, in order. */
+  stepEvents: readonly AnimationEvent[];
 }
+
+/** The gap between consecutive draws in one step, before pace. */
+export const DRAW_STAGGER_MS = 90;
 
 interface RoutedObject {
   objectId: ObjectId;
@@ -49,6 +58,11 @@ function routedObjectFor(event: AnimationEvent, post: GameState | null): RoutedO
       return { objectId: event.data.object_id, route: { kind: "cast" } };
     case "ZoneChanged": {
       const { object_id: objectId, from, to } = event.data;
+      if (from === "Library" && to === "Hand") {
+        // A card is drawn into its owner's hand.
+        const object = post?.objects[objectId];
+        return object ? { objectId, route: { kind: "draw", ownerId: object.owner } } : null;
+      }
       if (from !== "Stack") return null;
       if (to === "Battlefield") return { objectId, route: { kind: "resolveToBattlefield" } };
       if (to !== "Graveyard") return null;
@@ -66,9 +80,24 @@ function routedObjectFor(event: AnimationEvent, post: GameState | null): RoutedO
 /** The card flight that presents `event`, or `null` when the event has no
  *  flight (it then presents Classic). A zero or negative pace has no flight,
  *  matching the step timers' instant mode. */
+const isDraw = (event: AnimationEvent) =>
+  event.type === "ZoneChanged" && event.data.from === "Library" && event.data.to === "Hand";
+
+/** When a flight leaves after its step starts. Only draws stagger: the nth
+ *  draw of the step leaves n gaps in, and the gaps shrink so the last draw
+ *  still leaves within the step's first half. */
+function delayFor(event: AnimationEvent, stepEvents: readonly AnimationEvent[], pace: number, owningStepMs: number) {
+  if (!isDraw(event)) return 0;
+  const draws = stepEvents.filter(isDraw);
+  const index = draws.indexOf(event);
+  if (index <= 0) return 0;
+  const gap = Math.min(DRAW_STAGGER_MS * pace, owningStepMs / 2 / (draws.length - 1));
+  return index * gap;
+}
+
 export function cardFlightSpecFor(
   event: AnimationEvent,
-  { pre, post, pace, owningStepMs }: CardFlightSpecContext,
+  { pre, post, pace, owningStepMs, stepEvents }: CardFlightSpecContext,
 ): CardFlightSpec | null {
   if (pace <= 0) return null;
   const routed = routedObjectFor(event, post);
@@ -83,5 +112,6 @@ export function cardFlightSpecFor(
     endColors: endFace && endObject ? endObject.color : null,
     pace,
     owningStepMs,
+    delayMs: delayFor(event, stepEvents, pace, owningStepMs),
   };
 }

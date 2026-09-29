@@ -9,7 +9,14 @@ import { assetKey, catalogRoot, packId } from "../../../../services/visualPacks/
 import { useAnimationStore } from "../../../../stores/animationStore.ts";
 import { useGameStore } from "../../../../stores/gameStore.ts";
 import type { AnimationImageSnapshot } from "../../ResolvedAnimationImage.tsx";
-import { ABANDON_FADE_MS, CAST_FLIGHT_MS, RESOLVE_FLIGHT_MS, SETTLE_MS } from "../cardFlight.ts";
+import {
+  ABANDON_FADE_MS,
+  CAST_FLIGHT_MS,
+  DRAW_FLIGHT_MS,
+  LAND_STATIONARY_WAIT_MAX_MS,
+  RESOLVE_FLIGHT_MS,
+  SETTLE_MS,
+} from "../cardFlight.ts";
 import type { CardFlightRoute, CardFlightSpec } from "../cardFlightSpecs.ts";
 import {
   CARD_FLIGHT_FACE_READY_MAX_MS,
@@ -130,7 +137,7 @@ function spec(
   faces: Pick<CardFlightSpec, "startFace" | "endFace"> = { startFace: null, endFace: null },
   owningStepMs = 500,
 ): CardFlightSpec {
-  return { objectId, route, ...faces, endColors: null, pace: 1, owningStepMs };
+  return { objectId, route, ...faces, endColors: null, pace: 1, owningStepMs, delayMs: 0 };
 }
 
 const CAST: CardFlightRoute = { kind: "cast" };
@@ -672,6 +679,27 @@ describe("CardVfxLayer present contract", () => {
     await advance(1000);
     expect(hasVisible(last(calls("render")) as RendererCall, "landing-dust")).toBe(false);
     expect(canvas().style.visibility).toBe("hidden");
+  });
+
+  it("V5-3: a draw leaves the library after its stagger and lands in the veiled hand slot", async () => {
+    const { present } = await readyLayer();
+    anchor({ "data-library-pile": "0" }, 40, 700);
+    const draw = { ...spec(X, { kind: "draw", ownerId: 0 }), delayMs: 100 };
+    present(draw);
+    await frames(2);
+    // Veiled at once, so the hand never shows the card before its flight.
+    expect(veiled(X)).toBe(true);
+    expect(flightRenders()).toHaveLength(0);
+    await advance(100);
+    expect(flightRenders().length).toBeGreaterThan(0);
+
+    addFace(anchor({ "data-hand-card": "", "data-object-id": String(X) }, 200, 760));
+    act(() => {
+      useGameStore.setState({ engineCommitEpoch: useGameStore.getState().engineCommitEpoch + 1 });
+    });
+    await advance(DRAW_FLIGHT_MS + LAND_STATIONARY_WAIT_MAX_MS + 10 * FRAME_MS);
+    expect(veiled(X)).toBe(false);
+    expect(unveilSpy).toHaveBeenCalledWith(X);
   });
 
   it("V4-2: casts and graveyard landings kick up no dust", async () => {

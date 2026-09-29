@@ -832,6 +832,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
             post: useAnimationStore.getState().animationNewState,
             pace: speedMultiplier,
             owningStepMs,
+            stepEvents: stepEffects.map((stepEffect) => stepEffect.event),
           })
         : null;
       if (layer && spec) layer.present(spec, classic);

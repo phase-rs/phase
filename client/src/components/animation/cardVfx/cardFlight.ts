@@ -35,6 +35,7 @@ export type FlightRelease = "land" | "abandon";
 
 export const CAST_FLIGHT_MS = 440;
 export const RESOLVE_FLIGHT_MS = 420;
+export const DRAW_FLIGHT_MS = 340;
 export const SETTLE_MS = 150;
 /** A rebased leg lasts at least this fraction of the route's flight time. */
 export const REBASE_MIN_FRACTION = 0.6;
@@ -87,6 +88,7 @@ export const FLIGHT_PROFILES: Record<CardFlightRoute["kind"], FlightProfile> = {
   cast: { curve: "panel", durationMs: CAST_FLIGHT_MS },
   resolveToBattlefield: { curve: "land", durationMs: RESOLVE_FLIGHT_MS },
   resolveToGraveyard: { curve: "panel", durationMs: RESOLVE_FLIGHT_MS },
+  draw: { curve: "panel", durationMs: DRAW_FLIGHT_MS },
 };
 
 /** A card pose in flight: height above the table, how far the tilt and lean
@@ -342,6 +344,8 @@ export interface CardFlightParams {
   back: Texture | null;
   flip: FlightFlip;
   pace: number;
+  /** How long the card waits, unseen, before it leaves its source. */
+  delayMs: number;
   tier: CardVfxTier;
   aim: (origin: DOMRectReadOnly) => Aim;
   commitEpoch: () => number;
@@ -432,7 +436,7 @@ class CardFlightEffect implements CardFlight {
   }
 
   update(nowMs: number): boolean {
-    this.flightStartMs ??= nowMs;
+    this.flightStartMs ??= nowMs + this.params.delayMs;
     const { pace } = this.params;
     switch (this.phase.kind) {
       case "revealing":
@@ -450,7 +454,9 @@ class CardFlightEffect implements CardFlight {
         return true;
       }
       case "flying":
-        return this.fly(nowMs, this.flightStartMs);
+        // A staggered card is still in its source until its turn to leave.
+        this.setVisible(nowMs >= this.flightStartMs);
+        return nowMs < this.flightStartMs || this.fly(nowMs, this.flightStartMs);
     }
   }
 
@@ -565,6 +571,11 @@ class CardFlightEffect implements CardFlight {
   private release(reason: FlightRelease, next: FlightPhase) {
     this.phase = next;
     this.params.onRelease(reason);
+  }
+
+  private setVisible(visible: boolean) {
+    this.card.visible = visible;
+    if (this.shadow) this.shadow.visible = visible;
   }
 
   private draw(pose: FlightFrame, squash: number, alpha: number) {
