@@ -13,10 +13,10 @@ use crate::types::ability::CardPlayMode::{Cast, Play};
 use crate::types::ability::CastFromZoneDriver::{DuringResolution, LingeringPermission};
 use crate::types::ability::{
     AbilityUseTally, AttachSelection, AttachmentKind, CardSelectionMode, CastCostModifier,
-    CastManaObjectScope, CastManaSpentMetric, CommanderOwnership, CountBinding, DigRestOrder,
-    ExcessRecipient, ForEachCategoryAction, MassLibraryShuffleMode, ModalChoice,
-    PerpetualModification, PileSource, SeatDirection, TurnJournalKind, VoteTally, VoteVisibility,
-    VoterScope,
+    CastManaObjectScope, CastManaSpentMetric, CommanderOwnership, CountBinding,
+    CounterTransferMode, DigRestOrder, ExcessRecipient, ForEachCategoryAction,
+    MassLibraryShuffleMode, ModalChoice, PerpetualModification, PileSource, SeatDirection,
+    TurnJournalKind, VoteTally, VoteVisibility, VoterScope,
 };
 use crate::types::card_type::CoreType;
 use crate::types::mana::{ManaCost, ManaCostShard};
@@ -232,6 +232,40 @@ fn grip_of_phyresis_exact_oracle_lowers_gain_control_token_attach_chain() {
     assert_grip_of_phyresis_chain(
         "Gain control of target Equipment, then create a 0/0 black Phyrexian Germ creature token and attach that Equipment to it.",
     );
+}
+
+/// SHAPE — CR 608.2c + CR 111.1 + CR 122.8: in a single effect chain,
+/// "that token" after token creation binds the counter-transfer destination to
+/// `LastCreated`; the source remains the departed/self object for LKI counters.
+#[test]
+fn move_counters_that_token_binds_last_created_in_effect_chain() {
+    let def = parse_effect_chain(
+        "Create a 0/0 green and blue Fractal creature token, then put this creature's counters on that token.",
+        AbilityKind::Spell,
+    );
+    assert_attachment_chain_has_no_unimplemented(&def);
+    assert!(matches!(def.effect.as_ref(), Effect::Token { .. }));
+
+    let move_counters = def
+        .sub_ability
+        .as_deref()
+        .expect("MoveCounters follows token creation");
+    let Effect::MoveCounters {
+        source,
+        counter_type,
+        count,
+        mode,
+        target,
+        ..
+    } = move_counters.effect.as_ref()
+    else {
+        panic!("expected MoveCounters tail, got {:?}", move_counters.effect);
+    };
+    assert_eq!(source, &TargetFilter::SelfRef);
+    assert_eq!(counter_type, &None);
+    assert_eq!(count, &None);
+    assert_eq!(*mode, CounterTransferMode::Put);
+    assert_eq!(target, &TargetFilter::LastCreated);
 }
 
 fn nested_batch_aggregate() -> PropertyAggregate {

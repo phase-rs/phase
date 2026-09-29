@@ -12,14 +12,14 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction,
     AttackSubject, BounceSelection, CardSelectionMode, CardTypeSetSource, CastingPermission,
     ChosenAttribute, CombatHistoryScope, Comparator, ContinuousModification, ControllerRef,
-    CopyChooseScope, CopyRetargetPermission, CountScope, DamageAmountScope, DamageAmountThreshold,
-    DamageChannel, DamageModification, DamageSource, DelayedTriggerCondition, DiscardSelfScope,
-    Duration, Effect, EffectScope, FilterProp, ManaContribution, ManaProduction,
-    ManaSpendPermission, ModalChoice, ObjectProperty, ObjectScope, PerpetualModification,
-    PlayerFilter, PlayerScope, PropertyAggregate, PtStat, PtValue, PtValueScope, QuantityExpr,
-    QuantityRef, SeatDirection, SharedQuality, SiblingCondition, SubAbilityLink, TapStateChange,
-    TargetFilter, TriggerCondition, TriggerDefinition, TurnJournalKind, TypeFilter, TypedFilter,
-    ZoneRef,
+    CopyChooseScope, CopyRetargetPermission, CountScope, CounterTransferMode, DamageAmountScope,
+    DamageAmountThreshold, DamageChannel, DamageModification, DamageSource,
+    DelayedTriggerCondition, DiscardSelfScope, Duration, Effect, EffectScope, FilterProp,
+    ManaContribution, ManaProduction, ManaSpendPermission, ModalChoice, ObjectProperty,
+    ObjectScope, PerpetualModification, PlayerFilter, PlayerScope, PropertyAggregate, PtStat,
+    PtValue, PtValueScope, QuantityExpr, QuantityRef, SeatDirection, SharedQuality,
+    SiblingCondition, SubAbilityLink, TapStateChange, TargetFilter, TriggerCondition,
+    TriggerDefinition, TurnJournalKind, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::{CounterMatch, CounterType};
@@ -219,6 +219,43 @@ fn real_oft_nabbed_goat_keeps_owner_relative_loss_with_deferred_condition_gap() 
         Some(PlayerFilter::Opponent),
         "owner-relative Goat clause must not fall through to controller-relative Opponent"
     );
+}
+
+/// SHAPE — CR 603.6c + CR 608.2c + CR 122.8: a dies trigger body preserves the
+/// same-chain created-token destination for `MoveCounters`.
+#[test]
+fn dies_trigger_move_counters_that_token_binds_last_created() {
+    let trigger = parse_trigger_line(
+        "When this creature dies, create a 0/0 green and blue Fractal creature token, then put this creature's counters on that token.",
+        "Synthetic Ambitious Augmenter",
+    );
+
+    assert_eq!(trigger.mode, TriggerMode::ChangesZone);
+    assert_eq!(trigger.origin, Some(Zone::Battlefield));
+    assert_eq!(trigger.destination, Some(Zone::Graveyard));
+    let execute = trigger.execute.as_deref().expect("dies trigger body");
+    assert_no_unimplemented(execute);
+    assert!(matches!(execute.effect.as_ref(), Effect::Token { .. }));
+    let move_counters = execute
+        .sub_ability
+        .as_deref()
+        .expect("MoveCounters follows token creation");
+    let Effect::MoveCounters {
+        source,
+        counter_type,
+        count,
+        mode,
+        target,
+        ..
+    } = move_counters.effect.as_ref()
+    else {
+        panic!("expected MoveCounters tail, got {:?}", move_counters.effect);
+    };
+    assert_eq!(source, &TargetFilter::SelfRef);
+    assert_eq!(counter_type, &None);
+    assert_eq!(count, &None);
+    assert_eq!(*mode, CounterTransferMode::Put);
+    assert_eq!(target, &TargetFilter::LastCreated);
 }
 
 const GUT_TRUE_SOUL_ZEALOT_ORACLE: &str = "Whenever you attack, you may sacrifice another creature or an artifact. If you do, create a 4/1 black Skeleton creature token with menace that's tapped and attacking. (It can't be blocked except by two or more creatures.)\nChoose a Background (You can have a Background as a second commander.)";
