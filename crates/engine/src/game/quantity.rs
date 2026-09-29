@@ -761,6 +761,10 @@ pub fn ability_definition_is_cast_stable_for_pre_cast(definition: &AbilityDefini
     let AbilityDefinition {
         kind: _,
         effect,
+        declares_chosen_group: _,
+        reads_chosen_group: _,
+        declares_return_result,
+        reads_return_result,
         cost,
         sub_ability,
         else_ability,
@@ -809,7 +813,9 @@ pub fn ability_definition_is_cast_stable_for_pre_cast(definition: &AbilityDefini
         face_down_in_exile: _,
     } = definition;
 
-    activation_mana_payment_restriction.is_none()
+    declares_return_result.is_none()
+        && reads_return_result.is_none()
+        && activation_mana_payment_restriction.is_none()
         && activator_filter.is_none()
         && activation_zone.is_none()
         && optional_player.is_none()
@@ -886,6 +892,10 @@ pub fn ability_definition_has_only_unbound_variable_quantities_for_pre_cast(
     let AbilityDefinition {
         kind: _,
         effect,
+        declares_chosen_group: _,
+        reads_chosen_group: _,
+        declares_return_result: None,
+        reads_return_result: None,
         cost,
         sub_ability: None,
         else_ability: None,
@@ -6829,6 +6839,17 @@ fn damage_record_target_matches(
 ) -> bool {
     match record.target {
         TargetRef::Object(object_id) => {
+            // CR 400.7 + CR 608.2h: damage to a departed trigger source is a
+            // historical fact. Match the record's captured recipient
+            // incarnation; live SelfRef matching must still reject a later
+            // same-id object when the original source leaves and returns.
+            if matches!(filter, TargetFilter::SelfRef | TargetFilter::OriginalSource) {
+                if let Some(source) = filter_ctx.trigger_source {
+                    let identity = source.identity.reference;
+                    return object_id == identity.object_id
+                        && record.target_incarnation == Some(identity.incarnation);
+                }
+            }
             let (live_target_filter, lki_controller) = split_controller_filter(filter);
             if let Some(expected) = lki_controller.as_ref() {
                 if !damage_source_controller_matches(
@@ -13836,6 +13857,90 @@ mod tests {
             },
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 1);
+    }
+
+    /// CR 400.7 + CR 608.2h: a source that leaves and returns is a new object.
+    /// Its old trigger still reads damage dealt to the departed incarnation,
+    /// while live "other" filters must include the returned creature.
+    #[test]
+    fn damage_to_departed_source_uses_recorded_incarnation() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1000),
+            PlayerId(0),
+            "Departing Source".to_string(),
+            Zone::Battlefield,
+        );
+        let dealer = create_object(
+            &mut state,
+            CardId(1001),
+            PlayerId(1),
+            "Damage Source".to_string(),
+            Zone::Battlefield,
+        );
+        let old_incarnation = state.objects[&source].incarnation;
+        let trigger_source = crate::game::triggers::trigger_source_context_for_latch(
+            &state,
+            &state.objects[&source],
+        );
+        state.damage_dealt_this_turn.push_back(DamageRecord {
+            source_id: dealer,
+            target: TargetRef::Object(source),
+            target_incarnation: Some(old_incarnation),
+            amount: 4,
+            ..Default::default()
+        });
+
+        let mut ability = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            Vec::new(),
+            source,
+            PlayerId(0),
+        );
+        ability.set_trigger_source_recursive(trigger_source);
+        let damage_to_source = QuantityExpr::Ref {
+            qty: QuantityRef::DamageDealtThisTurn {
+                source: Box::new(TargetFilter::Any),
+                target: Box::new(TargetFilter::SelfRef),
+                aggregate: AggregateFunction::Sum,
+                group_by: None,
+                damage_kind: DamageKindFilter::Any,
+                channel: DamageChannel::Total,
+            },
+        };
+        assert_eq!(
+            resolve_quantity_with_targets(&state, &damage_to_source, &ability),
+            4
+        );
+
+        state.objects.get_mut(&source).unwrap().bump_incarnation();
+        let returned_incarnation = state.objects[&source].incarnation;
+        state.damage_dealt_this_turn.push_back(DamageRecord {
+            source_id: dealer,
+            target: TargetRef::Object(source),
+            target_incarnation: Some(returned_incarnation),
+            amount: 9,
+            ..Default::default()
+        });
+        assert_eq!(
+            resolve_quantity_with_targets(&state, &damage_to_source, &ability),
+            4,
+            "the original trigger counts only damage to its source incarnation"
+        );
+        let other =
+            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Another]));
+        assert!(
+            matches_target_filter(
+                &state,
+                source,
+                &other,
+                &FilterContext::from_ability(&ability)
+            ),
+            "the returned object is another creature relative to the old trigger source"
+        );
     }
 
     /// CR 120.9 (audit M2): the parameterized `DamageDealtThisTurn` with

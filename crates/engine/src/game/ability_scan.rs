@@ -237,6 +237,10 @@ fn resolved_ability_axes(a: &ResolvedAbility, mode: ScanMode) -> Axes {
         // ---- read-free: concrete ids / cast-time snapshots / flags / links,
         //      none of which express a resolution-time dynamic read ----
         targets: _,                // concrete announced target refs (already resolved)
+        declares_chosen_group: _,  // definition-local target identity, no live read
+        reads_chosen_group: _,     // bound targets above carry the concrete values
+        declares_return_result: _, // producer effect carries its own writes
+        reads_return_result,       // instruction-local result is a dynamic read
         source_id: _,              // object id
         cast_occurrence: _,        // finalized-cast provenance, no dynamic read
         source_incarnation: _,     // self-transform epoch latch, no dynamic read
@@ -292,6 +296,9 @@ fn resolved_ability_axes(a: &ResolvedAbility, mode: ScanMode) -> Axes {
     } = a;
 
     let mut acc = scan_effect(effect, mode);
+    if reads_return_result.is_some() {
+        acc = acc.or(Axes::CONSERVATIVE);
+    }
     if let Some(sub) = sub_ability {
         acc = acc.or(resolved_ability_axes(sub, mode));
     }
@@ -5068,6 +5075,10 @@ fn ability_definition_axes(def: &AbilityDefinition, mode: ScanMode) -> Axes {
         cost: _,
         description: _,
         target_prompt: _,
+        declares_chosen_group: _,  // definition-local target identity
+        reads_chosen_group: _,     // effect and target metadata are scanned above
+        declares_return_result: _, // producer effect carries its own writes
+        reads_return_result,       // instruction-local result is a dynamic read
         activation_restrictions: _,
         // Payment-time only; it cannot create a resolution-time dependency.
         activation_mana_payment_restriction: _,
@@ -5098,6 +5109,9 @@ fn ability_definition_axes(def: &AbilityDefinition, mode: ScanMode) -> Axes {
     } = def;
 
     let mut acc = scan_effect(effect, mode);
+    if reads_return_result.is_some() {
+        acc = acc.or(Axes::CONSERVATIVE);
+    }
     if let Some(sub) = sub_ability {
         acc = acc.or(ability_definition_axes(sub, mode));
     }

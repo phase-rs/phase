@@ -1,5 +1,6 @@
 #![allow(unused_imports)]
 use super::*;
+use engine::types::ability::{DelayedTriggerCondition, Effect};
 
 fn tap_land_action(runner: &GameRunner, object_id: ObjectId) -> GameAction {
     engine::game::mana_sources::activatable_mana_actions_for_player(
@@ -233,8 +234,6 @@ fn becomes_blocked_by_creature_fires_for_each_blocker() {
 /// `trigger_blocks_or_becomes_blocked_venom_parses_delayed_destroy`.)
 #[test]
 fn venom_destroys_the_creature_that_blocked_it_at_end_of_combat() {
-    use engine::types::ability::{DelayedTriggerCondition, Effect};
-
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let attacker = scenario
@@ -311,6 +310,147 @@ fn venom_destroys_the_creature_that_blocked_it_at_end_of_combat() {
         Some(Zone::Battlefield),
         "the Venom host (attacker) must survive — Venom destroys the OTHER creature, \
          never its own host"
+    );
+}
+
+/// CR 509.1h + CR 509.1 + CR 603.7c + CR 608.2c: Tangle Asp's
+/// "Whenever this creature blocks or becomes blocked by a creature, destroy that creature at end of combat."
+/// When Tangle Asp BLOCKS an attacking creature, the delayed trigger created must target and destroy
+/// the attacking creature it blocked, and Tangle Asp must survive.
+#[test]
+fn tangle_asp_destroys_creature_it_blocks_at_end_of_combat() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let attacker = scenario.add_creature(P0, "Attacking Bear", 1, 5).id();
+    let asp = scenario
+        .add_creature(P1, "Tangle Asp", 1, 5)
+        .from_oracle_text(
+            "Whenever this creature blocks or becomes blocked by a creature, \
+             destroy that creature at end of combat.",
+        )
+        .id();
+    let mut runner = scenario.build();
+
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(attacker, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .expect("Bear should be able to attack");
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareBlockers {
+            assignments: vec![(asp, attacker)],
+        })
+        .expect("Tangle Asp should be able to block");
+    runner.advance_until_stack_empty();
+
+    let scheduled_destroy = runner.state().delayed_triggers.iter().any(|dt| {
+        matches!(
+            dt.condition,
+            DelayedTriggerCondition::AtNextPhase {
+                phase: Phase::EndCombat
+            }
+        ) && matches!(&dt.ability.effect, Effect::Destroy { .. })
+    });
+    assert!(
+        scheduled_destroy,
+        "Tangle Asp must schedule an end-of-combat destroy when blocking; delayed_triggers = {:?}",
+        runner.state().delayed_triggers
+    );
+
+    // Advance through combat damage into End of Combat so the delayed trigger fires.
+    for _ in 0..40 {
+        if runner.state().objects[&attacker].zone == Zone::Graveyard {
+            break;
+        }
+        if matches!(runner.state().waiting_for, WaitingFor::OrderTriggers { .. }) {
+            runner.advance_until_stack_empty();
+        } else if runner.act(GameAction::PassPriority).is_err() {
+            break;
+        }
+    }
+
+    assert_eq!(
+        runner.state().objects.get(&attacker).map(|o| o.zone),
+        Some(Zone::Graveyard),
+        "the attacking creature blocked by Tangle Asp must be destroyed at end of combat"
+    );
+    assert_eq!(
+        runner.state().objects.get(&asp).map(|o| o.zone),
+        Some(Zone::Battlefield),
+        "Tangle Asp must survive — it destroys the creature it blocked, not itself"
+    );
+}
+
+/// CR 509.1h + CR 509.3d + CR 603.7c + CR 608.2c: Tangle Asp's
+/// "Whenever this creature blocks or becomes blocked by a creature, destroy that creature at end of combat."
+/// When Tangle Asp ATTACKS and is blocked by a creature, the delayed trigger created must target and destroy
+/// the blocking creature, and Tangle Asp must survive.
+#[test]
+fn tangle_asp_destroys_creature_that_blocks_it_at_end_of_combat() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let asp = scenario
+        .add_creature(P0, "Tangle Asp", 1, 5)
+        .from_oracle_text(
+            "Whenever this creature blocks or becomes blocked by a creature, \
+             destroy that creature at end of combat.",
+        )
+        .id();
+    let blocker = scenario.add_creature(P1, "Blocking Bear", 1, 5).id();
+    let mut runner = scenario.build();
+
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(asp, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .expect("Tangle Asp should be able to attack");
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareBlockers {
+            assignments: vec![(blocker, asp)],
+        })
+        .expect("Bear should be able to block");
+    runner.advance_until_stack_empty();
+
+    let scheduled_destroy = runner.state().delayed_triggers.iter().any(|dt| {
+        matches!(
+            dt.condition,
+            DelayedTriggerCondition::AtNextPhase {
+                phase: Phase::EndCombat
+            }
+        ) && matches!(&dt.ability.effect, Effect::Destroy { .. })
+    });
+    assert!(
+        scheduled_destroy,
+        "Tangle Asp must schedule an end-of-combat destroy when blocked; delayed_triggers = {:?}",
+        runner.state().delayed_triggers
+    );
+
+    for _ in 0..40 {
+        if runner.state().objects[&blocker].zone == Zone::Graveyard {
+            break;
+        }
+        if matches!(runner.state().waiting_for, WaitingFor::OrderTriggers { .. }) {
+            runner.advance_until_stack_empty();
+        } else if runner.act(GameAction::PassPriority).is_err() {
+            break;
+        }
+    }
+
+    assert_eq!(
+        runner.state().objects.get(&blocker).map(|o| o.zone),
+        Some(Zone::Graveyard),
+        "the blocking creature that blocked Tangle Asp must be destroyed at end of combat"
+    );
+    assert_eq!(
+        runner.state().objects.get(&asp).map(|o| o.zone),
+        Some(Zone::Battlefield),
+        "Tangle Asp must survive — it destroys the creature that blocked it, not itself"
     );
 }
 

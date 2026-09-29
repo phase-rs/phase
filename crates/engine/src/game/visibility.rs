@@ -1409,11 +1409,15 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // authority for who receives priority after the batch finishes announcing.
     // No viewer projection carries it.
     filtered.pending_trigger_construction_priority_recipient = None;
-    // Resolution frames are server-authoritative continuations. They can carry
+    // CR 400.2 + CR 608.2c: Resolution frames and their instruction-local
+    // return results are server-authoritative continuations. They can carry
     // private object identities, trigger source contexts, and resolved ability
     // payloads; the separately projected `WaitingFor` prompt is the complete
     // viewer-facing interaction surface.
     filtered.resolution_stack = Default::default();
+    filtered.return_result_frames.clear();
+    filtered.active_return_result_occurrence = None;
+    filtered.next_return_result_occurrence_id = 1;
     // ChooseOneOf retains its runtime tail inside the authoritative prompt so
     // resolution can resume after the branch selection. Like every other
     // resolved continuation, that carrier can contain private object IDs and
@@ -3759,7 +3763,7 @@ mod tests {
             chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
-            chosen_counter_count: None,
+            chosen_counter_counts: Vec::new(),
             chosen_x: None,
             collected_evidence: Vec::new(),
             chosen_exiled: Vec::new(),
@@ -7823,6 +7827,7 @@ mod tests {
                 next_discard: 0,
                 next_exiled: 0,
                 next_sacrificed: 0,
+                next_counter_choice: 0,
                 selected_exile_remaining: Some(vec![hidden]),
                 selected_sacrifice_remaining: None,
                 deferred_cost_events: Vec::new(),
@@ -7865,6 +7870,7 @@ mod tests {
                         trigger_event: None,
                         trigger_events: Vec::new(),
                         trigger_match_count: None,
+                        return_result_occurrence: None,
                     }),
                     selected: vec![ObjectIncarnationRef::from_object(&state.objects[&hidden])],
                 },

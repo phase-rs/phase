@@ -450,6 +450,10 @@ mod tests {
         controller: PlayerId,
     ) -> ResolvedAbility {
         ResolvedAbility {
+            declares_chosen_group: None,
+            reads_chosen_group: None,
+            declares_return_result: None,
+            reads_return_result: None,
             detached_remainder: crate::types::ability::DetachedRemainder::NoProducer,
             effect: Effect::GivePlayerCounter {
                 counter_kind,
@@ -659,6 +663,10 @@ mod tests {
 
     fn make_lose_all(target: TargetFilter, controller: PlayerId) -> ResolvedAbility {
         ResolvedAbility {
+            declares_chosen_group: None,
+            reads_chosen_group: None,
+            declares_return_result: None,
+            reads_return_result: None,
             detached_remainder: crate::types::ability::DetachedRemainder::NoProducer,
             effect: Effect::LoseAllPlayerCounters { target },
             controller,

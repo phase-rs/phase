@@ -38469,14 +38469,15 @@ pub(crate) fn parse_effect_chain_ir(
             }
         }
 
-        // CR 608.2c + CR 107.1c: "Repeat this process until … whichever comes
+        // CR 608.2c: "Repeat this process until … whichever comes
         // first" — auto-repeat loop with game-state stop predicates (Tainted Pact).
         if let Some(continuation) = try_parse_repeat_until_stop_conditions(&lower_check) {
             pending_repeat_until = Some(continuation);
+            builder.note_repeated_process_boundary();
             continue;
         }
 
-        // CR 608.2c + CR 107.1c: "Repeat this process" — a loop-continuation
+        // CR 608.2c: "Repeat this process" — a loop-continuation
         // directive that doesn't produce an independent effect. It is a
         // back-reference applying to the process (chain) built so far.
         //
@@ -38506,6 +38507,7 @@ pub(crate) fn parse_effect_chain_ir(
                 }
                 RepeatProcessOutcome::ConsumeOnly => {}
             }
+            builder.note_repeated_process_boundary();
             continue;
         }
 

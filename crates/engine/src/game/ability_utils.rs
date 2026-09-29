@@ -151,6 +151,10 @@ pub fn build_resolved_from_def_with_targets(
 ) -> ResolvedAbility {
     let mut resolved =
         ResolvedAbility::new(*def.effect.clone(), targets, source_id, controller).kind(def.kind);
+    resolved.declares_chosen_group = def.declares_chosen_group;
+    resolved.reads_chosen_group = def.reads_chosen_group;
+    resolved.declares_return_result = def.declares_return_result;
+    resolved.reads_return_result = def.reads_return_result.clone();
     resolved.context.face_down_in_exile = def.face_down_in_exile;
     resolved.context.ability_tag = def.ability_tag;
     resolved.activation_cost_reduction = def.cost_reduction.clone();
@@ -277,6 +281,10 @@ pub(crate) fn apply_instead_swap(
 ) -> ResolvedAbility {
     let mut overridden = parent.clone();
     overridden.effect = sub.effect.clone();
+    overridden.declares_chosen_group = sub.declares_chosen_group;
+    overridden.reads_chosen_group = sub.reads_chosen_group;
+    overridden.declares_return_result = sub.declares_return_result;
+    overridden.reads_return_result = sub.reads_return_result.clone();
     overridden.duration = sub.duration.clone();
     // CR 608.2c: The override sub is consumed; its own sub_ability becomes the
     // new chain tail. The else_ability mirrors that chain.
@@ -1935,6 +1943,7 @@ pub fn assign_targets_in_chain(
     }
     stamp_other_batch_source_targets(ability);
     ability.capture_target_incarnations_recursive(state);
+    restamp_chosen_group_targets(ability);
     Ok(())
 }
 
@@ -1962,6 +1971,7 @@ pub fn assign_selected_slots_in_chain(
     }
     stamp_other_batch_source_targets(ability);
     ability.capture_target_incarnations_recursive(state);
+    restamp_chosen_group_targets(ability);
     Ok(())
 }
 
@@ -2848,6 +2858,7 @@ pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -
     if let Some(else_ability) = validated.else_ability.as_mut() {
         **else_ability = validate_targets_in_chain(state, else_ability);
     }
+    restamp_chosen_group_targets(&mut validated);
     validated
 }
 
@@ -10479,6 +10490,77 @@ pub(crate) fn restamp_derived_chain_targets(ability: &mut ResolvedAbility) {
     }
     remirror(ability);
     stamp_other_batch_source_targets(ability);
+    restamp_chosen_group_targets(ability);
+}
+
+/// CR 601.2c + CR 608.2b: An anaphoric instruction reads only the active
+/// producer's announced targets. An empty vector is an intentional binding.
+fn restamp_chosen_group_targets(ability: &mut ResolvedAbility) {
+    use std::collections::HashMap;
+
+    type GroupTargets = (Vec<TargetRef>, Vec<ObjectIncarnationRef>);
+
+    fn collect(
+        node: &ResolvedAbility,
+        groups: &mut HashMap<crate::types::ability::ChosenGroupId, GroupTargets>,
+    ) {
+        let instead = node.sub_ability.as_deref().filter(|sub| {
+            matches!(
+                sub.condition,
+                Some(AbilityCondition::AdditionalCostPaidInstead)
+            )
+        });
+        if let Some(sub) = instead {
+            if node.context.additional_cost_paid {
+                collect(sub, groups);
+                return;
+            }
+        }
+        if let Some(id) = node.declares_chosen_group {
+            groups.insert(
+                id,
+                (
+                    node.targets.clone(),
+                    node.selected_target_incarnations.clone(),
+                ),
+            );
+        }
+        if let Some(sub) = node.sub_ability.as_deref() {
+            if instead.is_some() {
+                if let Some(tail) = sub.sub_ability.as_deref() {
+                    if tail.sub_link == SubAbilityLink::SequentialSibling {
+                        collect(tail, groups);
+                    }
+                }
+            } else {
+                collect(sub, groups);
+            }
+        }
+        if let Some(other) = node.else_ability.as_deref() {
+            collect(other, groups);
+        }
+    }
+
+    fn bind(
+        node: &mut ResolvedAbility,
+        groups: &HashMap<crate::types::ability::ChosenGroupId, GroupTargets>,
+    ) {
+        if let Some(id) = node.reads_chosen_group {
+            let (targets, pins) = groups.get(&id).cloned().unwrap_or_default();
+            node.targets = targets;
+            node.selected_target_incarnations = pins;
+        }
+        if let Some(sub) = node.sub_ability.as_deref_mut() {
+            bind(sub, groups);
+        }
+        if let Some(other) = node.else_ability.as_deref_mut() {
+            bind(other, groups);
+        }
+    }
+
+    let mut groups = HashMap::new();
+    collect(ability, &mut groups);
+    bind(ability, &groups);
 }
 
 /// CR 601.2c + CR 115.8 + CR 700.2f: the prompt's addresses must still describe

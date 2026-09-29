@@ -2,7 +2,9 @@ use rand::Rng;
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use thiserror::Error;
 
-use crate::types::ability::{DurationEvent, EffectKind, KeywordAction, TargetRef};
+use crate::types::ability::{
+    AbilityCondition, DurationEvent, EffectKind, KeywordAction, TargetRef,
+};
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::action_rejection::{ActionRejection, ActionRejectionCode};
@@ -10001,10 +10003,28 @@ fn finalize_copy_retarget(
         .unwrap_or_default();
     if let Some(entry) = state.stack.iter_mut().find(|e| e.id == copy_id) {
         if let Some(ability) = entry.ability_mut() {
+            // CR 707.10c + CR 601.2c: An additional-cost "instead choose"
+            // branch owns the declared slots. The root is only its mirror.
+            // Update the child before re-deriving the mirror and selected-group
+            // readers, including the unchanged members of a variable target set.
+            if ability.context.additional_cost_paid {
+                if let Some(sub) = ability.sub_ability.as_deref_mut().filter(|sub| {
+                    matches!(
+                        sub.condition,
+                        Some(AbilityCondition::AdditionalCostPaidInstead)
+                    )
+                }) {
+                    sub.targets = targets.clone();
+                    for pin in &changed_pins {
+                        sub.update_selected_target_incarnation(*pin);
+                    }
+                }
+            }
             ability.targets = targets;
             for pin in changed_pins {
                 ability.update_selected_target_incarnation(pin);
             }
+            crate::game::ability_utils::restamp_derived_chain_targets(ability);
         }
     }
     events.push(GameEvent::EffectResolved {
@@ -23003,6 +23023,7 @@ mod stage2_injector_tests {
             trigger_event: None,
             trigger_events: Vec::new(),
             trigger_match_count: None,
+            return_result_occurrence: None,
         });
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: asked,

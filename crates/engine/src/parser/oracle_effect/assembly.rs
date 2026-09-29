@@ -26,9 +26,9 @@ use crate::parser::oracle_nom::error::OracleError;
 use crate::parser::oracle_nom::target::chain_text_mentions_chosen_object;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction,
-    CastFromZoneDriver, CastingPermission, ChoiceType, Comparator, ControllerRef, DamageChannel,
-    Effect, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, StaticCondition, SubAbilityLink,
-    TapStateChange, TargetFilter,
+    CastFromZoneDriver, CastingPermission, ChoiceType, ChosenGroupId, Comparator, ControllerRef,
+    DamageChannel, Effect, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, ReturnResultId,
+    StaticCondition, SubAbilityLink, TapStateChange, TargetFilter,
 };
 use crate::types::game_state::TargetSelectionConstraint;
 use crate::types::zones::Zone;
@@ -2711,6 +2711,22 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         let clause_effect = unabsorbed_rider_gap.unwrap_or_else(|| clause_ir.parsed.effect.clone());
         let is_target_only = matches!(clause_effect, Effect::TargetOnly { .. });
         let mut def = AbilityDefinition::new(kind, clause_effect);
+        def.declares_chosen_group = clause_ir
+            .declares_chosen_clause
+            .map(|id| ChosenGroupId(id.0));
+        def.reads_chosen_group = clause_ir.reads_chosen_clause.map(|id| ChosenGroupId(id.0));
+        if ir.clauses.iter().any(|reader| {
+            reader
+                .reads_return_result
+                .as_ref()
+                .is_some_and(|(id, _)| *id == clause_ir.id)
+        }) {
+            def.declares_return_result = Some(ReturnResultId(clause_ir.id.0));
+        }
+        def.reads_return_result = clause_ir
+            .reads_return_result
+            .as_ref()
+            .map(|(id, spec)| (ReturnResultId(id.0), spec.clone()));
         // CR 702.26a: Preserve clause provenance on parent-target tap riders so
         // host-bound phase-in rewrites can match the exact printed phrase without
         // falling back to whole-trigger text.
@@ -3428,6 +3444,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 // parent chain, so reset it to the default within-process step.
                 let lifted_sub_link = inner.sub_link;
                 inner.sub_link = SubAbilityLink::ContinuationStep;
+                let delayed_return_reader = inner.reads_return_result.take();
                 *current = AbilityDefinition::new(
                     kind,
                     Effect::CreateDelayedTrigger {
@@ -3436,6 +3453,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                         uses_tracked_set: false,
                     },
                 );
+                current.reads_return_result = delayed_return_reader;
                 current.condition = lifted_condition;
                 current.optional = lifted_optional;
                 current.optional_for = lifted_optional_for;

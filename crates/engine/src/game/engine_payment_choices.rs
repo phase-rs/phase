@@ -163,6 +163,7 @@ fn handle_optional_effect_choice_inner(
                 trigger_event: pending_event,
                 trigger_events: pending_events,
                 trigger_match_count: pending_count,
+                return_result_occurrence,
             } = frame;
             let choice = if accept {
                 AutoMayChoice::Accept
@@ -187,8 +188,16 @@ fn handle_optional_effect_choice_inner(
             // resolution would have observed.
             let previous_trigger_match_count = state.current_trigger_match_count;
             state.current_trigger_match_count = pending_count;
+            // CR 608.2c: this choice resumes the same resolving instruction,
+            // including its named-result frame. A nested resolution may have
+            // its own selector; restore that exact prior value afterwards.
+            let previous_return_occurrence = std::mem::replace(
+                &mut state.active_return_result_occurrence,
+                return_result_occurrence,
+            );
             let result =
                 effects::resolve_optional_effect_decision(state, *ability, choice, events, 1);
+            state.active_return_result_occurrence = previous_return_occurrence;
             state.current_trigger_event = previous_trigger_event;
             state.current_trigger_events = previous_trigger_events;
             state.current_trigger_match_count = previous_trigger_match_count;
@@ -2910,6 +2919,7 @@ mod tests {
             trigger_event: None,
             trigger_events: Vec::new(),
             trigger_match_count: None,
+            return_result_occurrence: None,
         });
         state.waiting_for = WaitingFor::OpponentMayChoice {
             player: PlayerId(0),
@@ -3000,6 +3010,7 @@ mod tests {
             trigger_event: None,
             trigger_events: Vec::new(),
             trigger_match_count: None,
+            return_result_occurrence: None,
         });
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
@@ -3033,6 +3044,7 @@ mod tests {
             trigger_event: None,
             trigger_events: Vec::new(),
             trigger_match_count: None,
+            return_result_occurrence: None,
         });
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
@@ -3072,6 +3084,7 @@ mod tests {
             trigger_event: None,
             trigger_events: Vec::new(),
             trigger_match_count: None,
+            return_result_occurrence: None,
         });
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
@@ -3108,6 +3121,7 @@ mod tests {
             trigger_event: None,
             trigger_events: Vec::new(),
             trigger_match_count: None,
+            return_result_occurrence: None,
         });
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
@@ -3142,6 +3156,7 @@ mod tests {
             trigger_event: None,
             trigger_events: Vec::new(),
             trigger_match_count: None,
+            return_result_occurrence: None,
         });
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
@@ -3175,6 +3190,7 @@ mod tests {
             trigger_event: None,
             trigger_events: Vec::new(),
             trigger_match_count: None,
+            return_result_occurrence: None,
         });
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
@@ -3208,6 +3224,7 @@ mod tests {
             trigger_event: None,
             trigger_events: Vec::new(),
             trigger_match_count: None,
+            return_result_occurrence: None,
         });
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
