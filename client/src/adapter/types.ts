@@ -815,6 +815,7 @@ export type TapCreaturesSelectionMode =
 // to the chosen objects. Internally tagged (`#[serde(tag = "type")]`).
 export type PayCostKind =
   | { type: "Discard" }
+  | { type: "Reveal" }
   | { type: "Sacrifice" }
   | { type: "ReturnToHand" }
   | { type: "ExileFromZone"; zone: ExileCostSourceZone }
