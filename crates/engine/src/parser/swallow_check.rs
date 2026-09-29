@@ -2876,13 +2876,11 @@ fn detect_dynamic_qty(
             return;
         }
     }
-    // CR 608.2c: a per-player iteration carried by co-scoped `player_scope` + a
-    // `ParentTarget` consumer is represented, not a swallowed quantity.
+    // CR 608.2c: each printed "For each <population>," is represented by its own
+    // distinct co-scoped player_scope + ParentTarget iteration (occurrence-counted
+    // per population); an unmatched occurrence is a swallowed clause.
     if let Some(populations) = cleaned_for_each_is_only_player_iteration(cleaned, &markers) {
-        if populations
-            .iter()
-            .all(|pop| any_ability_has_co_scoped_parent_target_iteration(scoped, pop))
-        {
+        if player_iterations_cover_all_for_each_markers(&populations, scoped) {
             return;
         }
     }
@@ -3094,7 +3092,9 @@ fn player_iteration_head(input: &str) -> Option<PlayerFilter> {
 /// CR 608.2c: `Some(populations)` when the only dynamic marker this line raises
 /// is "for each " (per the shared `active_dynamic_markers` authority, so
 /// " twice " and every other marker are excluded) and every "for each "
-/// occurrence is a "For each <population>," per-player iteration head.
+/// occurrence is a "For each <population>," per-player iteration head. The
+/// returned `Vec` holds one entry per printed occurrence (duplicates kept):
+/// `player_iterations_cover_all_for_each_markers` counts it as a multiset.
 fn cleaned_for_each_is_only_player_iteration(
     cleaned: &str,
     markers: &[&str],
@@ -3108,56 +3108,133 @@ fn cleaned_for_each_is_only_player_iteration(
         .collect()
 }
 
-/// CR 608.2c: "For each <population>," realised as a per-player iteration — a
+/// CR 608.2c: the co-scoped `ParentTarget` consumer of a per-iteration
+/// referent introducer scoped to `pop`, if `def` heads one printed per-player
+/// iteration. "For each <population>," realised as a per-player iteration: a
 /// def scoped to that population introduces a per-iteration object referent
 /// and its sub, co-scoped to the same population, consumes it through
 /// `ParentTarget`. A structural fact the parser produces only by binding the
 /// iteration, never implied by the "for each" text itself.
-fn def_tree_has_co_scoped_parent_target_iteration(
-    def: &AbilityDefinition,
+fn co_scoped_parent_target_consumer<'a>(
+    def: &'a AbilityDefinition,
     pop: &PlayerFilter,
-) -> bool {
-    let here = def.player_scope.as_ref() == Some(pop)
-        && crate::game::effects::effect_introduces_per_iteration_referent(&def.effect)
-        && def.sub_ability.as_deref().is_some_and(|sub| {
-            sub.player_scope.as_ref() == Some(pop)
-                && matches!(sub.effect.target_filter(), Some(TargetFilter::ParentTarget))
-        });
-    if here {
-        return true;
+) -> Option<&'a AbilityDefinition> {
+    if def.player_scope.as_ref() != Some(pop)
+        || !crate::game::effects::effect_introduces_per_iteration_referent(&def.effect)
+    {
+        return None;
     }
-    if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
-        if def_tree_has_co_scoped_parent_target_iteration(effect, pop) {
-            return true;
-        }
-    }
-    def.sub_ability
-        .as_deref()
-        .is_some_and(|sub| def_tree_has_co_scoped_parent_target_iteration(sub, pop))
-        || def
-            .else_ability
-            .as_deref()
-            .is_some_and(|branch| def_tree_has_co_scoped_parent_target_iteration(branch, pop))
-        || def
-            .mode_abilities
-            .iter()
-            .any(|mode| def_tree_has_co_scoped_parent_target_iteration(mode, pop))
+    def.sub_ability.as_deref().filter(|sub| {
+        sub.player_scope.as_ref() == Some(pop)
+            && matches!(sub.effect.target_filter(), Some(TargetFilter::ParentTarget))
+    })
 }
 
-fn any_ability_has_co_scoped_parent_target_iteration(
-    parsed: &ParsedAbilities,
+/// Iterations of `pop` below `def`: its `CreateDelayedTrigger` inner effect,
+/// the given `sub` (the def's own `sub_ability`, or `None` when that sub was
+/// spent as a consumer), its `else_ability` and its `mode_abilities`.
+fn iteration_count_below(
+    def: &AbilityDefinition,
     pop: &PlayerFilter,
-) -> bool {
-    let walk = |def: &AbilityDefinition| def_tree_has_co_scoped_parent_target_iteration(def, pop);
-    parsed.abilities.iter().any(walk)
-        || parsed
+    sub: Option<&AbilityDefinition>,
+) -> usize {
+    let delayed = match &*def.effect {
+        Effect::CreateDelayedTrigger { effect, .. } => {
+            def_tree_co_scoped_parent_target_iteration_count(effect, pop)
+        }
+        _ => 0,
+    };
+    delayed
+        + sub.map_or(0, |s| {
+            def_tree_co_scoped_parent_target_iteration_count(s, pop)
+        })
+        + def.else_ability.as_deref().map_or(0, |branch| {
+            def_tree_co_scoped_parent_target_iteration_count(branch, pop)
+        })
+        + def
+            .mode_abilities
+            .iter()
+            .map(|mode| def_tree_co_scoped_parent_target_iteration_count(mode, pop))
+            .sum::<usize>()
+}
+
+/// CR 608.2c: the number of distinct per-player iterations of `pop` in `def`'s
+/// tree. Each parsed node takes part in at most one (introducer, consumer)
+/// pair, so a consumer that is itself an introducer is never counted twice,
+/// while chained iterations along `sub_ability` each count.
+fn def_tree_co_scoped_parent_target_iteration_count(
+    def: &AbilityDefinition,
+    pop: &PlayerFilter,
+) -> usize {
+    match co_scoped_parent_target_consumer(def, pop) {
+        // CR 608.2c: one printed iteration = this introducer + its co-scoped consumer.
+        // The consumer is spent on this pair and never heads a second one, so the
+        // walk resumes at the consumer's own children (one node, at most one pair).
+        Some(consumer) => {
+            1 + iteration_count_below(def, pop, None)
+                + iteration_count_below(consumer, pop, consumer.sub_ability.as_deref())
+        }
+        None => iteration_count_below(def, pop, def.sub_ability.as_deref()),
+    }
+}
+
+/// CR 608.2c: the number of distinct printed per-player iterations of `pop`
+/// that the unit's parse represents. Spell-ability roots are separate printed
+/// items and are summed. CR 113.2c + CR 603.1b: every root in a unit's
+/// `scoped` comes from an item starting on the unit's one source line
+/// (`audit_units` / `scope_to_unit`), and that paragraph is one ability. The
+/// parser splits one printed triggered ability with several trigger conditions
+/// into one `TriggerDefinition` per condition, each carrying the ability's
+/// whole instruction list — equal clones or per-condition re-parses — so the
+/// ability counts as the MAX over the unit's trigger roots, never their sum.
+/// CR 113.2c + CR 614.1c / CR 614.1e: likewise a compound replacement head
+/// ("As ~ enters or is turned face up") counts as the max over the unit's
+/// replacement roots. Neither the item id (each split definition is its own
+/// item) nor structural equality (split halves may differ) can identify the
+/// splits; the unit can. Fail-loud: per category max ≤ Σ distinct ≤ Σ all, so
+/// this errs only when one unit carries two separately printed triggered
+/// abilities (or replacement effects) that each hold an iteration (CR 113.2c's
+/// keyword-line exception), which surfaces as a visible `DynamicQty` gap, never
+/// a silent swallow.
+fn co_scoped_parent_target_iteration_count(parsed: &ParsedAbilities, pop: &PlayerFilter) -> usize {
+    let count =
+        |def: &AbilityDefinition| def_tree_co_scoped_parent_target_iteration_count(def, pop);
+    parsed.abilities.iter().map(count).sum::<usize>()
+        + parsed
             .triggers
             .iter()
-            .any(|t| t.execute.as_deref().is_some_and(walk))
-        || parsed
+            .filter_map(|t| t.execute.as_deref())
+            .map(count)
+            .max()
+            .unwrap_or(0)
+        + parsed
             .replacements
             .iter()
-            .any(|r| r.execute.as_deref().is_some_and(walk))
+            .filter_map(|r| r.execute.as_deref())
+            .map(count)
+            .max()
+            .unwrap_or(0)
+}
+
+/// CR 608.2c: every printed "For each <population>," occurrence is represented
+/// by its own distinct parsed per-player iteration of that population.
+///
+/// Occurrence-counted, not set-like (as `ward_power_life_payments_cover_all_equal_to_markers`):
+/// asking "does some parsed iteration of this population exist?" once per
+/// occurrence would let one parsed iteration discharge every same-population
+/// occurrence, hiding a second printed clause the parser dropped. Each printed
+/// occurrence consumes one distinct parsed iteration of its population — the
+/// same consumption contract as `dynamic_markers_are_all_recorded_unrecognized`
+/// — so a second printed clause with no iteration of its own stays reported.
+fn player_iterations_cover_all_for_each_markers(
+    populations: &[PlayerFilter],
+    scoped: &ParsedAbilities,
+) -> bool {
+    !populations.is_empty()
+        && populations.iter().all(|pop| {
+            populations.iter().filter(|p| *p == pop).count()
+                <= co_scoped_parent_target_iteration_count(scoped, pop)
+        })
 }
 
 /// The counter-multiplier phrases whose ×2 is carried intrinsically by the
@@ -11951,6 +12028,15 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
     fn dynamic_qty_fires(cleaned: &str, abilities: Vec<AbilityDefinition>) -> bool {
         let mut parsed = no_activation_limit_abilities();
         parsed.abilities = abilities;
+        dynamic_qty_fires_parsed(cleaned, parsed)
+    }
+
+    /// Run `detect_dynamic_qty` over `cleaned` with `parsed` as the unit's
+    /// scoped roots (abilities, triggers and replacements).
+    fn dynamic_qty_fires_parsed(
+        cleaned: &str,
+        parsed: crate::parser::oracle::ParsedAbilities,
+    ) -> bool {
         let evidence = UnitEvidence::of(&parsed);
         let mut found = Vec::new();
         super::detect_dynamic_qty(cleaned, cleaned, &parsed, &evidence, &mut found);
@@ -12086,6 +12172,163 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
              revealed this way with mana value equal to its power.",
             pair(),
         ));
+    }
+
+    /// One line, two same-population "For each opponent," markers.
+    const TWO_OPP_TEXT: &str = "each opponent reveals their hand. for each opponent, exile a \
+                                creature card they revealed this way. for each opponent, exile a \
+                                creature card they revealed this way.";
+
+    /// One line, one "For each opponent," and one "For each player," marker.
+    const MIXED_TEXT: &str = "each opponent reveals their hand. for each opponent, exile a \
+                              creature card they revealed this way. for each player, exile a \
+                              creature card they revealed this way.";
+
+    /// One co-scoped per-player iteration of `pop` (introducer + `ParentTarget`
+    /// consumer).
+    fn pair(pop: PlayerFilter) -> AbilityDefinition {
+        scoped_reveal_choice(pop.clone(), Some((pop, TargetFilter::ParentTarget)))
+    }
+
+    /// Two chained co-scoped iterations of `pop` in one tree: the second pair
+    /// hangs off the first pair's consumer.
+    fn chain(pop: PlayerFilter) -> AbilityDefinition {
+        let mut p1 = pair(pop.clone());
+        p1.sub_ability.as_mut().expect("consumer").sub_ability = Some(Box::new(pair(pop)));
+        p1
+    }
+
+    /// CR 608.2c: two printed same-population iterations on one line need two
+    /// distinct parsed iterations; one parsed iteration leaves the second
+    /// printed clause reported.
+    #[test]
+    fn co_scoped_iteration_two_same_population_markers_one_iteration_still_warns() {
+        assert!(
+            dynamic_qty_fires(TWO_OPP_TEXT, vec![]),
+            "reach: the text raises it"
+        );
+        assert!(
+            !dynamic_qty_fires(
+                TWO_OPP_TEXT,
+                vec![pair(PlayerFilter::Opponent), pair(PlayerFilter::Opponent)],
+            ),
+            "two distinct iterations discharge two markers"
+        );
+        assert!(
+            dynamic_qty_fires(TWO_OPP_TEXT, vec![pair(PlayerFilter::Opponent)]),
+            "one iteration must not discharge two printed markers"
+        );
+    }
+
+    /// The count continues past a matched pair: chained iterations each count.
+    #[test]
+    fn co_scoped_iteration_chained_pairs_each_count() {
+        assert!(!dynamic_qty_fires(
+            TWO_OPP_TEXT,
+            vec![chain(PlayerFilter::Opponent)]
+        ));
+        // Negative twin: the inner iteration has no co-scoped consumer.
+        let mut broken = pair(PlayerFilter::Opponent);
+        broken.sub_ability.as_mut().expect("consumer").sub_ability =
+            Some(Box::new(scoped_reveal_choice(PlayerFilter::Opponent, None)));
+        assert!(dynamic_qty_fires(TWO_OPP_TEXT, vec![broken]));
+    }
+
+    /// A consumer that is itself an introducer is spent on one pair and never
+    /// opens a second: head → mid → tail counts one iteration, not two.
+    #[test]
+    fn co_scoped_iteration_shared_node_counts_once() {
+        let shared_chain = || {
+            let mut mid = pair(PlayerFilter::Opponent);
+            if let Effect::RevealHand { target, .. } = &mut *mid.effect {
+                *target = TargetFilter::ParentTarget;
+            }
+            let mut head = scoped_reveal_choice(PlayerFilter::Opponent, None);
+            head.sub_ability = Some(Box::new(mid));
+            head
+        };
+        assert!(
+            !dynamic_qty_fires(CO_SCOPED_TEXT, vec![shared_chain()]),
+            "the chain represents one iteration"
+        );
+        assert!(dynamic_qty_fires(TWO_OPP_TEXT, vec![shared_chain()]));
+    }
+
+    /// Mixed populations are counted per population, never pooled.
+    #[test]
+    fn co_scoped_iteration_mixed_populations_count_per_population() {
+        assert!(!dynamic_qty_fires(
+            MIXED_TEXT,
+            vec![pair(PlayerFilter::Opponent), pair(PlayerFilter::All)],
+        ));
+        assert!(dynamic_qty_fires(
+            MIXED_TEXT,
+            vec![pair(PlayerFilter::Opponent)]
+        ));
+        assert!(
+            dynamic_qty_fires(
+                MIXED_TEXT,
+                vec![pair(PlayerFilter::Opponent), pair(PlayerFilter::Opponent)],
+            ),
+            "two Opponent iterations must not discharge the Player marker"
+        );
+    }
+
+    /// CR 113.2c + CR 603.1b / CR 614.1c / CR 614.1e: one printed ability split
+    /// into several trigger or replacement roots counts once (the per-category
+    /// max), whether the split roots are equal or divergent.
+    #[test]
+    fn co_scoped_iteration_split_trigger_and_replacement_roots_count_once() {
+        use crate::types::ability::{ReplacementDefinition, TriggerDefinition};
+        use crate::types::replacements::ReplacementEvent;
+
+        // (a) Identical trigger clones.
+        let mut parsed = no_activation_limit_abilities();
+        parsed.triggers = vec![
+            TriggerDefinition::new(TriggerMode::ChangesZone).execute(pair(PlayerFilter::Opponent)),
+            TriggerDefinition::new(TriggerMode::BecomeMonstrous)
+                .execute(pair(PlayerFilter::Opponent)),
+        ];
+        assert!(
+            !dynamic_qty_fires_parsed(CO_SCOPED_TEXT, parsed.clone()),
+            "reach: trigger roots are walked"
+        );
+        assert!(dynamic_qty_fires_parsed(TWO_OPP_TEXT, parsed));
+
+        // (b) Identical replacement clones.
+        let mut parsed = no_activation_limit_abilities();
+        parsed.replacements = vec![
+            ReplacementDefinition::new(ReplacementEvent::Moved)
+                .execute(pair(PlayerFilter::Opponent)),
+            ReplacementDefinition::new(ReplacementEvent::TurnFaceUp)
+                .execute(pair(PlayerFilter::Opponent)),
+        ];
+        assert!(
+            !dynamic_qty_fires_parsed(CO_SCOPED_TEXT, parsed.clone()),
+            "reach: replacement roots are walked"
+        );
+        assert!(dynamic_qty_fires_parsed(TWO_OPP_TEXT, parsed));
+
+        // (c) Divergent trigger clones (per-condition re-parse).
+        let mut second = pair(PlayerFilter::Opponent);
+        second.description = Some("second".into());
+        let mut parsed = no_activation_limit_abilities();
+        parsed.triggers = vec![
+            TriggerDefinition::new(TriggerMode::ChangesZone).execute(pair(PlayerFilter::Opponent)),
+            TriggerDefinition::new(TriggerMode::BecomeMonstrous).execute(second),
+        ];
+        assert!(
+            !dynamic_qty_fires_parsed(CO_SCOPED_TEXT, parsed.clone()),
+            "reach: divergent trigger roots are walked"
+        );
+        assert!(dynamic_qty_fires_parsed(TWO_OPP_TEXT, parsed));
+
+        // (d) One trigger root holding two chained iterations discharges two markers.
+        let mut parsed = no_activation_limit_abilities();
+        parsed.triggers =
+            vec![TriggerDefinition::new(TriggerMode::ChangesZone)
+                .execute(chain(PlayerFilter::Opponent))];
+        assert!(!dynamic_qty_fires_parsed(TWO_OPP_TEXT, parsed));
     }
 
     // ── Detector P: DamageSubjectConjunction ────────────────────────────
