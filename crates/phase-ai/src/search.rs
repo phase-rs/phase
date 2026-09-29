@@ -1477,6 +1477,9 @@ pub fn fallback_action(
         // Take the engine's own issued answer instead of restating the rule.
         WaitingFor::ScryChoice { .. }
         | WaitingFor::DigChoice { .. }
+        // CR 401.2: exactly `top_count` cards, never an empty pick — take the
+        // engine's own issued answer rather than a blanket empty selection.
+        | WaitingFor::DigRestSplitChoice { .. }
         | WaitingFor::SurveilChoice { .. }
         | WaitingFor::RevealChoice { .. }
         | WaitingFor::SearchChoice { .. }
@@ -1921,8 +1924,17 @@ pub fn fallback_action(
         WaitingFor::AlternativeCastChoice { .. } => Some(GameAction::ChooseAlternativeCast {
             choice: AlternativeCastDecision::Normal,
         }),
+        // CR 601.2a + CR 601.2b: the first option's method, announced under
+        // the permission that gives up least.
         WaitingFor::CastingVariantChoice { options, .. } => {
-            (!options.is_empty()).then_some(GameAction::ChooseCastingVariant { index: 0 })
+            crate::policies::graveyard_authority::fallback_announcement(
+                state,
+                &config.policy_penalties,
+                options,
+            )
+            .or_else(|| {
+                (!options.is_empty()).then_some(GameAction::ChooseCastingVariant { index: 0 })
+            })
         }
         WaitingFor::ChoosePermanentTypeSlot {
             available_slots, ..
@@ -3633,6 +3645,13 @@ pub(crate) fn deterministic_choice(
 ) -> Option<GameAction> {
     if let Some(action) = resolving_effect_mana_choice(state, ai_player, actions)
         .or_else(|| evoke_variant_choice(state, ai_player))
+        .or_else(|| {
+            crate::policies::graveyard_authority::same_method_announcement(
+                state,
+                &config.policy_penalties,
+                ai_player,
+            )
+        })
     {
         return Some(action);
     }
@@ -3816,6 +3835,78 @@ pub(crate) fn deterministic_choice(
             scored.iter().take(*keep_count).map(|(id, _)| *id).collect()
         };
         return Some(GameAction::SelectCards { cards: kept });
+    }
+
+    // CR 401.2 + CR 401.4: the submission is a full ARRANGEMENT of the
+    // remainder — the leading `top_count` entries take the library top and the
+    // rest take the bottom. Sorting the whole pile by intrinsic value descending
+    // and submitting it verbatim gets both decisions right at once with the
+    // same ordering the sibling dig and surveil arms use:
+    //   * partition — the most valuable `top_count` cards land on top, where
+    //     they are drawn soonest;
+    //   * CR 401.4 order — within the top pile the best card is drawn first,
+    //     and within the bottom pile the better cards sit nearer the rest of
+    //     the library (`route_rest_split_then` appends bottom entries in the
+    //     submitted order, so the last entry ends up bottom-most).
+    //
+    // CR 401.4: when the partition is already settled (`OrderOnly` — the acting
+    // player is the library's owner, not the chooser), sorting the WHOLE pile
+    // would move cards across the top/bottom boundary and be rejected. Sort
+    // each pile independently instead, which keeps the same "best first"
+    // heuristic inside the partition the chooser fixed.
+    if let WaitingFor::DigRestSplitChoice {
+        cards,
+        top_count,
+        scope,
+        ..
+    } = &state.waiting_for
+    {
+        let by_value_desc = |segment: &[engine::types::identifiers::ObjectId]| {
+            let mut scored: Vec<_> = segment
+                .iter()
+                .map(|&id| (id, intrinsic_value(state, id)))
+                .collect();
+            scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            scored.into_iter().map(|(id, _)| id).collect::<Vec<_>>()
+        };
+        // CR 401.2 + CR 401.4 + CR 701.20e (hidden information): being the
+        // acting authority on this pile is NOT permission to see it. CR 401.4
+        // hands the arrangement to the library's OWNER, who for a cross-player
+        // dig is a different player than CR 701.20e's looker — so `by_value_desc`
+        // above must not run over a segment this AI was never shown. Like the
+        // `OpponentGuess` pre-emption in `choose_action`, the defect is that
+        // eval/search reads the UNFILTERED `GameState`: sorting a blind pile
+        // "best first" is a real information leak, observable to an attentive
+        // opponent as a consistent best-card-first arrangement. Pre-empt it by
+        // submitting the pile in its already-parked encounter order (the
+        // identity permutation), which is `deterministic_choice`'s analogue of
+        // that arm's rules-fair non-informative answer.
+        //
+        // Keyed on actual look permission, not on `scope`, so the common
+        // same-player dig (and a revealed or otherwise known pile) keeps the
+        // full value heuristic. `viewer_may_see_hidden_pile_card` is the engine
+        // authority `visibility.rs` uses for the same question, so the AI and
+        // the client projection cannot drift apart.
+        let arrange = |segment: &[engine::types::identifiers::ObjectId]| {
+            let may_see = segment.iter().all(|&id| {
+                engine::game::visibility::viewer_may_see_hidden_pile_card(state, ai_player, id)
+            });
+            if may_see {
+                by_value_desc(segment)
+            } else {
+                segment.to_vec()
+            }
+        };
+        let arrangement = if scope.partition_is_open() {
+            arrange(cards)
+        } else {
+            let split_at = (*top_count).min(cards.len());
+            let (top, bottom) = cards.split_at(split_at);
+            let mut arrangement = arrange(top);
+            arrangement.extend(arrange(bottom));
+            arrangement
+        };
+        return Some(GameAction::SelectCards { cards: arrangement });
     }
 
     if let WaitingFor::SurveilChoice { cards, .. } = &state.waiting_for {
@@ -11032,6 +11123,7 @@ mod tests {
             block_requirements: HashMap::new(),
             blocker_constraints: Default::default(),
             must_be_blocked_targets: Default::default(),
+            block_capacities: Default::default(),
         };
 
         for difficulty in [
@@ -14065,6 +14157,7 @@ mod tests {
             selectable_cards: pool,
             kept_destination: None,
             rest_destination: None,
+            rest_split_top_count: None,
             rest_order: engine::types::ability::DigRestOrder::Preserve,
             source_id: None,
             enter_tapped: false,
@@ -14191,6 +14284,7 @@ mod tests {
                 selectable_cards: vec![pool[0]],
                 kept_destination: None,
                 rest_destination: None,
+                rest_split_top_count: None,
                 rest_order: engine::types::ability::DigRestOrder::Preserve,
                 source_id: None,
                 enter_tapped: false,
@@ -15409,6 +15503,265 @@ mod tests {
         assert!(
             contract.contains_action(&state, &action),
             "the answer must be in P1's issued domain"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // CR 401.2 + CR 401.4 + CR 701.20e: the `DigRestSplitChoice` arranger must
+    // not sort a pile it was never shown.
+    //
+    // The AI mirror of the engine-layer regression in
+    // `crates/engine/tests/integration/telling_time_rest_split.rs`
+    // (`an_order_only_prompt_does_not_show_the_arranging_owner_the_card_faces`):
+    // the client projection stopped leaking the faces, but `deterministic_choice`
+    // runs on the UNFILTERED `GameState` and was still ordering the blind pile
+    // best-card-first — a leak an attentive opponent reads straight off the
+    // arrangement. Same class as the `OpponentGuess` pre-emption in
+    // `choose_action`.
+    // -----------------------------------------------------------------------
+
+    /// P0 digs four off P1's library, keeps one, and the whole three-card
+    /// remainder goes to the BOTTOM (`rest_split_top_count == 0`), so CR 401.4
+    /// hands P1 an `OrderOnly` arrangement of a pile only P0 looked at.
+    ///
+    /// `reveal` is the one axis that decides whether P1 may see it: `false` is
+    /// CR 701.20e's private look (shown to P0 alone), `true` is CR 701.20a's
+    /// public reveal (shown to everyone, P1 included).
+    fn order_only_cross_player_pause(reveal: bool) -> (GameRunner, Vec<ObjectId>) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let mut builder = scenario.add_spell_to_hand(P0, "Borrowed Foresight", true);
+        builder.with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 1,
+        });
+        builder.with_ability(Effect::Dig {
+            // "target player's library" — the axis that makes the looker (P0,
+            // the spell's controller) and the library's owner (P1) differ.
+            player: TargetFilter::Player,
+            count: QuantityExpr::Fixed { value: 4 },
+            destination: Some(Zone::Hand),
+            keep_count: Some(1),
+            keep_count_expr: None,
+            up_to: false,
+            filter: TargetFilter::Any,
+            rest_destination: Some(Zone::Library),
+            rest_split_top_count: Some(QuantityExpr::Fixed { value: 0 }),
+            rest_order: engine::types::ability::DigRestOrder::Preserve,
+            reveal,
+            enter_tapped: false,
+            enters_attacking: false,
+            source: engine::types::ability::DigSource::Library,
+        });
+        let spell_id = builder.id();
+        let mut runner = scenario.build();
+
+        for index in 0..5 {
+            let card_id = CardId(runner.state().next_object_id);
+            let id = create_object(
+                runner.state_mut(),
+                card_id,
+                P1,
+                format!("Theirs{index}"),
+                Zone::Library,
+            );
+            runner
+                .state_mut()
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+        for _ in 0..2 {
+            let unit = ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]);
+            runner.state_mut().players[0].mana_pool.add(unit);
+        }
+
+        let outcome = runner.cast(spell_id).target_player(P1).resolve();
+        let looked_at = match outcome.final_waiting_for() {
+            WaitingFor::DigChoice { cards, player, .. } => {
+                assert_eq!(*player, P0, "P0 is the looker");
+                cards.clone()
+            }
+            other => panic!("expected the keep prompt first, got {other:?}"),
+        };
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![looked_at[0]],
+            })
+            .expect("keeping one looked-at card must be accepted");
+        (runner, looked_at)
+    }
+
+    /// Reads the pile out of the live split prompt and grades it so its PARKED
+    /// order is strictly worst→best. `by_value_desc` must therefore REVERSE it,
+    /// which is what makes "did the AI sort by value?" empirically detectable
+    /// rather than a coincidence of the fixture's natural order.
+    fn graded_split_pile(runner: &mut GameRunner, expect_scope_open: bool) -> Vec<ObjectId> {
+        let (pile, scope) = match &runner.state().waiting_for {
+            WaitingFor::DigRestSplitChoice { cards, scope, .. } => (cards.clone(), *scope),
+            other => panic!("expected the split prompt, got {other:?}"),
+        };
+        assert_eq!(
+            scope.partition_is_open(),
+            expect_scope_open,
+            "fixture must reach the intended split scope"
+        );
+        assert!(
+            pile.len() >= 2,
+            "a one-card pile has one arrangement, so the test could not discriminate"
+        );
+        for (index, &id) in pile.iter().enumerate() {
+            let obj = runner.state_mut().objects.get_mut(&id).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.power = Some(index as i32 + 1);
+            obj.toughness = Some(index as i32 + 1);
+        }
+        // Reach-guard: the grading really is strictly increasing under the very
+        // scorer `by_value_desc` uses, so `value_desc != parked` is guaranteed.
+        let state = runner.state();
+        for window in pile.windows(2) {
+            assert!(
+                crate::card_value::intrinsic_value(state, window[0])
+                    < crate::card_value::intrinsic_value(state, window[1]),
+                "parked order must be strictly worst-first for the test to discriminate"
+            );
+        }
+        pile
+    }
+
+    fn split_answer(state: &GameState, ai_player: PlayerId) -> Vec<ObjectId> {
+        let config = create_config(AiDifficulty::Medium, Platform::Native);
+        match deterministic_choice(state, ai_player, &config, &[], None) {
+            Some(GameAction::SelectCards { cards }) => cards,
+            other => panic!("the split arm must answer with an arrangement, got {other:?}"),
+        }
+    }
+
+    /// THE REGRESSION ASSERTION. P1 arranges a pile only P0 was shown, so the
+    /// AI must submit it in parked order — NOT best-card-first.
+    ///
+    /// Revert-failing: restoring the unconditional `by_value_desc` makes the
+    /// answer the reversed (value-sorted) pile and both assertions below fail.
+    #[test]
+    fn a_blind_order_only_pile_is_not_arranged_by_card_value() {
+        let (mut runner, _looked_at) = order_only_cross_player_pause(false);
+        let pile = graded_split_pile(&mut runner, false);
+        let value_sorted: Vec<ObjectId> = pile.iter().rev().copied().collect();
+
+        // Reach-guard: P1 genuinely lacks look permission here — this is the
+        // blind branch, not a fixture that accidentally reveals the pile.
+        for &id in &pile {
+            assert!(
+                !engine::game::visibility::viewer_may_see_hidden_pile_card(runner.state(), P1, id),
+                "CR 701.20e: the private look was shown to P0 only"
+            );
+        }
+
+        let answer = split_answer(runner.state(), P1);
+        assert_eq!(
+            answer, pile,
+            "CR 401.4 grants P1 the ORDER of these cards, not permission to look \
+             at them (CR 401.2 + CR 701.20e) — the AI must arrange blind, in \
+             parked order"
+        );
+        assert_ne!(
+            answer, value_sorted,
+            "best-card-first over a pile P1 never saw is an observable \
+             information leak"
+        );
+    }
+
+    /// PAIRED POSITIVE (same fixture, `reveal` flipped): a CR 701.20a public
+    /// reveal genuinely shows P1 the pile, so the value heuristic must survive.
+    /// This is the control proving the fix keys on LOOK PERMISSION rather than
+    /// blanket-blinding every `OrderOnly` arranger.
+    #[test]
+    fn a_revealed_order_only_pile_is_still_arranged_by_card_value() {
+        let (mut runner, _looked_at) = order_only_cross_player_pause(true);
+        let pile = graded_split_pile(&mut runner, false);
+        let value_sorted: Vec<ObjectId> = pile.iter().rev().copied().collect();
+
+        for &id in &pile {
+            assert!(
+                engine::game::visibility::viewer_may_see_hidden_pile_card(runner.state(), P1, id),
+                "CR 701.20a: a revealed pile is shown to all players, P1 included"
+            );
+        }
+
+        let answer = split_answer(runner.state(), P1);
+        assert_eq!(
+            answer, value_sorted,
+            "with legitimate look permission the AI must keep sorting best-first"
+        );
+    }
+
+    /// PAIRED POSITIVE (the common production path — every currently printed
+    /// card of this class, e.g. Telling Time): a same-player dig leaves the
+    /// looker as the arranger and the partition still open, so the full
+    /// value heuristic runs over the WHOLE pile, unchanged.
+    #[test]
+    fn a_same_player_split_is_still_arranged_by_card_value() {
+        // Verbatim Telling Time Oracle text through the real parser — the
+        // printed card this whole capability exists for.
+        const TELLING_TIME_ORACLE: &str = "Look at the top three cards of your \
+library. Put one of those cards into your hand, one on top of your library, and \
+one on the bottom of your library.";
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let mut builder =
+            scenario.add_spell_to_hand_from_oracle(P0, "Telling Time", false, TELLING_TIME_ORACLE);
+        builder.with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 1,
+        });
+        let spell_id = builder.id();
+        let mut runner = scenario.build();
+
+        for index in 0..4 {
+            let card_id = CardId(runner.state().next_object_id);
+            let id = create_object(
+                runner.state_mut(),
+                card_id,
+                P0,
+                format!("Mine{index}"),
+                Zone::Library,
+            );
+            runner
+                .state_mut()
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+        for _ in 0..2 {
+            let unit = ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]);
+            runner.state_mut().players[0].mana_pool.add(unit);
+        }
+
+        let outcome = runner.cast(spell_id).resolve();
+        let looked_at = match outcome.final_waiting_for() {
+            WaitingFor::DigChoice { cards, .. } => cards.clone(),
+            other => panic!("expected the keep prompt first, got {other:?}"),
+        };
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![looked_at[0]],
+            })
+            .expect("keeping one looked-at card must be accepted");
+
+        let pile = graded_split_pile(&mut runner, true);
+        let value_sorted: Vec<ObjectId> = pile.iter().rev().copied().collect();
+        let answer = split_answer(runner.state(), P0);
+        assert_eq!(
+            answer, value_sorted,
+            "the looker arranging their own library keeps the full value \
+             heuristic — this fix must not cost the AI its card evaluation on \
+             the common path"
         );
     }
 

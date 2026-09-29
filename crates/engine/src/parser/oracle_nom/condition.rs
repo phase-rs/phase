@@ -14,6 +14,7 @@ use nom::Parser;
 
 use super::bridge::nom_on_lower;
 use super::error::{oracle_err, OracleError, OracleResult};
+use super::filter as nom_filter;
 use super::primitives::{
     parse_article, parse_color, parse_keyword_name, parse_mana_cost, parse_number,
     parse_object_recipient_pronoun, parse_property_keyword, parse_superlative_adjective,
@@ -7436,23 +7437,21 @@ fn parse_creatures_died_this_turn_threshold(input: &str) -> OracleResult<'_, Sta
 }
 
 /// "a <type-phrase> died this turn" — the filtered Morbid gate without a
-/// controller scope (Undead Sprinter's "a non-Zombie creature died this turn").
-/// Mirrors `parse_died_under_control_this_turn` but terminates on the bare
-/// " died this turn" and injects NO controller constraint. Rejects a non-empty
-/// type-phrase leftover / `TargetFilter::Any` so only a fully-typed subject claims
-/// the arm — a name-negation ("a creature not named X died this turn", Ebondeath)
-/// leaves "not named …" as leftover and falls through to a clean gap.
+/// controller scope (Undead Sprinter's "a non-Zombie creature died this turn";
+/// Ebondeath, Dracolich's "a creature not named Ebondeath, Dracolich died this
+/// turn"). Mirrors `parse_died_under_control_this_turn` but terminates on the
+/// bare " died this turn" and injects NO controller constraint. The subject is
+/// read by the shared `parse_died_subject_filter`.
 fn parse_filtered_creature_died_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = parse_article(input)?;
     let (rest, type_text) = take_until(" died this turn").parse(rest)?;
     let (rest, _) = tag(" died this turn").parse(rest)?;
-    let (filter, leftover) = parse_type_phrase_folding(type_text);
-    if !leftover.trim().is_empty() || filter == TargetFilter::Any {
+    let Some(filter) = parse_died_subject_filter(type_text) else {
         return Err(nom::Err::Error(nom::error::Error::new(
             input,
             nom::error::ErrorKind::Fail,
         )));
-    }
+    };
     Ok((
         rest,
         make_quantity_ge(
@@ -7464,6 +7463,39 @@ fn parse_filtered_creature_died_this_turn(input: &str) -> OracleResult<'_, Stati
             1,
         ),
     ))
+}
+
+/// CR 700.4 + CR 201.2: the subject of a "<subject> died [under …] this turn"
+/// gate, shared by the plain and under-control arms. A fully consumed type
+/// phrase keeps today's filter. A trailing "not named <name>" is folded in as
+/// `Not(Named)` (`oracle_nom::filter::parse_not_named_suffix`). The dead
+/// creature's name is read off its death-time zone-change snapshot, which the
+/// Ebondeath ruling requires ("cares what the creature's name was while it was
+/// last on the battlefield").
+///
+/// Returns `None` (the arm fails, leaving an honest gap) when:
+/// - the phrase is unrecognized (`Any`);
+/// - anything besides that suffix is left over;
+/// - the name exclusion would have to bind to a non-`Typed` (`Or`/`And`)
+///   subject, which isn't modelled.
+fn parse_died_subject_filter(type_text: &str) -> Option<TargetFilter> {
+    let (filter, leftover) = parse_type_phrase_folding(type_text);
+    if filter == TargetFilter::Any {
+        return None;
+    }
+    let leftover = leftover.trim();
+    if leftover.is_empty() {
+        return Some(filter);
+    }
+    let TargetFilter::Typed(mut typed) = filter else {
+        return None;
+    };
+    let (rest, name_exclusion) = nom_filter::parse_not_named_suffix(leftover).ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    typed.properties.push(name_exclusion);
+    Some(TargetFilter::Typed(typed))
 }
 
 /// CR 106.3 + CR 601.2h + CR 603.4: Parse
@@ -8429,13 +8461,12 @@ fn parse_died_under_control_this_turn(input: &str) -> OracleResult<'_, StaticCon
     ))
     .parse(rest)?;
     let (rest, _) = tag(" this turn").parse(rest)?;
-    let (filter, leftover) = parse_type_phrase_folding(type_text);
-    if !leftover.trim().is_empty() || filter == TargetFilter::Any {
+    let Some(filter) = parse_died_subject_filter(type_text) else {
         return Err(nom::Err::Error(nom::error::Error::new(
             input,
             nom::error::ErrorKind::Fail,
         )));
-    }
+    };
     Ok((
         rest,
         make_quantity_ge(

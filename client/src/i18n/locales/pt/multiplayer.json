@@ -267,6 +267,8 @@
     "hostServerUnscored": "{{name}} — ainda sem classificação",
     "sandboxMode": "Modo Sandbox — permitir ações de depuração",
     "sandboxModeHelp": "O anfitrião pode manipular diretamente o estado do jogo (mover cartas, alterar vidas, modificar marcadores) e conceder permissão de depuração a outros jogadores. Use para testes ou jogo de sandbox — não para partidas competitivas. Esta configuração não pode ser alterada depois que o jogo começa.",
+    "experimentalDungeons": "Masmorras experimentais",
+    "experimentalDungeonsHelp": "Aventurar-se na masmorra oferece Baldur's Gate Wilderness junto das opções habituais, e tomar a iniciativa oferece-a como alternativa. Experimental e não oficial. Desativado por defeito. Esta definição não pode ser alterada depois de o jogo começar.",
     "setPassword": "Definir senha",
     "passwordPlaceholder": "Senha do jogo",
     "back": "Voltar",
@@ -302,11 +304,9 @@
     "joinErrorCantJoinTitle": "Não é possível entrar nesta sala",
     "titleLobby": "Entre em uma mesa ou hospede uma.",
     "titleHostSetup": "Configure sua mesa.",
-    "titleDraftLobby": "Pod de Draft",
     "titleDeckSelect": "Escolha um deck.",
     "descriptionLobby": "Navegue pelas mesas disponíveis, entre por código ou hospede uma nova partida.",
     "descriptionHostSetup": "Ajuste o formato, a privacidade e o tempo antes de abrir a sala.",
-    "descriptionDraftLobby": "Aguardando os jogadores entrarem no pod de draft.",
     "descriptionDeckSelectFormat": "Escolha um deck para {{format}}.",
     "descriptionDeckSelect": "Escolha o deck que você quer levar para o online.",
     "offlineUnavailableTitle": "O modo multijogador não está disponível offline.",
@@ -333,15 +333,6 @@
     "updateFailedTitle": "Não foi possível atualizar automaticamente",
     "updateFailedMessage": "Atualize para obter a versão mais recente ou continue nesta. Jogadores em versões diferentes não podem entrar na mesma partida.",
     "continueAnyway": "Continuar mesmo assim"
-  },
-  "draftLobbyPanel": {
-    "draftPod": "Pod de Draft",
-    "connecting": "Conectando ao pod de draft...",
-    "connectionFailed": "Falha na conexão.",
-    "playersJoined": "{{joined}}/{{total}} jogadores entraram",
-    "seat": "Assento {{number}}",
-    "draftInProgress": "Draft em andamento. A tela de draft abrirá automaticamente.",
-    "leaveDraft": "Sair do Draft"
   },
   "deckLegalityChip": {
     "checking": "Verificando o deck em {{format}}…",

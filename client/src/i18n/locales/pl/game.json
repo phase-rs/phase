@@ -311,6 +311,10 @@
     "eligibleCount": "{{count}} dozwolonych",
     "attackingCount": "atak {{count}}",
     "selectedCount": "wyb {{count}}",
+    "directBlockTargetCount": "cele bloków {{count}}",
+    "blockingWith": "Blokuje przy użyciu {{name}}",
+    "blockedBy": "Zablokowane przez {{names}}",
+    "unblocked": "Niezablokowane",
     "pickAll": "Wszystko",
     "pickNone": "Nic",
     "underAttack_one": "Atakowany przez {{count}} stwora",
@@ -768,6 +772,8 @@
     "mustAttackSatisfiedBadge": "Attacking ✓",
     "mustBlockBadge": "Must block",
     "mustBlockExactBadge": "Musi zablokować {{attacker}}",
+    "mustBeBlockedBadge": "Musi zostać zablokowane",
+    "bandBadge": "Banda {{n}}",
     "mustBlockSatisfiedBadge": "Blocking ✓",
     "cantAttackBadge": "Can't attack",
     "cantBlockBadge": "Can't block",
@@ -1341,6 +1347,8 @@
     },
     "config": {
       "startingLife": "Życie początkowe",
+      "experimentalDungeons": "Eksperymentalne lochy",
+      "experimentalDungeonsHelp": "Oferuj Baldur's Gate Wilderness w opcjach lochów i przy przejmowaniu inicjatywy. Eksperymentalne i nieoficjalne.",
       "players": "Gracze",
       "whoGoesFirst": "Kto zaczyna",
       "firstPlayer": {
@@ -1426,7 +1434,16 @@
       "subtitleUpTo_other": "Wybierz do {{count}} kart, aby położyć {{destination}}",
       "destinationTop": "na wierzchu twojej biblioteki",
       "destinationBattlefield": "na pole bitwy",
-      "destinationHand": "do twojej ręki"
+      "destinationHand": "do twojej ręki",
+      "titleSplit": "Podziel pozostałe karty",
+      "subtitleSplit_one": "Ułóż karty: {{count}} trafi na wierzch twojej biblioteki, pozostałe {{remaining}} trafią na spód",
+      "subtitleSplit_other": "Ułóż karty: {{count}} trafią na wierzch twojej biblioteki, pozostałe {{remaining}} trafią na spód",
+      "badgeTop": "Wierzch {{order}}",
+      "badgeBottom": "Spód",
+      "hintSplit": "Przeciągnij, aby zmienić kolejność · zielone trafiają na wierzch (pierwsza najwyżej), szare na spód",
+      "moveEarlier": "Przesuń {{card}} wcześniej",
+      "moveLater": "Przesuń {{card}} później",
+      "hintSplitOrderOnly": "Przeciągnij lub użyj strzałek, aby zmienić kolejność w obrębie każdego stosu · to, które karty trafią na wierzch, wybrał inny gracz"
     },
     "surveil": {
       "title": "Surveil",
@@ -1943,6 +1960,8 @@
     "additionalExile": "+ Wygnaj kartę",
     "additionalSacrifice": "+ Poświęć trwałego",
     "additionalPayLife": "+ Zapłać życie",
+    "additionalPayLifeAmount": "+ Zapłać {{amount}} życia",
+    "additionalCollectEvidence": "+ Zbierz dowody {{amount}}",
     "additionalDiscard": "+ Odrzuć kartę",
     "additionalTapCreatures": "+ Obróć stwory",
     "additionalGeneric": "+ {{type}}"
@@ -2070,6 +2089,7 @@
     "variantForetell": "Rzuć z Foretell",
     "variantOverload": "Rzuć z Overload",
     "variantBestow": "Rzuć z Bestow",
+    "variantBlitz": "Rzuć z Blitz",
     "variantFreerunning": "Rzuć z Freerunning",
     "variantFuse": "Rzuć z Fuse",
     "variantMutate": "Rzuć z Mutate",
@@ -2079,7 +2099,14 @@
     "variantMoreThanMeetsTheEye": "Cast Converted",
     "variantPrototype": "Rzuć z Prototype",
     "variantFaceDown": "Rzuć zakrytą",
-    "variantFallback": "Rzuć z {{type}}"
+    "variantFallback": "Rzuć z {{type}}",
+    "viaSource": "przez {{name}}",
+    "extraCostAdditional": "+ {{cost}}",
+    "extraCostAlternative": "zamiast kosztu many: {{cost}}",
+    "entersWithCounter": "wchodzi z żetonem {{counter}}",
+    "slotPerType": "używa miejsca {{type}}",
+    "slotChooseType": "wybierz typ permanentu",
+    "slotOncePerTurn": "raz w tej turze"
   },
   "categoryChoice": {
     "title": "Wybierz trwałe do zatrzymania",
@@ -2246,6 +2273,12 @@
     "no": "Nie",
     "dontAskAgain": "Nie pytaj ponownie w tej grze",
     "dontAskAgainForSameCard": "Użyj tego wyboru dla każdej kopii tej karty w tej grze"
+  },
+  "keywordDetail": {
+    "selfManaCost": "jego koszt many",
+    "selfManaValue": "jego wartość many",
+    "manaCostReduced": "jego koszt many zmniejszony o {{reduction}}",
+    "spliceOnto": "do {{subtype}} {{cost}}"
   },
   "resolutionOptionalPayment": {
     "title": "Wybierz opcjonalną opłatę",

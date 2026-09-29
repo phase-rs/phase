@@ -311,6 +311,10 @@
     "eligibleCount": "{{count}} legali",
     "attackingCount": "att {{count}}",
     "selectedCount": "sel {{count}}",
+    "directBlockTargetCount": "bersagli di blocco {{count}}",
+    "blockingWith": "Blocca con {{name}}",
+    "blockedBy": "Bloccato da {{names}}",
+    "unblocked": "Non bloccato",
     "pickAll": "Tutti",
     "pickNone": "Nessuno",
     "underAttack_one": "Attaccato da {{count}} creatura",
@@ -768,6 +772,8 @@
     "mustAttackSatisfiedBadge": "Attacking ✓",
     "mustBlockBadge": "Must block",
     "mustBlockExactBadge": "Deve bloccare {{attacker}}",
+    "mustBeBlockedBadge": "Deve essere bloccato",
+    "bandBadge": "Banda {{n}}",
     "mustBlockSatisfiedBadge": "Blocking ✓",
     "cantAttackBadge": "Can't attack",
     "cantBlockBadge": "Can't block",
@@ -1341,6 +1347,8 @@
     },
     "config": {
       "startingLife": "Punti vita iniziali",
+      "experimentalDungeons": "Dungeon sperimentali",
+      "experimentalDungeonsHelp": "Offri Baldur's Gate Wilderness nelle opzioni del dungeon e quando prendi l'iniziativa. Sperimentale e non ufficiale.",
       "players": "Giocatori",
       "whoGoesFirst": "Chi inizia",
       "firstPlayer": {
@@ -1426,7 +1434,16 @@
       "subtitleUpTo_other": "Seleziona fino a {{count}} carte da mettere {{destination}}",
       "destinationTop": "in cima al tuo grimorio",
       "destinationBattlefield": "sul campo di battaglia",
-      "destinationHand": "nella tua mano"
+      "destinationHand": "nella tua mano",
+      "titleSplit": "Dividi le carte rimanenti",
+      "subtitleSplit_one": "Disponi le carte: {{count}} va in cima al tuo grimorio, le altre {{remaining}} vanno in fondo",
+      "subtitleSplit_other": "Disponi le carte: {{count}} vanno in cima al tuo grimorio, le altre {{remaining}} vanno in fondo",
+      "badgeTop": "Cima {{order}}",
+      "badgeBottom": "Fondo",
+      "hintSplit": "Trascina per riordinare · le verdi vanno in cima (la prima è la più alta), le grigie in fondo",
+      "moveEarlier": "Sposta {{card}} prima",
+      "moveLater": "Sposta {{card}} dopo",
+      "hintSplitOrderOnly": "Trascina o usa le frecce per riordinare all’interno di ogni pila · un altro giocatore ha scelto quali carte vanno in cima"
     },
     "surveil": {
       "title": "Sorvegliare",
@@ -1943,6 +1960,8 @@
     "additionalExile": "+ Esilia una carta",
     "additionalSacrifice": "+ Sacrifica un permanente",
     "additionalPayLife": "+ Paga punti vita",
+    "additionalPayLifeAmount": "+ Paga {{amount}} punti vita",
+    "additionalCollectEvidence": "+ Raccogli prove {{amount}}",
     "additionalDiscard": "+ Scarta una carta",
     "additionalTapCreatures": "+ TAPpa creature",
     "additionalGeneric": "+ {{type}}"
@@ -2070,6 +2089,7 @@
     "variantForetell": "Lancia da Predire",
     "variantOverload": "Lancia con Sovraccarico",
     "variantBestow": "Lancia con Conferire",
+    "variantBlitz": "Lancia con Blitz",
     "variantFreerunning": "Lancia con Freerunning",
     "variantFuse": "Lancia con Fusione",
     "variantMutate": "Lancia con Mutate",
@@ -2079,7 +2099,14 @@
     "variantMoreThanMeetsTheEye": "Cast Converted",
     "variantPrototype": "Lancia con Prototipo",
     "variantFaceDown": "Lancia a faccia in giù",
-    "variantFallback": "Lancia con {{type}}"
+    "variantFallback": "Lancia con {{type}}",
+    "viaSource": "tramite {{name}}",
+    "extraCostAdditional": "+ {{cost}}",
+    "extraCostAlternative": "invece del suo costo di mana: {{cost}}",
+    "entersWithCounter": "entra con un segnalino {{counter}}",
+    "slotPerType": "usa il suo spazio {{type}}",
+    "slotChooseType": "scegli un tipo di permanente",
+    "slotOncePerTurn": "una volta in questo turno"
   },
   "categoryChoice": {
     "title": "Scegli i permanenti da tenere",
@@ -2246,6 +2273,12 @@
     "no": "No",
     "dontAskAgain": "Non chiedere di nuovo in questa partita",
     "dontAskAgainForSameCard": "Usa questa scelta per ogni copia di questa carta in questa partita"
+  },
+  "keywordDetail": {
+    "selfManaCost": "il suo costo di mana",
+    "selfManaValue": "il suo valore di mana",
+    "manaCostReduced": "il suo costo di mana ridotto di {{reduction}}",
+    "spliceOnto": "su {{subtype}} {{cost}}"
   },
   "resolutionOptionalPayment": {
     "title": "Scegli un pagamento opzionale",

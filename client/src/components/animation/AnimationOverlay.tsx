@@ -1,4 +1,4 @@
-import { AnimatePresence, motion } from "framer-motion";
+import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { type RefObject, useCallback, useEffect, useRef, useState } from "react";
 
 import {
@@ -6,6 +6,7 @@ import {
   impactDelayMsForAnimationEvent,
   isPlayerDamageAnimationEvent,
   lifeChangeImpactDelayMs,
+  MELD_FORGE_PHASES,
   type StepEffect,
 } from "../../animation/types.ts";
 import { getCardColors } from "../../animation/wubrgColors.ts";
@@ -14,13 +15,14 @@ import { useAnimationStore } from "../../stores/animationStore.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { audioManager } from "../../audio/AudioManager.ts";
-import { hexToRgb } from "./particleEffects.ts";
+import { FORGE_YELLOW, hexToRgb } from "./particleEffects.ts";
 import { CardRevealBurst } from "./CardRevealBurst.tsx";
 import { applyCardSlam } from "./CardSlamAnimation.tsx";
 import { CastArcAnimation } from "./CastArcAnimation.tsx";
 import { DamageVignette } from "./DamageVignette.tsx";
 import { DeathShatter } from "./DeathShatter.tsx";
 import { FloatingNumber } from "./FloatingNumber.tsx";
+import { MeldForgeAnimation, type MeldForgePiece } from "./MeldForgeAnimation.tsx";
 import { MillRevealAnimation } from "./MillRevealAnimation.tsx";
 import type { MillCard } from "./MillRevealAnimation.tsx";
 import { RippleRevealAnimation } from "./RippleRevealAnimation.tsx";
@@ -74,6 +76,16 @@ interface ActiveMillReveal {
   to: { x: number; y: number };
 }
 
+interface ActiveMeldForge {
+  id: number;
+  center: { x: number; y: number };
+  cardSize: { width: number; height: number };
+  source: MeldForgePiece;
+  partner: MeldForgePiece;
+  result: AnimationImageSnapshot | null;
+  durationMs: number;
+}
+
 interface ActiveRippleReveal {
   id: number;
   cards: MillCard[];
@@ -103,6 +115,10 @@ let deathCloneIdCounter = 0;
 let castArcIdCounter = 0;
 let millRevealIdCounter = 0;
 let rippleRevealIdCounter = 0;
+let meldForgeIdCounter = 0;
+
+/** Card size used when neither meld card has a measured board position. */
+const MELD_FALLBACK_CARD_SIZE = { width: 80, height: 112 };
 
 const DEATH_IMAGE_READY_MAX_MS = 250;
 
@@ -110,6 +126,10 @@ function visiblePreEventSnapshot(objectId: number): AnimationImageSnapshot | nul
   return visibleAnimationImageSnapshot(
     useGameStore.getState().gameState?.objects[objectId],
   );
+}
+
+function rectCenter(rect: DOMRect): { x: number; y: number } {
+  return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
 }
 
 function visiblePostEventSnapshot(objectId: number): AnimationImageSnapshot | null {
@@ -188,23 +208,30 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
   const [activeCastArcs, setActiveCastArcs] = useState<ActiveCastArc[]>([]);
   const [activeMillReveals, setActiveMillReveals] = useState<ActiveMillReveal[]>([]);
   const [activeRippleReveals, setActiveRippleReveals] = useState<ActiveRippleReveal[]>([]);
+  const [activeMeldForges, setActiveMeldForges] = useState<ActiveMeldForge[]>([]);
 
   const vfxQuality = usePreferencesStore((s) => s.vfxQuality);
   const speedMultiplier = usePreferencesStore((s) => s.animationSpeedMultiplier);
+  const reduceMotion = useReducedMotion();
 
-  const getObjectPosition = useCallback(
-    (objectId: number): { x: number; y: number } | null => {
+  const getObjectRect = useCallback(
+    (objectId: number): DOMRect | null =>
       // Fallback chain: pre-dispatch snapshot, then live registry, then the
       // group representative for a collapsed swarm member that has no node of
       // its own (resolved live via data-grouped-ids — see findCardElement).
-      const rect =
-        currentSnapshot.get(objectId) ??
-        getPosition(objectId) ??
-        findCardElement(objectId)?.getBoundingClientRect();
-      if (!rect) return null;
-      return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
-    },
+      currentSnapshot.get(objectId) ??
+      getPosition(objectId) ??
+      findCardElement(objectId)?.getBoundingClientRect() ??
+      null,
     [getPosition],
+  );
+
+  const getObjectPosition = useCallback(
+    (objectId: number): { x: number; y: number } | null => {
+      const rect = getObjectRect(objectId);
+      return rect ? rectCenter(rect) : null;
+    },
+    [getObjectRect],
   );
 
   /** Query the actual DOM position of a player's HUD element. */
@@ -641,6 +668,93 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
           break;
         }
 
+        case "Melded": {
+          // CR 701.42a: forge the pair on the board, then turn the fused blank
+          // over to the melded permanent's combined face.
+          if (owningStepMs <= 0) break;
+          const { object_id, partner_id } = event.data;
+          const sourceRect = getObjectRect(object_id);
+          const partnerRect = getObjectRect(partner_id);
+          const measured = [sourceRect, partnerRect].filter((rect): rect is DOMRect => rect != null);
+          const centers = measured.map(rectCenter);
+          const center = centers.length > 0
+            ? {
+                x: centers.reduce((sum, point) => sum + point.x, 0) / centers.length,
+                y: centers.reduce((sum, point) => sum + point.y, 0) / centers.length,
+              }
+            : { x: window.innerWidth / 2, y: window.innerHeight / 2 };
+          // A tapped card's rect is landscape; the forge works in portrait.
+          const cardSize = measured.length > 0
+            ? {
+                width: Math.min(measured[0].width, measured[0].height),
+                height: Math.max(measured[0].width, measured[0].height),
+              }
+            : MELD_FALLBACK_CARD_SIZE;
+          const piece = (objectId: number, rect: DOMRect | null, side: -1 | 1): MeldForgePiece => {
+            const at = rect ? rectCenter(rect) : null;
+            return {
+              snapshot: visiblePreEventSnapshot(objectId),
+              offset: at
+                ? { x: at.x - center.x, y: at.y - center.y }
+                : { x: side * cardSize.width * 1.5, y: 0 },
+            };
+          };
+          // The forge lifts both cards off the board, so their board cards hide
+          // for the rest of this step.
+          useAnimationStore.getState().veilObjects([object_id, partner_id]);
+          const id = ++meldForgeIdCounter;
+          setActiveMeldForges((previous) => [
+            ...previous,
+            {
+              id,
+              center,
+              cardSize,
+              source: piece(object_id, sourceRect, -1),
+              partner: piece(partner_id, partnerRect, 1),
+              result: visiblePostEventSnapshot(object_id),
+              durationMs: owningStepMs,
+            },
+          ]);
+
+          // The hammer blows always ring. Particles and screen shake move the
+          // board, so they honor reduced motion as well as the VFX quality —
+          // as the forge itself does by cross-fading instead.
+          const animatesVfx = vfxQuality !== "minimal" && !reduceMotion;
+          const at = (fraction: number) => fraction * owningStepMs;
+          if (animatesVfx) {
+            scheduleStepTimeout(
+              () => particleRef.current?.forgeHeat(
+                center.x,
+                center.y,
+                at(MELD_FORGE_PHASES.fused - MELD_FORGE_PHASES.gathered),
+              ),
+              at(MELD_FORGE_PHASES.gathered),
+            );
+          }
+          MELD_FORGE_PHASES.strikes.forEach((strikeAt, blow) => {
+            const isFinalBlow = blow === MELD_FORGE_PHASES.strikes.length - 1;
+            scheduleStepTimeout(() => {
+              audioManager.playSfx("DamageDealt", isFinalBlow ? 1 : 0.7);
+              if (!animatesVfx) return;
+              particleRef.current?.forgeStrike(
+                center.x,
+                center.y,
+                (blow + 1) / MELD_FORGE_PHASES.strikes.length,
+              );
+              if (vfxQuality === "full" && containerRef.current) {
+                applyScreenShake(containerRef.current, isFinalBlow ? "medium" : "light", speedMultiplier);
+              }
+            }, at(strikeAt));
+          });
+          if (animatesVfx) {
+            scheduleStepTimeout(
+              () => particleRef.current?.summonBurst(center.x, center.y, FORGE_YELLOW),
+              at(MELD_FORGE_PHASES.flipped),
+            );
+          }
+          break;
+        }
+
         case "TokenCreated": {
           const { object_id } = event.data;
           const pos = getObjectPosition(object_id);
@@ -691,9 +805,11 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
     [
       getPosition,
       getObjectPosition,
+      getObjectRect,
       getPlayerHudPosition,
       vfxQuality,
       speedMultiplier,
+      reduceMotion,
       containerRef,
       scheduleStepTimeout,
       addPendingDeath,
@@ -747,6 +863,10 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
 
   const handleRippleRevealComplete = useCallback((id: number) => {
     setActiveRippleReveals((prev) => prev.filter((m) => m.id !== id));
+  }, []);
+
+  const handleMeldForgeComplete = useCallback((id: number) => {
+    setActiveMeldForges((prev) => prev.filter((m) => m.id !== id));
   }, []);
 
   return (
@@ -846,6 +966,20 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
           cards={ripple.cards}
           from={ripple.from}
           onComplete={() => handleRippleRevealComplete(ripple.id)}
+        />
+      ))}
+
+      {/* Meld forge-and-flip animations (z-50, beneath the particle sparks) */}
+      {activeMeldForges.map((forge) => (
+        <MeldForgeAnimation
+          key={`meld-${forge.id}`}
+          center={forge.center}
+          cardSize={forge.cardSize}
+          source={forge.source}
+          partner={forge.partner}
+          result={forge.result}
+          durationMs={forge.durationMs}
+          onComplete={() => handleMeldForgeComplete(forge.id)}
         />
       ))}
 

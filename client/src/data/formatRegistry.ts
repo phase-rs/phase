@@ -42,6 +42,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       sideboard_policy: { type: "Limited", data: 15 },
       default_deck_copy_limit: { type: "UpTo", data: 4 },
       allow_debug_actions: false,
+      allow_experimental_dungeons: false,
     },
   },
   {
@@ -67,6 +68,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       sideboard_policy: { type: "Limited", data: 15 },
       default_deck_copy_limit: { type: "UpTo", data: 4 },
       allow_debug_actions: false,
+      allow_experimental_dungeons: false,
     },
   },
   {
@@ -92,6 +94,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       sideboard_policy: { type: "Limited", data: 15 },
       default_deck_copy_limit: { type: "UpTo", data: 4 },
       allow_debug_actions: false,
+      allow_experimental_dungeons: false,
     },
   },
   {
@@ -117,6 +120,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       sideboard_policy: { type: "Limited", data: 15 },
       default_deck_copy_limit: { type: "UpTo", data: 4 },
       allow_debug_actions: false,
+      allow_experimental_dungeons: false,
     },
   },
   {
@@ -142,6 +146,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       sideboard_policy: { type: "Limited", data: 15 },
       default_deck_copy_limit: { type: "UpTo", data: 4 },
       allow_debug_actions: false,
+      allow_experimental_dungeons: false,
     },
   },
   {
@@ -167,6 +172,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       sideboard_policy: { type: "Limited", data: 15 },
       default_deck_copy_limit: { type: "UpTo", data: 4 },
       allow_debug_actions: false,
+      allow_experimental_dungeons: false,
     },
   },
   {
@@ -192,6 +198,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       sideboard_policy: { type: "Limited", data: 15 },
       default_deck_copy_limit: { type: "UpTo", data: 4 },
       allow_debug_actions: false,
+      allow_experimental_dungeons: false,
     },
   },
   {
@@ -217,6 +224,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       sideboard_policy: { type: "Limited", data: 15 },
       default_deck_copy_limit: { type: "UpTo", data: 4 },
       allow_debug_actions: false,
+      allow_experimental_dungeons: false,
     },
   },
   {
@@ -242,6 +250,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       sideboard_policy: { type: "Limited", data: 15 },
       default_deck_copy_limit: { type: "UpTo", data: 4 },
       allow_debug_actions: false,
+      allow_experimental_dungeons: false,
     },
   },
   {
@@ -267,6 +276,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       sideboard_policy: { type: "Limited", data: 15 },
       default_deck_copy_limit: { type: "Unlimited" },
       allow_debug_actions: false,
+      allow_experimental_dungeons: false,
     },
   },
   {
@@ -292,6 +302,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       sideboard_policy: { type: "Forbidden" },
       default_deck_copy_limit: { type: "UpTo", data: 1 },
       allow_debug_actions: false,
+      allow_experimental_dungeons: false,
     },
   },
   {
@@ -317,6 +328,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       sideboard_policy: { type: "Forbidden" },
       default_deck_copy_limit: { type: "UpTo", data: 1 },
       allow_debug_actions: false,
+      allow_experimental_dungeons: false,
     },
   },
   {
@@ -342,6 +354,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       sideboard_policy: { type: "Forbidden" },
       default_deck_copy_limit: { type: "UpTo", data: 1 },
       allow_debug_actions: false,
+      allow_experimental_dungeons: false,
     },
   },
   {
@@ -367,6 +380,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       sideboard_policy: { type: "Limited", data: 10 },
       default_deck_copy_limit: { type: "UpTo", data: 1 },
       allow_debug_actions: false,
+      allow_experimental_dungeons: false,
     },
   },
   {
@@ -392,6 +406,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       sideboard_policy: { type: "Forbidden" },
       default_deck_copy_limit: { type: "UpTo", data: 1 },
       allow_debug_actions: false,
+      allow_experimental_dungeons: false,
     },
   },
   {
@@ -417,6 +432,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       sideboard_policy: { type: "Forbidden" },
       default_deck_copy_limit: { type: "UpTo", data: 1 },
       allow_debug_actions: false,
+      allow_experimental_dungeons: false,
     },
   },
   {
@@ -442,6 +458,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       sideboard_policy: { type: "Forbidden" },
       default_deck_copy_limit: { type: "UpTo", data: 1 },
       allow_debug_actions: false,
+      allow_experimental_dungeons: false,
     },
   },
   {
@@ -467,6 +484,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       sideboard_policy: { type: "Forbidden" },
       default_deck_copy_limit: { type: "Unlimited" },
       allow_debug_actions: false,
+      allow_experimental_dungeons: false,
     },
   },
   {
@@ -492,6 +510,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       sideboard_policy: { type: "Forbidden" },
       default_deck_copy_limit: { type: "Unlimited" },
       allow_debug_actions: false,
+      allow_experimental_dungeons: false,
     },
   },
   {
@@ -517,6 +536,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       sideboard_policy: { type: "Unlimited" },
       default_deck_copy_limit: { type: "Unlimited" },
       allow_debug_actions: false,
+      allow_experimental_dungeons: false,
     },
   },
   {
@@ -542,6 +562,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       sideboard_policy: { type: "Unlimited" },
       default_deck_copy_limit: { type: "Unlimited" },
       allow_debug_actions: false,
+      allow_experimental_dungeons: false,
     },
   },
   {
@@ -568,6 +589,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       default_deck_copy_limit: { type: "UpTo", data: 4 },
       archenemy_player: 0,
       allow_debug_actions: false,
+      allow_experimental_dungeons: false,
     },
   },
   {
@@ -593,6 +615,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       sideboard_policy: { type: "Unlimited" },
       default_deck_copy_limit: { type: "UpTo", data: 4 },
       allow_debug_actions: false,
+      allow_experimental_dungeons: false,
     },
   },
   {
@@ -618,6 +641,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       sideboard_policy: { type: "Unlimited" },
       default_deck_copy_limit: { type: "Unlimited" },
       allow_debug_actions: false,
+      allow_experimental_dungeons: false,
     },
   },
   {
@@ -643,6 +667,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       sideboard_policy: { type: "Forbidden" },
       default_deck_copy_limit: { type: "Unlimited" },
       allow_debug_actions: false,
+      allow_experimental_dungeons: false,
     },
   },
 ];

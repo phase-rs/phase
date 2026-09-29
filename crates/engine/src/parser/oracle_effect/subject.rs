@@ -4657,6 +4657,206 @@ fn build_keyword_choice_clause(
     })
 }
 
+/// One alternative of a disjunctive P/T-modification grant.
+struct PtChoiceAlternative {
+    /// The item exactly as printed ("+1/-1"), used verbatim as the branch label.
+    phrase: String,
+    power: PtValue,
+    toughness: PtValue,
+}
+
+/// CR 608.2d + CR 613.4c: recognize a disjunctive P/T-modification grant —
+/// "get[s] <P/T> or <P/T>" — and return its alternative Layer 7c modifications.
+///
+/// EIGHT cards print this shape (an X-AWARE corpus scan for `get[s] `, a
+/// `[+-]?[0-9X]+/[+-]?[0-9X]+` token, an `or`, and a second such token). Seven
+/// are Morphling-class shapeshifters whose two alternatives are exact inverse
+/// literals: Brightling, Endling, Greater Morphling, Shorecrasher Elemental,
+/// Multiform Wonder, Pemmin's Aura, Shaper Parasite. The eighth is Liliana of
+/// the Dark Realms, whose alternatives are the VARIABLE pair "+X/+X or -X/-X"
+/// under a "where X is the number of Swamps you control" binding — the earlier
+/// digit-only scan could not see it, and the arm has to keep X bound (the
+/// binding is applied downstream by `lower::apply_where_x_effect_expression`,
+/// which walks into `ChooseOneOf` branches for exactly this reason).
+///
+/// Brightling's Oracle ruling states the timing outright — "you don't choose
+/// whether Brightling gets +1/-1 or -1/+1 until that ability resolves" — which
+/// is CR 608.2d: a choice offered by a resolving ability is announced while the
+/// effect is applied, not when the ability is activated.
+///
+/// Reuses [`super::split_bare_disjunctive_choice_list_items`], the shared
+/// counter-choice splitter, so the whole N-ary class is covered by one arm and
+/// the "final top-level separator must be `or`" rule — what makes a list a
+/// choice rather than a conjunction — is not restated here. Each item must then
+/// be a complete [`super::lower::parse_pump_modifier_phrase`] with nothing left
+/// over, so a list carrying extra prose (a "chosen at random" tail, a keyword
+/// branch) declines and is reported honestly downstream instead of being
+/// silently collapsed to its first alternative.
+///
+/// ROOT CAUSE, DELIBERATELY LEFT ALONE: `oracle_static::grammar::parse_pt_mod`
+/// binds the nom remainder to `_`, so " or -1/+1" evaporates inside it and the
+/// keyword-grant "gets " arm goes on to reassemble a clean, confident, WRONG
+/// single `Effect::Pump`. Rejecting a non-empty remainder there would fix the
+/// discard at its source, but `parse_pt_mod`'s other callers depend on the
+/// remainder by design — `oracle_static::anthem`'s base-P/T path parses "3/4
+/// ninja creature" and re-slices the tail itself — and the strict variant was
+/// measured at 155 failing library tests. This arm intercepts the disjunction
+/// upstream of that path instead.
+///
+/// STILL OPEN, MEASURED AND DECLINED: an ANCHORED list this arm does not claim
+/// still collapses to its first alternative rather than reporting a gap. Probe:
+/// "This creature gets +0/+0, +1/+0 or +2/+0 until end of turn chosen at random"
+/// — the "chosen at random" tail makes every item fail `all_consuming`, this arm
+/// declines (correctly: CR 608.2d's choice is a PLAYER's, and a random pick is
+/// not), and the line then falls through to `parse_pt_mod`, which discards its
+/// remainder and emits `Pump { Fixed(0), Fixed(0) }`. No corpus card prints that
+/// shape today — Rainbow Knights, the only random P/T list, has no "get[s] "
+/// anchor at all and stays honestly `Unimplemented`.
+///
+/// Closing it at the one call site that feeds this path
+/// (`oracle_static::keyword_grant`'s "gets " arm, switched to
+/// `grammar::parse_pt_mod_with_remainder` and declining on a non-empty
+/// remainder) was MEASURED over the corpus and REJECTED: of the 5,652 cards
+/// whose text contains a `get[s] <P/T>` token, 2,181 change — 763 gain an
+/// `Unimplemented` and 1,418 change with NO new gap node, i.e. they silently
+/// lose the P/T grant while their keyword conjuncts survive. Both halves are
+/// worse than the hole. The casualties are the ordinary anthem and attached-grant
+/// population, not an exotic tail: "Enchanted creature gets +1/+1." (A-Most
+/// Wanted) becomes a gap on its trailing period alone, "Equipped creature gets
+/// +0/+3 and has vigilance" (Accorder's Shield) and "Target creature gets +2/+2
+/// and gains indestructible until end of turn" (Adamant Will) silently drop the
+/// pump. The remainder that arm discards is load-bearing for those conjuncts,
+/// which other scanners in the same function re-read; rejecting it there is not a
+/// tightening but a different parse.
+fn parse_pt_choice_grant(predicate: &str) -> Option<Vec<PtChoiceAlternative>> {
+    let lower = predicate.to_lowercase();
+    // The predicate normally arrives DECONJUGATED (gets -> get); accept the
+    // printed form too, matching the `alt` the single-pump path already uses.
+    let (rest, _) = alt((tag::<_, _, OracleError<'_>>("get "), tag("gets ")))
+        .parse(lower.as_str())
+        .ok()?;
+    // NO duration strip here. The predicate reaching `build_continuous_clause`
+    // has already had its trailing duration peeled by `clause_shell::peel_clause`
+    // — a `strip_trailing_duration` call at this seam returned `None` for every
+    // corpus card, measured with a sentinel value. The printed window is read
+    // from `ParseContext::stated_clause_duration` by the caller instead.
+    let items = super::split_bare_disjunctive_choice_list_items(rest.trim())?;
+    let alternatives = items
+        .iter()
+        .map(|item| {
+            let item = item.trim();
+            let (_, (power, toughness)) = all_consuming(super::lower::parse_pump_modifier_phrase)
+                .parse(item)
+                .ok()?;
+            Some(PtChoiceAlternative {
+                phrase: item.to_string(),
+                power,
+                toughness,
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    // The splitter already requires a final `or`, so fewer than two items cannot
+    // occur; the guard keeps that invariant checkable at this seam.
+    (alternatives.len() >= 2).then_some(alternatives)
+}
+
+/// CR 608.2d + CR 613.4c: lower a "gets <P/T> or <P/T>" grant onto
+/// `Effect::ChooseOneOf` over one `Pump`/`PumpAll` branch per alternative.
+///
+/// Structural twin of [`build_keyword_choice_clause`]: the branch set is flat,
+/// the chooser is the controller, and a DECLARED target is announced by an outer
+/// `Effect::TargetOnly` whose `sub_ability` carries the choice, so the branch's
+/// `ParentTarget` resolves to the announced object. CR 601.2c (reached for an
+/// activated ability by CR 602.2b and for Shaper Parasite's triggered one by CR
+/// 603.3d) puts the target choice at the moment the ability goes on the stack,
+/// while CR 608.2d puts the modification choice at resolution — two choices at
+/// two different times, which is exactly why the target cannot live inside the
+/// branches. Mirrors `game::effects::choose_counter_adjustment`, which builds
+/// the same flat `ChooseOneOf` for the sibling "choose one of two adjustments"
+/// shape.
+///
+/// CR 611.2a — WHERE THE DURATION GOES. "A continuous effect generated by the
+/// resolution of a spell or ability lasts as long as stated by the spell or
+/// ability creating it"; the effect here is the one the CHOSEN BRANCH creates,
+/// and `choose_one_of::resolve_branch` builds that branch through
+/// `build_resolved_from_def`, which reads the duration off the branch and off
+/// nothing else. So the printed window has to be ON the branch — the enclosing
+/// clause's own `duration`, which `with_clause_duration` fills in after this
+/// function returns, never reaches it. The window is not in `predicate` by then
+/// either (`clause_shell::peel_clause` peeled it), so it is read from
+/// `ParseContext::stated_clause_duration`, the channel that publishes the peeled
+/// value to the body parse. `None` there means the clause printed no window and
+/// the branch keeps `None`, which `pump::resolve` reads as until end of turn.
+fn build_pt_choice_clause(
+    application: &SubjectApplication,
+    predicate: &str,
+    ctx: &ParseContext,
+) -> Option<ParsedEffectClause> {
+    let alternatives = parse_pt_choice_grant(predicate)?;
+
+    // Every branch pumps the SAME subject; only the modification differs. Routing
+    // through `static_affected_for_application` + `build_pump_effect` — the pair
+    // the single-modification path already uses — makes each branch byte-identical
+    // to the effect this engine ships for the same subject WITHOUT the
+    // disjunction. Measured across the three shapes the corpus prints:
+    // `Pump { target: SelfRef }` for "This creature" (Brightling, Endling,
+    // Greater Morphling, Shorecrasher Elemental, Multiform Wonder),
+    // `PumpAll { Typed[Creature, EnchantedBy] }` for "Enchanted creature"
+    // (Pemmin's Aura), and `Pump { target: ParentTarget }` for a declared target
+    // (Shaper Parasite). Any other subject reaches the same builder, so no fourth
+    // code path exists to drift.
+    let branch_application = SubjectApplication {
+        affected: static_affected_for_application(application),
+        target: None,
+        multi_target: None,
+        inherits_parent: false,
+        is_optional: false,
+    };
+
+    let branches = alternatives
+        .into_iter()
+        .map(|alternative| {
+            let mut branch = AbilityDefinition::new(
+                AbilityKind::Spell,
+                build_pump_effect(
+                    &branch_application,
+                    alternative.power,
+                    alternative.toughness,
+                ),
+            );
+            // CR 611.2a: the clause's PRINTED window, carried onto the branch
+            // because the branch is the definition `build_resolved_from_def`
+            // reads a duration from. See this function's doc.
+            branch.duration = ctx.stated_clause_duration.clone();
+            branch.description = Some(format!("gets {}", alternative.phrase));
+            branch
+        })
+        .collect();
+
+    let choose_effect = Effect::ChooseOneOf {
+        chooser: PlayerFilter::Controller,
+        branches,
+    };
+    let (effect, sub_ability) = if let Some(target) = application.target.clone() {
+        let choose = AbilityDefinition::new(AbilityKind::Spell, choose_effect);
+        (Effect::TargetOnly { target }, Some(Box::new(choose)))
+    } else {
+        (choose_effect, None)
+    };
+
+    Some(ParsedEffectClause {
+        unlowered_guard: None,
+        effect,
+        duration: None,
+        sub_ability,
+        distribute: None,
+        multi_target: application.multi_target.clone(),
+        condition: None,
+        optional: false,
+        unless_pay: None,
+    })
+}
+
 fn build_continuous_clause(
     application: SubjectApplication,
     predicate: &str,
@@ -4706,6 +4906,19 @@ fn build_continuous_clause(
     }
 
     if let Some(clause) = build_keyword_choice_clause(&application, &normalized) {
+        return Some(clause);
+    }
+
+    // CR 608.2d + CR 613.4c: "<subject> gets <P/T> or <P/T>" — two alternative
+    // Layer 7c modifications, exactly one of which is chosen as the ability
+    // resolves. The position is load-bearing: it sits after
+    // `parse_pump_clause_with_context` (which declines because its `eof` leaves
+    // the " or …" tail unconsumed) and after `build_keyword_choice_clause`, so
+    // the arm can only see lines both already rejected. Without it the line falls
+    // through to `parse_continuous_modifications` -> `extract_pump_modifiers`
+    // below, where `parse_pt_mod`'s discarded nom remainder has already thrown the
+    // second alternative away and a single, wrong `Effect::Pump` is emitted.
+    if let Some(clause) = build_pt_choice_clause(&application, &normalized, ctx) {
         return Some(clause);
     }
 

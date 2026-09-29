@@ -63,6 +63,7 @@ function createTwoPlayerState(overrides: Partial<GameState> = {}): GameState {
       uses_commander: false,
 
       allow_debug_actions: false,
+      allow_experimental_dungeons: false,
     },
     eliminated_players: [],
     ...overrides,
@@ -250,6 +251,7 @@ describe("OpponentHud designations (multiplayer tab path)", () => {
         uses_commander: true,
 
         allow_debug_actions: false,
+        allow_experimental_dungeons: false,
       },
       eliminated_players: [],
       ...overrides,

@@ -762,6 +762,7 @@ describe("WebSocketAdapter", () => {
         default_deck_copy_limit: { type: "UpTo", data: 1 },
         uses_commander: true,
         allow_debug_actions: false,
+        allow_experimental_dungeons: false,
       };
       const nativeAdapter = new WebSocketAdapter(
         "native-engine",
@@ -880,6 +881,7 @@ describe("WebSocketAdapter", () => {
         default_deck_copy_limit: { type: "UpTo", data: 1 },
         uses_commander: true,
         allow_debug_actions: false,
+        allow_experimental_dungeons: false,
       };
       const pregameAdapter = new WebSocketAdapter(
         "native-engine",

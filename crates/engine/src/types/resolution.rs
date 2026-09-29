@@ -3707,17 +3707,15 @@ const LEGACY_TYPED_FRAME_RESOLUTION_STATE_WIRE_VERSION: u64 = 2;
 /// limit and what its serde-default control does and does not close. Read it
 /// there before trusting this list against a serde change. Do not delete it.
 ///
-/// STOPGAP, and scoped to stay one. This list exists only because the producer
-/// leaves no positive mark. The engine's other projection gate,
+/// The producer now also writes a positive `wire_projection` mark. This list
+/// remains as a legacy fallback for unmarked historical captures, because
+/// those bytes cannot be retroactively stamped. The engine's other projection gate,
 /// `reject_viewer_projection_as_authority` (`crate::types::game_state`), keys
 /// on a `viewer_projection` stamp its writer sets; the principled sibling here
-/// is the same thing for the client wire — a `wire_projection` stamp written at
-/// `client_state_wire_value` (`crate::game::derived_views`). That stamp is a
-/// DEFERRED item and is not shipped, so reading absence is what a reader must
-/// do UNTIL THE PRODUCER STAMPS. When it lands, this const and
-/// [`is_redacted_client_wire_projection`] are what it replaces, and a versioned
-/// payload already takes [`declare_raw_resolution_wire`]'s early return, so it
-/// can supersede this without conflicting with it.
+/// is the same thing for the client wire — the `wire_projection` stamp written
+/// at `client_state_wire_value` (`crate::game::derived_views`) is checked before
+/// any declared-version early return. The absence fingerprint below remains
+/// only for legacy unmarked captures.
 const CLIENT_WIRE_UNCONDITIONAL_FIELDS: &[&str] = &[
     "next_delayed_trigger_token",
     "next_delayed_trigger_instance",
@@ -3726,10 +3724,9 @@ const CLIENT_WIRE_UNCONDITIONAL_FIELDS: &[&str] = &[
 ];
 
 /// Whether an unversioned raw payload was written by the client wire rather
-/// than by a raw persistence writer — inferred from what that writer REMOVED,
-/// because it leaves no positive mark. A fingerprint UNTIL THE PRODUCER STAMPS:
-/// see [`CLIENT_WIRE_UNCONDITIONAL_FIELDS`] for the deferred `wire_projection`
-/// stamp at `client_state_wire_value` that supersedes it.
+/// than by a raw persistence writer — legacy inference from what that writer
+/// removed. New client wires carry the positive `wire_projection` marker and
+/// are rejected before this fallback is consulted.
 ///
 /// Conjunctive on purpose. Each field individually went in at a different time
 /// — `resolved_rules_journal` in #6331 (2026-07-22), the two allocators in
@@ -3768,19 +3765,14 @@ fn is_redacted_client_wire_projection(object: &Map<String, Value>) -> bool {
 /// 2. `client_state_wire_value` (`crate::game::derived_views`) — production
 ///    Rust, the origin of every payload that crosses the WASM boundary to the
 ///    client, and therefore of every client debug export. It runs that same
-///    derived `Serialize` and then removes nine top-level carriers plus a
-///    recursive six-key firing sweep. It removes NEITHER `resolution_stack`
-///    NOR `resolving_stack_entry`, so its output carries `resolution_stack`
-///    under exactly the same condition as (1).
+///    derived `Serialize`, writes a positive `wire_projection` marker, and
+///    removes the private top-level carriers plus recursive firing data. The
+///    shared viewer projection also removes the private `resolution_stack`.
 ///
-///    Writer (2)'s UNVERSIONED output is now REFUSED rather than inferred:
-///    [`is_redacted_client_wire_projection`] recognises it by the three
-///    unconditionally-serialized fields the redactor removes, and this function
-///    returns an error for it below. A VERSIONED client-wire payload is
-///    unaffected — it takes the first statement's early return and never
-///    reaches the fingerprint check, which is what leaves room for a future
-///    write-time `wire_projection` stamp to supersede the inference without
-///    conflicting with it.
+///    Writer (2)'s output is refused by the positive marker before any
+///    declared-version or unversioned wire inference. Historical unmarked
+///    captures still use [`is_redacted_client_wire_projection`] as a
+///    compatibility fallback below.
 ///
 ///    `phase_ai::saved_state::load_saved_game_state` is a second in-repo
 ///    consumer of this arm besides a player's restore: it decodes the
@@ -3793,13 +3785,11 @@ fn is_redacted_client_wire_projection(object: &Map<String, Value>) -> bool {
 ///
 /// This reader keys on that field, and the mapping holds for both writers.
 ///
-/// For writer (2) that agreement is a fact about a MUTABLE removal list, not a
-/// structural identity: if `client_state_wire_value` ever begins stripping
-/// `resolution_stack`, this rule silently stops applying to the entire
-/// client-wire population, with no compiler signal. That is why it is pinned by
-/// a test rather than by this comment — `client_wire_still_carries_resolution_stack`
-/// in `types/game_state.rs`'s `mod tests` goes red if the redactor's keep-list
-/// changes. Do not delete it.
+/// For historical writer (2) bytes that agreement is a fact about a MUTABLE
+/// removal list, not a structural identity. New bytes do not depend on that
+/// premise because the positive marker is checked first. The projection test
+/// in `types/game_state.rs` pins that the shared fail-closed redaction removes
+/// the private stack and emits the marker.
 ///
 /// The version stamped below is the same kind of mutable premise: the mapping
 /// is to the current typed-frame shape, whose carrier is `resolution_frames`
@@ -3836,6 +3826,7 @@ fn is_redacted_client_wire_projection(object: &Map<String, Value>) -> bool {
 /// `ResolutionStack`.
 /// The move below is a rename, not a reinterpretation.
 pub(crate) fn declare_raw_resolution_wire(value: &mut Value) -> Result<(), String> {
+    reject_wire_projection_marker(value)?;
     let object = value
         .as_object_mut()
         .ok_or_else(|| "persisted game state must be a JSON object".to_string())?;
@@ -3927,6 +3918,22 @@ pub(crate) fn declare_raw_resolution_wire(value: &mut Value) -> Result<(), Strin
                 Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION),
             );
         }
+    }
+    Ok(())
+}
+
+/// Refuses a client projection at any persistence ingress, including a
+/// versioned/trusted envelope. Transport decoding intentionally does not call
+/// this helper because redacted client state is valid on the wire.
+pub(crate) fn reject_wire_projection_marker(value: &Value) -> Result<(), String> {
+    if value
+        .as_object()
+        .is_some_and(|object| object.contains_key("wire_projection"))
+    {
+        return Err(
+            "This saved game is missing the private rules record for the resolution it was paused in — this is what a debug export of the on-screen state looks like."
+                .to_string(),
+        );
     }
     Ok(())
 }

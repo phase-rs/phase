@@ -732,6 +732,7 @@ function defaultSeatState(playerCount: number, formatConfig?: FormatConfig): Sea
       default_deck_copy_limit: { type: "UpTo", data: 4 },
       uses_commander: false,
       allow_debug_actions: false,
+      allow_experimental_dungeons: false,
     },
     gameStarted: false,
   };

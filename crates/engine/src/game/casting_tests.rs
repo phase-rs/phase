@@ -21,7 +21,9 @@ use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{ManaChoice, ManaChoicePrompt, SpellCastRecord};
-use crate::types::keywords::{EmergeCost, EscapeCost, FlashbackCost, Keyword, KeywordKind};
+use crate::types::keywords::{
+    BlitzCost, EmergeCost, EscapeCost, FlashbackCost, Keyword, KeywordKind,
+};
 use crate::types::mana::{
     ManaColor, ManaCost, ManaCostShard, ManaRestriction, ManaSourceSelection, ManaSpellGrant,
     ManaType, ManaUnit,
@@ -2657,6 +2659,7 @@ fn ordinary_cast_preparation_accepts_only_current_face() {
         CastingVariant::Normal,
         CastingVariantFace::Current,
         CastingMode::Actual,
+        None,
     )
     .expect("ordinary casts must accept their explicit Current face");
     assert_eq!(current.prepared.casting_variant, CastingVariant::Normal);
@@ -2670,6 +2673,7 @@ fn ordinary_cast_preparation_accepts_only_current_face() {
                 CastingVariant::Normal,
                 face,
                 CastingMode::Actual,
+                None,
             )
             .is_err(),
             "ordinary casts must reject the split-only {face:?} selector"
@@ -14739,6 +14743,7 @@ fn x_cost_alt_cost_max_and_charge_derive_from_alt_base() {
         spell,
         CastingVariant::Overload,
         crate::types::game_state::CastingVariantFace::Current,
+        None,
         CastPaymentMode::Auto,
         &mut events,
     )
@@ -17549,7 +17554,8 @@ fn blitz_creature_offers_blitz_variant() {
         obj.base_card_types.core_types.push(CoreType::Creature);
         obj.mana_cost = ManaCost::generic(4);
         obj.base_mana_cost = ManaCost::generic(4);
-        obj.keywords.push(Keyword::Blitz(ManaCost::generic(2)));
+        obj.keywords
+            .push(Keyword::Blitz(BlitzCost::Mana(ManaCost::generic(2))));
     }
 
     assert!(
@@ -17595,7 +17601,7 @@ fn granted_blitz_offers_blitz_variant() {
         obj.card_types.core_types.push(CoreType::Creature);
         obj.base_card_types.core_types.push(CoreType::Creature);
         let def = StaticDefinition::new(StaticMode::CastWithKeyword {
-            keyword: Keyword::Blitz(ManaCost::generic(2)),
+            keyword: Keyword::Blitz(BlitzCost::Mana(ManaCost::generic(2))),
         })
         .affected(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)));
         obj.static_definitions = vec![def].into();
@@ -17676,7 +17682,7 @@ fn granted_blitz_self_mana_cost_resolves_to_spell_mana_cost() {
         obj.card_types.core_types.push(CoreType::Creature);
         obj.base_card_types.core_types.push(CoreType::Creature);
         let def = StaticDefinition::new(StaticMode::CastWithKeyword {
-            keyword: Keyword::Blitz(ManaCost::SelfManaCost),
+            keyword: Keyword::Blitz(BlitzCost::Mana(ManaCost::SelfManaCost)),
         })
         .affected(TargetFilter::Typed(
             TypedFilter::new(TypeFilter::Creature).properties(vec![FilterProp::Cmc {
@@ -18592,7 +18598,8 @@ fn blitz_full_cast_installs_riders_on_resolution() {
         obj.base_card_types.core_types.push(CoreType::Creature);
         obj.mana_cost = ManaCost::generic(4);
         obj.base_mana_cost = ManaCost::generic(4);
-        obj.keywords.push(Keyword::Blitz(ManaCost::generic(2)));
+        obj.keywords
+            .push(Keyword::Blitz(BlitzCost::Mana(ManaCost::generic(2))));
     }
 
     apply_as_current(
@@ -29692,6 +29699,267 @@ fn will_scion_of_peace_reduces_white_blue_spells_by_life_gained() {
     );
 }
 
+/// CR 611.2a + CR 601.2f: a player-wide transient cost grant stops discounting
+/// the moment its duration lapses, even though the stored TCE is swept later.
+/// `ForAsLongAs`/`DuringYourTurn` flips the duration without touching the
+/// list, so the cast on the far side proves the liveness gate — not a sweep —
+/// refused the discount.
+#[test]
+fn transient_player_wide_grant_stops_when_its_duration_lapses() {
+    use crate::game::dungeon::dungeon_sentinel_id;
+    use crate::types::statics::{CostModifyMode, CostReductionReach, StaticMode};
+
+    let mut state = GameState::new_two_player(42);
+    let spell = create_object(
+        &mut state,
+        CardId(10),
+        PlayerId(0),
+        "Discountable Spell".to_string(),
+        Zone::Hand,
+    );
+    {
+        let obj = state.objects.get_mut(&spell).unwrap();
+        obj.mana_cost = ManaCost::generic(3);
+        obj.base_mana_cost = ManaCost::generic(3);
+        obj.base_card_types.core_types.push(CoreType::Instant);
+        obj.card_types.core_types.push(CoreType::Instant);
+    }
+    let grant = ContinuousModification::GrantStaticAbility {
+        definition: Box::new(StaticDefinition::new(StaticMode::ModifyCost {
+            mode: CostModifyMode::Reduce,
+            amount: ManaCost::generic(2),
+            spell_filter: None,
+            dynamic_count: None,
+            reach: CostReductionReach::SpillsToGeneric,
+        })),
+    };
+    state.add_transient_continuous_effect(
+        dungeon_sentinel_id(PlayerId(0)),
+        PlayerId(0),
+        Duration::ForAsLongAs {
+            condition: StaticCondition::DuringYourTurn,
+        },
+        TargetFilter::SpecificPlayer { id: PlayerId(0) },
+        vec![grant],
+        None,
+    );
+
+    let cost = |state: &GameState, id| {
+        apply_cost_modifiers_to_base(
+            state,
+            PlayerId(0),
+            id,
+            state.objects.get(&id).unwrap().mana_cost.clone(),
+        )
+        .expect("cost computed")
+    };
+    state.active_player = PlayerId(0);
+    assert_eq!(
+        cost(&state, spell),
+        ManaCost::generic(1),
+        "live duration discounts 3 by 2"
+    );
+    assert_eq!(
+        state.transient_continuous_effects.len(),
+        1,
+        "one stored grant before the boundary"
+    );
+    state.active_player = PlayerId(1);
+    assert_eq!(
+        cost(&state, spell),
+        ManaCost::generic(3),
+        "lapsed duration discounts nothing"
+    );
+    assert_eq!(
+        state.transient_continuous_effects.len(),
+        1,
+        "the TCE is still stored; the liveness gate — not a sweep — refused it"
+    );
+}
+
+/// CR 611.2c + CR 604.1: an object-bound transient grant is never read off
+/// the TCE — not even after its recipient leaves and stops supplying a
+/// functioning static. The functioning-static path owns it; the direct
+/// collector reads only player-wide grants, so no board-wide discount leaks
+/// onto unrelated spells.
+#[test]
+fn transient_object_bound_grant_is_ignored_after_its_recipient_leaves() {
+    use crate::game::layers::evaluate_layers;
+    use crate::types::statics::{CostModifyMode, CostReductionReach, StaticMode};
+
+    let mut state = GameState::new_two_player(42);
+    let granter = create_object(
+        &mut state,
+        CardId(1),
+        PlayerId(0),
+        "Granter".to_string(),
+        Zone::Battlefield,
+    );
+    let make_spell = |state: &mut GameState, id: u64, name: &str, core: CoreType| {
+        let s = create_object(state, CardId(id), PlayerId(0), name.to_string(), Zone::Hand);
+        let obj = state.objects.get_mut(&s).unwrap();
+        obj.mana_cost = ManaCost::generic(3);
+        obj.base_mana_cost = ManaCost::generic(3);
+        obj.base_card_types.core_types.push(core);
+        obj.card_types.core_types.push(core);
+        s
+    };
+    let instant = make_spell(&mut state, 10, "Matching Instant", CoreType::Instant);
+    let creature = make_spell(&mut state, 11, "Unrelated Creature", CoreType::Creature);
+    let grant = ContinuousModification::GrantStaticAbility {
+        definition: Box::new(StaticDefinition::new(StaticMode::ModifyCost {
+            mode: CostModifyMode::Reduce,
+            amount: ManaCost::generic(2),
+            spell_filter: Some(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::AnyOf(vec![
+                    TypeFilter::Instant,
+                    TypeFilter::Sorcery,
+                ])],
+                controller: None,
+                properties: vec![],
+            })),
+            dynamic_count: None,
+            reach: CostReductionReach::SpillsToGeneric,
+        })),
+    };
+    state.add_transient_continuous_effect(
+        granter,
+        PlayerId(0),
+        Duration::UntilEndOfTurn,
+        TargetFilter::SpecificObject { id: granter },
+        vec![grant],
+        None,
+    );
+    evaluate_layers(&mut state);
+
+    let cost = |state: &GameState, id| {
+        apply_cost_modifiers_to_base(
+            state,
+            PlayerId(0),
+            id,
+            state.objects.get(&id).unwrap().mana_cost.clone(),
+        )
+        .expect("cost computed")
+    };
+    // Control: with the recipient out, the grafted static discounts exactly
+    // once (double collection would floor to {0}) and the filter still binds.
+    assert_eq!(
+        cost(&state, instant),
+        ManaCost::generic(1),
+        "functioning graft discounts the matching spell once"
+    );
+    assert_eq!(
+        cost(&state, creature),
+        ManaCost::generic(3),
+        "the filter excludes the unrelated spell"
+    );
+
+    // The recipient leaves; no layer pass runs, so the TCE is still stored —
+    // exactly the state the direct collector must refuse.
+    state.battlefield.retain(|id| *id != granter);
+    state.objects.get_mut(&granter).unwrap().zone = Zone::Graveyard;
+    assert_eq!(
+        state.transient_continuous_effects.len(),
+        1,
+        "the grant is still stored after its recipient left"
+    );
+    assert_eq!(
+        cost(&state, instant),
+        ManaCost::generic(3),
+        "no functioning graft, no direct read: the matching spell pays full"
+    );
+    assert_eq!(
+        cost(&state, creature),
+        ManaCost::generic(3),
+        "the unrelated spell stays untouched"
+    );
+}
+
+/// CR 601.2f: the reduction-order prompt labels a transient grant's row by its
+/// source — the live object first, then the construction snapshot when the
+/// source changed zones (CR 400.7) or is a dungeon sentinel. A later dungeon
+/// must not rename the original room grant.
+#[test]
+fn transient_grant_display_name_keeps_the_source_snapshot() {
+    use crate::game::dungeon::{dungeon_sentinel_id, DungeonId, DungeonProgress};
+
+    let mut state = GameState::new_two_player(42);
+    let beacon = create_object(
+        &mut state,
+        CardId(1),
+        PlayerId(0),
+        "Beacon".to_string(),
+        Zone::Battlefield,
+    );
+    state.dungeon_progress.insert(
+        PlayerId(0),
+        DungeonProgress {
+            current_dungeon: Some(DungeonId::BaldursGateWilderness),
+            current_room: 11,
+            ..Default::default()
+        },
+    );
+    state.add_transient_continuous_effect(
+        beacon,
+        PlayerId(0),
+        Duration::UntilEndOfTurn,
+        TargetFilter::SpecificPlayer { id: PlayerId(0) },
+        vec![],
+        None,
+    );
+    state.add_transient_continuous_effect(
+        dungeon_sentinel_id(PlayerId(0)),
+        PlayerId(0),
+        Duration::UntilEndOfTurn,
+        TargetFilter::SpecificPlayer { id: PlayerId(0) },
+        vec![],
+        None,
+    );
+
+    let tces = state.transient_continuous_effects.clone();
+    assert_eq!(
+        super::transient_grant_display_name(&state, &tces[0]),
+        "Beacon",
+        "a live source names itself"
+    );
+    assert_eq!(
+        super::transient_grant_display_name(&state, &tces[1]),
+        "Baldur's Gate Wilderness",
+        "a sentinel source uses its construction-time dungeon"
+    );
+
+    state
+        .dungeon_progress
+        .get_mut(&PlayerId(0))
+        .unwrap()
+        .current_dungeon = None;
+    assert_eq!(
+        super::transient_grant_display_name(&state, &tces[1]),
+        "Baldur's Gate Wilderness",
+        "completing the dungeon must not erase the grant's label"
+    );
+    state
+        .dungeon_progress
+        .get_mut(&PlayerId(0))
+        .unwrap()
+        .current_dungeon = Some(DungeonId::Undercity);
+    assert_eq!(
+        super::transient_grant_display_name(&state, &tces[1]),
+        "Baldur's Gate Wilderness",
+        "a later dungeon must not rename the grant"
+    );
+
+    // The snapshot leg: the source leaves the object map entirely, so only
+    // the construction-time name remains.
+    state.battlefield.retain(|id| *id != beacon);
+    state.objects.remove(&beacon);
+    assert_eq!(
+        super::transient_grant_display_name(&state, &tces[0]),
+        "Beacon",
+        "a zoned-out source keeps its snapshotted name"
+    );
+}
+
 /// CR 601.2f: self-spell reductions and battlefield raises share one total
 /// cost calculation. A self reduction must not floor the spell to {0}
 /// before a battlefield tax is added.
@@ -31543,6 +31811,7 @@ fn chosen_muldrotha_variant_requests_and_consumes_permanent_type_slot() {
                 graveyard_destination_replacement: None,
                 extra_cost: None,
                 enters_with_counter: None,
+                required_cast_keyword: None,
             })
             .affected(TargetFilter::Typed(TypedFilter::new(TypeFilter::Permanent))),
         );
@@ -31664,6 +31933,117 @@ fn chosen_muldrotha_variant_requests_and_consumes_permanent_type_slot() {
             .contains(&(source, CoreType::Artifact)),
         "the unselected Artifact slot must remain available"
     );
+}
+
+/// Muldrotha (per-type graveyard permission) on the battlefield and a {0}
+/// artifact creature card in the graveyard: two slots to choose from.
+fn muldrotha_and_graveyard_artifact_creature(state: &mut GameState) -> (ObjectId, ObjectId) {
+    let player = PlayerId(0);
+    let source = create_object(
+        state,
+        CardId(28_200),
+        player,
+        "Muldrotha, the Gravetide".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&source)
+        .unwrap()
+        .static_definitions
+        .push(
+            StaticDefinition::new(StaticMode::GraveyardCastPermission {
+                frequency: CastFrequency::OncePerTurnPerPermanentType,
+                play_mode: CardPlayMode::Cast,
+                graveyard_destination_replacement: None,
+                extra_cost: None,
+                enters_with_counter: None,
+                required_cast_keyword: None,
+            })
+            .affected(TargetFilter::Typed(TypedFilter::new(TypeFilter::Permanent))),
+        );
+    let spell = create_object(
+        state,
+        CardId(28_201),
+        player,
+        "Graveyard Artifact Creature".to_string(),
+        Zone::Graveyard,
+    );
+    let object = state.objects.get_mut(&spell).unwrap();
+    object.card_types.core_types = vec![CoreType::Artifact, CoreType::Creature];
+    object.base_card_types = object.card_types.clone();
+    object.mana_cost = ManaCost::generic(0);
+    object.base_mana_cost = object.mana_cost.clone();
+    (source, spell)
+}
+
+/// CR 110.4 + CR 601.2a: a printed cast through Muldrotha prepares awaiting its
+/// slot, and such a cast can't be announced or paid: `continue_with_prepared`
+/// refuses it before the spell is put on the stack.
+#[test]
+fn a_cast_awaiting_its_graveyard_slot_is_refused_before_announcement() {
+    let mut state = setup_game_at_main_phase();
+    let (_, spell) = muldrotha_and_graveyard_artifact_creature(&mut state);
+    let prepared = prepare_spell_cast(&state, PlayerId(0), spell).expect("the cast prepares");
+    assert!(
+        matches!(
+            prepared.graveyard_authority,
+            Some(GraveyardAuthorityResolution::AwaitingSlot { .. })
+        ),
+        "two slots available: the printed cast awaits its slot, got {:?}",
+        prepared.graveyard_authority
+    );
+    let mut events = Vec::new();
+    assert!(continue_with_prepared(&mut state, PlayerId(0), prepared, &mut events).is_err());
+    assert!(state.stack.is_empty(), "refused before announcement");
+    assert_eq!(state.objects[&spell].zone, Zone::Graveyard);
+    assert!(state.graveyard_cast_permissions_used_per_type.is_empty());
+}
+
+/// CR 110.4: `finalize_cast` refuses independently a per-type permission that
+/// reaches it with no slot, rather than spending none or guessing one.
+#[test]
+fn finalize_refuses_a_per_type_graveyard_authority_without_a_slot() {
+    let mut state = setup_game_at_main_phase();
+    let (source, spell) = muldrotha_and_graveyard_artifact_creature(&mut state);
+    let slotted = prepare_spell_cast_announced(
+        &state,
+        PlayerId(0),
+        spell,
+        Some(CastingVariant::GraveyardPermission {
+            source,
+            frequency: CastFrequency::OncePerTurnPerPermanentType,
+            slot_type: Some(CoreType::Artifact),
+            graveyard_destination_replacement: None,
+        }),
+        None,
+        None,
+        CastingMode::Actual,
+        None,
+    )
+    .expect("the slotted cast prepares");
+    let mut prepared = slotted;
+    let Some(GraveyardAuthorityResolution::Complete(mut authority)) =
+        prepared.graveyard_authority.take()
+    else {
+        panic!("a chosen slot resolves completely");
+    };
+    let unslotted = CastingVariant::GraveyardPermission {
+        source,
+        frequency: CastFrequency::OncePerTurnPerPermanentType,
+        slot_type: None,
+        graveyard_destination_replacement: None,
+    };
+    authority.variant = unslotted;
+    prepared.casting_variant = unslotted;
+    prepared.graveyard_authority = Some(GraveyardAuthorityResolution::Complete(authority));
+    let mut events = Vec::new();
+    let result = continue_with_prepared(&mut state, PlayerId(0), prepared, &mut events);
+    assert!(
+        result.is_err(),
+        "finalization refuses an unslotted per-type authority, got {result:?}"
+    );
+    assert!(state.graveyard_cast_permissions_used_per_type.is_empty());
 }
 
 #[test]
@@ -49127,6 +49507,7 @@ fn exile_static_any_color_is_bound_to_elected_source() {
             frequency: CastFrequency::Unlimited,
         },
         crate::types::game_state::CastingVariantFace::Current,
+        None,
         CastPaymentMode::Auto,
         &mut denied_events,
     );
@@ -49144,6 +49525,7 @@ fn exile_static_any_color_is_bound_to_elected_source() {
             frequency: CastFrequency::Unlimited,
         },
         crate::types::game_state::CastingVariantFace::Current,
+        None,
         CastPaymentMode::Auto,
         &mut allowed_events,
     )

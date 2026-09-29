@@ -847,6 +847,22 @@ pub enum GameEvent {
         augmenting_id: ObjectId,
         controller: PlayerId,
     },
+    /// CR 701.42a + CR 712.4a: The two cards of a meld pair were put onto the
+    /// battlefield back faces up and combined, as a single permanent represented
+    /// by both cards. Emitted only once the melded permanent has entered the
+    /// battlefield — never for a meld that fails (CR 701.42c). `object_id` is the
+    /// melded permanent, which keeps the instigating card's `ObjectId`;
+    /// `partner_id` is the other card of the pair, now its second component.
+    ///
+    /// Distinct from `Mutated`: melding enters a new object onto the battlefield
+    /// (CR 701.42a), whereas a CR 730.2b merge is not a battlefield entry. No
+    /// printed card triggers on melding, so this event dispatches no trigger key;
+    /// it drives the game log and the frontend's meld animation.
+    Melded {
+        object_id: ObjectId,
+        partner_id: ObjectId,
+        controller: PlayerId,
+    },
     /// CR 707.10: A spell was copied onto the stack. A copy of a spell isn't
     /// cast, so this is a distinct event from `SpellCast` — copy-sensitive
     /// triggers (Magecraft, "whenever you copy a spell") fire on this, while

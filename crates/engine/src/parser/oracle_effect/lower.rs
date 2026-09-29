@@ -10066,7 +10066,11 @@ pub(super) fn absorb_trailing_rounding_suffix(
     (amount, rest)
 }
 
-fn parse_pump_modifier_phrase(input: &str) -> OracleResult<'_, (PtValue, PtValue)> {
+/// CR 613.4c: the bare P/T-modification phrase inside a pump clause ("+2/-2",
+/// "an additional +1/+1"). Shared with `subject.rs`'s P/T-disjunction arm so a
+/// "gets +1/-1 or -1/+1" branch item parses through exactly the same grammar as
+/// the single-modification `parse_pump_clause_with_context` path.
+pub(super) fn parse_pump_modifier_phrase(input: &str) -> OracleResult<'_, (PtValue, PtValue)> {
     let (rest, _) = opt(alt((
         tag::<_, _, OracleError<'_>>("an additional "),
         tag("additional "),
@@ -11364,6 +11368,26 @@ pub(super) fn apply_where_x_effect_expression(
         }
         Effect::Scry { count, .. } => {
             bind_where_x_quantity(count, where_x_expression, &mut unbound_where_x);
+        }
+        // CR 107.3i + CR 608.2d: a trailing "where X is …" defines X for the whole
+        // instruction, and a branch of a resolution-time choice is PART of that
+        // instruction — "all instances of X on an object have the same value".
+        // Structurally the branch is a nested `AbilityDefinition`, exactly like the
+        // `mode_abilities` / `else_ability` / `sub_ability` links that
+        // `apply_where_x_ability_expression` already walks, so it is walked the same
+        // way and each branch reports its own gap.
+        //
+        // Without this arm the walk stopped at the branch boundary. Liliana of the
+        // Dark Realms — "[-3]: Target creature gets +X/+X or -X/-X until end of turn,
+        // where X is the number of Swamps you control" — kept a bare
+        // `PtValue::Variable("X")` in both branches, i.e. a silent +0/+0 that still
+        // reads as supported. The totality guard at the end of this function cannot
+        // catch that: its probe is anchored on `QuantityRef` keys, and a P/T slot
+        // holding `PtValue::Variable` is not one.
+        Effect::ChooseOneOf { branches, .. } => {
+            for branch in branches.iter_mut() {
+                apply_where_x_ability_expression(branch, where_x_expression);
+            }
         }
         Effect::Pump {
             power, toughness, ..
@@ -15055,6 +15079,7 @@ mod where_x_tests {
                                     ]),
                                 ),
                                 rest_destination: Some(Zone::Library),
+                                rest_split_top_count: None,
                                 rest_order: crate::types::ability::DigRestOrder::Preserve,
                                 reveal: true,
                                 enter_tapped: false,

@@ -4,6 +4,7 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
+use crate::types::format::FormatConfig;
 use crate::types::player::PlayerId;
 
 // ─── Dungeon Identity ────────────────────────────────────────────────────────
@@ -511,14 +512,29 @@ pub fn dungeon_preview(id: DungeonId) -> DungeonPreview {
 
 /// CR 701.49a / CR 701.49d: Get available dungeons for a new venture.
 /// Normal venture offers the AFR trio; Specific constrains to one dungeon.
-pub fn available_dungeons(source: VentureSource) -> Vec<DungeonId> {
+/// When the session allows experimental dungeons, Baldur's Gate Wilderness
+/// joins the normal pool, and an initiative venture offers it as an
+/// alternative to Undercity instead of auto-entering the Undercity.
+pub fn available_dungeons(source: VentureSource, config: &FormatConfig) -> Vec<DungeonId> {
     match source {
-        VentureSource::Normal => vec![
-            DungeonId::LostMineOfPhandelver,
-            DungeonId::DungeonOfTheMadMage,
-            DungeonId::TombOfAnnihilation,
-        ],
-        VentureSource::Specific(id) => vec![id],
+        VentureSource::Normal => {
+            let mut options = vec![
+                DungeonId::LostMineOfPhandelver,
+                DungeonId::DungeonOfTheMadMage,
+                DungeonId::TombOfAnnihilation,
+            ];
+            if config.allow_experimental_dungeons {
+                options.push(DungeonId::BaldursGateWilderness);
+            }
+            options
+        }
+        VentureSource::Specific(id) => {
+            if id == DungeonId::Undercity && config.allow_experimental_dungeons {
+                vec![DungeonId::Undercity, DungeonId::BaldursGateWilderness]
+            } else {
+                vec![id]
+            }
+        }
     }
 }
 
@@ -537,15 +553,17 @@ pub fn dungeon_sentinel_id(player: PlayerId) -> crate::types::identifiers::Objec
 use crate::game::ability_utils::build_resolved_from_def;
 use crate::parser::oracle_effect::parse_effect_chain;
 use crate::types::ability::{
-    AbilityCondition, AbilityKind, CardPlayMode, CastFromZoneDriver, CastingPermission,
-    ContinuousModification, ControllerRef, Duration, Effect, FilterProp, PlayerFilter, PlayerScope,
-    PtValue, QuantityExpr, ResolvedAbility, SearchSelectionConstraint, StaticDefinition,
-    TargetFilter, TypeFilter, TypedFilter,
+    AbilityCondition, AbilityKind, AggregateFunction, CardPlayMode, CardTypeSetSource,
+    CastFromZoneDriver, CastingPermission, ContinuousModification, ControllerRef, Duration, Effect,
+    FilterProp, ObjectProperty, ObjectSelectionCardinality, PlayerFilter, PlayerScope,
+    PropertyAggregate, PtValue, QuantityExpr, QuantityRef, ResolvedAbility,
+    SearchSelectionConstraint, StaticDefinition, TargetFilter, TrackedAnaphorSource, TypeFilter,
+    TypedFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::CounterType;
 use crate::types::game_state::TargetSelectionConstraint;
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
 use crate::types::statics::StaticMode;
@@ -586,10 +604,9 @@ pub fn room_effects(
             vec![],
         ),
         // 2: Mine Tunnels — "Create a Treasure token"
-        (DungeonId::LostMineOfPhandelver, 2) => (
-            simple(treasure_token(), source_id, controller),
-            vec![],
-        ),
+        (DungeonId::LostMineOfPhandelver, 2) => {
+            (simple(treasure_token(), source_id, controller), vec![])
+        }
         // 3: Storeroom — "Put a +1/+1 counter on target creature"
         // (any creature; the Oracle text is unrestricted, matching the sibling
         // counter-rooms Undercity "Forge" / "Throne of the Dead Three").
@@ -608,7 +625,10 @@ pub fn room_effects(
         // 4: Dark Pool — "Each opponent loses 1 life. You gain 1 life."
         (DungeonId::LostMineOfPhandelver, 4) => {
             let mut lose = ResolvedAbility::new(
-                Effect::LoseLife { amount: fixed(1), target: None },
+                Effect::LoseLife {
+                    amount: fixed(1),
+                    target: None,
+                },
                 vec![],
                 source_id,
                 controller,
@@ -682,10 +702,9 @@ pub fn room_effects(
             vec![],
         ),
         // 2: Goblin Bazaar — "Create a Treasure token"
-        (DungeonId::DungeonOfTheMadMage, 2) => (
-            simple(treasure_token(), source_id, controller),
-            vec![],
-        ),
+        (DungeonId::DungeonOfTheMadMage, 2) => {
+            (simple(treasure_token(), source_id, controller), vec![])
+        }
         // 3: Twisted Caverns — "Target creature can't attack until your next turn"
         // CR 309.4c + CR 508.1c: Room ability applying a combat restriction.
         (DungeonId::DungeonOfTheMadMage, 3) => {
@@ -767,15 +786,7 @@ pub fn room_effects(
         // 6: Muiral's Graveyard — "Create two 1/1 black Skeleton creature tokens"
         (DungeonId::DungeonOfTheMadMage, 6) => (
             simple(
-                creature_token(
-                    "Skeleton",
-                    1,
-                    1,
-                    &["Skeleton"],
-                    &[ManaColor::Black],
-                    &[],
-                    2,
-                ),
+                creature_token("Skeleton", 1, 1, &["Skeleton"], &[ManaColor::Black], &[], 2),
                 source_id,
                 controller,
             ),
@@ -795,16 +806,16 @@ pub fn room_effects(
         ),
         // 8: Mad Wizard's Lair — "Draw three cards and reveal them. You may cast one of them
         //    without paying its mana cost."
-        (DungeonId::DungeonOfTheMadMage, 8) => (
-            mad_wizards_lair(source_id, controller),
-            vec![],
-        ),
+        (DungeonId::DungeonOfTheMadMage, 8) => (mad_wizards_lair(source_id, controller), vec![]),
 
         // ── Tomb of Annihilation ────────────────────────────────────────
         // 0: Trapped Entry — "Each player loses 1 life"
         (DungeonId::TombOfAnnihilation, 0) => {
             let mut ability = simple(
-                Effect::LoseLife { amount: fixed(1), target: None },
+                Effect::LoseLife {
+                    amount: fixed(1),
+                    target: None,
+                },
                 source_id,
                 controller,
             );
@@ -839,9 +850,12 @@ pub fn room_effects(
                 min_count: 0,
             };
             let sac_land = simple(sac(TypedFilter::land()), source_id, controller);
-            let sac_artifact =
-                simple(sac(TypedFilter::new(TypeFilter::Artifact)), source_id, controller)
-                    .sub_ability(sac_land);
+            let sac_artifact = simple(
+                sac(TypedFilter::new(TypeFilter::Artifact)),
+                source_id,
+                controller,
+            )
+            .sub_ability(sac_land);
             let sac_creature = simple(sac(TypedFilter::creature()), source_id, controller)
                 .sub_ability(sac_artifact);
             let discard = simple(
@@ -905,10 +919,7 @@ pub fn room_effects(
         // ── Undercity ───────────────────────────────────────────────────
         // 0: Secret Entrance — "Search your library for a basic land card, reveal it,
         //    put it into your hand, then shuffle."
-        (DungeonId::Undercity, 0) => (
-            search_basic_land(source_id, controller),
-            vec![],
-        ),
+        (DungeonId::Undercity, 0) => (search_basic_land(source_id, controller), vec![]),
         // 1: Forge — "Put two +1/+1 counters on target creature"
         (DungeonId::Undercity, 1) => (
             simple(
@@ -959,10 +970,7 @@ pub fn room_effects(
             vec![],
         ),
         // 5: Stash — "Create a Treasure token"
-        (DungeonId::Undercity, 5) => (
-            simple(treasure_token(), source_id, controller),
-            vec![],
-        ),
+        (DungeonId::Undercity, 5) => (simple(treasure_token(), source_id, controller), vec![]),
         // 6: Archives — "Draw a card"
         (DungeonId::Undercity, 6) => (
             simple(
@@ -993,23 +1001,16 @@ pub fn room_effects(
             vec![],
         ),
         // 8: Throne of the Dead Three — reveal 10, put creature with counters, hexproof, shuffle
-        (DungeonId::Undercity, 8) => (
-            throne_of_dead_three(source_id, controller),
-            vec![],
-        ),
+        (DungeonId::Undercity, 8) => (throne_of_dead_three(source_id, controller), vec![]),
 
         // ── Baldur's Gate Wilderness ────────────────────────────────────
         // 0: Crash Landing — "Search your library for a basic land card, reveal it,
         //    put it into your hand, then shuffle."
-        (DungeonId::BaldursGateWilderness, 0) => (
-            search_basic_land(source_id, controller),
-            vec![],
-        ),
+        (DungeonId::BaldursGateWilderness, 0) => (search_basic_land(source_id, controller), vec![]),
         // 1: Goblin Camp — "Create a Treasure token"
-        (DungeonId::BaldursGateWilderness, 1) => (
-            simple(treasure_token(), source_id, controller),
-            vec![],
-        ),
+        (DungeonId::BaldursGateWilderness, 1) => {
+            (simple(treasure_token(), source_id, controller), vec![])
+        }
         // 2: Emerald Grove — "Create a 2/2 white Knight creature token"
         (DungeonId::BaldursGateWilderness, 2) => (
             simple(
@@ -1074,7 +1075,8 @@ pub fn room_effects(
                     enter_with_counters: vec![],
                     conditional_enter_with_counters: vec![],
                     face_down_profile: None,
-                 enters_modified_if: None },
+                    enters_modified_if: None,
+                },
                 source_id,
                 controller,
             );
@@ -1099,36 +1101,20 @@ pub fn room_effects(
             vec![],
         ),
         // 7: Grymforge — "For each opponent, goad up to one target creature that player controls."
-        (DungeonId::BaldursGateWilderness, 7) => (
-            simple(
-                Effect::Unimplemented {
-                    name: "Room: Grymforge".to_string(),
-                    description: Some(
-                        "For each opponent, goad up to one target creature that player controls."
-                            .to_string(),
-                    ),
-                },
-                source_id,
-                controller,
-            ),
-            vec![],
-        ),
+        (DungeonId::BaldursGateWilderness, 7) => {
+            const ORACLE: &str =
+                "For each opponent, goad up to one target creature that player controls.";
+            let def = parse_effect_chain(ORACLE, AbilityKind::Spell);
+            (build_resolved_from_def(&def, source_id, controller), vec![])
+        }
         // 8: Githyanki Crèche — "Distribute three +1/+1 counters among up to three target
         //    creatures you control."
-        (DungeonId::BaldursGateWilderness, 8) => (
-            simple(
-                Effect::Unimplemented {
-                    name: "Room: Githyanki Crèche".to_string(),
-                    description: Some(
-                        "Distribute three +1/+1 counters among up to three target creatures you control."
-                            .to_string(),
-                    ),
-                },
-                source_id,
-                controller,
-            ),
-            vec![],
-        ),
+        (DungeonId::BaldursGateWilderness, 8) => {
+            const ORACLE: &str =
+                "Distribute three +1/+1 counters among up to three target creatures you control.";
+            let def = parse_effect_chain(ORACLE, AbilityKind::Spell);
+            (build_resolved_from_def(&def, source_id, controller), vec![])
+        }
         // 9: Last Light Inn — "Draw two cards"
         (DungeonId::BaldursGateWilderness, 9) => (
             simple(
@@ -1142,74 +1128,54 @@ pub fn room_effects(
             vec![],
         ),
         // 10: Reithwin Tollhouse — "Roll 2d4 and create that many Treasure tokens."
-        (DungeonId::BaldursGateWilderness, 10) => (
-            simple(
-                Effect::Unimplemented {
-                    name: "Room: Reithwin Tollhouse".to_string(),
-                    description: Some(
-                        "Roll 2d4 and create that many Treasure tokens.".to_string(),
-                    ),
-                },
-                source_id,
-                controller,
-            ),
-            vec![],
-        ),
+        (DungeonId::BaldursGateWilderness, 10) => {
+            const ORACLE: &str = "Roll 2d4 and create that many Treasure tokens.";
+            let def = parse_effect_chain(ORACLE, AbilityKind::Spell);
+            (build_resolved_from_def(&def, source_id, controller), vec![])
+        }
         // 11: Moonrise Towers — "Instant and sorcery spells you cast this turn cost {3} less
         //     to cast."
-        (DungeonId::BaldursGateWilderness, 11) => (
-            simple(
-                Effect::Unimplemented {
-                    name: "Room: Moonrise Towers".to_string(),
-                    description: Some(
-                        "Instant and sorcery spells you cast this turn cost {3} less to cast."
-                            .to_string(),
-                    ),
+        (DungeonId::BaldursGateWilderness, 11) => {
+            const ORACLE: &str =
+                "Instant and sorcery spells you cast this turn cost {3} less to cast.";
+            let def = parse_effect_chain(ORACLE, AbilityKind::Spell);
+            (
+                patch_moonrise_cost_grant(build_resolved_from_def(&def, source_id, controller)),
+                vec![],
+            )
+        }
+        // 12: Gauntlet of Shar — "Each opponent loses 5 life"
+        (DungeonId::BaldursGateWilderness, 12) => {
+            let mut ability = simple(
+                Effect::LoseLife {
+                    amount: fixed(5),
+                    target: None,
                 },
                 source_id,
                 controller,
-            ),
-            vec![],
-        ),
-        // 12: Gauntlet of Shar — "Each opponent loses 5 life"
-        (DungeonId::BaldursGateWilderness, 12) => {
-            let mut ability =
-                simple(Effect::LoseLife { amount: fixed(5), target: None }, source_id, controller);
+            );
             ability.player_scope = Some(PlayerFilter::Opponent);
             (ability, vec![])
         }
         // 13: Balthazar's Lab — "Return up to two target creature cards from your graveyard
         //     to your hand."
-        (DungeonId::BaldursGateWilderness, 13) => (
-            simple(
-                Effect::Unimplemented {
-                    name: "Room: Balthazar's Lab".to_string(),
-                    description: Some(
-                        "Return up to two target creature cards from your graveyard to your hand."
-                            .to_string(),
-                    ),
-                },
-                source_id,
-                controller,
-            ),
-            vec![],
-        ),
+        (DungeonId::BaldursGateWilderness, 13) => {
+            const ORACLE: &str =
+                "Return up to two target creature cards from your graveyard to your hand.";
+            let def = parse_effect_chain(ORACLE, AbilityKind::Spell);
+            (build_resolved_from_def(&def, source_id, controller), vec![])
+        }
         // 14: Circus of the Last Days — "Create a token that's a copy of one of your
         //     commanders, except it's not legendary."
-        (DungeonId::BaldursGateWilderness, 14) => (
-            simple(
-                Effect::Unimplemented {
-                    name: "Room: Circus of the Last Days".to_string(),
-                    description: Some(
-                        "Create a token that's a copy of one of your commanders, except it's not legendary."
-                            .to_string(),
-                    ),
-                },
-                source_id,
-                controller,
-            ),
-            vec![],
-        ),
+        (DungeonId::BaldursGateWilderness, 14) => {
+            const ORACLE: &str =
+                "Create a token that's a copy of one of your commanders, except it's not legendary.";
+            let def = parse_effect_chain(ORACLE, AbilityKind::Spell);
+            (
+                patch_circus_commander_choice(build_resolved_from_def(&def, source_id, controller)),
+                vec![],
+            )
+        }
         // 15: Undercity Ruins — "Create three 4/1 black Skeleton creature tokens with menace"
         (DungeonId::BaldursGateWilderness, 15) => (
             simple(
@@ -1267,23 +1233,16 @@ pub fn room_effects(
             ),
             vec![],
         ),
-        // 17: Ansur's Sanctum — "Reveal the top four cards of your library. Put those cards
-        //     into your hand. Each opponent loses life equal to the total mana value of
-        //     those cards."
-        (DungeonId::BaldursGateWilderness, 17) => (
-            simple(
-                Effect::Unimplemented {
-                    name: "Room: Ansur's Sanctum".to_string(),
-                    description: Some(
-                        "Reveal the top four cards of your library. Put those cards into your hand. Each opponent loses life equal to the total mana value of those cards."
-                            .to_string(),
-                    ),
-                },
-                source_id,
-                controller,
-            ),
-            vec![],
-        ),
+        // 17: Ansur's Sanctum — "Reveal the top four cards of your library and put them into
+        //     your hand. Each opponent loses life equal to those cards' total mana value."
+        (DungeonId::BaldursGateWilderness, 17) => {
+            const ORACLE: &str = "Reveal the top four cards of your library and put them into your hand. Each opponent loses life equal to those cards' total mana value.";
+            let def = parse_effect_chain(ORACLE, AbilityKind::Spell);
+            (
+                patch_ansur_drain(build_resolved_from_def(&def, source_id, controller)),
+                vec![],
+            )
+        }
         // 18: Temple of Bhaal — "Creatures your opponents control get -5/-5 until end of turn"
         (DungeonId::BaldursGateWilderness, 18) => (
             ResolvedAbility::new(
@@ -1474,6 +1433,139 @@ fn retarget_hexproof_to_parent(ability: &mut ResolvedAbility) {
     if let Some(sub) = ability.sub_ability.as_mut() {
         retarget_hexproof_to_parent(sub);
     }
+}
+
+/// CR 309.4c + CR 115.10 + CR 115.10a: Baldur's Gate Wilderness room 14
+/// (Circus of the Last Days). "One of your commanders" never uses the word
+/// "target", so the commander is chosen — untargeted — during resolution, not
+/// declared when the trigger goes on the stack. The parser lowers the phrase
+/// to an unconstrained `Any` target; rebuild the room as a choice chain: a
+/// `ChooseObjectsIntoTrackedSet` root (exactly one commander permanent the
+/// controller owns — the same eligibility the targeted form narrowed to, now
+/// as a choice filter, so hexproof/shroud can't exclude it) with the parsed
+/// `CopyTokenOf` body as its continuation, re-pointed at the chain's tracked
+/// set. Neither half declares a stack target (`TrackedSet` is a context ref),
+/// and `source_filter` stays `None`: it resolves as EVERY matching object,
+/// not one chosen source.
+fn patch_circus_commander_choice(mut root: ResolvedAbility) -> ResolvedAbility {
+    if !matches!(root.effect, Effect::CopyTokenOf { .. }) {
+        return root;
+    }
+    if let Effect::CopyTokenOf { target, .. } = &mut root.effect {
+        *target = TargetFilter::TrackedSet {
+            id: TrackedSetId(0),
+        };
+    }
+    let mut choice = ResolvedAbility::new(
+        Effect::ChooseObjectsIntoTrackedSet {
+            chooser: TargetFilter::Controller,
+            filter: TargetFilter::Typed(TypedFilter::permanent().properties(vec![
+                FilterProp::IsCommander,
+                FilterProp::Owned {
+                    controller: ControllerRef::You,
+                },
+            ])),
+            min: 1,
+            max: Some(1),
+            cardinality: Some(ObjectSelectionCardinality::Exactly { count: 1 }),
+            eligibility: None,
+        },
+        Vec::new(),
+        root.source_id,
+        root.controller,
+    );
+    choice.sub_ability = Some(Box::new(root));
+    choice
+}
+
+/// CR 309.4c: Baldur's Gate Wilderness room 11 (Moonrise Towers).
+/// The parser lowers "Instant and sorcery spells you cast this turn cost {3}
+/// less to cast" with a null spell filter, which the cost collector would
+/// read as "all spells you cast". Pin the granted reduction to instant and
+/// sorcery spells. The controller axis stays None: caster scope ("spells YOU
+/// cast") is enforced separately from the granted static's affected filter,
+/// and resolving "you" against the sentinel source would only add a
+/// stale-source dependency.
+///
+/// The same parse binds the grant `SelfRef` — both the `GenericEffect`
+/// target descriptor and the static's `affected` — which installation
+/// resolves to the room's sentinel, an object that is never on the
+/// battlefield, so the layer-6 graft can never land and the functioning-static
+/// path stays blind. Rebind a sentinel-sourced grant to the controller: the
+/// granted effect is player-scoped (CR 611.2), and only the player arm
+/// installs a TCE the cost collector is allowed to read. The declared target
+/// goes back to `None` (the room trigger targets nothing); the application
+/// filter falls through to the controller binding. Printed-card grants keep
+/// their `SelfRef` (their source is a real permanent); this rewrite is
+/// room-local.
+fn patch_moonrise_cost_grant(mut root: ResolvedAbility) -> ResolvedAbility {
+    if let Effect::GenericEffect {
+        target,
+        static_abilities,
+        ..
+    } = &mut root.effect
+    {
+        if *target == Some(TargetFilter::SelfRef) {
+            *target = None;
+        }
+        for static_ability in static_abilities.iter_mut() {
+            if static_ability.affected == Some(TargetFilter::SelfRef) {
+                static_ability.affected = Some(TargetFilter::Controller);
+            }
+            for modification in static_ability.modifications.iter_mut() {
+                if let ContinuousModification::GrantStaticAbility { definition } = modification {
+                    if let StaticMode::ModifyCost { spell_filter, .. } = &mut definition.mode {
+                        *spell_filter = Some(TargetFilter::Typed(TypedFilter {
+                            type_filters: vec![TypeFilter::AnyOf(vec![
+                                TypeFilter::Instant,
+                                TypeFilter::Sorcery,
+                            ])],
+                            controller: None,
+                            properties: vec![],
+                        }));
+                    }
+                }
+            }
+        }
+    }
+    root
+}
+
+/// CR 309.4c: Baldur's Gate Wilderness room 17 (Ansur's Sanctum).
+/// The parser has no reading for "those cards' total mana value" (possessive
+/// plus word order), so the drain half lowers to `Unimplemented`. Replace it
+/// with life loss equal to the revealed pool's total mana value — the
+/// Ensnared-by-the-Mara shape, `Sum` over `ManaValue` of the `ChainSet`
+/// the `RevealTop` producer published (members are addressed by identity,
+/// so the move to hand in between does not disturb the read).
+fn patch_ansur_drain(mut root: ResolvedAbility) -> ResolvedAbility {
+    let mut node = &mut root;
+    loop {
+        if matches!(node.effect, Effect::Unimplemented { .. }) {
+            let aggregate = PropertyAggregate::new(
+                AggregateFunction::Sum,
+                ObjectProperty::ManaValue,
+                CardTypeSetSource::TrackedSet {
+                    set: TrackedAnaphorSource::ChainSet,
+                    caused_by: None,
+                },
+            )
+            .expect("Sum over ManaValue of the chain set is statically valid");
+            node.effect = Effect::LoseLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::PropertyAggregate(aggregate),
+                },
+                target: None,
+            };
+            node.player_scope = Some(PlayerFilter::Opponent);
+            break;
+        }
+        match node.sub_ability.as_mut() {
+            Some(sub) => node = sub.as_mut(),
+            None => break,
+        }
+    }
+    root
 }
 
 /// Build a "search for a basic land, reveal, put into hand, shuffle" ability chain.
@@ -1771,25 +1863,27 @@ static UNDERCITY: DungeonDefinition = DungeonDefinition {
 };
 
 /// Baldur's Gate Wilderness (Commander Legends: Battle for Baldur's Gate)
-/// 19 rooms in a diamond pattern. Room effects are complex — most deferred as Unimplemented.
+/// 19 rooms in a diamond pattern. The complex rooms parse their Oracle text
+/// through `parse_effect_chain` (the Tomb-room precedent) rather than
+/// hand-building Effects.
 /// Graph structure: each room in a row leads to the adjacent rooms in the next row.
 static BALDURS_GATE_WILDERNESS: DungeonDefinition = DungeonDefinition {
     id: DungeonId::BaldursGateWilderness,
     name: "Baldur's Gate Wilderness",
     rooms: &[
-        // Row 1 (top)
-        // 0: Crash Landing → {Goblin Camp, Emerald Grove}
+        // Row 1 (top). Three doors: one over each second-row room.
+        // 0: Crash Landing → {Goblin Camp, Emerald Grove, Auntie's Teahouse}
         RoomDefinition {
             name: "Crash Landing",
             text: "Search your library for a basic land card, reveal it, put it into your hand, then shuffle.",
-            next_rooms: &[1, 2],
+            next_rooms: &[1, 2, 3],
         },
         // Row 2
-        // 1: Goblin Camp → {Auntie's Teahouse, Defiled Temple}
+        // 1: Goblin Camp → {Defiled Temple}
         RoomDefinition {
             name: "Goblin Camp",
             text: "Create a Treasure token.",
-            next_rooms: &[3, 4],
+            next_rooms: &[4],
         },
         // 2: Emerald Grove → {Defiled Temple, Mountain Pass}
         RoomDefinition {
@@ -1797,102 +1891,103 @@ static BALDURS_GATE_WILDERNESS: DungeonDefinition = DungeonDefinition {
             text: "Create a 2/2 white Knight creature token.",
             next_rooms: &[4, 5],
         },
-        // Row 3
-        // 3: Auntie's Teahouse → {Ebonlake Grotto, Grymforge}
+        // 3: Auntie's Teahouse → {Mountain Pass}
         RoomDefinition {
             name: "Auntie's Teahouse",
             text: "Scry 3.",
-            next_rooms: &[6, 7],
+            next_rooms: &[5],
         },
-        // 4: Defiled Temple → {Grymforge, Githyanki Crèche}
+        // Row 3
+        // 4: Defiled Temple → {Ebonlake Grotto, Grymforge}
         RoomDefinition {
             name: "Defiled Temple",
             text: "You may sacrifice a permanent. If you do, draw a card.",
-            next_rooms: &[7, 8],
+            next_rooms: &[6, 7],
         },
-        // 5: Mountain Pass → {Githyanki Crèche, Last Light Inn}
+        // 5: Mountain Pass → {Grymforge, Githyanki Crèche}
         RoomDefinition {
             name: "Mountain Pass",
             text: "You may put a land card from your hand onto the battlefield.",
-            next_rooms: &[8, 9],
+            next_rooms: &[7, 8],
         },
-        // Row 4 (widest)
-        // 6: Ebonlake Grotto → {Reithwin Tollhouse, Moonrise Towers}
+        // Row 4
+        // 6: Ebonlake Grotto → {Last Light Inn}
         RoomDefinition {
             name: "Ebonlake Grotto",
             text: "Create two 1/1 blue Faerie Dragon creature tokens with flying.",
-            next_rooms: &[10, 11],
+            next_rooms: &[9],
         },
-        // 7: Grymforge → {Reithwin Tollhouse, Moonrise Towers}
+        // 7: Grymforge → {Last Light Inn, Reithwin Tollhouse}
         RoomDefinition {
             name: "Grymforge",
             text: "For each opponent, goad up to one target creature that player controls.",
-            next_rooms: &[10, 11],
+            next_rooms: &[9, 10],
         },
-        // 8: Githyanki Crèche → {Moonrise Towers, Gauntlet of Shar}
+        // 8: Githyanki Crèche → {Reithwin Tollhouse}
         RoomDefinition {
             name: "Githyanki Crèche",
             text: "Distribute three +1/+1 counters among up to three target creatures you control.",
-            next_rooms: &[11, 12],
+            next_rooms: &[10],
         },
+        // Row 5
         // 9: Last Light Inn → {Moonrise Towers, Gauntlet of Shar}
         RoomDefinition {
             name: "Last Light Inn",
             text: "Draw two cards.",
             next_rooms: &[11, 12],
         },
-        // Row 5
-        // 10: Reithwin Tollhouse → {Balthazar's Lab, Circus of the Last Days}
+        // 10: Reithwin Tollhouse → {Gauntlet of Shar, Balthazar's Lab}
         RoomDefinition {
             name: "Reithwin Tollhouse",
             text: "Roll 2d4 and create that many Treasure tokens.",
-            next_rooms: &[13, 14],
+            next_rooms: &[12, 13],
         },
-        // 11: Moonrise Towers → {Circus of the Last Days, Undercity Ruins}
+        // Row 6
+        // 11: Moonrise Towers → {Circus of the Last Days}
         RoomDefinition {
             name: "Moonrise Towers",
             text: "Instant and sorcery spells you cast this turn cost {3} less to cast.",
-            next_rooms: &[14, 15],
+            next_rooms: &[14],
         },
-        // 12: Gauntlet of Shar → {Undercity Ruins}
+        // 12: Gauntlet of Shar → {Circus of the Last Days, Undercity Ruins}
         RoomDefinition {
             name: "Gauntlet of Shar",
             text: "Each opponent loses 5 life.",
-            next_rooms: &[15],
+            next_rooms: &[14, 15],
         },
-        // Row 6
-        // 13: Balthazar's Lab → {Steel Watch Foundry}
+        // 13: Balthazar's Lab → {Undercity Ruins}
         RoomDefinition {
             name: "Balthazar's Lab",
             text: "Return up to two target creature cards from your graveyard to your hand.",
-            next_rooms: &[16],
+            next_rooms: &[15],
         },
+        // Row 7
         // 14: Circus of the Last Days → {Steel Watch Foundry, Ansur's Sanctum}
         RoomDefinition {
             name: "Circus of the Last Days",
             text: "Create a token that's a copy of one of your commanders, except it's not legendary.",
             next_rooms: &[16, 17],
         },
-        // 15: Undercity Ruins → {Ansur's Sanctum}
+        // 15: Undercity Ruins → {Ansur's Sanctum, Temple of Bhaal}
         RoomDefinition {
             name: "Undercity Ruins",
             text: "Create three 4/1 black Skeleton creature tokens with menace.",
-            next_rooms: &[17],
+            next_rooms: &[17, 18],
         },
-        // Row 7
-        // 16: Steel Watch Foundry → Temple of Bhaal
+        // Row 8 (bottom). Three terminal rooms; venturing onward from any of
+        // them completes the dungeon (CR 701.49c).
+        // 16: Steel Watch Foundry (bottommost)
         RoomDefinition {
             name: "Steel Watch Foundry",
             text: "You get an emblem with \"Creatures you control get +2/+2 and have trample.\"",
-            next_rooms: &[18],
+            next_rooms: &[],
         },
-        // 17: Ansur's Sanctum → Temple of Bhaal
+        // 17: Ansur's Sanctum (bottommost)
         RoomDefinition {
             name: "Ansur's Sanctum",
             text: "Reveal the top four cards of your library and put them into your hand. Each opponent loses life equal to those cards' total mana value.",
-            next_rooms: &[18],
+            next_rooms: &[],
         },
-        // Row 8 (bottom)
         // 18: Temple of Bhaal (bottommost)
         RoomDefinition {
             name: "Temple of Bhaal",
@@ -1931,6 +2026,8 @@ pub fn has_completed_dungeon(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::mana::ManaCost;
+    use crate::types::statics::CostModifyMode;
 
     const ALL_DUNGEONS: [DungeonId; 5] = [
         DungeonId::LostMineOfPhandelver,
@@ -1939,6 +2036,45 @@ mod tests {
         DungeonId::Undercity,
         DungeonId::BaldursGateWilderness,
     ];
+
+    /// CR 611.2: Moonrise Towers' cost grant binds the controller, not the
+    /// room sentinel — installation must take the player arm (a `SelfRef`
+    /// grant would resolve to a sentinel no graft can ever land on, leaving
+    /// the reduction readable by neither cost path).
+    #[test]
+    fn wilderness_moonrise_grant_is_player_scoped() {
+        let (ability, _) = room_effects(
+            DungeonId::BaldursGateWilderness,
+            11,
+            ObjectId(1),
+            PlayerId(0),
+        );
+        match &ability.effect {
+            Effect::GenericEffect {
+                target,
+                static_abilities,
+                ..
+            } => {
+                assert_eq!(
+                    *target, None,
+                    "the room trigger declares no target, got {target:?}"
+                );
+                assert!(
+                    !static_abilities.is_empty(),
+                    "Moonrise Towers must grant a cost reduction"
+                );
+                for static_ability in static_abilities {
+                    assert_eq!(
+                        static_ability.affected,
+                        Some(TargetFilter::Controller),
+                        "room cost grants bind the controller, got {:?}",
+                        static_ability.affected
+                    );
+                }
+            }
+            other => panic!("expected a GenericEffect grant, got {other:?}"),
+        }
+    }
 
     /// CR 309.4c: Every room has a room ability, so every room must carry its
     /// printed effect — the prompts, stack entry, and game log all render it.
@@ -2090,6 +2226,51 @@ mod tests {
         assert!(next_rooms(DungeonId::LostMineOfPhandelver, 6).is_empty());
     }
 
+    /// CR 309.5a: the Wilderness venture graph, transcribed independently from
+    /// the printed card's door arrows (tclb #0) — one entry per room, in room
+    /// order. This is the backstop against a table that is internally
+    /// consistent but topologically wrong: room tests navigate by parentage,
+    /// which agrees with whatever the table says, while this pins the table
+    /// itself to the cardboard. Three doors leave Crash Landing; Goblin Camp
+    /// has a single exit to Defiled Temple; the bottom row holds three
+    /// terminal rooms (16, 17, 18).
+    #[test]
+    fn wilderness_edges_match_the_printed_card() {
+        const EXPECTED: [&[u8]; 19] = [
+            &[1, 2, 3], // 0 Crash Landing
+            &[4],       // 1 Goblin Camp
+            &[4, 5],    // 2 Emerald Grove
+            &[5],       // 3 Auntie's Teahouse
+            &[6, 7],    // 4 Defiled Temple
+            &[7, 8],    // 5 Mountain Pass
+            &[9],       // 6 Ebonlake Grotto
+            &[9, 10],   // 7 Grymforge
+            &[10],      // 8 Githyanki Crèche
+            &[11, 12],  // 9 Last Light Inn
+            &[12, 13],  // 10 Reithwin Tollhouse
+            &[14],      // 11 Moonrise Towers
+            &[14, 15],  // 12 Gauntlet of Shar
+            &[15],      // 13 Balthazar's Lab
+            &[16, 17],  // 14 Circus of the Last Days
+            &[17, 18],  // 15 Undercity Ruins
+            &[],        // 16 Steel Watch Foundry
+            &[],        // 17 Ansur's Sanctum
+            &[],        // 18 Temple of Bhaal
+        ];
+        assert_eq!(
+            get_definition(DungeonId::BaldursGateWilderness).rooms.len(),
+            EXPECTED.len(),
+            "the card holds all 19 rooms"
+        );
+        for (index, expected) in EXPECTED.iter().enumerate() {
+            assert_eq!(
+                next_rooms(DungeonId::BaldursGateWilderness, index as u8),
+                *expected,
+                "room {index} exits disagree with the printed arrows"
+            );
+        }
+    }
+
     /// Oracle fidelity: Lost Mine of Phandelver "Storeroom" is "Put a +1/+1
     /// counter on target creature" — ANY creature, no controller restriction
     /// (matching the sibling unrestricted counter-rooms). Revert-probe: the old
@@ -2151,13 +2332,382 @@ mod tests {
 
     #[test]
     fn available_dungeons_normal_vs_specific() {
-        let normal = available_dungeons(VentureSource::Normal);
+        let config = FormatConfig::standard();
+        let normal = available_dungeons(VentureSource::Normal, &config);
         assert_eq!(normal.len(), 3);
         assert!(!normal.contains(&DungeonId::Undercity));
         assert!(!normal.contains(&DungeonId::BaldursGateWilderness));
 
-        let specific = available_dungeons(VentureSource::Specific(DungeonId::Undercity));
+        let specific = available_dungeons(VentureSource::Specific(DungeonId::Undercity), &config);
         assert_eq!(specific, vec![DungeonId::Undercity]);
+    }
+
+    #[test]
+    fn available_dungeons_experimental_pool_adds_the_wilderness() {
+        let mut config = FormatConfig::standard();
+        config.allow_experimental_dungeons = true;
+
+        let normal = available_dungeons(VentureSource::Normal, &config);
+        assert_eq!(normal.len(), 4);
+        assert!(normal.contains(&DungeonId::BaldursGateWilderness));
+
+        // Taking the initiative stops auto-entering the Undercity and offers
+        // the Wilderness as an alternative instead.
+        let specific = available_dungeons(VentureSource::Specific(DungeonId::Undercity), &config);
+        assert_eq!(
+            specific,
+            vec![DungeonId::Undercity, DungeonId::BaldursGateWilderness]
+        );
+
+        // A venture constrained to any other dungeon is unaffected.
+        let other = available_dungeons(
+            VentureSource::Specific(DungeonId::TombOfAnnihilation),
+            &config,
+        );
+        assert_eq!(other, vec![DungeonId::TombOfAnnihilation]);
+    }
+
+    /// Oracle fidelity: Baldur's Gate Wilderness "Grymforge" is "For each
+    /// opponent, goad up to one target creature that player controls" — 0 to
+    /// N targets (N = opponent count), each a creature its player controls.
+    #[test]
+    fn wilderness_grymforge_goads_up_to_one_creature_per_opponent() {
+        let (ability, _) = room_effects(
+            DungeonId::BaldursGateWilderness,
+            7,
+            ObjectId(1),
+            PlayerId(0),
+        );
+        match &ability.effect {
+            Effect::Goad {
+                target: TargetFilter::Typed(tf),
+            } => {
+                assert_eq!(
+                    tf.controller,
+                    Some(ControllerRef::TargetPlayer),
+                    "each goad target must be controlled by its own player, got {:?}",
+                    tf.controller
+                );
+            }
+            other => panic!("expected Goad, got {other:?}"),
+        }
+        let multi = ability
+            .multi_target
+            .as_ref()
+            .expect("up-to-one-per-opponent is multi-target");
+        assert!(
+            matches!(multi.min, QuantityExpr::Fixed { value: 0 }),
+            "declining every opponent must be legal, got {:?}",
+            multi.min
+        );
+        match &multi.max {
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::PlayerCount { filter },
+            }) => assert_eq!(*filter, PlayerFilter::Opponent),
+            other => panic!("max targets must be the opponent count, got {other:?}"),
+        }
+    }
+
+    /// Oracle fidelity: Baldur's Gate Wilderness "Githyanki Crèche" is
+    /// "Distribute three +1/+1 counters among up to three target creatures
+    /// you control" — a captured counter distribution over 0-3 of your
+    /// creatures.
+    #[test]
+    fn wilderness_creche_distributes_three_counters_over_up_to_three_creatures() {
+        let (ability, _) = room_effects(
+            DungeonId::BaldursGateWilderness,
+            8,
+            ObjectId(1),
+            PlayerId(0),
+        );
+        match &ability.effect {
+            Effect::PutCounter {
+                counter_type,
+                count,
+                target,
+                ..
+            } => {
+                assert_eq!(*counter_type, CounterType::Plus1Plus1);
+                assert!(
+                    matches!(count, QuantityExpr::Fixed { value: 3 }),
+                    "three counters, got {count:?}"
+                );
+                match target {
+                    TargetFilter::Typed(tf) => {
+                        assert_eq!(tf.controller, Some(ControllerRef::You));
+                    }
+                    other => panic!("expected your creatures, got {other:?}"),
+                }
+            }
+            other => panic!("expected PutCounter, got {other:?}"),
+        }
+        assert!(
+            matches!(
+                ability.distribute,
+                Some(crate::types::game_state::DistributionUnit::Counters(_))
+            ),
+            "the distribution unit must be captured, got {:?}",
+            ability.distribute
+        );
+        let multi = ability
+            .multi_target
+            .as_ref()
+            .expect("up-to-three is multi-target");
+        assert!(matches!(multi.min, QuantityExpr::Fixed { value: 0 }));
+        assert!(
+            matches!(multi.max, Some(QuantityExpr::Fixed { value: 3 })),
+            "at most three targets, got {:?}",
+            multi.max
+        );
+    }
+
+    /// Oracle fidelity: Baldur's Gate Wilderness "Reithwin Tollhouse" is
+    /// "Roll 2d4 and create that many Treasure tokens" — the token count
+    /// reads the die total.
+    #[test]
+    fn wilderness_tollhouse_creates_treasures_equal_to_the_2d4_total() {
+        let (ability, _) = room_effects(
+            DungeonId::BaldursGateWilderness,
+            10,
+            ObjectId(1),
+            PlayerId(0),
+        );
+        match &ability.effect {
+            Effect::RollDie { count, sides, .. } => {
+                assert!(
+                    matches!(count, QuantityExpr::Fixed { value: 2 }),
+                    "two dice, got {count:?}"
+                );
+                assert_eq!(*sides, 4);
+            }
+            other => panic!("expected RollDie, got {other:?}"),
+        }
+        let sub = ability.sub_ability.as_ref().expect("treasure continuation");
+        match &sub.effect {
+            Effect::Token { name, count, .. } => {
+                assert_eq!(name, "Treasure");
+                assert!(
+                    matches!(
+                        count,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::EventContextAmount,
+                        }
+                    ),
+                    "\"that many\" must read the roll total, got {count:?}"
+                );
+            }
+            other => panic!("expected a Treasure token continuation, got {other:?}"),
+        }
+    }
+
+    /// Oracle fidelity: Baldur's Gate Wilderness "Moonrise Towers" is
+    /// "Instant and sorcery spells you cast this turn cost {3} less to cast"
+    /// — a {3} generic reduction granted until end of turn.
+    #[test]
+    fn wilderness_moonrise_towers_grants_a_3_generic_reduction_this_turn() {
+        let (ability, _) = room_effects(
+            DungeonId::BaldursGateWilderness,
+            11,
+            ObjectId(1),
+            PlayerId(0),
+        );
+        match &ability.effect {
+            Effect::GenericEffect {
+                static_abilities, ..
+            } => {
+                // The reduction rides a granted static: the outer static is a
+                // plain Continuous carrier whose GrantStaticAbility modification
+                // holds the ModifyCost definition.
+                let reduction = static_abilities.iter().find_map(|st| {
+                    st.modifications
+                        .iter()
+                        .find_map(|modification| match modification {
+                            ContinuousModification::GrantStaticAbility { definition } => {
+                                match &definition.mode {
+                                    StaticMode::ModifyCost {
+                                        mode,
+                                        amount,
+                                        spell_filter,
+                                        ..
+                                    } => Some((mode, amount, spell_filter)),
+                                    _ => None,
+                                }
+                            }
+                            _ => None,
+                        })
+                });
+                match reduction {
+                    Some((
+                        CostModifyMode::Reduce,
+                        ManaCost::Cost { generic, .. },
+                        Some(TargetFilter::Typed(spell_filter)),
+                    )) => {
+                        assert_eq!(*generic, 3);
+                        assert_eq!(
+                            spell_filter.type_filters,
+                            vec![TypeFilter::AnyOf(vec![
+                                TypeFilter::Instant,
+                                TypeFilter::Sorcery,
+                            ])],
+                            "only instant and sorcery spells are reduced, got {:?}",
+                            spell_filter.type_filters
+                        );
+                    }
+                    other => panic!("expected a Reduce static, got {other:?}"),
+                }
+            }
+            other => panic!("expected a granted static, got {other:?}"),
+        }
+        assert_eq!(ability.duration, Some(Duration::UntilEndOfTurn));
+    }
+
+    /// Oracle fidelity: Baldur's Gate Wilderness "Balthazar's Lab" is
+    /// "Return up to two target creature cards from your graveyard to your
+    /// hand."
+    #[test]
+    fn wilderness_balthazars_lab_returns_up_to_two_creatures_from_graveyard() {
+        let (ability, _) = room_effects(
+            DungeonId::BaldursGateWilderness,
+            13,
+            ObjectId(1),
+            PlayerId(0),
+        );
+        match &ability.effect {
+            Effect::ChangeZone {
+                origin,
+                destination,
+                target,
+                ..
+            } => {
+                assert_eq!(*origin, Some(Zone::Graveyard));
+                assert_eq!(*destination, Zone::Hand);
+                assert!(
+                    matches!(target, TargetFilter::Typed(_)),
+                    "creature cards, got {target:?}"
+                );
+            }
+            other => panic!("expected ChangeZone, got {other:?}"),
+        }
+        let multi = ability
+            .multi_target
+            .as_ref()
+            .expect("up-to-two is multi-target");
+        assert!(matches!(multi.min, QuantityExpr::Fixed { value: 0 }));
+        assert!(
+            matches!(multi.max, Some(QuantityExpr::Fixed { value: 2 })),
+            "at most two targets, got {:?}",
+            multi.max
+        );
+    }
+
+    /// Oracle fidelity: Baldur's Gate Wilderness "Circus of the Last Days"
+    /// is "Create a token that's a copy of one of your commanders, except
+    /// it's not legendary" — no "target", so the room is a choice chain: pick
+    /// exactly one of your battlefield commanders at resolution (CR 115.10a),
+    /// then copy the chosen commander without Legendary.
+    #[test]
+    fn wilderness_circus_copies_your_commander_nonlegendary() {
+        let (ability, _) = room_effects(
+            DungeonId::BaldursGateWilderness,
+            14,
+            ObjectId(1),
+            PlayerId(0),
+        );
+        match &ability.effect {
+            Effect::ChooseObjectsIntoTrackedSet {
+                chooser,
+                filter,
+                cardinality,
+                ..
+            } => {
+                assert_eq!(
+                    *chooser,
+                    TargetFilter::Controller,
+                    "you choose your commander, got {chooser:?}"
+                );
+                match filter {
+                    TargetFilter::Typed(tf) => {
+                        assert!(
+                            tf.properties.contains(&FilterProp::IsCommander),
+                            "choice must be a commander, got {:?}",
+                            tf.properties
+                        );
+                    }
+                    other => panic!("expected a typed commander choice, got {other:?}"),
+                }
+                assert_eq!(
+                    *cardinality,
+                    Some(crate::types::ability::ObjectSelectionCardinality::Exactly { count: 1 }),
+                    "exactly one commander is chosen"
+                );
+            }
+            other => panic!("expected ChooseObjectsIntoTrackedSet, got {other:?}"),
+        }
+        let copy = ability
+            .sub_ability
+            .as_ref()
+            .expect("the choice continues into the copy");
+        match &copy.effect {
+            Effect::CopyTokenOf {
+                target,
+                additional_modifications,
+                ..
+            } => {
+                assert!(
+                    matches!(target, TargetFilter::TrackedSet { .. }),
+                    "the copy reads the chosen commander, got {target:?}"
+                );
+                assert!(
+                    additional_modifications.iter().any(|modification| {
+                        matches!(
+                            modification,
+                            ContinuousModification::RemoveSupertype { supertype }
+                            if *supertype == Supertype::Legendary
+                        )
+                    }),
+                    "the copy must lose Legendary, got {additional_modifications:?}"
+                );
+            }
+            other => panic!("expected CopyTokenOf continuation, got {other:?}"),
+        }
+    }
+
+    /// Oracle fidelity: Baldur's Gate Wilderness "Ansur's Sanctum" is
+    /// "Reveal the top four cards of your library and put them into your
+    /// hand. Each opponent loses life equal to those cards' total mana
+    /// value."
+    #[test]
+    fn wilderness_ansurs_sanctum_drains_the_revealed_mana_value() {
+        let (ability, _) = room_effects(
+            DungeonId::BaldursGateWilderness,
+            17,
+            ObjectId(1),
+            PlayerId(0),
+        );
+        match &ability.effect {
+            Effect::RevealTop { count, .. } => assert_eq!(*count, 4),
+            other => panic!("expected RevealTop, got {other:?}"),
+        }
+        let mut node = &ability;
+        loop {
+            if let Effect::LoseLife { amount, .. } = &node.effect {
+                assert!(
+                    matches!(
+                        amount,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::PropertyAggregate(_),
+                        }
+                    ),
+                    "drain must aggregate the revealed pool, got {amount:?}"
+                );
+                assert_eq!(node.player_scope, Some(PlayerFilter::Opponent));
+                return;
+            }
+            match node.sub_ability.as_ref() {
+                Some(sub) => node = sub,
+                None => panic!("no LoseLife in the Ansur's Sanctum chain"),
+            }
+        }
     }
 
     #[test]
@@ -2392,26 +2942,12 @@ mod tests {
     }
 
     #[test]
-    fn room_effects_bgw_implemented_rooms() {
-        let implemented = [0, 1, 2, 3, 4, 5, 6, 9, 12, 15, 16, 18];
-        for room in implemented {
+    fn room_effects_bgw_no_room_is_unimplemented() {
+        for room in 0..19u8 {
             let ability = bgw_effect(room);
             assert!(
                 !matches!(ability.effect, Effect::Unimplemented { .. }),
-                "Room {room} ({}) should be implemented",
-                room_name(DungeonId::BaldursGateWilderness, room),
-            );
-        }
-    }
-
-    #[test]
-    fn room_effects_bgw_deferred_rooms() {
-        let deferred = [7, 8, 10, 11, 13, 14, 17];
-        for room in deferred {
-            let ability = bgw_effect(room);
-            assert!(
-                matches!(ability.effect, Effect::Unimplemented { .. }),
-                "Room {room} ({}) should be Unimplemented",
+                "Room {room} ({}) must be implemented",
                 room_name(DungeonId::BaldursGateWilderness, room),
             );
         }

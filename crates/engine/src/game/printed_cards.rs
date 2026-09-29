@@ -20,7 +20,7 @@ use crate::types::card::{CardFace, CardLayout, LayoutKind, PrintedCardRef, Print
 use crate::types::card_type::{CardType, CoreType};
 use crate::types::counter::CounterType;
 use crate::types::format::GameFormat;
-use crate::types::game_state::{GameState, MeldPairRecord};
+use crate::types::game_state::{GameState, MeldPairRecord, OutsideGameFaces};
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
@@ -1093,12 +1093,30 @@ struct OutsideGameSeeds {
     digital: Vec<String>,
 }
 
-impl OutsideGameSeeds {
-    /// Move into `out` the seed legs a game in `format` can actually reach.
-    fn drain_admitted_by(self, format: GameFormat, out: &mut Vec<String>) {
-        out.extend(self.meld);
+/// Which legs of [`OutsideGameSeeds`] a game can reach.
+#[derive(Clone, Copy)]
+enum OutsideGameLegs {
+    Paper,
+    PaperAndDigital,
+}
+
+impl OutsideGameLegs {
+    fn of(format: GameFormat) -> Self {
         if format.admits_digital_only_cards() {
-            out.extend(self.digital);
+            OutsideGameLegs::PaperAndDigital
+        } else {
+            OutsideGameLegs::Paper
+        }
+    }
+}
+
+impl OutsideGameSeeds {
+    /// Move into `out` the seed legs `legs` admits.
+    fn drain_admitted_by(self, legs: OutsideGameLegs, out: &mut Vec<String>) {
+        out.extend(self.meld);
+        match legs {
+            OutsideGameLegs::Paper => {}
+            OutsideGameLegs::PaperAndDigital => out.extend(self.digital),
         }
     }
 }
@@ -1234,9 +1252,20 @@ pub(crate) fn build_conjure_registry(
     state: &GameState,
     db: &CardDatabase,
 ) -> (HashMap<String, CardFace>, Vec<String>) {
-    let format = state.format_config.format;
+    let legs = OutsideGameLegs::of(state.format_config.format);
     let mut pending = Vec::new();
-    collect_seed_conjure_names(state, db).drain_admitted_by(format, &mut pending);
+    collect_seed_conjure_names(state, db).drain_admitted_by(legs, &mut pending);
+    resolve_outside_game_closure(pending, legs, db)
+}
+
+/// Resolve `pending` outside-the-game names, and every name their faces reach
+/// under `legs`, to a fixpoint. Returns the resolved faces keyed as the Conjure
+/// and meld resolvers look them up, plus every admitted name encountered.
+fn resolve_outside_game_closure(
+    mut pending: Vec<String>,
+    legs: OutsideGameLegs,
+    db: &CardDatabase,
+) -> (HashMap<String, CardFace>, Vec<String>) {
     // Fed only from `pending`, so a gated-out name can never reach the debug
     // safety net in `rehydrate_card_db_metadata` or `card_subset.rs`'s universe.
     let mut all_collected = pending.clone();
@@ -1257,12 +1286,66 @@ pub(crate) fn build_conjure_registry(
         let before = pending.len();
         let mut seeds = OutsideGameSeeds::default();
         collect_conjure_names_from_face(face, &mut seeds);
-        seeds.drain_admitted_by(format, &mut pending);
+        seeds.drain_admitted_by(legs, &mut pending);
         all_collected.extend_from_slice(&pending[before..]);
         registry.insert(key, face.clone());
     }
 
     (registry, all_collected)
+}
+
+/// Faces from outside the game `face` can reach, resolved for both sides of
+/// the digital-only format gate. A card entering mid-game carries these so its
+/// entry can extend the game's registry without consulting the database.
+pub fn outside_game_faces_for(face: &CardFace, db: &CardDatabase) -> OutsideGameFaces {
+    let closure = |legs| {
+        let mut seeds = OutsideGameSeeds::default();
+        collect_conjure_names_from_face(face, &mut seeds);
+        let mut pending = Vec::new();
+        seeds.drain_admitted_by(legs, &mut pending);
+        resolve_outside_game_closure(pending, legs, db).0
+    };
+    let paper = closure(OutsideGameLegs::Paper);
+    let sorted = |faces: HashMap<String, CardFace>| {
+        let mut faces: Vec<(String, CardFace)> = faces.into_iter().collect();
+        faces.sort_by(|(a, _), (b, _)| a.cmp(b));
+        faces.into_iter().map(|(_, face)| face).collect::<Vec<_>>()
+    };
+    let digital = closure(OutsideGameLegs::PaperAndDigital)
+        .into_iter()
+        .filter(|(key, _)| !paper.contains_key(key))
+        .collect();
+    OutsideGameFaces {
+        paper: sorted(paper),
+        digital: sorted(digital),
+    }
+}
+
+/// CR 701.42a: add the outside-the-game faces a card entering mid-game can
+/// reach — its meld pair's combined back — to `card_face_registry`, under this
+/// game's digital-only format gate, exactly as if it had started in the game.
+pub fn extend_card_face_registry(state: &mut GameState, faces: &OutsideGameFaces) {
+    let digital: &[CardFace] = match OutsideGameLegs::of(state.format_config.format) {
+        OutsideGameLegs::Paper => &[],
+        OutsideGameLegs::PaperAndDigital => &faces.digital,
+    };
+    let missing: Vec<&CardFace> = faces
+        .paper
+        .iter()
+        .chain(digital)
+        .filter(|face| {
+            !state
+                .card_face_registry
+                .contains_key(&face.name.to_lowercase())
+        })
+        .collect();
+    if missing.is_empty() {
+        return;
+    }
+    let registry = Arc::make_mut(&mut state.card_face_registry);
+    for face in missing {
+        registry.insert(face.name.to_lowercase(), face.clone());
+    }
 }
 
 /// CR 712 / CR 715 / CR 722: Build the other printed face for a face-complete
@@ -3445,6 +3528,89 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         rehydrate_game_from_card_db(&mut state, &db);
         assert_eq!(state.meld_pair_registry.as_ref(), &registry);
+    }
+
+    /// CR 701.42b + CR 712.4: MTGJSON publishes a meld pair as three single-face
+    /// groups (two fronts, one shared combined back). Loaded through the real
+    /// parser, that shape must still yield the canonical pair — this is the
+    /// production data shape, not a hand-built `meld` layout fixture.
+    #[test]
+    fn mtgjson_meld_shape_builds_canonical_meld_pair_registry_entry() {
+        let face =
+            |name: &str, face_name: &str, side: &str, oracle: &str, fields: serde_json::Value| {
+                let mut json = serde_json::json!({
+                    "name": name,
+                    "faceName": face_name,
+                    "side": side,
+                    "layout": "meld",
+                    "colors": ["W"],
+                    "colorIdentity": ["W"],
+                    "types": ["Creature"],
+                    "subtypes": ["Angel", "Horror"],
+                    "supertypes": ["Legendary"],
+                    "type": "Legendary Creature — Angel Horror",
+                    "identifiers": { "scryfallOracleId": oracle }
+                });
+                json.as_object_mut()
+                    .unwrap()
+                    .extend(fields.as_object().unwrap().clone());
+                json
+            };
+        let atomic = serde_json::json!({ "data": {
+            "Gisela, the Broken Blade // Brisela, Voice of Nightmares": [face(
+                "Gisela, the Broken Blade // Brisela, Voice of Nightmares",
+                "Gisela, the Broken Blade",
+                "a",
+                "gisela-oracle",
+                serde_json::json!({
+                    "manaCost": "{2}{W}{W}",
+                    "manaValue": 4.0,
+                    "power": "4",
+                    "toughness": "3",
+                    "text": "Flying, first strike, lifelink\nAt the beginning of your end step, if you both own and control Gisela and a creature named Bruna, the Fading Light, exile them, then meld them into Brisela, Voice of Nightmares."
+                }),
+            )],
+            "Bruna, the Fading Light // Brisela, Voice of Nightmares": [face(
+                "Bruna, the Fading Light // Brisela, Voice of Nightmares",
+                "Bruna, the Fading Light",
+                "a",
+                "bruna-oracle",
+                serde_json::json!({
+                    "manaCost": "{5}{W}{W}",
+                    "manaValue": 7.0,
+                    "power": "5",
+                    "toughness": "7",
+                    "text": "When you cast this spell, you may return target Angel or Human creature card from your graveyard to the battlefield.\nFlying, vigilance\n(Melds with Gisela, the Broken Blade.)"
+                }),
+            )],
+            "Brisela, Voice of Nightmares": [face(
+                "Brisela, Voice of Nightmares",
+                "Brisela, Voice of Nightmares",
+                "b",
+                "brisela-oracle",
+                serde_json::json!({
+                    "manaValue": 0.0,
+                    "power": "9",
+                    "toughness": "10",
+                    "subtypes": ["Eldrazi", "Angel"],
+                    "type": "Legendary Creature — Eldrazi Angel",
+                    "text": "Flying, first strike, vigilance, lifelink\nYour opponents can't cast spells with mana value 3 or less."
+                }),
+            )],
+        }});
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut file, atomic.to_string().as_bytes()).unwrap();
+        let db = CardDatabase::from_mtgjson(file.path()).expect("MTGJSON meld shape loads");
+
+        let key = meld_pair_key("Gisela, the Broken Blade", "Bruna, the Fading Light");
+        assert_eq!(
+            build_meld_pair_registry(&db).get(&key),
+            Some(&MeldPairRecord {
+                source: "Gisela, the Broken Blade".to_string(),
+                partner: "Bruna, the Fading Light".to_string(),
+                result: "Brisela, Voice of Nightmares".to_string(),
+            })
+        );
     }
 
     fn conjure_ability(target_name: &str, destination: Zone) -> AbilityDefinition {

@@ -267,6 +267,8 @@
     "hostServerUnscored": "{{name}} — not yet rated",
     "sandboxMode": "Sandbox Mode — allow debug actions",
     "sandboxModeHelp": "The host can directly manipulate the game state (move cards, change life, modify counters) and grant debug permission to other players. Use for testing or sandbox play — not for competitive matches. This setting cannot be changed once the game starts.",
+    "experimentalDungeons": "Experimental Dungeons",
+    "experimentalDungeonsHelp": "Venturing into the dungeon offers Baldur's Gate Wilderness alongside the usual options, and taking the initiative offers it as an alternative to Undercity. Experimental and unofficial. Off by default. This setting cannot be changed once the game starts.",
     "setPassword": "Set password",
     "passwordPlaceholder": "Game password",
     "back": "Back",
@@ -302,11 +304,9 @@
     "joinErrorCantJoinTitle": "Can't join this room",
     "titleLobby": "Join or host a table.",
     "titleHostSetup": "Set up your table.",
-    "titleDraftLobby": "Draft Pod",
     "titleDeckSelect": "Choose a deck.",
     "descriptionLobby": "Browse available tables, join by code, or host a new match.",
     "descriptionHostSetup": "Adjust format, privacy, and timing before opening the room.",
-    "descriptionDraftLobby": "Waiting for players to join the draft pod.",
     "descriptionDeckSelectFormat": "Pick a deck for {{format}}.",
     "descriptionDeckSelect": "Pick the deck you want to bring online.",
     "offlineUnavailableTitle": "Multiplayer is unavailable while offline.",
@@ -333,15 +333,6 @@
     "updateFailedTitle": "Couldn't update automatically",
     "updateFailedMessage": "Refresh to get the latest version, or continue on this one. Players on different versions can't join the same game.",
     "continueAnyway": "Continue anyway"
-  },
-  "draftLobbyPanel": {
-    "draftPod": "Draft Pod",
-    "connecting": "Connecting to draft pod...",
-    "connectionFailed": "Connection failed.",
-    "playersJoined": "{{joined}}/{{total}} players joined",
-    "seat": "Seat {{number}}",
-    "draftInProgress": "Draft in progress. The draft view will open automatically.",
-    "leaveDraft": "Leave Draft"
   },
   "deckLegalityChip": {
     "checking": "Checking deck against {{format}}…",

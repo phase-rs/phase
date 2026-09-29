@@ -25923,6 +25923,7 @@ fn exiled_cause_publishers_all_stamp_exiled_at_runtime() {
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: None,
+            rest_split_top_count: None,
             rest_order: crate::types::ability::DigRestOrder::Preserve,
             reveal: false,
             enter_tapped: false,
@@ -27400,6 +27401,7 @@ fn dig_put_those_cards_on_top_in_any_order() {
             destination: Some(Zone::Library),
             keep_count: None,
             rest_destination: Some(Zone::Library),
+            rest_split_top_count: None,
             reveal: false,
             ..
         }
@@ -27430,6 +27432,7 @@ fn reveal_dig_put_those_cards_on_top_stays_dig() {
             destination: Some(Zone::Library),
             keep_count: None,
             rest_destination: Some(Zone::Library),
+            rest_split_top_count: None,
             reveal: true,
             ..
         }
@@ -75017,4 +75020,582 @@ fn possessive_shift_object_recipient_is_not_rebound_to_the_actor() {
             "{root:#?}"
         );
     }
+}
+
+/// CR 608.2d + CR 613.4c — SelfRef subject (Brightling, Endling, Greater
+/// Morphling, Shorecrasher Elemental, Multiform Wonder all print this clause).
+///
+/// "This creature gets +1/-1 or -1/+1 until end of turn" is a disjunction of
+/// two alternative Layer 7c modifications; Brightling's Oracle ruling says the
+/// pick happens on resolution ("you don't choose whether Brightling gets +1/-1
+/// or -1/+1 until that ability resolves"), so it must lower to `ChooseOneOf`.
+///
+/// REGRESSION GUARD: before the fix `parse_pt_mod` bound the nom remainder to
+/// `_`, " or -1/+1" evaporated, and this lowered to a bare
+/// `Effect::Pump { +1, -1 }` — no choice, and wrong half the time by
+/// construction because the alternatives are exact inverses. Asserting the head
+/// is `ChooseOneOf` (not merely "some pump exists") is what makes that
+/// unrecoverable here.
+#[test]
+fn self_ref_pt_disjunction_lowers_to_a_two_branch_choice() {
+    let def = parse_effect_chain(
+        "This creature gets +1/-1 or -1/+1 until end of turn",
+        AbilityKind::Spell,
+    );
+
+    let Effect::ChooseOneOf { chooser, branches } = &*def.effect else {
+        panic!(
+            "the P/T disjunction must be the head ChooseOneOf, got {:?}",
+            def.effect
+        );
+    };
+    assert_eq!(*chooser, PlayerFilter::Controller);
+    assert_eq!(branches.len(), 2, "two alternatives, two branches");
+    assert!(
+        def.sub_ability.is_none(),
+        "an untargeted self grant chains nothing after the choice"
+    );
+
+    // Each branch must be byte-identical to what the engine already emits for
+    // the SAME subject with a single, non-disjunctive modification — the choice
+    // adds a branch set, it does not change the pump.
+    for (branch, expected_power, expected_toughness) in
+        [(&branches[0], 1, -1), (&branches[1], -1, 1)]
+    {
+        let Effect::Pump {
+            power,
+            toughness,
+            target,
+        } = &*branch.effect
+        else {
+            panic!("expected a Pump branch, got {:?}", branch.effect);
+        };
+        assert_eq!(*power, PtValue::Fixed(expected_power));
+        assert_eq!(*toughness, PtValue::Fixed(expected_toughness));
+        assert_eq!(*target, TargetFilter::SelfRef);
+        assert_eq!(
+            branch.duration,
+            Some(Duration::UntilEndOfTurn),
+            "CR 611.2a: the stated duration rides on the branch that is applied"
+        );
+    }
+    // The branch labels are the printed alternatives, so the prompt a player
+    // sees names the modification rather than a bare index.
+    assert_eq!(
+        branches
+            .iter()
+            .map(|b| b.description.clone().unwrap_or_default())
+            .collect::<Vec<_>>(),
+        vec!["gets +1/-1".to_string(), "gets -1/+1".to_string()],
+    );
+}
+
+/// CR 608.2d + CR 613.4c — `EnchantedBy` class subject (Pemmin's Aura). The
+/// choice must sit at the head with each branch pumping the ENCHANTED creature,
+/// not the Aura.
+#[test]
+fn enchanted_creature_pt_disjunction_keeps_the_enchanted_subject() {
+    let def = parse_effect_chain(
+        "Enchanted creature gets +1/-1 or -1/+1 until end of turn",
+        AbilityKind::Spell,
+    );
+
+    let Effect::ChooseOneOf { branches, .. } = &*def.effect else {
+        panic!("expected a head ChooseOneOf, got {:?}", def.effect);
+    };
+    assert_eq!(branches.len(), 2);
+    for branch in branches {
+        let Effect::PumpAll { target, .. } = &*branch.effect else {
+            panic!(
+                "a class-filter subject keeps the PumpAll shape, got {:?}",
+                branch.effect
+            );
+        };
+        let TargetFilter::Typed(typed) = target else {
+            panic!("expected a typed EnchantedBy filter, got {target:?}");
+        };
+        assert!(
+            typed.properties.contains(&FilterProp::EnchantedBy),
+            "each branch must pump the enchanted creature, got {typed:?}"
+        );
+    }
+}
+
+/// CR 603.3d + CR 601.2c + CR 608.2d + CR 613.4c — declared-target subject
+/// (Shaper Parasite's turned-face-up trigger). CR 603.3d routes a triggered
+/// ability's target choice through CR 601.2c, so the TARGET is announced when
+/// the ability goes on the stack while only the modification is chosen on
+/// resolution. Two choices at two different times: the head is `TargetOnly` and
+/// the choice hangs off it as a sub-ability whose branches pump `ParentTarget`.
+#[test]
+fn targeted_pt_disjunction_announces_the_target_before_the_choice() {
+    let def = parse_effect_chain(
+        "Target creature gets +2/-2 or -2/+2 until end of turn",
+        AbilityKind::Spell,
+    );
+
+    let Effect::TargetOnly { target } = &*def.effect else {
+        panic!("expected a TargetOnly head, got {:?}", def.effect);
+    };
+    assert!(matches!(target, TargetFilter::Typed(_)), "got {target:?}");
+
+    let choice = def
+        .sub_ability
+        .as_deref()
+        .expect("a targeted disjunction chains the choice as a sub-ability");
+    let Effect::ChooseOneOf { chooser, branches } = &*choice.effect else {
+        panic!(
+            "expected a ChooseOneOf sub-ability, got {:?}",
+            choice.effect
+        );
+    };
+    assert_eq!(*chooser, PlayerFilter::Controller);
+    assert_eq!(branches.len(), 2);
+    for (branch, expected_power, expected_toughness) in
+        [(&branches[0], 2, -2), (&branches[1], -2, 2)]
+    {
+        let Effect::Pump {
+            power,
+            toughness,
+            target,
+        } = &*branch.effect
+        else {
+            panic!("expected a Pump branch, got {:?}", branch.effect);
+        };
+        assert_eq!(*power, PtValue::Fixed(expected_power));
+        assert_eq!(*toughness, PtValue::Fixed(expected_toughness));
+        assert_eq!(
+            *target,
+            TargetFilter::ParentTarget,
+            "the branch must pump the object announced by the TargetOnly head"
+        );
+    }
+}
+
+/// NEGATIVE: an ordinary, non-disjunctive pump must not be pulled into the new
+/// arm. It is still a bare `Effect::Pump` with no branch set.
+#[test]
+fn single_pump_is_not_turned_into_a_choice() {
+    let def = parse_effect_chain(
+        "This creature gets +1/-1 until end of turn",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(&*def.effect, Effect::Pump { .. }),
+        "a single modification must stay a plain Pump, got {:?}",
+        def.effect
+    );
+}
+
+/// NEGATIVE: a conjunction is not a choice. "gets +1/+1 and gains flying" must
+/// keep its existing compound lowering rather than become two branches, since
+/// the splitter the arm reuses requires the final top-level separator to be
+/// `or`.
+#[test]
+fn pt_conjunction_is_not_turned_into_a_choice() {
+    let def = parse_effect_chain(
+        "Target creature gets +1/+1 and gains flying until end of turn",
+        AbilityKind::Spell,
+    );
+    let grant = match &*def.effect {
+        Effect::TargetOnly {
+            target: TargetFilter::Typed(_),
+        } => def
+            .sub_ability
+            .as_deref()
+            .expect("targeted compound must retain its grant"),
+        Effect::GenericEffect {
+            target: Some(TargetFilter::Typed(_)),
+            ..
+        } => &def,
+        other => panic!("targeted compound must retain its target, got {other:?}"),
+    };
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = &*grant.effect
+    else {
+        panic!(
+            "ordinary `and` must lower to one compound grant, got {:?}",
+            grant.effect
+        );
+    };
+    assert!(
+        grant.sub_ability.is_none(),
+        "the compound must not hide a second choice"
+    );
+    let modifications = &static_abilities[0].modifications;
+    assert!(
+        modifications.contains(&ContinuousModification::AddPower { value: 1 }),
+        "the pump's power must survive the conjunction: {modifications:?}"
+    );
+    assert!(
+        modifications.contains(&ContinuousModification::AddToughness { value: 1 }),
+        "the pump's toughness must survive the conjunction: {modifications:?}"
+    );
+    assert!(
+        modifications.contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Flying,
+        }),
+        "flying must survive the conjunction: {modifications:?}"
+    );
+}
+
+/// NEGATIVE, EXPLICITLY OUT OF SCOPE: Rainbow Knights,
+/// "{W}{W}: +0/+0, +1/+0 or +2/+0 until end of turn chosen at random."
+///
+/// Three alternatives picked AT RANDOM, not by a player (so `ChooseOneOf`,
+/// which prompts the controller under CR 608.2d, would be the WRONG shape), and
+/// no "gets" anchor at all. It already exports a loud `Effect::Unimplemented` —
+/// unsupported, not silently wrong — and the new arm must leave it exactly
+/// there. Two independent guards hold: the missing "get[s] " prefix, and the
+/// "chosen at random" tail that no P/T item can consume.
+#[test]
+fn rainbow_knights_random_pt_list_is_not_captured_by_the_choice_arm() {
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "When Rainbow Knights comes into play, it gains protection from a random color \
+         permanently.\n{1}: First strike until end of turn.\n{W}{W}: +0/+0, +1/+0 or +2/+0 \
+         until end of turn chosen at random.",
+        "Rainbow Knights",
+        &[],
+        &["Creature".to_string()],
+        &["Human".to_string(), "Knight".to_string()],
+    );
+    let random_pt = parsed
+        .abilities
+        .iter()
+        .find(|a| {
+            a.description
+                .as_deref()
+                .is_some_and(|d| d.contains("chosen at random"))
+        })
+        .expect("the {W}{W} random P/T ability must still be produced");
+    assert!(
+        matches!(&*random_pt.effect, Effect::Unimplemented { .. }),
+        "a RANDOM three-way P/T list must stay honestly unimplemented, not become a \
+         player-made ChooseOneOf; got {:?}",
+        random_pt.effect
+    );
+    assert!(
+        !parsed
+            .abilities
+            .iter()
+            .any(|a| matches!(&*a.effect, Effect::ChooseOneOf { .. })),
+        "no Rainbow Knights ability may lower to a controller-made choice"
+    );
+}
+
+/// CR 608.2d + CR 613.4c — THE WHOLE CORPUS, LITERAL ALTERNATIVES.
+///
+/// An X-AWARE scan of every card in `card-data.json` — a
+/// `[+-]?[0-9X]+/[+-]?[0-9X]+` token, an optional list tail, an `or`, and a
+/// second such token — finds THIRTEEN cards. Eight of them anchor the
+/// disjunction on `get[s] `, which is the shape this arm claims:
+///
+/// * the seven listed below, whose alternatives are inverse LITERALS;
+/// * Liliana of the Dark Realms, whose alternatives are the VARIABLE pair
+///   "+X/+X or -X/-X" under a where-clause — covered by
+///   `liliana_pt_disjunction_keeps_both_alternatives_and_binds_x_to_swamps`,
+///   because the assertions here read `PtValue::Fixed`.
+///
+/// The remaining five are other shapes and stay out: Rainbow Knights (random,
+/// no "gets" anchor — its own negative test below), Master of Winds and its
+/// Alchemy rebalance and Aquamorph Entity (base-P/T SETTING, CR 613.4b layer 7b,
+/// not a 7c modification), and Frankenstein's Monster (a counter KIND chosen per
+/// exiled card, not a P/T modification at all).
+///
+/// All seven below print two INVERSE alternatives, so a parser that keeps only
+/// the first is wrong exactly half the time — which is what made this a silent
+/// defect rather than a gap.
+///
+/// Verbatim Scryfall Oracle text, three different subject shapes, and one of
+/// them (Shaper Parasite) carries the clause inside a TRIGGER rather than an
+/// activated ability, so the walk below covers both homes.
+#[test]
+fn every_gets_pt_or_pt_card_lowers_to_an_inverse_two_branch_choice() {
+    const CARDS: [(&str, &str); 7] = [
+        ("Brightling", "{W}: This creature gains vigilance until end of turn.\n{W}: This creature gains lifelink until end of turn.\n{W}: Return this creature to its owner's hand.\n{1}: This creature gets +1/-1 or -1/+1 until end of turn."),
+        ("Endling", "{B}: This creature gains menace until end of turn.\n{B}: This creature gains deathtouch until end of turn.\n{B}: This creature gains undying until end of turn. (When this creature dies, if it had no +1/+1 counters on it, return it to the battlefield under its owner's control with a +1/+1 counter on it.)\n{1}: This creature gets +1/-1 or -1/+1 until end of turn."),
+        ("Greater Morphling", "{2}: This creature gains your choice of banding, bushido 1, double strike, fear, flying, first strike, haste, landwalk of your choice, protection from a color of your choice, provoke, rampage 1, shadow, or trample until end of turn.\n{2}: This creature becomes the colors of your choice until end of turn.\n{2}: This creature becomes the creature type of your choice until end of turn.\n{2}: This creature's expansion symbol becomes the symbol of your choice until end of turn.\n{2}: This creature's art becomes by the artist of your choice until end of turn.\n{2}: This creature gets +2/-2 or -2/+2 until end of turn.\n{2}: Untap this creature."),
+        ("Shorecrasher Elemental", "{U}: Exile this creature, then return it to the battlefield face down under its owner's control.\n{1}: This creature gets +1/-1 or -1/+1 until end of turn.\nMegamorph {4}{U} (You may cast this card face down as a 2/2 creature for {3}. Turn it face up any time for its megamorph cost and put a +1/+1 counter on it.)"),
+        ("Multiform Wonder", "When this creature enters, you get {E}{E}{E} (three energy counters).\nPay {E}: This creature gains your choice of flying, vigilance, or lifelink until end of turn.\nPay {E}: This creature gets +2/-2 or -2/+2 until end of turn."),
+        ("Pemmin's Aura", "Enchant creature\n{U}: Untap enchanted creature.\n{U}: Enchanted creature gains flying until end of turn.\n{U}: Enchanted creature gains shroud until end of turn. (It can't be the target of spells or abilities.)\n{1}: Enchanted creature gets +1/-1 or -1/+1 until end of turn."),
+        ("Shaper Parasite", "Morph {2}{U} (You may cast this card face down as a 2/2 creature for {3}. Turn it face up any time for its morph cost.)\nWhen this creature is turned face up, target creature gets +2/-2 or -2/+2 until end of turn."),
+    ];
+
+    for (name, oracle) in CARDS {
+        let parsed = crate::parser::oracle::parse_oracle_text(oracle, name, &[], &[], &[]);
+        // The clause lives in an activated ability for six of the seven and in
+        // `triggers[0].execute` for Shaper Parasite; walk both homes plus the
+        // one-level `sub_ability` a declared target hangs the choice from.
+        let choices: Vec<&AbilityDefinition> = parsed
+            .abilities
+            .iter()
+            .chain(parsed.triggers.iter().filter_map(|t| t.execute.as_deref()))
+            .flat_map(|def| std::iter::once(def).chain(def.sub_ability.as_deref()))
+            // Greater Morphling and Multiform Wonder ALSO print a "gains your
+            // choice of ..." keyword menu, which is a legitimate second
+            // `ChooseOneOf`. Narrow to the P/T one by branch effect shape.
+            .filter(|def| match &*def.effect {
+                Effect::ChooseOneOf { branches, .. } => branches
+                    .iter()
+                    .all(|b| matches!(&*b.effect, Effect::Pump { .. } | Effect::PumpAll { .. })),
+                _ => false,
+            })
+            .collect();
+        assert_eq!(
+            choices.len(),
+            1,
+            "{name}: exactly one P/T disjunction must lower to a ChooseOneOf; got {} pump \
+             choices among {} abilities and {} triggers",
+            choices.len(),
+            parsed.abilities.len(),
+            parsed.triggers.len()
+        );
+        let Effect::ChooseOneOf { chooser, branches } = &*choices[0].effect else {
+            unreachable!("filtered above");
+        };
+        assert_eq!(*chooser, PlayerFilter::Controller, "{name}");
+        assert_eq!(
+            branches.len(),
+            2,
+            "{name}: both printed alternatives must survive"
+        );
+
+        // Read each branch's modification, whatever pump shape the subject
+        // produced, and assert the two are exact inverses — the property that
+        // makes the collapsed single-Pump parse wrong half the time.
+        let modifications: Vec<(PtValue, PtValue)> = branches
+            .iter()
+            .map(|b| match &*b.effect {
+                Effect::Pump {
+                    power, toughness, ..
+                }
+                | Effect::PumpAll {
+                    power, toughness, ..
+                } => (power.clone(), toughness.clone()),
+                other => panic!("{name}: expected a pump branch, got {other:?}"),
+            })
+            .collect();
+        let [(p0, t0), (p1, t1)] = modifications.as_slice() else {
+            unreachable!("length asserted above");
+        };
+        let (PtValue::Fixed(p0), PtValue::Fixed(t0), PtValue::Fixed(p1), PtValue::Fixed(t1)) =
+            (p0, t0, p1, t1)
+        else {
+            panic!("{name}: all seven print literal modifications, got {modifications:?}");
+        };
+        assert_eq!(
+            (*p0, *t0),
+            (-*p1, -*t1),
+            "{name}: the two alternatives must be exact inverses"
+        );
+        assert_ne!(
+            *p0, 0,
+            "{name}: a zero modification would make the choice a no-op"
+        );
+        for branch in branches {
+            assert_eq!(
+                branch.duration,
+                Some(Duration::UntilEndOfTurn),
+                "{name}: every alternative is printed 'until end of turn'"
+            );
+        }
+    }
+}
+
+/// CR 611.2a — THE BRANCH CARRIES THE PRINTED WINDOW, NOT A CONSTANT.
+///
+/// "A continuous effect generated by the resolution of a spell or ability lasts
+/// as long as stated by the spell or ability creating it." The effect is the one
+/// the CHOSEN branch creates, and `choose_one_of::resolve_branch` builds that
+/// branch through `build_resolved_from_def`, which reads the duration off the
+/// branch and off nothing else — so a branch that hardcodes until-end-of-turn
+/// makes any other printed window wear off at the wrong moment.
+///
+/// This case is deliberately NOT "until end of turn": every shipping card in the
+/// class prints that window, so an assertion on it cannot tell a threaded value
+/// from a fabricated constant. `until your next turn` can. The clause-level
+/// duration is asserted alongside it because the two must agree: one printed
+/// window, written on both carriers.
+#[test]
+fn pt_disjunction_branches_carry_the_printed_non_end_of_turn_window() {
+    let def = parse_effect_chain(
+        "This creature gets +1/-1 or -1/+1 until your next turn",
+        AbilityKind::Spell,
+    );
+
+    let expected = Duration::UntilNextTurnOf {
+        player: PlayerScope::Controller,
+    };
+    assert_eq!(
+        def.duration,
+        Some(expected.clone()),
+        "the clause keeps the printed window"
+    );
+
+    let Effect::ChooseOneOf { branches, .. } = &*def.effect else {
+        panic!("expected a head ChooseOneOf, got {:?}", def.effect);
+    };
+    assert_eq!(branches.len(), 2);
+    for branch in branches {
+        assert_eq!(
+            branch.duration,
+            Some(expected.clone()),
+            "CR 611.2a: the branch must carry the window the clause PRINTED; a \
+             hardcoded UntilEndOfTurn would end this effect a turn early"
+        );
+    }
+}
+
+/// CR 611.2a: a leading printed window is peeled before the P/T-choice body
+/// parser runs. The selected branch must inherit that window from the shared
+/// parse context rather than defaulting to end of turn.
+#[test]
+fn pt_disjunction_branches_carry_a_leading_non_end_of_turn_window() {
+    let def = parse_effect_chain(
+        "Until your next turn, this creature gets +1/-1 or -1/+1",
+        AbilityKind::Spell,
+    );
+    let expected = Duration::UntilNextTurnOf {
+        player: PlayerScope::Controller,
+    };
+    assert_eq!(def.duration, Some(expected.clone()));
+    let Effect::ChooseOneOf { branches, .. } = &*def.effect else {
+        panic!(
+            "the leading-duration clause must keep both choices: {:?}",
+            def.effect
+        );
+    };
+    assert_eq!(branches.len(), 2);
+    for branch in branches {
+        assert!(matches!(&*branch.effect, Effect::Pump { .. }));
+        assert_eq!(branch.duration, Some(expected.clone()));
+    }
+}
+
+/// CR 107.3i + CR 608.2d + CR 613.4c — Liliana of the Dark Realms, the EIGHTH
+/// card in the class and the only one whose alternatives are variable:
+///
+///   [-3]: Target creature gets +X/+X or -X/-X until end of turn, where X is the
+///         number of Swamps you control.
+///
+/// Two things have to hold at once, and each was broken on its own:
+///
+/// * BOTH alternatives survive — the disjunction is the whole point of the
+///   clause, and before the `ChooseOneOf` arm existed only "+X/+X" was kept.
+/// * X stays BOUND to the Swamp count. The where-clause binding is applied by
+///   `lower::apply_where_x_effect_expression`, whose walk used to stop at the
+///   branch boundary; both branches then held a bare `PtValue::Variable("X")`,
+///   which resolves to 0 — a silent +0/+0 that still reads as supported, and
+///   invisible to that pass's totality guard (its probe is anchored on
+///   `QuantityRef` keys, and a `PtValue::Variable` is not one).
+///
+/// The two branches are compared against EACH OTHER rather than against a
+/// hand-built filter, so the test pins the inverse relationship the card prints
+/// instead of restating the quantity grammar's output shape.
+#[test]
+fn liliana_pt_disjunction_keeps_both_alternatives_and_binds_x_to_swamps() {
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "[+1]: Search your library for a Swamp card, reveal it, put it into your hand, then \
+         shuffle.\n[\u{2212}3]: Target creature gets +X/+X or -X/-X until end of turn, where X \
+         is the number of Swamps you control.\n[\u{2212}6]: You get an emblem with \"Swamps you \
+         control have '{T}: Add {B}{B}{B}{B}.'\"",
+        "Liliana of the Dark Realms",
+        &[],
+        &["Planeswalker".to_string()],
+        &["Liliana".to_string()],
+    );
+    let minus_three = parsed
+        .abilities
+        .iter()
+        .find(|a| {
+            a.description
+                .as_deref()
+                .is_some_and(|d| d.contains("+X/+X or -X/-X"))
+        })
+        .expect("the [-3] ability must be produced");
+
+    let Effect::TargetOnly { .. } = &*minus_three.effect else {
+        panic!(
+            "CR 601.2c: the target is announced on the stack, so the head is a \
+             TargetOnly; got {:?}",
+            minus_three.effect
+        );
+    };
+    let choice = minus_three
+        .sub_ability
+        .as_deref()
+        .expect("the resolution-time choice hangs off the target announcement");
+    let Effect::ChooseOneOf { chooser, branches } = &*choice.effect else {
+        panic!(
+            "expected a ChooseOneOf sub-ability, got {:?}",
+            choice.effect
+        );
+    };
+    assert_eq!(*chooser, PlayerFilter::Controller);
+    assert_eq!(
+        branches.len(),
+        2,
+        "both printed alternatives must survive the parse"
+    );
+
+    let modifications: Vec<(PtValue, PtValue)> = branches
+        .iter()
+        .map(|b| match &*b.effect {
+            Effect::Pump {
+                power, toughness, ..
+            } => (power.clone(), toughness.clone()),
+            other => panic!("expected a Pump branch, got {other:?}"),
+        })
+        .collect();
+
+    // The "+X/+X" branch: X is the Swamp count, NOT an unbound placeholder.
+    let (PtValue::Quantity(plus_power), PtValue::Quantity(plus_toughness)) = &modifications[0]
+    else {
+        panic!(
+            "CR 107.3c: X must be bound to the where-clause quantity, not left a bare \
+             placeholder; got {:?}",
+            modifications[0]
+        );
+    };
+    assert_eq!(plus_power, plus_toughness, "the card prints +X/+X");
+    let QuantityExpr::Ref {
+        qty: QuantityRef::ObjectCount { filter },
+    } = plus_power
+    else {
+        panic!("expected a Swamp ObjectCount, got {plus_power:?}");
+    };
+    let TargetFilter::Typed(typed) = filter else {
+        panic!("expected a typed Swamp filter, got {filter:?}");
+    };
+    assert!(
+        typed
+            .type_filters
+            .contains(&TypeFilter::Subtype("Swamp".to_string())),
+        "X is the number of SWAMPS, got {typed:?}"
+    );
+    assert_eq!(
+        typed.controller,
+        Some(ControllerRef::You),
+        "…that YOU control, got {typed:?}"
+    );
+
+    // The "-X/-X" branch: the same quantity, negated. Comparing against the
+    // first branch's expression is what pins the inverse relationship.
+    let (PtValue::Quantity(minus_power), PtValue::Quantity(minus_toughness)) = &modifications[1]
+    else {
+        panic!(
+            "the second alternative must bind X too, got {:?}",
+            modifications[1]
+        );
+    };
+    assert_eq!(minus_power, minus_toughness, "the card prints -X/-X");
+    assert_eq!(
+        *minus_power,
+        QuantityExpr::Multiply {
+            factor: -1,
+            inner: Box::new(plus_power.clone()),
+        },
+        "the two alternatives must be exact inverses of one bound quantity"
+    );
 }

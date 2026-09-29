@@ -178,6 +178,22 @@ export function isCustomFormatRulesShape(value: unknown): value is CustomFormatR
  * serde-optional and therefore invisible in most payloads:
  * `range_of_influence`, `archenemy_player`, `supplies_fixed_deck`.
  */
+/**
+ * Fill a missing (or corrupt) `allow_experimental_dungeons` on an untrusted
+ * config blob with the engine's default (`false`) before shape validation.
+ * Returns the input untouched when there is nothing to fill, so current
+ * payloads pass through by reference. Both untrusted ingresses (persisted
+ * setups and broker frames) predate the flag, so both rehydrate here rather
+ * than discarding an otherwise-valid config. Non-boolean values reset to the
+ * default too: a capability flag must never rehydrate as truthy from corrupt
+ * data.
+ */
+export function rehydrateExperimentalDungeons(value: unknown): unknown {
+  if (!isRecord(value)) return value;
+  if (typeof value.allow_experimental_dungeons === "boolean") return value;
+  return { ...value, allow_experimental_dungeons: false };
+}
+
 export function isFormatConfigShape(value: unknown): value is FormatConfig {
   if (!isRecord(value)) return false;
   if (typeof value.format !== "string") return false;
@@ -195,6 +211,7 @@ export function isFormatConfigShape(value: unknown): value is FormatConfig {
     || !isSideboardPolicy(value.sideboard_policy)
     || !isDeckCopyLimit(value.default_deck_copy_limit)
     || typeof value.allow_debug_actions !== "boolean"
+    || typeof value.allow_experimental_dungeons !== "boolean"
   ) {
     return false;
   }

@@ -35,7 +35,7 @@ const mocks = vi.hoisted(() => ({
     leave: vi.fn(async () => {}),
     role: null as "host" | "guest" | null,
     roomCode: null as string | null,
-    hostDraft: vi.fn(async () => true),
+    hostDraft: vi.fn(async () => ({ status: "opened" as const })),
     resumeDraft: vi.fn(async () => "absent" as const),
     view: null as { kind: string; seats: { seat_index: number }[] } | null,
   },

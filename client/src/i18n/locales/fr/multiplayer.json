@@ -267,6 +267,8 @@
     "hostServerUnscored": "{{name}} — pas encore évalué",
     "sandboxMode": "Mode bac à sable — autoriser les actions de débogage",
     "sandboxModeHelp": "L'hôte peut manipuler directement l'état de la partie (déplacer des cartes, modifier les points de vie, modifier les marqueurs) et accorder la permission de débogage à d'autres joueurs. À utiliser pour des tests ou du jeu bac à sable — pas pour des matchs compétitifs. Ce paramètre ne peut pas être modifié une fois la partie lancée.",
+    "experimentalDungeons": "Donjons expérimentaux",
+    "experimentalDungeonsHelp": "S'aventurer dans le donjon propose Baldur's Gate Wilderness en plus des options habituelles, et prendre l'initiative la propose comme alternative. Expérimental et non officiel. Désactivé par défaut. Ce paramètre ne peut pas être modifié une fois la partie commencée.",
     "setPassword": "Définir un mot de passe",
     "passwordPlaceholder": "Mot de passe de la partie",
     "back": "Retour",
@@ -302,11 +304,9 @@
     "joinErrorCantJoinTitle": "Impossible de rejoindre cette salle",
     "titleLobby": "Rejoignez ou hébergez une table.",
     "titleHostSetup": "Configurez votre table.",
-    "titleDraftLobby": "Pod de draft",
     "titleDeckSelect": "Choisissez un deck.",
     "descriptionLobby": "Parcourez les tables disponibles, rejoignez par code ou hébergez un nouveau match.",
     "descriptionHostSetup": "Ajustez le format, la confidentialité et le timing avant d'ouvrir la salle.",
-    "descriptionDraftLobby": "En attente que des joueurs rejoignent le pod de draft.",
     "descriptionDeckSelectFormat": "Choisissez un deck pour {{format}}.",
     "descriptionDeckSelect": "Choisissez le deck que vous voulez amener en ligne.",
     "offlineUnavailableTitle": "Le multijoueur n’est pas disponible hors ligne.",
@@ -333,15 +333,6 @@
     "updateFailedTitle": "Impossible de mettre à jour automatiquement",
     "updateFailedMessage": "Actualisez pour obtenir la dernière version, ou continuez avec celle-ci. Les joueurs sur des versions différentes ne peuvent pas rejoindre la même partie.",
     "continueAnyway": "Continuer quand même"
-  },
-  "draftLobbyPanel": {
-    "draftPod": "Pod de draft",
-    "connecting": "Connexion au pod de draft...",
-    "connectionFailed": "Échec de la connexion.",
-    "playersJoined": "{{joined}}/{{total}} joueurs ont rejoint",
-    "seat": "Siège {{number}}",
-    "draftInProgress": "Draft en cours. La vue du draft s'ouvrira automatiquement.",
-    "leaveDraft": "Quitter le draft"
   },
   "deckLegalityChip": {
     "checking": "Vérification du deck pour {{format}}…",
