@@ -19,7 +19,10 @@ use crate::analysis::resource::ResourceAxis;
 use crate::game::ability_utils::flatten_targets_in_chain;
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::{AttachTarget, DisplaySource};
-use crate::game::stack::{effective_stack_ability, stack_display_groups, StackDisplayGroup};
+use crate::game::stack::{
+    effective_stack_ability, stack_display_groups, stack_display_groups_revealing,
+    stack_revealed_card_names, StackDisplayGroup,
+};
 use crate::types::ability::{
     ContinuousModification, Duration, GameRestriction, KeywordAction, ProhibitedActivity,
     RestrictionExpiry, RestrictionPlayerScope, TargetFilter, TargetRef,
@@ -757,6 +760,19 @@ pub struct DerivedViews {
     /// paid cast facts, and public trigger context. Empty when the stack is empty.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub stack_entry_details: HashMap<ObjectId, StackEntryDisplay>,
+
+    /// CR 701.20a: the cards each stack entry keeps revealed ("If revealing a
+    /// card causes a triggered ability to trigger, the card remains revealed
+    /// until that triggered ability leaves the stack"), by name, keyed by the
+    /// public stack entry id. Built from the authoritative lease map, so it
+    /// disappears when the lease ends.
+    ///
+    /// CR 401.2: deliberately unindexed. A leased card that sits in a library
+    /// stays a hidden object in the projected state, because naming that
+    /// object would disclose its library position; this map is the only place
+    /// its public identity appears, with no object id attached.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub stack_revealed_cards: BTreeMap<ObjectId, Vec<String>>,
 
     /// CR 702.40a: the public number of copies the current Storm trigger will
     /// create, or that a newly cast Storm spell would create when no Storm
@@ -1534,6 +1550,7 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
         views.stack_display_groups = stack_display_groups(state);
         views.stack_entry_details = stack_entry_details(state);
     }
+    views.stack_revealed_cards = stack_revealed_card_names(state);
 
     // CR 303.4 + CR 702.5: Walk the battlefield once and bucket Player-host
     // attachments by their host PlayerId. Object-host attachments are skipped
@@ -2158,6 +2175,14 @@ pub fn derive_filtered_views(
     // display projection even when a viewer-safe state intentionally omits raw
     // combat records unrelated to rendering.
     views.blocker_assignment_pairs = blocker_assignment_pairs(authoritative_state);
+    // CR 701.20a: the viewer copy carries no lease map (it is a position
+    // channel), so the public presentation is rebuilt from rules state, and
+    // the stack grouping keeps entries with different reveals apart.
+    views.stack_revealed_cards = stack_revealed_card_names(authoritative_state);
+    if !filtered_state.stack.is_empty() {
+        views.stack_display_groups =
+            stack_display_groups_revealing(filtered_state, &views.stack_revealed_cards);
+    }
     views
 }
 

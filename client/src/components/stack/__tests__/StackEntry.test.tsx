@@ -241,6 +241,46 @@ describe("StackEntry", () => {
     expect(screen.queryByAltText("Unknown")).not.toBeInTheDocument();
   });
 
+  it("shows the engine-authored revealed card names for its own entry only", () => {
+    // CR 701.20a: the card stays revealed while this trigger is on the stack.
+    // The engine publishes its name keyed by stack entry; the chip renders it.
+    const entry: StackEntryType = buildStackEntry({
+      id: 93,
+      source_id: 0,
+      controller: 0,
+      kind: {
+        type: "TriggeredAbility",
+        data: { source_id: 0, ability: { targets: [] }, source_name: "Calibrated Blast" },
+      },
+    });
+    const other: StackEntryType = buildStackEntry({
+      id: 94,
+      source_id: 0,
+      controller: 0,
+      kind: {
+        type: "TriggeredAbility",
+        data: { source_id: 0, ability: { targets: [] }, source_name: "Calibrated Blast" },
+      },
+    });
+    const gameState = createGameState({
+      objects: {},
+      stack: [entry, other],
+      derived: { stack_revealed_cards: { "93": ["Three Drop"] } },
+    });
+
+    act(() => {
+      useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+    });
+
+    const { rerender } = render(
+      <StackEntry entry={entry} index={0} isTop cardSize={{ width: 120, height: 168 }} />,
+    );
+    expect(screen.getByTestId("stack-revealed-cards")).toHaveTextContent("Revealed: Three Drop");
+
+    rerender(<StackEntry entry={other} index={1} isTop={false} cardSize={{ width: 120, height: 168 }} />);
+    expect(screen.queryByTestId("stack-revealed-cards")).not.toBeInTheDocument();
+  });
+
   it("invents no name when the wire carries none", () => {
     // The row above cannot reach the deleted `|| "Unknown"` literal: it supplies
     // a `source_name`, so the fallback chain short-circuits before the last

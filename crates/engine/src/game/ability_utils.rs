@@ -9653,18 +9653,12 @@ fn validate_target_constraints(
                     QuantityExpr::Fixed { value } => *value,
                     _ => {
                         // Skip dynamic caps when source/controller provenance is
-                        // unavailable. For the where-X die-result cap
-                        // (`EventContextAmount`), `resolve_quantity` reads
-                        // `state.die_result_this_resolution` (CR 706.2 + CR 706.4).
+                        // unavailable.
                         let Some(ability) = ability else {
                             continue;
                         };
-                        crate::game::quantity::resolve_quantity(
-                            state,
-                            value,
-                            ability.controller,
-                            ability.source_id,
-                        )
+                        // CR 107.3 + CR 603.12: X may be the amount paid for a parent's "pay {X}", which a reflexive trigger carries on `ability.chosen_x`.
+                        crate::game::quantity::resolve_quantity_with_targets(state, value, ability)
                     }
                 };
                 // CR 202.3 + CR 202.3e: combined mana value of the chosen object

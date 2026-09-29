@@ -808,6 +808,7 @@
     "titleTargets": "Cele: {{targets}}",
     "titlePaid": "Zapłacono: {{paid}}",
     "titleContext": "Kontekst: {{context}}",
+    "revealedCards": "Odkryta: {{cards}}",
     "paidXValue": "X={{value}}",
     "paidManaSpent": "{{amount}} many",
     "paidColorsSpent": "{{count}} kolorów",

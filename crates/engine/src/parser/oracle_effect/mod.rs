@@ -911,6 +911,125 @@ fn rewrite_cost_paid_exiled_reflexive_for_effect_exile_parent(
     condition
 }
 
+/// CR 608.2c + CR 701.20a: whether the referent of a following "that card" is
+/// produced by a single-hit reveal-until — the only producer proven to stamp
+/// exactly one card snapshot as the demonstrative (`effect_context_object`)
+/// referent: every exit publishes `EffectResolved { RevealUntil, subject }`
+/// with the hit's pre-move snapshot when exactly one card matched. Walks back
+/// over non-`Continue` clauses, skipping `ParentTarget` carriers ("Return that
+/// card …"), to the referent's originator. Positive allowlist: any other
+/// originator, or none, is not a proven producer.
+fn nearest_referent_producer_is_single_hit_reveal_until(clauses: &[ClauseIr]) -> bool {
+    let originator = clauses
+        .iter()
+        .rev()
+        .filter(|clause| !matches!(clause.disposition, ClauseDisposition::Continue { .. }))
+        .find(|clause| {
+            !matches!(
+                clause.parsed.effect.target_filter(),
+                Some(TargetFilter::ParentTarget)
+            )
+        });
+    originator.is_some_and(|clause| {
+        matches!(
+            clause.parsed.effect,
+            Effect::RevealUntil {
+                count: QuantityExpr::Fixed { value: 1 },
+                matched_disposition: RevealUntilDisposition::KeepEach
+                    | RevealUntilDisposition::RevealOnly,
+                ..
+            }
+        )
+    })
+}
+
+/// CR 603.12: a zone-change "this way" gate (`ZoneChangedThisWay`) that is not a
+/// `WhenYouDo` reflexive — the "When you discard/exile/sacrifice … this way"
+/// family whose separate-trigger target timing is not yet modeled.
+fn is_unmodeled_zone_change_reflexive_gate(condition: &AbilityCondition) -> bool {
+    !condition.has_when_you_do_marker()
+        && matches!(condition, AbilityCondition::ZoneChangedThisWay { .. })
+}
+
+/// CR 603.12 + CR 701.20a: the outcome of owning a leading
+/// "When you reveal … this way, <body>" head.
+enum RevealThisWayGate {
+    /// The chunk does not start with a "when you reveal … this way, " head.
+    NotOwned,
+    /// The head restates the immediately preceding reveal-until's
+    /// until-condition, so it names that instruction's own event: a CR 603.12
+    /// reflexive trigger (`WhenYouDo` + `RevealUntilMatched` guard) whose body
+    /// is `remainder`.
+    Reflexive { remainder: String },
+    /// The head is present but its trigger event is not the preceding
+    /// reveal-until's until-condition (different filter, plural quantifier,
+    /// multi-match or non-reveal-until parent). Fails closed.
+    Unsupported,
+}
+
+/// CR 603.12: nom head for "when you reveal <filter phrase> this way, ";
+/// returns the filter phrase (still carrying its article).
+fn parse_when_you_reveal_this_way_head(input: &str) -> OracleResult<'_, &str> {
+    let (rest, _) = tag("when you reveal ").parse(input)?;
+    let (rest, phrase) = take_until(" this way, ").parse(rest)?;
+    let (rest, _) = tag(" this way, ").parse(rest)?;
+    Ok((rest, phrase))
+}
+
+/// CR 603.12 + CR 701.20a: "Reveal cards … until you reveal a creature card.
+/// … When you reveal a creature card this way, <body>" (Yuna's Whistle,
+/// Calibrated Blast). The "when" head is a reflexive trigger whose event is the
+/// preceding reveal-until's until-condition being met, so it lowers to the
+/// `WhenYouDo` creation gate guarded by `EffectOutcomeSignal::RevealUntilMatched`;
+/// the guard reads that reveal's own one-hop verdict
+/// (`ParentTargetMissingReason::RevealUntil`) to decide whether the event
+/// occurred.
+///
+/// The gate's filter is produced by the SAME two functions that built the
+/// parent's until-filter (`parse_reveal_until_active_filter_text` +
+/// `build_reveal_until_filter`), so the informational "card" noun is stripped
+/// identically on both sides and the comparison is structural `TargetFilter`
+/// equality. Anything else under this head fails closed.
+fn strip_reveal_this_way_reflexive_gate(text: &str, clauses: &[ClauseIr]) -> RevealThisWayGate {
+    // ASCII lowercasing keeps byte offsets aligned with `text` for the
+    // remainder slice below (the head grammar is ASCII).
+    let lower = text.to_ascii_lowercase();
+    let Ok((after_head, phrase)) = parse_when_you_reveal_this_way_head(&lower) else {
+        return RevealThisWayGate::NotOwned;
+    };
+    let Ok((filter_phrase, _)) =
+        alt((tag::<_, _, OracleError<'_>>("a "), tag("an "))).parse(phrase)
+    else {
+        return RevealThisWayGate::Unsupported;
+    };
+    let Ok((_, filter_text)) = parse_reveal_until_active_filter_text(filter_phrase) else {
+        return RevealThisWayGate::Unsupported;
+    };
+    let gate_filter = build_reveal_until_filter(filter_text);
+    let restates_parent_until_condition = clauses
+        .iter()
+        .rev()
+        .find(|clause| !matches!(clause.disposition, ClauseDisposition::Continue { .. }))
+        .is_some_and(|clause| {
+            matches!(
+                &clause.parsed.effect,
+                Effect::RevealUntil {
+                    filter,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    matched_disposition:
+                        RevealUntilDisposition::KeepEach | RevealUntilDisposition::RevealOnly,
+                    ..
+                } if *filter == gate_filter
+            )
+        });
+    if !restates_parent_until_condition {
+        return RevealThisWayGate::Unsupported;
+    }
+    RevealThisWayGate::Reflexive {
+        remainder: text[text.len() - after_head.len()..].to_string(),
+    }
+}
+
 /// True for exactly the filter shape the keyword anaphor's context-free lowering
 /// emits: a bare, controller-agnostic, type-agnostic typed filter carrying one
 /// kind-level keyword predicate. Both polarities are in scope on purpose —
@@ -2508,6 +2627,12 @@ fn try_parse_reflexive_this_way_trigger(tp: TextPair) -> Option<ParsedEffectClau
     // `parse_effect_clause` caller that hands over the whole sentence cannot be
     // rerouted through the delayed-trigger machinery.
     if strip_if_you_do_conditional(tp.original).0.is_some() {
+        return None;
+    }
+    // CR 603.12 + CR 701.20a: "when you reveal … this way" is owned by the
+    // chunk-loop's `strip_reveal_this_way_reflexive_gate` (a `WhenYouDo` on the
+    // reveal-until's own verdict); never mint a delayed trigger for it here.
+    if parse_when_you_reveal_this_way_head(tp.lower).is_ok() {
         return None;
     }
 
@@ -39314,7 +39439,41 @@ pub(crate) fn parse_effect_chain_ir(
                 (Some(cond), Some(head)) => (difference_expr(cond), head.to_string()),
                 _ => (None, text),
             };
-        let (if_you_do, text, deferred_when_you_do_guard) = if condition.is_none() {
+        // CR 603.12 + CR 701.20a: "When you reveal a <filter> card this way,
+        // <body>" after a reveal-until. Owned here, before the generic
+        // reflexive connectors, so the head can never fall through unparsed
+        // (Calibrated Blast's gate used to be dropped silently).
+        let reveal_gate = if condition.is_none() {
+            match strip_reveal_this_way_reflexive_gate(&text, builder.clauses()) {
+                RevealThisWayGate::NotOwned => None,
+                RevealThisWayGate::Reflexive { remainder } => Some(remainder),
+                RevealThisWayGate::Unsupported => {
+                    unimplemented_clause(
+                        &mut builder,
+                        "reveal_this_way_reflexive_gate",
+                        normalized_text,
+                        chunk.boundary_after,
+                    );
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
+        let (if_you_do, text, deferred_when_you_do_guard) = if let Some(remainder) = reveal_gate {
+            // CR 603.12 + CR 701.20a: the reflexive's trigger event is the
+            // reveal-until's until-condition, so its creation gate carries the
+            // reveal-until-hit guard (a generic "When you do" does not).
+            (
+                Some(AbilityCondition::when_you_do_with_guard(
+                    AbilityCondition::EffectOutcome {
+                        signal: EffectOutcomeSignal::RevealUntilMatched,
+                    },
+                )),
+                remainder,
+                None,
+            )
+        } else if condition.is_none() {
             match strip_if_you_do_conditional_with_context(&text, ctx) {
                 conditions::ReflexiveConditionalStrip::Parsed {
                     condition,
@@ -39655,6 +39814,33 @@ pub(crate) fn parse_effect_chain_ir(
                 strip_trailing_where_x(TextPair::new(&text, &text_where_x_lower));
             (without_where_x.original.to_string(), where_x_expression)
         };
+        // CR 608.2c + CR 202.3: "where X is the mana value of that card" binds
+        // the demonstrative referent only when a producer that is PROVEN to
+        // publish exactly one "that card" snapshot precedes it — a single-hit
+        // reveal-until. Anything else (an unimplemented antecedent such as The
+        // Kami War // O-Kagachi Made Manifest's graveyard choice, a non-card
+        // effect, a multi-hit reveal) stays an honest where-X gap.
+        if local_where_x_expression
+            .as_deref()
+            .is_some_and(|expression| {
+                lower::is_mana_value_of_that_card_where_x(
+                    expression
+                        .trim()
+                        .trim_end_matches('.')
+                        .to_lowercase()
+                        .as_str(),
+                )
+            })
+            && !nearest_referent_producer_is_single_hit_reveal_until(builder.clauses())
+        {
+            unimplemented_clause(
+                &mut builder,
+                "where_x_binding",
+                normalized_text,
+                chunk.boundary_after,
+            );
+            continue;
+        }
         // CR 608.2c: "twice" / "N times" suffix — same mechanism as "for each" prefix.
         let (repeat_count, text) = if repeat_for.is_none() {
             let (repeat_count, stripped_text) =
@@ -41068,6 +41254,45 @@ pub(crate) fn parse_effect_chain_ir(
         // Ancestral Katana ("Whenever a Samurai or Warrior … attach ~ to it")
         // attach to the triggering creature, not the parent target.
         let text_lower = text.to_lowercase();
+        // CR 107.3i + CR 608.2c: a trailing "where X is …" clause DEFINES a
+        // quantity; its "that card"/"that creature" referent never names this
+        // clause's recipient. Anaphor detection for the recipient rewrites below
+        // reads the clause without that definition, or "put X counters on target
+        // creature you control, where X is that card's mana value" would have
+        // its explicit target clobbered to the parent's referent.
+        let recipient_anaphor_lower = strip_trailing_where_x(TextPair::new(&text, &text_lower))
+            .0
+            .lower
+            .to_string();
+        // CR 603.12: a "When you <verb> … this way, <target clause>, where X is
+        // that card's …" reflexive gated on the zone-change ledger
+        // (`ZoneChangedThisWay`, no `WhenYouDo` marker) is not modeled as a
+        // separate reflexive trigger: its target would be announced with the
+        // enclosing ability, before the event (Cait Sith, Fortune Teller's
+        // 2025-06-06 ruling says otherwise). Before the where-X referent was kept
+        // out of recipient detection, that referent silently misbound the
+        // target; now that the explicit target binds, fail the clause closed so
+        // coverage does not claim the ruling's timing.
+        let where_x_referent_was_the_only_anaphor = has_anaphoric_reference(&text_lower)
+            && !has_anaphoric_reference(&recipient_anaphor_lower);
+        let normalized_lower = normalized_text.to_lowercase();
+        let reflexive_when_head = tag::<_, _, OracleError<'_>>("when ")
+            .parse(normalized_lower.as_str())
+            .is_ok();
+        if where_x_referent_was_the_only_anaphor
+            && reflexive_when_head
+            && condition
+                .as_ref()
+                .is_some_and(is_unmodeled_zone_change_reflexive_gate)
+        {
+            unimplemented_clause(
+                &mut builder,
+                "zone_change_reflexive_target_timing",
+                normalized_text,
+                chunk.boundary_after,
+            );
+            continue;
+        }
         let typed_trigger_subject = ctx_has_typed_trigger_subject(ctx);
         // CR 109.5 + CR 608.2c: A compound-subject distribution chunk ("~ and
         // that creature each ...") has already had an explicit recipient bound
@@ -41096,7 +41321,7 @@ pub(crate) fn parse_effect_chain_ir(
             // (Revelation of Power) still rewrites to the parent target here.
             && !binds_source_counter_pronoun
             && !builder.is_empty()
-            && has_anaphoric_reference(&text_lower)
+            && has_anaphoric_reference(&recipient_anaphor_lower)
             && !matches!(if_you_do_anchor, Some(TargetFilter::SelfRef))
             && !typed_trigger_subject
             && !explicit_any_target_clause(&clause.effect, &text_lower)
@@ -41164,7 +41389,7 @@ pub(crate) fn parse_effect_chain_ir(
             && builder.clauses().last().is_some_and(|prev| {
                 prev.condition.is_some() && has_typed_target(&prev.parsed.effect)
             })
-            && has_anaphoric_reference(&text_lower)
+            && has_anaphoric_reference(&recipient_anaphor_lower)
             && !typed_trigger_subject
             && !explicit_any_target_clause(&clause.effect, &text_lower)
             && !replace_fight_subject_with_parent_if_anaphoric_subject(
@@ -41186,7 +41411,7 @@ pub(crate) fn parse_effect_chain_ir(
         if condition.is_none()
             && !is_distributed_chunk
             && chain_has_prior_typed_referent(builder.clauses(), false)
-            && has_anaphoric_reference(&text_lower)
+            && has_anaphoric_reference(&recipient_anaphor_lower)
             && !typed_trigger_subject
             && !explicit_any_target_clause(&clause.effect, &text_lower)
             && !replace_fight_subject_with_parent_if_anaphoric_subject(
@@ -41309,7 +41534,7 @@ pub(crate) fn parse_effect_chain_ir(
         if (typed_trigger_subject
             || exile_then_return_transformed
             || attach_anaphor_after_self_ref_transform)
-            && has_anaphoric_reference(&text_lower)
+            && has_anaphoric_reference(&recipient_anaphor_lower)
             && builder
                 .clauses()
                 .last()
@@ -44086,6 +44311,9 @@ fn extract_effect_verb(effect: &Effect) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod reveal_this_way_tests;
 
 #[cfg(test)]
 mod gendered_still_type_tests {

@@ -808,6 +808,7 @@
     "titleTargets": "Alvos: {{targets}}",
     "titlePaid": "Pago: {{paid}}",
     "titleContext": "Contexto: {{context}}",
+    "revealedCards": "Revelada: {{cards}}",
     "paidXValue": "X={{value}}",
     "paidManaSpent": "{{amount}} de mana",
     "paidColorsSpent": "{{count}} cores",

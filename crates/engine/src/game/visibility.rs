@@ -885,6 +885,10 @@ pub(crate) fn identity_projection_for_viewer(
             || (state.revealed_cards.contains(&obj_id)
                 && !manifest_dread_cards.contains(&obj_id))
             || state.viewer_knows_card_identity(viewer, obj_id)
+            // CR 701.20a + CR 401.2: a stack-bound reveal lease deliberately
+            // does NOT unhide a library object. Its identity is public, but its
+            // library position is not, so the identity is published only through
+            // the unindexed `DerivedViews::stack_revealed_cards`.
             // CR 701.20e: own (or controlled-turn) library top under a
             // MayLookAtTopOfLibrary permission — see `look_top_visible` above.
             || look_top_visible.contains(&obj_id);
@@ -1051,6 +1055,7 @@ pub(crate) fn identity_projection_for_unseated_viewer(
     let mut projections = BTreeMap::new();
     let mut hide_if_private = |object_id: ObjectId| {
         let public = state.revealed_cards.contains(&object_id)
+            || stack_bound_reveal_unhides(state, object_id)
             || state.objects.get(&object_id).is_some_and(|object| {
                 state.public_revealed_cards.contains(&object_id) && object.zone != Zone::Library
             });
@@ -1278,7 +1283,8 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
                             && projected_object.zone != base_object.zone;
                     let identity_already_known = viewer_knows(*object_id)
                         || state.revealed_cards.contains(object_id)
-                        || state.public_revealed_cards.contains(object_id);
+                        || state.public_revealed_cards.contains(object_id)
+                        || stack_bound_reveal_unhides(state, *object_id);
                     (crossed_hidden_boundary
                         && !can_view_private_for_player(base_object.owner)
                         && !identity_already_known)
@@ -1542,10 +1548,14 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         None => identity_projection_for_unseated_viewer(state),
     };
     let mut hidden_zone_change_ids = HashSet::new();
+    let mut hidden_library_ids = HashSet::new();
     for (obj_id, projection) in identity_projection {
         match projection {
             IdentityProjection::Hidden => {
                 hidden_zone_change_ids.insert(obj_id);
+                if hides_library_occurrence(state, obj_id, projection) {
+                    hidden_library_ids.insert(obj_id);
+                }
                 hide_card(&mut filtered, obj_id);
                 record_hidden_replacement_candidate_source(
                     replacement_candidate_source_ids.as_ref(),
@@ -2779,6 +2789,8 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         }
     }
 
+    redact_hidden_library_identity_carriers(&mut filtered, &hidden_library_ids);
+
     // This is the single display-identity authority sent to every client. The
     // preceding projection/redaction passes decide whether an object's identity
     // remains available; UI code consumes this result rather than recreating
@@ -2932,6 +2944,23 @@ pub fn filter_events_for_viewer(
 ) -> Vec<GameEvent> {
     let spectator = !state.players.iter().any(|player| player.id == viewer);
     let hidden_search_viewers = hidden_search_audiences(state, events);
+    // CR 400.2 + CR 401.2: computed once per batch, only when the batch can
+    // carry a library occurrence's identity.
+    let carries_identity = events.iter().any(|event| {
+        matches!(
+            event,
+            GameEvent::CardsRevealed { .. }
+                | GameEvent::EffectResolved {
+                    subject: Some(_),
+                    ..
+                }
+        )
+    });
+    let hidden_library = if carries_identity {
+        hidden_library_ids(state, (!spectator).then_some(viewer))
+    } else {
+        HashSet::new()
+    };
     events
         .iter()
         .zip(hidden_search_viewers.iter())
@@ -2960,6 +2989,27 @@ pub fn filter_events_for_viewer(
                     object_id: *object_id,
                     cast_mana_value: None,
                 }
+            }
+            // CR 401.2: a revealed card that now sits in a library at a hidden
+            // position keeps its name (reveal order, no position) but loses the
+            // object id that would locate it in the projected library order.
+            GameEvent::CardsRevealed {
+                player,
+                card_ids,
+                card_names,
+            } => GameEvent::CardsRevealed {
+                player: *player,
+                card_ids: card_ids
+                    .iter()
+                    .copied()
+                    .filter(|id| !hidden_library.contains(id))
+                    .collect(),
+                card_names: card_names.clone(),
+            },
+            GameEvent::EffectResolved { .. } => {
+                let mut event = event.clone();
+                redact_hidden_library_event(&mut event, &hidden_library);
+                event
             }
             other => other.clone(),
         })
@@ -3321,9 +3371,53 @@ fn viewer_may_look_at_face_down(
 fn is_visible_revealed_card(state: &GameState, viewer: PlayerId, obj_id: ObjectId) -> bool {
     state.revealed_cards.contains(&obj_id)
         || state.viewer_knows_card_identity(viewer, obj_id)
+        || stack_bound_reveal_unhides(state, obj_id)
         || state.objects.get(&obj_id).is_some_and(|obj| {
             state.public_revealed_cards.contains(&obj_id) && obj.zone != Zone::Library
         })
+}
+
+/// CR 701.20a + CR 401.2: a card whose reveal caused a triggered ability stays
+/// revealed until that ability leaves the stack. That lease discloses the
+/// card's identity on its current object only outside a library: a library card
+/// keeps its hidden projection, because showing it would also disclose its
+/// position, and CR 401.2 keeps that from every player (the owner included).
+/// The identity of a library-resident leased card is published only through
+/// `DerivedViews::stack_revealed_cards`, which carries no object id.
+fn stack_bound_reveal_unhides(state: &GameState, obj_id: ObjectId) -> bool {
+    state.holds_stack_bound_reveal(obj_id)
+        && state
+            .objects
+            .get(&obj_id)
+            .is_some_and(|obj| obj.zone != Zone::Library)
+}
+
+/// CR 400.2 + CR 401.2: the library occurrences whose identity this audience's
+/// projection hides. An object id in this set is a bare position handle, so no
+/// viewer-copy carrier may pair it with that card's identity (name, last-known
+/// snapshot, or reveal order). `None` is the unseated audience.
+pub(crate) fn hidden_library_ids(state: &GameState, viewer: Option<PlayerId>) -> HashSet<ObjectId> {
+    let projection = match viewer {
+        Some(viewer) => identity_projection_for_viewer(state, viewer),
+        None => identity_projection_for_unseated_viewer(state),
+    };
+    projection
+        .into_iter()
+        .filter(|(id, projection)| hides_library_occurrence(state, *id, *projection))
+        .map(|(id, _)| id)
+        .collect()
+}
+
+fn hides_library_occurrence(
+    state: &GameState,
+    obj_id: ObjectId,
+    projection: IdentityProjection,
+) -> bool {
+    matches!(projection, IdentityProjection::Hidden)
+        && state
+            .objects
+            .get(&obj_id)
+            .is_some_and(|obj| obj.zone == Zone::Library)
 }
 
 /// Removes printed-card identity from a viewer projection while retaining the
@@ -3487,6 +3581,164 @@ fn redact_pending_trigger_context_for_observer(
 ) {
     redact_pending_trigger_for_observer(&mut ctx.pending);
     ctx.trigger_events.clear();
+}
+
+/// CR 400.2 + CR 401.2: an `EffectResolved` subject snapshot pairs a hidden
+/// library occurrence's object id with its identity. The authoritative event
+/// keeps it (trigger matching reads it); a viewer copy drops it.
+fn redact_hidden_library_event(event: &mut GameEvent, hidden_library: &HashSet<ObjectId>) {
+    if let GameEvent::EffectResolved { subject, .. } = event {
+        if subject
+            .as_ref()
+            .is_some_and(|snapshot| hidden_library.contains(&snapshot.identity.object_id))
+        {
+            *subject = None;
+        }
+    }
+}
+
+/// CR 400.2 + CR 401.2: a resolved ability's `effect_context_object` (the "that
+/// card" referent) pairs its object id with that card's last-known identity.
+/// When the object is a hidden library occurrence, a viewer copy drops the
+/// snapshot, across the whole sub/else chain. The rules state keeps it.
+fn redact_hidden_library_ability(
+    ability: &mut crate::types::ability::ResolvedAbility,
+    hidden_library: &HashSet<ObjectId>,
+) {
+    if ability
+        .effect_context_object
+        .as_ref()
+        .is_some_and(|snapshot| hidden_library.contains(&snapshot.object_id))
+    {
+        ability.effect_context_object = None;
+    }
+    if let Some(sub_ability) = ability.sub_ability.as_mut() {
+        redact_hidden_library_ability(sub_ability, hidden_library);
+    }
+    if let Some(else_ability) = ability.else_ability.as_mut() {
+        redact_hidden_library_ability(else_ability, hidden_library);
+    }
+}
+
+fn redact_hidden_library_pending_trigger(
+    pending: &mut crate::game::triggers::PendingTrigger,
+    hidden_library: &HashSet<ObjectId>,
+) {
+    redact_hidden_library_ability(&mut pending.ability, hidden_library);
+    if let Some(event) = pending.trigger_event.as_mut() {
+        redact_hidden_library_event(event, hidden_library);
+    }
+}
+
+fn redact_hidden_library_trigger_context(
+    ctx: &mut crate::game::triggers::PendingTriggerContext,
+    hidden_library: &HashSet<ObjectId>,
+) {
+    redact_hidden_library_pending_trigger(&mut ctx.pending, hidden_library);
+    for event in &mut ctx.trigger_events {
+        redact_hidden_library_event(event, hidden_library);
+    }
+}
+
+/// CR 401.2 + CR 701.20a: a revealed card that ends in a library at a hidden
+/// position keeps its identity public only while its reveal lasts, and only
+/// through unindexed presentation (`DerivedViews::stack_revealed_cards`,
+/// `CardsRevealed.card_names`). Every viewer-copy carrier that would pair that
+/// occurrence's object id with its identity is cleared here, for every
+/// audience, the owner included (no player may know a library's order).
+fn redact_hidden_library_identity_carriers(
+    filtered: &mut GameState,
+    hidden_library: &HashSet<ObjectId>,
+) {
+    // The lease map is rules bookkeeping, and its exact `ObjectIncarnationRef`
+    // is a position handle; the presentation derived from it is the public
+    // surface.
+    *filtered.stack_bound_reveals = Default::default();
+    // Resolution bookkeeping written in reveal order (the same order as
+    // `CardsRevealed.card_names`), so its ids join to the names. No client
+    // reads it.
+    filtered.last_revealed_ids.clear();
+    for entry in filtered
+        .stack
+        .iter_mut()
+        .chain(filtered.resolving_stack_entry.iter_mut())
+    {
+        match &mut entry.kind {
+            StackEntryKind::Spell {
+                ability: Some(ability),
+                ..
+            }
+            | StackEntryKind::ActivatedAbility { ability, .. } => {
+                redact_hidden_library_ability(ability, hidden_library);
+            }
+            StackEntryKind::TriggeredAbility {
+                ability,
+                trigger_event,
+                ..
+            } => {
+                redact_hidden_library_ability(ability, hidden_library);
+                if let Some(event) = trigger_event.as_mut() {
+                    redact_hidden_library_event(event, hidden_library);
+                }
+            }
+            StackEntryKind::Spell { ability: None, .. }
+            | StackEntryKind::KeywordAction { .. }
+            | StackEntryKind::CombatDamage { .. } => {}
+        }
+    }
+    for event in filtered
+        .stack_trigger_event_batches
+        .values_mut()
+        .flatten()
+        .chain(filtered.current_trigger_event.iter_mut())
+        .chain(filtered.current_trigger_events.iter_mut())
+        .chain(filtered.pending_trigger_event_batch.iter_mut())
+        .chain(filtered.pending_attack_trigger_events.iter_mut())
+        .chain(
+            filtered
+                .consumed_before_priority_trigger_events
+                .iter_mut()
+                .map(|occurrence| &mut occurrence.event),
+        )
+    {
+        redact_hidden_library_event(event, hidden_library);
+    }
+    if let Some(pending) = filtered.pending_trigger.as_mut() {
+        redact_hidden_library_pending_trigger(pending, hidden_library);
+    }
+    if let Some(order) = filtered.pending_trigger_order.as_mut() {
+        for ctx in order
+            .groups
+            .iter_mut()
+            .flat_map(|group| group.triggers.iter_mut())
+        {
+            redact_hidden_library_trigger_context(ctx, hidden_library);
+        }
+    }
+    for ctx in &mut filtered.deferred_triggers {
+        redact_hidden_library_trigger_context(ctx, hidden_library);
+    }
+    match &mut filtered.waiting_for {
+        WaitingFor::TriggerTargetSelection {
+            trigger_event,
+            trigger_events,
+            ..
+        } => {
+            for event in trigger_event.iter_mut().chain(trigger_events.iter_mut()) {
+                redact_hidden_library_event(event, hidden_library);
+            }
+        }
+        WaitingFor::RevealUntilBottomOrder {
+            reveal_until_hit_snapshot,
+            ..
+        } if reveal_until_hit_snapshot
+            .as_ref()
+            .is_some_and(|snapshot| hidden_library.contains(&snapshot.identity.object_id)) =>
+        {
+            *reveal_until_hit_snapshot = None;
+        }
+        _ => {}
+    }
 }
 
 #[cfg(test)]
@@ -10360,5 +10612,198 @@ mod tests {
         // never firing anywhere.
         let wire = filter_state_for_viewer(&state, PlayerId(0));
         assert_eq!(wire.objects[&fd].name, "Grizzly Bears");
+    }
+
+    /// CR 401.2: a revealed card that now sits in a library at a hidden
+    /// position loses its id from the viewer copy of `CardsRevealed` (every
+    /// seat, the owner included, and a spectator); a revealed library card
+    /// still showing and a non-library card keep theirs, and the names are
+    /// untouched.
+    #[test]
+    fn cards_revealed_drops_only_hidden_library_ids_for_every_viewer() {
+        let mut state = GameState::new_two_player(42);
+        let bottomed = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bottomed".to_string(),
+            Zone::Library,
+        );
+        let still_revealed = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Still Revealed".to_string(),
+            Zone::Library,
+        );
+        state.revealed_cards.insert(still_revealed);
+        let in_hand = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "In Hand".to_string(),
+            Zone::Hand,
+        );
+        let names = vec![
+            "Bottomed".to_string(),
+            "Still Revealed".to_string(),
+            "In Hand".to_string(),
+        ];
+        let event = GameEvent::CardsRevealed {
+            player: PlayerId(0),
+            card_ids: vec![bottomed, still_revealed, in_hand],
+            card_names: names.clone(),
+        };
+        for viewer in [PlayerId(0), PlayerId(1), PlayerId(99)] {
+            assert_eq!(
+                filter_events_for_viewer(std::slice::from_ref(&event), &state, viewer),
+                vec![GameEvent::CardsRevealed {
+                    player: PlayerId(0),
+                    card_ids: vec![still_revealed, in_hand],
+                    card_names: names.clone(),
+                }],
+                "viewer {viewer:?}"
+            );
+        }
+    }
+
+    /// CR 400.2 + CR 401.2: an `EffectResolved` subject naming a hidden library
+    /// occurrence is dropped from the viewer copy of the event stream and of
+    /// every projected event carrier, and a ResolvedAbility's library
+    /// `effect_context_object` is dropped from the projection; a battlefield
+    /// subject is untouched in both. The authoritative state keeps all of it.
+    #[test]
+    fn hidden_library_identity_is_dropped_from_viewer_event_and_ability_carriers() {
+        use crate::types::game_state::StackEntry;
+        let mut state = GameState::new_two_player(42);
+        let library_card = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Library Card".to_string(),
+            Zone::Library,
+        );
+        let permanent = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Permanent".to_string(),
+            Zone::Battlefield,
+        );
+        let resolved = |object: ObjectId, state: &GameState| GameEvent::EffectResolved {
+            kind: EffectKind::RevealUntil,
+            source_id: ObjectId(900),
+            subject: state.capture_event_object_snapshot(object).map(Box::new),
+        };
+        let library_event = resolved(library_card, &state);
+        let permanent_event = resolved(permanent, &state);
+        assert!(
+            matches!(
+                &library_event,
+                GameEvent::EffectResolved {
+                    subject: Some(_),
+                    ..
+                }
+            ),
+            "reach guard: the library snapshot was captured"
+        );
+        let with_context = |object: ObjectId, state: &GameState| {
+            let mut ability =
+                ResolvedAbility::new(Effect::NoOp, Vec::new(), ObjectId(900), PlayerId(0));
+            let object = state.objects.get(&object).expect("object");
+            ability.effect_context_object = Some(CostPaidObjectSnapshot::capture(
+                object,
+                object.snapshot_public_characteristics(),
+            ));
+            ability
+        };
+        for (id, object, event) in [
+            (ObjectId(800), library_card, library_event.clone()),
+            (ObjectId(801), permanent, permanent_event.clone()),
+        ] {
+            state.stack.push_back(StackEntry {
+                id,
+                source_id: ObjectId(900),
+                controller: PlayerId(0),
+                kind: StackEntryKind::TriggeredAbility {
+                    source_id: ObjectId(900),
+                    ability: Box::new(with_context(object, &state)),
+                    condition: None,
+                    trigger_event: Some(event.clone()),
+                    description: None,
+                    source_name: String::new(),
+                    subject_match_count: None,
+                    die_result: None,
+                    provenance: None,
+                },
+            });
+            state.current_trigger_events.push(event);
+        }
+        state.last_revealed_ids = vec![library_card];
+
+        let stripped = |event: &GameEvent| match event {
+            GameEvent::EffectResolved {
+                kind, source_id, ..
+            } => GameEvent::EffectResolved {
+                kind: *kind,
+                source_id: *source_id,
+                subject: None,
+            },
+            other => other.clone(),
+        };
+        for viewer in [PlayerId(0), PlayerId(1)] {
+            assert_eq!(
+                filter_events_for_viewer(
+                    &[library_event.clone(), permanent_event.clone()],
+                    &state,
+                    viewer
+                ),
+                vec![stripped(&library_event), permanent_event.clone()],
+                "event stream, viewer {viewer:?}"
+            );
+            let projected = filter_state_for_viewer(&state, viewer);
+            assert!(projected.last_revealed_ids.is_empty());
+            assert_eq!(
+                projected.current_trigger_events,
+                vec![stripped(&library_event), permanent_event.clone()]
+            );
+            let carried: Vec<_> = projected
+                .stack
+                .iter()
+                .map(|entry| match &entry.kind {
+                    StackEntryKind::TriggeredAbility {
+                        ability,
+                        trigger_event,
+                        ..
+                    } => (
+                        ability.effect_context_object.as_ref().map(|s| s.object_id),
+                        trigger_event.clone(),
+                    ),
+                    _ => unreachable!(),
+                })
+                .collect();
+            assert_eq!(
+                carried,
+                vec![
+                    (None, Some(stripped(&library_event))),
+                    (Some(permanent), Some(permanent_event.clone())),
+                ],
+                "stack carriers, viewer {viewer:?}"
+            );
+        }
+        let projected = filter_state_for_unseated_viewer(&state);
+        assert!(projected.last_revealed_ids.is_empty());
+        assert_eq!(
+            projected.current_trigger_events,
+            vec![stripped(&library_event), permanent_event.clone()]
+        );
+        assert_eq!(state.last_revealed_ids, vec![library_card]);
+        assert!(matches!(
+            &state.current_trigger_events[0],
+            GameEvent::EffectResolved {
+                subject: Some(_),
+                ..
+            }
+        ));
     }
 }

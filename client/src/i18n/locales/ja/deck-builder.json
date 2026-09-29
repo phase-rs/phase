@@ -278,7 +278,9 @@
     "dataVersion": "データ: {{version}}",
     "aboutBrackets": "ブラケットについて ↗",
     "estimatedChip": "推定: B{{tier}}",
-    "estimatedChipFull": "推定ブラケット: B{{tier}} {{label}}"
+    "estimatedChipFull": "推定ブラケット: B{{tier}} {{label}}",
+    "manualChip": "B{{tier}}",
+    "manualChipFull": "申告ブラケット: B{{tier}} {{label}}"
   },
   "bracketPicker": {
     "ariaLabel": "デッキブラケット",

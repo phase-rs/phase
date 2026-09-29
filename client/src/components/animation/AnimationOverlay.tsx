@@ -26,6 +26,7 @@ import { MeldForgeAnimation, type MeldForgePiece } from "./MeldForgeAnimation.ts
 import { MillRevealAnimation } from "./MillRevealAnimation.tsx";
 import type { MillCard } from "./MillRevealAnimation.tsx";
 import { RippleRevealAnimation } from "./RippleRevealAnimation.tsx";
+import { revealFanCards } from "./revealFanCards.ts";
 import { ParticleCanvas } from "./ParticleCanvas.tsx";
 import type { ParticleCanvasHandle } from "./ParticleCanvas.tsx";
 import {
@@ -776,18 +777,10 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
           // CR 702.60a + CR 701.20b: Ripple (and other "reveal the top N")
           // effects publish their pile without moving it. Fan the revealed
           // cards out of the revealing player's library for every seat to read.
-          const { player, card_ids: cardIds } = event.data;
-          if (vfxQuality === "minimal" || !cardIds || cardIds.length === 0) break;
+          const { player, card_ids: cardIds = [], card_names: cardNames } = event.data;
+          if (vfxQuality === "minimal" || cardNames.length === 0) break;
           const newState = useAnimationStore.getState().animationNewState;
-          const revealCards: MillCard[] = cardIds.map((id) => {
-            const object = newState?.objects[id];
-            const snapshot = visibleAnimationImageSnapshot(object);
-            return {
-              objectId: id,
-              snapshot,
-              colors: snapshot ? getCardColors(object?.color ?? []) : [],
-            };
-          });
+          const revealCards: MillCard[] = revealFanCards(cardIds, cardNames, newState?.objects);
           const libEl = document.querySelector(`[data-library-pile="${player}"]`);
           const libRect = libEl?.getBoundingClientRect();
           const fromPos = libRect

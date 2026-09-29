@@ -861,6 +861,14 @@ impl ResolutionStack {
         self.frames.capture_depth()
     }
 
+    /// Whether the frame at the captured `child_stack_start` is a `CopyToken` owner.
+    pub fn copy_token_at_child_boundary(&self, child_stack_start: ChildStackDepth) -> bool {
+        self.frames
+            .slot_at_captured_depth(child_stack_start)
+            .and_then(|slot| self.frames.get(slot))
+            .is_some_and(|frame| matches!(frame, ResolutionFrame::CopyToken(_)))
+    }
+
     pub fn last(&self) -> Option<&ResolutionFrame> {
         self.frames.last()
     }

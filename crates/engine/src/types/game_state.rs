@@ -19500,6 +19500,14 @@ pub struct GameEnd {
     pub winner: Option<PlayerId>,
 }
 
+/// Serde skip predicate for `GameState::stack_bound_reveals`: an empty lease
+/// map is omitted so pre-lease snapshots stay byte-identical.
+fn stack_bound_reveals_is_empty(
+    reveals: &std::collections::BTreeMap<ObjectId, Vec<ObjectIncarnationRef>>,
+) -> bool {
+    reveals.is_empty()
+}
+
 /// Declares the runtime state and its private serde-only raw mirror from one
 /// field list. Keeping the field declaration single-sourced makes persistence
 /// ingress exhaustive whenever `GameState` evolves.
@@ -21176,6 +21184,15 @@ declare_game_state! {
     #[serde(default)]
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
     pub public_revealed_cards: Box<HashSet<ObjectId>>,
+    /// CR 701.20a: per-stack-entry public reveal leases
+    /// (`ResolvedInformationLifetime::UntilStackObjectLeaves`), keyed by the
+    /// triggered ability's stack entry. Each row is one exact occurrence the
+    /// entry keeps revealed; overlapping leases on one occurrence are separate
+    /// rows. Maintained only by `apply_information_edit` (acquire/release, both
+    /// journaled) and by the CR 400.7 zone-exit drop, which live play and
+    /// replay both apply. Boxed and sparse, for the `GameState` stack budget.
+    #[serde(default, skip_serializing_if = "stack_bound_reveals_is_empty")]
+    pub stack_bound_reveals: Box<std::collections::BTreeMap<ObjectId, Vec<ObjectIncarnationRef>>>,
     /// Durable card identities learned by a particular audience. Product
     /// knowledge affects only viewer projection and AI determinization; it is
     /// never consulted by rules execution, legality, or prompts.
@@ -21450,13 +21467,16 @@ declare_game_state! {
     /// recently resolved `Dig`/`ChooseFromZone`/`RevealHand` reveal-choice/
     /// `ExileTop` came up with nothing (empty library, no eligible card, an
     /// empty reveal-choice set, or no card exiled respectively; `ExileTop`
-    /// since issue #8798) — distinct from "none of those has run
+    /// since issue #8798; a `RevealUntil` that revealed no matching card) — distinct from "none of those has run
     /// in this chain link," which is `None`. This is a brief, transient
     /// relay: `effects::apply_parent_chain_context` reads and immediately
     /// clears it at the very next parent->child hand-off (whatever that
     /// child turns out to be), copying it onto that ONE child's typed
-    /// `ResolvedAbility::parent_target_missing_reason` field. Nothing else
-    /// reads this flag directly — in particular, the shared
+    /// `ResolvedAbility::parent_target_missing_reason` field. The only other
+    /// reader is the same hop's inline `WhenYouDo` creation gate
+    /// (`effects::reflexive_occurrence_voided_by_parent`), which peeks without
+    /// clearing immediately before that hand-off — in
+    /// particular, the shared
     /// `resolved_targets` chokepoint does not, so an empty Dig/ChooseFromZone/
     /// RevealHand can never affect any `ParentTarget` consumer beyond its own
     /// immediate sub_ability (e.g. Avenging Angel's unrelated LTB self-return
@@ -26329,14 +26349,7 @@ impl GameState {
                 continue;
             };
             let occurrence = ObjectIncarnationRef::from_object(object);
-            let active = match audience {
-                ResolvedInformationAudience::Controller(_) => {
-                    self.revealed_cards.contains(object_id)
-                }
-                ResolvedInformationAudience::Public => {
-                    self.public_revealed_cards.contains(object_id)
-                }
-            };
+            let active = self.information_active(audience, lifetime, occurrence);
             if matches!(edit, ResolvedInformationEdit::Reveal) != active {
                 occurrences.push(occurrence);
             }
@@ -26403,15 +26416,7 @@ impl GameState {
                 ResolvedInformationLifetime::UntilZoneChange,
             ),
         ] {
-            let active = match audience {
-                ResolvedInformationAudience::Controller(_) => {
-                    self.revealed_cards.contains(&occurrence.object_id)
-                }
-                ResolvedInformationAudience::Public => {
-                    self.public_revealed_cards.contains(&occurrence.object_id)
-                }
-            };
-            if active {
+            if self.information_active(audience, lifetime, occurrence) {
                 self.apply_information_edit(
                     &[occurrence],
                     audience,
@@ -26419,6 +26424,108 @@ impl GameState {
                     ResolvedInformationEdit::Hide,
                 )
                 .expect("zone-exit reveal clear must match the live object occurrence");
+            }
+        }
+        self.drop_stack_bound_reveals_for_occurrence(occurrence);
+    }
+
+    /// CR 400.7 + CR 701.20a: A stack-bound reveal lease belongs to one exact
+    /// occurrence; once that object changes zones it is a new object, so every
+    /// lease row naming the old occurrence ends. Called by the live zone-exit
+    /// cleanup above AND by the journal replay zone-change applier
+    /// (`zones::apply_resolved_zone_change`), which bypasses that cleanup — both
+    /// derive the same lease map from the same zone-change fact.
+    pub(crate) fn drop_stack_bound_reveals_for_occurrence(
+        &mut self,
+        occurrence: ObjectIncarnationRef,
+    ) {
+        if self.stack_bound_reveals.is_empty() {
+            return;
+        }
+        self.stack_bound_reveals.retain(|_, rows| {
+            rows.retain(|row| *row != occurrence);
+            !rows.is_empty()
+        });
+    }
+
+    /// CR 701.20a: whether `object_id`'s CURRENT occurrence is held by a live
+    /// stack-bound reveal lease. Exact-occurrence, so a lease never discloses a
+    /// later object that reuses the storage id (CR 400.7).
+    pub fn holds_stack_bound_reveal(&self, object_id: ObjectId) -> bool {
+        if self.stack_bound_reveals.is_empty() {
+            return false;
+        }
+        let Some(object) = self.objects.get(&object_id) else {
+            return false;
+        };
+        let current = ObjectIncarnationRef::from_object(object);
+        self.stack_bound_reveals
+            .values()
+            .any(|rows| rows.contains(&current))
+    }
+
+    /// CR 701.20a: acquire a stack-bound public reveal lease for each object's
+    /// current occurrence, owned by `stack_entry`. Journaled like every
+    /// information edit.
+    pub(crate) fn grant_stack_bound_reveal(
+        &mut self,
+        stack_entry: ObjectId,
+        object_ids: &[ObjectId],
+    ) {
+        self.resolve_and_apply_information(
+            object_ids,
+            ResolvedInformationAudience::Public,
+            ResolvedInformationLifetime::UntilStackObjectLeaves { stack_entry },
+            ResolvedInformationEdit::Reveal,
+        )
+        .expect("stack-bound reveal grant must reference live, distinct occurrences");
+    }
+
+    /// CR 701.20a: `stack_entry` has left the stack — release every lease row
+    /// it owns (journaled). Rows whose occurrence already changed zones were
+    /// dropped by `drop_stack_bound_reveals_for_occurrence`.
+    pub(crate) fn release_stack_bound_reveals(&mut self, stack_entry: ObjectId) {
+        let Some(rows) = self.stack_bound_reveals.get(&stack_entry) else {
+            return;
+        };
+        let object_ids: Vec<ObjectId> = rows.iter().map(|row| row.object_id).collect();
+        self.resolve_and_apply_information(
+            &object_ids,
+            ResolvedInformationAudience::Public,
+            ResolvedInformationLifetime::UntilStackObjectLeaves { stack_entry },
+            ResolvedInformationEdit::Hide,
+        )
+        .expect("stack-bound reveal release must reference live lease rows");
+    }
+
+    /// CR 701.20a: every stack entry's leases end at once (the debug phase
+    /// jump that clears the stack wholesale).
+    pub(crate) fn release_all_stack_bound_reveals(&mut self) {
+        let entries: Vec<ObjectId> = self.stack_bound_reveals.keys().copied().collect();
+        for entry in entries {
+            self.release_stack_bound_reveals(entry);
+        }
+    }
+
+    /// Whether one exact occurrence is active under one audience × lifetime.
+    /// The two set-backed leases key on storage id (their zone-exit clear keeps
+    /// them occurrence-exact); a stack-bound lease is a per-entry row.
+    fn information_active(
+        &self,
+        audience: ResolvedInformationAudience,
+        lifetime: ResolvedInformationLifetime,
+        occurrence: ObjectIncarnationRef,
+    ) -> bool {
+        match (audience, lifetime) {
+            (_, ResolvedInformationLifetime::UntilStackObjectLeaves { stack_entry }) => self
+                .stack_bound_reveals
+                .get(&stack_entry)
+                .is_some_and(|rows| rows.contains(&occurrence)),
+            (ResolvedInformationAudience::Controller(_), _) => {
+                self.revealed_cards.contains(&occurrence.object_id)
+            }
+            (ResolvedInformationAudience::Public, _) => {
+                self.public_revealed_cards.contains(&occurrence.object_id)
             }
         }
     }
@@ -26430,17 +26537,9 @@ impl GameState {
         lifetime: ResolvedInformationLifetime,
         edit: ResolvedInformationEdit,
     ) -> Result<(), ResolvedInformationReplayInvariantError> {
-        let valid_lifetime = matches!(
-            (audience, lifetime),
-            (
-                ResolvedInformationAudience::Controller(_),
-                ResolvedInformationLifetime::UntilActionBoundary
-            ) | (
-                ResolvedInformationAudience::Public,
-                ResolvedInformationLifetime::UntilZoneChange
-            )
-        );
-        if !valid_lifetime {
+        if !crate::types::resolved_commands::information_audience_lifetime_is_valid(
+            audience, lifetime,
+        ) {
             return Err(
                 ResolvedInformationReplayInvariantError::InvalidAudienceLifetime {
                     audience,
@@ -26469,14 +26568,7 @@ impl GameState {
                     found,
                 });
             }
-            let active = match audience {
-                ResolvedInformationAudience::Controller(_) => {
-                    self.revealed_cards.contains(&occurrence.object_id)
-                }
-                ResolvedInformationAudience::Public => {
-                    self.public_revealed_cards.contains(&occurrence.object_id)
-                }
-            };
+            let active = self.information_active(audience, lifetime, *occurrence);
             match edit {
                 ResolvedInformationEdit::Reveal if active => {
                     return Err(
@@ -26492,6 +26584,28 @@ impl GameState {
                 }
                 ResolvedInformationEdit::Reveal | ResolvedInformationEdit::Hide => {}
             }
+        }
+
+        // CR 701.20a: a stack-bound lease is a per-entry row, never a shared
+        // membership bit, so overlapping leases release independently.
+        if let ResolvedInformationLifetime::UntilStackObjectLeaves { stack_entry } = lifetime {
+            match edit {
+                ResolvedInformationEdit::Reveal => {
+                    self.stack_bound_reveals
+                        .entry(stack_entry)
+                        .or_default()
+                        .extend(occurrences.iter().copied());
+                }
+                ResolvedInformationEdit::Hide => {
+                    if let Some(rows) = self.stack_bound_reveals.get_mut(&stack_entry) {
+                        rows.retain(|row| !occurrences.contains(row));
+                        if rows.is_empty() {
+                            self.stack_bound_reveals.remove(&stack_entry);
+                        }
+                    }
+                }
+            }
+            return Ok(());
         }
 
         let revealed_cards = match audience {
@@ -27183,6 +27297,7 @@ impl GameState {
             modal_modes_chosen_this_game: HashSet::new(),
             revealed_cards: HashSet::new(),
             public_revealed_cards: Box::default(),
+            stack_bound_reveals: Box::default(),
             product_knowledge_state: Box::default(),
             resolution_stack: Box::default(),
             payment_transaction: None,
@@ -29576,6 +29691,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         modal_modes_chosen_this_game: _,
         revealed_cards: _,
         public_revealed_cards: _,
+        stack_bound_reveals: _,
         product_knowledge_state: _,
         resolution_stack: _,
         payment_transaction: _,
@@ -29929,6 +30045,7 @@ impl PartialEq for GameState {
             && self.modal_modes_chosen_this_game == other.modal_modes_chosen_this_game
             && self.revealed_cards == other.revealed_cards
             && self.public_revealed_cards == other.public_revealed_cards
+            && self.stack_bound_reveals == other.stack_bound_reveals
             && self.product_knowledge_state == other.product_knowledge_state
             && self.resolution_stack.game_state_eq(&other.resolution_stack)
             && self.payment_transaction == other.payment_transaction
@@ -43276,6 +43393,126 @@ mod tests {
         assert_eq!(
             deserialized.active_spend_only_on_x_count, None,
             "deserialized active_spend_only_on_x_count must be None"
+        );
+    }
+}
+
+#[cfg(test)]
+mod stack_bound_reveal_tests {
+    //! CR 701.20a: per-stack-entry reveal leases (`UntilStackObjectLeaves`).
+    use super::GameState;
+    use crate::game::zones::create_object;
+    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::player::PlayerId;
+    use crate::types::resolved_commands::{
+        information_audience_lifetime_is_valid, ResolvedInformationAudience,
+        ResolvedInformationLifetime, ResolvedRulesCommand,
+    };
+    use crate::types::zones::Zone;
+
+    fn state_with_hand_card() -> (GameState, ObjectId) {
+        let mut state = GameState::new_two_player(7);
+        let card = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Leased".to_string(),
+            Zone::Hand,
+        );
+        (state, card)
+    }
+
+    #[test]
+    fn overlapping_leases_on_one_occurrence_release_independently() {
+        let (mut state, card) = state_with_hand_card();
+        let (a, b) = (ObjectId(900), ObjectId(901));
+        state.grant_stack_bound_reveal(a, &[card]);
+        state.grant_stack_bound_reveal(b, &[card]);
+        assert_eq!(state.stack_bound_reveals.len(), 2, "reach guard: two rows");
+        state.release_stack_bound_reveals(a);
+        assert!(state.holds_stack_bound_reveal(card), "B still holds it");
+        state.release_stack_bound_reveals(b);
+        assert!(!state.holds_stack_bound_reveal(card));
+        assert!(state.stack_bound_reveals.is_empty());
+        // Neither lease ever touched the shared public membership.
+        assert!(!state.public_revealed_cards.contains(&card));
+    }
+
+    #[test]
+    fn a_zone_exit_ends_every_lease_on_the_old_occurrence() {
+        let (mut state, card) = state_with_hand_card();
+        state.grant_stack_bound_reveal(ObjectId(900), &[card]);
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, card, Zone::Graveyard, &mut events);
+        assert!(state.stack_bound_reveals.is_empty());
+        // Releasing the departed entry later is a no-op, not a stale hide.
+        state.release_stack_bound_reveals(ObjectId(900));
+    }
+
+    #[test]
+    fn journal_replay_rebuilds_the_lease_map_exactly() {
+        let (mut state, card) = state_with_hand_card();
+        let before = state.clone();
+        state.grant_stack_bound_reveal(ObjectId(900), &[card]);
+        state.release_stack_bound_reveals(ObjectId(900));
+        let commands: Vec<_> = state
+            .resolved_rules_journal
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry.command.as_ref() {
+                Some(ResolvedRulesCommand::Information(command)) => Some(command.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            commands.len(),
+            2,
+            "reach guard: acquire + release journaled"
+        );
+        let mut replay = before;
+        replay.apply_resolved_information(&commands[0]).unwrap();
+        assert!(replay.holds_stack_bound_reveal(card));
+        replay.apply_resolved_information(&commands[1]).unwrap();
+        assert_eq!(replay.stack_bound_reveals, state.stack_bound_reveals);
+    }
+
+    #[test]
+    fn a_journal_carrying_leases_survives_trusted_serialization() {
+        let (mut state, card) = state_with_hand_card();
+        state.grant_stack_bound_reveal(ObjectId(900), &[card]);
+        state.grant_stack_bound_reveal(ObjectId(901), &[card]);
+        state.release_stack_bound_reveals(ObjectId(900));
+        let json = serde_json::to_string(&state).unwrap();
+        let restored: GameState =
+            serde_json::from_str(&json).expect("journal authority validation accepts leases");
+        assert_eq!(restored.stack_bound_reveals, state.stack_bound_reveals);
+        assert!(restored.holds_stack_bound_reveal(card));
+    }
+
+    #[test]
+    fn only_the_public_audience_may_carry_a_stack_bound_lease() {
+        let lease = ResolvedInformationLifetime::UntilStackObjectLeaves {
+            stack_entry: ObjectId(900),
+        };
+        assert!(information_audience_lifetime_is_valid(
+            ResolvedInformationAudience::Public,
+            lease
+        ));
+        assert!(!information_audience_lifetime_is_valid(
+            ResolvedInformationAudience::Controller(PlayerId(0)),
+            lease
+        ));
+    }
+
+    #[test]
+    fn equality_sees_the_lease_map() {
+        let (state, card) = state_with_hand_card();
+        let mut leased = state.clone();
+        leased.grant_stack_bound_reveal(ObjectId(900), &[card]);
+        leased.resolved_rules_journal = state.resolved_rules_journal.clone();
+        assert!(
+            state != leased,
+            "a lease difference alone makes states unequal"
         );
     }
 }

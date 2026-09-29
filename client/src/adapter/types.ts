@@ -3927,6 +3927,13 @@ export interface DerivedViews {
    */
   stack_entry_details?: Record<string, StackEntryDisplay>;
   /**
+   * CR 701.20a: the card names each stack entry keeps revealed, keyed by stack
+   * entry id. Engine-authored and deliberately unindexed (CR 401.2): a revealed
+   * card that sits in a library stays a hidden object, so this is the only
+   * place its name appears. Display only.
+   */
+  stack_revealed_cards?: Record<string, string[]>;
+  /**
    * CR 702.40a: public, table-wide number of copies the current Storm trigger
    * will create, or a newly cast Storm spell would create. Engine-authored;
    * spell copies do not count.

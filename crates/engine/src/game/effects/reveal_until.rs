@@ -3,8 +3,8 @@ use rand::seq::SliceRandom;
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 use crate::types::ability::{
-    DigRestOrder, Effect, EffectError, EffectKind, LibraryPosition, ResolvedAbility,
-    RevealUntilDisposition, TargetFilter, TargetRef,
+    DigRestOrder, Effect, EffectError, EffectKind, LibraryPosition, ParentTargetMissingReason,
+    ResolvedAbility, RevealUntilDisposition, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{BatchCompletion, GameState, WaitingFor};
@@ -22,10 +22,40 @@ use crate::types::zones::{EtbTapState, Zone};
 /// All revealed cards are marked as publicly revealed and a `CardsRevealed`
 /// event is emitted. If the library is exhausted without finding a match, all
 /// revealed cards go to `rest_destination`.
+///
+/// CR 603.12 + CR 608.2c: after this instance's own moves have run (or paused),
+/// its outcome is published on the one-hop parent->child hand-off slot, so the
+/// immediate child — including a `WhenYouDo` "when you reveal a <filter> card
+/// this way" reflexive — reads THIS reveal's verdict and never an unrelated
+/// event that a nested replacement effect pushed into the same event slice.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    let mut matched = false;
+    let result = resolve_reveal(state, ability, events, &mut matched);
+    if result.is_ok() {
+        publish_reveal_until_verdict(state, matched);
+    }
+    result
+}
+
+/// CR 701.20a + CR 603.12: Publish whether this reveal-until revealed any card
+/// matching its until-filter. A whiff records
+/// `ParentTargetMissingReason::RevealUntil`; a hit clears the slot, because this
+/// instance is the immediate parent of the next hand-off and no stale reason
+/// from an earlier or nested producer may reach its child.
+fn publish_reveal_until_verdict(state: &mut GameState, matched: bool) {
+    state.last_parent_target_missing_reason =
+        (!matched).then_some(ParentTargetMissingReason::RevealUntil);
+}
+
+fn resolve_reveal(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    matched: &mut bool,
 ) -> Result<(), EffectError> {
     let (
         player_filter,
@@ -123,6 +153,7 @@ pub fn resolve(
             rest_order,
             enter_tapped,
             events,
+            matched,
         );
     }
 
@@ -141,6 +172,7 @@ pub fn resolve(
             }
         }
     }
+    *matched = !hit_cards.is_empty();
 
     // CR 608.2c: when exactly one card was hit by the until condition, snapshot
     // it before moving to its destination so chained instructions (e.g. Erratic
@@ -601,6 +633,7 @@ fn resolve_choose_any_number(
     rest_order: DigRestOrder,
     enter_tapped: EtbTapState,
     events: &mut Vec<GameEvent>,
+    any_matched: &mut bool,
 ) -> Result<(), EffectError> {
     let mut revealed: Vec<ObjectId> = Vec::new();
     let mut matched: Vec<ObjectId> = Vec::new();
@@ -618,6 +651,7 @@ fn resolve_choose_any_number(
             }
         }
     }
+    *any_matched = !matched.is_empty();
 
     state
         .resolve_and_apply_information(
@@ -859,6 +893,54 @@ mod tests {
 
     fn install_library_to_exile_redirect(state: &mut GameState) -> ObjectId {
         install_destination_to_exile_redirect(state, Zone::Library, "Library Exile Redirect")
+    }
+
+    fn library_card(state: &mut GameState, card: CardId, name: &str, core: CoreType) -> ObjectId {
+        let id = create_object(state, card, PlayerId(0), name.to_string(), Zone::Library);
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(core);
+        id
+    }
+
+    /// CR 603.12 + CR 701.20a: the reveal publishes ITS OWN verdict after its
+    /// moves. A hit clears a stale reason (e.g. one a nested producer left
+    /// behind), and a whiff records `RevealUntil`, whatever was there before.
+    #[test]
+    fn verdict_is_this_reveals_own_outcome_regardless_of_the_prior_slot() {
+        let creature_filter = TargetFilter::Typed(crate::types::ability::TypedFilter::creature());
+
+        let mut hit_state = GameState::new_two_player(42);
+        library_card(&mut hit_state, CardId(1), "Forest", CoreType::Land);
+        library_card(&mut hit_state, CardId(2), "Bear", CoreType::Creature);
+        hit_state.last_parent_target_missing_reason = Some(ParentTargetMissingReason::RevealUntil);
+        let ability = make_reveal_until_ability(
+            PlayerId(0),
+            creature_filter.clone(),
+            Zone::Hand,
+            Zone::Library,
+        );
+        resolve(&mut hit_state, &ability, &mut Vec::new()).unwrap();
+        assert!(
+            !hit_state.players[0].hand.is_empty(),
+            "reach guard: the reveal hit"
+        );
+        assert_eq!(hit_state.last_parent_target_missing_reason, None);
+
+        let mut whiff_state = GameState::new_two_player(42);
+        library_card(&mut whiff_state, CardId(1), "Forest", CoreType::Land);
+        library_card(&mut whiff_state, CardId(2), "Island", CoreType::Land);
+        whiff_state.last_parent_target_missing_reason = Some(ParentTargetMissingReason::Dig);
+        resolve(&mut whiff_state, &ability, &mut Vec::new()).unwrap();
+        assert_eq!(whiff_state.last_revealed_ids.len(), 2, "reach guard: whiff");
+        assert_eq!(
+            whiff_state.last_parent_target_missing_reason,
+            Some(ParentTargetMissingReason::RevealUntil)
+        );
     }
 
     fn install_hand_to_exile_redirect(state: &mut GameState) -> ObjectId {

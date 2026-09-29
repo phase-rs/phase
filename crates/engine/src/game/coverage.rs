@@ -9640,6 +9640,7 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
                 ("EffectOutcomeCurrentScopeSucceeded", Handled)
             }
             EffectOutcomeSignal::Guessed { .. } => ("EffectOutcomeGuessed", Handled),
+            EffectOutcomeSignal::RevealUntilMatched => ("EffectOutcomeRevealUntilMatched", Handled),
         },
         AbilityCondition::EventOutcomeWon => ("EventOutcomeWon", Handled),
         AbilityCondition::CoinFlipOutcome { .. } => ("CoinFlipOutcome", Handled),
