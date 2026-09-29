@@ -6142,7 +6142,7 @@ fn collect_pending_triggers_with_collection(
             }
         }
 
-        // CR 725.2: At the beginning of the initiative holder's upkeep,
+        // CR 726.2: At the beginning of the initiative holder's upkeep,
         // that player ventures into the Undercity. Synthetic game-rule trigger.
         if let GameEvent::PhaseChanged {
             phase: Phase::Upkeep,
@@ -6276,8 +6276,8 @@ fn collect_pending_triggers_with_collection(
             }
         }
 
-        // CR 725.2: When a creature deals combat damage to the initiative holder,
-        // its controller takes the initiative. Synthetic game-rule trigger.
+        // CR 726.2: When one or more creatures a player controls deal combat
+        // damage to the initiative holder, that player takes the initiative.
         if let GameEvent::DamageDealt {
             source_id,
             target: TargetRef::Player(target_player),
