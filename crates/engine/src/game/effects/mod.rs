@@ -6524,7 +6524,10 @@ fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> b
                     // CR 608.2d: a `Guessed` gate is a positive guess-outcome
                     // branch, not an optional-decline alternative — declining an
                     // optional effect never selects it.
-                    | EffectOutcomeSignal::Guessed { .. },
+                    | EffectOutcomeSignal::Guessed { .. }
+                    // CR 701.20a: a reveal-until-hit guard is not an
+                    // optional-decline alternative either.
+                    | EffectOutcomeSignal::RevealUntilMatched,
             },
         ) => false,
     }
@@ -9168,6 +9171,65 @@ fn when_you_do_mandatory_parent_did_nothing(
         && !parent.context.optional_effect_performed
         && !effect_manages_own_outcome_flag(&parent.effect)
         && !mandatory_parent_effect_performed(&parent.effect, parent_events)
+}
+
+/// CR 603.12 + CR 701.20a: the inline half of the reveal-until-hit guard. The
+/// reveal-until that just resolved published its own one-hop verdict on
+/// `state.last_parent_target_missing_reason` (the slot its immediate child
+/// takes at the hand-off). Only a reflexive that carries the
+/// `EffectOutcomeSignal::RevealUntilMatched` guard is voided by a whiff; a
+/// generic "When you do" after a reveal-until is not. Read-only: the child's
+/// `apply_parent_chain_context` still takes the slot. The resumed-root and
+/// stack halves are the guard's own `evaluate_condition` arm, which reads the
+/// same verdict after the hand-off stamped it onto the child.
+fn reflexive_occurrence_voided_by_parent(
+    condition: &AbilityCondition,
+    parent_verdict: Option<crate::types::ability::ParentTargetMissingReason>,
+) -> bool {
+    condition_has_reveal_until_matched_guard(condition)
+        && parent_verdict == Some(crate::types::ability::ParentTargetMissingReason::RevealUntil)
+}
+
+/// Whether the root condition carries the reveal-until-hit guard, alone or as a
+/// member of the flat root `And` built by `when_you_do_with_guard`.
+pub(crate) fn condition_has_reveal_until_matched_guard(condition: &AbilityCondition) -> bool {
+    let is_guard = |condition: &AbilityCondition| {
+        matches!(
+            condition,
+            AbilityCondition::EffectOutcome {
+                signal: EffectOutcomeSignal::RevealUntilMatched,
+            }
+        )
+    };
+    match condition {
+        AbilityCondition::And { conditions } => conditions.iter().any(is_guard),
+        condition => is_guard(condition),
+    }
+}
+
+#[cfg(test)]
+mod reflexive_occurrence_verdict_tests {
+    use super::reflexive_occurrence_voided_by_parent;
+    use crate::types::ability::{AbilityCondition, EffectOutcomeSignal, ParentTargetMissingReason};
+
+    #[test]
+    fn only_the_reveal_until_hit_guard_is_voided_by_a_whiff() {
+        let guard = AbilityCondition::when_you_do_with_guard(AbilityCondition::EffectOutcome {
+            signal: EffectOutcomeSignal::RevealUntilMatched,
+        });
+        let whiff = Some(ParentTargetMissingReason::RevealUntil);
+        assert!(reflexive_occurrence_voided_by_parent(&guard, whiff));
+        assert!(!reflexive_occurrence_voided_by_parent(&guard, None));
+        assert!(!reflexive_occurrence_voided_by_parent(
+            &guard,
+            Some(ParentTargetMissingReason::Dig)
+        ));
+        // A generic "When you do" after a reveal-until whiff is not voided.
+        assert!(!reflexive_occurrence_voided_by_parent(
+            &AbilityCondition::WhenYouDo,
+            whiff
+        ));
+    }
 }
 
 fn mandatory_parent_effect_performed(effect: &Effect, events: &[GameEvent]) -> bool {
@@ -17495,6 +17557,10 @@ fn resolve_chain_body(
                     condition,
                     ability,
                     &events[events_before..],
+                )
+                && !reflexive_occurrence_voided_by_parent(
+                    condition,
+                    state.last_parent_target_missing_reason,
                 );
             if !condition_met {
                 // CR 608.2c: This parent-side gate skips dispatching the sub
@@ -17828,14 +17894,18 @@ fn resolve_chain_body(
                 }
                 _ => None,
             };
-            if sub_clone.reads_return_result.is_some()
+            if (sub_clone.reads_return_result.is_some()
+                || state
+                    .resolution_stack
+                    .copy_token_at_child_boundary(child_stack_start))
                 && state.resolution_stack.capture_child_boundary() > child_stack_start
             {
-                // CR 608.2c: the reader follows the complete producer action.
-                // A replacement post-effect may have parked a continuation
-                // beneath the producer's batch frame, so insert this reader
-                // outside the whole child stack, at the boundary captured
-                // before resolving the producer.
+                // CR 608.2c: the rest of the chain follows the complete producer action,
+                // so insert it outside the whole child stack, at the boundary captured
+                // before resolving the producer. A named-result reader needs this because
+                // a replacement post-effect may have parked a continuation beneath the
+                // producer's batch frame; a copy-token producer parks its own batch owner
+                // at that boundary.
                 let mut pending = PendingContinuation::new(Box::new(sub_clone), state);
                 pending.pending_return_result_producer = pending_return_result_producer;
                 state
@@ -17843,7 +17913,7 @@ fn resolve_chain_body(
                         pending,
                         child_stack_start,
                     )
-                    .expect("named result reader must remain outside its producer's child stack");
+                    .expect("continuation must remain outside its producer's child stack");
             } else {
                 prepend_to_pending_continuation_with_producer(
                     state,
@@ -18937,6 +19007,17 @@ pub(crate) fn evaluate_condition(
         AbilityCondition::EffectOutcome {
             signal: EffectOutcomeSignal::Guessed { outcome },
         } => ability.context.guess_outcome == Some(*outcome),
+        // CR 701.20a + CR 603.12: "When you reveal a <filter> card this way" —
+        // the reveal-until's own one-hop verdict, carried on this node by the
+        // parent->child hand-off (a resumed deferred reflexive, or the
+        // materialized stack object). The inline creation gate reads the same
+        // verdict before that hand-off via `reflexive_occurrence_voided_by_parent`.
+        AbilityCondition::EffectOutcome {
+            signal: EffectOutcomeSignal::RevealUntilMatched,
+        } => {
+            ability.parent_target_missing_reason
+                != Some(crate::types::ability::ParentTargetMissingReason::RevealUntil)
+        }
         AbilityCondition::EventOutcomeWon => state
             .current_trigger_event
             .as_ref()

@@ -210,6 +210,16 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 92 — ResolvedAbility.parent_target_missing_reason is serialized and
+ *      ParentTargetMissingReason gains RevealUntil (CR 701.20a + CR 603.12),
+ *      the reveal-until whiff verdict read by the new
+ *      EffectOutcomeSignal.RevealUntilMatched reflexive guard on resume, plus
+ *      the CR 701.20a reveal lease (ResolvedInformationLifetime
+ *      UntilStackObjectLeaves and GameState.stack_bound_reveals, presented
+ *      through the new DerivedViews.stack_revealed_cards). A v91
+ *      peer cannot parse the new tags; the exact-match handshake
+ *      refuses the pairing. P2P moves in lockstep (wire 74); lobby messages
+ *      are unchanged.
  * 91 — PendingManaAbility.chosen_counter_count is retyped to the required
  *      chosen_counter_counts array (#9207). A v90 peer cannot deserialize
  *      the new state. P2P moves in lockstep to wire 73.
@@ -613,7 +623,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 91;
+export const PROTOCOL_VERSION = 92;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
@@ -1569,7 +1579,7 @@ export class WebSocketAdapter implements EngineAdapter {
     // A client-supplied actor here would provide zero additional safety and
     // only creates a spoofing surface if it were ever put on the wire.
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      throw new AdapterError("WS_ERROR", "WebSocket not connected", false);
+      throw new AdapterError(AdapterErrorCode.ACTION_NOT_SENT, "WebSocket not connected", false);
     }
 
     this.emit({ type: "actionPendingChanged", pending: true });
@@ -1582,7 +1592,7 @@ export class WebSocketAdapter implements EngineAdapter {
         this.pendingResolve = null;
         this.pendingReject = null;
         this.emit({ type: "actionPendingChanged", pending: false });
-        reject(new AdapterError("WS_CLOSED", "Failed to send action", true));
+        reject(new AdapterError(AdapterErrorCode.ACTION_NOT_SENT, "Failed to send action", true));
       }
     });
   }

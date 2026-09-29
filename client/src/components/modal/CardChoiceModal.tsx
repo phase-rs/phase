@@ -150,6 +150,17 @@ function effectZoneChoiceFallbackKey(data: EffectZoneChoice["data"]): string {
   ].join("|");
 }
 
+function payCostPromptKey(data: PayCost["data"]): string {
+  return [
+    data.player,
+    JSON.stringify(data.kind),
+    data.choices.join(","),
+    data.count,
+    data.min_count,
+    JSON.stringify(data.resume),
+  ].join("|");
+}
+
 /**
  * Generic card choice modal for Scry, Dig, Surveil, Reveal, Search, and NamedChoice.
  * Renders based on the WaitingFor type.
@@ -310,7 +321,7 @@ export function CardChoiceModal() {
     case "PayCost":
       if (!canActForWaitingState) return null;
       if (getBoardChoiceView(waitingFor, objects)) return null;
-      return <PayCostDispatch data={waitingFor.data} />;
+      return <PayCostDispatch key={payCostPromptKey(waitingFor.data)} data={waitingFor.data} />;
     case "MultiTargetSelection":
       if (!canActForWaitingState) return null;
       return <MultiTargetSelectionModal data={waitingFor.data} />;
@@ -2372,18 +2383,32 @@ function BeholdModal({
   );
 }
 
+function RevealForCostModal({ data }: { data: PayCost["data"] }) {
+  const { t } = useTranslation("game");
+  return (
+    <ExileForCostModal
+      cards={data.choices}
+      count={data.count}
+      minCount={data.count}
+      title={t("cardChoice.reveal.titleReveal")}
+      subtitle={t("cardChoice.reveal.subtitleChoose")}
+      confirmLabel={t("cardChoice.badges.reveal")}
+    />
+  );
+}
+
 // CR 118.3 + CR 601.2b + CR 605.3b: single dispatch for the unified `PayCost`
 // state — branch on `kind.type` to the matching cost-selection modal. The
-// `key` forces a fresh selection set when the eligible-object list changes.
+// `key` forces a fresh selection set when the prompt identity or cost step changes.
 function PayCostDispatch({ data }: { data: PayCost["data"] }) {
   const { t } = useTranslation("game");
   const isManaAbility = data.resume.type === "ManaAbility";
-  const choicesKey = data.choices.join(",");
+  const promptKey = payCostPromptKey(data);
   switch (data.kind.type) {
     case "Discard":
       return (
         <DiscardModal
-          key={choicesKey}
+          key={promptKey}
           data={{ ...data, cards: data.choices }}
           title={
             isManaAbility
@@ -2393,30 +2418,32 @@ function PayCostDispatch({ data }: { data: PayCost["data"] }) {
           canCancel={!isManaAbility}
         />
       );
+    case "Reveal":
+      return <RevealForCostModal key={promptKey} data={data} />;
     case "Sacrifice":
       return isManaAbility ? (
-        <SacrificeForManaAbilityModal data={data} />
+        <SacrificeForManaAbilityModal key={promptKey} data={data} />
       ) : (
-        <SacrificeModal key={choicesKey} data={data} />
+        <SacrificeModal key={promptKey} data={data} />
       );
     case "ReturnToHand":
-      return <ReturnToHandModal key={choicesKey} data={data} />;
+      return <ReturnToHandModal key={promptKey} data={data} />;
     case "RemoveCounter":
-      return <RemoveCounterModal key={choicesKey} data={data} />;
+      return <RemoveCounterModal key={promptKey} data={data} />;
     case "TapCreatures":
       // Tap-creature costs are resolved by battlefield clicks + TargetingOverlay,
       // not a modal (mirrors the pre-collapse behavior).
       return null;
     case "Behold":
-      return <BeholdModal data={data} action={data.kind.action} />;
+      return <BeholdModal key={promptKey} data={data} action={data.kind.action} />;
     case "ExileFromZone":
-      return <ExileForCostDispatch data={data} zone={data.kind.zone} />;
+      return <ExileForCostDispatch key={promptKey} data={data} zone={data.kind.zone} />;
     case "ExileMaterials":
-      return <CraftMaterialsModal data={data} />;
+      return <CraftMaterialsModal key={promptKey} data={data} />;
     case "ExilePermanent":
-      return <ExilePermanentForCostModal data={data} />;
+      return <ExilePermanentForCostModal key={promptKey} data={data} />;
     case "ExileFromManaZone":
-      return <ExileForManaAbilityModal data={data} zone={data.kind.zone} />;
+      return <ExileForManaAbilityModal key={promptKey} data={data} zone={data.kind.zone} />;
   }
 }
 

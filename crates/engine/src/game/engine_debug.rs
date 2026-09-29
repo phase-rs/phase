@@ -552,6 +552,9 @@ pub fn apply_debug_action(
             state.priority_player = active_player;
             state.combat = None;
             state.stack.clear();
+            // CR 701.20a: every reveal lease is bound to a stack entry that
+            // this jump just removed.
+            state.release_all_stack_bound_reveals();
             state.waiting_for = WaitingFor::Priority {
                 player: active_player,
             };
