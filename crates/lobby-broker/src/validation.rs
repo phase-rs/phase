@@ -376,6 +376,23 @@ pub fn validate_report_match_result_fields(
     Ok(())
 }
 
+pub struct SubmitTournamentDeckFields<'a> {
+    pub code: &'a str,
+    pub player_token: &'a str,
+}
+
+pub fn validate_submit_tournament_deck_fields(
+    fields: SubmitTournamentDeckFields<'_>,
+) -> Result<(), String> {
+    validate_token("code", fields.code, MAX_GAME_CODE_LEN)?;
+    validate_token("player_token", fields.player_token, MAX_TOKEN_LEN)?;
+    // The `deck` is opaque `DeckData`, bounded no more tightly here than the
+    // identical deck a casual `CreateGameWithSettings` carries — deck contents
+    // are the game layer's concern, and resolution rejects anything unusable
+    // when the pairing's table is actually spawned.
+    Ok(())
+}
+
 pub struct DropFromTournamentFields<'a> {
     pub code: &'a str,
     pub player_token: &'a str,
@@ -563,6 +580,17 @@ pub fn validate_lobby_message(msg: &crate::protocol::LobbyClientMessage) -> Resu
                 code,
                 player_token,
                 outcome,
+            })?;
+        }
+        M::SubmitTournamentDeck {
+            code,
+            player_token,
+            deck: _,
+            request_id: _,
+        } => {
+            validate_submit_tournament_deck_fields(SubmitTournamentDeckFields {
+                code,
+                player_token,
             })?;
         }
         M::DropFromTournament {

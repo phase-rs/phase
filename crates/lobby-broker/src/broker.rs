@@ -641,6 +641,16 @@ impl Broker {
                 self.settle_gated(request_id, outcome)
             }
 
+            LobbyClientMessage::SubmitTournamentDeck {
+                code,
+                player_token,
+                deck,
+                request_id,
+            } => {
+                let outcome = self.handle_submit_tournament_deck(code, player_token, deck, env);
+                self.settle_gated(request_id, outcome)
+            }
+
             LobbyClientMessage::DropFromTournament {
                 code,
                 player_token,
@@ -1648,6 +1658,43 @@ impl Broker {
         // so broadcasting the whole list here would be a no-op re-render for
         // every subscriber. That reasoning is now the justification for a typed
         // field rather than for an unwritten convention.
+        Ok(GatedEffect {
+            code,
+            view,
+            list_row: ListRowEffect::Unchanged,
+        })
+    }
+
+    /// Player-gated: store the token owner's submitted deck for hosted play.
+    /// Resolving the token to its owner ([`Self::authorize_player`]) confines a
+    /// submission to the presenting entrant — the key is never taken from the
+    /// payload, so a client cannot submit a deck on someone else's behalf. Unlike
+    /// [`Self::handle_report_match_result`], no pairing-seat check applies: a deck
+    /// is per-event, not per-pairing.
+    fn handle_submit_tournament_deck(
+        &mut self,
+        code: String,
+        player_token: String,
+        deck: engine::starter_decks::DeckData,
+        env: &impl BrokerEnv,
+    ) -> Result<GatedEffect, String> {
+        let player_key = match self.authorize_player(&code, &player_token, env) {
+            Ok(key) => key,
+            Err(reason) => {
+                warn!(tournament = %code, %reason, "SubmitTournamentDeck rejected — player not authorized");
+                return Err(reason);
+            }
+        };
+        self.tournaments
+            .submit_deck(&code, &player_key, deck, env)?;
+        let Some(view) = self.tournament_view(&code) else {
+            return Err(format!("Tournament not found: {code}"));
+        };
+        info!(tournament = %code, player = %player_key, "tournament deck submitted");
+
+        // A submission flips only `PlayerSummary.deck_submitted`, a detail-view
+        // field — no `TournamentSummary` field changes, so the list row is
+        // untouched, exactly like a result report.
         Ok(GatedEffect {
             code,
             view,
