@@ -662,6 +662,7 @@ mod tests {
         ManaRestriction, ManaSourcePenalty, ManaSourceSelection, ManaType, TapsForManaSelection,
     };
     use engine::types::{GameAction, ObjectId};
+    use lobby_broker::inbound_guard::MAX_MAIN_DECK_ENTRIES;
     use lobby_broker::validation::MAX_CONSUMED_TOKENS;
 
     #[test]
@@ -1044,6 +1045,18 @@ mod tests {
                 },
             ),
             (
+                "deck.main_deck",
+                ClientMessage::SubmitTournamentDeck {
+                    code: "TOUR01".into(),
+                    player_token: "tok".into(),
+                    deck: crate::protocol::DeckData {
+                        main_deck: vec!["Forest".into(); MAX_MAIN_DECK_ENTRIES + 1],
+                        ..Default::default()
+                    },
+                    request_id: None,
+                },
+            ),
+            (
                 "player_token",
                 ClientMessage::DropFromTournament {
                     code: "TOUR01".into(),
@@ -1115,6 +1128,15 @@ mod tests {
                 pairing_id: 0,
                 player_token: "tok".into(),
                 outcome: PodOutcome::Draw,
+                request_id: None,
+            },
+            ClientMessage::SubmitTournamentDeck {
+                code: "TOUR01".into(),
+                player_token: "tok".into(),
+                deck: crate::protocol::DeckData {
+                    main_deck: vec!["Forest".into()],
+                    ..Default::default()
+                },
                 request_id: None,
             },
             ClientMessage::DropFromTournament {

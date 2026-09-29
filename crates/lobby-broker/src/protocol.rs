@@ -2591,15 +2591,21 @@ mod tests {
                 outcome: PodOutcome::Draw,
                 request_id: Some(TournamentRequestId(2)),
             },
+            LobbyClientMessage::SubmitTournamentDeck {
+                code: "TOUR01".to_string(),
+                player_token: "tok".to_string(),
+                deck: DeckData::default(),
+                request_id: Some(TournamentRequestId(3)),
+            },
             LobbyClientMessage::DropFromTournament {
                 code: "TOUR01".to_string(),
                 player_token: "tok".to_string(),
-                request_id: Some(TournamentRequestId(3)),
+                request_id: Some(TournamentRequestId(4)),
             },
             LobbyClientMessage::EndTournament {
                 code: "TOUR01".to_string(),
                 organizer_token: "tok".to_string(),
-                request_id: Some(TournamentRequestId(4)),
+                request_id: Some(TournamentRequestId(5)),
             },
         ];
         for (i, msg) in gated.iter().enumerate() {
@@ -2869,8 +2875,14 @@ mod tests {
     /// (point replies) legitimately do.
     #[test]
     fn broadcast_tournament_messages_never_carry_a_token() {
-        let meta = meta_fixture();
+        let mut meta = meta_fixture();
+        const PRIVATE_CARD: &str = "private-deck-card-do-not-leak";
+        meta.players[0].deck = Some(DeckData {
+            main_deck: vec![PRIVATE_CARD.to_string()],
+            ..Default::default()
+        });
         let view = TournamentView::from(&meta);
+        assert!(view.players[0].deck_submitted);
         let broadcasts = [
             LobbyServerMessage::TournamentUpdate {
                 code: meta.code.clone(),
@@ -2889,6 +2901,10 @@ mod tests {
             for secret in [ORGANIZER_SECRET, PLAYER_A_SECRET, PLAYER_B_SECRET] {
                 assert!(!json.contains(secret), "{json} leaked {secret}");
             }
+            assert!(
+                !json.contains(PRIVATE_CARD),
+                "{json} leaked a submitted deck"
+            );
         }
     }
 
