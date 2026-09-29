@@ -20,11 +20,29 @@
 //!   [`effects::life::apply_life_loss`] which runs the replacement pipeline.
 //! - **CR 119.4b** — Players can always pay 0 life, even under a pay-life prohibition.
 //! - **CR 119.8** — "A cost that involves having that player pay life can't be paid."
+//!
+//! # Gain-side sibling
+//!
+//! Costs that have ANOTHER player gain life (CR 118.3 + CR 119.3 — Invigorate's
+//! "have an opponent gain 3 life"), whose recipient the payer chooses during
+//! payment (CR 115.10a), live here too: [`life_gain_cost_recipients`] answers who
+//! can be chosen and [`give_life_as_cost`] performs the gain.
+//!
+//! - **CR 119.7** — a player who can't gain life can't gain life; the gain event
+//!   can't happen for that player.
+//! - **CR 614.17b doctrine (as annotated elsewhere in the engine)** — if an event
+//!   can't happen, a player can't choose to pay a cost that includes that event,
+//!   so a player under a CR 119.7 lock is not a choosable recipient. A gain that a
+//!   replacement reduces to zero CAN still happen and stays payable.
 
-use crate::game::effects::life::{apply_life_loss, ReplacementDeferred};
-use crate::game::static_abilities::{player_cant_pay_life_as_cost, player_has_cant_lose_life};
+use crate::game::effects::life::{apply_life_gain, apply_life_loss, ReplacementDeferred};
+use crate::game::static_abilities::{
+    player_cant_pay_life_as_cost, player_has_cant_gain_life, player_has_cant_lose_life,
+};
+use crate::types::ability::TargetFilter;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 
 /// Outcome of attempting to pay life as a cost.
@@ -198,6 +216,75 @@ pub fn pay_life_as_cast_or_activation_cost(
         return PayLifeCostResult::Prohibited;
     }
     pay_life_as_cost(state, player, amount, events)
+}
+
+/// CR 118.3 + CR 119.3 + CR 115.10a: The players `payer` may choose as the
+/// recipient of a life-gain cost whose recipient is described by `recipient`, in
+/// seat order.
+///
+/// The recipient is a CHOICE, not a target, so it uses the choice seam
+/// (`player_exists_for_choice`: alive and phased in) and is evaluated relative to
+/// the PAYER (team-aware, CR 102.3).
+///
+/// Only a "can't gain life" static excludes a player. A replacement that
+/// prevents or reduces the gain (e.g. to zero) deliberately does NOT: the gain
+/// event can still happen and is merely modified (CR 614.1a), so the cost stays
+/// payable. This intentionally differs from the counter-cost gate in `costs.rs`
+/// (`mandatory_prevention_applies`); do not unify the two without revisiting it.
+pub fn life_gain_cost_recipients(
+    state: &GameState,
+    payer: PlayerId,
+    source_id: ObjectId,
+    recipient: &TargetFilter,
+) -> Vec<PlayerId> {
+    state
+        .players
+        .iter()
+        .map(|p| p.id)
+        .filter(|&p| crate::game::players::player_exists_for_choice(state, p))
+        .filter(|&p| {
+            crate::game::filter::player_matches_target_filter_in_state(
+                state,
+                recipient,
+                p,
+                Some(payer),
+                Some(source_id),
+            )
+        })
+        // CR 119.7 + CR 614.17b (engine doctrine): a player who can't gain life can't
+        // be the recipient of a cost whose event can't happen. Q1 — needs manual
+        // verification against the CR / Invigorate rulings. A gain replaced down to
+        // zero is deliberately NOT excluded: that event can happen.
+        .filter(|&p| !player_has_cant_gain_life(state, p))
+        .collect()
+}
+
+/// Outcome of performing a life-gain cost for a chosen recipient.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GiveLifeCostResult {
+    /// The gain event finished; `gained` is the amount actually gained after
+    /// replacements (possibly 0).
+    Paid { gained: u32 },
+    /// The gain event paused for player input (a replacement ordering choice or a
+    /// substitute's continuation); `state.waiting_for` owns the continuation.
+    Deferred,
+}
+
+/// CR 118.3 + CR 119.3 + CR 614.1a: Perform a life-gain cost — `recipient` gains
+/// `amount` life. The cost's instruction is the ordinary life-gain event, so CR
+/// 119.7 and replacement effects apply. On `Deferred`, `state.waiting_for` owns the
+/// continuation (a `ReplacementChoice` or a substitute), answered by the recipient
+/// (CR 616.1: the affected player orders competing replacements).
+pub fn give_life_as_cost(
+    state: &mut GameState,
+    recipient: PlayerId,
+    amount: u32,
+    events: &mut Vec<GameEvent>,
+) -> GiveLifeCostResult {
+    match apply_life_gain(state, recipient, amount, events) {
+        Ok(gained) => GiveLifeCostResult::Paid { gained },
+        Err(_) => GiveLifeCostResult::Deferred,
+    }
 }
 
 #[cfg(test)]
@@ -534,5 +621,106 @@ mod tests {
             crate::game::players::team_life_total(&state, PlayerId(0)),
             2
         );
+    }
+
+    fn opponent_recipient() -> TargetFilter {
+        TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
+    }
+
+    fn recipient_source(state: &mut GameState) -> ObjectId {
+        create_object(
+            state,
+            CardId(910),
+            PlayerId(0),
+            "Recipient Cost Source".to_string(),
+            Zone::Hand,
+        )
+    }
+
+    /// CR 115.10a + CR 102.3: recipients of "have an opponent gain life" are the
+    /// payer's choosable opponents, in seat order.
+    #[test]
+    fn life_gain_cost_recipients_are_payer_relative_choosable_opponents() {
+        let mut two = GameState::new_two_player(42);
+        let src = recipient_source(&mut two);
+        assert_eq!(
+            life_gain_cost_recipients(&two, PlayerId(0), src, &opponent_recipient()),
+            vec![PlayerId(1)]
+        );
+        assert_eq!(
+            life_gain_cost_recipients(&two, PlayerId(1), src, &opponent_recipient()),
+            vec![PlayerId(0)]
+        );
+
+        let mut three = GameState::new(FormatConfig::standard(), 3, 42);
+        let src = recipient_source(&mut three);
+        assert_eq!(
+            life_gain_cost_recipients(&three, PlayerId(0), src, &opponent_recipient()),
+            vec![PlayerId(1), PlayerId(2)]
+        );
+
+        // CR 115.10a: an eliminated player can't be chosen.
+        let mut events = Vec::new();
+        crate::game::elimination::eliminate_player(&mut three, PlayerId(2), &mut events);
+        assert_eq!(
+            life_gain_cost_recipients(&three, PlayerId(0), src, &opponent_recipient()),
+            vec![PlayerId(1)]
+        );
+    }
+
+    /// CR 102.3: a teammate is not an opponent (Two-Headed Giant).
+    #[test]
+    fn life_gain_cost_recipients_exclude_teammates() {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 0);
+        let src = recipient_source(&mut state);
+        let recipients = life_gain_cost_recipients(&state, PlayerId(0), src, &opponent_recipient());
+        assert!(!recipients.contains(&PlayerId(0)));
+        assert!(!recipients.contains(&PlayerId(1)));
+        assert_eq!(recipients.len(), 2, "both opposing heads: {recipients:?}");
+    }
+
+    /// CR 119.7 + CR 614.17b doctrine: a player who can't gain life isn't a
+    /// recipient. Positive control first on the same builder.
+    #[test]
+    fn life_gain_cost_recipients_exclude_cant_gain_life() {
+        let mut state = GameState::new_two_player(42);
+        let src = recipient_source(&mut state);
+        assert_eq!(
+            life_gain_cost_recipients(&state, PlayerId(0), src, &opponent_recipient()),
+            vec![PlayerId(1)]
+        );
+
+        let lock = create_object(
+            &mut state,
+            CardId(911),
+            PlayerId(1),
+            "Everlasting Torment".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&lock)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::CantGainLife)
+                    .affected(TargetFilter::Typed(TypedFilter::default())),
+            );
+        assert!(
+            life_gain_cost_recipients(&state, PlayerId(0), src, &opponent_recipient()).is_empty()
+        );
+    }
+
+    /// CR 119.3 + CR 119.7: the cost's gain is the ordinary gain event.
+    #[test]
+    fn give_life_as_cost_gains_through_the_life_gain_authority() {
+        let mut state = GameState::new_two_player(42);
+        let before = state.players[1].life;
+        let mut events = Vec::new();
+        assert_eq!(
+            give_life_as_cost(&mut state, PlayerId(1), 3, &mut events),
+            GiveLifeCostResult::Paid { gained: 3 }
+        );
+        assert_eq!(state.players[1].life, before + 3);
     }
 }

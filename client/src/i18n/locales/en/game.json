@@ -2335,7 +2335,8 @@
       "zoneExile": "exile",
       "zoneHand": "your hand",
       "discard": "Discard {{count}} {{cards}}",
-      "exile": "Exile {{count}} {{cards}} from {{zone}}"
+      "exile": "Exile {{count}} {{cards}} from {{zone}}",
+      "haveOpponentGainLife": "Have an opponent gain {{amount}} life"
     }
   },
   "topOrBottom": {

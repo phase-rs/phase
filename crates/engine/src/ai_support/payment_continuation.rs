@@ -706,6 +706,14 @@ fn classify_parked_cost_move_root(state: &GameState) -> PaymentContinuationState
     }
 }
 
+/// Classify a parked `DeferredLifeCostResume` root.
+///
+/// A `Cast` root may be parked on a prompt answered by a non-payer (the
+/// recipient of a life-gain cost, CR 616.1). It is still `Affiliated` with the
+/// payer's root: the witness applies the non-payer's candidates as the current
+/// actor and accepts those that finalize the root. Unlike `ManaRoot`, no
+/// `PayerMismatch` is raised, because the non-payer's decision is part of
+/// completing the payer's cost. Pinned by `invigorate_alternative_cost::v9c_*`.
 fn classify_deferred_life_root(
     state: &GameState,
     deferred: &DeferredLifeCostResume,
