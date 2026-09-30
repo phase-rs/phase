@@ -76356,6 +76356,291 @@ fn liliana_pt_disjunction_keeps_both_alternatives_and_binds_x_to_swamps() {
     );
 }
 
+/// CR 608.2c: an unconditional, mandatory "repeat this process <cap>" re-follows the
+/// whole process `cap` additional times, so the total run count is `cap + 1`
+/// (Remorseless Punishment). Every spelled-out cap shares the one `Offset` shape.
+#[test]
+fn repeat_process_directive_unconditional_cap_is_a_counted_repeat() {
+    for (text, additional) in [
+        ("repeat this process once", 1),
+        ("Repeat this process once.", 1),
+        ("repeat this process twice", 2),
+        ("repeat this process three times", 3),
+    ] {
+        let mut ctx = ParseContext::default();
+        match try_parse_repeat_process_directive(text, &mut ctx) {
+            Some(RepeatProcessOutcome::CappedRepeat(QuantityExpr::Offset { inner, offset: 1 })) => {
+                assert_eq!(*inner, QuantityExpr::Fixed { value: additional }, "{text}");
+            }
+            other => panic!("{text}: expected a counted repeat, got {other:?}"),
+        }
+    }
+}
+
+/// Paired negative reach guard for the counted form above: a conditional cap keeps
+/// its loop predicate, and an uncapped directive stays consume-only, so neither is
+/// silently promoted to an unconditional fixed repeat.
+#[test]
+fn repeat_process_directive_conditional_or_uncapped_is_not_a_counted_repeat() {
+    let mut ctx = ParseContext::default();
+    assert!(matches!(
+        try_parse_repeat_process_directive(
+            "then if an opponent controls more lands than you, repeat this process once",
+            &mut ctx,
+        ),
+        Some(RepeatProcessOutcome::Continuation(_))
+    ));
+    for text in [
+        "repeat this process",
+        "repeat this process any number of times",
+    ] {
+        assert!(
+            matches!(
+                try_parse_repeat_process_directive(text, &mut ctx),
+                Some(RepeatProcessOutcome::ConsumeOnly)
+            ),
+            "{text}"
+        );
+    }
+}
+
+/// A multi-clause process is never stamped on the root: the runtime repeats only
+/// the root instruction of a `repeat_for` chain whose following sentences are
+/// independent siblings, so stamping the count there would repeat the wrong scope.
+/// The dropped cap is surfaced as the named `repeat_process_multi_clause` gap so the
+/// card cannot count as supported while running the process once.
+#[test]
+fn repeat_process_once_after_a_multi_clause_process_fails_closed() {
+    let def = parse_effect_chain(
+        "Draw a card. Each opponent loses 1 life. Repeat this process once.",
+        AbilityKind::Spell,
+    );
+    assert!(def.repeat_for.is_none(), "{def:?}");
+    let gaps: Vec<_> = collect_chain_effects(&def)
+        .into_iter()
+        .filter_map(|effect| match effect {
+            Effect::Unimplemented { name, .. } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(gaps, vec!["repeat_process_multi_clause"], "{def:?}");
+}
+
+/// CR 608.2c + CR 118.12a: the counted repeat lands on the ROOT ability as
+/// `repeat_for`, which the runtime drives together with the unless-payment gate
+/// (the same player chooses each time).
+#[test]
+fn repeat_process_once_stamps_repeat_for_on_unless_pay_root() {
+    let def = parse_effect_chain(
+        "Target opponent loses 5 life unless that player discards two cards. Repeat this process once.",
+        AbilityKind::Spell,
+    );
+    assert!(matches!(*def.effect, Effect::LoseLife { .. }), "{def:?}");
+    assert!(def.unless_pay.is_some(), "the unless payment must survive");
+    assert_eq!(
+        def.repeat_for,
+        Some(QuantityExpr::Offset {
+            inner: Box::new(QuantityExpr::Fixed { value: 1 }),
+            offset: 1,
+        })
+    );
+    let twice = parse_effect_chain(
+        "Target opponent loses 5 life unless that player discards two cards. Repeat this process twice.",
+        AbilityKind::Spell,
+    );
+    assert_eq!(
+        twice.repeat_for,
+        Some(QuantityExpr::Offset {
+            inner: Box::new(QuantityExpr::Fixed { value: 2 }),
+            offset: 1,
+        })
+    );
+}
+
+fn ignore_hexproof_grant(text: &str) -> Effect {
+    *parse_effect_chain(text, AbilityKind::Activated).effect
+}
+
+/// CR 702.11e + CR 609.4: every "[Duration,] <subject> can be the target[s] of
+/// spells and abilities … as though it/they didn't have hexproof/shroud" effect
+/// fails closed under the named `targeting_bypass_unmodeled` gap. The only runtime
+/// hook (`StaticMode::IgnoreHexproof` on the controller) carries no subject filter
+/// and is never consulted by player hexproof, so an opponent-scoped grant (Detection
+/// Tower) would widen to every hexproof permanent while never reaching the opponent
+/// player itself. It must also never fall back to granting the keyword it ignores.
+#[test]
+fn ignore_hexproof_effect_fails_closed() {
+    for text in [
+        "Until end of turn, your opponents and creatures your opponents control with hexproof can be the targets of spells and abilities you control as though they didn't have hexproof.",
+        "Until end of turn, creatures your opponents control can be the targets of spells and abilities you control as though they didn't have hexproof.",
+        "Until end of turn, ~ can be the target of spells and abilities controlled by target player as though it didn't have shroud.",
+        "Until end of turn, creatures your opponents control can be the targets of spells and abilities as though they didn't have hexproof.",
+        "Until end of turn, creatures you control can be the targets of spells and abilities you control as though they didn't have hexproof.",
+    ] {
+        let effect = ignore_hexproof_grant(text);
+        assert!(
+            matches!(&effect, Effect::Unimplemented { name, .. } if name == "targeting_bypass_unmodeled"),
+            "{text}: {effect:?}"
+        );
+    }
+}
+
+/// CR 508.5: "defending player" joins the compound-subject recipient axis, with or
+/// without the article, and a ", then <verb>" continuation is part of the
+/// distributed body — every named player does both halves.
+#[test]
+fn compound_subject_each_defending_player_distributes_the_whole_body() {
+    for text in [
+        "you and defending player each draw a card, then discard a card",
+        "you and the defending player each draw a card, then discard a card",
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        let effects: Vec<(&str, &TargetFilter)> = collect_chain_effects(&def)
+            .into_iter()
+            .map(|effect| match effect {
+                Effect::Draw { target, .. } => ("draw", target),
+                Effect::Discard { target, .. } => ("discard", target),
+                other => panic!("{text}: unexpected effect {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            effects,
+            vec![
+                ("draw", &TargetFilter::OriginalController),
+                ("discard", &TargetFilter::OriginalController),
+                ("draw", &TargetFilter::DefendingPlayer),
+                ("discard", &TargetFilter::DefendingPlayer),
+            ],
+            "{text}"
+        );
+    }
+}
+
+/// The chunker keeps the whole compound-subject body together for every recipient
+/// axis, including a conjoined predicate after " and ".
+#[test]
+fn compound_subject_each_defending_player_is_one_chunk() {
+    let chunks = super::sequence::split_clause_sequence(
+        "you and defending player each draw a card and lose 1 life",
+    );
+    assert_eq!(chunks.len(), 1, "{chunks:?}");
+}
+
+/// Paired negative reach guard: a distributive subject scoping over a two-way
+/// disjunction ("each discard a card or sacrifice a permanent") cannot be expressed
+/// by the two-branch splitter, so it stays an honest gap rather than giving only the
+/// first alternative the shared subject. A ", then" after a plain (non-compound)
+/// subject still splits as before.
+#[test]
+fn compound_subject_each_over_a_disjunction_fails_closed() {
+    let def = parse_effect_chain(
+        "you and defending player each discard a card or sacrifice a permanent",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(*def.effect, Effect::Unimplemented { .. }),
+        "{def:?}"
+    );
+    let chunks = super::sequence::split_clause_sequence("draw a card, then discard a card");
+    assert_eq!(chunks.len(), 2, "{chunks:?}");
+}
+
+/// CR 601.2b + CR 601.2h + CR 608.2c: "if you revealed a <type> card or controlled a
+/// <type> as you cast this spell" gates the following instruction on the optional
+/// reveal additional cost OR the cast-time battlefield snapshot. Two subtypes and two
+/// effect shapes pin the class (Draconic Roar, Foul-Tongue Invocation), not a card.
+#[test]
+fn revealed_or_controlled_as_cast_gates_the_rider_on_either_half() {
+    for (text, subtype) in [
+        (
+            "~ deals 3 damage to target creature. If you revealed a Dragon card or controlled a Dragon as you cast this spell, ~ deals 3 damage to that creature's controller.",
+            "Dragon",
+        ),
+        (
+            "Target player sacrifices a creature of their choice. If you revealed an Elf card or controlled an Elf as you cast this spell, you gain 4 life.",
+            "Elf",
+        ),
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        let rider = def
+            .sub_ability
+            .as_deref()
+            .unwrap_or_else(|| panic!("{text}: the gated rider must survive"));
+        let Some(AbilityCondition::Or { conditions }) = &rider.condition else {
+            panic!("{text}: expected an Or gate, got {:?}", rider.condition);
+        };
+        assert_eq!(conditions.len(), 2, "{text}");
+        assert_eq!(
+            conditions[0],
+            AbilityCondition::additional_cost_paid_any(),
+            "{text}: the revealed half is the optional reveal cost"
+        );
+        let AbilityCondition::ControllerControlledMatchingAsCast {
+            filter: TargetFilter::Typed(typed),
+        } = &conditions[1]
+        else {
+            panic!("{text}: expected the cast-time snapshot, got {:?}", conditions[1]);
+        };
+        assert!(
+            typed
+                .type_filters
+                .contains(&TypeFilter::Subtype(subtype.to_string())),
+            "{text}: {typed:?}"
+        );
+        assert_eq!(typed.controller, Some(ControllerRef::You), "{text}");
+    }
+}
+
+/// Paired negative reach guard: without the cast-time qualifier, or when the
+/// disjunction is only half present, no gate is fabricated (the rider stays an
+/// ungated honest gap instead of firing on a partial condition).
+#[test]
+fn revealed_or_controlled_without_the_cast_time_qualifier_builds_no_or_gate() {
+    for text in [
+        "~ deals 3 damage to target creature. If you revealed a Dragon card or controlled a Dragon, ~ deals 3 damage to that creature's controller.",
+        "~ deals 3 damage to target creature. If you revealed a Dragon card as you cast this spell, ~ deals 3 damage to that creature's controller.",
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        let gate = def.sub_ability.as_deref().and_then(|sub| sub.condition.as_ref());
+        assert!(
+            !matches!(gate, Some(AbilityCondition::Or { .. })),
+            "{text}: {gate:?}"
+        );
+    }
+}
+
+/// CR 601.2 + CR 608.2c: the cast-time battlefield snapshot is stamped only on the
+/// cast spell's own ability chain, never on a triggered ability. The same condition
+/// text is therefore accepted on a spell (both the plain and the disjunctive form)
+/// and declined inside a trigger, where it could never read true.
+#[test]
+fn cast_time_snapshot_condition_is_accepted_on_a_spell_and_declined_in_a_trigger() {
+    for text in [
+        "If you revealed a Dragon card or controlled a Dragon as you cast this spell, draw a card.",
+        "If you controlled a Dragon as you cast this spell, draw a card.",
+    ] {
+        let spell = parse_effect_chain(text, AbilityKind::Spell);
+        assert!(
+            spell.condition.is_some(),
+            "{text}: a spell keeps its gate: {spell:?}"
+        );
+
+        let mut ctx = ParseContext {
+            in_trigger: true,
+            ..Default::default()
+        };
+        let trigger = parse_effect_chain_with_context(text, AbilityKind::Spell, &mut ctx);
+        assert!(
+            matches!(trigger.effect.as_ref(), Effect::Unimplemented { .. }),
+            "{text}: a trigger fails closed instead of publishing the draw: {trigger:?}"
+        );
+        assert!(
+            trigger.condition.is_none(),
+            "{text}: a trigger must not carry the snapshot gate: {trigger:?}"
+        );
+    }
+}
+
 /// CR 608.2c + CR 109.4 + CR 608.2b: Vex ("Counter target spell. That spell's controller may draw a card.")
 /// parses to a `Counter` root effect followed by an optional `Draw` sub-ability targeted at
 /// `TargetFilter::ParentTargetController` with `optional_player` set to the countered spell's controller.

@@ -1,5 +1,5 @@
 import { AnimatePresence, motion } from "framer-motion";
-import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
@@ -237,6 +237,26 @@ export function TargetingOverlay() {
     ? renderDescription(waitingFor.data.pending_cast.ability.description, sourceName ?? "this")
     : undefined;
   const enginePrompt = triggerDescription ?? spellTargetDescription;
+  const descriptionLineRef = useRef<HTMLDivElement>(null);
+  const [descriptionOverflows, setDescriptionOverflows] = useState(false);
+  // Offer the disclosure only when the collapsed caption actually clips. This
+  // keeps short engine descriptions from presenting a control with no visible
+  // effect, while measuring the live line preserves the existing truncation
+  // behavior as the viewport changes.
+  useLayoutEffect(() => {
+    const line = descriptionLineRef.current;
+    if (!line) return;
+
+    const updateOverflow = () => {
+      setDescriptionOverflows(line.scrollWidth > line.clientWidth + 1);
+    };
+    updateOverflow();
+
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(updateOverflow);
+    observer.observe(line);
+    return () => observer.disconnect();
+  }, [activeModeLabel, canActForWaitingState, enginePrompt, isOpponentChosenSlot, slotProgress, sourceName, t, triggerDamageAmount]);
   const overlayPrompt = isCopyTargetChoice
     ? t("targeting.choosePermanentToCopy")
     : isCopyRetarget
@@ -524,7 +544,7 @@ export function TargetingOverlay() {
             </div>
             {promptMeta.length > 0 && (
               <div className="flex w-full items-center justify-center gap-x-2 text-xs">
-                <div className="min-w-0 truncate">
+                <div ref={descriptionLineRef} className="min-w-0 truncate">
                   {promptMeta.map(({ key, node }, index) => (
                     <Fragment key={key}>
                       {index > 0 && <span aria-hidden="true" className="px-1 font-normal text-gray-500">·</span>}
@@ -532,7 +552,7 @@ export function TargetingOverlay() {
                     </Fragment>
                   ))}
                 </div>
-                {enginePrompt && (
+                {enginePrompt && (descriptionOverflows || descriptionExpanded) && (
                   // The visible label names the action, and `aria-label`
                   // repeats it with the description appended: without the
                   // explicit name a screen reader would hear only "show the

@@ -42,7 +42,7 @@ use super::super::oracle_static::{
     parse_cant_attack_defended_scope_nom, parse_cant_be_activated_exemption_in_text,
     parse_chosen_qualifier_subject, parse_continuous_modifications,
     parse_continuous_subject_filter, parse_static_line, parse_static_line_multi,
-    peel_compound_all_quantified_conjuncts,
+    parse_targeting_bypass_tail, peel_compound_all_quantified_conjuncts,
 };
 use super::super::oracle_target::{
     parse_target, parse_target_with_ctx, parse_target_with_syntax, parse_type_phrase_folding,
@@ -149,6 +149,24 @@ pub(super) fn try_parse_subject_predicate_ast(
     // must intercept before continuous clause parsing which would incorrectly
     // extract "defender" as an AddKeyword from "didn't have defender".
     if let Some(clause) = try_parse_can_attack_with_defender(text, ctx) {
+        return Some(subject_predicate_ast_from_clause(
+            text,
+            clause,
+            |effect, duration, sub_ability| PredicateAst::Restriction {
+                effect,
+                duration,
+                sub_ability,
+            },
+            ctx,
+        ));
+    }
+
+    // CR 702.11e + CR 702.18a: "[subject] can be the target[s] of spells and
+    // abilities [you control] as though it/they didn't have hexproof/shroud" —
+    // must intercept before continuous clause parsing, which would extract the
+    // quality word as an `AddKeyword` from "didn't have hexproof" and grant the
+    // very keyword the clause says to ignore.
+    if let Some(clause) = try_parse_targeting_bypass_clause(text) {
         return Some(subject_predicate_ast_from_clause(
             text,
             clause,
@@ -2342,6 +2360,48 @@ fn try_parse_can_attack_with_defender(
             target: application.target,
             end_cost: None,
         },
+        duration,
+        sub_ability: None,
+        distribute: None,
+        multi_target: None,
+        condition: None,
+        optional: false,
+        unless_pay: None,
+    })
+}
+
+/// CR 702.11e + CR 702.18a + CR 609.4: "[Duration,] [subject] can be the target[s]
+/// of spells and abilities [you control] as though it/they didn't have
+/// hexproof/shroud".
+///
+/// FAILS CLOSED for every beneficiary/quality combination. The only runtime
+/// hook is the player-scoped `StaticMode::IgnoreHexproof` grant
+/// (`player_ignores_hexproof`), which carries no subject filter: it would widen
+/// "creatures your opponents control with hexproof" to every hexproof permanent
+/// an opponent controls, and `player_cannot_be_targeted_by` never consults it, so
+/// it cannot reach "your opponents" (Detection Tower). Until the grant can carry
+/// the subject filter and reach player hexproof, the clause is surfaced as a
+/// named gap so the card does not count as supported while wrong. The STATIC
+/// form ("… can be the target of … as though …") is parsed separately in
+/// `oracle_static` and is unaffected.
+fn try_parse_targeting_bypass_clause(text: &str) -> Option<ParsedEffectClause> {
+    let (text, duration) = strip_leading_duration(text);
+    let lower = text.to_lowercase();
+    let (tail, _subject_lower) = take_until::<_, _, OracleError<'_>>(" can be the target")
+        .parse(lower.as_str())
+        .ok()?;
+    let (rest, _) = terminated(
+        parse_targeting_bypass_tail,
+        opt(tag::<_, _, OracleError<'_>>(".")),
+    )
+    .parse(tail)
+    .ok()?;
+    if !rest.is_empty() {
+        return None;
+    }
+    Some(ParsedEffectClause {
+        unlowered_guard: None,
+        effect: Effect::unimplemented("targeting_bypass_unmodeled", text),
         duration,
         sub_ability: None,
         distribute: None,

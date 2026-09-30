@@ -1271,9 +1271,16 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
             }
             ',' if paren_depth == 0 && !in_single_quote && !in_double_quote => {
                 let remainder = chars.clone().collect::<String>();
-                if let Some((boundary, chars_to_skip)) =
-                    split_comma_clause_boundary(&current, &remainder)
-                {
+                // CR 608.2c + CR 109.5: ", then <verb>" after a compound-subject-each
+                // head continues the distributed body ("you and defending player
+                // each draw a card, then discard a card" — every named player does
+                // both), so it is not a clause boundary. Splitting would strand the
+                // trailing verb on the controller alone.
+                let comma_split =
+                    split_comma_clause_boundary(&current, &remainder).filter(|(boundary, _)| {
+                        !(compound_subject_each_sticky && matches!(boundary, ClauseBoundary::Then))
+                    });
+                if let Some((boundary, chars_to_skip)) = comma_split {
                     push_clause_chunk(&mut chunks, &current, Some(boundary));
                     current.clear();
                     compound_subject_each_sticky = false;
@@ -2706,28 +2713,18 @@ fn is_inside_temporal_prefix(lower: &str) -> bool {
 /// both sites in lockstep.
 ///
 /// Recognized second-subject axes (mirror `try_parse_compound_subject_each`):
-/// - "that player each" — the player-axis form (Council's-dilemma "for each
-///   player who chose <choice>" body).
-/// - "target opponent each" / "target player each" — targeted player-axis forms.
-///   The parser binds their exact player scope after the splitter preserves the
-///   full clause.
-/// - "that creature each" — the object-axis form (CR 115.1 parent-target
-///   binding; e.g. Gogo, Mysterious Mime's "~ and that creature each get
-///   +2/+0 and gain haste ... and attack this turn if able").
+/// - the static player/object axes owned by
+///   `parse_static_compound_second_subject` ("that player each", "target
+///   opponent each", "target player each", "defending player each", "that
+///   creature each"), shared with the effect parser so the two sites cannot
+///   drift.
 /// - "target &lt;filter&gt;'s controller/owner each" — the possessive-actor form
 ///   (CR 109.4; Life at Stake's "You and target creature's controller each
 ///   secretly choose a number 0 or greater"), delegated to the shared axis
 ///   combinator so the two sites cannot drift.
 fn remainder_trimmed_starts_with_compound_subject_each(remainder: &str) -> bool {
     let lower = remainder.to_ascii_lowercase();
-    let result: nom::IResult<&str, (), OracleError<'_>> = alt((
-        value((), tag("that player each ")),
-        value((), tag("target opponent each ")),
-        value((), tag("target player each ")),
-        value((), tag("that creature each ")),
-    ))
-    .parse(lower.as_str());
-    if result.is_ok() {
+    if super::parse_static_compound_second_subject(lower.as_str()).is_ok() {
         return true;
     }
     controlled_creature_each_subject_starts(&lower)

@@ -1659,7 +1659,7 @@ mod tests {
 
     #[test]
     fn delayed_return_reader_after_a_repeat_is_not_a_single_iteration_result() {
-        let text = "Choose target creature you own. Return each chosen creature to your hand. Repeat this process once. At the beginning of the next upkeep, create a 1/1 white Soldier creature token for each creature returned to your hand this way.";
+        let text = "Choose target creature you own. Return each chosen creature to your hand. Repeat this process any number of times. At the beginning of the next upkeep, create a 1/1 white Soldier creature token for each creature returned to your hand this way.";
         let ir = crate::parser::oracle_effect::parse_effect_chain_ir(
             text,
             AbilityKind::Spell,
@@ -1714,7 +1714,7 @@ mod tests {
 
     #[test]
     fn delayed_return_reader_inside_repeated_process_keeps_its_instruction_link() {
-        let text = "Choose target creature you own. Return each chosen creature to your hand. At the beginning of the next upkeep, create a 1/1 white Soldier creature token for each creature returned to your hand this way. Repeat this process once.";
+        let text = "Choose target creature you own. Return each chosen creature to your hand. At the beginning of the next upkeep, create a 1/1 white Soldier creature token for each creature returned to your hand this way. Repeat this process any number of times.";
         let ir = crate::parser::oracle_effect::parse_effect_chain_ir(
             text,
             AbilityKind::Spell,
@@ -1755,7 +1755,7 @@ mod tests {
     #[test]
     fn delayed_return_reader_cannot_bind_across_any_repeated_process_boundary() {
         for (directive, expect_count, expect_stop) in [
-            ("Repeat this process once.", false, false),
+            ("Repeat this process any number of times.", false, false),
             ("Repeat this process one more time.", true, false),
             (
                 "Repeat this process until you put a card into your hand.",
@@ -1821,7 +1821,7 @@ mod tests {
 
     #[test]
     fn a_second_repeated_process_boundary_advances_the_reader_cutoff() {
-        let text = "Choose target creature you own. Return each chosen creature to your hand. Repeat this process once. Choose target artifact you own. Return each chosen artifact to your hand. Repeat this process once. At the beginning of the next upkeep, create a 1/1 white Soldier creature token for each artifact returned to your hand this way.";
+        let text = "Choose target creature you own. Return each chosen creature to your hand. Repeat this process any number of times. Choose target artifact you own. Return each chosen artifact to your hand. Repeat this process any number of times. At the beginning of the next upkeep, create a 1/1 white Soldier creature token for each artifact returned to your hand this way.";
         let ir = crate::parser::oracle_effect::parse_effect_chain_ir(
             text,
             AbilityKind::Spell,
@@ -1845,7 +1845,7 @@ mod tests {
 
     #[test]
     fn later_independent_return_after_repeat_can_bind_its_own_reader() {
-        let text = "Choose target creature you own. Return each chosen creature to your hand. Repeat this process once. Choose target artifact you own. Return each chosen artifact to your hand. At the beginning of the next upkeep, create a 1/1 white Soldier creature token for each artifact returned to your hand this way.";
+        let text = "Choose target creature you own. Return each chosen creature to your hand. Repeat this process any number of times. Choose target artifact you own. Return each chosen artifact to your hand. At the beginning of the next upkeep, create a 1/1 white Soldier creature token for each artifact returned to your hand this way.";
         let ir = crate::parser::oracle_effect::parse_effect_chain_ir(
             text,
             AbilityKind::Spell,

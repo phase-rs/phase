@@ -1157,6 +1157,7 @@ mod panther_habit_equipped_prevention_scope;
 mod parent_target_slot_delayed_condition_8758;
 mod parent_target_slot_illegal_at_resolution;
 mod pariah_attached_redirect;
+mod parser_velocity_sprint_1_runtime;
 mod part_in_friendship_conditional_reveal;
 mod pass_priority_structural_legality;
 mod peer_into_the_abyss;
