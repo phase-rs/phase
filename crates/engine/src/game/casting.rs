@@ -10904,7 +10904,7 @@ pub(super) fn lock_in_total_cost(
     extra: &[CostReductionEntry],
     election: Option<&CostReductionElection>,
 ) -> CostLockOutcome {
-    // Hot path. `pay_and_push` runs this on EVERY cast, including the simulated
+    // Hot path. `pay_and_push_with_lock` runs this on EVERY cast, including the simulated
     // ones the AI search drives, so the overwhelmingly common board — no
     // `ModifyCost` static anywhere and nothing accepted — must not pay for a
     // second round of modifier collection. Behaviour-neutral: with no reduction

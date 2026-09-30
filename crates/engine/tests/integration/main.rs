@@ -1277,6 +1277,7 @@ mod spellstutter_sprite_counter_with_x;
 mod spelunking_shockland_order;
 mod sphinx_of_uthuun_etb_pile_separation;
 mod spikeshell_harrier_speed_superlative;
+mod splice_cost_rebuild;
 mod split_offstack_mana_value;
 mod springheart_nantuko_bestow_landfall;
 mod springheart_realdb_repro;

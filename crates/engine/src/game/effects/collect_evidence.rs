@@ -279,7 +279,7 @@ fn complete_cost_payment(
             // any remaining (non-interactive) cost — collect evidence is a no-op
             // there — and pushes the ability. Detected by the activation index
             // carried on the pending; spell casts (bestow Detective's Phoenix)
-            // have `None` and fall through to `pay_and_push`.
+            // have `None` and fall through to `pay_and_push_with_lock`.
             if pending.activation_ability_index.is_some() {
                 return super::super::casting_costs::finish_activated_ability_at_payment_boundary(
                     state, player, pending, events,

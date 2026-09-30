@@ -6808,10 +6808,10 @@ pub(super) fn push_ability_entry(
 
 /// Check for an additional cost on the object being cast. If one exists,
 /// return `WaitingFor::OptionalCostChoice` so the player can decide;
-/// otherwise proceed directly to `pay_and_push`.
+/// otherwise proceed directly to `pay_and_push_with_lock`.
 ///
 /// This function sits between targeting and payment in the casting pipeline:
-/// `CastSpell → [ModeChoice] → [TargetSelection] → [AdditionalCostChoice] → pay_and_push → Stack`
+/// `CastSpell → [ModeChoice] → [TargetSelection] → [AdditionalCostChoice] → pay_and_push_with_lock → Stack`
 #[allow(clippy::too_many_arguments)]
 pub(super) fn check_additional_cost_or_pay(
     state: &mut GameState,
@@ -6842,6 +6842,7 @@ pub(super) fn check_additional_cost_or_pay(
         None,
         origin_zone,
         payment_mode,
+        Vec::new(),
         events,
     )
 }
@@ -6898,6 +6899,7 @@ pub(super) fn finish_pending_cast_cost_or_pay(
         distribute,
         origin_zone,
         payment_mode,
+        pending.declared_mana_additions,
         events,
     )
 }
@@ -7373,9 +7375,29 @@ fn required_cost_from_additional(additional: Option<AdditionalCost>) -> Option<A
     }
 }
 
+/// A pending cast rebuilt by the additional-cost authority, carrying the mana of
+/// the additional costs already declared for it (CR 601.2b + CR 601.2f).
+fn pending_cast_with_declared_mana(
+    object_id: ObjectId,
+    card_id: CardId,
+    ability: ResolvedAbility,
+    cost: ManaCost,
+    declared_mana_additions: &[ManaCost],
+) -> PendingCast {
+    let mut pending = PendingCast::new(object_id, card_id, ability, cost);
+    pending.declared_mana_additions = declared_mana_additions.to_vec();
+    pending
+}
+
 /// CR 601.2d: Extended version of `check_additional_cost_or_pay` that threads the
 /// `distribute` flag through PendingCast creation so X-spell distribution
 /// survives to the `(ManaPayment, PassPriority)` handler.
+///
+/// CR 601.2b + CR 601.2f: `declared_mana_additions` are the mana components of
+/// additional costs the caster already declared: splice costs (CR 702.47a) and
+/// the costs of chosen Spree or entwined modes (CR 702.172a, CR 702.42a). Every
+/// pending cast rebuilt here carries them, so a total recomputed from
+/// `base_cost` still includes them.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn check_additional_cost_or_pay_with_distribute(
     state: &mut GameState,
@@ -7391,6 +7413,7 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
     distribute: Option<DistributionUnit>,
     origin_zone: Zone,
     payment_mode: CastPaymentMode,
+    declared_mana_additions: Vec<ManaCost>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     // CR 601.3d + CR 702.8a: When the cast was authorized as-though-it-had-flash
@@ -7415,7 +7438,13 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
             casting_variant == CastingVariant::Fuse,
         )
     {
-        let pending_for_cancel = PendingCast::new(object_id, card_id, ability, cost.clone());
+        let pending_for_cancel = pending_cast_with_declared_mana(
+            object_id,
+            card_id,
+            ability,
+            cost.clone(),
+            &declared_mana_additions,
+        );
         super::casting::handle_cancel_cast(state, &pending_for_cancel, events);
         return Err(EngineError::ActionNotAllowed(
             "Chosen targets do not satisfy the flash casting condition".to_string(),
@@ -7565,7 +7594,13 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
             // Foretold) across the choice round-trip so its per-turn slot is
             // consumed at finalize. `None` for self-options / `Unlimited` grants.
             let alt_cost_grant_source = alt_cost.once_per_turn_source;
-            let mut pending = PendingCast::new(object_id, card_id, ability, ManaCost::NoCost);
+            let mut pending = pending_cast_with_declared_mana(
+                object_id,
+                card_id,
+                ability,
+                ManaCost::NoCost,
+                &declared_mana_additions,
+            );
             pending.base_cost = base_cost.clone();
             pending.casting_variant = casting_variant;
             pending.casting_permission_index = casting_permission_index;
@@ -7618,7 +7653,13 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
     }
 
     if !additional_cost_queue.is_empty() {
-        let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
+        let mut pending = pending_cast_with_declared_mana(
+            object_id,
+            card_id,
+            ability,
+            cost.clone(),
+            &declared_mana_additions,
+        );
         pending.base_cost = base_cost.clone();
         pending.casting_variant = casting_variant;
         pending.casting_permission_index = casting_permission_index;
@@ -7636,7 +7677,13 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         match &additional_cost {
             AdditionalCost::Required(req_cost) => {
                 // Required additional costs bypass the choice prompt — pay directly.
-                let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
+                let mut pending = pending_cast_with_declared_mana(
+                    object_id,
+                    card_id,
+                    ability,
+                    cost.clone(),
+                    &declared_mana_additions,
+                );
                 pending.base_cost = base_cost.clone();
                 pending.casting_variant = casting_variant;
                 pending.casting_permission_index = casting_permission_index;
@@ -7681,7 +7728,13 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
                 costs,
                 repeatability,
             } => {
-                let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
+                let mut pending = pending_cast_with_declared_mana(
+                    object_id,
+                    card_id,
+                    ability,
+                    cost.clone(),
+                    &declared_mana_additions,
+                );
                 pending.base_cost = base_cost.clone();
                 pending.casting_variant = casting_variant;
                 pending.casting_permission_index = casting_permission_index;
@@ -7711,7 +7764,13 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
                 cost: repeatable_cost,
                 repeatability: crate::types::ability::AdditionalCostRepeatability::Repeatable,
             } => {
-                let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
+                let mut pending = pending_cast_with_declared_mana(
+                    object_id,
+                    card_id,
+                    ability,
+                    cost.clone(),
+                    &declared_mana_additions,
+                );
                 pending.base_cost = base_cost.clone();
                 pending.casting_variant = casting_variant;
                 pending.casting_permission_index = casting_permission_index;
@@ -7731,7 +7790,13 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
                 cost: opt_cost,
                 repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
             } => {
-                let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
+                let mut pending = pending_cast_with_declared_mana(
+                    object_id,
+                    card_id,
+                    ability,
+                    cost.clone(),
+                    &declared_mana_additions,
+                );
                 pending.base_cost = base_cost.clone();
                 pending.casting_variant = casting_variant;
                 pending.casting_permission_index = casting_permission_index;
@@ -7764,7 +7829,13 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
                 ));
             }
             AdditionalCost::Choice(preferred, fallback) => {
-                let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
+                let mut pending = pending_cast_with_declared_mana(
+                    object_id,
+                    card_id,
+                    ability,
+                    cost.clone(),
+                    &declared_mana_additions,
+                );
                 pending.base_cost = base_cost.clone();
                 pending.casting_variant = casting_variant;
                 pending.casting_permission_index = casting_permission_index;
@@ -7824,7 +7895,13 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         }
     });
     if let Some(energy_mv) = energy_cost {
-        let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
+        let mut pending = pending_cast_with_declared_mana(
+            object_id,
+            card_id,
+            ability,
+            cost.clone(),
+            &declared_mana_additions,
+        );
         pending.base_cost = base_cost.clone();
         pending.casting_variant = casting_variant;
         pending.casting_permission_index = casting_permission_index;
@@ -7922,7 +7999,13 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         }
     });
     if let Some(alt_cost) = alt_ability_cost {
-        let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
+        let mut pending = pending_cast_with_declared_mana(
+            object_id,
+            card_id,
+            ability,
+            cost.clone(),
+            &declared_mana_additions,
+        );
         pending.base_cost = base_cost.clone();
         pending.casting_variant = casting_variant;
         pending.casting_permission_index = casting_permission_index;
@@ -7941,7 +8024,13 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
     // a time by `pay_additional_cost`'s Composite arm (CR 601.2h).
     if casting_variant == CastingVariant::Escape {
         if let Some((_, residual)) = super::keywords::effective_escape_data(state, object_id) {
-            let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
+            let mut pending = pending_cast_with_declared_mana(
+                object_id,
+                card_id,
+                ability,
+                cost.clone(),
+                &declared_mana_additions,
+            );
             pending.base_cost = base_cost.clone();
             pending.casting_variant = casting_variant;
             pending.casting_permission_index = casting_permission_index;
@@ -7957,7 +8046,13 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
     // CR 702.81a: Retrace requires discarding a land card as an additional
     // cost, then paying the card's normal mana cost.
     if casting_variant == CastingVariant::Retrace {
-        let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
+        let mut pending = pending_cast_with_declared_mana(
+            object_id,
+            card_id,
+            ability,
+            cost.clone(),
+            &declared_mana_additions,
+        );
         pending.base_cost = base_cost.clone();
         pending.casting_variant = casting_variant;
         pending.casting_permission_index = casting_permission_index;
@@ -7972,7 +8067,13 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
     // CR 702.133a: Jump-start requires discarding a card (any card) as an
     // additional cost, then paying the card's normal mana cost.
     if casting_variant == CastingVariant::JumpStart {
-        let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
+        let mut pending = pending_cast_with_declared_mana(
+            object_id,
+            card_id,
+            ability,
+            cost.clone(),
+            &declared_mana_additions,
+        );
         pending.base_cost = base_cost.clone();
         pending.casting_variant = casting_variant;
         pending.casting_permission_index = casting_permission_index;
@@ -7998,7 +8099,13 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
     if let Some(non_mana_cost) =
         alternative_cost_residual(state, player, object_id, casting_variant)
     {
-        let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
+        let mut pending = pending_cast_with_declared_mana(
+            object_id,
+            card_id,
+            ability,
+            cost.clone(),
+            &declared_mana_additions,
+        );
         pending.base_cost = base_cost.clone();
         pending.casting_variant = casting_variant;
         pending.casting_permission_index = casting_permission_index;
@@ -8020,7 +8127,13 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
     // CR 601.2b: Check for Defiler cost reduction — optional life payment for colored mana
     // reduction on matching-color permanent spells.
     if let Some(defiler) = find_defiler_reduction(state, player, object_id) {
-        let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
+        let mut pending = pending_cast_with_declared_mana(
+            object_id,
+            card_id,
+            ability,
+            cost.clone(),
+            &declared_mana_additions,
+        );
         pending.base_cost = base_cost.clone();
         pending.casting_variant = casting_variant;
         pending.casting_permission_index = casting_permission_index;
@@ -8039,7 +8152,13 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
     }
 
     if let Some(imposed_cost) = imposed_required_cost {
-        let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
+        let mut pending = pending_cast_with_declared_mana(
+            object_id,
+            card_id,
+            ability,
+            cost.clone(),
+            &declared_mana_additions,
+        );
         pending.base_cost = base_cost.clone();
         pending.casting_variant = casting_variant;
         pending.casting_permission_index = casting_permission_index;
@@ -8056,7 +8175,13 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         return pay_additional_cost(state, player, imposed_cost, pending, events);
     }
 
-    let waiting_for = pay_and_push(
+    // CR 601.2f: the lock recomputes from `base_cost` whenever a reduction is
+    // accepted or elected, so it is handed the declared additions too.
+    let lock = CostLockInput {
+        declared_mana_additions,
+        ..CostLockInput::default()
+    };
+    let waiting_for = pay_and_push_with_lock(
         state,
         player,
         object_id,
@@ -8070,6 +8195,7 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         distribute,
         origin_zone,
         payment_mode,
+        lock,
         events,
     )?;
     Ok(drain_deferred_triggers_after_stack_object_announcement(
@@ -8697,7 +8823,7 @@ fn apply_defiler_mana_reduction(
 }
 
 /// CR 601.2b: Pay an additional cost, returning a WaitingFor if interactive input is needed
-/// (e.g. choosing which card to discard), or continuing to pay_and_push if atomic.
+/// (e.g. choosing which card to discard), or continuing to pay_and_push_with_lock if atomic.
 fn pay_additional_cost(
     state: &mut GameState,
     player: PlayerId,
@@ -10534,52 +10660,10 @@ pub(super) fn can_pay_jumpstart_additional_cost(
     !super::casting::find_eligible_discard_targets(state, player, object_id, None).is_empty()
 }
 
-/// CR 601.2f: Announce-time entry to the lock seam, for the paths that reach it
-/// with no `PendingCast` in hand — nothing has been declared, accepted or
-/// elected yet. Any caller that DOES hold a `PendingCast` must call
-/// [`pay_and_push_with_lock`] with [`CostLockInput::from_pending`] instead, so
-/// the cast's declared additional mana costs and accepted reductions survive
-/// the seam's recompute.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn pay_and_push(
-    state: &mut GameState,
-    player: PlayerId,
-    object_id: ObjectId,
-    card_id: CardId,
-    ability: ResolvedAbility,
-    cost: &crate::types::mana::ManaCost,
-    base_cost: Option<ManaCost>,
-    casting_variant: CastingVariant,
-    casting_permission_index: Option<CastingPermissionIndex>,
-    cast_timing_permission: Option<CastTimingPermission>,
-    distribute: Option<DistributionUnit>,
-    origin_zone: Zone,
-    payment_mode: CastPaymentMode,
-    events: &mut Vec<GameEvent>,
-) -> Result<WaitingFor, EngineError> {
-    pay_and_push_with_lock(
-        state,
-        player,
-        object_id,
-        card_id,
-        ability,
-        cost,
-        base_cost,
-        casting_variant,
-        casting_permission_index,
-        cast_timing_permission,
-        distribute,
-        origin_zone,
-        payment_mode,
-        CostLockInput::default(),
-        events,
-    )
-}
-
 /// CR 601.2f: What the lock seam at the head of [`pay_and_push_with_lock`] needs
 /// beyond the board to determine the total cost.
 ///
-/// The seam rebuilds a probe [`PendingCast`] from `pay_and_push`'s exploded
+/// The seam rebuilds a probe [`PendingCast`] from `pay_and_push_with_lock`'s exploded
 /// parameters and hands it to [`super::casting::recompute_pending_mana_total_with`].
 /// EVERY `PendingCast` field that recompute reads and that is not one of those
 /// exploded parameters has to be carried here, or the probe silently drops its
@@ -14236,7 +14320,7 @@ pub(super) fn largest_x_satisfying_at_most(max: u32, predicate: impl Fn(u32) -> 
 /// CR 702.102b + CR 702.132a: THREADED. Assist is a `CastWithKeyword`-grantable
 /// cost keyword whose grant filter may be value-keyed (Cmc/HasColor/ColorCount),
 /// and this read is pre-payment-reachable (before the fuse marker at
-/// `pay_and_push`'s payment step) for a FUSED split cast. `fused` projects the
+/// `pay_and_push_with_lock`'s payment step) for a FUSED split cast. `fused` projects the
 /// combined MV/colors so a value-keyed assist grant is not silently dropped on the
 /// front half. Callers pass `casting_variant == CastingVariant::Fuse`.
 pub(super) fn assist_offer_params(
@@ -17140,7 +17224,7 @@ mod tests {
     /// rest) via last-known information. This drives the FULL `apply_action`
     /// cast pipeline (not a `process_triggers` shape test): the `SelectCards`
     /// action runs `handle_sacrifice_for_cost` → `finish_pending_cost_or_cast`
-    /// → `pay_and_push` → `WaitingFor::Priority` → `run_post_action_pipeline` →
+    /// → `pay_and_push_with_lock` → `WaitingFor::Priority` → `run_post_action_pipeline` →
     /// `process_triggers` over the same `events` vector that still carries the
     /// cost-sacrifice `ZoneChanged` records. The spell has NO kicker and NO
     /// deferred targets, so the cast lands in the SAME action — the only path
@@ -17168,7 +17252,7 @@ mod tests {
         };
 
         // The spell being cast: a no-target, no-kicker effect (Scry) so the cast
-        // lands directly via `pay_and_push` to `Priority` in the same action.
+        // lands directly via `pay_and_push_with_lock` to `Priority` in the same action.
         let spell = create_object(
             &mut state,
             CardId(1),
@@ -17223,14 +17307,14 @@ mod tests {
         }
 
         // Build the pending spell cast (NOT an activated ability: index None so
-        // `finish_pending_cost_or_cast` routes to `pay_and_push`).
+        // `finish_pending_cost_or_cast` routes to `pay_and_push_with_lock`).
         let mut pending = make_pending(spell);
         pending.activation_ability_index = None;
         pending.card_id = CardId(1);
         pending.origin_zone = Zone::Hand;
 
         // CR 601.2a/601.2i: the spell was announced onto the stack before cost
-        // payment; `pay_and_push` finalizes that existing entry rather than
+        // payment; `pay_and_push_with_lock` finalizes that existing entry rather than
         // pushing a new one. Mirror the announcement entry the real cast flow
         // leaves on the stack while costs are paid.
         state.stack.push_back(StackEntry {
@@ -18133,6 +18217,7 @@ mod tests {
             None,
             Zone::Hand,
             CastPaymentMode::Auto,
+            Vec::new(),
             &mut events,
         )
         .expect("granted casualty should be castable");
@@ -18249,6 +18334,7 @@ mod tests {
             None,
             Zone::Hand,
             CastPaymentMode::Auto,
+            Vec::new(),
             &mut events,
         )
         .expect("granted conspire should be castable");
@@ -25892,6 +25978,7 @@ its replicate cost was paid.)\nDraw a card.";
             None,
             Zone::Hand,
             CastPaymentMode::Auto,
+            Vec::new(),
             &mut events,
         )
         .expect("Spirit offering spell must be castable");
@@ -26114,6 +26201,7 @@ its replicate cost was paid.)\nDraw a card.";
             None,
             Zone::Hand,
             CastPaymentMode::Auto,
+            Vec::new(),
             &mut events,
         )
         .expect("Spirit offering spell must be castable");
@@ -26293,6 +26381,7 @@ its replicate cost was paid.)\nDraw a card.";
             None,
             Zone::Hand,
             CastPaymentMode::Auto,
+            Vec::new(),
             &mut events,
         )
         .expect("Artifact offering spell must be castable");
@@ -26409,6 +26498,7 @@ its replicate cost was paid.)\nDraw a card.";
             None,
             Zone::Hand,
             CastPaymentMode::Manual,
+            Vec::new(),
             &mut events,
         )
         .expect("Spirit offering spell must be castable");
@@ -26728,6 +26818,7 @@ its replicate cost was paid.)\nDraw a card.";
             None,
             Zone::Hand,
             CastPaymentMode::Manual, // manual so mana payment pauses, not auto-completes
+            Vec::new(),
             &mut events,
         )
         .expect("Spirit offering spell must be castable");
