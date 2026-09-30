@@ -1587,6 +1587,39 @@ Trample";
         }
     }
 
+    /// CR 107.3a + CR 601.2b: the X of an additional discard cost is announced
+    /// while casting, so the count stays symbolic (Firestorm, Devastating Dreams).
+    #[test]
+    fn parse_additional_cost_discard_x_cards_keeps_x() {
+        let x = QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        };
+        for (lower, raw, selection) in [
+            (
+                "as an additional cost to cast this spell, discard x cards.",
+                "As an additional cost to cast this spell, discard X cards.",
+                CardSelectionMode::Chosen,
+            ),
+            (
+                "as an additional cost to cast this spell, discard x cards at random.",
+                "As an additional cost to cast this spell, discard X cards at random.",
+                CardSelectionMode::Random,
+            ),
+        ] {
+            match parse_additional_cost_line(lower, raw) {
+                Some(AdditionalCost::Required(AbilityCost::Discard {
+                    count,
+                    filter: None,
+                    selection: parsed,
+                    ..
+                })) if count == x && parsed == selection => {}
+                other => panic!("Expected Required(Discard X) for {raw:?}, got {other:?}"),
+            }
+        }
+    }
+
     #[test]
     fn parse_additional_cost_pay_life() {
         let lower = "as an additional cost to cast this spell, pay 3 life.";
@@ -2612,15 +2645,10 @@ Trample";
     /// can read must surface an honest `Unimplemented` cost, not vanish. The
     /// old tail answered `None` — "this spell has NO additional cost" — which
     /// erased a printed cost from the total cost and left the spell castable
-    /// without it. Three real corpus lines, one per unreadable shape.
+    /// without it. One line per unreadable shape.
     #[test]
     fn unreadable_required_additional_cost_is_surfaced_not_dropped() {
         for (lower, raw, expected_description) in [
-            (
-                "as an additional cost to cast this spell, discard x cards at random.",
-                "As an additional cost to cast this spell, discard X cards at random.",
-                "discard X cards at random",
-            ),
             (
                 "as an additional cost to cast this spell, gobble x.",
                 "As an additional cost to cast this spell, gobble X.",

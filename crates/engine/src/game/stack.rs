@@ -2193,12 +2193,16 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     *enter_tapped = crate::types::proposed_event::EtbTapState::Tapped;
                 }
             }
-            // CR 712.14a + CR 310.12b: If this spell was finalized from an
-            // ExileWithAltCost permission with `cast_transformed`, the permanent
-            // enters the battlefield transformed (resolving to its back face).
-            // The finalized stack-paid snapshot is authoritative here; the
-            // mutable permission list is casting-time authorization, not
-            // resolution-time cast metadata.
+            // CR 712.8c + CR 712.11a + CR 712.13 + CR 310.12b: if this spell was
+            // finalized from an ExileWithAltCost permission with
+            // `cast_transformed`, the permanent enters the battlefield
+            // transformed (resolving to its back face) — a spell cast
+            // transformed has its back face up with only its back face's
+            // characteristics and resolves onto the battlefield with that face
+            // up; the engine keeps the front face up on the stack and swaps to
+            // the back face at entry. The finalized stack-paid snapshot is
+            // authoritative here; the mutable permission list is casting-time
+            // authorization, not resolution-time cast metadata.
             if let Some(obj) = state.objects.get(&entry.id) {
                 // CR 107.3m + CR 707.10: a resolving copied spell has no new
                 // payment snapshot, but inherits the original spell's chosen
@@ -2225,17 +2229,22 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 // the ZoneChange ProposedEvent so Doubling-Season-class
                 // AddCounter replacements (CR 614.1a) see and modify them as
                 // the replacement pipeline runs.
-                // CR 712.14a: For cast_transformed (Craft / ExileWithAltCost) the
-                // spell is on the stack with the front face but enters as the back
-                // face — read loyalty/defense from the back face directly so the
-                // replacement pipeline sees the correct counter count.
+                // CR 712.8c + CR 712.11a + CR 712.13: for cast_transformed (Craft /
+                // ExileWithAltCost / a Siege's victory cast), a spell cast
+                // transformed has its back face up with only its back face's
+                // characteristics and resolves onto the battlefield with that
+                // face up; the engine keeps the front face up on the stack and
+                // swaps to the back face at entry — read loyalty/defense from
+                // the back face directly so the replacement pipeline sees the
+                // correct counter count. Lore is not seeded — the back face's
+                // own CR 714.3a replacement applies through the CR 614.12
+                // projection (`replacement::stage_transformed_entry_projection`).
                 let intrinsic = match (cast_transformed, obj.back_face.as_ref()) {
-                    (true, Some(back)) => super::printed_cards::intrinsic_entry_counters_for_face(
+                    (true, Some(back)) => super::printed_cards::intrinsic_face_entry_counters(
                         back.printed_loyalty,
                         back.loyalty,
                         resolving_spell_x,
                         back.defense,
-                        &back.card_types,
                     ),
                     _ => super::printed_cards::intrinsic_etb_counters(obj, resolving_spell_x),
                 };
@@ -9413,6 +9422,94 @@ mod tests {
                 Some(3),
                 "SourceIndependent fixed GainLife run should ignore distinct sources"
             );
+
+            let life_before = state.players[0].life;
+            let mut events = Vec::new();
+            let consumed = resolve_next_committed(&mut state, &mut events);
+
+            assert_eq!(consumed, 3);
+            assert_eq!(state.players[0].life, life_before + 3);
+            assert!(state.stack.is_empty());
+            assert_eq!(
+                crate::game::perf_counters::snapshot().stack_batched_entries,
+                3
+            );
+        }
+
+        /// CR 607.1: a triggered ability's provenance is derived from
+        /// its definition occurrence when read, never latched into its
+        /// `SpellContext` — so printed gain-life triggers carrying a definition
+        /// ref, put on the stack through the production authority, still batch.
+        #[test]
+        fn fixed_controller_gain_life_printed_triggers_with_definition_ref_still_batch() {
+            use crate::types::ability::{
+                SpellContext, TriggerBaseSetInstanceRef, TriggerDefinitionOccurrenceRef,
+                TriggerDefinitionRef,
+            };
+            use crate::types::identifiers::ObjectIncarnationRef;
+
+            fn push_printed_gain_life_trigger(
+                state: &mut GameState,
+                source: ObjectId,
+                trigger_event: GameEvent,
+            ) {
+                let entry_id = ObjectId(state.next_object_id);
+                state.next_object_id += 1;
+                let mut ability = ResolvedAbility::new(
+                    fixed_controller_gain_life_effect(),
+                    vec![],
+                    source,
+                    PlayerId(0),
+                );
+                ability.description = Some("you gain 1 life".to_string());
+                ability.ability_index = Some(0);
+                ability.trigger_definition_ref = Some(TriggerDefinitionRef {
+                    source: ObjectIncarnationRef::from_object(&state.objects[&source]),
+                    occurrence: TriggerDefinitionOccurrenceRef::Printed {
+                        base_set: TriggerBaseSetInstanceRef::INITIAL,
+                        printed_index: 0,
+                    },
+                });
+                let entry = StackEntry {
+                    id: entry_id,
+                    source_id: source,
+                    controller: PlayerId(0),
+                    kind: StackEntryKind::TriggeredAbility {
+                        source_id: source,
+                        ability: Box::new(ability),
+                        condition: None,
+                        trigger_event: Some(trigger_event),
+                        description: Some(
+                            "Whenever a creature enters, you gain 1 life.".to_string(),
+                        ),
+                        source_name: state.objects[&source].name.clone(),
+                        subject_match_count: None,
+                        die_result: None,
+                        provenance: None,
+                    },
+                };
+                let mut events = Vec::new();
+                super::super::push_to_stack(state, entry, &mut events);
+            }
+
+            crate::game::perf_counters::reset();
+            let mut state = setup();
+            let source_a = add_self_counter_source(&mut state, "Bogwater Lumaret A");
+            let source_b = add_self_counter_source(&mut state, "Bogwater Lumaret B");
+            let etb = life_event(PlayerId(0), 0);
+            push_printed_gain_life_trigger(&mut state, source_a, etb.clone());
+            push_printed_gain_life_trigger(&mut state, source_b, etb.clone());
+            push_printed_gain_life_trigger(&mut state, source_b, etb);
+
+            for entry in &state.stack {
+                let ability = entry.ability().expect("a triggered ability");
+                // Reach: the production stamps ran and the occurrence is attributable.
+                assert!(ability.trigger_definition_ref.is_some());
+                assert!(ability.source_incarnation.is_some());
+                assert!(ability.source_ability_provenance().is_some());
+                assert_eq!(ability.context, SpellContext::default(), "no latch");
+            }
+            assert_eq!(fixed_controller_gain_life_run_len(&state), Some(3));
 
             let life_before = state.players[0].life;
             let mut events = Vec::new();

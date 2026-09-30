@@ -3982,8 +3982,19 @@ pub(crate) fn apply_parent_chain_context(
     // context wholesale, so preserve the node-local intent while inheriting
     // the remaining casting-time facts from its parent.
     let child_face_down_in_exile = child.context.face_down_in_exile;
+    // CR 610.3b: `check_exile_returns` latches a specified "until" event on the
+    // exact duration-bearing ChangeZone node it happened for (after the trigger,
+    // before that node's initial zone change). Like the face-down marker, the
+    // latch is node-local: a non-ChangeZone parent (a hand reveal, a target
+    // declaration) carries none, so the wholesale hand-off must not erase it.
+    let child_duration_events = std::mem::take(&mut child.context.duration_events);
     child.context = parent.context.clone();
     child.context.face_down_in_exile |= child_face_down_in_exile;
+    for event in child_duration_events {
+        if !child.context.duration_events.contains(&event) {
+            child.context.duration_events.push(event);
+        }
+    }
     // CR 120.1 + CR 608.2b: The damage-subject binding names the object THIS
     // hand-off supplies (or fails to supply) to the immediate child's damage
     // clause. It is one-hop by construction — a grandchild's subject slot is a
@@ -6778,6 +6789,22 @@ fn effect_introduces_per_player_object_referent(effect: &Effect) -> bool {
     matches!(effect, Effect::RevealTop { .. })
 }
 
+/// CR 608.2c + CR 701.20a: a per-iteration reveal choice introduces the chosen
+/// card as that iteration's object referent (chain targets), consumed by a
+/// co-scoped `ParentTarget` clause ("exile a creature card they revealed this
+/// way" — Valki, God of Lies).
+fn effect_introduces_per_player_chosen_card_referent(effect: &Effect) -> bool {
+    reveal_hand::effect_parks_reveal_card_choice(effect)
+}
+
+/// CR 608.2c: single authority for "this clause introduces a per-iteration object
+/// referent" — consumed by the player-scope co-scope split and by the swallow
+/// audit's per-player-iteration evidence.
+pub(crate) fn effect_introduces_per_iteration_referent(effect: &Effect) -> bool {
+    effect_introduces_per_player_object_referent(effect)
+        || effect_introduces_per_player_chosen_card_referent(effect)
+}
+
 /// CR 608.2c: True when an effect (or its quantity/target) reads the parent's
 /// per-player object referent anaphorically — a `Demonstrative`/`Anaphoric`
 /// object scope in a quantity, or a `ParentTarget`/`ParentTargetSlot` target.
@@ -6901,7 +6928,7 @@ fn detach_after_player_scope_local_chain(
     // `PreviousEffectAmount`, the greatest discarded table-wide) is NOT a
     // referent consumer, so it still runs as its own post-all-iterations loop.
     let referent_in_scope =
-        referent_introduced || effect_introduces_per_player_object_referent(&node.effect);
+        referent_introduced || effect_introduces_per_iteration_referent(&node.effect);
     let next_is_co_scoped_anaphoric_consumer = next.player_scope.as_ref() == Some(scope)
         && referent_in_scope
         && effect_consumes_parent_object_referent(&next.effect);
@@ -33159,6 +33186,250 @@ mod tests {
             vec![creature],
             "CR 611.2c: the published population is the later static's broadcast set"
         );
+    }
+
+    /// CR 608.2c + CR 701.20a — a per-iteration reveal CHOICE (a `RevealHand`
+    /// that parks a card choice) introduces the chosen card as that iteration's
+    /// referent, so a co-scoped `ParentTarget` consumer ("exile a creature card
+    /// they revealed this way" — Valki, God of Lies) stays inside the scoped
+    /// template. A reveal that parks no choice introduces no referent, so the same
+    /// child still detaches as the unscoped tail (unchanged behaviour).
+    #[test]
+    fn split_player_scope_keeps_reveal_choice_consumer_in_iteration() {
+        let make_chain = |card_filter: TargetFilter| {
+            let mut reveal = ResolvedAbility::new(
+                Effect::RevealHand {
+                    target: TargetFilter::Controller,
+                    card_filter,
+                    count: None,
+                    selection: crate::types::ability::CardSelectionMode::Chosen,
+                    choice_optional: false,
+                    reveal: true,
+                },
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            );
+            reveal.player_scope = Some(PlayerFilter::Opponent);
+            let mut exile = ResolvedAbility::new(
+                Effect::ChangeZone {
+                    origin: None,
+                    destination: Zone::Exile,
+                    target: TargetFilter::ParentTarget,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                },
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            );
+            exile.player_scope = Some(PlayerFilter::Opponent);
+            reveal.sub_ability = Some(Box::new(exile));
+            reveal
+        };
+
+        let choice = make_chain(TargetFilter::Typed(TypedFilter::creature()));
+        let (scoped, tail) = split_player_scope_chain(&choice, &PlayerFilter::Opponent);
+        assert!(
+            tail.is_none(),
+            "the chosen-card consumer stays in the iteration"
+        );
+        let kept = scoped
+            .sub_ability
+            .as_ref()
+            .expect("the ChangeZone stays attached to the reveal");
+        assert!(matches!(kept.effect, Effect::ChangeZone { .. }));
+        assert!(
+            kept.player_scope.is_none(),
+            "the kept consumer's redundant player_scope is cleared so it does not re-loop"
+        );
+
+        // Positive twin: a reveal with no card choice introduces no referent.
+        let no_choice = make_chain(TargetFilter::None);
+        let (scoped, tail) = split_player_scope_chain(&no_choice, &PlayerFilter::Opponent);
+        assert!(scoped.sub_ability.is_none());
+        let tail = tail.expect("without a choice the consumer detaches as the tail");
+        assert!(matches!(tail.effect, Effect::ChangeZone { .. }));
+    }
+
+    /// CR 608.2c — a non-choosing per-player reveal introduces no per-iteration
+    /// referent, so the next co-scoped instruction (the per-player card choice and
+    /// its `ParentTarget` consumer) detaches and fans out as its own pass after
+    /// every reveal; inside that pass the choice keeps its consumer (Valki, God of
+    /// Lies).
+    #[test]
+    fn split_player_scope_runs_the_choice_pass_after_every_reveal() {
+        let reveal_hand = |card_filter: TargetFilter, reveal: bool| Effect::RevealHand {
+            target: TargetFilter::Controller,
+            card_filter,
+            count: None,
+            selection: crate::types::ability::CardSelectionMode::Chosen,
+            choice_optional: false,
+            reveal,
+        };
+        let mut reveal_pass = ResolvedAbility::new(
+            reveal_hand(TargetFilter::None, true),
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        reveal_pass.player_scope = Some(PlayerFilter::Opponent);
+        let mut choice_pass = ResolvedAbility::new(
+            reveal_hand(TargetFilter::Typed(TypedFilter::creature()), false),
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        choice_pass.player_scope = Some(PlayerFilter::Opponent);
+        choice_pass.sub_link = SubAbilityLink::SequentialSibling;
+        let mut exile = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Exile,
+                target: TargetFilter::ParentTarget,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        exile.player_scope = Some(PlayerFilter::Opponent);
+        exile.sub_link = SubAbilityLink::SequentialSibling;
+        choice_pass.sub_ability = Some(Box::new(exile));
+        reveal_pass.sub_ability = Some(Box::new(choice_pass));
+
+        // The reveal pass: every opponent reveals; the choice pass is the tail.
+        let (scoped, tail) = split_player_scope_chain(&reveal_pass, &PlayerFilter::Opponent);
+        assert!(
+            scoped.sub_ability.is_none(),
+            "the reveal pass keeps no later instruction in its iteration"
+        );
+        let tail = tail.expect("the choice pass detaches as the tail");
+        assert!(crate::game::effects::reveal_hand::effect_parks_reveal_card_choice(&tail.effect));
+        assert_eq!(
+            tail.player_scope,
+            Some(PlayerFilter::Opponent),
+            "the detached choice pass fans out over the same opponents"
+        );
+        assert!(matches!(
+            tail.sub_ability.as_deref().map(|sub| &sub.effect),
+            Some(Effect::ChangeZone { .. })
+        ));
+
+        // The choice pass: the chosen card's consumer stays in its iteration.
+        let (scoped, tail) = split_player_scope_chain(&tail, &PlayerFilter::Opponent);
+        assert!(tail.is_none(), "the consumer stays in the choice iteration");
+        let kept = scoped
+            .sub_ability
+            .as_ref()
+            .expect("the ChangeZone stays attached to the choice");
+        assert!(matches!(kept.effect, Effect::ChangeZone { .. }));
+        assert_eq!(
+            kept.player_scope, None,
+            "the kept consumer's redundant player_scope is cleared"
+        );
+    }
+
+    /// CR 610.3b + CR 608.2c — the parent→child hand-off keeps the child's own
+    /// "until" latch. `check_exile_returns` records a specified event on the exact
+    /// duration-bearing ChangeZone node (node-local, like the face-down marker);
+    /// a non-ChangeZone parent (Kitesail Freebooter's / Valki's hand reveal)
+    /// carries none, so a wholesale context copy would erase it and the initial
+    /// exile would happen anyway. The parent's own latches are still inherited.
+    #[test]
+    fn parent_chain_handoff_keeps_the_childs_cr610_3b_latch() {
+        use crate::types::ability::{DurationEvent, ExileConcealment};
+
+        let reveal = || {
+            ResolvedAbility::new(
+                Effect::RevealHand {
+                    target: TargetFilter::Player,
+                    card_filter: TargetFilter::Typed(TypedFilter::creature()),
+                    count: None,
+                    selection: crate::types::ability::CardSelectionMode::Chosen,
+                    choice_optional: false,
+                    reveal: true,
+                },
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            )
+        };
+        let exile_until_leaves = || {
+            let mut exile = ResolvedAbility::new(
+                Effect::ChangeZone {
+                    origin: None,
+                    destination: Zone::Exile,
+                    target: TargetFilter::ParentTarget,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                },
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            );
+            exile.duration = Some(Duration::UntilHostLeavesPlay);
+            exile
+        };
+        let latched = vec![DurationEvent::SourceLeftBattlefield];
+        let mut state = GameState::new_two_player(42);
+
+        // (a) The child's own latch survives a parent that carries none.
+        let parent = reveal();
+        let mut child = exile_until_leaves();
+        child.context.duration_events = latched.clone();
+        apply_parent_chain_context(&mut child, &parent, None, &mut state);
+        assert_eq!(
+            child.context.duration_events, latched,
+            "the node-local CR 610.3b latch must survive the hand-off"
+        );
+
+        // (b) Reach-guard: the hand-off ran and still inherits the parent's latch.
+        let mut parent = reveal();
+        parent.context.duration_events = latched.clone();
+        let mut child = exile_until_leaves();
+        apply_parent_chain_context(&mut child, &parent, None, &mut state);
+        assert_eq!(child.context.duration_events, latched);
+
+        // (c) Both latched: the union carries the event once.
+        let mut child = exile_until_leaves();
+        child.context.duration_events = latched.clone();
+        apply_parent_chain_context(&mut child, &parent, None, &mut state);
+        assert_eq!(child.context.duration_events, latched);
+
+        // (d) The existing node-local precedent is not regressed.
+        let parent = reveal();
+        let mut child = exile_until_leaves();
+        child.context.face_down_in_exile = ExileConcealment::FaceDown;
+        child.context.duration_events = latched.clone();
+        apply_parent_chain_context(&mut child, &parent, None, &mut state);
+        assert!(child.context.face_down_in_exile.is_face_down());
+        assert_eq!(child.context.duration_events, latched);
     }
 
     /// CR 608.2c — building-block discriminator for the per-player reveal-anaphora

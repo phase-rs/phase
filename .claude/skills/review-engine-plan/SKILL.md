@@ -99,6 +99,12 @@ When execution is permitted, use an isolated `CARGO_TARGET_DIR` and the worktree
    - Cast-pipeline runtime tests must be planned via the `/card-test` recipe with the card's verbatim Oracle text, not a paraphrase.
    - If the plan adds a field to an existing enum variant or struct, require an enumeration of every construction/consumption site of that variant and how each threads the new field (resume/continuation paths, single-vs-multi-pick branches, and adapter payload constructors are the recurring drop points).
 
+9a. **Reference readings**
+   - Find every parity, preservation or copied-route row in the Verification Matrix, including rows the plan did not list under Reference Readings. A row missing from that list is itself a finding.
+   - For each row, derive the expected value yourself from the card's verbatim Oracle text and the CR, then compare it with both the plan's derivation and the measured reference.
+   - Reject a plan that asserts parity with, or preservation of, a reading nobody derived. Reject one whose derivation disagrees with its measured reference but does not take the [defective-reference route](../engine-implementer/SKILL.md#defective-reference-route).
+   - Tag the finding `behavior`.
+
 10. **Identity / provenance contract**
    - For any "this way", "that source", "chosen", "cast using", "from among them", selected target/mode, duration-bound effect, replacement predicate, or controller/owner-relative text, require the plan to name the source phrase/rules concept, selected authority type and id/value, binding time/event, live vs snapshotted/latched semantics, storage location, consumption point, invalidation/expiration behavior, and a multi-authority hostile fixture.
    - Reject plans that rely on rescanning matching permissions, sources, costs, replacements, tracked sets, controllers, owners, or choices at consumption time unless they prove the rescan is equivalent for a multi-authority fixture.
@@ -146,7 +152,7 @@ Check **only** Sizing consistency against the plan body (check 12's substance, n
 
 ## Review Loop
 
-Return every gap to the caller. Standalone, require a revised full plan and re-review the entire revised plan with fresh context until a round returns clean. In the engine-implementer pipeline, return each result to the orchestrator, whose [run limits](../engine-implementer/SKILL.md#run-limits) decide what happens next from your tags; switching modes or phases does not reset that history.
+Return every gap to the caller. Standalone, require a revised full plan and re-review the entire revised plan with fresh context until a round returns no behavior gap. A round whose gaps are all wording or other text fixes, each with its replacement text, is closed by applying them, with no further review. In the engine-implementer pipeline, return each result to the orchestrator, whose [run limits](../engine-implementer/SKILL.md#run-limits) decide what happens next from your tags; switching modes or phases does not reset that history.
 
 ## Output
 

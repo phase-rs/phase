@@ -2823,6 +2823,10 @@ fn seed_live_characteristics_from_base(obj: &mut crate::game::game_object::GameO
     // Subsequent layer effects that mutate `obj.abilities` / definitions
     // trigger copy-on-write via `Arc::make_mut`.
     obj.abilities = Arc::clone(&obj.base_abilities);
+    // CR 613.1a + CR 613.1f: the ability-slot provenance is layer-derived with
+    // `abilities`; layer 1 and layer 6 re-establish it this pass.
+    obj.granted_abilities_from = None;
+    obj.layer1_copy_effect = None;
     obj.materialize_base_trigger_definitions();
     // CR 611.2c + CR 613.1: reseed the printed baseline, carrying resolution-created
     // continuous effects across the reset. See
@@ -8966,6 +8970,10 @@ fn apply_continuous_effect_filtered(
                     modification_index: effect.mod_index,
                 };
                 apply_copiable_values(obj, values, copy_effect);
+                // CR 613.1a + CR 607.5: the last applied copy effect supplies this
+                // pass's characteristic abilities; a later copy overwrites it
+                // (timestamp order).
+                obj.layer1_copy_effect = Some(copy_effect);
                 // Display routing follows the copy: override the baseline
                 // restored by the layer reset so the copy renders the source's
                 // art. Reverts automatically when the copy effect expires.
@@ -9212,6 +9220,8 @@ fn apply_continuous_effect_filtered(
             }
             ContinuousModification::RemoveAllAbilities => {
                 Arc::make_mut(&mut obj.abilities).clear();
+                // CR 613.1f: every ability added after this removal is granted.
+                obj.granted_abilities_from = Some(0);
                 obj.trigger_definitions.clear();
                 // CR 613.1f + CR 611.2c: Layer 6 removes the object's ABILITIES.
                 // A replacement created by the resolution of a spell or ability is
@@ -9457,6 +9467,10 @@ fn apply_continuous_effect_filtered(
                 let mut granted = *definition.clone();
                 super::ability_utils::concretize_granting_object(&mut granted, effect.source_id);
                 if !obj.abilities.iter().any(|a| a == &granted) {
+                    // CR 613.1f + CR 607.1: layer-6 grants follow the
+                    // characteristic prefix; the first one marks its end.
+                    obj.granted_abilities_from
+                        .get_or_insert(obj.abilities.len());
                     Arc::make_mut(&mut obj.abilities).push(granted);
                 }
             }
@@ -9706,6 +9720,9 @@ fn set_land_subtype_replacing(obj: &mut crate::game::game_object::GameObject, su
     obj.card_types.subtypes.retain(|s| !is_land_subtype(s));
     obj.card_types.subtypes.push(subtype);
     Arc::make_mut(&mut obj.abilities).clear();
+    // CR 305.7: no rules-text ability survives; later-added abilities are not
+    // characteristic.
+    obj.granted_abilities_from = Some(0);
     obj.trigger_definitions.clear();
     // CR 305.7: "It loses all abilities generated from its rules text... Note that
     // this doesn't remove any abilities that were granted to the land by other
@@ -11225,6 +11242,202 @@ mod tests {
         );
         assert!(live[0].is_resolution_installed());
         assert!(live[0].is_consumed, "runtime state survives Humility too");
+    }
+
+    /// An activated ability whose effect draws `count` cards — distinct
+    /// abilities for the slot-provenance fixtures below.
+    fn draw_ability(count: i32) -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: count },
+                target: TargetFilter::Controller,
+            },
+        )
+    }
+
+    /// A creature whose printed activated abilities are `abilities`.
+    fn creature_with_abilities(
+        state: &mut GameState,
+        name: &str,
+        abilities: Vec<AbilityDefinition>,
+    ) -> ObjectId {
+        let id = make_creature(state, name, 1, 1, PlayerId(0));
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.base_abilities = Arc::new(abilities.clone());
+        obj.abilities = Arc::new(abilities);
+        obj.base_characteristics_initialized = true;
+        id
+    }
+
+    fn install_until_end_of_turn(
+        state: &mut GameState,
+        host: ObjectId,
+        modification: ContinuousModification,
+    ) -> u64 {
+        state.add_transient_continuous_effect(
+            host,
+            PlayerId(0),
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificObject { id: host },
+            vec![modification],
+            None,
+        )
+    }
+
+    fn relayer(state: &mut GameState) {
+        state.layers_dirty.mark_full();
+        evaluate_layers(state);
+    }
+
+    /// CR 613.1a + CR 613.1f + CR 607.1 + CR 607.5: the live activated slots
+    /// split exactly into the characteristic prefix (of the winning layer-1
+    /// copiable set) and the layer-6 granted tail — including an identical
+    /// re-grant after an ability-removing effect — and the split is
+    /// layer-derived.
+    #[test]
+    fn activated_slot_provenance_tracks_layer_1_set_and_layer_6_grants() {
+        use crate::types::ability::{
+            AbilityProvenance, CharacteristicSetRef, CopyEffectInstanceRef,
+        };
+        let own = AbilityProvenance::Characteristic(CharacteristicSetRef::Own);
+
+        // (i) base [A] + grant B → A characteristic, B granted.
+        let mut state = setup();
+        let host = creature_with_abilities(&mut state, "Host", vec![draw_ability(1)]);
+        install_until_end_of_turn(
+            &mut state,
+            host,
+            ContinuousModification::GrantAbility {
+                definition: Box::new(draw_ability(2)),
+            },
+        );
+        relayer(&mut state);
+        let obj = &state.objects[&host];
+        assert_eq!(obj.abilities.len(), 2, "reach: the grant applied");
+        assert_eq!(obj.activated_ability_provenance(0), own);
+        assert_eq!(
+            obj.activated_ability_provenance(1),
+            AbilityProvenance::Granted
+        );
+        assert_eq!(
+            obj.activated_ability_provenance(2),
+            AbilityProvenance::Granted
+        );
+
+        // (ii) base [A] + an identical grant of A → deduplicated; still printed.
+        let mut state = setup();
+        let host = creature_with_abilities(&mut state, "Host", vec![draw_ability(1)]);
+        install_until_end_of_turn(
+            &mut state,
+            host,
+            ContinuousModification::GrantAbility {
+                definition: Box::new(draw_ability(1)),
+            },
+        );
+        relayer(&mut state);
+        let obj = &state.objects[&host];
+        assert_eq!(obj.abilities.len(), 1);
+        assert_eq!(obj.granted_abilities_from, None);
+        assert_eq!(obj.activated_ability_provenance(0), own);
+
+        // (iii) base [A], B granted, all abilities removed, then an identical A
+        // granted (timestamp order) → the live A is the grant, not the printed
+        // ability: the removal re-opens the granted tail at slot 0.
+        let mut state = setup();
+        let host = creature_with_abilities(&mut state, "Host", vec![draw_ability(1)]);
+        install_until_end_of_turn(
+            &mut state,
+            host,
+            ContinuousModification::GrantAbility {
+                definition: Box::new(draw_ability(2)),
+            },
+        );
+        install_until_end_of_turn(&mut state, host, ContinuousModification::RemoveAllAbilities);
+        install_until_end_of_turn(
+            &mut state,
+            host,
+            ContinuousModification::GrantAbility {
+                definition: Box::new(draw_ability(1)),
+            },
+        );
+        relayer(&mut state);
+        let obj = &state.objects[&host];
+        assert_eq!(obj.abilities.len(), 1, "reach: removed, then re-granted");
+        assert_eq!(
+            obj.activated_ability_provenance(0),
+            AbilityProvenance::Granted
+        );
+
+        // (iv) a layer-1 copy supplying [X, Y] + a layer-6 grant of Z.
+        let mut state = setup();
+        let host = creature_with_abilities(&mut state, "Host", vec![draw_ability(1)]);
+        let donor =
+            creature_with_abilities(&mut state, "Donor", vec![draw_ability(3), draw_ability(4)]);
+        let donor_values =
+            crate::game::printed_cards::intrinsic_copiable_values(&state.objects[&donor]);
+        let copy_id = install_until_end_of_turn(
+            &mut state,
+            host,
+            ContinuousModification::CopyValues {
+                values: Box::new(donor_values),
+                display_source: crate::game::game_object::DisplaySource::Card,
+                printed_ref: None,
+                token_image_ref: None,
+            },
+        );
+        install_until_end_of_turn(
+            &mut state,
+            host,
+            ContinuousModification::GrantAbility {
+                definition: Box::new(draw_ability(5)),
+            },
+        );
+        relayer(&mut state);
+        let copied = CharacteristicSetRef::Copied(CopyEffectInstanceRef {
+            continuous_effect_id: copy_id,
+            modification_index: 0,
+        });
+        let obj = &state.objects[&host];
+        assert_eq!(obj.name, "Donor", "reach: the copy applied");
+        assert_eq!(obj.abilities.len(), 3);
+        assert_eq!(
+            obj.layer1_copy_effect,
+            Some(CopyEffectInstanceRef {
+                continuous_effect_id: copy_id,
+                modification_index: 0,
+            })
+        );
+        assert_eq!(obj.characteristic_set(), copied);
+        assert_eq!(
+            obj.activated_ability_provenance(0),
+            AbilityProvenance::Characteristic(copied)
+        );
+        assert_eq!(
+            obj.activated_ability_provenance(1),
+            AbilityProvenance::Characteristic(copied)
+        );
+        assert_eq!(
+            obj.activated_ability_provenance(2),
+            AbilityProvenance::Granted
+        );
+
+        // (vi) Leaving the battlefield reverts both layer-derived fields.
+        let mut reverted = state.objects[&host].clone();
+        reverted.revert_layered_characteristics_to_base();
+        assert_eq!(reverted.granted_abilities_from, None);
+        assert_eq!(reverted.layer1_copy_effect, None);
+
+        // (v) Once the copy and the grant end, the next pass re-derives the
+        // object's own printed set with no granted tail.
+        prune_end_of_turn_effects(&mut state);
+        relayer(&mut state);
+        let obj = &state.objects[&host];
+        assert_eq!(obj.name, "Host", "reach: the copy ended");
+        assert_eq!(obj.abilities.len(), 1);
+        assert_eq!(obj.granted_abilities_from, None);
+        assert_eq!(obj.layer1_copy_effect, None);
+        assert_eq!(obj.activated_ability_provenance(0), own);
     }
 
     fn add_unspent_blue_mana(state: &mut GameState, player: PlayerId, count: usize) {

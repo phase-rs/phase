@@ -306,6 +306,21 @@ impl EntersUnderSpec {
     }
 }
 
+/// CR 608.2c: how a clause following a hand reveal refers to the card chosen
+/// from the revealed hand. The binding decides which chain-builder rules apply
+/// to the consumer (who it addresses, and how its object is re-bound).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub(crate) enum RevealChoiceBinding {
+    /// CR 608.2c: "choose a <type> card from it / from among them" — the consumer
+    /// names the choice itself over the revealed hand ("it") and is absorbed into
+    /// it (Kitesail Freebooter, Deep-Cavern Bat).
+    FromIt,
+    /// CR 608.2c: "<verb> a <type> card [they] revealed this way" — the consumer
+    /// acts on a card chosen from what the reveal showed, so its object is the
+    /// chosen card (Valki, God of Lies).
+    RevealedThisWay,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) enum ContinuationAst {
     SearchDestination {
@@ -325,6 +340,9 @@ pub(crate) enum ContinuationAst {
     RevealHandFilter {
         card_filter: Option<TargetFilter>,
         choice_optional: bool,
+        /// CR 608.2c: how the consuming clause refers to the card chosen from
+        /// the revealed hand.
+        binding: RevealChoiceBinding,
     },
     ManaRestriction {
         restrictions: Vec<ManaSpendRestriction>,
@@ -1613,6 +1631,11 @@ pub(crate) enum ChooseImperativeAst {
         up_to: bool,
         /// CR 608.2d (override): `Random` for "choose ... at random".
         selection: crate::types::ability::CardSelectionMode,
+        /// CR 607.2a + CR 406.6 vs CR 608.2c: which pool the clause names — the
+        /// source's linked pile ("exiled with ~", `Direct` zone scan filtered by
+        /// linkage) or the chain's own exile output ("exiled this way", `Legacy`
+        /// tracked-set provenance).
+        candidate_source: crate::types::ability::ZoneChoiceCandidateSource,
     },
     /// "choose from among the permanents ... an artifact, a creature, ..." —
     /// multi-category selection where each player keeps one per type, then sacrifices the rest.

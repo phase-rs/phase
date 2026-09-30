@@ -109,11 +109,12 @@ use super::oracle_modal::{
     strip_flavor_word_with_name, AnchorModeIr, OracleBlockIr, FLAVOR_WORD_COST_LABEL_MAX_WORDS,
 };
 use super::oracle_replacement::{
-    find_copy_verb_present, lower_as_enters_becomes_choice_modal,
+    find_copy_verb_present, is_as_self_enters_frame, lower_as_enters_becomes_choice_modal,
     lower_as_enters_or_face_up_counters, lower_replacement_ir,
-    parse_bidirectional_damage_prevention, parse_oneshot_damage_replacement,
-    parse_replacement_line, parse_replacement_line_ir, parse_whenever_you_cast_enters_with_outcome,
-    parse_windowed_graveyard_redirect_install, CastEntersWithOutcome,
+    parse_as_enters_one_shot_replacement, parse_bidirectional_damage_prevention,
+    parse_oneshot_damage_replacement, parse_replacement_line, parse_replacement_line_ir,
+    parse_whenever_you_cast_enters_with_outcome, parse_windowed_graveyard_redirect_install,
+    CastEntersWithOutcome,
 };
 use super::oracle_saga::{is_saga_chapter, parse_saga_chapters};
 use super::oracle_spacecraft::parse_spacecraft_threshold_lines;
@@ -514,6 +515,26 @@ fn try_parse_mulligan_time_ability(line: &str, lower: &str) -> Option<AbilityIr>
     ir.shell.optional = true;
     ir.shell.description = Some(line.to_string());
     Some(ir)
+}
+
+/// CR 614.1c + CR 603.6d: emit the "As ~ enters, <one-shot>" replacement for
+/// `line` when the gated arm accepts it. Shared by the two routing sites (the
+/// Priority-7 static-shaped reroute and the post-Priority-8 last resort).
+fn emit_as_enters_one_shot(
+    emitter: &mut DocEmitter<'_>,
+    item_line: usize,
+    line: &str,
+    card_name: &str,
+) -> bool {
+    let Some(definition) = parse_as_enters_one_shot_replacement(line, card_name) else {
+        return false;
+    };
+    emitter.emit_at(
+        item_line,
+        OracleNodeIr::Replacement(ReplacementIr::from_definition(line, definition)),
+        OuterRoute::Replacement,
+    );
+    true
 }
 
 fn try_parse_opening_hand_reveal_delayed_trigger(
@@ -6777,6 +6798,19 @@ fn parse_normalized_oracle_ir(
                     i += 1;
                     continue;
                 }
+            } else if is_as_self_enters_frame(&lower) {
+                // CR 614.1c + CR 603.6d: "As ~ enters, <one-shot>" is a
+                // replacement effect. Static-shaped frame lines — Tibalt's quoted
+                // "you may spend mana as though" — would otherwise be claimed by
+                // the static parser. This site runs before Priority 8, so it also
+                // sees static-shaped frame lines that a Priority-8 arm claims
+                // (Thief of Blood, Arsenal Thresher). The gate declines those, and
+                // on `None` the line falls through to the static parser and then
+                // to Priority 8, exactly as before.
+                if emit_as_enters_one_shot(&mut emitter, item_line, &line, card_name) {
+                    i += 1;
+                    continue;
+                }
             }
             // Guard: ability-word-prefixed trigger lines (e.g., "Flurry — Whenever...")
             // handled above at Priority 6b. The check below is kept as a defensive
@@ -7191,6 +7225,16 @@ fn parse_normalized_oracle_ir(
                 i += 1;
                 continue;
             }
+        }
+
+        // CR 614.1c: replacement-tier last resort for "As ~ enters, <one-shot>"
+        // frame lines no earlier route claimed; runs after Priority 8 so every
+        // specific as-enters arm keeps its lines.
+        if is_as_self_enters_frame(&lower)
+            && emit_as_enters_one_shot(&mut emitter, item_line, &line, card_name)
+        {
+            i += 1;
+            continue;
         }
 
         if let Some(def) = try_parse_opening_hand_reveal_delayed_trigger(&line, &lower) {

@@ -9,7 +9,7 @@ use crate::types::player::PlayerId;
 
 use super::ability_utils::{
     assign_targets_in_chain, auto_select_targets_for_ability, begin_target_selection_for_ability,
-    build_target_slots, flatten_targets_in_chain, random_select_targets_for_ability,
+    build_target_slots, declared_targets_in_chain, random_select_targets_for_ability,
 };
 use super::casting::emit_targeting_events;
 use super::engine::EngineError;
@@ -256,10 +256,15 @@ pub fn handle_activate_loyalty(
     // CR 602.2 + CR 601.2c (capture L): the activation's journal facts, now,
     // before its targets are chosen and before any loyalty is paid. Interactive
     // targets add theirs at target settlement; automatic ones just below.
+    // CR 602.2a: provenance too.
     resolved.ability_index = Some(ability_index);
-    resolved.activation_record =
-        super::casting::capture_activation_record(state, player, pw_id, ability_index, &resolved)
-            .map(Box::new);
+    super::casting::record_activation_announcement(
+        state,
+        player,
+        pw_id,
+        ability_index,
+        &mut resolved,
+    );
 
     // CR 602.2b + CR 601.2c: Targets are announced before costs are paid.
     // If this ability requires targets, prompt for selection first.
@@ -469,7 +474,7 @@ fn complete_loyalty_activation(
     let record = super::casting::take_activation_record(&mut resolved, player)?;
     record_loyalty_activation(state, pw_id, player);
 
-    let assigned_targets = flatten_targets_in_chain(&resolved);
+    let assigned_targets = declared_targets_in_chain(&resolved);
     let crime_candidate = super::casting::targets_commit_crime(state, &assigned_targets, player);
     emit_targeting_events(state, &assigned_targets, pw_id, player, events);
 

@@ -53,7 +53,7 @@ use super::ability_utils::{
     assign_targets_in_chain, auto_select_targets, auto_select_targets_for_ability,
     begin_target_selection, begin_target_selection_for_ability, build_resolved_from_def,
     build_target_slots, build_target_slots_for_announcement, compute_unavailable_modes,
-    filter_references_target_player, flatten_targets_in_chain,
+    declared_targets_in_chain, filter_references_target_player, flatten_targets_in_chain,
     has_legal_target_assignment_for_ability, modal_choice_for_player,
     simple_legal_target_assignment_exists_for_ability, target_constraints_from_modal,
     unresolved_x_target_construction_error, TargetSlotBuildOutcome,
@@ -5018,9 +5018,22 @@ fn exile_permission_timing_active(
     }
 }
 
-/// CR 601.2a + CR 113.6b: Enumerate every battlefield permanent controlled by
-/// `player` whose `StaticMode::ExileCastPermission` static is currently
-/// functioning. The returned filter is owned by the static definition (via
+/// CR 114.4: emblem abilities function in the command zone. Yields every
+/// command-zone emblem, in command-zone order; each caller restricts the
+/// player (the exile path by the static's `ExileCastGrantee`, the graveyard
+/// path by the owner gate — CR 114.2).
+fn command_zone_emblems(state: &GameState) -> impl Iterator<Item = ObjectId> + '_ {
+    state
+        .command_zone
+        .iter()
+        .copied()
+        .filter(move |&id| state.objects.get(&id).is_some_and(|obj| obj.is_emblem))
+}
+
+/// CR 601.2a + CR 113.6b: Enumerate every battlefield permanent and every
+/// command-zone emblem whose `StaticMode::ExileCastPermission` static is
+/// currently functioning; the `grantee` match and the own-exiles pool restrict
+/// `player`. The returned filter is owned by the static definition (via
 /// `active_static_definitions`) and lives at least as long as the inferred
 /// borrow.
 ///
@@ -5031,6 +5044,7 @@ fn exile_permission_sources(state: &GameState, player: PlayerId) -> Vec<ExilePer
         .battlefield
         .iter()
         .copied()
+        .chain(command_zone_emblems(state))
         .filter_map(|source_id| {
             let obj = state.objects.get(&source_id)?;
             active_static_definitions(state, obj).find_map(|definition| match definition.mode {
@@ -5054,7 +5068,8 @@ fn exile_permission_sources(state: &GameState, player: PlayerId) -> Vec<ExilePer
                 } => {
                     // CR 406.6 + CR 607.1: "you may …" grants only the source's
                     // controller; "each player may … cards they exiled" grants
-                    // every player their own share of the pool.
+                    // every player their own share of the pool. CR 114.2: an
+                    // emblem's controller is the player who owns it.
                     let own_exiles_of = match grantee {
                         ExileCastGrantee::SourceController => {
                             if obj.controller != player {
@@ -5413,12 +5428,7 @@ fn graveyard_permission_sources(
     play_mode_filter: Option<CardPlayMode>,
 ) -> Vec<GraveyardPermissionSource<'_>> {
     let mut source_ids: Vec<ObjectId> = state.battlefield.iter().copied().collect();
-    source_ids.extend(state.command_zone.iter().copied().filter(|&id| {
-        state
-            .objects
-            .get(&id)
-            .is_some_and(|obj| obj.is_emblem && obj.owner == player)
-    }));
+    source_ids.extend(command_zone_emblems(state));
     if let Some(player_data) = state.players.iter().find(|p| p.id == player) {
         source_ids.extend(player_data.graveyard.iter().copied());
     }
@@ -10894,7 +10904,7 @@ pub(super) fn lock_in_total_cost(
     extra: &[CostReductionEntry],
     election: Option<&CostReductionElection>,
 ) -> CostLockOutcome {
-    // Hot path. `pay_and_push` runs this on EVERY cast, including the simulated
+    // Hot path. `pay_and_push_with_lock` runs this on EVERY cast, including the simulated
     // ones the AI search drives, so the overwhelmingly common board — no
     // `ModifyCost` static anywhere and nothing accepted — must not pay for a
     // second round of modifier collection. Behaviour-neutral: with no reduction
@@ -18438,7 +18448,7 @@ fn continue_with_prepared(
                 assign_targets_in_chain(state, &mut resolved, &targets)?;
                 emit_targeting_events(
                     state,
-                    &flatten_targets_in_chain(&resolved),
+                    &declared_targets_in_chain(&resolved),
                     prepared.object_id,
                     player,
                     events,
@@ -18524,7 +18534,7 @@ fn continue_with_prepared(
             assign_targets_in_chain(state, &mut resolved, &targets)?;
             emit_targeting_events(
                 state,
-                &flatten_targets_in_chain(&resolved),
+                &declared_targets_in_chain(&resolved),
                 prepared.object_id,
                 player,
                 events,
@@ -18921,7 +18931,7 @@ fn continue_with_prepared(
             assign_targets_in_chain(state, &mut resolved, &targets)?;
             emit_targeting_events(
                 state,
-                &flatten_targets_in_chain(&resolved),
+                &declared_targets_in_chain(&resolved),
                 prepared.object_id,
                 player,
                 events,
@@ -23390,7 +23400,14 @@ pub(crate) fn resolve_non_self_discard_requirement_with_ability(
     let Some((count, filter, _selection)) = find_non_self_discard(cost) else {
         return Ok(None);
     };
-    let count = super::quantity::resolve_quantity(state, count, player, source_id).max(0) as usize;
+    // CR 107.3a: the ability carries the announced X that a "discard X cards"
+    // count reads; without it X would resolve to 0 and the cost would be skipped.
+    let count = ability
+        .map_or_else(
+            || super::quantity::resolve_quantity(state, count, player, source_id),
+            |ability| super::quantity::resolve_quantity_with_targets(state, count, ability),
+        )
+        .max(0) as usize;
     // CR 601.2h + CR 701.9a: A resolved zero-card discard is paid by doing nothing — never
     // surface a dead selection prompt for it.
     if count == 0 {
@@ -26355,9 +26372,8 @@ fn activate_with_cost_carrier(
     resolved.ability_index = Some(ability_index);
     // CR 602.2 + CR 601.2c (capture A): the activation's journal facts,
     // captured now, before any cost is paid. Target settlement adds the
-    // committed targets on every target-first route.
-    resolved.activation_record =
-        capture_activation_record(state, player, source_id, ability_index, &resolved).map(Box::new);
+    // committed targets on every target-first route. CR 602.2a: provenance too.
+    record_activation_announcement(state, player, source_id, ability_index, &mut resolved);
     // CR 602.2b + CR 601.2b/c: an X announcement can determine how many
     // targets an ability has. Before X is chosen, target-slot construction may
     // reject that specific class of otherwise legal activation; defer only that
@@ -27018,7 +27034,7 @@ fn activate_with_cost_carrier(
             // declares targets before any activation cost is paid.
             emit_targeting_events(
                 state,
-                &flatten_targets_in_chain(&resolved),
+                &declared_targets_in_chain(&resolved),
                 source_id,
                 player,
                 events,
@@ -27141,7 +27157,7 @@ fn activate_with_cost_carrier(
     let record = take_activation_record(&mut resolved, player)?;
     let entry_id = ObjectId(state.next_object_id);
     state.next_object_id += 1;
-    let announced_targets = flatten_targets_in_chain(&resolved);
+    let announced_targets = declared_targets_in_chain(&resolved);
     let crime_candidate = targets_commit_crime(state, &announced_targets, player);
 
     stack::push_to_stack(
@@ -27286,6 +27302,28 @@ pub(crate) fn capture_activation_record(
     )
 }
 
+/// CR 602.2a + CR 607.1 + CR 613.1f: bind the facts an activated ability
+/// takes from its announcement — the journal record and whether the
+/// announced slot is a characteristic ability of its source (and of which
+/// copiable set) — while `ability_index` and the definition are bound to the
+/// same live `abilities`. Both ride `ability` to the stack; later cost
+/// payment cannot change them.
+pub(crate) fn record_activation_announcement(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    ability_index: usize,
+    ability: &mut ResolvedAbility,
+) {
+    ability.activation_record =
+        capture_activation_record(state, player, source_id, ability_index, ability).map(Box::new);
+    let provenance = state
+        .objects
+        .get(&source_id)
+        .map(|source| source.activated_ability_provenance(ability_index));
+    ability.set_source_ability_provenance_recursive(provenance);
+}
+
 /// [`capture_activation_record`] from an ability definition and its committed
 /// targets.
 pub(crate) fn capture_activation_record_from(
@@ -27347,7 +27385,20 @@ fn capture_settled_targets(state: &GameState, player: PlayerId, pending: &mut Pe
     };
     match pending.ability.activation_record.as_deref_mut() {
         Some(record) => record.targets = fresh.targets,
-        None => pending.ability.activation_record = Some(Box::new(fresh)),
+        None => {
+            pending.ability.activation_record = Some(Box::new(fresh));
+            // CR 602.2a: same announcement-phase binding as the record (before
+            // payment).
+            if pending.ability.context.source_ability_provenance.is_none() {
+                let provenance = state
+                    .objects
+                    .get(&pending.object_id)
+                    .map(|source| source.activated_ability_provenance(ability_index));
+                pending
+                    .ability
+                    .set_source_ability_provenance_recursive(provenance);
+            }
+        }
     }
 }
 

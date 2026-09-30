@@ -31826,3 +31826,218 @@ fn owner_subject_shuffle_them_into_their_libraries_moves_the_objects() {
         "{defs:?}"
     );
 }
+
+// ── "As ~ enters, <one-shot>" replacement arm (CR 614.1c + CR 603.6d) ─────────
+
+/// Tibalt, Cosmic Impostor (Kaldheim MDFC back face), verbatim Oracle text.
+const TIBALT_FULL: &str = "As Tibalt enters, you get an emblem with \"You may play cards exiled with Tibalt, Cosmic Impostor, and you may spend mana as though it were mana of any color to cast those spells.\"\n[+2]: Exile the top card of each player's library.\n[−3]: Exile target artifact or creature.\n[−8]: Exile all graveyards. Add {R}{R}{R}.";
+
+/// Positive twin shared by the gate-negative reach-guards below.
+const AS_ENTERS_LOSE_TWO: &str = "As ~ enters, you lose 2 life.";
+
+/// `line`, self-reference-normalized and lowercased, as the routing sites see it.
+fn normalized_lower_frame_line(line: &str, card_name: &str) -> String {
+    crate::parser::oracle_util::normalize_card_name_refs(line, card_name).to_lowercase()
+}
+
+/// SHAPE (CR 614.1c + CR 603.6d + CR 114.2): Tibalt's "As Tibalt enters" line is
+/// a mandatory `Moved` self-to-battlefield replacement whose execute creates the
+/// emblem hosting the persistent any-color exile-play permission — no static,
+/// no swallowed clause.
+#[test]
+fn tibalt_as_enters_emblem_parses_as_moved_self_replacement() {
+    let parsed = parse_oracle_text(
+        TIBALT_FULL,
+        "Tibalt, Cosmic Impostor",
+        &[],
+        &["Planeswalker".into()],
+        &["Tibalt".into()],
+    );
+    // Reach-guard: the three loyalty lines parsed.
+    assert_eq!(parsed.abilities.len(), 3, "{:?}", parsed.abilities);
+    assert!(parsed.statics.is_empty(), "{:?}", parsed.statics);
+    assert_eq!(parsed.replacements.len(), 1, "{:?}", parsed.replacements);
+    let repl = &parsed.replacements[0];
+    assert_eq!(repl.event, ReplacementEvent::Moved);
+    assert_eq!(repl.valid_card, Some(TargetFilter::SelfRef));
+    assert_eq!(repl.destination_zone, Some(Zone::Battlefield));
+    assert_eq!(repl.mode, ReplacementMode::Mandatory);
+    let execute = repl.execute.as_deref().expect("the replacement executes");
+    assert!(execute.sub_ability.is_none(), "{execute:?}");
+    let Effect::CreateEmblem { statics, triggers } = &*execute.effect else {
+        panic!("expected CreateEmblem, got {:?}", execute.effect);
+    };
+    assert!(triggers.is_empty(), "{triggers:?}");
+    assert_eq!(statics.len(), 1, "{statics:?}");
+    assert_eq!(
+        statics[0].mode,
+        StaticMode::ExileCastPermission {
+            frequency: CastFrequency::Unlimited,
+            play_mode: CardPlayMode::Play,
+            cost: crate::types::statics::ExileCastCost::PayNormalCost,
+            pool: crate::types::statics::ExileCardPool::Persistent,
+            timing: crate::types::statics::ExileCastTiming::AnyTime,
+            mana_spend_permission: Some(crate::types::ability::ManaSpendPermission::AnyColor),
+            grants_flash: false,
+            extra_cost: None,
+            enters_with_counter: None,
+            grantee: crate::types::statics::ExileCastGrantee::SourceController,
+        }
+    );
+    assert!(
+        !parsed
+            .parse_warnings
+            .iter()
+            .any(|warning| matches!(warning, OracleDiagnostic::SwallowedClause { .. })),
+        "{:?}",
+        parsed.parse_warnings
+    );
+}
+
+/// Gate negative (CR 614.12a): Phylactery Lich's as-enters body puts a counter
+/// on an artifact you control — an object effect outside the kind allowlist — so
+/// its frame line keeps its prior `replacement_structure` gap.
+#[test]
+fn phylactery_lich_as_enters_object_effect_body_keeps_prior_shape() {
+    let oracle = "Indestructible\nAs this creature enters, put a phylactery counter on an artifact you control.\nWhen you control no permanents with phylactery counters on them, sacrifice this creature.";
+    let line = "As this creature enters, put a phylactery counter on an artifact you control.";
+    let parsed = parse_oracle_text(
+        oracle,
+        "Phylactery Lich",
+        &["Indestructible".into()],
+        &["Creature".into()],
+        &["Zombie".into()],
+    );
+    assert!(
+        !parsed
+            .replacements
+            .iter()
+            .any(|repl| repl.event == ReplacementEvent::Moved),
+        "{:?}",
+        parsed.replacements
+    );
+    assert!(
+        parsed.abilities.iter().any(|ability| matches!(
+            &*ability.effect,
+            Effect::Unimplemented { name, .. } if name == "replacement_structure"
+        )),
+        "{:?}",
+        parsed.abilities
+    );
+    // Reach-guard: the frame is recognized and the arm itself declines the body,
+    // while the admitted twin is accepted.
+    assert!(is_as_self_enters_frame(&normalized_lower_frame_line(
+        line,
+        "Phylactery Lich"
+    )));
+    assert!(parse_as_enters_one_shot_replacement(line, "Phylactery Lich").is_none());
+    assert!(parse_as_enters_one_shot_replacement(AS_ENTERS_LOSE_TWO, "Phylactery Lich").is_some());
+}
+
+/// The static-shaped routing site runs before Priority 8. Static-shaped frame
+/// lines that a Priority-8 arm claims today (Thief of Blood's population
+/// counter removal, Arsenal Thresher's optional reveal) are declined by the
+/// gate and keep their Priority-8 replacement.
+#[test]
+fn static_shaped_as_enters_lines_keep_priority_eight_replacement() {
+    for (name, oracle, line, description, keywords, types, subtypes) in [
+        (
+            "Thief of Blood",
+            "Flying\nAs this creature enters, remove all counters from all permanents. This creature enters with a +1/+1 counter on it for each counter removed this way.",
+            "As this creature enters, remove all counters from all permanents. This creature enters with a +1/+1 counter on it for each counter removed this way.",
+            "As ~ enters, remove all counters from all permanents. ~ enters with a +1/+1 counter on it for each counter removed this way.",
+            vec!["Flying".to_string()],
+            vec!["Creature".to_string()],
+            vec!["Vampire".to_string()],
+        ),
+        (
+            "Arsenal Thresher",
+            "As this creature enters, you may reveal any number of other artifact cards from your hand. This creature enters with a +1/+1 counter on it for each card revealed this way.",
+            "As this creature enters, you may reveal any number of other artifact cards from your hand. This creature enters with a +1/+1 counter on it for each card revealed this way.",
+            "As ~ enters, you may reveal any number of other artifact cards from your hand. ~ enters with a +1/+1 counter on it for each card revealed this way.",
+            vec![],
+            vec!["Artifact".to_string(), "Creature".to_string()],
+            vec!["Construct".to_string()],
+        ),
+    ] {
+        let parsed = parse_oracle_text(oracle, name, &keywords, &types, &subtypes);
+        let moved: Vec<&ReplacementDefinition> = parsed
+            .replacements
+            .iter()
+            .filter(|repl| repl.event == ReplacementEvent::Moved)
+            .collect();
+        assert_eq!(moved.len(), 1, "{name}: {:?}", parsed.replacements);
+        assert_eq!(moved[0].description.as_deref(), Some(description), "{name}");
+        assert!(
+            matches!(
+                moved[0].execute.as_deref().map(|e| &*e.effect),
+                Some(Effect::PutCounter { .. })
+            ),
+            "{name}: {:?}",
+            moved[0].execute
+        );
+        // Reach-guard: the static-shaped routing site sees the frame and the gate declines the body.
+        assert!(
+            is_as_self_enters_frame(&normalized_lower_frame_line(line, name)),
+            "{name}"
+        );
+        assert!(
+            parse_as_enters_one_shot_replacement(line, name).is_none(),
+            "{name}"
+        );
+        assert!(parse_as_enters_one_shot_replacement(AS_ENTERS_LOSE_TWO, name).is_some());
+    }
+}
+
+/// Admitted class face (CR 614.1c + CR 603.6d + CR 119.3): Lich's "As this
+/// enchantment enters, you lose life equal to your life total." is a mandatory
+/// `Moved` self replacement losing the controller's life total.
+#[test]
+fn lich_as_enters_life_loss_parses_as_moved_self_replacement() {
+    let oracle = "As this enchantment enters, you lose life equal to your life total.\nYou don't lose the game for having 0 or less life.\nIf you would gain life, draw that many cards instead.\nWhenever you're dealt damage, sacrifice that many nontoken permanents. If you can't, you lose the game.\nWhen this enchantment is put into a graveyard from the battlefield, you lose the game.";
+    let parsed = parse_oracle_text(oracle, "Lich", &[], &["Enchantment".into()], &[]);
+    let moved: Vec<&ReplacementDefinition> = parsed
+        .replacements
+        .iter()
+        .filter(|repl| repl.event == ReplacementEvent::Moved)
+        .collect();
+    assert_eq!(moved.len(), 1, "{:?}", parsed.replacements);
+    let repl = moved[0];
+    assert_eq!(repl.valid_card, Some(TargetFilter::SelfRef));
+    assert_eq!(repl.destination_zone, Some(Zone::Battlefield));
+    assert_eq!(repl.mode, ReplacementMode::Mandatory);
+    assert_eq!(
+        repl.description.as_deref(),
+        Some("As ~ enters, you lose life equal to your life total.")
+    );
+    let execute = repl.execute.as_deref().expect("the replacement executes");
+    assert!(execute.sub_ability.is_none(), "{execute:?}");
+    assert_eq!(
+        *execute.effect,
+        Effect::LoseLife {
+            amount: QuantityExpr::Ref {
+                qty: QuantityRef::LifeTotal {
+                    player: crate::types::ability::PlayerScope::Controller
+                }
+            },
+            target: Some(TargetFilter::Controller),
+        }
+    );
+    assert!(
+        !parsed.abilities.iter().any(|ability| ability
+            .description
+            .as_deref()
+            .is_some_and(|d| d == "As ~ enters, you lose life equal to your life total.")),
+        "the frame line is no longer an ability: {:?}",
+        parsed.abilities
+    );
+    // Reach-guards: Lich's other lines are unchanged.
+    assert!(parsed
+        .replacements
+        .iter()
+        .any(|repl| repl.event == ReplacementEvent::GainLife));
+    assert!(parsed
+        .statics
+        .iter()
+        .any(|def| matches!(def.mode, StaticMode::CantLoseTheGame)));
+}

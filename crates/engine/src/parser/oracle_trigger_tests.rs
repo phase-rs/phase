@@ -23641,8 +23641,10 @@ fn trigger_cast_spell_while_attacking_gates_on_combat() {
     assert_eq!(def.valid_target, Some(TargetFilter::Controller));
     assert_eq!(
         def.condition,
-        Some(TriggerCondition::SourceIsAttacking),
-        "the `while ~ is attacking` gate must become a SourceIsAttacking condition"
+        Some(TriggerCondition::EventTime {
+            condition: Box::new(TriggerCondition::SourceIsAttacking),
+        }),
+        "the `while ~ is attacking` gate must become an event-time SourceIsAttacking condition"
     );
     // The remaining event clause still parses to the copy effect.
     assert!(matches!(
@@ -23665,7 +23667,9 @@ fn trigger_while_attacking_composes_with_existing_condition() {
     match def.condition {
         Some(TriggerCondition::And { conditions }) => {
             assert!(
-                conditions.contains(&TriggerCondition::SourceIsAttacking),
+                conditions.contains(&TriggerCondition::EventTime {
+                    condition: Box::new(TriggerCondition::SourceIsAttacking),
+                }),
                 "expected SourceIsAttacking among AND conditions, got {conditions:?}"
             );
             assert!(
@@ -23756,10 +23760,12 @@ fn trigger_cast_instant_sorcery_while_two_or_more_quest_counters() {
     assert_eq!(def.valid_target, Some(TargetFilter::Controller));
     assert_eq!(
         def.condition,
-        Some(TriggerCondition::HasCounters {
-            counters: CounterMatch::OfType(CounterType::Generic("quest".to_string())),
-            minimum: 2,
-            maximum: None,
+        Some(TriggerCondition::EventTime {
+            condition: Box::new(TriggerCondition::HasCounters {
+                counters: CounterMatch::OfType(CounterType::Generic("quest".to_string())),
+                minimum: 2,
+                maximum: None,
+            }),
         }),
         "the quest-counter gate must become a HasCounters condition"
     );
@@ -27709,6 +27715,57 @@ fn unadmitted_state_change_head_yields_an_honest_unknown_arm() {
     assert_eq!(
         triggers[1].description.as_deref(),
         Some("When ~ is turned face down, draw a card.")
+    );
+}
+
+/// CR 508.1m + CR 109.4: Pugnacious Hammerskull's while-gate must survive. The
+/// negated "you don't control another Dinosaur" used to fail to parse, the gate
+/// was dropped (`condition: None`) and the stun counter landed on EVERY attack.
+#[test]
+fn attacks_while_you_dont_control_another_type_keeps_the_gate() {
+    let triggers = parse_trigger_lines(
+        "Whenever this creature attacks while you don't control another Dinosaur, put a stun counter on it.",
+        "Pugnacious Hammerskull",
+    );
+    assert_eq!(triggers.len(), 1);
+    assert_eq!(triggers[0].mode, TriggerMode::Attacks);
+    // The gate lowers to "count of OTHER Dinosaurs you control == 0" (the same
+    // shape as Kari Zev's "you don't control a legendary Monkey").
+    let cond = format!("{:?}", triggers[0].condition);
+    // CR 508.1m + CR 603.4: an event-time gate, never a resolution recheck.
+    assert!(
+        cond.starts_with("Some(EventTime"),
+        "the while-gate must be wrapped as EventTime, got {cond}"
+    );
+    assert!(
+        cond.contains("Another")
+            && cond.contains("Dinosaur")
+            && (cond.contains("Not {")
+                || (cond.contains("comparator: EQ") && cond.contains("Fixed { value: 0 }"))),
+        "expected the 'no other Dinosaur' gate, got {cond}"
+    );
+}
+
+/// CR 603.4 + CR 201.2: The Majestic Duo — the intervening-if reads "another
+/// permanent named The Majestic Duo" and stops at the comma, so the copy effect
+/// survives. Pins the name boundary the negated-control fix exposed: before it,
+/// the name swallowed ", create a token …" and the copy was dropped.
+#[test]
+fn majestic_duo_named_condition_stops_at_the_effect_comma() {
+    let triggers = parse_trigger_lines(
+        "When The Majestic Duo enters, if you don't control another permanent named The Majestic Duo, create a token that's a copy of it, except it's not legendary, it has \"Whenever this creature deals combat damage to a player, draw a card and earnestly tell them good luck,\" and it loses all other abilities.",
+        "The Majestic Duo",
+    );
+    assert_eq!(triggers.len(), 1);
+    let cond = format!("{:?}", triggers[0].condition);
+    assert!(
+        cond.contains("Another") && cond.to_lowercase().contains("name: \"the majestic duo\""),
+        "condition must name exactly The Majestic Duo, got {cond}"
+    );
+    let exec = format!("{:?}", triggers[0].execute);
+    assert!(
+        exec.contains("CopyTokenOf"),
+        "the copy effect must survive the condition, got {exec}"
     );
 }
 
@@ -35228,4 +35285,116 @@ fn split_graveyard_origin_owner_axes() {
             }
         );
     }
+}
+
+/// CR 608.2c + CR 608.2d: a hand reveal that parks a card choice introduces the
+/// chosen revealed card as the referent of a later `ParentTarget`, so it is a
+/// chosen-object boundary for the event-source lift — whatever player the
+/// reveal targets (Valki's per-opponent reveal targets `Controller`, which the
+/// `Typed` chosen-filter arm cannot see). Without the boundary the lift rewrites
+/// Valki's "exile a creature card they revealed this way" to
+/// `TriggeringSource`, so Valki exiles itself and its ETB re-fires.
+#[test]
+fn card_parking_hand_reveal_is_a_chosen_object_boundary_for_the_event_source_lift() {
+    use crate::game::effects::reveal_hand::effect_parks_reveal_card_choice;
+
+    // (i) Valki, God of Lies — verbatim ETB.
+    let valki = parse_trigger_line(
+        "When Valki enters, each opponent reveals their hand. For each opponent, exile a creature card they revealed this way until Valki leaves the battlefield.",
+        "Valki, God of Lies",
+    );
+    assert_eq!(valki.mode, TriggerMode::ChangesZone);
+    let exec = valki.execute.as_deref().expect("Valki ETB execute");
+    // Reach-guards: the verbatim two-instruction shape reached trigger lowering.
+    assert!(
+        !effect_parks_reveal_card_choice(&exec.effect),
+        "the root reveal pass parks no card choice: {:?}",
+        exec.effect
+    );
+    assert_eq!(exec.player_scope, Some(PlayerFilter::Opponent));
+    let choice = exec.sub_ability.as_deref().expect("the choice step");
+    assert!(
+        effect_parks_reveal_card_choice(&choice.effect),
+        "the choice step parks the card choice: {:?}",
+        choice.effect
+    );
+    assert_eq!(choice.player_scope, Some(PlayerFilter::Opponent));
+    let sub = choice.sub_ability.as_deref().expect("the exile consumer");
+    assert_eq!(sub.duration, Some(Duration::UntilHostLeavesPlay));
+    match &*sub.effect {
+        Effect::ChangeZone {
+            destination,
+            target,
+            ..
+        } => {
+            assert_eq!(*destination, Zone::Exile);
+            assert_eq!(
+                *target,
+                TargetFilter::ParentTarget,
+                "the exile consumer keeps the chosen revealed card, not the trigger event"
+            );
+        }
+        other => panic!("expected the exile consumer, got {other:?}"),
+    }
+
+    // (ii) Reach-guard: the lift still runs where no card-parking reveal stops it.
+    let necroduality = parse_trigger_line(
+        "Whenever a nontoken Zombie you control enters, create a token that's a copy of that creature.",
+        "Necroduality",
+    );
+    assert!(matches!(
+        &*necroduality.execute.as_deref().expect("execute").effect,
+        Effect::CopyTokenOf {
+            target: TargetFilter::TriggeringSource,
+            ..
+        }
+    ));
+
+    // (iii) Sibling pin where the new stop fires with no liftable consumer after
+    // it: Armored Kincaller lowers exactly as before.
+    let kincaller = parse_trigger_line(
+        "When this creature enters, you may reveal a Dinosaur card from your hand. If you do or if you control another Dinosaur, you gain 3 life.",
+        "Armored Kincaller",
+    );
+    let kincaller_exec = kincaller.execute.as_deref().expect("execute");
+    assert!(effect_parks_reveal_card_choice(&kincaller_exec.effect));
+    assert!(matches!(
+        &*kincaller_exec.effect,
+        Effect::RevealHand {
+            target: TargetFilter::Controller,
+            ..
+        }
+    ));
+    let base_kincaller: serde_json::Value = serde_json::from_str(
+        r#"{"kind":"Spell","effect":{"type":"RevealHand","target":{"type":"Controller"},"card_filter":{"type":"Typed","type_filters":[{"Subtype":"Dinosaur"}],"controller":null,"properties":[]},"count":null,"reveal":true},"cost":null,"sub_ability":{"kind":"Spell","effect":{"type":"GainLife","amount":{"type":"Fixed","value":3}},"cost":null,"sub_ability":null,"duration":null,"description":null,"target_prompt":null,"condition":{"type":"Or","conditions":[{"type":"EffectOutcome","signal":"OptionalEffectPerformed"},{"type":"QuantityCheck","lhs":{"type":"Ref","qty":{"type":"ObjectCount","filter":{"type":"Typed","type_filters":[{"Subtype":"Dinosaur"}],"controller":"You","properties":[{"type":"Another"},{"type":"InZone","zone":"Battlefield"}]}}},"comparator":"GE","rhs":{"type":"Fixed","value":1}}]},"optional_targeting":false,"optional":false,"forward_result":false,"sub_link":"SequentialSibling"},"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":true,"forward_result":false}"#,
+    )
+    .expect("base Kincaller JSON");
+    assert_eq!(
+        serde_json::to_value(kincaller_exec).expect("serialize"),
+        base_kincaller,
+        "Armored Kincaller's lowered trigger is unchanged"
+    );
+
+    // (iv) Predicate units: the new arm keys on card-parking, not on "is a
+    // RevealHand".
+    let reveal = |card_filter: TargetFilter, choice_optional: bool| Effect::RevealHand {
+        target: TargetFilter::Controller,
+        card_filter,
+        count: None,
+        selection: CardSelectionMode::default(),
+        choice_optional,
+        reveal: true,
+    };
+    assert!(introduces_chosen_object_target(&reveal(
+        TargetFilter::Typed(TypedFilter::creature()),
+        false
+    )));
+    assert!(introduces_chosen_object_target(&reveal(
+        TargetFilter::None,
+        true
+    )));
+    assert!(!introduces_chosen_object_target(&reveal(
+        TargetFilter::None,
+        false
+    )));
 }

@@ -4252,6 +4252,23 @@ fn parse_hand_reveal_target_and_card_filter(
     after_reveal_lower: &str,
     ctx: &mut ParseContext,
 ) -> (TargetFilter, TargetFilter) {
+    // CR 701.20a + CR 608.2c: a bare "their hand" names the clause subject's
+    // hand; with no subject of its own that is the acting player (Controller),
+    // which a per-player scope rebinds to the iterating player and
+    // `inject_subject_target` rebinds to a declared subject.
+    if all_consuming(terminated(
+        alt((
+            tag::<_, _, OracleError<'_>>("their hand"),
+            tag("his or her hand"),
+        )),
+        opt(tag(".")),
+    ))
+    .parse(after_reveal_lower.trim())
+    .is_ok()
+    {
+        return (TargetFilter::Controller, TargetFilter::None);
+    }
+
     // CR 701.20a + reflexive choose: "<possessive> hand and you choose a [filter]
     // card from it" names the revealing player's hand directly, then the
     // controller chooses a filtered card from it (Biting-Palm Ninja: "that player
@@ -4731,7 +4748,7 @@ pub(super) fn parse_choose_ast(
     // "exiled with ~/it" referent is the source's linked-exile set, scanned in
     // Exile by `TargetFilter::ExiledBySource` (Omenpath Journey). Checked before
     // the bare "choose " strip so it never misroutes to the targeting fallback.
-    if let Some(ast) = try_parse_choose_exiled_anaphor(lower) {
+    if let Some(ast) = try_parse_choose_exiled_anaphor(lower, ctx) {
         return Some(ast);
     }
 
@@ -5158,6 +5175,7 @@ fn try_parse_choose_owned_by_voter(
         up_to: false,
         // CR 608.2d: per-ballot voter choice is controller-directed, never random.
         selection: crate::types::ability::CardSelectionMode::Chosen,
+        candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Direct,
     })
 }
 
@@ -5186,7 +5204,16 @@ fn try_parse_choose_owned_by_voter(
 /// "you choose" → [`Chooser::Controller`]. The targeted form ("target
 /// opponent chooses") is not accepted — it must bind the chooser to the
 /// chosen target slot, so it falls through honestly.
-fn try_parse_choose_exiled_anaphor(lower: &str) -> Option<ChooseImperativeAst> {
+///
+/// The typed forms ("a creature card exiled with ~" / "a nonland card exiled
+/// this way") accept an optional trailing mana-value suffix ("… with mana value
+/// X" — Valki, God of Lies), parsed by the shared `parse_mana_value_suffix`
+/// building block and intersected into the card-type filter. The untyped
+/// "exiled this way" tracked-set form accepts no suffix.
+fn try_parse_choose_exiled_anaphor(
+    lower: &str,
+    ctx: &mut ParseContext,
+) -> Option<ChooseImperativeAst> {
     type E<'a> = OracleError<'a>;
 
     // CR 608.2c + CR 608.2d: A standalone "Choose one." / "Choose one card."
@@ -5260,29 +5287,42 @@ fn try_parse_choose_exiled_anaphor(lower: &str) -> Option<ChooseImperativeAst> {
     //   And { Typed, ExiledBySource } }` shape as the Koh arm so the runtime
     //   scans the shared exile zone (CR 400.1) and linkage does all scoping.
     if let Ok((tail, _)) = tag::<_, _, E>(" exiled this way").parse(rest_after) {
-        if tail.is_empty() {
-            return Some(match card_type {
-                None => ChooseImperativeAst::FromTrackedSet {
+        match card_type {
+            None if tail.is_empty() => {
+                return Some(ChooseImperativeAst::FromTrackedSet {
                     count: 1,
                     chooser,
                     selection,
                     candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
-                },
-                Some(tf) => ChooseImperativeAst::FromZone {
+                });
+            }
+            None => {}
+            Some(tf) => {
+                // CR 202.3 + CR 107.3a: an optional "with mana value N/X" suffix
+                // bounds the pool by mana value (X is the value announced on
+                // activation).
+                let mana_value = parse_exiled_anaphor_mana_value_tail(tail, ctx)?;
+                return Some(ChooseImperativeAst::FromZone {
                     count: 1,
                     zones: vec![Zone::Exile],
                     zone_owner: ZoneOwner::AllOwners,
                     filter: TargetFilter::And {
                         filters: vec![
-                            TargetFilter::Typed(TypedFilter::new(tf)),
+                            TargetFilter::Typed(
+                                TypedFilter::new(tf).properties(mana_value.into_iter().collect()),
+                            ),
                             TargetFilter::ExiledBySource,
                         ],
                     },
                     chooser,
                     up_to: false,
                     selection,
-                },
-            });
+                    // CR 608.2c: "exiled this way" refers back to what an earlier
+                    // instruction of THIS ability exiled — the chain's tracked set
+                    // (`Legacy`) is exactly that pool's provenance.
+                    candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
+                });
+            }
         }
     }
 
@@ -5293,15 +5333,26 @@ fn try_parse_choose_exiled_anaphor(lower: &str) -> Option<ChooseImperativeAst> {
     if let Ok((tail, _)) =
         alt((tag::<_, _, E>(" exiled with ~"), tag(" exiled with it"))).parse(rest_after)
     {
-        if tail.is_empty() {
-            let filter = match card_type {
-                Some(tf) => TargetFilter::And {
+        // CR 202.3 + CR 107.3a: "with mana value X" bounds the linked pile by
+        // the X announced on activation (Valki, God of Lies).
+        if let Some(mana_value) = parse_exiled_anaphor_mana_value_tail(tail, ctx) {
+            // CR 607.2a + CR 406.6: "exiled with ~" names the linked pile.
+            let filter = match (card_type, mana_value) {
+                (Some(tf), mana_value) => TargetFilter::And {
                     filters: vec![
-                        TargetFilter::Typed(TypedFilter::new(tf)),
+                        TargetFilter::Typed(
+                            TypedFilter::new(tf).properties(mana_value.into_iter().collect()),
+                        ),
                         TargetFilter::ExiledBySource,
                     ],
                 },
-                None => TargetFilter::ExiledBySource,
+                (None, Some(prop)) => TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::Typed(TypedFilter::card().properties(vec![prop])),
+                        TargetFilter::ExiledBySource,
+                    ],
+                },
+                (None, None) => TargetFilter::ExiledBySource,
             };
             // CR 400.1 + CR 607.2a: "exiled with [source]" is owner-agnostic —
             // exile is a zone shared by all players (CR 400.1) and the
@@ -5317,11 +5368,33 @@ fn try_parse_choose_exiled_anaphor(lower: &str) -> Option<ChooseImperativeAst> {
                 chooser,
                 up_to: false,
                 selection,
+                candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Direct,
             });
         }
     }
 
     None
+}
+
+/// CR 202.3 + CR 107.3a: the tail after a typed "exiled with ~" / "exiled this
+/// way" choose anaphor. `None` rejects the clause (unrecognized leftover — the
+/// honest strict-failure path); `Some(None)` is an empty tail; `Some(Some(prop))`
+/// is a mana-value bound ("with mana value X") parsed by the shared
+/// `parse_mana_value_suffix` building block, which must consume the whole tail
+/// (a trailing period aside).
+fn parse_exiled_anaphor_mana_value_tail(
+    tail: &str,
+    ctx: &mut ParseContext,
+) -> Option<Option<FilterProp>> {
+    if tail.is_empty() {
+        return Some(None);
+    }
+    let (prop, consumed) = crate::parser::oracle_target::parse_mana_value_suffix(tail, ctx)?;
+    tail[consumed..]
+        .trim_end_matches('.')
+        .trim()
+        .is_empty()
+        .then_some(Some(prop))
 }
 
 /// CR 702.62b + CR 608.2c: "choose a suspended card [you own]" — an interactive
@@ -5367,6 +5440,7 @@ fn try_parse_choose_suspended_card(lower: &str) -> Option<ChooseImperativeAst> {
         up_to: false,
         // CR 608.2d: controller-directed selection, never random.
         selection: CardSelectionMode::Chosen,
+        candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Direct,
     })
 }
 
@@ -5439,6 +5513,7 @@ fn try_parse_choose_exiled_card_with_counter(lower: &str) -> Option<ChooseImpera
         up_to: false,
         // CR 608.2d: controller-directed selection, never random.
         selection: CardSelectionMode::Chosen,
+        candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Direct,
     })
 }
 
@@ -5549,6 +5624,7 @@ fn try_parse_choose_from_zone(lower: &str, ctx: &mut ParseContext) -> Option<Cho
         chooser: Chooser::Controller,
         up_to: false,
         selection,
+        candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Direct,
     })
 }
 
@@ -5585,6 +5661,7 @@ pub(super) fn parse_for_each_player_choose_from_zone(
         chooser,
         up_to,
         selection,
+        candidate_source,
     }) = try_parse_choose_from_zone(body, ctx)
     {
         return Some(ChooseImperativeAst::FromZone {
@@ -5595,6 +5672,7 @@ pub(super) fn parse_for_each_player_choose_from_zone(
             chooser,
             up_to,
             selection,
+            candidate_source,
         });
     }
 
@@ -6383,42 +6461,13 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
             chooser,
             up_to,
             selection,
+            candidate_source,
         } => {
             let mut zones = zones.into_iter();
             let zone = zones.next().unwrap_or(Zone::Hand);
-            // CR 608.2c + CR 608.2d: this clause NAMES its own zone ("a creature
-            // card in your graveyard"), so its candidate pool is that zone — not
-            // whatever set an earlier instruction in the same chain happened to
-            // publish. `Legacy` prefers the chain's tracked set whenever one
-            // exists, which silently substituted the preceding clause's output
-            // for the named zone: Rejoin the Fight offered only the three cards
-            // it had just milled and never the rest of the graveyard.
-            //
-            // EXCEPT when the filter carries `TargetFilter::ExiledBySource` —
-            // the "exiled this way" anaphor. Those clauses name a zone AND
-            // refer back to the set an EARLIER INSTRUCTION OF THIS SAME ABILITY
-            // put there, which is still CR 608.2c (the instructions are
-            // followed in the order written, and the later one refers to the
-            // earlier one's result). Deliberately NOT CR 607.2a: that rule
-            // links two SEPARATE abilities printed on one object (CR 607.1),
-            // whereas Author of Shadows and Plargg and Nassari each carry a
-            // single triggered ability whose second sentence refers to its own
-            // first sentence.
-            //
-            // Keeping `Legacy` here preserves pool PROVENANCE: the printed pool
-            // is "what this instruction exiled", which is exactly the chain's
-            // tracked set. `ExiledBySource` would independently reject cards
-            // this source never exiled, so this is not the difference between
-            // offering unrelated exile and not — it is the difference between a
-            // pool defined by the instruction and one re-derived from the zone.
-            // The `FromTrackedSet` sibling arm above covers the anaphors that
-            // name no zone ("choose one of them"); `ExiledBySource` covers the
-            // ones that do.
-            let candidate_source = if super::lower::filter_mentions_exiled_by_source(&filter) {
-                crate::types::ability::ZoneChoiceCandidateSource::Legacy
-            } else {
-                crate::types::ability::ZoneChoiceCandidateSource::Direct
-            };
+            // CR 608.2c + CR 608.2d: the candidate pool is the one the clause
+            // NAMES, carried on the AST (`candidate_source`) by the parser arm
+            // that recognized it — never re-derived here from the filter shape.
             Effect::ChooseFromZone {
                 count,
                 zone,
@@ -22116,6 +22165,101 @@ mod tests {
             }
             other => panic!("Expected FromTrackedSet, got {other:?}"),
         }
+    }
+
+    fn choose_exiled(text: &str) -> Option<ChooseImperativeAst> {
+        let lower = text.to_lowercase();
+        parse_choose_ast(text, &lower, &mut ParseContext::default())
+    }
+
+    /// CR 607.2a + CR 406.6: "choose a <type> card exiled with ~" (Koh, the Face
+    /// Stealer) names the source's linked pile, so its pool is a `Direct` scan of
+    /// exile filtered by linkage; the filter is unchanged by the suffix support.
+    #[test]
+    fn choose_exiled_with_mana_value_suffix_koh_is_direct_linked_pile() {
+        let Some(ChooseImperativeAst::FromZone {
+            filter,
+            candidate_source,
+            ..
+        }) = choose_exiled("choose a creature card exiled with ~")
+        else {
+            panic!("expected FromZone");
+        };
+        assert_eq!(candidate_source, ZoneChoiceCandidateSource::Direct);
+        assert_eq!(
+            filter,
+            TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::creature()),
+                    TargetFilter::ExiledBySource,
+                ],
+            }
+        );
+    }
+
+    /// CR 608.2c: "exiled this way" refers back to this ability's own exile, so
+    /// its pool keeps the chain's tracked-set provenance (`Legacy`) — Plargg and
+    /// Nassari.
+    #[test]
+    fn choose_exiled_with_mana_value_suffix_this_way_keeps_legacy_pool() {
+        let Some(ChooseImperativeAst::FromZone {
+            candidate_source,
+            chooser,
+            ..
+        }) = choose_exiled("an opponent chooses a nonland card exiled this way")
+        else {
+            panic!("expected FromZone");
+        };
+        assert_eq!(chooser, Chooser::Opponent);
+        assert_eq!(candidate_source, ZoneChoiceCandidateSource::Legacy);
+    }
+
+    /// CR 202.3 + CR 107.3a: a "with mana value N" suffix after the linked-pile
+    /// anaphor bounds the pool by mana value (untyped "a card" still gets a card
+    /// type leg to carry the property).
+    #[test]
+    fn choose_exiled_with_mana_value_suffix_fixed_value_is_intersected() {
+        let Some(ChooseImperativeAst::FromZone {
+            filter,
+            candidate_source,
+            ..
+        }) = choose_exiled("choose a card exiled with ~ with mana value 2")
+        else {
+            panic!("expected FromZone");
+        };
+        assert_eq!(candidate_source, ZoneChoiceCandidateSource::Direct);
+        assert_eq!(
+            filter,
+            TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::Cmc {
+                        comparator: crate::types::ability::Comparator::EQ,
+                        value: QuantityExpr::Fixed { value: 2 },
+                    }])),
+                    TargetFilter::ExiledBySource,
+                ],
+            }
+        );
+    }
+
+    /// The untyped "exiled this way" tracked-set form accepts no suffix: the
+    /// clause declines rather than dropping the mana-value bound.
+    #[test]
+    fn choose_exiled_with_mana_value_suffix_untyped_this_way_declines() {
+        let declined = choose_exiled("choose a card exiled this way with mana value x");
+        assert!(
+            !matches!(
+                declined,
+                Some(ChooseImperativeAst::FromTrackedSet { .. })
+                    | Some(ChooseImperativeAst::FromZone { .. })
+            ),
+            "{declined:?}"
+        );
+        // Reach-guard: the same clause without the suffix is the tracked-set form.
+        assert!(matches!(
+            choose_exiled("choose a card exiled this way"),
+            Some(ChooseImperativeAst::FromTrackedSet { .. })
+        ));
     }
 
     #[test]

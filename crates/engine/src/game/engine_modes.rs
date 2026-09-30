@@ -134,10 +134,11 @@ fn handle_activated_mode_choice(
     // CR 602.2 + CR 601.2c (capture A, modal): the chosen modes' chain is built
     // here, after the announcement returned for the mode choice, so its journal
     // facts are captured now, before any cost is paid. Target settlement adds
-    // the committed targets.
-    resolved.activation_record =
-        casting::capture_activation_record(state, player, source_id, ability_index, &resolved)
-            .map(Box::new);
+    // the committed targets. CR 700.2a: modes are chosen as part of
+    // activating; no game action can intervene while `AbilityModeChoice` is
+    // pending, so this is still the announcement layout (CR 602.2a: provenance
+    // too).
+    casting::record_activation_announcement(state, player, source_id, ability_index, &mut resolved);
 
     let target_constraints = target_constraints_from_modal(&modal);
 
@@ -249,7 +250,7 @@ fn handle_activated_mode_choice(
             // declaration before activation costs are paid.
             casting::emit_targeting_events(
                 state,
-                &super::ability_utils::flatten_targets_in_chain(&resolved),
+                &super::ability_utils::declared_targets_in_chain(&resolved),
                 source_id,
                 player,
                 events,

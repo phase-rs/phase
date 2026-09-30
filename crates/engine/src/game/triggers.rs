@@ -4418,6 +4418,10 @@ fn collect_pending_triggers_with_collection(
     // CR 603.2c: Track which batched triggers (source_id, trig_idx) have already
     // fired in this pass so "one or more" triggers fire at most once per batch.
     let mut batched_this_pass: HashSet<(ObjectId, usize)> = HashSet::new();
+    // CR 726.2: the initiative steal is "whenever ONE OR MORE creatures a
+    // player controls deal combat damage", so each damaging player steals at
+    // most once per pass no matter how many of their creatures connect.
+    let mut initiative_stolen_this_pass: HashSet<PlayerId> = HashSet::new();
     let off_zone_trigger_sources = if events.is_empty() {
         Vec::new()
     } else {
@@ -6138,7 +6142,7 @@ fn collect_pending_triggers_with_collection(
             }
         }
 
-        // CR 725.2: At the beginning of the initiative holder's upkeep,
+        // CR 726.2: At the beginning of the initiative holder's upkeep,
         // that player ventures into the Undercity. Synthetic game-rule trigger.
         if let GameEvent::PhaseChanged {
             phase: Phase::Upkeep,
@@ -6272,8 +6276,8 @@ fn collect_pending_triggers_with_collection(
             }
         }
 
-        // CR 725.2: When a creature deals combat damage to the initiative holder,
-        // its controller takes the initiative. Synthetic game-rule trigger.
+        // CR 726.2: When one or more creatures a player controls deal combat
+        // damage to the initiative holder, that player takes the initiative.
         if let GameEvent::DamageDealt {
             source_id,
             target: TargetRef::Player(target_player),
@@ -6284,7 +6288,9 @@ fn collect_pending_triggers_with_collection(
             if state.initiative == Some(*target_player) {
                 if let Some(attacker) = state.objects.get(source_id) {
                     let new_holder = attacker.controller;
-                    if new_holder != *target_player {
+                    if new_holder != *target_player
+                        && initiative_stolen_this_pass.insert(new_holder)
+                    {
                         let source_context = trigger_source_context_for_latch(state, attacker);
                         let mut take_init = ResolvedAbility::new(
                             Effect::TakeTheInitiative,
@@ -8565,7 +8571,7 @@ fn push_pending_trigger_to_stack_with_firing_and_duration_events(
     );
     let crime_candidate = super::casting::targets_commit_crime(
         state,
-        &super::ability_utils::flatten_targets_in_chain(&ability),
+        &super::ability_utils::declared_targets_in_chain(&ability),
         controller,
     );
     let reveal_caused_card = reveal_causing_card(&ability);
@@ -8973,7 +8979,7 @@ fn prepare_trigger_targets(state: &GameState, trigger: &PendingTrigger) -> Prepa
             let mut events = Vec::new();
             super::casting::emit_targeting_events(
                 &prepared_state,
-                &super::ability_utils::flatten_targets_in_chain(&prepared_trigger.ability),
+                &super::ability_utils::declared_targets_in_chain(&prepared_trigger.ability),
                 prepared_trigger.source_id,
                 prepared_trigger.controller,
                 &mut events,
@@ -14162,6 +14168,15 @@ fn trigger_condition_designation_anchors_resolvable(
             source_context,
             trigger_event,
         ),
+        TriggerCondition::EventTime { condition } => {
+            trigger_condition_designation_anchors_resolvable(
+                state,
+                condition,
+                controller,
+                source_context,
+                trigger_event,
+            )
+        }
         _ => true,
     }
 }
@@ -15233,6 +15248,16 @@ fn evaluate_trigger_condition_with_source(
             source_context,
             trigger_event,
         ),
+        // CR 508.1m + CR 603.4: an event-time gate evaluates its wrapped
+        // condition when the trigger event occurs; it never reaches the
+        // resolution recheck (`stack_condition_for_trigger` drops it).
+        TriggerCondition::EventTime { condition } => evaluate_trigger_condition_with_source(
+            state,
+            condition,
+            controller,
+            source_context,
+            trigger_event,
+        ),
         // CR 309.7: True when the controller has completed a dungeon. `specific: None`
         // matches "any dungeon"; `specific: Some(d)` matches dungeon `d`. Negation
         // ("haven't completed Tomb of Annihilation") wraps via `Not`.
@@ -15628,6 +15653,9 @@ fn stack_condition_for_trigger(
     }
 
     match condition {
+        // CR 508.1m + CR 603.4: a "while" gate was read at the trigger event and
+        // is not an intervening `if`, so it never becomes a resolution recheck.
+        TriggerCondition::EventTime { .. } => None,
         TriggerCondition::And { conditions } => {
             let mut remaining: Vec<TriggerCondition> = conditions
                 .iter()
@@ -18898,6 +18926,35 @@ pub mod tests {
             stack_condition_for_trigger(&non_attacks, &negated),
             Some(negated)
         );
+    }
+
+    /// CR 508.1m + CR 603.4: an event-time "while" gate never reaches the
+    /// stack, in any trigger mode, while a genuine intervening `if` beside it
+    /// keeps its resolution recheck.
+    #[test]
+    fn stack_condition_strips_event_time_gates_but_keeps_intervening_if() {
+        let intervening_if = TriggerCondition::SourceEnteredThisTurn;
+        let event_time = TriggerCondition::EventTime {
+            condition: Box::new(TriggerCondition::SourceIsAttacking),
+        };
+        for mode in [TriggerMode::Attacks, TriggerMode::SpellCast] {
+            let trigger = make_trigger(mode.clone());
+            assert_eq!(
+                stack_condition_for_trigger(&trigger, &event_time),
+                None,
+                "{mode:?}: an event-time gate must not be rechecked on resolution"
+            );
+            assert_eq!(
+                stack_condition_for_trigger(
+                    &trigger,
+                    &TriggerCondition::And {
+                        conditions: vec![event_time.clone(), intervening_if.clone()],
+                    },
+                ),
+                Some(intervening_if.clone()),
+                "{mode:?}: the intervening-if beside it must stay on the stack"
+            );
+        }
     }
 
     #[test]
@@ -48712,8 +48769,10 @@ pub mod tests {
             );
             assert_eq!(
                 trigger.condition,
-                Some(TriggerCondition::SourceIsAttacking),
-                "precondition: the parsed trigger must carry the SourceIsAttacking gate"
+                Some(TriggerCondition::EventTime {
+                    condition: Box::new(TriggerCondition::SourceIsAttacking),
+                }),
+                "precondition: the parsed trigger must carry the event-time SourceIsAttacking gate"
             );
             state
                 .objects

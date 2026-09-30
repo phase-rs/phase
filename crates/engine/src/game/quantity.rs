@@ -1382,6 +1382,9 @@ fn trigger_condition_is_cast_stable_for_pre_cast(condition: &TriggerCondition) -
         TriggerCondition::Not { condition } => {
             trigger_condition_is_cast_stable_for_pre_cast(condition)
         }
+        TriggerCondition::EventTime { condition } => {
+            trigger_condition_is_cast_stable_for_pre_cast(condition)
+        }
         // Every other trigger condition reads a game, event, filter, or journal
         // fact that the ordinary cast can change. Keep the cast when it is not
         // explicitly proven stable above.

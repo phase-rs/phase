@@ -4819,6 +4819,9 @@ fn fmt_trigger_condition(cond: &crate::types::ability::TriggerCondition) -> Stri
             parts.join(" or ")
         }
         TC::Not { condition } => format!("not ({})", fmt_trigger_condition(condition)),
+        TC::EventTime { condition } => {
+            format!("at the event: {}", fmt_trigger_condition(condition))
+        }
     }
 }
 

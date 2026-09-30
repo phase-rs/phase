@@ -73313,6 +73313,109 @@ fn standalone_mana_spend_concession_is_a_gap() {
     }
 }
 
+/// Tibalt, Cosmic Impostor's emblem clause, verbatim (full self-reference).
+const TIBALT_EMBLEM_CLAUSE: &str = "you get an emblem with \"You may play cards exiled with Tibalt, Cosmic Impostor, and you may spend mana as though it were mana of any color to cast those spells.\"";
+
+/// Tibalt's normalized emblem clause with the one-word substitution "spend mana" →
+/// "spend white mana": a single-kind concession inside the emblem's quotes.
+const SINGLE_KIND_EMBLEM_CLAUSE: &str = "you get an emblem with \"You may play cards exiled with ~, and you may spend white mana as though it were mana of any color to cast those spells.\"";
+
+/// The persistent exile-play permission Tibalt's emblem grants.
+fn tibalt_emblem_permission() -> StaticMode {
+    StaticMode::ExileCastPermission {
+        frequency: CastFrequency::Unlimited,
+        play_mode: Play,
+        cost: crate::types::statics::ExileCastCost::PayNormalCost,
+        pool: crate::types::statics::ExileCardPool::Persistent,
+        timing: crate::types::statics::ExileCastTiming::AnyTime,
+        mana_spend_permission: Some(crate::types::ability::ManaSpendPermission::AnyColor),
+        grants_flash: false,
+        extra_cost: None,
+        enters_with_counter: None,
+        grantee: crate::types::statics::ExileCastGrantee::SourceController,
+    }
+}
+
+/// CR 114.1 + CR 114.2: "you get an emblem with [ability]" creates an emblem
+/// whose ability is the quoted text. An every-mana concession inside the quotes
+/// is the emblem's own static, so the clause lowers to `CreateEmblem` instead of
+/// the standalone mana-spend concession gap.
+#[test]
+fn emblem_clause_with_any_color_concession_lowers_to_create_emblem() {
+    let normalized = crate::parser::oracle_util::normalize_card_name_refs(
+        TIBALT_EMBLEM_CLAUSE,
+        "Tibalt, Cosmic Impostor",
+    );
+    // Positive marker: production's `~` normalization reached the quoted name.
+    assert_eq!(
+        normalized,
+        "you get an emblem with \"You may play cards exiled with ~, and you may spend mana as though it were mana of any color to cast those spells.\""
+    );
+    let chain = parse_effect_chain(&normalized, AbilityKind::Spell);
+    let effects = collect_chain_effects(&chain);
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Unimplemented { .. })),
+        "no gap anywhere in the chain: {effects:?}"
+    );
+    let Effect::CreateEmblem { statics, triggers } = &*chain.effect else {
+        panic!("expected CreateEmblem, got {:?}", chain.effect);
+    };
+    assert!(triggers.is_empty(), "no emblem triggers: {triggers:?}");
+    assert_eq!(statics.len(), 1, "exactly one emblem static: {statics:?}");
+    assert_eq!(statics[0].mode, tibalt_emblem_permission());
+    assert_eq!(statics[0].affected, Some(TargetFilter::Any));
+    assert!(chain.sub_ability.is_none());
+}
+
+/// CR 609.4b: a concession that relaxes one kind of mana only ("spend white
+/// mana as though …") has no `ManaSpendPermission` shape; inside an emblem
+/// clause it keeps the unrepresentable concession gap rather than lowering to an
+/// emblem static.
+#[test]
+fn emblem_clause_with_single_kind_concession_keeps_unrepresentable_gap() {
+    // Reach markers: the twin carries a single-kind concession and the positive
+    // an every-mana one, so both reach the concession block.
+    assert_eq!(
+        mana_spend_concession_is_single_kind(&SINGLE_KIND_EMBLEM_CLAUSE.to_lowercase()),
+        Some(true)
+    );
+    let positive = crate::parser::oracle_util::normalize_card_name_refs(
+        TIBALT_EMBLEM_CLAUSE,
+        "Tibalt, Cosmic Impostor",
+    );
+    assert_eq!(
+        mana_spend_concession_is_single_kind(&positive.to_lowercase()),
+        Some(false)
+    );
+
+    let chain = parse_effect_chain(SINGLE_KIND_EMBLEM_CLAUSE, AbilityKind::Spell);
+    let effects = collect_chain_effects(&chain);
+    assert!(
+        matches!(
+            &*chain.effect,
+            Effect::Unimplemented { name, .. } if name == UNREPRESENTABLE_MANA_SPEND_CONCESSION_GAP
+        ),
+        "single-kind emblem body keeps the unrepresentable gap: {:?}",
+        chain.effect
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::CreateEmblem { .. })),
+        "no emblem lowered: {effects:?}"
+    );
+
+    // Positive twin: the any-color clause reaches emblem creation from this seam.
+    let positive_chain = parse_effect_chain(&positive, AbilityKind::Spell);
+    assert!(
+        matches!(&*positive_chain.effect, Effect::CreateEmblem { .. }),
+        "the any-color twin lowers to CreateEmblem: {:?}",
+        positive_chain.effect
+    );
+}
+
 /// CR 609.4b: the rider modifies the grant it FOLLOWS. Without a cast grant
 /// directly before it nothing is folded and the clause is the standalone
 /// concession gap. A concession narrower than "mana" after a grant ("colorless
@@ -74485,6 +74588,941 @@ fn exile_all_but_edge_with_unbound_player_does_not_exile_permanents() {
         "unbound library owner must remain unsupported: {:?}",
         def.effect
     );
+}
+
+// ── Valki, God of Lies: per-player reveal choices (CR 608.2c / 608.2d / 701.20a) ──
+
+const VALKI_FULL: &str = "When Valki enters, each opponent reveals their hand. For each opponent, exile a creature card they revealed this way until Valki leaves the battlefield.\n{X}: Choose a creature card exiled with Valki with mana value X. Valki becomes a copy of that card.";
+const EACH_CHOOSES_FROM_IT: &str =
+    "Each player reveals their hand, then chooses a nonland card from it.";
+const EACH_DISCARDS_FROM_IT: &str =
+    "Each player reveals their hand, then discards a nonland card from it.";
+const YOU_CHOOSE_FROM_IT: &str =
+    "Each player reveals their hand. You choose a nonland card from it.";
+const EACH_REVEALS_TYPED: &str = "Each player reveals a creature card from their hand.";
+
+/// Every node of a chain: `def`, then recursively its `sub_ability`,
+/// `else_ability`, every `mode_abilities` entry and a `CreateDelayedTrigger`'s
+/// effect (the traversal of `swallow_check::def_tree_has_apnap_ordering`).
+fn chain_nodes(def: &AbilityDefinition) -> Vec<&AbilityDefinition> {
+    let mut nodes = vec![def];
+    if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
+        nodes.extend(chain_nodes(effect));
+    }
+    if let Some(sub) = def.sub_ability.as_deref() {
+        nodes.extend(chain_nodes(sub));
+    }
+    if let Some(branch) = def.else_ability.as_deref() {
+        nodes.extend(chain_nodes(branch));
+    }
+    for mode in &def.mode_abilities {
+        nodes.extend(chain_nodes(mode));
+    }
+    nodes
+}
+
+fn parks_reveal_choice(def: &AbilityDefinition) -> bool {
+    crate::game::effects::reveal_hand::effect_parks_reveal_card_choice(&def.effect)
+}
+
+fn non_controller_gaps(root: &AbilityDefinition) -> Vec<&AbilityDefinition> {
+    chain_nodes(root)
+        .into_iter()
+        .filter(|node| unimplemented_name(node) == Some("non_controller_reveal_choice"))
+        .collect()
+}
+
+fn parse_named_face(
+    text: &str,
+    name: &str,
+    types: &[&str],
+) -> crate::parser::oracle::ParsedAbilities {
+    parse_oracle_text(
+        text,
+        name,
+        &[],
+        &types.iter().map(|ty| (*ty).to_string()).collect::<Vec<_>>(),
+        &[],
+    )
+}
+
+fn assert_json_eq<T: serde::Serialize>(value: &T, expected: &str, what: &str) {
+    let expected: serde_json::Value = serde_json::from_str(expected).expect("expected JSON");
+    assert_eq!(
+        serde_json::to_value(value).expect("serialize"),
+        expected,
+        "{what} must equal its base shape"
+    );
+}
+
+/// SHAPE: the verbatim ETB reveals every opponent's hand, then — as the next
+/// instruction, co-scoped to the same opponents — the controller chooses a
+/// creature card from each revealed hand and the exile consumes it through
+/// `ParentTarget` (CR 608.2c: instructions in the order written).
+#[test]
+fn valki_etb_shape_reveals_every_hand_before_the_per_opponent_choice() {
+    let parsed = parse_named_face(VALKI_FULL, "Valki, God of Lies", &["Creature"]);
+    let etb = parsed.triggers[0].execute.as_deref().expect("ETB execute");
+    let nodes = chain_nodes(etb);
+    assert_eq!(nodes.len(), 3, "reveal pass, choice step, exile: {etb:#?}");
+    assert!(nodes.iter().all(|node| unimplemented_name(node).is_none()));
+
+    // The reveal pass: every opponent reveals; no card is chosen here.
+    let Effect::RevealHand {
+        target,
+        card_filter,
+        reveal,
+        ..
+    } = &*etb.effect
+    else {
+        panic!("expected RevealHand root, got {:?}", etb.effect);
+    };
+    assert_eq!(*target, TargetFilter::Controller);
+    assert_eq!(*card_filter, TargetFilter::None);
+    assert!(*reveal);
+    assert_eq!(etb.player_scope, Some(PlayerFilter::Opponent));
+    assert!(!parks_reveal_choice(etb));
+
+    // The choice step: the next instruction, over the same opponents, with no
+    // second reveal.
+    let choice = etb.sub_ability.as_deref().expect("choice step");
+    let Effect::RevealHand {
+        target,
+        card_filter,
+        count,
+        choice_optional,
+        reveal,
+        ..
+    } = &*choice.effect
+    else {
+        panic!("expected RevealHand choice step, got {:?}", choice.effect);
+    };
+    assert_eq!(*target, TargetFilter::Controller);
+    assert_eq!(*card_filter, TargetFilter::Typed(TypedFilter::creature()));
+    assert_eq!(*count, None);
+    assert!(!*choice_optional);
+    assert!(!*reveal);
+    assert_eq!(choice.player_scope, Some(PlayerFilter::Opponent));
+    assert_eq!(choice.sub_link, SubAbilityLink::SequentialSibling);
+    assert!(parks_reveal_choice(choice));
+
+    // The exile consumes the chosen card.
+    let sub = choice.sub_ability.as_deref().expect("exile consumer");
+    let Effect::ChangeZone {
+        destination,
+        target,
+        ..
+    } = &*sub.effect
+    else {
+        panic!("expected ChangeZone consumer, got {:?}", sub.effect);
+    };
+    assert_eq!(*destination, Zone::Exile);
+    assert_eq!(*target, TargetFilter::ParentTarget);
+    assert_eq!(sub.player_scope, Some(PlayerFilter::Opponent));
+    assert_eq!(sub.repeat_for, None);
+    assert_eq!(sub.duration, Some(Duration::UntilHostLeavesPlay));
+}
+
+/// SHAPE: "{X}: Choose a creature card exiled with Valki with mana
+/// value X. Valki becomes a copy of that card." — the linked pile (CR 607.2a)
+/// bounded by the announced X, then a copy of the chosen card (CR 707.2).
+#[test]
+fn valki_x_shape_choose_linked_creature_with_mana_value_x() {
+    let parsed = parse_named_face(VALKI_FULL, "Valki, God of Lies", &["Creature"]);
+    let ability = &parsed.abilities[0];
+    assert!(chain_nodes(ability)
+        .iter()
+        .all(|node| unimplemented_name(node).is_none()));
+    let Effect::ChooseFromZone {
+        zone,
+        zone_owner,
+        filter,
+        chooser,
+        candidate_source,
+        ..
+    } = &*ability.effect
+    else {
+        panic!("expected ChooseFromZone, got {:?}", ability.effect);
+    };
+    assert_eq!(*zone, Zone::Exile);
+    assert_eq!(*zone_owner, ZoneOwner::AllOwners);
+    assert_eq!(
+        *chooser,
+        crate::types::ability::ZoneChoiceChooser::Controller
+    );
+    assert_eq!(
+        *candidate_source,
+        crate::types::ability::ZoneChoiceCandidateSource::Direct
+    );
+    assert_eq!(
+        *filter,
+        Some(TargetFilter::And {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Cmc {
+                    comparator: Comparator::EQ,
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::Variable {
+                            name: "X".to_string()
+                        },
+                    },
+                }])),
+                TargetFilter::ExiledBySource,
+            ],
+        })
+    );
+    let copy = ability.sub_ability.as_deref().expect("BecomeCopy");
+    assert!(matches!(
+        &*copy.effect,
+        Effect::BecomeCopy {
+            target: TargetFilter::ParentTarget,
+            ..
+        }
+    ));
+}
+
+/// My Wish Is Your Command's "choose a … card revealed this way" is one
+/// choice across every revealed hand with no matching per-player quantifier, so
+/// the binding declines and the choose clause is an honest
+/// `unbound_revealed_this_way` gap (CR 608.2c); no reveal parks a card choice.
+#[test]
+fn my_wish_is_your_command_revealed_this_way_choice_is_declined() {
+    let parsed = parse_named_face(
+        "When you set this scheme in motion, each opponent reveals their hand. You may choose a noncreature, nonland card revealed this way and cast it without paying its mana cost.",
+        "My Wish Is Your Command",
+        &["Scheme"],
+    );
+    let root = parsed.triggers[0].execute.as_deref().expect("execute");
+    let nodes = chain_nodes(root);
+    assert!(nodes.len() >= 2, "reach-guard: the walk visited the chain");
+    assert!(matches!(
+        &*root.effect,
+        Effect::RevealHand {
+            target: TargetFilter::Controller,
+            card_filter: TargetFilter::None,
+            ..
+        }
+    ));
+    assert!(nodes.iter().all(|node| !parks_reveal_choice(node)));
+    assert_json_eq(
+        root.sub_ability.as_deref().expect("choose/cast clause"),
+        r#"{"kind":"Spell","effect":{"type":"Unimplemented","name":"unbound_revealed_this_way","description":"You may choose a noncreature, nonland card revealed this way"},"cost":null,"sub_ability":{"kind":"Spell","effect":{"type":"CastFromZone","target":{"type":"ParentTarget"},"without_paying_mana_cost":true,"mode":"Cast","driver":"DuringResolution"},"cost":null,"sub_ability":null,"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"target_choice_timing":"Resolution","forward_result":false},"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":true,"forward_result":false,"sub_link":"SequentialSibling"}"#,
+        "My Wish Is Your Command's choose/cast clause",
+    );
+}
+
+/// Noxious Vapors — the scoped player's own "chooses … from it" is not
+/// turned into a controller choice (neither follow-up arm claims it).
+#[test]
+fn noxious_vapors_scoped_player_choice_is_not_bound_to_controller() {
+    let parsed = parse_named_face(
+        "Each player reveals their hand, chooses one card of each color from it, then discards all other nonland cards.",
+        "Noxious Vapors",
+        &["Sorcery"],
+    );
+    let root = &parsed.abilities[0];
+    let nodes = chain_nodes(root);
+    assert!(nodes.len() >= 3, "reach-guard: the walk visited the chain");
+    assert!(matches!(
+        &*root.effect,
+        Effect::RevealHand {
+            target: TargetFilter::Controller,
+            ..
+        }
+    ));
+    assert_eq!(root.player_scope, Some(PlayerFilter::All));
+    assert!(nodes.iter().all(|node| !parks_reveal_choice(node)));
+    assert_eq!(
+        nodes[1].effect.unimplemented_description(),
+        Some("choose one card of each color from it")
+    );
+    assert!(unimplemented_name(nodes[2]).is_some());
+    assert!(non_controller_gaps(root).is_empty());
+}
+
+/// A "from it" continuation of a player-scoped reveal whose
+/// consumer addresses the scoped player is declined, and the consumer becomes an
+/// honest `non_controller_reveal_choice` gap — never a card-parking reveal the
+/// printed controller would choose from. The "you" twin keeps base absorption.
+#[test]
+fn scoped_reveal_from_it_choice_by_scoped_player_declines_to_a_gap() {
+    for (text, consumer) in [
+        (EACH_CHOOSES_FROM_IT, "chooses a nonland card from it"),
+        (EACH_DISCARDS_FROM_IT, "discards a nonland card from it"),
+    ] {
+        let root = parse_effect_chain(text, AbilityKind::Spell);
+        let nodes = chain_nodes(&root);
+        assert!(
+            nodes.len() >= 2,
+            "{text}: reach-guard: walk visited the chain"
+        );
+        assert!(matches!(
+            &*root.effect,
+            Effect::RevealHand {
+                target: TargetFilter::Controller,
+                ..
+            }
+        ));
+        assert_eq!(root.player_scope, Some(PlayerFilter::All));
+        // Reach-guard: the `FromIt` arm claims the consumer text, so the gate —
+        // not a missed arm — produced the decline.
+        assert!(matches!(
+            super::sequence::parse_followup_continuation_ast_with_search_destination(
+                consumer,
+                &root.effect,
+                &mut ParseContext::default(),
+                false,
+            ),
+            Some(ContinuationAst::RevealHandFilter {
+                binding: RevealChoiceBinding::FromIt,
+                ..
+            })
+        ));
+
+        assert!(
+            nodes.iter().all(|node| !parks_reveal_choice(node)),
+            "{text}: no node parks a reveal card choice: {root:#?}"
+        );
+        let described: Vec<_> = nodes
+            .iter()
+            .filter(|node| node.effect.unimplemented_description() == Some(consumer))
+            .collect();
+        assert_eq!(described.len(), 1, "{text}: {root:#?}");
+        assert_eq!(
+            unimplemented_name(described[0]),
+            Some("non_controller_reveal_choice")
+        );
+        assert_eq!(described[0].player_scope, Some(PlayerFilter::All));
+    }
+
+    // Positive twin: the controller-addressed consumer binds, with the printed
+    // controller as the chooser. After a per-player reveal its card choice is
+    // the next instruction's own co-scoped step (CR 608.2c), run after every
+    // player has revealed.
+    let root = parse_effect_chain(YOU_CHOOSE_FROM_IT, AbilityKind::Spell);
+    let nodes = chain_nodes(&root);
+    assert_eq!(
+        nodes.len(),
+        2,
+        "reveal pass, then the choice step: {root:#?}"
+    );
+    assert!(nodes.iter().all(|node| unimplemented_name(node).is_none()));
+    assert_eq!(root.player_scope, Some(PlayerFilter::All));
+    assert!(!parks_reveal_choice(&root));
+    assert!(matches!(
+        &*root.effect,
+        Effect::RevealHand {
+            target: TargetFilter::Controller,
+            card_filter: TargetFilter::None,
+            ..
+        }
+    ));
+    let choice = nodes[1];
+    assert_eq!(choice.player_scope, Some(PlayerFilter::All));
+    assert_eq!(choice.sub_link, SubAbilityLink::SequentialSibling);
+    assert!(parks_reveal_choice(choice));
+    let Effect::RevealHand {
+        target,
+        card_filter,
+        reveal,
+        ..
+    } = &*choice.effect
+    else {
+        panic!(
+            "expected the RevealHand choice step, got {:?}",
+            choice.effect
+        );
+    };
+    assert_eq!(*target, TargetFilter::Controller);
+    assert!(!*reveal);
+    assert_eq!(
+        *card_filter,
+        TargetFilter::Typed(
+            TypedFilter::default().with_type(TypeFilter::Non(Box::new(TypeFilter::Land)))
+        )
+    );
+}
+
+/// A per-player clause's OWN reveal choice (the revealing
+/// player chooses what to reveal) becomes the honest gap; the unscoped twin and
+/// Biting-Palm Ninja's unscoped fused choice still park.
+#[test]
+fn per_player_own_reveal_choice_declines_to_a_gap() {
+    let root = parse_effect_chain(EACH_REVEALS_TYPED, AbilityKind::Spell);
+    let nodes = chain_nodes(&root);
+    assert!(!nodes.is_empty());
+    assert!(nodes.iter().all(|node| !parks_reveal_choice(node)));
+    let gaps = non_controller_gaps(&root);
+    assert_eq!(gaps.len(), 1, "{root:#?}");
+    assert_eq!(gaps[0].player_scope, Some(PlayerFilter::All));
+
+    // Paired positive: the same own-filter branch, unscoped, parks.
+    let unscoped = parse_effect_chain(
+        "Target opponent reveals a creature card from their hand.",
+        AbilityKind::Spell,
+    );
+    assert_eq!(chain_nodes(&unscoped).len(), 1);
+    assert!(parks_reveal_choice(&unscoped));
+    assert!(matches!(
+        &*unscoped.effect,
+        Effect::RevealHand { card_filter, .. } if *card_filter == TargetFilter::Typed(TypedFilter::creature())
+    ));
+
+    // Biting-Palm Ninja: unscoped subject-bearing fused choice is unchanged.
+    let ninja = parse_named_face(
+        "Ninjutsu {2}{B}\nThis creature enters with a menace counter on it.\nWhenever this creature deals combat damage to a player, you may remove a menace counter from it. When you do, that player reveals their hand and you choose a nonland card from it. Exile that card.",
+        "Biting-Palm Ninja",
+        &["Creature"],
+    );
+    let execute = ninja.triggers[0].execute.as_deref().expect("execute");
+    let reveal = chain_nodes(execute)
+        .into_iter()
+        .find(|node| matches!(&*node.effect, Effect::RevealHand { .. }))
+        .expect("Ninja's reveal");
+    assert!(parks_reveal_choice(reveal));
+    assert_json_eq(
+        &*reveal.effect,
+        r#"{"type":"RevealHand","target":{"type":"TriggeringPlayer"},"card_filter":{"type":"Typed","type_filters":[{"Non":"Land"}],"controller":null,"properties":[]},"count":null,"reveal":true}"#,
+        "Biting-Palm Ninja's reveal",
+    );
+    assert!(non_controller_gaps(execute).is_empty());
+}
+
+/// Assert that no node of `root`'s chain is an executable zone move and that
+/// exactly one node is the `gap` gap describing `consumer`.
+fn assert_consumer_is_a_gap(root: &AbilityDefinition, gap: &str, consumer: &str) {
+    let nodes = chain_nodes(root);
+    assert!(
+        nodes
+            .iter()
+            .all(|node| !matches!(&*node.effect, Effect::ChangeZone { .. })),
+        "no executable zone move survives: {root:#?}"
+    );
+    let gaps: Vec<_> = nodes
+        .iter()
+        .filter(|node| unimplemented_name(node) == Some(gap))
+        .collect();
+    assert_eq!(gaps.len(), 1, "exactly one {gap} gap: {root:#?}");
+    assert_eq!(gaps[0].effect.unimplemented_description(), Some(consumer));
+}
+
+/// Reach guard: the `RevealedThisWay` arm claims `consumer` after `root`'s
+/// reveal, so the binder or the actor gate — not a missed arm — decided.
+fn assert_revealed_this_way_arm_claims(root: &AbilityDefinition, consumer: &str) {
+    assert!(matches!(
+        super::sequence::parse_followup_continuation_ast_with_search_destination(
+            consumer,
+            &root.effect,
+            &mut ParseContext::default(),
+            false,
+        ),
+        Some(ContinuationAst::RevealHandFilter {
+            binding: RevealChoiceBinding::RevealedThisWay,
+            ..
+        })
+    ));
+}
+
+/// CR 608.2c: a "revealed this way" consumer whose "For each <population>,"
+/// names a different population than the reveal's scope cannot be re-bound
+/// to the card chosen from the revealed hand, so it is an honest gap — never
+/// a zone move of any creature card by its raw filter.
+#[test]
+fn revealed_this_way_population_mismatch_is_declined() {
+    let root = parse_effect_chain(
+        "Each opponent reveals their hand. For each player, exile a creature card they revealed this way.",
+        AbilityKind::Spell,
+    );
+    let nodes = chain_nodes(&root);
+    assert!(nodes.len() >= 2, "reach-guard");
+    assert_revealed_this_way_arm_claims(&root, "exile a creature card they revealed this way");
+    assert!(nodes.iter().all(|node| !parks_reveal_choice(node)));
+    // "For each player," peels into the consumer's own `player_scope`, so the
+    // consumer-actor gate (not the binder) is the seam that declines it.
+    assert_consumer_is_a_gap(
+        &root,
+        "non_controller_reveal_choice",
+        "For each player, exile a creature card they revealed this way",
+    );
+
+    // Paired positive: the matching population binds (Valki's shape).
+    let bound = parse_effect_chain(
+        "Each opponent reveals their hand. For each opponent, exile a creature card they revealed this way.",
+        AbilityKind::Spell,
+    );
+    assert!(!parks_reveal_choice(&bound));
+    let choice = bound.sub_ability.as_deref().expect("choice step");
+    assert!(parks_reveal_choice(choice));
+    assert_eq!(choice.player_scope, Some(PlayerFilter::Opponent));
+    let sub = choice.sub_ability.as_deref().expect("consumer");
+    assert_eq!(
+        sub.effect.target_filter(),
+        Some(&TargetFilter::ParentTarget)
+    );
+    assert_eq!(sub.player_scope, Some(PlayerFilter::Opponent));
+    assert_eq!(sub.repeat_for, None);
+}
+
+/// CR 608.2c + CR 109.5: a consumer that names a non-controller actor
+/// ("they exile …") is declined by the consumer-actor gate and becomes an
+/// honest gap — never a raw-filter zone move.
+#[test]
+fn revealed_this_way_consumer_with_non_controller_subject_is_declined() {
+    let root = parse_effect_chain(
+        "Each opponent reveals their hand. For each opponent, they exile a creature card they revealed this way.",
+        AbilityKind::Spell,
+    );
+    let nodes = chain_nodes(&root);
+    assert!(nodes.len() >= 2, "reach-guard: {root:#?}");
+    assert_revealed_this_way_arm_claims(&root, "they exile a creature card they revealed this way");
+    assert!(
+        nodes.iter().all(|node| !parks_reveal_choice(node)),
+        "{root:#?}"
+    );
+    assert_consumer_is_a_gap(
+        &root,
+        "non_controller_reveal_choice",
+        "For each opponent, they exile a creature card they revealed this way",
+    );
+}
+
+/// CR 608.2c: after an unscoped (single-player) reveal, a "For each
+/// opponent," repeat names a population the reveal never had, so the
+/// consumer is a gap. Paired positive: without the repeat it binds.
+#[test]
+fn revealed_this_way_repeat_after_unscoped_reveal_is_a_gap() {
+    let root = parse_effect_chain(
+        "Target opponent reveals their hand. For each opponent, exile a creature card they revealed this way.",
+        AbilityKind::Spell,
+    );
+    assert!(chain_nodes(&root).len() >= 2, "reach-guard: {root:#?}");
+    assert_revealed_this_way_arm_claims(&root, "exile a creature card they revealed this way");
+    assert_consumer_is_a_gap(
+        &root,
+        "unbound_revealed_this_way",
+        "For each opponent, exile a creature card they revealed this way",
+    );
+
+    let bound = parse_effect_chain(
+        "Target opponent reveals their hand. Exile a creature card they revealed this way.",
+        AbilityKind::Spell,
+    );
+    let sub = bound.sub_ability.as_deref().expect("consumer");
+    assert!(matches!(
+        &*sub.effect,
+        Effect::ChangeZone {
+            target: TargetFilter::ParentTarget,
+            ..
+        }
+    ));
+}
+
+/// CR 608.2c: a consumer whose verb is not an origin-less zone move cannot
+/// be re-bound to the chosen card, so it is a gap rather than an action on
+/// any card matching its raw filter.
+#[test]
+fn revealed_this_way_non_zone_move_consumer_is_a_gap() {
+    // Provenance of the red-on-revert claim: the pre-change parse of this text
+    // (`parse_effect_chain` JSON) left the consumer executable as
+    // `{"type":"Discard","count":{"type":"Fixed","value":1},"target":{"type":"Controller"}}`
+    // — a discard from the controller's own hand, not of a revealed card.
+    let root = parse_effect_chain(
+        "Target opponent reveals their hand. Discard a creature card they revealed this way.",
+        AbilityKind::Spell,
+    );
+    let nodes = chain_nodes(&root);
+    assert!(nodes.len() >= 2, "reach-guard: {root:#?}");
+    assert_revealed_this_way_arm_claims(&root, "discard a creature card they revealed this way");
+    let gaps: Vec<_> = nodes
+        .iter()
+        .filter(|node| unimplemented_name(node) == Some("unbound_revealed_this_way"))
+        .collect();
+    assert_eq!(gaps.len(), 1, "{root:#?}");
+    assert_eq!(
+        gaps[0].effect.unimplemented_description(),
+        Some("Discard a creature card they revealed this way")
+    );
+    assert!(
+        nodes
+            .iter()
+            .all(|node| unimplemented_name(node).is_some() || std::ptr::eq(*node, &root)),
+        "only the reveal is executable: {root:#?}"
+    );
+}
+
+/// CR 608.2c + CR 608.2d: "Each opponent chooses a creature card they
+/// revealed this way" is a choice made by each opponent, which `RevealHand`
+/// cannot represent — an honest gap, never a controller-chosen parked reveal.
+/// Paired positive: a controller-addressed consumer parks the choice.
+#[test]
+fn revealed_this_way_choice_by_other_player_is_a_gap() {
+    let root = parse_effect_chain(
+        "Each opponent reveals their hand. Each opponent chooses a creature card they revealed this way.",
+        AbilityKind::Spell,
+    );
+    let nodes = chain_nodes(&root);
+    assert!(nodes.len() >= 2, "reach-guard: {root:#?}");
+    assert_revealed_this_way_arm_claims(&root, "chooses a creature card they revealed this way");
+    assert!(
+        nodes.iter().all(|node| !parks_reveal_choice(node)),
+        "{root:#?}"
+    );
+    let gaps = non_controller_gaps(&root);
+    assert_eq!(gaps.len(), 1, "{root:#?}");
+
+    let controller = parse_effect_chain(YOU_CHOOSE_FROM_IT, AbilityKind::Spell);
+    assert!(chain_nodes(&controller)
+        .iter()
+        .any(|node| parks_reveal_choice(node)));
+}
+
+/// The unscoped building block — a single-player reveal followed by an
+/// imperative "exile a creature card they revealed this way" binds `ParentTarget`.
+#[test]
+fn revealed_this_way_consumer_binds_parent_target_for_single_reveal() {
+    let root = parse_effect_chain(
+        "Target opponent reveals their hand. Exile a creature card they revealed this way.",
+        AbilityKind::Spell,
+    );
+    let Effect::RevealHand {
+        target,
+        card_filter,
+        ..
+    } = &*root.effect
+    else {
+        panic!("expected RevealHand, got {:?}", root.effect);
+    };
+    assert_eq!(
+        *target,
+        TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
+    );
+    assert_eq!(*card_filter, TargetFilter::Typed(TypedFilter::creature()));
+    let sub = root.sub_ability.as_deref().expect("consumer");
+    assert!(matches!(
+        &*sub.effect,
+        Effect::ChangeZone {
+            target: TargetFilter::ParentTarget,
+            ..
+        }
+    ));
+    assert_eq!(sub.player_scope, None);
+}
+
+/// Mass "each … card revealed this way" (Fall) and the unscoped "from it"
+/// forms (Deep-Cavern Bat) are not claimed by the new arm.
+#[test]
+fn revealed_this_way_arm_ignores_mass_and_from_it_forms() {
+    let fall = parse_named_face(
+        "Target player reveals two cards at random from their hand, then discards each nonland card revealed this way.",
+        "Fall",
+        &["Sorcery"],
+    );
+    assert_json_eq(
+        &fall.abilities[0],
+        r#"{"kind":"Spell","effect":{"type":"RevealHand","target":{"type":"Player"},"card_filter":{"type":"None"},"count":null,"reveal":true},"cost":null,"sub_ability":{"kind":"Spell","effect":{"type":"Unimplemented","name":"unparsed_verb_arguments","description":"discard each nonland card revealed this way"},"cost":null,"sub_ability":null,"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false},"duration":null,"description":"Target player reveals two cards at random from their hand, then discards each nonland card revealed this way.","target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false}"#,
+        "Fall",
+    );
+
+    let bat = parse_named_face(
+        "Flying, lifelink\nWhen this creature enters, look at target opponent's hand. You may exile a nonland card from it until this creature leaves the battlefield.",
+        "Deep-Cavern Bat",
+        &["Creature"],
+    );
+    let execute = bat.triggers[0].execute.as_deref().expect("execute");
+    // Reach-guard: the existing "from it" arm fired.
+    assert!(matches!(
+        &*execute.effect,
+        Effect::RevealHand { card_filter, .. } if *card_filter != TargetFilter::None
+    ));
+    let sub = execute.sub_ability.as_deref().expect("exile");
+    assert!(matches!(
+        sub.effect.target_filter(),
+        Some(TargetFilter::Typed(_))
+    ));
+}
+
+/// The unscoped "from it" absorption (Kitesail Freebooter) is never
+/// gated — its ETB lowers exactly as at base.
+#[test]
+fn kitesail_freebooter_unscoped_from_it_choice_is_unchanged() {
+    let parsed = parse_named_face(
+        "Flying\nWhen this creature enters, target opponent reveals their hand. You choose a noncreature, nonland card from it. Exile that card until this creature leaves the battlefield.",
+        "Kitesail Freebooter",
+        &["Creature"],
+    );
+    let execute = parsed.triggers[0].execute.as_deref().expect("execute");
+    assert!(parks_reveal_choice(execute));
+    assert_eq!(execute.player_scope, None);
+    assert!(non_controller_gaps(execute).is_empty());
+    assert_json_eq(
+        execute,
+        r#"{"kind":"Spell","effect":{"type":"RevealHand","target":{"type":"Typed","type_filters":[],"controller":"Opponent","properties":[]},"card_filter":{"type":"Typed","type_filters":[{"Non":"Creature"},{"Non":"Land"}],"controller":null,"properties":[]},"count":null,"reveal":true},"cost":null,"sub_ability":{"kind":"Spell","effect":{"type":"ChangeZone","origin":null,"destination":"Exile","target":{"type":"ParentTarget"},"owner_library":false,"enter_transformed":false,"enter_tapped":false,"enters_attacking":false},"cost":null,"sub_ability":null,"duration":"UntilHostLeavesPlay","description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false,"sub_link":"SequentialSibling"},"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false}"#,
+        "Kitesail Freebooter's ETB",
+    );
+}
+
+/// A bare "their hand" is the acting player's hand — rebound by a peeled
+/// per-player scope, and overridden by a declared or anaphoric subject.
+#[test]
+fn bare_their_hand_binds_scope_or_subject() {
+    let scoped = parse_effect_chain("Each opponent reveals their hand.", AbilityKind::Spell);
+    assert!(matches!(
+        &*scoped.effect,
+        Effect::RevealHand {
+            target: TargetFilter::Controller,
+            ..
+        }
+    ));
+    assert_eq!(scoped.player_scope, Some(PlayerFilter::Opponent));
+
+    let declared = parse_effect_chain("Target opponent reveals their hand.", AbilityKind::Spell);
+    assert!(matches!(
+        &*declared.effect,
+        Effect::RevealHand { target, .. }
+            if *target == TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
+    ));
+
+    let anaphoric = parse_effect_chain("That player reveals their hand.", AbilityKind::Spell);
+    assert!(matches!(
+        &*anaphoric.effect,
+        Effect::RevealHand {
+            target: TargetFilter::ParentTargetController,
+            ..
+        }
+    ));
+}
+
+/// CR 608.2c + CR 701.20a: the object phrase of a "… revealed this way"
+/// consumer is read in place — the printed type phrase ("creature card",
+/// "noncreature, nonland card") goes to the type-phrase authority as printed,
+/// and mass or condition forms are not claimed.
+#[test]
+fn revealed_this_way_card_filter_reads_the_description_in_place() {
+    let typed = |type_filters: Vec<TypeFilter>| {
+        Some(TargetFilter::Typed(TypedFilter {
+            type_filters,
+            controller: None,
+            properties: vec![],
+        }))
+    };
+    for (phrase, expected) in [
+        (
+            "exile a creature card they revealed this way",
+            typed(vec![TypeFilter::Creature]),
+        ),
+        (
+            "exile a card they revealed this way",
+            typed(vec![TypeFilter::Card]),
+        ),
+        (
+            "choose a noncreature, nonland card revealed this way",
+            typed(vec![
+                TypeFilter::Card,
+                TypeFilter::Non(Box::new(TypeFilter::Creature)),
+                TypeFilter::Non(Box::new(TypeFilter::Land)),
+            ]),
+        ),
+        (
+            "exile an artifact card that player revealed this way",
+            typed(vec![TypeFilter::Artifact]),
+        ),
+        (
+            "exile one creature card those players revealed this way",
+            typed(vec![TypeFilter::Creature]),
+        ),
+        ("discard each nonland card revealed this way", None),
+        ("if a card with the chosen name is revealed this way", None),
+        ("exile a creature they revealed this way", None),
+    ] {
+        assert_eq!(
+            super::sequence::parse_revealed_this_way_card_filter(phrase),
+            expected,
+            "{phrase}"
+        );
+    }
+}
+
+// ── Possessive-shift subject: player-recipient binding (CR 608.2c / 109.4 / 115.1) ──
+
+/// Verbatim Oracle text (Scryfall).
+const DENIED: &str = "Choose a card name, then target spell's controller reveals their hand. If a card with the chosen name is revealed this way, counter that spell.";
+/// Verbatim Oracle text (Scryfall).
+const FRIENDLY_FIRE: &str = "Target creature's controller reveals a card at random from their hand. Friendly Fire deals damage to that creature and that player equal to the revealed card's mana value.";
+/// Verbatim Oracle text (Scryfall).
+const MISLEADING_MOTES: &str =
+    "Target creature's owner puts it on their choice of the top or bottom of their library.";
+/// Verbatim Oracle text (Scryfall).
+const MERCY_KILLING: &str = "Target creature's controller sacrifices it, then creates X 1/1 green and white Elf Warrior creature tokens, where X is that creature's power.";
+/// Grammar fixtures (not cards): one per player-recipient arm of the binding.
+const OWNER_REVEALS: &str = "Target creature's owner reveals their hand.";
+const DRAW_SHIFT: &str = "Target creature's controller draws a card.";
+const DISCARD_SHIFT: &str = "Target creature's controller discards a card.";
+const MILL_SHIFT: &str = "Target creature's controller mills two cards.";
+const SCRY_SHIFT: &str = "Target creature's controller scries 2.";
+const SURVEIL_SHIFT: &str = "Target creature's controller surveils 2.";
+
+/// The player a player-recipient instruction addresses (the slot the
+/// possessive-shift binding writes), or `None` for any other effect.
+fn player_recipient(effect: &Effect) -> Option<&TargetFilter> {
+    match effect {
+        Effect::RevealHand { target, .. }
+        | Effect::Draw { target, .. }
+        | Effect::Discard { target, .. }
+        | Effect::Mill { target, .. }
+        | Effect::Scry { target, .. }
+        | Effect::Surveil { target, .. } => Some(target),
+        _ => None,
+    }
+}
+
+/// The chain node whose immediate `sub_ability` is `child`.
+fn parent_of<'a>(
+    root: &'a AbilityDefinition,
+    child: &AbilityDefinition,
+) -> Option<&'a AbilityDefinition> {
+    chain_nodes(root).into_iter().find(|node| {
+        node.sub_ability
+            .as_deref()
+            .is_some_and(|sub| std::ptr::eq(sub, child))
+    })
+}
+
+fn creature_target_only() -> Effect {
+    Effect::TargetOnly {
+        target: TargetFilter::Typed(TypedFilter::creature()),
+    }
+}
+
+/// "target <filter>'s controller/owner <player-verb>s …" — the
+/// possessive-shift subject names the ACTING player (CR 608.2c + CR 109.4), the
+/// targeted object's controller/owner (CR 115.1), never the caster.
+#[test]
+fn possessive_shift_subject_binds_hand_reveal_to_target_controller() {
+    // Denied! reveals the targeted spell's controller's hand.
+    let denied = parse_named_face(DENIED, "Denied!", &["Instant"]);
+    let root = &denied.abilities[0];
+    let nodes = chain_nodes(root);
+    assert!(nodes.len() >= 4, "reach-guard: the walk visited the chain");
+    assert_json_eq(
+        &*root.effect,
+        r#"{"type":"Choose","choice_type":"CardName","persist":true}"#,
+        "Denied!'s root",
+    );
+    let reveals: Vec<_> = nodes
+        .iter()
+        .filter(|node| matches!(&*node.effect, Effect::RevealHand { .. }))
+        .collect();
+    assert_eq!(reveals.len(), 1, "{root:#?}");
+    let reveal = *reveals[0];
+    let Effect::RevealHand {
+        target,
+        card_filter,
+        ..
+    } = &*reveal.effect
+    else {
+        unreachable!();
+    };
+    assert_eq!(*target, TargetFilter::ParentTargetController);
+    assert_eq!(*card_filter, TargetFilter::None);
+    // Reach-guard: the possessive-shift wrap produced the reveal's parent.
+    assert!(matches!(
+        &*parent_of(root, reveal).expect("the reveal's parent").effect,
+        Effect::TargetOnly {
+            target: TargetFilter::StackSpell
+        }
+    ));
+    // The helper touched only the reveal: the counter keeps its base shape.
+    assert_json_eq(
+        &*reveal.sub_ability.as_deref().expect("counter").effect,
+        r#"{"type":"Counter","target":{"type":"TriggeringSource"}}"#,
+        "Denied!'s counter",
+    );
+
+    // Friendly Fire's random reveal — same binding, count unchanged.
+    let friendly = parse_named_face(FRIENDLY_FIRE, "Friendly Fire", &["Instant"]);
+    let root = &friendly.abilities[0];
+    assert_eq!(
+        *root.effect,
+        creature_target_only(),
+        "reach-guard: the wrap"
+    );
+    let reveal = root.sub_ability.as_deref().expect("reveal");
+    let Effect::RevealHand {
+        target,
+        card_filter,
+        count,
+        ..
+    } = &*reveal.effect
+    else {
+        panic!("expected RevealHand, got {:?}", reveal.effect);
+    };
+    assert_eq!(*target, TargetFilter::ParentTargetController);
+    assert_eq!(*card_filter, TargetFilter::None);
+    assert_eq!(*count, None, "unchanged from base");
+
+    // The owner shift binds the owner; one grammar fixture per non-reveal
+    // arm binds the controller.
+    for (text, actor) in [
+        (OWNER_REVEALS, TargetFilter::ParentTargetOwner),
+        (DRAW_SHIFT, TargetFilter::ParentTargetController),
+        (DISCARD_SHIFT, TargetFilter::ParentTargetController),
+        (MILL_SHIFT, TargetFilter::ParentTargetController),
+        (SCRY_SHIFT, TargetFilter::ParentTargetController),
+        (SURVEIL_SHIFT, TargetFilter::ParentTargetController),
+    ] {
+        let root = parse_effect_chain(text, AbilityKind::Spell);
+        assert_eq!(
+            *root.effect,
+            creature_target_only(),
+            "{text}: reach-guard: the possessive-shift wrap ran"
+        );
+        let inner = root.sub_ability.as_deref().expect("wrapped instruction");
+        assert_eq!(
+            player_recipient(&inner.effect),
+            Some(&actor),
+            "{text}: {inner:#?}"
+        );
+    }
+}
+
+/// Object-recipient possessive-shift instructions are not player
+/// recipients, so nothing is rebound to the shifted actor.
+#[test]
+fn possessive_shift_object_recipient_is_not_rebound_to_the_actor() {
+    // Mercy Killing goes through the wrap arm (reach-guard) with an object
+    // recipient ("sacrifices it"): the sacrifice keeps its base `ParentTarget`.
+    let mercy = parse_named_face(MERCY_KILLING, "Mercy Killing", &["Instant"]);
+    let root = &mercy.abilities[0];
+    assert_eq!(
+        *root.effect,
+        creature_target_only(),
+        "reach-guard: the wrap"
+    );
+    let sacrifice = root.sub_ability.as_deref().expect("sacrifice");
+    assert_json_eq(
+        &*sacrifice.effect,
+        r#"{"type":"Sacrifice","target":{"type":"ParentTarget"},"count":{"type":"Fixed","value":1}}"#,
+        "Mercy Killing's sacrifice",
+    );
+
+    // Misleading Motes (the "owner puts it …" family) does not reach the wrap
+    // arm at all (its base root is the `PutOnTopOrBottom` itself); it is pinned
+    // to its base parse so the binding provably leaves the family untouched.
+    let motes = parse_named_face(MISLEADING_MOTES, "Misleading Motes", &["Instant"]);
+    assert_json_eq(
+        &motes.abilities[0],
+        r#"{"kind":"Spell","effect":{"type":"PutOnTopOrBottom","target":{"type":"Typed","type_filters":["Creature"],"controller":null,"properties":[]}},"cost":null,"sub_ability":null,"duration":null,"description":"Target creature's owner puts it on their choice of the top or bottom of their library.","target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false}"#,
+        "Misleading Motes",
+    );
+
+    for root in [&mercy.abilities[0], &motes.abilities[0]] {
+        assert!(
+            chain_nodes(root).iter().all(|node| !matches!(
+                player_recipient(&node.effect),
+                Some(TargetFilter::ParentTargetController | TargetFilter::ParentTargetOwner)
+            )),
+            "{root:#?}"
+        );
+    }
 }
 
 // --- Shared trailing "equal to <quantity>" across coordinated amount-elided verbs ---

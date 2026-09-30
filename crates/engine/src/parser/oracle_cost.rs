@@ -1012,9 +1012,7 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
             all_consuming(parse_random_discard_cost_body).parse(rest_lower.as_str())
         {
             return AbilityCost::Discard {
-                count: QuantityExpr::Fixed {
-                    value: count as i32,
-                },
+                count,
                 filter: None,
                 selection: crate::types::ability::CardSelectionMode::Random,
                 self_scope: crate::types::ability::DiscardSelfScope::FromHand,
@@ -1038,10 +1036,24 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         // phrase. Ordered before the plain `parse_number` arm so "two creature
         // cards" is not swallowed as an untyped count.
         if let Some((count, after_count)) = parse_count_expr(&rest_lower) {
-            if let Some(filter) = parse_discard_card_filter(after_count.trim_start()) {
+            let noun = after_count.trim_start();
+            if let Some(filter) = parse_discard_card_filter(noun) {
                 return AbilityCost::Discard {
                     count,
                     filter: Some(filter),
+                    selection: crate::types::ability::CardSelectionMode::Chosen,
+                    self_scope: crate::types::ability::DiscardSelfScope::FromHand,
+                };
+            }
+            // CR 107.3a: an untyped "discard X cards" keeps X symbolic so the
+            // announced value is discarded, not the X→0 of `parse_number`.
+            if all_consuming(alt((tag::<_, _, E<'_>>("cards"), tag("card"))))
+                .parse(noun)
+                .is_ok()
+            {
+                return AbilityCost::Discard {
+                    count,
+                    filter: None,
                     selection: crate::types::ability::CardSelectionMode::Chosen,
                     self_scope: crate::types::ability::DiscardSelfScope::FromHand,
                 };
@@ -1490,15 +1502,17 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
     }
 }
 
-/// CR 701.9b: Complete grammar for the corpus-supported fixed-count,
-/// unfiltered random discard-cost body. Variable `X` is deliberately excluded:
-/// treating it as the cost parser's usual zero sentinel would make a required
-/// random discard free rather than honestly unsupported.
-fn parse_random_discard_cost_body(input: &str) -> super::oracle_nom::error::OracleResult<'_, u32> {
+/// CR 701.9b: Complete grammar for the unfiltered random discard-cost body.
+/// CR 107.3a: an `X` count stays symbolic (`Variable("X")`), never the cost
+/// parser's usual zero sentinel, so the announced number of cards is discarded
+/// (Devastating Dreams).
+fn parse_random_discard_cost_body(
+    input: &str,
+) -> super::oracle_nom::error::OracleResult<'_, QuantityExpr> {
     alt((
-        value(1, tag("a card at random")),
+        value(QuantityExpr::Fixed { value: 1 }, tag("a card at random")),
         terminated(
-            nom_primitives::parse_number,
+            nom_quantity::parse_quantity_expr_number,
             alt((tag(" card at random"), tag(" cards at random"))),
         ),
     ))
@@ -4072,16 +4086,46 @@ mod tests {
         );
     }
 
+    /// CR 107.3a: an untyped "Discard X cards" keeps X symbolic, so the
+    /// announced value is discarded rather than zero cards.
+    #[test]
+    fn cost_discard_x_untyped_cards_keeps_x_symbolic() {
+        assert_eq!(
+            parse_oracle_cost("Discard X cards"),
+            AbilityCost::Discard {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+                filter: None,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                self_scope: crate::types::ability::DiscardSelfScope::FromHand,
+            }
+        );
+    }
+
     #[test]
     fn cost_discard_at_random_is_game_selected() {
         for (text, expected) in [
-            ("Discard a card at random", 1),
-            ("Discard two cards at random", 2),
+            ("Discard a card at random", QuantityExpr::Fixed { value: 1 }),
+            (
+                "Discard two cards at random",
+                QuantityExpr::Fixed { value: 2 },
+            ),
+            (
+                "Discard X cards at random",
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+            ),
         ] {
             assert_eq!(
                 parse_oracle_cost(text),
                 AbilityCost::Discard {
-                    count: QuantityExpr::Fixed { value: expected },
+                    count: expected,
                     filter: None,
                     selection: crate::types::ability::CardSelectionMode::Random,
                     self_scope: crate::types::ability::DiscardSelfScope::FromHand,
@@ -4096,7 +4140,6 @@ mod tests {
             "Discard a creature card at random",
             "Discard a card at random from your hand",
             "Discard frobnitz at random",
-            "Discard X cards at random",
         ] {
             assert!(
                 matches!(parse_oracle_cost(text), AbilityCost::Unimplemented { .. }),

@@ -6,12 +6,12 @@ use serde::{Deserialize, Serialize};
 use crate::types::ability::{
     additional_cost_instance_payment_count, additional_cost_instance_payment_count_for_ordinal,
     materialize_legacy_printed_trigger_entries, AbilityBlockEntry, AbilityDefinition,
-    AdditionalCost, AdditionalCostInstancePayment, AdditionalCostOrigin, BasicLandType,
-    CastTimingPermission, CastVariantPaid, CastingPermission, CastingRestriction, ChosenAttribute,
-    ChosenSubtypeKind, CostPaidObjectSnapshot, ExiledSpellRider, ModalChoice,
-    ReplacementDefinition, SeatDirection, SolveCondition, SpellCastingOption, StaticDefinition,
-    TriggerBaseSetInstanceRef, TriggerDefinition, TriggerDefinitionOccurrenceRef, TriggerEntry,
-    TriggerOccurrenceState, TriggerPrintedOrigin,
+    AbilityProvenance, AdditionalCost, AdditionalCostInstancePayment, AdditionalCostOrigin,
+    BasicLandType, CastTimingPermission, CastVariantPaid, CastingPermission, CastingRestriction,
+    CharacteristicSetRef, ChosenAttribute, ChosenSubtypeKind, CostPaidObjectSnapshot,
+    ExiledSpellRider, ModalChoice, ReplacementDefinition, SeatDirection, SolveCondition,
+    SpellCastingOption, StaticDefinition, TriggerBaseSetInstanceRef, TriggerDefinition,
+    TriggerDefinitionOccurrenceRef, TriggerEntry, TriggerOccurrenceState, TriggerPrintedOrigin,
 };
 use crate::types::card::{LayoutKind, PrintedCardRef, PrintedLoyalty, TokenImageRef};
 use crate::types::card_type::{CardType, CoreType};
@@ -406,6 +406,16 @@ pub struct EmblemSource {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub printed_ref: Option<PrintedCardRef>,
+}
+
+/// CR 607.1d + CR 607.5 + CR 400.7: an emblem's pairing identity — the exact
+/// object that created it and the copiable-value set of the ability that
+/// created it. Only exiles made by that object's characteristic abilities of
+/// the same set are "exiled with" it for the emblem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct LinkedAbilitySource {
+    pub creator: ObjectIncarnationRef,
+    pub characteristic_set: CharacteristicSetRef,
 }
 
 /// CR 702.16p: Start-time attachment exemption captured for one continuous
@@ -1051,6 +1061,15 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub emblem_source: Option<EmblemSource>,
 
+    /// CR 607.1d + CR 607.5 + CR 400.7: for an emblem, the exact object (storage
+    /// id + incarnation) that was the source of the ability that created it — the
+    /// object an emblem ability's "cards exiled with [that object]" refers to —
+    /// and the copiable-value set of that ability, which its exile-performing
+    /// partners must share. `None` for every non-emblem object, and for an emblem
+    /// whose creating ability is not attributable. Written once in `create_emblem`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linked_ability_source: Option<LinkedAbilitySource>,
+
     /// CR 111.1: Whether this object is a token (not a card).
     #[serde(default, skip_serializing_if = "is_false")]
     pub is_token: bool,
@@ -1228,6 +1247,20 @@ pub struct GameObject {
     /// an earlier exception (CR 613.1a timestamp order).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layer1_name_origin: Option<crate::types::ability::CopiedNameOrigin>,
+
+    /// CR 613.1f + CR 607.1: index of the first live `abilities` slot that is not
+    /// one of this object's characteristic abilities. Layer 6 appends granted
+    /// abilities after the layer-1 set; an ability-removing effect (CR 613.1f) or a
+    /// basic-land-type set (CR 305.7) empties the characteristic prefix. `None` =
+    /// every live slot is characteristic. Layer-derived: reset with `abilities`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub granted_abilities_from: Option<usize>,
+    /// CR 613.1a + CR 607.5: the winning layer-1 copy effect whose copiable values
+    /// supplied the characteristic `abilities` this pass; `None` = the object's
+    /// own. Layer-derived: set by the layer-1 `CopyValues` arm, cleared by the
+    /// Step-1 seed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layer1_copy_effect: Option<crate::types::ability::CopyEffectInstanceRef>,
 
     /// CR 707.9b: the BASE name's origin for a MATERIALIZED object (duplicate
     /// conjure / copy-token creation of an exception-named copy) — persistent,
@@ -1522,6 +1555,8 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         is_renowned: _,
         is_emblem: _,
         emblem_source: _,
+        // omitted-safe-by-write-site: written once at emblem creation, immutable after.
+        linked_ability_source: _,
         is_token: _,
         is_copy: _,
         display_source: _,
@@ -1550,6 +1585,8 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         room_unlocks: _,
         copied_room_halves: _,
         layer1_name_origin: _,
+        granted_abilities_from: _,
+        layer1_copy_effect: _,
         base_name_origin: _,
         class_level: _,
         cast_from_zone: _,
@@ -2692,6 +2729,7 @@ impl GameObject {
             is_renowned: false,
             is_emblem: false,
             emblem_source: None,
+            linked_ability_source: None,
             is_token: false,
             is_copy: false,
             display_source: DisplaySource::Card,
@@ -2720,6 +2758,8 @@ impl GameObject {
             room_unlocks: None,
             copied_room_halves: None,
             layer1_name_origin: None,
+            granted_abilities_from: None,
+            layer1_copy_effect: None,
             base_name_origin: None,
             class_level: None,
             cast_from_zone: None,
@@ -3005,6 +3045,31 @@ impl GameObject {
         self.static_definitions = Arc::clone(&self.base_static_definitions).into();
     }
 
+    /// CR 613.1a + CR 607.5: the copiable-value set that supplies this object's
+    /// characteristic abilities this layer pass — the winning layer-1 copy
+    /// effect's, else the object's own.
+    pub fn characteristic_set(&self) -> CharacteristicSetRef {
+        self.layer1_copy_effect
+            .map_or(CharacteristicSetRef::Own, CharacteristicSetRef::Copied)
+    }
+
+    /// CR 607.1 + CR 607.5 + CR 613.1f: whether the live activated-ability slot
+    /// `index` is one of this object's characteristic abilities (of its current
+    /// copiable-value set) or one gained in layer 6. An index past the live
+    /// `abilities` (a runtime-granted cycling/graveyard/plot/equip slot, or no
+    /// such slot at all) is `Granted` — fail closed.
+    pub fn activated_ability_provenance(&self, index: usize) -> AbilityProvenance {
+        if index >= self.abilities.len()
+            || self
+                .granted_abilities_from
+                .is_some_and(|from| index >= from)
+        {
+            AbilityProvenance::Granted
+        } else {
+            AbilityProvenance::Characteristic(self.characteristic_set())
+        }
+    }
+
     /// CR 613.1 + CR 400.7: Revert layer-derived characteristics to the object's
     /// printed baseline. Mirrors the per-object reset in `evaluate_layers` Step 1
     /// (layers.rs) but runs at zone-exit time so off-battlefield objects — e.g. a
@@ -3025,6 +3090,8 @@ impl GameObject {
         self.mana_cost = self.base_mana_cost.clone();
         self.keywords = self.base_keywords.clone();
         self.abilities = Arc::clone(&self.base_abilities);
+        self.granted_abilities_from = None;
+        self.layer1_copy_effect = None;
         self.materialize_base_trigger_definitions();
         self.replacement_definitions = Arc::clone(&self.base_replacement_definitions).into();
         self.static_definitions = Arc::clone(&self.base_static_definitions).into();
