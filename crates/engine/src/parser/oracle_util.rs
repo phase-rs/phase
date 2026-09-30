@@ -492,11 +492,13 @@ pub fn parse_count_expr(text: &str) -> Option<(QuantityExpr, &str)> {
         }
     }
 
-    // CR 608.2c: "that many" / "that much" — an anaphoric back-reference to the
-    // previous effect's count (read the whole text and apply the rules of
-    // English). Resolves to `EventContextAmount` (which falls back to
-    // `state.last_effect_count` for chained sub-ability
-    // continuations). Composes with the "twice"/"three times" multipliers
+    // CR 608.2c: "that many" / "that much" / "that number of" — an
+    // anaphoric back-reference to the previous effect's count (read the whole
+    // text and apply the rules of English). Resolves to `EventContextAmount`
+    // (which falls back to `state.last_effect_count` for chained sub-ability
+    // continuations); a governing gate that measured the antecedent later
+    // rebinds the placeholder to its own `QuantityRef`. Composes with the
+    // "twice"/"three times" multipliers
     // above so "twice that many cards" parses as Multiply{2, EventContextAmount}.
     if let Some(((), rest)) = super::oracle_nom::bridge::nom_on_lower(text, &lower, |i| {
         nom::combinator::value(
@@ -504,6 +506,7 @@ pub fn parse_count_expr(text: &str) -> Option<(QuantityExpr, &str)> {
             nom::branch::alt((
                 nom::bytes::complete::tag::<_, _, OracleError<'_>>("that many"),
                 nom::bytes::complete::tag("that much"),
+                nom::bytes::complete::tag("that number of"),
             )),
         )
         .parse(i)
@@ -4303,6 +4306,32 @@ mod tests {
             other => panic!("expected Multiply, got {other:?}"),
         }
         assert_eq!(rest, "stun counters");
+    }
+
+    /// CR 608.2c: the demonstrative count phrases — "that many", "that much",
+    /// and "that number of" — all parse to the unbound `EventContextAmount`
+    /// placeholder and leave the counted noun as the remainder.
+    #[test]
+    fn parse_count_expr_demonstrative_count_phrases() {
+        for (text, expected_rest) in [
+            (
+                "that number of +1/+1 counters on target creature",
+                "+1/+1 counters on target creature",
+            ),
+            ("that many +1/+1 counters", "+1/+1 counters"),
+            ("that much life", "life"),
+        ] {
+            let (qty, rest) = parse_count_expr(text)
+                .unwrap_or_else(|| panic!("{text:?} must parse as a count expression"));
+            assert_eq!(
+                qty,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount
+                },
+                "{text:?} must be the EventContextAmount placeholder"
+            );
+            assert_eq!(rest, expected_rest, "{text:?} must leave the noun phrase");
+        }
     }
 
     /// CR 107.1b: "equal to" in count positions must compose full quantity

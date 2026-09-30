@@ -1928,9 +1928,7 @@ fn resolution_only_scope_referent_present(
         // recipient. Never reached via the classifier, answered `true` for safety.
         ObjectScope::Source | ObjectScope::Recipient => true,
         ObjectScope::Target => targets.iter().any(|t| matches!(t, TargetRef::Object(_))),
-        ObjectScope::EventSource => {
-            object_id_for_scope(state, ObjectScope::EventSource, ctx, targets).is_some()
-        }
+        ObjectScope::EventSource => event_source_referent_present(state, Some(ability)),
         ObjectScope::EventTarget => {
             object_id_for_scope(state, ObjectScope::EventTarget, ctx, targets).is_some()
         }
@@ -1939,13 +1937,13 @@ fn resolution_only_scope_referent_present(
         ObjectScope::CostPaidObject => {
             ability.cost_paid_object.is_some()
                 || ability.effect_context_object.is_some()
-                || object_id_for_scope(state, ObjectScope::EventSource, ctx, targets).is_some()
+                || event_source_referent_present(state, Some(ability))
         }
         // CR 608.2c: earlier-instruction referent, then trigger-event source, then
         // cost referent (the `Anaphoric`/`Demonstrative` fallback order).
         ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
             ability.effect_context_object.is_some()
-                || object_id_for_scope(state, ObjectScope::EventSource, ctx, targets).is_some()
+                || event_source_referent_present(state, Some(ability))
                 || ability.cost_paid_object.is_some()
         }
         // CR 608.2c: the "other" revealed card exists only when a `last_revealed_ids`
@@ -4882,16 +4880,16 @@ fn resolve_ref(
         // vector is maintained by layer 5, so recipient-relative static boosts
         // see color-changing effects correctly when this resolves in layer 7c.
         QuantityRef::ObjectColorCount { scope } => {
-            resolve_object_color_count(state, *scope, ctx, targets)
+            resolve_object_color_count(state, *scope, ctx, targets, ability)
         }
         QuantityRef::ObjectNameWordCount { scope } => {
-            resolve_object_name_word_count(state, *scope, ctx, targets)
+            resolve_object_name_word_count(state, *scope, ctx, targets, ability)
         }
         QuantityRef::ObjectTypelineComponentCount { scope } => {
-            resolve_object_typeline_component_count(state, *scope, ctx, targets)
+            resolve_object_typeline_component_count(state, *scope, ctx, targets, ability)
         }
         QuantityRef::ManaSymbolsInManaCost { scope, color } => {
-            resolve_mana_symbols_in_mana_cost(state, *scope, *color, ctx, targets)
+            resolve_mana_symbols_in_mana_cost(state, *scope, *color, ctx, targets, ability)
         }
         // CR 202.3 + CR 202.3e + CR 118.9: Mana value of the source object. Used by
         // alt-cost cast permissions ("pay life equal to its mana value rather
@@ -5061,15 +5059,13 @@ fn resolve_ref(
                             Some(ct) => {
                                 u32_to_i32_saturating(obj.counters.get(ct).copied().unwrap_or(0))
                             }
-                            None => {
-                                u32_to_i32_saturating(obj.counters.values().copied().sum::<u32>())
-                            }
+                            None => counter_count_from_map(&obj.counters, None),
                         })
                     } else {
                         None
                     }
                 })
-                .sum()
+                .fold(0_i32, i32::saturating_add)
         }
         QuantityRef::Devotion { colors } => match colors {
             crate::types::ability::DevotionColors::Fixed(colors) => u32_to_i32_saturating(
@@ -7151,6 +7147,86 @@ fn current_or_detection_trigger_event(state: &GameState) -> Option<GameEvent> {
         .or_else(detection_trigger_event)
 }
 
+/// CR 603.7 + CR 603.10a + CR 608.2h: The event whose OBJECT an object
+/// look-back read names. A phase-delayed ability created under a battlefield
+/// departure carries that departure (`SpellContext::creation_lookback_event`),
+/// because the phase event that fires it names no object. Every other ability
+/// reads the event that fired it. Player reads keep `current_trigger_event`;
+/// only object-subject reads go through here.
+fn object_lookback_event(
+    state: &GameState,
+    ability: Option<&ResolvedAbility>,
+) -> Option<GameEvent> {
+    ability
+        .and_then(|a| a.context.creation_lookback_event.as_deref())
+        .cloned()
+        .or_else(|| current_or_detection_trigger_event(state))
+}
+
+/// CR 603.2 + CR 603.7 + CR 608.2h: whether an object look-back read has a triggering-event source.
+/// See [`object_lookback_event`].
+fn event_source_referent_present(state: &GameState, ability: Option<&ResolvedAbility>) -> bool {
+    object_lookback_event(state, ability)
+        .and_then(|event| crate::game::targeting::extract_source_from_event(&event))
+        .is_some()
+}
+
+/// CR 603.10a + CR 608.2h + CR 400.7: The departed object's record-owned
+/// last-known information, when the look-back event is a battlefield
+/// departure. `Present` is authoritative over any live or id-keyed read (a
+/// same-id object may since have returned as a new object); `Malformed` must
+/// never fall back to one.
+enum DepartureLookback {
+    NotBattlefieldDeparture,
+    Present(Box<TriggerSourceContext>),
+    Absent,
+    Malformed,
+}
+
+fn departure_lookback(state: &GameState, ability: Option<&ResolvedAbility>) -> DepartureLookback {
+    let Some(event) = object_lookback_event(state, ability) else {
+        return DepartureLookback::NotBattlefieldDeparture;
+    };
+    match battlefield_departure_counter_context(&event) {
+        BattlefieldDepartureCounterContext::Present { context } => {
+            DepartureLookback::Present(Box::new(context.clone()))
+        }
+        BattlefieldDepartureCounterContext::Absent { .. } => DepartureLookback::Absent,
+        BattlefieldDepartureCounterContext::Malformed => DepartureLookback::Malformed,
+        BattlefieldDepartureCounterContext::NotBattlefieldDeparture => {
+            DepartureLookback::NotBattlefieldDeparture
+        }
+    }
+}
+
+/// CR 608.2h + CR 603.10a: For a trigger-event-source characteristic read
+/// (`EventSource`, or an `Anaphoric` pronoun whose referent is that source),
+/// the departed object's record-owned context when the look-back event is a
+/// battlefield departure. `Some(None)` is a malformed record: the read fails
+/// closed rather than consulting a live same-id object. `None` means the
+/// caller keeps its ordinary path.
+fn departure_context_for_scope(
+    state: &GameState,
+    scope: ObjectScope,
+    ability: Option<&ResolvedAbility>,
+) -> Option<Option<Box<TriggerSourceContext>>> {
+    if !matches!(scope, ObjectScope::EventSource | ObjectScope::Anaphoric) {
+        return None;
+    }
+    // CR 608.2c: an anaphor first binds the object introduced by an earlier
+    // instruction in the same ability; only without one does it fall back to
+    // the trigger-event source.
+    if scope == ObjectScope::Anaphoric && ability.is_some_and(|a| a.effect_context_object.is_some())
+    {
+        return None;
+    }
+    match departure_lookback(state, ability) {
+        DepartureLookback::Present(context) => Some(Some(context)),
+        DepartureLookback::Malformed => Some(None),
+        DepartureLookback::Absent | DepartureLookback::NotBattlefieldDeparture => None,
+    }
+}
+
 /// CR 400.7 + CR 603.10a: Classify a battlefield departure's counter authority.
 ///
 /// The record-owned context is authoritative for a coherent departure; an
@@ -7209,7 +7285,7 @@ fn event_context_counter_count_from_lki(
         ) => counter_type,
         _ => return None,
     };
-    let event = current_or_detection_trigger_event(state)?;
+    let event = object_lookback_event(state, ability)?;
     let count = match battlefield_departure_counter_context(&event) {
         BattlefieldDepartureCounterContext::Present { context } => {
             counter_count_from_map(&context.lki.counters, Some(counter_type))
@@ -7231,8 +7307,12 @@ pub(crate) fn counter_count_from_map(
 ) -> i32 {
     match counter_type {
         Some(ct) => u32_to_i32_saturating(counters.get(ct).copied().unwrap_or(0)),
-        None => u32_to_i32_saturating(counters.values().copied().sum::<u32>()),
+        None => counter_total_from_map(counters),
     }
+}
+
+fn counter_total_from_map(counters: &HashMap<CounterType, u32>) -> i32 {
+    i32::try_from(crate::types::counter::counter_total(counters)).unwrap_or(i32::MAX)
 }
 
 /// Resolve an ordinary object scope through its live object or its LKI snapshot.
@@ -7291,7 +7371,7 @@ fn resolve_counters_on_scope(
         // the event's prior incarnation, not a same-id object that has since
         // returned. Other event kinds retain the ordinary scope lookup below.
         ObjectScope::EventSource => {
-            let event = current_or_detection_trigger_event(state);
+            let event = object_lookback_event(state, ability);
             match event
                 .as_ref()
                 .map(battlefield_departure_counter_context)
@@ -7404,7 +7484,23 @@ fn resolve_object_color_count(
     scope: ObjectScope,
     ctx: QuantityContext,
     targets: &[TargetRef],
+    ability: Option<&ResolvedAbility>,
 ) -> i32 {
+    if let Some(context) = departure_context_for_scope(state, scope, ability) {
+        return context
+            .map(|context| {
+                usize_to_i32_saturating(
+                    context
+                        .lki
+                        .colors
+                        .iter()
+                        .copied()
+                        .collect::<HashSet<_>>()
+                        .len(),
+                )
+            })
+            .unwrap_or(0);
+    }
     if matches!(scope, ObjectScope::Source) && ctx.trigger_source.is_some() {
         return source_lki_for_context(state, &ctx)
             .map(|lki| {
@@ -7435,7 +7531,13 @@ fn resolve_object_name_word_count(
     scope: ObjectScope,
     ctx: QuantityContext,
     targets: &[TargetRef],
+    ability: Option<&ResolvedAbility>,
 ) -> i32 {
+    if let Some(context) = departure_context_for_scope(state, scope, ability) {
+        return context
+            .map(|context| usize_to_i32_saturating(context.lki.name.split_whitespace().count()))
+            .unwrap_or(0);
+    }
     if matches!(scope, ObjectScope::Source) && ctx.trigger_source.is_some() {
         return source_lki_for_context(state, &ctx)
             .map(|lki| usize_to_i32_saturating(lki.name.split_whitespace().count()))
@@ -7458,7 +7560,19 @@ fn resolve_object_typeline_component_count(
     scope: ObjectScope,
     ctx: QuantityContext,
     targets: &[TargetRef],
+    ability: Option<&ResolvedAbility>,
 ) -> i32 {
+    if let Some(context) = departure_context_for_scope(state, scope, ability) {
+        return context
+            .map(|context| {
+                usize_to_i32_saturating(
+                    context.lki.supertypes.len()
+                        + context.lki.card_types.len()
+                        + context.lki.subtypes.len(),
+                )
+            })
+            .unwrap_or(0);
+    }
     if matches!(scope, ObjectScope::Source) && ctx.trigger_source.is_some() {
         return source_lki_for_context(state, &ctx)
             .map(|lki| {
@@ -7499,7 +7613,17 @@ fn resolve_mana_symbols_in_mana_cost(
     color: Option<ManaColor>,
     ctx: QuantityContext,
     targets: &[TargetRef],
+    ability: Option<&ResolvedAbility>,
 ) -> i32 {
+    // CR 202.1 + CR 707.2 + CR 708.2a + CR 608.2h: a departed object's mana
+    // symbols are those of its layered mana cost as it left the battlefield
+    // (a copied cost for a copy, none for a face-down permanent), captured on
+    // the departure record — not the printed card now in its new zone.
+    if let Some(context) = departure_context_for_scope(state, scope, ability) {
+        return context
+            .map(|context| context.mana_cost.count_colored_pips(color))
+            .unwrap_or(0);
+    }
     if matches!(scope, ObjectScope::Source) && ctx.trigger_source.is_some() {
         return source_object_for_context(state, ctx.source, ctx.trigger_source.as_ref())
             .map(|object| object.mana_cost.count_colored_pips(color))
@@ -7594,12 +7718,11 @@ where
     })
 }
 
-fn trigger_event_source_identity(state: &GameState) -> Option<(ObjectId, Option<u64>)> {
-    let event = state
-        .current_trigger_event
-        .as_ref()
-        .cloned()
-        .or_else(detection_trigger_event)?;
+fn trigger_event_source_identity(
+    state: &GameState,
+    ability: Option<&ResolvedAbility>,
+) -> Option<(ObjectId, Option<u64>)> {
+    let event = object_lookback_event(state, ability)?;
     let object_id = crate::game::targeting::extract_source_from_event(&event)?;
     let expected_incarnation = match &event {
         crate::types::events::GameEvent::ZoneChanged {
@@ -7612,8 +7735,14 @@ fn trigger_event_source_identity(state: &GameState) -> Option<(ObjectId, Option<
     Some((object_id, expected_incarnation))
 }
 
+/// CR 608.2h + CR 603.10a + CR 400.7: power/toughness of the trigger-event
+/// source. A battlefield departure answers from its record-owned last-known
+/// information, which is exact after the step's `lki_cache` is cleared and
+/// after a same-id object has returned; other events use the guarded
+/// identity read.
 fn read_trigger_event_source_pt<F, G>(
     state: &GameState,
+    ability: Option<&ResolvedAbility>,
     obj_extract: &F,
     lki_extract: &G,
 ) -> Option<i32>
@@ -7621,7 +7750,12 @@ where
     F: Fn(&crate::game::game_object::GameObject) -> Option<i32>,
     G: Fn(&crate::types::game_state::LKISnapshot) -> Option<i32>,
 {
-    trigger_event_source_identity(state).and_then(|(id, expected_incarnation)| {
+    match departure_lookback(state, ability) {
+        DepartureLookback::Present(context) => return lki_extract(&context.lki),
+        DepartureLookback::Malformed => return None,
+        DepartureLookback::Absent | DepartureLookback::NotBattlefieldDeparture => {}
+    }
+    trigger_event_source_identity(state, ability).and_then(|(id, expected_incarnation)| {
         read_object_pt_by_id_for_incarnation(
             state,
             id,
@@ -7732,7 +7866,7 @@ where
         // dies, ... its power"). When the source has left the battlefield, prefer
         // its buffed LKI over a base-only live read via the shared guarded read.
         ObjectScope::EventSource => {
-            read_trigger_event_source_pt(state, &obj_extract, &lki_extract).unwrap_or(0)
+            read_trigger_event_source_pt(state, ability, &obj_extract, &lki_extract).unwrap_or(0)
         }
         // CR 603.2 + CR 208.1: the power/toughness of the object that received
         // the triggering damage ("that creature's toughness"). Same guarded
@@ -7789,7 +7923,7 @@ where
                 // record's incarnation prevents a blinked object from reading
                 // the re-entered permanent's live P/T instead of original LKI.
                 // Slots 1 and 2 (snapshot-only) are unchanged.
-                read_trigger_event_source_pt(state, &obj_extract, &lki_extract)
+                read_trigger_event_source_pt(state, ability, &obj_extract, &lki_extract)
             })
             .unwrap_or(0),
         // CR 608.2c: A demonstrative noun phrase ("that creature's toughness")
@@ -7816,7 +7950,7 @@ where
             .or_else(|| {
                 // CR 400.7 + CR 608.2h: slot 2 trigger-event source uses exact
                 // ETB incarnation identity. Slots 1 and 3 are unchanged.
-                read_trigger_event_source_pt(state, &obj_extract, &lki_extract)
+                read_trigger_event_source_pt(state, ability, &obj_extract, &lki_extract)
             })
             .or_else(|| {
                 ability
@@ -7860,9 +7994,11 @@ where
             .or_else(|| {
                 // CR 608.2h: slot 2 trigger-event source; guarded live-then-LKI
                 // read so "its power" on a dies trigger reads the buffed value.
+                // Routed through the same trigger-event-source reader as the
+                // `CostPaidObject` / `Demonstrative` slots, so a phase-delayed
+                // payload reads its creation departure (CR 603.7 + CR 603.10a).
                 // Slots 1 and 3 (snapshot-only) are unchanged.
-                object_id_for_scope(state, ObjectScope::EventSource, ctx, targets)
-                    .and_then(|id| read_object_pt_by_id(state, id, &obj_extract, &lki_extract))
+                read_trigger_event_source_pt(state, ability, &obj_extract, &lki_extract)
             })
             .or_else(|| {
                 ability
@@ -7993,6 +8129,34 @@ fn resolve_object_mana_value(
     targets: &[TargetRef],
     ability: Option<&ResolvedAbility>,
 ) -> i32 {
+    // CR 608.2h + CR 603.10a + CR 400.7 + CR 708.2a: the trigger-event source's
+    // mana value. A battlefield departure answers from its record-owned
+    // last-known information (0 for a face-down permanent), never from a live
+    // same-id object that has since returned; other events keep the id-keyed
+    // live-then-LKI read.
+    let event_source_mana_value = || -> Option<i32> {
+        match departure_lookback(state, ability) {
+            DepartureLookback::Present(context) => {
+                return Some(u32_to_i32_saturating(context.lki.mana_value));
+            }
+            DepartureLookback::Malformed => return Some(0),
+            DepartureLookback::Absent | DepartureLookback::NotBattlefieldDeparture => {}
+        }
+        let id = object_lookback_event(state, ability)
+            .and_then(|e| crate::game::targeting::extract_source_from_event(&e))?;
+        state
+            .objects
+            .get(&id)
+            // CR 202.3d + CR 709.4b: combined MV for a split card off the
+            // stack; CR 202.3e: chosen X for an on-stack source.
+            .map(|obj| u32_to_i32_saturating(obj.effective_mana_value()))
+            .or_else(|| {
+                state
+                    .lki_cache
+                    .get(&id)
+                    .map(|lki| u32_to_i32_saturating(lki.mana_value))
+            })
+    };
     match scope {
         // CR 202.3e: include cost_x_paid so on-stack spells report X's chosen value.
         ObjectScope::Source => {
@@ -8025,22 +8189,7 @@ fn resolve_object_mana_value(
             if let Some(mana_value) = event_source_mana_value_override(state) {
                 return mana_value;
             }
-            let Some(object_id) =
-                object_id_for_scope(state, ObjectScope::EventSource, ctx, targets)
-            else {
-                return 0;
-            };
-            state
-                .objects
-                .get(&object_id)
-                .map(|obj| u32_to_i32_saturating(obj.effective_mana_value()))
-                .or_else(|| {
-                    state
-                        .lki_cache
-                        .get(&object_id)
-                        .map(|lki| u32_to_i32_saturating(lki.mana_value))
-                })
-                .unwrap_or(0)
+            event_source_mana_value().unwrap_or(0)
         }
         // CR 603.2 + CR 202.3: mana value of the object that received the
         // triggering damage. Same live-then-LKI resolution as `EventSource`.
@@ -8083,23 +8232,7 @@ fn resolve_object_mana_value(
                     .and_then(|a| a.effect_context_object.as_ref())
                     .map(|snapshot| u32_to_i32_saturating(snapshot.lki.mana_value))
             })
-            .or_else(|| {
-                object_id_for_scope(state, ObjectScope::EventSource, ctx, targets).and_then(|id| {
-                    state
-                        .objects
-                        .get(&id)
-                        // CR 202.3d + CR 709.4b: combined MV for a split card off
-                        // the stack; CR 202.3e: chosen X for an on-stack source
-                        // (parity with the sibling Anaphoric event-source arm).
-                        .map(|obj| u32_to_i32_saturating(obj.effective_mana_value()))
-                        .or_else(|| {
-                            state
-                                .lki_cache
-                                .get(&id)
-                                .map(|lki| u32_to_i32_saturating(lki.mana_value))
-                        })
-                })
-            })
+            .or_else(event_source_mana_value)
             .unwrap_or(0),
         ObjectScope::AmassedArmy => ability
             .and_then(|a| a.amassed_army_object.as_ref())
@@ -8163,24 +8296,11 @@ fn resolve_object_mana_value(
             .and_then(|a| a.effect_context_object.as_ref())
             .map(|s| u32_to_i32_saturating(s.lki.mana_value))
             .or_else(|| {
-                current_or_detection_trigger_event(state)
+                object_lookback_event(state, ability)
                     .as_ref()
                     .and_then(|event| spell_cast_mana_value_for_event(state, event))
             })
-            .or_else(|| {
-                object_id_for_scope(state, ObjectScope::EventSource, ctx, targets).and_then(|id| {
-                    state
-                        .objects
-                        .get(&id)
-                        .map(|obj| u32_to_i32_saturating(obj.effective_mana_value()))
-                        .or_else(|| {
-                            state
-                                .lki_cache
-                                .get(&id)
-                                .map(|lki| u32_to_i32_saturating(lki.mana_value))
-                        })
-                })
-            })
+            .or_else(event_source_mana_value)
             .or_else(|| {
                 ability
                     .and_then(|a| a.cost_paid_object.as_ref())
@@ -15342,6 +15462,48 @@ mod tests {
         };
 
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 2);
+    }
+
+    #[test]
+    fn counters_on_objects_all_counter_kinds_saturates_per_object() {
+        let mut state = GameState::new_two_player(42);
+
+        let counted = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Overloaded Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&counted).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.counters
+                .insert(CounterType::Generic("charge".to_string()), u32::MAX);
+            obj.counters
+                .insert(CounterType::Generic("oil".to_string()), 1);
+        }
+
+        let source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::CountersOnObjects {
+                counter_type: None,
+                filter: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            },
+        };
+
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(0), source),
+            i32::MAX,
+            "CountersOnObjects must saturate an all-counter-kind per-object total before folding"
+        );
     }
 
     #[test]

@@ -489,6 +489,12 @@ pub struct TriggerSourceContext {
     pub is_token: bool,
     #[serde(default)]
     pub face_down: bool,
+    /// CR 202.1 + CR 707.2 + CR 708.2a: The observed object's layered mana cost
+    /// (copy effects applied; a face-down permanent has none). `LKISnapshot`
+    /// records only the mana value, so a look-back read of the departed
+    /// object's mana symbols answers from this capture.
+    #[serde(default)]
+    pub mana_cost: ManaCost,
     #[serde(default)]
     pub transformed: bool,
     #[serde(default)]

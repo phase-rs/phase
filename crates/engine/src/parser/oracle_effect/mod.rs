@@ -4121,6 +4121,22 @@ fn try_parse_inline_delayed_trigger(
     let condition_text = &tp.lower["when ".len()..comma];
     let effect_text = &tp.original[comma + 2..];
 
+    // CR 603.7b + CR 608.2c: an "another <type phrase> …" subject names a
+    // DIFFERENT object that must match the delayed trigger's own event ("when
+    // another creature you control dies this turn"). No delayed condition here
+    // models a typed other-object subject, and the definite-self fallback below
+    // would silently turn it into a trigger on this object. Fail the whole
+    // clause closed so the card stays honestly unsupported.
+    if tag::<_, _, OracleError<'_>>("another ")
+        .parse(condition_text)
+        .is_ok()
+    {
+        return Some(parsed_clause(Effect::unimplemented(
+            "delayed_trigger_other_subject",
+            tp.original,
+        )));
+    }
+
     // CR 603.6 + CR 603.7c: A self-referential disjunctive condition ("when ~
     // <eventA> or <eventB>, …") embeds two triggers; the demonstrative inner
     // subject binds to the parent target (rebound below). Detect it before the
@@ -25970,6 +25986,36 @@ fn player_scope_from_parent_target_subject(affected: &TargetFilter) -> Option<Pl
     }
 }
 
+/// CR 608.2c + CR 108.3: When an immediately preceding owner-subject clause
+/// establishes the anchor, "each other player" excludes that owner rather than
+/// the ability controller. This helper only strips the subject; the caller owns
+/// the chain-local antecedent and stamps the player scope.
+fn strip_owner_relative_each_other_player_subject(text: &str) -> Option<&str> {
+    nom_on_lower(text, &text.to_lowercase(), |i| {
+        value((), tag("each other player ")).parse(i)
+    })
+    .map(|(_, rest)| rest)
+}
+
+/// CR 603.4 + CR 608.2c + CR 108.3: Phase 1 deliberately leaves unsupported
+/// intervening-if text represented by the existing `Condition_If` diagnostic,
+/// but the following conjunct still needs the English owner antecedent for
+/// "each other player". Detect only that antecedent; do not strip or model the
+/// condition here.
+fn deferred_leading_condition_has_parent_target_owner_subject(
+    text: &str,
+    ctx: &ParseContext,
+) -> bool {
+    let Some((_condition_fragment, body)) = conditions::split_leading_conditional(text) else {
+        return false;
+    };
+    let mut probe_ctx = ctx.clone_throwaway();
+    matches!(
+        subject::parse_leading_subject_application(&body, &mut probe_ctx),
+        Some(application) if application.affected == TargetFilter::ParentTargetOwner
+    )
+}
+
 /// CR 701.16a + CR 400.7: Parse a "for each <filter> <cause> this way" SUFFIX
 /// (lowercased predicate text) into a `repeat_for` count for a count-less effect
 /// like `Effect::Investigate`. Routes the tail through the shared
@@ -34780,12 +34826,22 @@ fn resolve_difference_anaphor_in_effect(effect: &mut Effect, bound: Option<&Quan
     }
 }
 
-/// CR 608.2h: rebind a bare `EventContextAmount` "that many" count placeholder
-/// in a `PutCounter` effect to the concrete `QuantityRef` a leading
-/// counter-threshold gate measured. Sibling of
+/// CR 608.2h: rebind an `EventContextAmount` "that many" / "that much" /
+/// "that number of" count placeholder to the concrete `QuantityRef` a
+/// governing counter gate measured. Sibling of
 /// `resolve_difference_anaphor_in_effect` above — same call site, same
 /// `effective_condition` read — but a ONE-operand counter-gate operand rather
-/// than a two-operand difference.
+/// than a two-operand difference. Two gates feed it: a spell's leading
+/// counter-threshold clause ("If that artifact had counters on it, …" —
+/// Dismantle) and a trigger's positive past-tense intervening-if ("if it had
+/// one or more counters on it, …" — Yuna, Grand Summoner; bound from
+/// `lower_trigger_ir`).
+///
+/// The effect's own direct count/amount slot (`Effect::count_expr_mut`, the
+/// uniform accessor for `Draw`/`LoseLife`/`PutCounter`/`Token`/… magnitudes) is
+/// rebound first, through `QuantityExpr::rebind_event_context_amount` so an
+/// arithmetic wrapper ("twice that many") keeps its shape. That covers every
+/// count-bearing effect uniformly instead of one hand-written arm per variant.
 ///
 /// The descent below is the UNION of `resolve_difference_anaphor_in_effect`'s
 /// carrier set (`CreateDrawReplacement` / `CreateDelayedTrigger`) and every
@@ -34824,19 +34880,13 @@ fn resolve_difference_anaphor_in_effect(effect: &mut Effect, bound: Option<&Quan
 /// resolution, so they are leaves here too, explicitly listed alongside the
 /// module's own leaf set below rather than folded into it silently.
 fn rebind_event_context_amount_counts(effect: &mut Effect, gate_qty: &QuantityRef) {
+    // CR 608.2c + CR 608.2h: the effect's own magnitude slot. Leaves any
+    // non-placeholder quantity untouched (`rebind_event_context_amount` only
+    // rewrites `EventContextAmount` leaves).
+    if let Some(count) = effect.count_expr_mut() {
+        count.rebind_event_context_amount(gate_qty);
+    }
     match effect {
-        Effect::PutCounter { count, .. } => {
-            if matches!(
-                count,
-                QuantityExpr::Ref {
-                    qty: QuantityRef::EventContextAmount
-                }
-            ) {
-                *count = QuantityExpr::Ref {
-                    qty: gate_qty.clone(),
-                };
-            }
-        }
         Effect::ChooseOneOf { branches, .. } => {
             for branch in branches {
                 rebind_event_context_amount_counts_in_ability(branch, gate_qty);
@@ -34934,7 +34984,10 @@ fn rebind_event_context_amount_counts(effect: &mut Effect, gate_qty: &QuantityRe
         | Effect::Counter { .. } => {}
         // Leaf effects with no nested ability/effect carrier — verbatim from
         // `ability_visit::visit_effect_scoped`'s own leaf-arm enumeration.
-        Effect::StartYourEngines { .. }
+        // `PutCounter`'s direct `count` slot was already rebound above via
+        // `count_expr_mut`; it carries no nested payload.
+        Effect::PutCounter { .. }
+        | Effect::StartYourEngines { .. }
         | Effect::ChangeSpeed { .. }
         | Effect::DealDamage { .. }
         | Effect::ApplyPostReplacementDamage { .. }
@@ -38640,6 +38693,11 @@ pub(crate) fn parse_effect_chain_ir(
     // recipient through it) rather than boundary-cleared, preventing leak into
     // an unrelated later sentence.
     let mut chain_parent_target_controller_scope: Option<ControllerRef> = None;
+    // CR 608.2c + CR 108.3: Chain-spanning "its owner" antecedent for the
+    // immediately following "each other player" chunk. The next nonempty chunk
+    // consumes or clears this single-shot scope before generic player-scope
+    // peeling, so an owner-relative "other" reading cannot leak further.
+    let mut chain_parent_target_owner_scope: Option<PlayerFilter> = None;
     // CR 611.2a: carried across iterations — (clause count when the stamp was set, the
     // stamping chunk's text). The residual this closes is a chunk that carries a
     // distributed leading duration but pushes NO clause at all (it instead mutates an
@@ -38687,6 +38745,7 @@ pub(crate) fn parse_effect_chain_ir(
         if normalized_text.is_empty() {
             continue;
         }
+        let chain_parent_target_owner_scope_for_chunk = chain_parent_target_owner_scope.take();
         let previous_is_multi_coin_flip = builder
             .clauses()
             .iter()
@@ -40406,18 +40465,22 @@ pub(crate) fn parse_effect_chain_ir(
             // conditional strip ("a number of times equal to the difference").
             .or(difference_repeat)
             .or_else(|| pending_repeat_for.take());
-        let (player_scope, text, subject_worded_exile) = match early_player_scope {
-            Some(scope) => (Some(scope), text, false),
-            None => {
-                let subject_worded = nom_on_lower(&text, &text.to_lowercase(), |i| {
-                    value((), tag("each ")).parse(i)
-                })
-                .is_some();
-                let (scope, stripped) = super::clause_shell::peel_player_scope_subject(&text);
-                let subject_worded_exile = subject_worded && scope.is_some();
-                (scope, stripped, subject_worded_exile)
-            }
-        };
+        let owner_relative_player_scope = chain_parent_target_owner_scope_for_chunk
+            .zip(strip_owner_relative_each_other_player_subject(&text));
+        let (player_scope, text, subject_worded_exile) =
+            match (early_player_scope, owner_relative_player_scope) {
+                (Some(scope), _) => (Some(scope), text, false),
+                (None, Some((scope, stripped))) => (Some(scope), stripped.to_string(), true),
+                (None, None) => {
+                    let subject_worded = nom_on_lower(&text, &text.to_lowercase(), |i| {
+                        value((), tag("each ")).parse(i)
+                    })
+                    .is_some();
+                    let (scope, stripped) = super::clause_shell::peel_player_scope_subject(&text);
+                    let subject_worded_exile = subject_worded && scope.is_some();
+                    (scope, stripped, subject_worded_exile)
+                }
+            };
         let pending_player_scope_for_clause = pending_player_scope.take();
         let carried_player_scope = if player_scope.is_none()
             && !sequence::starts_clause_text(&text)
@@ -41079,6 +41142,8 @@ pub(crate) fn parse_effect_chain_ir(
             chain_parent_target_controller_scope = None;
         }
         let leading_subject_application = subject::parse_leading_subject_application(&text, ctx);
+        let deferred_leading_owner_subject = leading_subject_application.is_none()
+            && deferred_leading_condition_has_parent_target_owner_subject(&text, ctx);
         // CR 608.2c + CR 109.5: A chained clause whose explicit subject is the caster
         // ("you"/"you may") switches the acting player back to the ability controller
         // (CR 109.5: "you"/"your" refer to the object's controller). A non-caster
@@ -42916,6 +42981,15 @@ pub(crate) fn parse_effect_chain_ir(
             Some(app) if app.is_optional && app.affected == TargetFilter::ParentTargetController
         ) {
             chain_parent_target_controller_scope = Some(ControllerRef::ParentTargetController);
+        }
+        if matches!(
+            leading_subject_application.as_ref(),
+            Some(app) if app.affected == TargetFilter::ParentTargetOwner
+        ) || deferred_leading_owner_subject
+        {
+            chain_parent_target_owner_scope = Some(PlayerFilter::AllExcept {
+                exclude: Box::new(PlayerFilter::ParentObjectTargetOwner),
+            });
         }
 
         // CR 608.2e: The decline-consequence rebind scope ends at the sentence

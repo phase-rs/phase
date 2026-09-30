@@ -1699,15 +1699,26 @@ pub(crate) fn resolve_event_context_target_for_event_or_state(
             let controller = state.objects.get(&source_obj_id)?.controller;
             Some(TargetRef::Player(controller))
         }
-        // CR 108.3 + CR 608.2c: `ParentTargetOwner` mirrors `ParentTargetController`
-        // but returns the *owner* of the resolved object. When no trigger event
-        // supplies a source object (Enslave's phase trigger), fall back to the
-        // ability source's AttachedTo host — the Aura/Equipment context where
-        // "its owner" anaphorically refers to the equipped/enchanted permanent.
+        // CR 108.3 + CR 603.10a + CR 608.2c + CR 608.2h: `ParentTargetOwner`
+        // mirrors `ParentTargetController` but returns the *owner* of the
+        // resolved object. Zone-change triggers prefer the record/LKI owner,
+        // because the departing object may already be a new object by the time
+        // the ability resolves. When no trigger event supplies a source object
+        // (Enslave's phase trigger), fall back to the ability source's
+        // AttachedTo host — the Aura/Equipment context where "its owner"
+        // anaphorically refers to the equipped/enchanted permanent.
         TargetFilter::ParentTargetOwner => {
+            if let Some(GameEvent::ZoneChanged { record, .. }) = event {
+                return Some(TargetRef::Player(record.owner));
+            }
             if let Some(event) = event {
                 if let Some(source_obj_id) = extract_source_from_event(event) {
-                    if let Some(owner) = state.objects.get(&source_obj_id).map(|o| o.owner) {
+                    if let Some(owner) = state
+                        .objects
+                        .get(&source_obj_id)
+                        .map(|o| o.owner)
+                        .or_else(|| state.lki_cache.get(&source_obj_id).map(|lki| lki.owner))
+                    {
                         return Some(TargetRef::Player(owner));
                     }
                 }
@@ -3327,6 +3338,7 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{Comparator, ContinuousModification, Duration, QuantityExpr};
     use crate::types::card_type::CoreType;
+    use crate::types::format::FormatConfig;
     use crate::types::game_state::{
         CastingVariant, DrainStatus, PostReplacementDrain, ResidentDrainPolicy,
     };
@@ -3698,6 +3710,34 @@ mod tests {
             ObjectId(999),
         );
         assert_eq!(result, Some(TargetRef::Player(PlayerId(1))));
+    }
+
+    #[test]
+    fn parent_target_owner_prefers_zone_change_record_owner() {
+        // CR 108.3 + CR 603.10a + CR 608.2h: leaves-the-battlefield owner
+        // anaphors read the zone-change record/LKI authority. The live object
+        // row is absent here on purpose; falling back to live object state (or
+        // to the ability controller) would return None or P1 instead of P0.
+        let mut state = GameState::new(FormatConfig::standard(), 3, 0);
+        let moved = ObjectId(77);
+        state.current_trigger_event = Some(GameEvent::ZoneChanged {
+            object_id: moved,
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            record: Box::new(crate::types::game_state::ZoneChangeRecord {
+                owner: PlayerId(0),
+                controller: PlayerId(1),
+                ..crate::types::game_state::ZoneChangeRecord::test_minimal(
+                    moved,
+                    Some(Zone::Battlefield),
+                    Zone::Graveyard,
+                )
+            }),
+        });
+
+        let result =
+            resolve_event_context_target(&state, &TargetFilter::ParentTargetOwner, ObjectId(999));
+        assert_eq!(result, Some(TargetRef::Player(PlayerId(0))));
     }
 
     #[test]

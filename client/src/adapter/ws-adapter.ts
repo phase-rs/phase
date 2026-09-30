@@ -210,14 +210,20 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
- * 94 — FilterProp.Unblocked is reshaped to FilterProp.BlockStatus { status:
+ * 95 — FilterProp.Unblocked is reshaped to FilterProp.BlockStatus { status:
  *      AttackerBlockStatus } (Blocked | Unblocked), so "blocked creature"
  *      filters (CR 509.1h: an attacking creature stays blocked for the rest of
  *      combat once blocked) are expressible. The legacy "Unblocked" tag still
- *      deserializes via a serde alias with a defaulted status, but a v93 peer
+ *      deserializes via a serde alias with a defaulted status, but a v94 peer
  *      cannot parse the new "BlockStatus" tag carried in GameState ability
- *      definitions. Full-game peers and P2P move in lockstep (wire 76); lobby
+ *      definitions. Full-game peers and P2P move in lockstep (wire 77); lobby
  *      messages are unchanged.
+ * 94 — SpellContext.creation_lookback_event carries the battlefield departure a
+ *      phase-delayed triggered ability was created under (CR 603.7 + CR 603.10a
+ *      + CR 608.2h), and TriggerSourceContext.mana_cost captures the observed
+ *      object's layered mana cost (CR 707.2 + CR 708.2a). A v93 peer would drop
+ *      both; the exact-match handshake refuses the pairing. P2P moves in
+ *      lockstep (wire 76); lobby messages are unchanged.
  * 93 — ReductionProvenance gains SacrificedForCost, the reduction an Emerge
  *      or Offering sacrifice earns before a deferred target declaration. A
  *      v92 peer cannot deserialize it. P2P moves in lockstep to wire 75.
@@ -634,7 +640,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 94;
+export const PROTOCOL_VERSION = 95;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

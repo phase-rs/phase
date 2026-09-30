@@ -4873,7 +4873,11 @@ fn removable_counter_count_for_mana_cost(
         return 0;
     };
     match counter_type {
-        CounterMatch::Any => obj.counters.values().copied().sum(),
+        // CR 122.1: exact total clamped to u32. The count feeds only "can remove
+        // at least N" availability checks, so clamping preserves every such answer.
+        CounterMatch::Any => {
+            u32::try_from(counter_type.count_in(&obj.counters)).unwrap_or(u32::MAX)
+        }
         CounterMatch::OfType(counter_type) => obj.counters.get(counter_type).copied().unwrap_or(0),
     }
 }

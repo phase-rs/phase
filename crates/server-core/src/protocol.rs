@@ -3319,9 +3319,14 @@ mod tests {
     }
 
     /// `FilterProp::Unblocked` is reshaped to `FilterProp::BlockStatus { status:
-    /// AttackerBlockStatus }` (CR 509.1h); a v93 peer cannot parse the new
+    /// AttackerBlockStatus }` (CR 509.1h); a v94 peer cannot parse the new
     /// `"BlockStatus"` tag carried in `GameState` ability definitions, so it must
-    /// be refused before it receives v94 state.
+    /// be refused before it receives v95 state.
+    /// `SpellContext.creation_lookback_event` and `TriggerSourceContext.mana_cost`
+    /// are new in serialized full-game state (CR 603.7 + CR 603.10a + CR 608.2h,
+    /// CR 707.2); a v93 peer would drop both and resolve a phase-delayed
+    /// departure look-back differently, so it must be refused before it
+    /// receives v94 state.
     /// `ReductionProvenance` gains `SacrificedForCost`, the reduction an Emerge
     /// or Offering sacrifice earns before a deferred target declaration; v92
     /// state cannot decode a v93 provenance, so it must be refused before
@@ -3355,8 +3360,8 @@ mod tests {
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_94_for_block_status_filter_prop() {
-        assert_eq!(PROTOCOL_VERSION, 94);
+    fn protocol_version_is_95_for_block_status_filter_prop() {
+        assert_eq!(PROTOCOL_VERSION, 95);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3367,7 +3372,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_94_for_block_status_filter_prop` stays
+    /// `protocol_version_is_95_for_block_status_filter_prop` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {
