@@ -8,7 +8,7 @@ use crate::types::player::PlayerId;
 
 use super::ability_utils::{
     assign_selected_slots_in_chain, assign_targets_in_chain, choose_target_for_ability,
-    distribution_targets, flatten_targets_in_chain, validate_selected_targets_for_ability,
+    distribution_targets, flatten_declared_targets_in_chain, validate_selected_targets_for_ability,
     TargetSelectionAdvance,
 };
 use super::casting_targets::extract_distribution_total;
@@ -31,7 +31,9 @@ pub(super) fn finalize_trigger_target_selection(
     ability: Box<ResolvedAbility>,
     events: &mut Vec<GameEvent>,
 ) -> WaitingFor {
-    let assigned_targets = flatten_targets_in_chain(&ability);
+    // CR 115.10a + CR 700.13: only the targets chosen for the trigger become
+    // targets and can make putting it on the stack a crime.
+    let assigned_targets = flatten_declared_targets_in_chain(&ability);
     let crime_candidate =
         casting::targets_commit_crime(state, &assigned_targets, trigger.controller);
     casting::emit_targeting_events(

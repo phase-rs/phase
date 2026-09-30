@@ -57,6 +57,7 @@ mod tests {
             force_block_attacker: None,
             target_incarnations: Vec::new(),
             selected_target_incarnations: Vec::new(),
+            chosen_target_slots: Vec::new(),
             illegal_target_slots: Vec::new(),
             targets: vec![],
             kind: AbilityKind::Spell,

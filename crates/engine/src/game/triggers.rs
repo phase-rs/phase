@@ -8332,10 +8332,15 @@ pub(crate) fn seed_batched_attack_parent_targets(
 /// `current_trigger_event`. CR 603.6 specifically authorizes zone-change
 /// abilities to find and affect the object after it changes zones.
 fn parent_target_seeding_blocked(ability: &ResolvedAbility) -> bool {
+    // CR 115.1: a target chosen for the trigger can't be changed, even when it
+    // is the trigger's own source.
+    if !ability.chosen_target_slots.is_empty() {
+        return true;
+    }
     if ability.targets.is_empty() {
         return false;
     }
-    // CR 608.2c: only skip when real propagated targets exist — a lone source
+    // CR 608.2c: skip when real propagated targets exist — a lone source
     // fallback from `resolved_targets` use_self must be overwritable.
     ability
         .targets
@@ -8569,9 +8574,11 @@ fn push_pending_trigger_to_stack_with_firing_and_duration_events(
         "a source-less rule ability must carry its own name — the display layer \
          has no object from which to read one"
     );
+    // CR 700.13 + CR 115.10a: only a target chosen for the trigger can make
+    // putting it on the stack a crime.
     let crime_candidate = super::casting::targets_commit_crime(
         state,
-        &super::ability_utils::flatten_targets_in_chain(&ability),
+        &super::ability_utils::flatten_declared_targets_in_chain(&ability),
         controller,
     );
     let reveal_caused_card = reveal_causing_card(&ability);
@@ -8977,9 +8984,10 @@ fn prepare_trigger_targets(state: &GameState, trigger: &PendingTrigger) -> Prepa
                 return PreparedTriggerTargets::NeedsFallbackPush;
             }
             let mut events = Vec::new();
+            // CR 115.10a: only the targets chosen for the trigger become targets.
             super::casting::emit_targeting_events(
                 &prepared_state,
-                &super::ability_utils::flatten_targets_in_chain(&prepared_trigger.ability),
+                &super::ability_utils::flatten_declared_targets_in_chain(&prepared_trigger.ability),
                 prepared_trigger.source_id,
                 prepared_trigger.controller,
                 &mut events,
@@ -18118,6 +18126,49 @@ pub mod tests {
             EventContextSeedTiming::StackPush,
         );
         assert_eq!(ability.targets, vec![TargetRef::Object(creature)]);
+    }
+
+    #[test]
+    fn seed_event_context_parent_targets_keeps_a_chosen_source_target() {
+        use crate::types::ability::PerpetualModification;
+
+        let spacecraft = ObjectId(1);
+        let creature = ObjectId(2);
+        let event = GameEvent::Stationed {
+            spacecraft_id: spacecraft,
+            creature_id: creature,
+            counters_added: 1,
+        };
+        for timing in [
+            EventContextSeedTiming::StackPush,
+            EventContextSeedTiming::ResolutionFallback,
+        ] {
+            let mut fallback = ResolvedAbility::new(
+                Effect::ApplyPerpetual {
+                    target: TargetFilter::ParentTarget,
+                    modification: PerpetualModification::GrantKeywords {
+                        keywords: vec![Keyword::Deathtouch],
+                    },
+                },
+                vec![TargetRef::Object(spacecraft)],
+                spacecraft,
+                PlayerId(0),
+            );
+            let mut chosen = fallback.clone();
+            chosen.chosen_target_slots = vec![0];
+            seed_event_context_parent_targets(&mut fallback, Some(&event), timing);
+            seed_event_context_parent_targets(&mut chosen, Some(&event), timing);
+            assert_eq!(
+                fallback.targets,
+                vec![TargetRef::Object(creature)],
+                "reach guard: {timing:?} seeds an unchosen source"
+            );
+            assert_eq!(
+                chosen.targets,
+                vec![TargetRef::Object(spacecraft)],
+                "CR 115.1: {timing:?}"
+            );
+        }
     }
 
     #[test]

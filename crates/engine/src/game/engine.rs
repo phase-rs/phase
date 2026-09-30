@@ -10003,6 +10003,7 @@ fn finalize_copy_retarget(
         .unwrap_or_default();
     if let Some(entry) = state.stack.iter_mut().find(|e| e.id == copy_id) {
         if let Some(ability) = entry.ability_mut() {
+            let first_choice = ability.targets.is_empty();
             // CR 707.10c + CR 601.2c: An additional-cost "instead choose"
             // branch owns the declared slots. The root is only its mirror.
             // Update the child before re-deriving the mirror and selected-group
@@ -10021,6 +10022,10 @@ fn finalize_copy_retarget(
                 }
             }
             ability.targets = targets;
+            if first_choice {
+                // CR 707.12 + CR 601.2c: a copy cast without targets chooses them here.
+                crate::game::ability_utils::record_root_target_slots(ability);
+            }
             for pin in changed_pins {
                 ability.update_selected_target_incarnation(pin);
             }
