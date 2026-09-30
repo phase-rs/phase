@@ -25,6 +25,7 @@ const SPREE_BODY: &str =
     "Spree\n+ {1} — Destroy target creature an opponent controls.\n+ {2} — You gain 3 life.";
 const COLOURED_ONLY_LESS: &str = "Instant spells you cast cost {B} less to cast. This effect reduces only the amount of colored mana you pay.";
 const SPILLING_LESS: &str = "Instant spells you cast cost {B} less to cast.";
+const ALTERNATIVE_ONE: &str = "You may pay {1} rather than pay this spell's mana cost.";
 
 // Verbatim Oracle text (pinned MTGJSON AtomicCards).
 const DEVOURING_RAGE: &str = "As an additional cost to cast this spell, you may sacrifice any number of Spirits.\nTarget creature gets +3/+0 until end of turn. For each Spirit sacrificed this way, that creature gets an additional +3/+0 until end of turn.";
@@ -255,6 +256,28 @@ fn unspliced_host_pays_only_its_own_cost() {
     assert_eq!(pool(&host.runner), 2);
 }
 
+/// CR 118.9b + CR 601.2f: declining the alternative cost pays the mana cost,
+/// {B}{B}, plus the splice cost {1}.
+#[test]
+fn splice_mana_is_charged_beside_a_declined_alternative_mana_cost() {
+    let mut host = arcane_host(&format!("{ALTERNATIVE_ONE}\n{DESTROY_ONE}"), true, false);
+    let host_cast = cast_host(&mut host);
+    assert_eq!(host_cast.optional_offers, 1);
+    assert_eq!(zone(&host.runner, host.spell), Zone::Stack);
+    assert_eq!(pool(&host.runner), 1);
+}
+
+/// CR 118.9d: additional costs apply to an alternative cost, so paying the
+/// alternative {1} still pays the splice cost {1}.
+#[test]
+fn splice_mana_is_charged_beside_a_paid_alternative_mana_cost() {
+    let mut host = arcane_host(&format!("{ALTERNATIVE_ONE}\n{DESTROY_ONE}"), true, true);
+    let host_cast = cast_host(&mut host);
+    assert_eq!(host_cast.optional_offers, 1);
+    assert_eq!(zone(&host.runner, host.spell), Zone::Stack);
+    assert_eq!(pool(&host.runner), 2);
+}
+
 /// A {1}{B} Arcane host spliced with a {1} card, beside a coloured-only {B}
 /// reducer and a spilling {B} reducer, with {B}{B}{B}{B} in the pool. The
 /// caster applies the `coloured_only_first` reducer's reduction first.
@@ -419,6 +442,11 @@ fn devouring_rage_spliced_with_kodamas_might_is_refused_short_of_the_splice_cost
     let spell = printed.spell;
     let rage = cast(&mut printed.runner, spell, printed.answers);
     assert!(rage.refused, "{{3}}{{R}}{{G}} cannot pay {{4}}{{R}}{{G}}");
+    // The splice was declared and the refusal came when the total was
+    // determined after targets, not at announcement.
+    assert!(rage.prompted("SpliceOffer"));
+    assert_eq!(rage.prompts.last(), Some(&"TargetSelection"));
+    assert_eq!(rage.optional_offers, 0);
     assert_eq!(zone(&printed.runner, spell), Zone::Hand);
     assert_eq!(zone(&printed.runner, printed.spirit), Zone::Battlefield);
     assert_eq!(pool(&printed.runner), 5);

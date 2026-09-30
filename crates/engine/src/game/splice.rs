@@ -7,7 +7,8 @@
 //! at the same pre-target seam that Emerge and Casualty use. When the caster
 //! reveals a splice card:
 //!
-//! * its splice cost is folded into the host spell's mana cost (CR 702.47a);
+//! * its splice cost is added to the host spell's total cost as an additional
+//!   cost (CR 702.47a);
 //! * its text-box spell ability is cloned and appended to the host spell's
 //!   resolved-ability chain (CR 702.47c) so it resolves as part of that spell;
 //! * the card is revealed and **stays in the caster's hand** (CR 702.47a).
