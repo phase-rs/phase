@@ -877,3 +877,84 @@ fn two_printed_targets_still_announce_twice() {
     assert_eq!(triggers_from(state, first).len(), 1);
     assert_eq!(displayed_target_count(state, spell_entry), 2);
 }
+
+// ---------------------------------------------------------------------------
+// W2 (review round 3): target-count costs read ANNOUNCED targets. Strive
+// ("costs {1} more for each target beyond the first") over the Swords modal:
+// two targets are announced (the creature and the player); the life-gain
+// rider's snapshot is not a third.
+// ---------------------------------------------------------------------------
+
+const STRIVE_LINE: &str = "This spell costs {1} more to cast for each target beyond the first.";
+
+/// Casts the strive modal for {W} with both modes from a pool of {W} plus
+/// `generic` colorless. Returns the mana left in P0's pool, the creature's
+/// zone, P1's life change, and P0's draws.
+fn cast_strive_modal(body: &str, generic: usize) -> (usize, Zone, i32, i64) {
+    use engine::types::mana::{ManaCost, ManaCostShard};
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let creature = scenario.add_creature(P1, "Creature A", 3, 3).id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Strive Modal", true, &format!("{STRIVE_LINE}\n{body}"))
+        .with_mana_cost(ManaCost::Cost {
+            generic: 0,
+            shards: vec![ManaCostShard::White],
+        })
+        .id();
+    let mut pool = vec![ManaUnit::new(ManaType::White, ObjectId(0), false, vec![])];
+    pool.extend(
+        (0..generic).map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![])),
+    );
+    scenario.with_mana_pool(P0, pool);
+    for i in 0..4 {
+        scenario.add_card_to_library_top(P0, &format!("P0 Library {i}"));
+    }
+    let mut runner = scenario.build();
+    assert!(
+        runner.state().objects[&spell].strive_cost.is_some(),
+        "reach guard: the strive surcharge parsed"
+    );
+    let life_before = runner.state().players[1].life;
+    let outcome = runner
+        .cast(spell)
+        .modes(&[0, 1])
+        .target_object(creature)
+        .target_player(P0)
+        .resolve();
+    let state = outcome.state();
+    (
+        state.players[0].mana_pool.mana.len(),
+        state.objects[&creature].zone,
+        state.players[1].life - life_before,
+        outcome.hand_drawn(P0),
+    )
+}
+
+const SWORDS_MODAL_BODY: &str = "Choose one or both —\n• Exile target creature. Its controller gains life equal to its power.\n• Target player draws a card.";
+const PLAIN_MODAL_BODY: &str =
+    "Choose one or both —\n• Exile target creature.\n• Target player draws a card.";
+
+/// CR 601.2f + CR 115.10a: two announced targets cost {1} more — not {2}. With
+/// exactly {W}{1} the cast succeeds and resolves; with {W}{2} one mana is left.
+#[test]
+fn strive_counts_announced_targets_not_the_life_gain_snapshot() {
+    let (left, zone, life, drawn) = cast_strive_modal(SWORDS_MODAL_BODY, 1);
+    assert_eq!(left, 0, "the {{1}} surcharge consumed the pool");
+    assert_eq!(zone, Zone::Exile, "reach guard: mode 1 resolved");
+    assert_eq!(life, 3, "its controller gains life equal to its power");
+    assert_eq!(drawn, 1, "reach guard: mode 2 resolved");
+
+    let (left, ..) = cast_strive_modal(SWORDS_MODAL_BODY, 2);
+    assert_eq!(left, 1, "exactly {{1}} of surcharge was charged");
+}
+
+/// Control: the same modal without the life-gain rider also costs {1} more.
+#[test]
+fn strive_control_without_an_inheriting_rider() {
+    let (left, zone, life, drawn) = cast_strive_modal(PLAIN_MODAL_BODY, 2);
+    assert_eq!(left, 1, "exactly {{1}} of surcharge was charged");
+    assert_eq!(zone, Zone::Exile);
+    assert_eq!(life, 0);
+    assert_eq!(drawn, 1);
+}

@@ -13346,6 +13346,19 @@ mod tests {
             vec![TargetRef::Object(t0), TargetRef::Object(t1)],
             "CR 608.2b: the rider's snapshot is not a specified target"
         );
+        // CR 115.10a + CR 608.2c: announced targets in slot order — a
+        // positional reader (`ParentTargetSlot { 1 }`) must find t1 at index 1,
+        // not the rider's carried copy of t0.
+        assert_eq!(
+            declared_targets_in_chain(&chain),
+            vec![TargetRef::Object(t0), TargetRef::Object(t1)],
+            "the rider's snapshot is not an announced target"
+        );
+        assert_eq!(
+            flatten_targets_in_chain(&chain).len(),
+            3,
+            "reach guard: the carried snapshot is present in the raw flatten"
+        );
     }
 
     /// V9 — CR 603.7c: a ROOT node holding a `ParentTarget` snapshot

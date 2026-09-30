@@ -860,7 +860,7 @@ fn exchange_participants(
     ability: &ResolvedAbility,
     semantic_owner: PlayerId,
 ) -> Option<(ObjectId, TargetRef)> {
-    let mut targets = crate::game::ability_utils::flatten_targets_in_chain(ability).into_iter();
+    let mut targets = crate::game::ability_utils::declared_targets_in_chain(ability).into_iter();
     let TargetRef::Object(source) = targets.next()? else {
         return None;
     };

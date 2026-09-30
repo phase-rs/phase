@@ -1841,7 +1841,7 @@ fn spell_targets_filter(
         .pending_cast
         .as_ref()
         .filter(|pending| pending.object_id == source_id)
-        .map(|pending| super::ability_utils::flatten_targets_in_chain(&pending.ability))
+        .map(|pending| super::ability_utils::declared_targets_in_chain(&pending.ability))
         .or_else(|| {
             state
                 .stack
@@ -1852,7 +1852,7 @@ fn spell_targets_filter(
                     crate::types::game_state::StackEntryKind::Spell {
                         ability: Some(resolved),
                         ..
-                    } => Some(super::ability_utils::flatten_targets_in_chain(resolved)),
+                    } => Some(super::ability_utils::declared_targets_in_chain(resolved)),
                     _ => None,
                 })
         });
@@ -1922,7 +1922,7 @@ fn spell_cast_targets(
             StackEntryKind::Spell {
                 ability: Some(resolved),
                 ..
-            } => Some(super::ability_utils::flatten_targets_in_chain(resolved)),
+            } => Some(super::ability_utils::declared_targets_in_chain(resolved)),
             _ => None,
         })
         .or_else(|| {
@@ -1939,7 +1939,7 @@ fn spell_cast_targets(
                             StackEntryKind::Spell {
                                 ability: Some(resolved),
                                 ..
-                            } => Some(super::ability_utils::flatten_targets_in_chain(resolved)),
+                            } => Some(super::ability_utils::declared_targets_in_chain(resolved)),
                             _ => None,
                         }),
                     _ => None,
@@ -2017,7 +2017,7 @@ pub(crate) fn target_dependent_flash_permission_satisfied(
     if has_real_flash {
         return true;
     }
-    let targets = super::ability_utils::flatten_targets_in_chain(ability);
+    let targets = super::ability_utils::declared_targets_in_chain(ability);
     let ctx = super::filter::FilterContext::from_source(state, object_id);
     let evaluate_target_filter = |filter: &crate::types::ability::TargetFilter| -> bool {
         targets.iter().any(|t| match t {
