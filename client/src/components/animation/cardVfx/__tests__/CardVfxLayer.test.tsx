@@ -145,9 +145,9 @@ function face(objectId: number, cardName = "Llanowar Elves"): AnimationImageSnap
   return { objectId, cardName, faceIndex: 0, isToken: false };
 }
 
-/** The epoch a step queued now is stamped with. */
-function queuedEpoch() {
-  return useGameStore.getState().engineCommitEpoch;
+/** The snapshot a step queued now animates: the next to commit. */
+function queuedSeq() {
+  return useGameStore.getState().lastCommittedSeq + 1;
 }
 
 function spec(
@@ -165,7 +165,7 @@ function spec(
     endColors: null,
     pace: 1,
     owningStepMs,
-    commitEpoch: queuedEpoch(),
+    snapshotSeq: queuedSeq(),
     delayMs: 0,
   };
 }
@@ -243,7 +243,10 @@ function veiled(objectId: number) {
 /** The engine commits the step's state. */
 const commitEngine = () =>
   act(() => {
-    useGameStore.setState({ engineCommitEpoch: useGameStore.getState().engineCommitEpoch + 1 });
+    useGameStore.setState((state) => ({
+      engineCommitEpoch: state.engineCommitEpoch + 1,
+      lastCommittedSeq: state.lastCommittedSeq + 1,
+    }));
   });
 
 function canvas() {
@@ -651,7 +654,10 @@ describe("CardVfxLayer present contract", () => {
     expect(veiled(X)).toBe(true);
 
     act(() => {
-      useGameStore.setState({ engineCommitEpoch: useGameStore.getState().engineCommitEpoch + 1 });
+      useGameStore.setState((state) => ({
+        engineCommitEpoch: state.engineCommitEpoch + 1,
+        lastCommittedSeq: state.lastCommittedSeq + 1,
+      }));
     });
     await frames(2);
     expect(veiled(X)).toBe(false);
@@ -676,7 +682,10 @@ describe("CardVfxLayer present contract", () => {
     await frames(1);
     anchor({ "data-permanent-card": String(X) }, 300, 400);
     act(() => {
-      useGameStore.setState({ engineCommitEpoch: useGameStore.getState().engineCommitEpoch + 1 });
+      useGameStore.setState((state) => ({
+        engineCommitEpoch: state.engineCommitEpoch + 1,
+        lastCommittedSeq: state.lastCommittedSeq + 1,
+      }));
     });
 
     await advance(RESOLVE_FLIGHT_MS / 2);
@@ -702,7 +711,10 @@ describe("CardVfxLayer present contract", () => {
     await frames(1);
     addFace(anchor({ "data-permanent-card": String(X) }, 300, 400));
     act(() => {
-      useGameStore.setState({ engineCommitEpoch: useGameStore.getState().engineCommitEpoch + 1 });
+      useGameStore.setState((state) => ({
+        engineCommitEpoch: state.engineCommitEpoch + 1,
+        lastCommittedSeq: state.lastCommittedSeq + 1,
+      }));
     });
     await advance(RESOLVE_FLIGHT_MS + SETTLE_MS + 5 * FRAME_MS);
     expect(veiled(X)).toBe(false);
@@ -732,7 +744,10 @@ describe("CardVfxLayer present contract", () => {
 
     addFace(anchor({ "data-hand-card": "", "data-object-id": String(X) }, 200, 760));
     act(() => {
-      useGameStore.setState({ engineCommitEpoch: useGameStore.getState().engineCommitEpoch + 1 });
+      useGameStore.setState((state) => ({
+        engineCommitEpoch: state.engineCommitEpoch + 1,
+        lastCommittedSeq: state.lastCommittedSeq + 1,
+      }));
     });
     await advance(DRAW_FLIGHT_MS + LAND_STATIONARY_WAIT_MAX_MS + 10 * FRAME_MS);
     expect(veiled(X)).toBe(false);
@@ -847,6 +862,17 @@ describe("CardVfxLayer present contract", () => {
     expect(veiled(X)).toBe(false);
   });
 
+  it("V11-13: a flight whose step's snapshot a newer one superseded before it was queued ends without a commit", async () => {
+    const { present } = await readyLayer();
+    handCard(X);
+    anchor({ "data-exile-pile": "1" }, 40, 700);
+
+    present({ ...spec(X, { from: "Hand", to: "Exile", ownerId: 1 }), snapshotSeq: queuedSeq() - 1 });
+    await advance(RESOLVE_FLIGHT_MS + LAND_STATIONARY_WAIT_MAX_MS + LAND_REVEAL_WAIT_MAX_MS + 10 * FRAME_MS);
+
+    expect(veiled(X)).toBe(false);
+  });
+
   it("V11-8: a covered event shows nothing while its move flies, waits on one still loading, and is Classic otherwise", async () => {
     const { present } = await renderLayer();
     expect(present({ kind: "covered", objectId: X })).toHaveBeenCalledTimes(1);
@@ -883,7 +909,10 @@ describe("CardVfxLayer present contract", () => {
     const pulse = addPulse(permanent);
     addPip(permanent);
     act(() => {
-      useGameStore.setState({ engineCommitEpoch: useGameStore.getState().engineCommitEpoch + 1 });
+      useGameStore.setState((state) => ({
+        engineCommitEpoch: state.engineCommitEpoch + 1,
+        lastCommittedSeq: state.lastCommittedSeq + 1,
+      }));
     });
 
     await advance(RESOLVE_FLIGHT_MS + SETTLE_MS + 5 * FRAME_MS);
@@ -1121,12 +1150,15 @@ describe("CardVfxLayer shatter", () => {
     face: cardFace,
     pace: 1,
     owningStepMs: 500,
-    commitEpoch: queuedEpoch(),
+    snapshotSeq: queuedSeq(),
   });
   const shatterRenders = () => calls("render").filter((call) => hasVisible(call, "card-shatter"));
   const commit = () =>
     act(() => {
-      useGameStore.setState({ engineCommitEpoch: useGameStore.getState().engineCommitEpoch + 1 });
+      useGameStore.setState((state) => ({
+        engineCommitEpoch: state.engineCommitEpoch + 1,
+        lastCommittedSeq: state.lastCommittedSeq + 1,
+      }));
     });
 
   async function loadFace() {
@@ -1243,7 +1275,7 @@ describe("CardVfxLayer exile dissolve", () => {
     holderId,
     pace: 1,
     owningStepMs: 500,
-    commitEpoch: queuedEpoch(),
+    snapshotSeq: queuedSeq(),
   });
 
   async function loadFace() {
@@ -1268,7 +1300,10 @@ describe("CardVfxLayer exile dissolve", () => {
 
     anchor({ "data-exile-ghost": String(X) }, 510, 420);
     act(() => {
-      useGameStore.setState({ engineCommitEpoch: useGameStore.getState().engineCommitEpoch + 1 });
+      useGameStore.setState((state) => ({
+        engineCommitEpoch: state.engineCommitEpoch + 1,
+        lastCommittedSeq: state.lastCommittedSeq + 1,
+      }));
     });
     await advance((DISSOLVE_LIFT_S + DISSOLVE_CROSS_S + DISSOLVE_TRAVEL_S * 0.85) * 1000 + 5 * FRAME_MS);
     expect(veiled(X)).toBe(false);
@@ -1405,7 +1440,7 @@ describe("CardVfxLayer damage strike", () => {
     addFace(anchor({ "data-permanent-card": String(Y), "data-grouped-ids": `${Y} ${X}` }, 300, 100));
 
     expect(present(atPermanent())).toHaveBeenCalledTimes(1);
-    expect(present({ kind: "shatter", objectId: X, face: face(X), pace: 1, owningStepMs: 400, commitEpoch: queuedEpoch() })).toHaveBeenCalledTimes(1);
+    expect(present({ kind: "shatter", objectId: X, face: face(X), pace: 1, owningStepMs: 400, snapshotSeq: queuedSeq() })).toHaveBeenCalledTimes(1);
   });
 
   it("V10-15: unmounting before the impact lands the hit once and releases the veil it takes", async () => {
@@ -1515,13 +1550,50 @@ describe("CardVfxLayer damage strike", () => {
     await advance(DAMAGE_CAUSE_IMPACT_MS + 2 * FRAME_MS);
     expect(veiled(X)).toBe(true);
 
-    present({ kind: "shatter", objectId: X, face: face(X), pace: 1, owningStepMs: 400, commitEpoch: queuedEpoch() });
+    present({ kind: "shatter", objectId: X, face: face(X), pace: 1, owningStepMs: 400, snapshotSeq: queuedSeq() });
     await loadFace();
     await frames(2);
     expect(hasVisible(last(calls("render")) as RendererCall, "damage-hit")).toBe(false);
     expect(hasVisible(last(calls("render")) as RendererCall, "card-shatter")).toBe(true);
     await advance(HIT_S * 1000);
     expect(veiled(X)).toBe(true);
+  });
+
+  it("V10-18: a strike whose hit was replaced lands after the replacement ends without veiling again", async () => {
+    const { present } = await readyLayer();
+    anchor({ "data-stack-entry": String(SPELL) }, 600, 300);
+    addFace(anchor({ "data-permanent-card": String(X) }, 300, 100));
+    const slowImpact = vi.fn();
+    present({ ...atPermanent(), pace: 2 }, vi.fn(), slowImpact);
+    await loadFace();
+    present({ ...atPermanent(), pace: 0.1 });
+    await loadFace();
+
+    await advance((DAMAGE_CAUSE_IMPACT_MS + HIT_S * 1000) * 0.1 + 4 * FRAME_MS);
+    expect(veiled(X)).toBe(false);
+    await advance(DAMAGE_CAUSE_IMPACT_MS * 2);
+    expect(slowImpact).toHaveBeenCalledTimes(1);
+    expect(veiled(X)).toBe(false);
+  });
+
+  it("V10-19: a hit replacing a hit leaves a flight's hold on the card alone", async () => {
+    const { present } = await readyLayer();
+    anchor({ "data-stack-entry": String(SPELL) }, 600, 300);
+    addFace(anchor({ "data-permanent-card": String(X) }, 300, 100));
+    present(atPermanent());
+    await loadFace();
+    await advance(DAMAGE_CAUSE_IMPACT_MS + 2 * FRAME_MS);
+    // A back-only flight to a hand with no card of X's: it holds until the commit.
+    const classic = present(spec(X, { from: "Battlefield", to: "Hand", ownerId: 1 }));
+    await frames(1);
+
+    present(atPermanent());
+    await loadFace();
+    await advance(DAMAGE_CAUSE_IMPACT_MS + HIT_S * 1000 + 4 * FRAME_MS);
+
+    expect(classic).not.toHaveBeenCalled();
+    expect(veiled(X)).toBe(true);
+    expect(unveilSpy).not.toHaveBeenCalled();
   });
 
   it("V10-17: a shatter that takes over before the strike's impact keeps the veil, and releases it", async () => {
@@ -1531,7 +1603,7 @@ describe("CardVfxLayer damage strike", () => {
     const onImpact = vi.fn();
     present(atPermanent(), vi.fn(), onImpact);
     await loadFace();
-    present({ kind: "shatter", objectId: X, face: face(X), pace: 1, owningStepMs: 400, commitEpoch: queuedEpoch() });
+    present({ kind: "shatter", objectId: X, face: face(X), pace: 1, owningStepMs: 400, snapshotSeq: queuedSeq() });
     await loadFace();
     expect(veiled(X)).toBe(true);
 

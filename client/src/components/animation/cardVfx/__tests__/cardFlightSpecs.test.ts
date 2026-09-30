@@ -29,7 +29,7 @@ function context(
   pace = 1,
   stepEvents: readonly AnimationEvent[] = [],
 ): CardFlightSpecContext {
-  return { pre, post, pace, owningStepMs: 500, commitEpoch: 0, stepEvents };
+  return { pre, post, pace, owningStepMs: 500, snapshotSeq: 1, stepEvents };
 }
 
 const spellCast: AnimationEvent = {
@@ -293,7 +293,7 @@ describe("cardVfxSpecFor", () => {
       face: expect.objectContaining({ cardName: "Llanowar Elves" }),
       pace: 1,
       owningStepMs: 500,
-      commitEpoch: 0,
+      snapshotSeq: 1,
     });
     expect(cardVfxSpecFor(zoneChanged("Stack", "Battlefield"), context(pre, post))?.kind).toBe("flight");
   });
@@ -355,7 +355,7 @@ describe("cardVfxSpecFor exile", () => {
       holderId: null,
       pace: 1,
       owningStepMs: 500,
-      commitEpoch: 0,
+      snapshotSeq: 1,
     });
 
     const held = { ...post, derived: { ...post.derived, linked_exile_ids: { "3": [9, X] } } } as GameState;

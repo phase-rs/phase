@@ -90,7 +90,7 @@ function seed(event: AnimationStep["effects"][number]["event"], pre: GameObject,
   act(() => {
     useGameStore.setState({ gameState: stateWith(pre) });
     useAnimationStore.getState().setAnimationNewState(stateWith(post));
-    useAnimationStore.getState().enqueueSteps([{ effects: [{ event, duration: 500 }], duration: 500 }]);
+    useAnimationStore.getState().enqueueSteps([{ effects: [{ event, duration: 500 }], duration: 500 }], 1);
   });
 }
 
@@ -303,7 +303,7 @@ describe("AnimationOverlay combat blows", () => {
     const bears = gameObjectFactory.withId(Y).named("Grizzly Bears").creature(2, 2).onBattlefield().build();
     act(() => {
       useGameStore.setState({ gameState: buildGameState({ objects: buildObjectMap(elves.onBattlefield().build(), bears) }) });
-      useAnimationStore.getState().enqueueSteps([{ effects: [{ event: hit, duration: 500 }], duration: 500 }]);
+      useAnimationStore.getState().enqueueSteps([{ effects: [{ event: hit, duration: 500 }], duration: 500 }], 1);
     });
   }
 
@@ -371,7 +371,7 @@ describe("AnimationOverlay combat blows", () => {
     };
     act(() => {
       useGameStore.setState({ gameState: buildGameState({ objects: buildObjectMap(elves.onBattlefield().build()) }) });
-      useAnimationStore.getState().enqueueSteps([{ effects: [{ event: flurry, duration: 500 }], duration: 500 }]);
+      useAnimationStore.getState().enqueueSteps([{ effects: [{ event: flurry, duration: 500 }], duration: 500 }], 1);
     });
 
     renderOverlay();
@@ -403,7 +403,7 @@ describe("AnimationOverlay life changes", () => {
   function seedLife(effects: AnimationStep["effects"]) {
     act(() => {
       useGameStore.setState({ gameState: buildGameState({ objects: buildObjectMap(elves.onBattlefield().build()) }) });
-      useAnimationStore.getState().enqueueSteps([{ effects, duration: 500 }]);
+      useAnimationStore.getState().enqueueSteps([{ effects, duration: 500 }], 1);
     });
   }
 

@@ -565,7 +565,7 @@ async function processAction(
 
   if (steps.length > 0 && multiplier > 0) {
     useAnimationStore.getState().setAnimationNewState(newState);
-    useAnimationStore.getState().enqueueSteps(steps);
+    useAnimationStore.getState().enqueueSteps(steps, snapshotResult.seq);
 
     // Schedule SFX synced with each step's visual timing
     scheduleSfxForSteps(steps, multiplier);
@@ -920,7 +920,7 @@ async function processRemoteUpdateInner(
 
   if (steps.length > 0 && multiplier > 0) {
     useAnimationStore.getState().setAnimationNewState(state);
-    useAnimationStore.getState().enqueueSteps(steps);
+    useAnimationStore.getState().enqueueSteps(steps, snapshot.seq);
     scheduleSfxForSteps(steps, multiplier);
 
     const totalDuration = steps.reduce(

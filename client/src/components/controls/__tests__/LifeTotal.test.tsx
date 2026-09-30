@@ -24,7 +24,7 @@ function setLife(playerId: number, life: number) {
 function combatDamageStep(playerId: number, amount: number): QueuedStep {
   return {
     duration: 900,
-    commitEpoch: 0,
+    snapshotSeq: 1,
     effects: [
       {
         event: { type: "LifeChanged", data: { player_id: playerId, amount } },
@@ -49,7 +49,7 @@ function combatDamageStep(playerId: number, amount: number): QueuedStep {
 function groupedDamageStep(playerId: number, lifeAmount?: number, lifePlayerId = playerId): QueuedStep {
   return {
     duration: 900,
-    commitEpoch: 0,
+    snapshotSeq: 1,
     effects: [
       {
         event: {

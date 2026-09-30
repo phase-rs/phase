@@ -905,7 +905,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
   // Under the New style a mounted layer presents the event's card VFX, or runs
   // the Classic effect instead; never both, never neither.
   const processEffect = useCallback(
-    (effect: StepEffect, stepEffects: StepEffect[], owningStepMs: number, commitEpoch: number) => {
+    (effect: StepEffect, stepEffects: StepEffect[], owningStepMs: number, snapshotSeq: number) => {
       const classic = () => processClassicEffect(effect, stepEffects, owningStepMs);
       const layer = cardVfxRef.current;
       const spec = layer
@@ -914,7 +914,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
             post: useAnimationStore.getState().animationNewState,
             pace: speedMultiplier,
             owningStepMs,
-            commitEpoch,
+            snapshotSeq,
             stepEvents: stepEffects.map((stepEffect) => stepEffect.event),
           })
         : null;
@@ -938,7 +938,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
         effect,
         activeStep.effects,
         activeStep.duration * speedMultiplier,
-        activeStep.commitEpoch,
+        activeStep.snapshotSeq,
       );
     }
 

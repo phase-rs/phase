@@ -121,7 +121,7 @@ function seedOverlay(preState: GameState, postState: GameState, animationStep: A
   act(() => {
     useGameStore.setState({ gameState: preState });
     useAnimationStore.getState().setAnimationNewState(postState);
-    useAnimationStore.getState().enqueueSteps([animationStep]);
+    useAnimationStore.getState().enqueueSteps([animationStep], 1);
   });
 }
 

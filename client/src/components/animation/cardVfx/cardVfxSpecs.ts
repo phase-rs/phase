@@ -15,8 +15,8 @@ export interface CardShatterSpec {
   face: AnimationImageSnapshot | null;
   pace: number;
   owningStepMs: number;
-  /** As `CardFlightSpec.commitEpoch`. */
-  commitEpoch: number;
+  /** As `CardFlightSpec.snapshotSeq`. */
+  snapshotSeq: number;
 }
 
 /** A permanent exiled from the battlefield, dissolving where it lies. */
@@ -29,8 +29,8 @@ export interface ExileDissolveSpec {
   holderId: ObjectId | null;
   pace: number;
   owningStepMs: number;
-  /** As `CardFlightSpec.commitEpoch`. */
-  commitEpoch: number;
+  /** As `CardFlightSpec.snapshotSeq`. */
+  snapshotSeq: number;
 }
 
 /** A card VFX that happens to a permanent where it lies on the board. */
@@ -125,13 +125,13 @@ function coveredSpecFor(event: AnimationEvent, { post, pace }: CardFlightSpecCon
 // graveyard; the shatter shows it breaking where it lay.
 function cardShatterSpecFor(
   event: AnimationEvent,
-  { pre, pace, owningStepMs, commitEpoch }: CardFlightSpecContext,
+  { pre, pace, owningStepMs, snapshotSeq }: CardFlightSpecContext,
 ): CardShatterSpec | null {
   if (pace <= 0 || event.type !== "CreatureDestroyed") return null;
   const objectId = event.data.object_id;
   const object = pre?.objects[objectId];
   return object
-    ? { kind: "shatter", objectId, face: visibleAnimationImageSnapshot(object), pace, owningStepMs, commitEpoch }
+    ? { kind: "shatter", objectId, face: visibleAnimationImageSnapshot(object), pace, owningStepMs, snapshotSeq }
     : null;
 }
 
@@ -140,7 +140,7 @@ function cardShatterSpecFor(
 // holds it (the engine's linked-exile view) is where its flakes go.
 function exileDissolveSpecFor(
   event: AnimationEvent,
-  { pre, post, pace, owningStepMs, commitEpoch }: CardFlightSpecContext,
+  { pre, post, pace, owningStepMs, snapshotSeq }: CardFlightSpecContext,
 ): ExileDissolveSpec | null {
   if (pace <= 0 || event.type !== "ZoneChanged") return null;
   const { object_id: objectId, from, to } = event.data;
@@ -156,7 +156,7 @@ function exileDissolveSpecFor(
     holderId: holder === undefined ? null : Number(holder),
     pace,
     owningStepMs,
-    commitEpoch,
+    snapshotSeq,
   };
 }
 

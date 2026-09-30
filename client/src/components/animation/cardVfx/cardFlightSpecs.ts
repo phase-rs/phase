@@ -66,9 +66,8 @@ export interface CardFlightSpec {
   pace: number;
   /** The owning step's scaled duration, which bounds face readiness. */
   owningStepMs: number;
-  /** The engine commit epoch the owning step was queued under
-   *  (`QueuedStep.commitEpoch`): a later epoch means its state has committed. */
-  commitEpoch: number;
+  /** The snapshot the owning step animates (`QueuedStep.snapshotSeq`). */
+  snapshotSeq: number;
   /** How long after the step starts this flight leaves: draws in one step
    *  leave one after another, all inside the step's first half. */
   delayMs: number;
@@ -81,9 +80,8 @@ export interface CardFlightSpecContext {
   post: GameState | null;
   pace: number;
   owningStepMs: number;
-  /** The engine commit epoch the owning step was queued under
-   *  (`QueuedStep.commitEpoch`): a later epoch means its state has committed. */
-  commitEpoch: number;
+  /** The snapshot the owning step animates (`QueuedStep.snapshotSeq`). */
+  snapshotSeq: number;
   /** Every event in the owning step, in order. */
   stepEvents: readonly AnimationEvent[];
 }
@@ -195,7 +193,7 @@ function delayFor({ index, size }: { index: number; size: number }, pace: number
  *  matching the step timers' instant mode. */
 export function cardFlightSpecFor(
   event: AnimationEvent,
-  { pre, post, pace, owningStepMs, commitEpoch, stepEvents }: CardFlightSpecContext,
+  { pre, post, pace, owningStepMs, snapshotSeq, stepEvents }: CardFlightSpecContext,
 ): CardFlightSpec | null {
   if (pace <= 0) return null;
   const routed = routedObjectFor(event, pre, post);
@@ -215,7 +213,7 @@ export function cardFlightSpecFor(
     endColors: endFace && endObject ? endObject.color : null,
     pace,
     owningStepMs,
-    commitEpoch,
+    snapshotSeq,
     delayMs: delayFor(batch, pace, owningStepMs),
   };
 }

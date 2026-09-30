@@ -91,6 +91,16 @@ interface FaceRequest {
   failed(): void;
 }
 
+/** The scene runs at most one flight and one board effect per object; each
+ *  may hold its veil. */
+type VeilSlot = "flight" | "board";
+type VeilHolds = Record<VeilSlot, number | null>;
+
+/** Whether the snapshot a step animates, or a newer one, has committed. */
+function committed(snapshotSeq: number) {
+  return useGameStore.getState().lastCommittedSeq >= snapshotSeq;
+}
+
 /** A flight waiting for its face image. Later presents for the same object
  *  join it: one flight from the first source to the last destination. */
 interface PendingStart {
@@ -155,11 +165,13 @@ class CardVfxController {
   private readonly pending = new Map<ObjectId, PendingStart>();
   /** Board effects waiting for their face, each with the covered events' Classics. */
   private readonly pendingBoard = new Map<ObjectId, (() => void)[]>();
-  /** Each veiled object, by the effect holding its veil: only that effect
-   *  releases it, so one it took over from cannot unveil it. */
-  private readonly veilOwners = new Map<ObjectId, number>();
-  /** Each veil released only once the engine commit lands, by object. */
-  private readonly commitWaits = new Map<ObjectId, () => void>();
+  /** Each veiled object's holds: its flight's, its board effect's, or both. */
+  private readonly veilHolds = new Map<ObjectId, VeilHolds>();
+  /** Each object's running board effect. The scene runs one per object and
+   *  silently disposes the one it replaces, so only the latest may hold. */
+  private readonly boardEffects = new Map<ObjectId, number>();
+  /** Holds released only once their snapshot commits, by holder. */
+  private readonly commitWaits = new Map<number, () => void>();
 
   constructor(
     private readonly publishRequests: (requests: FaceRequest[]) => void,
@@ -440,8 +452,8 @@ class CardVfxController {
       (scene, surface) => {
         settle();
         const board = { ...surface, objectId, tier: this.tier, pace: spec.pace };
-        const owner = this.nextToken++;
-        const release = () => this.unveilAfterCommit(objectId, spec.commitEpoch, owner);
+        const holder = this.startBoardEffect(objectId);
+        const release = () => this.releaseAfterCommit(objectId, "board", holder, spec.snapshotSeq);
         switch (spec.kind) {
           case "shatter":
             scene.startShatter({ ...board, impact: shatterImpact(), onDone: release });
@@ -450,7 +462,7 @@ class CardVfxController {
             scene.startDissolve({ ...board, link: this.linkAimFor(spec), onArrive: release });
             break;
         }
-        this.veil(objectId, owner);
+        this.hold(objectId, "board", holder);
       },
       () => {
         settle();
@@ -466,7 +478,7 @@ class CardVfxController {
   private presentCovered(objectId: ObjectId, classic: () => void) {
     const waiting = this.pending.get(objectId)?.classics ?? this.pendingBoard.get(objectId);
     if (waiting) waiting.push(classic);
-    else if (!this.veilOwners.has(objectId)) classic();
+    else if (!this.veilHolds.has(objectId)) classic();
   }
 
   // Source and target are measured now: the source's stack entry leaves the
@@ -502,18 +514,18 @@ class CardVfxController {
       target.face,
       spec.owningStepMs,
       (liveScene, surface) => {
-        const owner = this.nextToken++;
-        const inherited = liveScene.startDamageStrike({
+        // The effect this hit replaces never completes; its hold stands until
+        // the hit's impact takes it over.
+        const holder = this.startBoardEffect(objectId);
+        liveScene.startDamageStrike({
           ...strike,
-          hit: { ...surface, objectId, onDone: () => this.unveil(objectId, owner) },
+          hit: { ...surface, objectId, onDone: () => this.release(objectId, "board", holder) },
           onImpact: () => {
-            // An effect that took over before the impact keeps its veil.
-            if (!this.veilOwners.has(objectId)) this.veil(objectId, owner);
+            // A hit already replaced has no copy left to hold for.
+            if (this.boardEffects.get(objectId) === holder) this.hold(objectId, "board", holder);
             onImpact();
           },
         });
-        // The effect the hit replaced never completes, so its veil is the hit's.
-        if (inherited) this.veil(objectId, owner);
       },
       classic,
     );
@@ -609,8 +621,8 @@ class CardVfxController {
     front: Texture | null,
     classics: readonly (() => void)[],
   ) {
-    const { objectId, route, commitEpoch } = spec;
-    const owner = this.nextToken++;
+    const { objectId, route, snapshotSeq } = spec;
+    const holder = this.nextToken++;
     const started = scene.startCardFlight({
       objectId,
       route,
@@ -622,45 +634,59 @@ class CardVfxController {
       tier: this.tier,
       landingColors: spec.endColors,
       aim: (origin) => this.aim(route, objectId, origin),
-      committed: () => useGameStore.getState().engineCommitEpoch !== commitEpoch,
+      committed: () => committed(snapshotSeq),
       // A pile stands in for its card before the commit moves it there, so
       // the card's old surface stays veiled until then.
-      onRelease: () => this.unveilAfterCommit(objectId, commitEpoch, owner),
+      onRelease: () => this.releaseAfterCommit(objectId, "flight", holder, snapshotSeq),
     });
     if (!started) {
       front?.dispose();
       runAll(classics);
       return;
     }
-    this.veil(objectId, owner);
+    this.hold(objectId, "flight", holder);
   }
 
-  // A handoff keeps the veil it already holds: no unveil in between. A new
-  // effect takes over the veil, and any commit wait it was held under.
-  private veil(objectId: ObjectId, owner: number) {
-    this.commitWaits.get(objectId)?.();
-    this.commitWaits.delete(objectId);
-    const held = this.veilOwners.has(objectId);
-    this.veilOwners.set(objectId, owner);
-    if (!held) useAnimationStore.getState().veilFlight(objectId);
+  private startBoardEffect(objectId: ObjectId) {
+    const holder = this.nextToken++;
+    this.boardEffects.set(objectId, holder);
+    return holder;
   }
 
-  /** Unveils once the engine commit after `commitEpoch` (the owning step's) has
-   *  landed, so an effect that ends first does not show the card's old surface
-   *  again. */
-  private unveilAfterCommit(objectId: ObjectId, commitEpoch: number, owner: number) {
-    if (this.veilOwners.get(objectId) !== owner) return;
-    if (useGameStore.getState().engineCommitEpoch !== commitEpoch) {
-      this.unveil(objectId, owner);
+  // An object stays veiled while its flight or its board effect holds it. A
+  // new effect in a slot takes over its predecessor's hold, and any commit
+  // wait it was held under: a handoff, with no unveil in between.
+  private hold(objectId: ObjectId, slot: VeilSlot, holder: number) {
+    const holds = this.veilHolds.get(objectId);
+    if (!holds) {
+      this.veilHolds.set(objectId, { flight: null, board: null, [slot]: holder });
+      useAnimationStore.getState().veilFlight(objectId);
+      return;
+    }
+    const previous = holds[slot];
+    if (previous !== null) this.cancelCommitWait(previous);
+    holds[slot] = holder;
+  }
+
+  /** Releases `holder`'s hold once the snapshot its step animates has committed,
+   *  so an effect that ends first does not show the card's old surface again. */
+  private releaseAfterCommit(objectId: ObjectId, slot: VeilSlot, holder: number, snapshotSeq: number) {
+    if (this.veilHolds.get(objectId)?.[slot] !== holder) return;
+    if (committed(snapshotSeq)) {
+      this.release(objectId, slot, holder);
       return;
     }
     const stop = useGameStore.subscribe((state) => {
-      if (state.engineCommitEpoch === commitEpoch) return;
-      stop();
-      this.commitWaits.delete(objectId);
-      this.unveil(objectId, owner);
+      if (state.lastCommittedSeq < snapshotSeq) return;
+      this.cancelCommitWait(holder);
+      this.release(objectId, slot, holder);
     });
-    this.commitWaits.set(objectId, stop);
+    this.commitWaits.set(holder, stop);
+  }
+
+  private cancelCommitWait(holder: number) {
+    this.commitWaits.get(holder)?.();
+    this.commitWaits.delete(holder);
   }
 
   private measureSource(spec: CardFlightSpec): CardPose | null {
@@ -677,9 +703,15 @@ class CardVfxController {
     return aim;
   }
 
-  private unveil(objectId: ObjectId, owner: number) {
-    if (this.veilOwners.get(objectId) !== owner) return;
-    this.veilOwners.delete(objectId);
+  /** Releases `holder`'s hold, if it still has it, and unveils the object
+   *  once nothing holds it. */
+  private release(objectId: ObjectId, slot: VeilSlot, holder: number) {
+    if (slot === "board" && this.boardEffects.get(objectId) === holder) this.boardEffects.delete(objectId);
+    const holds = this.veilHolds.get(objectId);
+    if (holds?.[slot] !== holder) return;
+    holds[slot] = null;
+    if (holds.flight !== null || holds.board !== null) return;
+    this.veilHolds.delete(objectId);
     useAnimationStore.getState().unveilFlight(objectId);
   }
 
@@ -694,8 +726,9 @@ class CardVfxController {
     for (const stop of this.commitWaits.values()) stop();
     this.commitWaits.clear();
     const { unveilFlight } = useAnimationStore.getState();
-    for (const objectId of this.veilOwners.keys()) unveilFlight(objectId);
-    this.veilOwners.clear();
+    for (const objectId of this.veilHolds.keys()) unveilFlight(objectId);
+    this.veilHolds.clear();
+    this.boardEffects.clear();
   }
 
   private publish() {
