@@ -2427,6 +2427,7 @@ impl GameObject {
                 printed_ref: self.printed_ref.clone(),
                 is_token: self.is_token,
                 face_down: self.face_down,
+                mana_cost: self.mana_cost.clone(),
                 transformed: self.transformed,
                 is_renowned: self.is_renowned,
                 is_saddled: self.is_saddled,

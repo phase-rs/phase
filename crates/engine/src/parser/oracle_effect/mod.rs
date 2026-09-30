@@ -4120,6 +4120,22 @@ fn try_parse_inline_delayed_trigger(
     let condition_text = &tp.lower["when ".len()..comma];
     let effect_text = &tp.original[comma + 2..];
 
+    // CR 603.7b + CR 608.2c: an "another <type phrase> …" subject names a
+    // DIFFERENT object that must match the delayed trigger's own event ("when
+    // another creature you control dies this turn"). No delayed condition here
+    // models a typed other-object subject, and the definite-self fallback below
+    // would silently turn it into a trigger on this object. Fail the whole
+    // clause closed so the card stays honestly unsupported.
+    if tag::<_, _, OracleError<'_>>("another ")
+        .parse(condition_text)
+        .is_ok()
+    {
+        return Some(parsed_clause(Effect::unimplemented(
+            "delayed_trigger_other_subject",
+            tp.original,
+        )));
+    }
+
     // CR 603.6 + CR 603.7c: A self-referential disjunctive condition ("when ~
     // <eventA> or <eventB>, …") embeds two triggers; the demonstrative inner
     // subject binds to the parent target (rebound below). Detect it before the

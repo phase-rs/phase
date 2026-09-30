@@ -210,6 +210,12 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 93 — SpellContext.creation_lookback_event carries the battlefield departure a
+ *      phase-delayed triggered ability was created under (CR 603.7 + CR 603.10a
+ *      + CR 608.2h), and TriggerSourceContext.mana_cost captures the observed
+ *      object's layered mana cost (CR 707.2 + CR 708.2a). A v92 peer would drop
+ *      both; the exact-match handshake refuses the pairing. P2P moves in
+ *      lockstep (wire 75); lobby messages are unchanged.
  * 92 — ResolvedAbility.parent_target_missing_reason is serialized and
  *      ParentTargetMissingReason gains RevealUntil (CR 701.20a + CR 603.12),
  *      the reveal-until whiff verdict read by the new
@@ -623,7 +629,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 92;
+export const PROTOCOL_VERSION = 93;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

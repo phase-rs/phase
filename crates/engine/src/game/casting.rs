@@ -24144,7 +24144,9 @@ pub(crate) fn removable_counter_count_for_cost_selection(
 ) -> u32 {
     match (counter_type, selection) {
         (crate::types::counter::CounterMatch::Any, CounterCostSelection::AmongObjects) => {
-            obj.counters.values().copied().sum()
+            // CR 122.1: exact total clamped to u32. This bounds how many counters
+            // may be selected, an availability ("at least N") use only.
+            u32::try_from(crate::types::counter::counter_total(&obj.counters)).unwrap_or(u32::MAX)
         }
         _ => removable_counter_count(obj, counter_type),
     }
