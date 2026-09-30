@@ -1030,6 +1030,9 @@ fn exile_gain_tap_with_slot_reader(response: Option<Response>) -> (Zone, bool, u
         while node.sub_ability.is_some() {
             node = node.sub_ability.as_deref_mut().unwrap();
         }
+        // The `ParentTargetSlot { 1 }` reader is appended synthetically: no
+        // printed Oracle shape combines an inherited rider with a slot reader,
+        // so this exercises the shared declared-slot numbering directly.
         node.sub_ability = Some(Box::new(ResolvedAbility::new(
             Effect::PutCounter {
                 counter_type: CounterType::Plus1Plus1,
@@ -1141,4 +1144,166 @@ fn illegal_first_target_leaves_the_second_slot_readable() {
     assert_eq!(b_zone, Zone::Battlefield, "reach guard: B was not exiled");
     assert!(b_tapped, "reach guard: the legal B was tapped");
     assert_eq!(b_counters, 1, "slot 1 is still B");
+}
+
+// ---------------------------------------------------------------------------
+// CodeRabbit CR1 (#9434): the validation restamp uses the same inherited-rider
+// criterion as every declared-slot site. A deferred parent (Surveil) over a
+// life-gain anaphor rider does NOT hand its rider a carried snapshot ? that
+// rider holds a target of its own, which validation must keep.
+// ---------------------------------------------------------------------------
+
+/// Which head the life-gain anaphor rider hangs under.
+#[derive(Clone, Copy, PartialEq)]
+enum RiderHead {
+    /// "Surveil 1": a deferred effect with no target of its own.
+    Surveil,
+    /// "Exile target creature": the rider inherits the exile's target.
+    Exile,
+}
+
+/// Returns (the rider's targets after validation, Surveil prompts, P1's life
+/// change, the victim's zone).
+fn life_gain_rider_under(head: RiderHead) -> (Vec<TargetRef>, usize, i32, Zone) {
+    use engine::game::ability_utils::validate_targets_in_chain;
+    use engine::game::triggers::drain_order_triggers_with_identity;
+    use engine::types::ability::{Effect, ResolvedAbility};
+    use engine::types::game_state::StackEntry;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let victim = scenario.add_creature(P1, "Victim", 3, 3).id();
+    let source = scenario
+        .add_artifact_from_oracle(P0, "Rider Source", "{T}: You gain 1 life.")
+        .id();
+    for i in 0..3 {
+        scenario.add_card_to_library_top(P0, &format!("Filler {i}"));
+    }
+    let mut runner = scenario.build();
+
+    let head_effect: Effect = serde_json::from_value(match head {
+        RiderHead::Surveil => serde_json::json!({
+            "type": "Surveil",
+            "count": {"type": "Fixed", "value": 1},
+            "target": {"type": "Controller"}
+        }),
+        RiderHead::Exile => serde_json::json!({
+            "type": "ChangeZone",
+            "origin": null,
+            "destination": "Exile",
+            "target": {"type": "Typed", "type_filters": ["Creature"], "controller": null, "properties": []},
+            "owner_library": false,
+            "enter_transformed": false,
+            "enter_tapped": false,
+            "enters_attacking": false
+        }),
+    })
+    .expect("head effect");
+    let rider_effect: Effect = serde_json::from_value(serde_json::json!({
+        "type": "GainLife",
+        "amount": {"type": "Ref", "qty": {"type": "Power", "scope": {"type": "Target"}}},
+        "player": {"type": "ParentTargetController"}
+    }))
+    .expect("life-gain anaphor rider");
+    let head_targets = match head {
+        RiderHead::Surveil => vec![],
+        RiderHead::Exile => vec![TargetRef::Object(victim)],
+    };
+    let mut chain = ResolvedAbility::new(head_effect, head_targets, source, P0);
+    chain.sub_ability = Some(Box::new(ResolvedAbility::new(
+        rider_effect,
+        vec![TargetRef::Object(victim)],
+        source,
+        P0,
+    )));
+
+    let validated = validate_targets_in_chain(runner.state(), &chain);
+    let rider_targets = validated
+        .sub_ability
+        .as_ref()
+        .map(|rider| rider.targets.clone())
+        .unwrap_or_default();
+
+    let life_before = runner.state().players[1].life;
+    {
+        let state = runner.state_mut();
+        state.stack.push_back(StackEntry {
+            id: source,
+            source_id: source,
+            controller: P0,
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: source,
+                ability: Box::new(chain),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: "Rider Source".to_string(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        });
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+    }
+    let mut surveil_prompts = 0;
+    for _ in 0..40 {
+        let action = match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            WaitingFor::OrderTriggers { .. } => {
+                drain_order_triggers_with_identity(runner.state_mut());
+                continue;
+            }
+            WaitingFor::SurveilChoice { cards, .. } => {
+                surveil_prompts += 1;
+                GameAction::SelectCards { cards }
+            }
+            other => panic!("unexpected prompt: {other:?}"),
+        };
+        runner.act(action).expect("action accepted");
+    }
+    assert!(
+        runner.state().stack.is_empty(),
+        "reach guard: the stack drained"
+    );
+    let life = runner.state().players[1].life - life_before;
+    let zone = runner.state().objects[&victim].zone;
+    (rider_targets, surveil_prompts, life, zone)
+}
+
+/// CR 601.2c + CR 608.2b: under a deferred Surveil head the rider's target is its
+/// own selection, not a snapshot of the head's (absent) target. Validation keeps
+/// it, Surveil happens, and the victim's controller gains 3.
+#[test]
+fn deferred_parent_rider_keeps_its_own_target() {
+    let (rider_targets, surveil_prompts, life, zone) = life_gain_rider_under(RiderHead::Surveil);
+    assert_eq!(
+        zone,
+        Zone::Battlefield,
+        "reach guard: nothing exiled the victim"
+    );
+    assert_eq!(
+        rider_targets.len(),
+        1,
+        "the rider keeps its selected target through validation"
+    );
+    assert_eq!(
+        surveil_prompts, 1,
+        "Surveil 1 resolves: the ability does not fizzle"
+    );
+    assert_eq!(life, 3, "P1 gains life equal to the victim's power");
+}
+
+/// Control: under an exile head the rider inherits the exile's target, and the
+/// restamp re-derives it from the validated parent.
+#[test]
+fn inherited_rider_under_an_exile_head_resolves() {
+    let (rider_targets, surveil_prompts, life, zone) = life_gain_rider_under(RiderHead::Exile);
+    assert_eq!(surveil_prompts, 0);
+    assert_eq!(zone, Zone::Exile, "reach guard: the exile resolved");
+    assert_eq!(rider_targets.len(), 1, "the restamp keeps the legal target");
+    assert_eq!(
+        life, 3,
+        "P1 gains life equal to the exiled creature's power"
+    );
 }

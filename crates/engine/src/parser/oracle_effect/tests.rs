@@ -67013,6 +67013,19 @@ fn bring_low_replacement_rider_fails_closed() {
         .abilities
         .first()
         .expect("Bring Low must produce a spell ability");
+    // Reach guard: the root damage clause still parses, so the ChainRootTarget
+    // check below inspects a real chain rather than a wholly failed parse.
+    assert!(
+        matches!(
+            &*ability.effect,
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::Typed(tf),
+                ..
+            } if tf.type_filters == vec![TypeFilter::Creature]
+        ),
+        "Bring Low's root must stay 3 damage to target creature, got {ability:#?}"
+    );
     let sub = ability
         .sub_ability
         .as_deref()
@@ -67023,6 +67036,24 @@ fn bring_low_replacement_rider_fails_closed() {
             Effect::Unimplemented { name, .. } if name == "target_has_unknown_keyword_condition"
         ),
         "the non-keyword gate must fail closed, got {sub:#?}"
+    );
+    fn unimplemented_names(def: &AbilityDefinition, out: &mut Vec<String>) {
+        if let Effect::Unimplemented { name, .. } = &*def.effect {
+            out.push(name.clone());
+        }
+        for child in [def.sub_ability.as_deref(), def.else_ability.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            unimplemented_names(child, out);
+        }
+    }
+    let mut names = Vec::new();
+    unimplemented_names(ability, &mut names);
+    assert_eq!(
+        names,
+        vec!["target_has_unknown_keyword_condition".to_string()],
+        "the rider must be the only Unimplemented node: {ability:#?}"
     );
     fn tree_mentions_chain_root_target(def: &AbilityDefinition) -> bool {
         let self_hit = matches!(

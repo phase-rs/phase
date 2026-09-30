@@ -3047,9 +3047,13 @@ pub(super) fn strip_target_keyword_instead(text: &str) -> KeywordConditionStrip 
         // "power 4 or greater") becomes `Keyword::Unknown`. The runtime check
         // for this gate is `has_keyword`, which such prose can never satisfy,
         // so an `Unknown` gate would be silently inert while reading as
-        // supported. The caller receives `UnknownKeyword` and fails the clause
-        // closed (Bring Low, Strider, Urdnan) instead.
-        let keyword = Keyword::from_str(keyword_str).unwrap();
+        // supported. No condition is built for it; once the rest of the gate
+        // grammar matches, the caller receives `UnknownKeyword` and fails the
+        // clause closed (Bring Low, Strider, Urdnan) instead.
+        let keyword = match Keyword::from_str(keyword_str).unwrap() {
+            Keyword::Unknown(_) => None,
+            keyword => Some(keyword),
+        };
         // Optional " and ~ doesn't" lack conjunct (Super-Adaptoid class). `~` is
         // the normalized card name; the bare anaphora forms cover un-normalized
         // text.
@@ -3067,34 +3071,28 @@ pub(super) fn strip_target_keyword_instead(text: &str) -> KeywordConditionStrip 
         .map(|(rest, matched)| (rest, matched.is_some()))?;
         // Connective ", " (optionally "; ") separates condition from the effect.
         let (i, _) = alt((tag(", "), tag("; "))).parse(i)?;
-        let condition = if source_lacks {
-            AbilityCondition::And {
-                conditions: vec![
-                    AbilityCondition::TargetHasKeywordInstead {
-                        keyword: keyword.clone(),
-                    },
-                    AbilityCondition::SourceLacksKeyword { keyword },
-                ],
+        let condition = keyword.map(|keyword| {
+            if source_lacks {
+                AbilityCondition::And {
+                    conditions: vec![
+                        AbilityCondition::TargetHasKeywordInstead {
+                            keyword: keyword.clone(),
+                        },
+                        AbilityCondition::SourceLacksKeyword { keyword },
+                    ],
+                }
+            } else {
+                AbilityCondition::TargetHasKeywordInstead { keyword }
             }
-        } else {
-            AbilityCondition::TargetHasKeywordInstead { keyword }
-        };
+        });
         Ok((i, condition))
     });
     let Some((condition, body)) = parsed else {
         return KeywordConditionStrip::NotOwned;
     };
-    let gate_keyword = match &condition {
-        AbilityCondition::TargetHasKeywordInstead { keyword } => Some(keyword),
-        AbilityCondition::And { conditions } => conditions.iter().find_map(|c| match c {
-            AbilityCondition::TargetHasKeywordInstead { keyword } => Some(keyword),
-            _ => None,
-        }),
-        _ => None,
-    };
-    if matches!(gate_keyword, Some(Keyword::Unknown(_))) {
+    let Some(condition) = condition else {
         return KeywordConditionStrip::UnknownKeyword;
-    }
+    };
     let body = body.trim();
     // Structural cleanup of the already-extracted effect body (drop the
     // trailing "instead" override marker and the leading "it " pronoun), not
@@ -9095,27 +9093,37 @@ mod tests {
     /// stripper reports it so the chunk loop can fail the clause closed.
     #[test]
     fn strip_target_keyword_instead_refuses_unknown_keyword_gates() {
-        for (text, expect_unknown) in [
-            (
-                "If that creature has a +1/+1 counter on it, ~ deals 5 damage to it instead.",
-                true,
-            ),
-            (
-                "If that creature has power 4 or greater, it gains first strike until end of turn.",
-                true,
-            ),
-            (
-                "If that creature has haste and ~ doesn't, put a haste counter on ~.",
-                false,
-            ),
+        for text in [
+            "If that creature has a +1/+1 counter on it, ~ deals 5 damage to it instead.",
+            "If that creature has power 4 or greater, it gains first strike until end of turn.",
         ] {
             let strip = strip_target_keyword_instead(text);
-            assert_eq!(
+            assert!(
                 matches!(strip, KeywordConditionStrip::UnknownKeyword),
-                expect_unknown,
                 "{text}: got {strip:?}"
             );
         }
+
+        // A real keyword with the lack conjunct still parses into both gates.
+        let text = "If that creature has haste and ~ doesn't, put a haste counter on ~.";
+        let strip = strip_target_keyword_instead(text);
+        let KeywordConditionStrip::Parsed { condition, body } = strip else {
+            panic!("{text}: haste gate must parse, got {strip:?}");
+        };
+        assert_eq!(
+            *condition,
+            AbilityCondition::And {
+                conditions: vec![
+                    AbilityCondition::TargetHasKeywordInstead {
+                        keyword: Keyword::Haste,
+                    },
+                    AbilityCondition::SourceLacksKeyword {
+                        keyword: Keyword::Haste,
+                    },
+                ],
+            }
+        );
+        assert_eq!(body, "put a haste counter on ~.");
     }
 
     /// CR 505.1 + CR 102.1: resolution-time "it is[n't] your [phase]" gate routes

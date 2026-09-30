@@ -2083,10 +2083,14 @@ pub fn declared_targets_in_chain(ability: &ResolvedAbility) -> Vec<TargetRef> {
 }
 
 /// CR 115.10a: whether `sub`'s own `targets` are a carried snapshot of
-/// `parent`'s object target rather than an announcement — the three structural
-/// conjuncts shared by [`declared_targets_in_chain`],
-/// [`flatten_specified_targets_in_chain`], [`illegal_declared_target_slots`] and
-/// [`declared_slots_ahead_of`], so every declared-slot numbering agrees.
+/// `parent`'s object target rather than an announcement. This is the single
+/// criterion every declared-slot site uses — the announce-time collectors,
+/// assigners and minimum counts, [`declared_targets_in_chain`],
+/// [`flatten_specified_targets_in_chain`], [`illegal_declared_target_slots`],
+/// [`declared_slots_ahead_of`] and the validation restamp — so they all agree.
+/// The bare shape test (`sub_ability_inherits_parent_creature_target_only`) is
+/// necessary but not sufficient: a deferred parent's sub, or a sub chosen at
+/// resolution, selects its own targets.
 fn rider_entries_are_inherited(parent: &ResolvedAbility, sub: &ResolvedAbility) -> bool {
     !defers_sub_ability_target_selection(&parent.effect)
         && !defers_conditional_target_selection(sub)
@@ -3003,7 +3007,7 @@ fn restamp_inherited_rider_target(parent: &mut ResolvedAbility) {
     let inherits = parent
         .sub_ability
         .as_deref()
-        .is_some_and(|sub| sub_ability_inherits_parent_creature_target_only(parent, sub));
+        .is_some_and(|sub| rider_entries_are_inherited(parent, sub));
     if !inherits {
         return;
     }
@@ -3798,7 +3802,7 @@ fn collect_target_slots_inner(
             if let Some(sub_ability) = ability.sub_ability.as_deref() {
                 if defers_conditional_target_selection(sub_ability) {
                     // Chosen at resolution; no slot now.
-                } else if sub_ability_inherits_parent_creature_target_only(ability, sub_ability) {
+                } else if rider_entries_are_inherited(ability, sub_ability) {
                     // CR 601.2c: an inheriting rider announces no slot of its
                     // own, but its sub-chain (a later chained mode) still does.
                     collect_sub_chain_slots(state, sub_ability, acc)?;
@@ -3961,7 +3965,7 @@ fn collect_target_slots_inner(
 /// The gate inside is unchanged and load-bearing: a sub whose targets are
 /// chosen at resolution (`defers_conditional_target_selection`, e.g. Arteeoh's
 /// "When you do…" reflexive body) surfaces NO slot here, and one that inherits
-/// the parent's creature target (`sub_ability_inherits_parent_creature_target_only`)
+/// the parent's creature target (`rider_entries_are_inherited`)
 /// surfaces none either. See the plan's §Newly Reachable Descent: all nine
 /// paired-with-sub_ability corpus chains were MEASURED to surface the same
 /// slot set before and after this extraction.
@@ -3983,7 +3987,7 @@ fn collect_sub_chain_slots(
         // mode-selection time, so there is no slot to attach a mode label to.
         if defers_conditional_target_selection(sub_ability) {
             // Pre-collected at resolution (see above).
-        } else if sub_ability_inherits_parent_creature_target_only(ability, sub_ability) {
+        } else if rider_entries_are_inherited(ability, sub_ability) {
             // CR 601.2c + CR 700.2: an inheriting rider (#3864 life-gain anaphor,
             // Conformer Shuriken's "that creature" gate) announces no slot of its
             // own, but the chain below it — e.g. a later chosen mode — still
@@ -6558,7 +6562,7 @@ fn collect_sub_chain_slot_specs(
     if let Some(sub_ability) = ability.sub_ability.as_deref() {
         if defers_conditional_target_selection(sub_ability) {
             // Chosen at resolution; no spec now.
-        } else if sub_ability_inherits_parent_creature_target_only(ability, sub_ability) {
+        } else if rider_entries_are_inherited(ability, sub_ability) {
             // Mirror of `collect_sub_chain_slots`: skip only the inheriting
             // rider's own spec, keep its sub-chain's.
             collect_sub_chain_slot_specs(state, sub_ability, specs, next_instance);
@@ -9134,13 +9138,7 @@ fn assign_targets_recursive(
             // surfaces no slot of its own, so it reserves no minimum here — but
             // the chain below it still does. Mirrors `minimum_targets_in_chain`'s
             // `rest` term (`minimum_targets_below` for an inheriting rider).
-            let remaining_minimum = match ability.sub_ability.as_deref() {
-                Some(sub) if sub_ability_inherits_parent_creature_target_only(ability, sub) => {
-                    minimum_targets_below(state, sub)
-                }
-                Some(sub) => minimum_targets_in_chain(state, sub),
-                None => 0,
-            };
+            let remaining_minimum = minimum_targets_below(state, ability);
             let remaining_after_current = targets.len().saturating_sub(*next_target);
             // Issue #321: cap at this node's own resolved `multi_target` max so a
             // node does not claim a downstream `up to N` effect's optional
@@ -9199,7 +9197,7 @@ fn assign_sub_chain_targets(
     let inherits_parent_creature_target = ability
         .sub_ability
         .as_ref()
-        .is_some_and(|sub| sub_ability_inherits_parent_creature_target_only(ability, sub));
+        .is_some_and(|sub| rider_entries_are_inherited(ability, sub));
     let parent_creature_target = ability.targets.iter().find_map(|t| match t {
         TargetRef::Object(id) => Some(TargetRef::Object(*id)),
         _ => None,
@@ -9688,7 +9686,7 @@ fn assign_sub_chain_selected_slots(
     let inherits_parent_creature_target = ability
         .sub_ability
         .as_ref()
-        .is_some_and(|sub| sub_ability_inherits_parent_creature_target_only(ability, sub));
+        .is_some_and(|sub| rider_entries_are_inherited(ability, sub));
     let parent_creature_target = ability.targets.iter().find_map(|t| match t {
         TargetRef::Object(id) => Some(TargetRef::Object(*id)),
         _ => None,
@@ -10514,7 +10512,7 @@ fn emit_node(
 /// effects (Scry/Dig/…) route through the deferred-descent helper below; every
 /// other node descends via `sub_ability`, skipping a sub that defers its own
 /// selection (`defers_conditional_target_selection`) or that only inherits the
-/// parent's creature target (`sub_ability_inherits_parent_creature_target_only`).
+/// parent's creature target (`rider_entries_are_inherited`).
 fn descend_retarget_slots(
     ability: &ResolvedAbility,
     path: &[ChainStep],
@@ -10533,7 +10531,7 @@ fn descend_retarget_slots(
     if let Some(sub) = ability.sub_ability.as_deref() {
         if defers_conditional_target_selection(sub) {
             // Chosen at resolution; not addressable now.
-        } else if sub_ability_inherits_parent_creature_target_only(ability, sub) {
+        } else if rider_entries_are_inherited(ability, sub) {
             // An inheriting rider owns no addressable slot, but the chain below
             // it (a later chained mode) does.
             let mut sub_path = path.to_vec();
@@ -11048,9 +11046,7 @@ fn minimum_targets_below(state: &GameState, ability: &ResolvedAbility) -> usize 
         return minimum_targets_after_deferred_effect(state, ability.sub_ability.as_deref());
     }
     match ability.sub_ability.as_deref() {
-        Some(sub) if sub_ability_inherits_parent_creature_target_only(ability, sub) => {
-            minimum_targets_below(state, sub)
-        }
+        Some(sub) if rider_entries_are_inherited(ability, sub) => minimum_targets_below(state, sub),
         Some(sub) => minimum_targets_in_chain(state, sub),
         None => 0,
     }
