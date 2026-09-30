@@ -5058,9 +5058,7 @@ fn resolve_ref(
                             Some(ct) => {
                                 u32_to_i32_saturating(obj.counters.get(ct).copied().unwrap_or(0))
                             }
-                            None => {
-                                u32_to_i32_saturating(obj.counters.values().copied().sum::<u32>())
-                            }
+                            None => counter_count_from_map(&obj.counters, None),
                         })
                     } else {
                         None
@@ -15343,6 +15341,48 @@ mod tests {
         };
 
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 2);
+    }
+
+    #[test]
+    fn counters_on_objects_all_counter_kinds_saturates_per_object() {
+        let mut state = GameState::new_two_player(42);
+
+        let counted = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Overloaded Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&counted).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.counters
+                .insert(CounterType::Generic("charge".to_string()), u32::MAX);
+            obj.counters
+                .insert(CounterType::Generic("oil".to_string()), 1);
+        }
+
+        let source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::CountersOnObjects {
+                counter_type: None,
+                filter: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            },
+        };
+
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(0), source),
+            i32::MAX,
+            "CountersOnObjects must saturate an all-counter-kind per-object total before folding"
+        );
     }
 
     #[test]
