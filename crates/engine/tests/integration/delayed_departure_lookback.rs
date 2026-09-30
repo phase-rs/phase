@@ -770,6 +770,14 @@ fn find_creation_lookbacks<'a>(value: &'a Value, out: &mut Vec<&'a Value>) {
     }
 }
 
+/// CR 400.2 + CR 401.2: the NEW carrier (`creation_lookback_event`) is redacted
+/// in every viewer projection. This checks the carrier, not whole-payload
+/// privacy at the moment of the move: the projection is taken after step
+/// transitions have cleared the pre-existing, unredacted LKI caches
+/// (`lki_cache`, `lki_by_incarnation`, `lki_copiable_values`), which are
+/// out of scope here and tracked separately. The whole-JSON name check below is
+/// therefore evidence about this carrier only, not a privacy proof at priority
+/// in the step where the card moved.
 #[test]
 fn creation_lookback_event_is_redacted_in_every_viewer_projection() {
     let secret_name = "Secret Leak Sentinel";
@@ -810,10 +818,10 @@ fn creation_lookback_event_is_redacted_in_every_viewer_projection() {
         1,
         "reach-guard: the delayed trigger remains installed after step transitions"
     );
-    // `lki_cache` / `lki_by_incarnation` are pre-existing upstream LKI carriers
-    // that visibility projection does not redact. They clear at step
-    // transitions, so this test isolates the new `creation_lookback_event`
-    // carrier rather than pinning the old policy.
+    // `lki_cache` / `lki_by_incarnation` / `lki_copiable_values` are
+    // pre-existing upstream LKI carriers that the viewer projection does not
+    // redact. They clear at step transitions, so this test isolates the new
+    // `creation_lookback_event` carrier rather than pinning the old policy.
     assert!(
         runner.state().lki_cache.get(&secret).is_none(),
         "reach-guard: pre-existing lki_cache carrier is out of scope"

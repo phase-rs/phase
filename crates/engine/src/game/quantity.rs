@@ -7163,8 +7163,8 @@ fn object_lookback_event(
         .or_else(|| current_or_detection_trigger_event(state))
 }
 
-/// CR 701.57c + CR 603.7: whether an object look-back read would find a
-/// trigger-event source object (see [`object_lookback_event`]).
+/// CR 603.2 + CR 603.7 + CR 608.2h: whether an object look-back read has a triggering-event source.
+/// See [`object_lookback_event`].
 fn event_source_referent_present(state: &GameState, ability: Option<&ResolvedAbility>) -> bool {
     object_lookback_event(state, ability)
         .and_then(|event| crate::game::targeting::extract_source_from_event(&event))
