@@ -20,8 +20,8 @@ use crate::types::ability::{
     CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric, CastPermissionConstraint,
     CastingPermission, CombatHistoryScope, ContinuousModification, ControllerRef, CountScope,
     DamageChannel, Duration, Effect, FilterProp, ModalSelectionCondition, ModalSelectionConstraint,
-    ObjectProperty, ObjectScope, ParsedCondition, PlayerFilter, PlayerScope, PossessionAxis,
-    QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility, RoundingMode,
+    NameStickerSet, ObjectProperty, ObjectScope, ParsedCondition, PlayerFilter, PlayerScope,
+    PossessionAxis, QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility, RoundingMode,
     SpellCastingOption, StaticCondition, StaticDefinition, SubtypeExclusion,
     TargetDamageSourceBinding, TargetFilter, TargetRef, ThisWayCause, TrackedAnaphorSource,
     TriggerCondition, TriggerDefinition, TurnJournalKind, TypeFilter, TypedFilter, ZoneRef,
@@ -37,6 +37,7 @@ use crate::types::identifiers::ObjectId;
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::player::PlayerId;
 use crate::types::statics::StaticMode;
+use crate::types::stickers::AppliedSticker;
 use crate::types::zones::Zone;
 
 /// Scope information for quantity resolution.
@@ -1708,6 +1709,13 @@ pub(crate) fn quantity_expr_uses_recipient(expr: &QuantityExpr) -> bool {
             | QuantityRef::ObjectNameWordCount {
                 scope: ObjectScope::Recipient,
             }
+            | QuantityRef::NameStickerLetterCount {
+                stickers:
+                    NameStickerSet::OnObject {
+                        scope: ObjectScope::Recipient,
+                    },
+                letters: _,
+            }
             | QuantityRef::ObjectTypelineComponentCount {
                 scope: ObjectScope::Recipient,
             }
@@ -1822,6 +1830,10 @@ pub(crate) fn quantity_expr_uses_resolution_only_object_scope(expr: &QuantityExp
             | QuantityRef::ObjectManaValue { scope }
             | QuantityRef::ObjectColorCount { scope }
             | QuantityRef::ObjectNameWordCount { scope }
+            | QuantityRef::NameStickerLetterCount {
+                stickers: NameStickerSet::OnObject { scope },
+                letters: _,
+            }
             | QuantityRef::ObjectTypelineComponentCount { scope }
             | QuantityRef::ManaSymbolsInManaCost { scope, .. } => scope_is_resolution_only(*scope),
             // CR 608.2h: `QuantityRef::CountersOn` deliberately stays OUT of the
@@ -1870,6 +1882,10 @@ pub(crate) fn quantity_expr_contains_scope(expr: &QuantityExpr, scope: ObjectSco
             | QuantityRef::ObjectManaValue { scope: s }
             | QuantityRef::ObjectColorCount { scope: s }
             | QuantityRef::ObjectNameWordCount { scope: s }
+            | QuantityRef::NameStickerLetterCount {
+                stickers: NameStickerSet::OnObject { scope: s },
+                letters: _,
+            }
             | QuantityRef::ObjectTypelineComponentCount { scope: s }
             | QuantityRef::ManaSymbolsInManaCost { scope: s, .. }
             | QuantityRef::CountersOn { scope: s, .. } => *s == scope,
@@ -2025,6 +2041,10 @@ pub(crate) fn quantity_expr_missing_resolution_only_referent(
             | QuantityRef::ObjectManaValue { scope }
             | QuantityRef::ObjectColorCount { scope }
             | QuantityRef::ObjectNameWordCount { scope }
+            | QuantityRef::NameStickerLetterCount {
+                stickers: NameStickerSet::OnObject { scope },
+                letters: _,
+            }
             | QuantityRef::ObjectTypelineComponentCount { scope }
             | QuantityRef::ManaSymbolsInManaCost { scope, .. } => {
                 leaf_scope_missing(state, *scope, ability)
@@ -2145,6 +2165,7 @@ fn quantity_ref_uses_unspent_mana(qty: &QuantityRef) -> bool {
         | QuantityRef::TargetObjectManaValue { .. }
         | QuantityRef::ObjectColorCount { .. }
         | QuantityRef::ObjectNameWordCount { .. }
+        | QuantityRef::NameStickerLetterCount { .. }
         | QuantityRef::ObjectTypelineComponentCount { .. }
         | QuantityRef::ManaSymbolsInManaCost { .. }
         | QuantityRef::SelfManaValue
@@ -2483,6 +2504,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::TargetObjectManaValue { .. }
         | QuantityRef::ObjectColorCount { .. }
         | QuantityRef::ObjectNameWordCount { .. }
+        | QuantityRef::NameStickerLetterCount { .. }
         | QuantityRef::ObjectTypelineComponentCount { .. }
         | QuantityRef::ManaSymbolsInManaCost { .. }
         | QuantityRef::SelfManaValue
@@ -2791,6 +2813,11 @@ fn quantity_ref_characteristic_reads(qty: &QuantityRef, depth: u32) -> Character
         | QuantityRef::CardsExiledBySource
         | QuantityRef::TrackedSetSize
         | QuantityRef::ExiledFromHandThisResolution
+        // CR 123.6d + CR 123.6e: letters are counted on the name sticker itself
+        // (`GameObject::stickers`), not in the object's name as changed by
+        // text-changing effects (CR 613.1c), so no layer-writable
+        // characteristic is read.
+        | QuantityRef::NameStickerLetterCount { .. }
         | QuantityRef::PreviousEffectAmount { .. }
         | QuantityRef::PreviousEffectCount
         | QuantityRef::LifeLostThisTurn { .. }
@@ -3048,6 +3075,7 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::TargetObjectManaValue { .. }
         | QuantityRef::ObjectColorCount { .. }
         | QuantityRef::ObjectNameWordCount { .. }
+        | QuantityRef::NameStickerLetterCount { .. }
         | QuantityRef::ObjectTypelineComponentCount { .. }
         | QuantityRef::ManaSymbolsInManaCost { .. }
         | QuantityRef::SelfManaValue
@@ -4884,6 +4912,32 @@ fn resolve_ref(
         }
         QuantityRef::ObjectNameWordCount { scope } => {
             resolve_object_name_word_count(state, *scope, ctx, targets, ability)
+        }
+        // CR 123.6d + CR 123.6e: letters on name-sticker text (case-insensitive).
+        QuantityRef::NameStickerLetterCount { stickers, letters } => {
+            let count = match stickers {
+                // CR 608.2c: "that sticker" is the sticker this resolution's
+                // preceding put-a-sticker instruction placed; none placed → no
+                // antecedent → 0.
+                NameStickerSet::ThatSticker => letters.count_in(
+                    state
+                        .placed_sticker_this_resolution
+                        .as_ref()
+                        .and_then(AppliedSticker::name_text),
+                ),
+                // CR 123.6d: count letters in the scoped object's name stickers.
+                // The currently unsupported put-a-sticker trigger class needs
+                // source-sticker LKI before it can be enabled: CR 608.2h requires
+                // last known information when the source has left its zone.
+                // `LKISnapshot` currently records no stickers, so this unsupported
+                // stale-source path fails closed to 0.
+                NameStickerSet::OnObject { scope } => object_for_scope(state, *scope, ctx, targets)
+                    .map_or(0, |object| {
+                        letters
+                            .count_in(object.stickers.iter().filter_map(AppliedSticker::name_text))
+                    }),
+            };
+            usize_to_i32_saturating(count)
         }
         QuantityRef::ObjectTypelineComponentCount { scope } => {
             resolve_object_typeline_component_count(state, *scope, ctx, targets, ability)
@@ -9433,9 +9487,10 @@ mod tests {
         AbilityCondition, AbilityDefinition, AbilityKind, ActivationRestriction, AggregateFunction,
         ChoiceValue, Comparator, ControllerRef, CountScope, DamageChannel, DamageKindFilter,
         DelayedTriggerCondition, DevotionColors, DieResultBranch, Duration, Effect, FilterProp,
-        KickerVariant, ModalSelectionCondition, ModalSelectionConstraint, ObjectProperty,
-        ObjectScope, PlayerRelation, RepeatContinuation, SharedQuality, StaticCondition,
-        TargetChoiceTiming, TargetFilter, TargetRef, ThisWayCause, TypeFilter, TypedFilter,
+        KickerVariant, LetterQuery, ModalSelectionCondition, ModalSelectionConstraint,
+        ObjectProperty, ObjectScope, PlayerRelation, RepeatContinuation, SharedQuality,
+        StaticCondition, TargetChoiceTiming, TargetFilter, TargetRef, ThisWayCause, TypeFilter,
+        TypedFilter,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::counter::{CounterMatch, CounterType};
@@ -18474,6 +18529,168 @@ mod tests {
             resolve_quantity_with_recipient(&state, &source_expr, PlayerId(0), source, recipient),
             1
         );
+    }
+
+    fn name_sticker_for_test(sheet: &str, index: u8, text: &str) -> AppliedSticker {
+        AppliedSticker::Name {
+            locator: crate::types::stickers::StickerLocator {
+                sheet: sheet.to_string(),
+                index,
+            },
+            text: text.to_string(),
+            position: 0,
+            timestamp: 0,
+        }
+    }
+
+    fn name_sticker_letters(
+        stickers: NameStickerSet,
+        letters: crate::types::ability::LetterQuery,
+    ) -> QuantityExpr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::NameStickerLetterCount { stickers, letters },
+        }
+    }
+
+    /// CR 123.6d + CR 123.6e: "in name stickers on ~" reads only the name
+    /// stickers on the scoped object — an art sticker's label has no letters
+    /// (CR 123.1), and another object's name sticker is not on it.
+    #[test]
+    fn name_sticker_letter_count_reads_only_name_stickers_on_the_scoped_object() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "_____ Balls of Fire".to_string(),
+            Zone::Battlefield,
+        );
+        let other = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Other".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&source).unwrap().stickers.extend([
+            name_sticker_for_test("Ancestral Hot Dog Minotaur", 1, "Hot Dog"),
+            name_sticker_for_test("Mystic Doom Sandwich", 1, "Doom"),
+            AppliedSticker::Art {
+                locator: crate::types::stickers::StickerLocator {
+                    sheet: "Ancestral Hot Dog Minotaur".to_string(),
+                    index: 0,
+                },
+                label: "Ancestral Hot Dog Minotaur art 1".to_string(),
+                timestamp: 0,
+            },
+        ]);
+        state
+            .objects
+            .get_mut(&other)
+            .unwrap()
+            .stickers
+            .push(name_sticker_for_test("Unique Charmed Pants", 0, "Unique"));
+        let on_source = NameStickerSet::OnObject {
+            scope: ObjectScope::Source,
+        };
+
+        let os = name_sticker_letters(on_source, LetterQuery::Letter { letter: 'o' });
+        assert_eq!(resolve_quantity(&state, &os, PlayerId(0), source), 4);
+        let vowels = name_sticker_letters(on_source, LetterQuery::UniqueVowels);
+        assert_eq!(resolve_quantity(&state, &vowels, PlayerId(0), source), 1);
+    }
+
+    /// CR 608.2c + CR 123.6e: "that sticker" is the sticker this resolution's
+    /// put-a-sticker instruction placed — not the source's other stickers, and
+    /// nothing when no sticker was placed.
+    #[test]
+    fn that_sticker_reads_the_resolution_record() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "_____ Goblin".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .stickers
+            .push(name_sticker_for_test("Sassy Gremlin Blood", 0, "Sassy"));
+        let expr = name_sticker_letters(NameStickerSet::ThatSticker, LetterQuery::UniqueVowels);
+
+        state.placed_sticker_this_resolution =
+            Some(name_sticker_for_test("Unique Charmed Pants", 0, "Unique"));
+        // U, I, E — not the union with the source's "Sassy" (5), not "Sassy" (2).
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 3);
+
+        state.placed_sticker_this_resolution = None;
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 0);
+
+        state.placed_sticker_this_resolution = Some(AppliedSticker::Art {
+            locator: crate::types::stickers::StickerLocator {
+                sheet: "Unique Charmed Pants".to_string(),
+                index: 0,
+            },
+            label: "Unique Charmed Pants art 1".to_string(),
+            timestamp: 0,
+        });
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 0);
+    }
+
+    /// Characterize the known unsupported source-sticker LKI path: the
+    /// put-a-sticker trigger class remains Unknown. CR 608.2h requires source
+    /// last known information before that trigger class can be enabled; this
+    /// fails-closed result is not the rules-correct result for that future class.
+    #[test]
+    fn unsupported_name_sticker_source_lki_path_fails_closed() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "_____ Balls of Fire".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&source).unwrap().stickers.extend([
+            name_sticker_for_test("Ancestral Hot Dog Minotaur", 1, "Hot Dog"),
+            name_sticker_for_test("Mystic Doom Sandwich", 1, "Doom"),
+            name_sticker_for_test("Unique Charmed Pants", 0, "Unique"),
+        ]);
+        let trigger_source = crate::game::triggers::trigger_source_context_for_latch(
+            &state,
+            &state.objects[&source],
+        );
+        let mut ability = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            Vec::new(),
+            source,
+            PlayerId(0),
+        );
+        ability.set_trigger_source_recursive(trigger_source);
+        let os = name_sticker_letters(
+            NameStickerSet::OnObject {
+                scope: ObjectScope::Source,
+            },
+            LetterQuery::Letter { letter: 'o' },
+        );
+        // Reach-guard: while the source is the exact incarnation, it reads 4.
+        assert_eq!(resolve_quantity_with_targets(&state, &os, &ability), 4);
+
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, source, Zone::Exile, &mut events);
+        crate::game::zones::move_to_zone(&mut state, source, Zone::Battlefield, &mut events);
+        assert_eq!(state.objects[&source].zone, Zone::Battlefield);
+        assert_eq!(
+            state.objects[&source].stickers.len(),
+            3,
+            "CR 123.5: stickers are retained through public zones"
+        );
+        assert_eq!(resolve_quantity_with_targets(&state, &os, &ability), 0);
     }
 
     #[test]

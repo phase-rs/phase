@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::fmt;
 use std::num::NonZeroU32;
 use std::ops::{BitOrAssign, ControlFlow};
@@ -2086,9 +2086,11 @@ impl ShieldKind {
 /// resolver-side one-shot discriminator (`prevent_damage::resolve`), so the
 /// two cannot drift. Deliberately strict: a `Typed` leaf carrying extra
 /// constraints (e.g. "target creature spell" — `InZone(Stack)` + Creature, or
-/// a controller clause) does NOT match, so a hypothetical future source-scoped
-/// prevent with a qualified creature leaf keeps its continuous
-/// `Prevention { All }` semantics instead of silently becoming one-shot.
+/// a controller clause) does NOT match, so a source-scoped prevent with a
+/// qualified creature leaf keeps its continuous `Prevention { All }` semantics
+/// instead of silently becoming one-shot. That case is live: "prevent all
+/// combat damage that would be dealt by target attacking creature this turn"
+/// (Warning) lowers to `And[ParentTargetSlot { 0 }, Typed{Creature, Attacking}]`.
 pub fn is_oneshot_target_source_prevent_shape(source_filter: &TargetFilter) -> bool {
     match source_filter {
         TargetFilter::And { filters } if filters.len() == 2 => {
@@ -6347,6 +6349,13 @@ fn is_default_shared_quality_relation(value: &SharedQualityRelation) -> bool {
     matches!(value, SharedQualityRelation::Shares)
 }
 
+/// CR 509.1h: An attacking creature is either blocked or unblocked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AttackerBlockStatus {
+    Blocked,
+    Unblocked,
+}
+
 /// Combat relationship required by `FilterProp::CombatRelation`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CombatRelation {
@@ -6431,8 +6440,16 @@ pub enum FilterProp {
         relation: CombatRelation,
         subject: CombatRelationSubject,
     },
-    /// CR 509.1h: Matches attacking creatures with no blockers assigned.
-    Unblocked,
+    /// CR 509.1h: Matches attacking creatures by whether a blocker was ever
+    /// assigned to them (blocked) or not (unblocked).
+    ///
+    /// Backward compat: deserializes from the legacy unit tag `Unblocked`
+    /// (no fields) via `#[serde(alias)]`, defaulting `status = Unblocked`.
+    #[serde(alias = "Unblocked")]
+    BlockStatus {
+        #[serde(default = "default_unblocked_status")]
+        status: AttackerBlockStatus,
+    },
     /// CR 506.5: Matches a creature that is (or, via the zone-change look-back
     /// snapshot, was) the sole attacker — "attacking alone". Live evaluation
     /// reads combat; look-back evaluation reads
@@ -9092,6 +9109,14 @@ pub enum QuantityRef {
     /// "enchanted/equipped creature gets +N/+N for each word in its name" by
     /// binding to the affected object rather than the Aura or Equipment source.
     ObjectNameWordCount { scope: ObjectScope },
+    /// CR 123.6d + CR 123.6e: A letter statistic over the text of name stickers —
+    /// "for each unique vowel on that sticker", "the number of o's in name
+    /// stickers on ~". `stickers` selects which name stickers are read; `letters`
+    /// selects the statistic. Non-name stickers carry no letters and are ignored.
+    NameStickerLetterCount {
+        stickers: NameStickerSet,
+        letters: LetterQuery,
+    },
     /// CR 205.4a + CR 205.2a + CR 205.3: Number of typeline components on an
     /// object (supertypes + core card types + subtypes). Embiggen: "+1/+1 for
     /// each supertype, card type, and subtype it has."
@@ -9802,6 +9827,52 @@ pub enum QuantityRef {
     VoteCount { choice_index: u32 },
 }
 
+/// Which name stickers a [`QuantityRef::NameStickerLetterCount`] reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum NameStickerSet {
+    /// CR 608.2c + CR 123.6e: "that sticker" — the sticker this resolution's
+    /// preceding put-a-sticker instruction placed
+    /// (`GameState::placed_sticker_this_resolution`). No such sticker → 0.
+    ThatSticker,
+    /// CR 123.6d: every name sticker currently on the scoped object
+    /// ("in name stickers on ~").
+    OnObject { scope: ObjectScope },
+}
+
+/// A letter statistic over name-sticker text (CR 123.6d / CR 123.6e).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum LetterQuery {
+    /// CR 123.6e: the number of different vowels (A, E, I, O, U, Y) that
+    /// appear, however often each appears.
+    UniqueVowels,
+    /// CR 123.6d: the number of occurrences of `letter`.
+    Letter { letter: char },
+}
+
+impl LetterQuery {
+    /// CR 123.6d + CR 123.6e: A lowercase letter and its uppercase equivalent
+    /// are the same letter. Over several stickers, occurrences are summed and
+    /// unique vowels are the distinct vowels appearing on any of them.
+    pub fn count_in<'a>(self, texts: impl IntoIterator<Item = &'a str>) -> usize {
+        let letters = texts
+            .into_iter()
+            .flat_map(str::chars)
+            .flat_map(char::to_lowercase);
+        match self {
+            LetterQuery::UniqueVowels => letters
+                .filter(|c| matches!(c, 'a' | 'e' | 'i' | 'o' | 'u' | 'y'))
+                .collect::<BTreeSet<char>>()
+                .len(),
+            LetterQuery::Letter { letter } => {
+                let wanted: Vec<char> = letter.to_lowercase().collect();
+                letters.filter(|c| wanted.contains(c)).count()
+            }
+        }
+    }
+}
+
 impl QuantityRef {
     /// CR 109.4: mutable access to this reference's single player-relativity
     /// axis, when it has one.
@@ -9853,6 +9924,7 @@ impl QuantityRef {
             | QuantityRef::TargetObjectManaValue { .. }
             | QuantityRef::ObjectColorCount { .. }
             | QuantityRef::ObjectNameWordCount { .. }
+            | QuantityRef::NameStickerLetterCount { .. }
             | QuantityRef::ObjectTypelineComponentCount { .. }
             | QuantityRef::ManaSymbolsInManaCost { .. }
             | QuantityRef::SelfManaValue
@@ -20362,6 +20434,12 @@ fn default_most_prevalent_zone() -> crate::types::zones::Zone {
     crate::types::zones::Zone::Library
 }
 
+/// Backward-compat default for the legacy `FilterProp::Unblocked` unit variant.
+/// Old saves carried no `status` field; the tag itself meant "unblocked".
+fn default_unblocked_status() -> AttackerBlockStatus {
+    AttackerBlockStatus::Unblocked
+}
+
 /// Backward-compat default for the legacy
 /// `QuantityRef::ObjectCountDistinctNames` shape. Old saves had no
 /// `qualities` field; the count was always deduplicated by name.
@@ -26417,10 +26495,13 @@ impl SubAbilityLink {
 /// this process for…" follows CR 608.2c) — each item is an INDEPENDENT OR-branch checked on its own
 /// keyword, so it must be evaluated regardless of any other branch's outcome.
 /// Stamped ONLY by the `ReplicatePerKeyword` lowering helpers
-/// (`attach_repeat_process_keywords`, `attach_perpetual_keyword_grants`) —
-/// never by ordinary sentence-boundary `SequentialSibling` stamping — so it
-/// cannot leak into a Thieving-Skydiver-shaped dependent continuation that
-/// also happens to carry `SequentialSibling`.
+/// (`attach_repeat_process_keywords`, `attach_perpetual_keyword_grants`) and by
+/// `mark_independent_mana_spent_gates` (a clause gated on the mana spent to cast
+/// the spell that directly follows another such clause, CR 601.2h — its gate
+/// reads the payment, never the previous clause) — never by ordinary
+/// sentence-boundary `SequentialSibling` stamping — so it cannot leak into a
+/// Thieving-Skydiver-shaped dependent continuation that also happens to carry
+/// `SequentialSibling`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum SiblingCondition {
     #[default]
@@ -35070,6 +35151,67 @@ mod tests {
     use crate::types::mana::ZoneSpendPolarity;
     use crate::types::zones::Zone;
 
+    /// CR 123.6e: unique vowels are the *different* vowels among A, E, I, O,
+    /// U and Y, case-insensitively, over every text read. Each value exposes
+    /// one wrong implementation: occurrences ("Unique" → 4), case-sensitive
+    /// distinct ("Unique" → 4), Y not a vowel ("Sassy" → 1, "Myr"/"Rhythm" →
+    /// 0), no case fold ("Yogurt" → 2), per-text sum (["Unique", "Cheese"] → 4).
+    #[test]
+    fn letter_query_counts_unique_vowels_per_cr_123_6e() {
+        let vowels = |texts: &[&str]| LetterQuery::UniqueVowels.count_in(texts.iter().copied());
+        assert_eq!(vowels(&["Unique"]), 3);
+        assert_eq!(vowels(&["Sassy"]), 2);
+        assert_eq!(vowels(&["Myr"]), 1);
+        assert_eq!(vowels(&["Rhythm"]), 1);
+        assert_eq!(vowels(&["Yogurt"]), 3);
+        // CR 123.6e: the distinct vowels across both stickers (U, I, E).
+        assert_eq!(vowels(&["Unique", "Cheese"]), 3);
+        assert_eq!(vowels(&[]), 0);
+    }
+
+    /// CR 123.6d: letter occurrences are counted case-insensitively and summed
+    /// over every text read.
+    #[test]
+    fn letter_query_counts_letter_occurrences_per_cr_123_6d() {
+        let letter = |letter: char, texts: &[&str]| {
+            LetterQuery::Letter { letter }.count_in(texts.iter().copied())
+        };
+        assert_eq!(letter('o', &["Hot Dog", "Doom"]), 4);
+        // CR 123.6d: "O" and "o" are the same letter.
+        assert_eq!(letter('o', &["Otter"]), 1);
+        assert_eq!(letter('u', &["Unique"]), 2);
+        // A hand-authored uppercase letter still folds.
+        assert_eq!(letter('O', &["Hot Dog"]), 2);
+    }
+
+    #[test]
+    fn name_sticker_letter_count_serde_shapes() {
+        let that_sticker = QuantityRef::NameStickerLetterCount {
+            stickers: NameStickerSet::ThatSticker,
+            letters: LetterQuery::UniqueVowels,
+        };
+        let on_source = QuantityRef::NameStickerLetterCount {
+            stickers: NameStickerSet::OnObject {
+                scope: ObjectScope::Source,
+            },
+            letters: LetterQuery::Letter { letter: 'o' },
+        };
+        let shapes = [
+            (
+                that_sticker,
+                r#"{"type":"NameStickerLetterCount","stickers":{"type":"ThatSticker"},"letters":{"type":"UniqueVowels"}}"#,
+            ),
+            (
+                on_source,
+                r#"{"type":"NameStickerLetterCount","stickers":{"type":"OnObject","scope":{"type":"Source"}},"letters":{"type":"Letter","letter":"o"}}"#,
+            ),
+        ];
+        for (value, json) in shapes {
+            assert_eq!(serde_json::to_string(&value).unwrap(), json);
+            assert_eq!(serde_json::from_str::<QuantityRef>(json).unwrap(), value);
+        }
+    }
+
     /// CR 607.1 + CR 607.5 + CR 613.1f: every trigger occurrence classifies
     /// exhaustively — printed and copied-value occurrences are characteristic
     /// of their copiable set, layer-6 grants are granted, and occurrences with
@@ -38423,7 +38565,12 @@ mod tests {
                 relation: CombatRelation::BlockingOrBlockedBy,
                 subject: CombatRelationSubject::ParentTarget,
             },
-            FilterProp::Unblocked,
+            FilterProp::BlockStatus {
+                status: AttackerBlockStatus::Unblocked,
+            },
+            FilterProp::BlockStatus {
+                status: AttackerBlockStatus::Blocked,
+            },
             FilterProp::Tapped,
             FilterProp::Untapped,
             FilterProp::HasHasteOrControlledSinceTurnBegan,
@@ -38478,6 +38625,19 @@ mod tests {
         let json = serde_json::to_string(&props).unwrap();
         let deserialized: Vec<FilterProp> = serde_json::from_str(&json).unwrap();
         assert_eq!(props, deserialized);
+    }
+
+    /// CR 509.1h: persisted states carrying the legacy unit variant
+    /// `{"type":"Unblocked"}` still deserialize, as `BlockStatus { Unblocked }`.
+    #[test]
+    fn legacy_unblocked_tag_deserializes_as_block_status() {
+        let legacy: FilterProp = serde_json::from_str(r#"{"type":"Unblocked"}"#).unwrap();
+        assert_eq!(
+            legacy,
+            FilterProp::BlockStatus {
+                status: AttackerBlockStatus::Unblocked,
+            }
+        );
     }
 
     /// CR 508.6: `AttackedThisTurn` parameterization is backward-compatible with

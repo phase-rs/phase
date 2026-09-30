@@ -469,6 +469,7 @@ fn parse_remaining_state_presence_conditions(input: &str) -> OracleResult<'_, St
         parse_opponent_comparison_conditions,
         parse_a_graveyard_size_condition,
         parse_life_conditions,
+        parse_each_player_life_threshold,
         parse_offered_card_mana_value_comparison,
         parse_quantity_quantity_comparison,
         parse_zone_conditions,
@@ -597,6 +598,8 @@ fn parse_remaining_state_presence_conditions_tail(
         // (Tarmogoyf, Cairn Wanderer). Guarded by the "is in a graveyard"
         // suffix, so it never mis-claims the other presence phrases above.
         parse_card_in_graveyard,
+        parse_permanent_on_battlefield,
+        parse_all_permanents_are_color,
     ))
     .parse(input)
 }
@@ -4054,26 +4057,15 @@ fn parse_you_have_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
             ));
         }
     }
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(" or more life").parse(rest) {
-        return Ok((
-            rest,
-            make_quantity_ge(
-                QuantityRef::LifeTotal {
-                    player: PlayerScope::Controller,
-                },
-                n,
-            ),
-        ));
-    }
-    // "you have N or less life" → LifeTotal LE N
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(" or less life").parse(rest) {
+    // "you have N or more life" / "you have N or less life" → LifeTotal GE / LE N
+    if let Ok((rest, comparator)) = parse_life_threshold_suffix(rest) {
         return Ok((
             rest,
             make_quantity_comparison(
                 QuantityRef::LifeTotal {
                     player: PlayerScope::Controller,
                 },
-                Comparator::LE,
+                comparator,
                 n,
             ),
         ));
@@ -4303,6 +4295,21 @@ fn parse_parent_target_referent(input: &str) -> OracleResult<'_, ParentTargetRef
     .parse(input)
 }
 
+/// CR 119 + CR 603.4: The " or less life" / " or more life" suffix shared by every
+/// life-threshold predicate ("you have N …", "that player has N …", "an opponent
+/// has N …", "each player has N …"). Returns the `Comparator` the suffix names;
+/// callers pair it with their own subject scope and the already-parsed `N`.
+fn parse_life_threshold_suffix(input: &str) -> OracleResult<'_, Comparator> {
+    alt((
+        value(
+            Comparator::LE,
+            tag::<_, _, OracleError<'_>>(" or less life"),
+        ),
+        value(Comparator::GE, tag(" or more life")),
+    ))
+    .parse(input)
+}
+
 /// Parse life-total predicates after a `<subject> has ` prefix has been
 /// consumed. Returns `Some(condition)` on match.
 ///
@@ -4328,18 +4335,7 @@ fn parse_life_predicate(rest: &str, player: PlayerScope) -> Option<(&str, Static
     // comparison against the scoped player's life total. Ezio Auditore da
     // Firenze canonical for the LE arm.
     let (after_n, n) = parse_number(rest).ok()?;
-    if let Ok((rest, comparator)) = alt((
-        value(
-            Comparator::LE,
-            tag::<_, _, OracleError<'_>>(" or less life"),
-        ),
-        value(
-            Comparator::GE,
-            tag::<_, _, OracleError<'_>>(" or more life"),
-        ),
-    ))
-    .parse(after_n)
-    {
+    if let Ok((rest, comparator)) = parse_life_threshold_suffix(after_n) {
         return Some((
             rest,
             make_quantity_comparison(QuantityRef::LifeTotal { player }, comparator, n),
@@ -5391,6 +5387,88 @@ pub(crate) fn parse_card_in_graveyard(input: &str) -> OracleResult<'_, StaticCon
     ))
 }
 
+/// CR 603.4 + CR 109.2: "<a/an/another> <type phrase> is on the battlefield" —
+/// existence of a matching permanent, expressed like every other battlefield
+/// existence gate as `ObjectCount(filter) >= 1`. `parse_type_phrase_folding` maps
+/// "another" to `FilterProp::Another` (an object other than the source). The
+/// trailing " is on the battlefield" is required, so a bare noun phrase is never
+/// claimed.
+fn parse_permanent_on_battlefield(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = peek(alt((tag("a "), tag("an "), tag("another ")))).parse(input)?;
+    let (filter, remainder) = parse_type_phrase_folding(rest);
+    if matches!(filter, TargetFilter::Any) {
+        return Err(oracle_err(input));
+    }
+    let (rest, _) = tag(" is on the battlefield").parse(remainder)?;
+    Ok((
+        rest,
+        make_quantity_ge(
+            QuantityRef::ObjectCount {
+                filter: inject_battlefield_presence(filter),
+            },
+            1,
+        ),
+    ))
+}
+
+/// CR 603.4 + CR 105.2: universal "all <type phrase> are <color>" — no matching
+/// permanent lacks the color. The universal is the negated existential over the
+/// complement (`Not(IsPresent(filter + NotColor))`), so it is vacuously true when
+/// no permanent matches the type phrase, exactly as the printed "all" is.
+fn parse_all_permanents_are_color(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("all ").parse(input)?;
+    let (filter, remainder) = parse_type_phrase_folding(rest);
+    if matches!(filter, TargetFilter::Any) {
+        return Err(oracle_err(input));
+    }
+    let (rest, _) = tag(" are ").parse(remainder)?;
+    let (rest, color) = parse_color(rest)?;
+    let complement = add_filter_property(filter, FilterProp::NotColor { color });
+    Ok((
+        rest,
+        StaticCondition::Not {
+            condition: Box::new(StaticCondition::IsPresent {
+                filter: Some(inject_battlefield_presence(complement)),
+            }),
+        },
+    ))
+}
+
+/// CR 603.4: universal player quantifier over life totals — "each
+/// player has N or less life" / "each opponent has N or more life". Every
+/// player satisfies `life <= N` exactly when the MAXIMUM life is `<= N`, and
+/// satisfies `life >= N` exactly when the MINIMUM is `>= N`, so the aggregate is
+/// the dual of the existential one (`existential_aggregate`).
+fn parse_each_player_life_threshold(input: &str) -> OracleResult<'_, StaticCondition> {
+    type ScopeOf = fn(AggregateFunction) -> PlayerScope;
+    let all_players: ScopeOf = |aggregate| PlayerScope::AllPlayers {
+        aggregate,
+        exclude: None,
+    };
+    let opponents: ScopeOf = |aggregate| PlayerScope::Opponent { aggregate };
+    let (rest, scope_of) = alt((
+        value(
+            all_players,
+            tag::<_, _, OracleError<'_>>("each player has "),
+        ),
+        value(opponents, tag("each opponent has ")),
+    ))
+    .parse(input)?;
+    let (rest, n) = parse_number(rest)?;
+    let (rest, comparator) = parse_life_threshold_suffix(rest)?;
+    let aggregate = universal_aggregate(comparator);
+    Ok((
+        rest,
+        make_quantity_comparison(
+            QuantityRef::LifeTotal {
+                player: scope_of(aggregate),
+            },
+            comparator,
+            n,
+        ),
+    ))
+}
+
 /// CR 611.3a + CR 702: Consume a full modeled graveyard-keyword grant sentence —
 /// "as long as <type> card [with <keyword>] is in a graveyard, this creature has
 /// <keyword>" — returning `()` on success. This is the sentence-boundary
@@ -6070,6 +6148,20 @@ fn existential_aggregate(comparator: Comparator) -> AggregateFunction {
         Comparator::EQ | Comparator::NE => unreachable!(
             "EQ/NE have no single-aggregate existential encoding; \
              parse_life_total_comparator never produces them"
+        ),
+    }
+}
+
+/// CR 603.4: Aggregate for a universal ("each player") life threshold — the dual
+/// of [`existential_aggregate`]: every player is `<= N` exactly when the MAXIMUM
+/// is `<= N`, and `>= N` exactly when the MINIMUM is `>= N`.
+fn universal_aggregate(comparator: Comparator) -> AggregateFunction {
+    match comparator {
+        Comparator::LE | Comparator::LT => AggregateFunction::Max,
+        Comparator::GE | Comparator::GT => AggregateFunction::Min,
+        Comparator::EQ | Comparator::NE => unreachable!(
+            "EQ/NE have no single-aggregate universal encoding; \
+             parse_life_threshold_suffix never produces them"
         ),
     }
 }
@@ -7134,6 +7226,26 @@ fn parse_combat_history_condition(input: &str) -> OracleResult<'_, StaticConditi
                 tag("you attacked with a creature this turn"),
                 tag("you attacked this turn"),
             )),
+        ),
+        // CR 508.1a + CR 603.4: the negated surface, "you didn't attack [with a
+        // creature] this turn" (Curious Obsession, See Red) — no attack declared
+        // by the controller this turn.
+        value(
+            make_quantity_comparison(
+                QuantityRef::AttackedThisTurn {
+                    scope: CountScope::Controller,
+                    filter: None,
+                },
+                Comparator::EQ,
+                0,
+            ),
+            (
+                tag("you "),
+                alt((tag("didn't "), tag("did not "))),
+                tag("attack"),
+                opt(alt((tag(" with a creature"), tag(" with any creatures")))),
+                tag(" this turn"),
+            ),
         ),
         parse_you_attacked_with_quantity,
         // CR 508.6 + CR 109.5: "a player attacked you during their last turn" —
@@ -10296,18 +10408,7 @@ fn parse_opponent_comparison_conditions(input: &str) -> OracleResult<'_, StaticC
                     ),
                 ));
             }
-            if let Ok((rest4, comparator)) = alt((
-                value(
-                    Comparator::LE,
-                    tag::<_, _, OracleError<'_>>(" or less life"),
-                ),
-                value(
-                    Comparator::GE,
-                    tag::<_, _, OracleError<'_>>(" or more life"),
-                ),
-            ))
-            .parse(rest3)
-            {
+            if let Ok((rest4, comparator)) = parse_life_threshold_suffix(rest3) {
                 return Ok((
                     rest4,
                     make_quantity_comparison(
@@ -24682,5 +24783,126 @@ mod counters_among_condition_tests {
             counters_among("there are two or more stun counters among creatures you control"),
             (Some(CounterType::Stun), Comparator::GE, 2)
         );
+    }
+}
+
+/// CR 603.4 + CR 105.2 + CR 109.2: the universal/existential state
+/// conditions an intervening-if commonly uses, at the building-block level.
+#[cfg(test)]
+mod intervening_if_state_condition_tests {
+    use super::parse_inner_condition;
+    use crate::types::ability::{
+        AggregateFunction, Comparator, FilterProp, PlayerScope, QuantityExpr, QuantityRef,
+        StaticCondition, TargetFilter,
+    };
+    use crate::types::mana::ManaColor;
+
+    fn life_threshold(text: &str) -> (PlayerScope, Comparator, i32) {
+        let (rest, condition) = parse_inner_condition(text).expect("condition must parse");
+        assert_eq!(rest, "", "the whole clause must be consumed");
+        let StaticCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty: QuantityRef::LifeTotal { player },
+                },
+            comparator,
+            rhs: QuantityExpr::Fixed { value },
+        } = condition
+        else {
+            panic!("expected a life-total comparison, got {condition:?}");
+        };
+        (player, comparator, value)
+    }
+
+    fn typed_properties(filter: &Option<TargetFilter>) -> &[FilterProp] {
+        match filter {
+            Some(TargetFilter::Typed(typed)) => &typed.properties,
+            other => panic!("expected a typed filter, got {other:?}"),
+        }
+    }
+
+    /// The universal reads the extremum that bounds EVERY player: all `<= N`
+    /// means the maximum is `<= N`; all `>= N` means the minimum is `>= N`.
+    #[test]
+    fn each_player_life_threshold_uses_the_universal_aggregate() {
+        assert_eq!(
+            life_threshold("each player has 10 or less life"),
+            (
+                PlayerScope::AllPlayers {
+                    aggregate: AggregateFunction::Max,
+                    exclude: None,
+                },
+                Comparator::LE,
+                10
+            )
+        );
+        assert_eq!(
+            life_threshold("each opponent has 5 or more life"),
+            (
+                PlayerScope::Opponent {
+                    aggregate: AggregateFunction::Min,
+                },
+                Comparator::GE,
+                5
+            )
+        );
+    }
+
+    #[test]
+    fn each_player_life_threshold_requires_a_comparator_suffix() {
+        assert!(parse_inner_condition("each player has 10 life").is_err());
+    }
+
+    /// The universal is the negated existential over the complement, so it
+    /// carries the type phrase's own properties plus the colour exclusion.
+    #[test]
+    fn all_permanents_are_color_negates_the_complement_presence() {
+        let (rest, condition) =
+            parse_inner_condition("all nonland permanents you control are white")
+                .expect("universal color condition must parse");
+        assert_eq!(rest, "");
+        let StaticCondition::Not { condition } = condition else {
+            panic!("expected a negated presence, got {condition:?}");
+        };
+        let StaticCondition::IsPresent { filter } = *condition else {
+            panic!("expected a presence check");
+        };
+        let properties = typed_properties(&filter);
+        assert!(properties.contains(&FilterProp::NotColor {
+            color: ManaColor::White
+        }));
+        assert!(properties
+            .iter()
+            .any(|prop| matches!(prop, FilterProp::InZone { .. })));
+    }
+
+    #[test]
+    fn all_permanents_are_requires_a_color_predicate() {
+        assert!(parse_inner_condition("all creatures you control are tapped").is_err());
+    }
+
+    /// "another" is the source-exclusion property, not a lexical noun.
+    #[test]
+    fn another_type_on_the_battlefield_is_a_count_gate_excluding_the_source() {
+        let (rest, condition) = parse_inner_condition("another creature is on the battlefield")
+            .expect("existence condition must parse");
+        assert_eq!(rest, "");
+        let StaticCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { filter },
+                },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        } = condition
+        else {
+            panic!("expected an object-count gate, got {condition:?}");
+        };
+        let filter = Some(filter);
+        let properties = typed_properties(&filter);
+        assert!(properties.contains(&FilterProp::Another));
+        assert!(properties
+            .iter()
+            .any(|prop| matches!(prop, FilterProp::InZone { .. })));
     }
 }

@@ -16,8 +16,8 @@ use crate::types::ability::{
     CounterKindDomain, DetachedRemainder, Duration, EachDamageRecipient, Effect, EffectError,
     EffectKind, EffectOutcomeSignal, EffectResolutionResult, EffectScope, FilterProp,
     ForEachCategoryAction, ForwardedResultContext, ManaProduction, MassLibraryShuffleMode,
-    ObjectSelectionCardinality, OpponentMayScope, PlayerFilter, PlayerRelation, PlayerScope,
-    PossessionAxis, PtValue, QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole,
+    NameStickerSet, ObjectSelectionCardinality, OpponentMayScope, PlayerFilter, PlayerRelation,
+    PlayerScope, PossessionAxis, PtValue, QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole,
     RepeatContinuation, ResolvedAbility, RevealUntilDisposition, SacrificeCost,
     SacrificeRequirement, SharedQuality, SharedQualityRelation, SiblingCondition, StaticDefinition,
     SubAbilityLink, TapStateChange, TargetChoiceTiming, TargetDamageSourceBinding, TargetFilter,
@@ -1690,12 +1690,16 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
                 }
             }
             // CR 608.2c + CR 614.12a + CR 615.5: Retiring a paused replacement
-            // dispatch can expose the next ordinary continuation. Drain that
-            // exact continuation before priority; if it is the remaining
-            // Attach operation, its own completion boundary owns the printed
-            // tail. A typed Attach-choice owner remains action-owned.
-            if retired_paused_dispatch
-                && matches!(state.waiting_for, WaitingFor::Priority { .. })
+            // dispatch, or removing an exhausted frame after a nested child
+            // already retired its dispatch, can expose the next ordinary
+            // continuation. Drain that exact continuation before priority; if
+            // it is the remaining Attach operation, its own completion boundary
+            // owns the printed tail. A typed Attach-choice owner remains
+            // action-owned.
+            if matches!(
+                state.resolution_stack.last(),
+                Some(ResolutionFrame::AbilityContinuation(_))
+            ) && matches!(state.waiting_for, WaitingFor::Priority { .. })
                 && state
                     .active_ability_continuation()
                     .is_some_and(|continuation| continuation.attachment_choice.is_none())
@@ -4606,7 +4610,11 @@ pub(crate) fn condition_survives_false_parent_gate(condition: &AbilityCondition)
 ///   is true" — Kathril / Mutable Pupa). That is a structural marker on the sub
 ///   (`SiblingCondition::ReplicatedOrBranch`) rather than a condition, and it
 ///   only means "independent OR-branch" on a `SequentialSibling` link, so BOTH
-///   conjuncts are part of the test.
+///   conjuncts are part of the test. The parser also stamps it on a clause gated
+///   on the mana spent to cast the spell that directly follows another such
+///   clause (CR 601.2h + CR 608.2c: "A if {R} was spent …, and B if {G} was
+///   spent …"), whose gate reads the spell's payment rather than the previous
+///   clause.
 ///
 /// Two consumers, which is why this is factored out rather than spelled twice:
 /// `resolve_ability_chain` (below) on its condition-false path, and
@@ -5799,6 +5807,7 @@ fn quantity_ref_counts_population_matching(
         | QuantityRef::ObjectManaValue { .. }
         | QuantityRef::ObjectColorCount { .. }
         | QuantityRef::ObjectNameWordCount { .. }
+        | QuantityRef::NameStickerLetterCount { .. }
         | QuantityRef::ObjectTypelineComponentCount { .. }
         | QuantityRef::ManaSymbolsInManaCost { .. }
         | QuantityRef::SelfManaValue
@@ -6863,6 +6872,10 @@ fn quantity_ref_references_demonstrative(qty: &QuantityRef) -> bool {
         | QuantityRef::CountersOn { scope, .. }
         | QuantityRef::ObjectColorCount { scope }
         | QuantityRef::ObjectNameWordCount { scope }
+        | QuantityRef::NameStickerLetterCount {
+            stickers: NameStickerSet::OnObject { scope },
+            letters: _,
+        }
         | QuantityRef::ObjectTypelineComponentCount { scope }
         | QuantityRef::ManaSymbolsInManaCost { scope, .. } => scope,
         _ => return false,
@@ -14419,6 +14432,9 @@ fn reset_top_level_resolution_state(state: &mut GameState) {
     // CR 608.2d: same reasoning, one axis over — a new top-level
     // resolution cannot inherit a prior resolution's announced colour.
     state.chosen_color_this_resolution = None;
+    // CR 608.2c: "that sticker" names a sticker this resolution's own PutSticker
+    // instruction placed; a new top-level resolution cannot inherit a prior one's.
+    state.placed_sticker_this_resolution = None;
     // CR 401.5 + CR 608.2c + CR 609.3 + issue #4950: Defense in depth —
     // `apply_parent_chain_context` already consumes this at the very next
     // parent->child hand-off after a Dig/ChooseFromZone/RevealHand sets
@@ -16672,7 +16688,13 @@ fn resolve_chain_body(
         } = event
         {
             state.player_actions_this_way.insert((*player_id, *action));
-            record_player_action_this_turn(state, *player_id, *action);
+            // Draw completions record their turn-ledger entry at the single event
+            // emission site in `draw.rs`; overlapping nested chain windows may
+            // still see that event for the resolution-local set, but must not
+            // append it to the Vec more than once.
+            if *action != PlayerActionKind::Draw {
+                record_player_action_this_turn(state, *player_id, *action);
+            }
         }
     }
 
@@ -18389,9 +18411,9 @@ fn resolve_chain_body(
     Ok(())
 }
 
-/// `resolve_chain_body` records, through this helper, each `PlayerPerformedAction`
-/// emitted inside its window; any other caller must run outside every chain
-/// window.
+/// Append one completed player action to the turn ledger. Draw frames call this
+/// at the same point they publish their `PlayerPerformedAction`; other event kinds
+/// use their single chain or completion recorder.
 pub(crate) fn record_player_action_this_turn(
     state: &mut GameState,
     player: PlayerId,

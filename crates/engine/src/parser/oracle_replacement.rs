@@ -39,8 +39,8 @@ use super::oracle_target::{
     parse_declared_damage_source_target, parse_target, parse_type_phrase_folding,
 };
 use super::oracle_util::{
-    first_sentence, normalize_card_name_refs, parse_count_expr, parse_number, parse_ordinal,
-    strip_after, strip_reminder_text, TextPair,
+    first_sentence, merge_or_filters, normalize_card_name_refs, parse_count_expr, parse_number,
+    parse_ordinal, strip_after, strip_reminder_text, TextPair,
 };
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, CastVariantPaid, ChoiceType, CombatDamageScope,
@@ -8635,6 +8635,21 @@ fn finish_damage_source_subject(subject: &str) -> Option<TargetFilter> {
         return Some(TargetFilter::SelfRef);
     }
 
+    // CR 614.1a: A disjunction of controlled damage-source subjects ("a red
+    // instant or sorcery spell you control or a red planeswalker you control")
+    // matches a source satisfying EITHER leg. Split only at the controller
+    // tail followed by an article, so an intra-phrase type "or" ("instant or
+    // sorcery") stays inside its leg; the tail recurses for 3+ legs.
+    if let Ok((_, (head, tail))) = nom_primitives::split_once_on(subject, " you control or ") {
+        if nom_primitives::parse_article.parse(tail).is_ok() {
+            let first_leg = &subject[..head.len() + " you control".len()];
+            return Some(merge_or_filters(
+                finish_damage_source_subject(first_leg)?,
+                finish_damage_source_subject(tail)?,
+            ));
+        }
+    }
+
     // Strip leading "a " or "an "
     let subject = nom_primitives::parse_article
         .parse(subject)
@@ -11809,7 +11824,7 @@ fn parse_cant_become_untapped_replacement(
 /// (the same subject-typing helper every other damage-source clause in this
 /// module already uses), which itself falls back to `parse_type_phrase_folding` — the
 /// SAME combinator that already resolves "unblocked creatures" / "unblocked
-/// attacking creatures" to `FilterProp::Unblocked` via
+/// attacking creatures" to `FilterProp::BlockStatus { Unblocked }` via
 /// `parse_combat_status_prefix` (`oracle_target.rs`), proven by the existing
 /// `parse_type_phrase_unblocked_attacking_creatures_you_control` test. This
 /// function adds NO new unblocked-detection — only the "by ... is dealt to"
@@ -14306,6 +14321,7 @@ fn parse_unconditional_life_floor_to_zero_form(input: &str) -> OracleResult<'_, 
 mod tests {
     use super::*;
     use crate::parser::oracle::parse_oracle_text;
+    use crate::types::ability::AttackerBlockStatus;
     use crate::types::ability::{
         AbilityCondition, Comparator, ControllerRef, CountScope, QuantityExpr,
         QuantityModification, QuantityRef, ReplacementCondition, RestrictionExpiry, ShieldKind,
@@ -21415,6 +21431,27 @@ mod tests {
         assert_eq!(def.combat_scope, None); // all damage
     }
 
+    /// CR 614.1a: a "<A> you control or <B> you control" damage-source subject
+    /// yields an `Or` of both typed legs rather than dropping the filter.
+    #[test]
+    fn damage_source_disjunction_of_controlled_subjects_is_or() {
+        for text in [
+            "If a red instant or sorcery spell you control or a red planeswalker you control would deal damage to a permanent or player, it deals that much damage plus 2 to that permanent or player instead.",
+            "If a creature you control or a planeswalker you control would deal damage to a permanent or player, it deals that much damage plus 1 to that permanent or player instead.",
+        ] {
+            let def = parse_replacement_line(text, "Test").unwrap();
+            let Some(TargetFilter::Or { filters }) = def.damage_source_filter else {
+                panic!("expected Or source filter for {text}");
+            };
+            // A leg with its own type-"or" ("instant or sorcery") flattens into
+            // the disjunction, so 2+ legs total.
+            assert!(filters.len() >= 2);
+            assert!(filters
+                .iter()
+                .all(|f| matches!(f, TargetFilter::Typed(tf) if tf.controller == Some(ControllerRef::You))));
+        }
+    }
+
     #[test]
     fn uncivil_unrest_double_damage_parses_creature_source_filter() {
         let def = parse_replacement_line(
@@ -23693,7 +23730,9 @@ mod tests {
         );
         match &def.damage_source_filter {
             Some(TargetFilter::Typed(tf)) => assert!(
-                tf.properties.contains(&FilterProp::Unblocked),
+                tf.properties.contains(&FilterProp::BlockStatus {
+                    status: AttackerBlockStatus::Unblocked
+                }),
                 "expected Unblocked property, got {:?}",
                 tf.properties
             ),
@@ -23724,7 +23763,9 @@ mod tests {
         );
         match &def.damage_source_filter {
             Some(TargetFilter::Typed(tf)) => {
-                assert!(tf.properties.contains(&FilterProp::Unblocked))
+                assert!(tf.properties.contains(&FilterProp::BlockStatus {
+                    status: AttackerBlockStatus::Unblocked
+                }))
             }
             other => panic!("expected a Typed damage_source_filter with Unblocked, got {other:?}"),
         }

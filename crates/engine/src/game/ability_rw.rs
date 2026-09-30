@@ -104,10 +104,10 @@ use crate::types::ability::FilterProp;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AttachCardinality, AttachSelection, AttackedYouScope,
     CardTypeSetSource, ContinuousModification, ControllerRef, Duration, Effect, GuessSubject,
-    KeeperConstraint, ModalChoice, MultiTargetSpec, ObjectProperty, ObjectScope, PlayerFilter,
-    PlayerScope, QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole, RepeatContinuation,
-    ReplacementDefinition, ResolvedAbility, StaticCondition, StaticDefinition, TargetFilter,
-    TriggerCondition, TriggerDefinition, TurnJournalKind, TypeFilter, TypedFilter,
+    KeeperConstraint, ModalChoice, MultiTargetSpec, NameStickerSet, ObjectProperty, ObjectScope,
+    PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole,
+    RepeatContinuation, ReplacementDefinition, ResolvedAbility, StaticCondition, StaticDefinition,
+    TargetFilter, TriggerCondition, TriggerDefinition, TurnJournalKind, TypeFilter, TypedFilter,
     ZoneChoiceCandidateSource, ZoneRef,
 };
 use crate::types::game_state::TargetSelectionConstraint;
@@ -2175,6 +2175,10 @@ fn legacy_quantity_ref(x: &QuantityRef) -> bool {
         | QuantityRef::ObjectManaValue { scope, .. }
         | QuantityRef::ObjectColorCount { scope, .. }
         | QuantityRef::ObjectNameWordCount { scope, .. }
+        | QuantityRef::NameStickerLetterCount {
+            stickers: NameStickerSet::OnObject { scope },
+            letters: _,
+        }
         | QuantityRef::ObjectTypelineComponentCount { scope, .. }
         | QuantityRef::ManaSymbolsInManaCost { scope, .. } => legacy_object_scope(scope),
         QuantityRef::HandSize { .. }
@@ -2211,6 +2215,11 @@ fn legacy_quantity_ref(x: &QuantityRef) -> bool {
         | QuantityRef::TrackedSetSize
         | QuantityRef::FilteredTrackedSetSize { .. }
         | QuantityRef::ExiledFromHandThisResolution
+        // CR 608.2c: the resolution's placed-sticker record, not a frozen tag.
+        | QuantityRef::NameStickerLetterCount {
+            stickers: NameStickerSet::ThatSticker,
+            letters: _,
+        }
         | QuantityRef::PreviousEffectAmount { .. }
         | QuantityRef::PreviousEffectCount
         | QuantityRef::TurnsTaken
@@ -2507,7 +2516,7 @@ fn legacy_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::Blocking
         | FilterProp::BlockingSource
         | FilterProp::CombatRelation { .. }
-        | FilterProp::Unblocked
+        | FilterProp::BlockStatus { .. }
         | FilterProp::AttackingAlone
         | FilterProp::BlockingAlone
         | FilterProp::Tapped
@@ -2800,7 +2809,7 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::Blocking
         | FilterProp::BlockingSource
         | FilterProp::CombatRelation { .. }
-        | FilterProp::Unblocked
+        | FilterProp::BlockStatus { .. }
         | FilterProp::AttackingAlone
         | FilterProp::BlockingAlone
         | FilterProp::Tapped
@@ -6431,6 +6440,14 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
         | QuantityRef::ObjectManaValue { scope, .. }
         | QuantityRef::ObjectColorCount { scope, .. }
         | QuantityRef::ObjectNameWordCount { scope, .. }
+        // CR 123.6d: the scoped object's name stickers — the same object-read
+        // proxy as `ObjectNameWordCount`. Sticker writers (`PutSticker` →
+        // `ext_write(StateKind::Other)`, `ApplySticker` → conservative) conflict
+        // with every read, so a same-event sticker write still orders against it.
+        | QuantityRef::NameStickerLetterCount {
+            stickers: NameStickerSet::OnObject { scope },
+            letters: _,
+        }
         | QuantityRef::ObjectTypelineComponentCount { scope, .. }
         | QuantityRef::ManaSymbolsInManaCost { scope, .. } => {
             read_object_scope(scope, StateKind::ObjectPt)
@@ -6504,6 +6521,10 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
         // Resolution-local / turn- / commander-scoped: no per-source binding
         // (member-invariant under uniformity).
         QuantityRef::ExiledFromHandThisResolution
+        | QuantityRef::NameStickerLetterCount {
+            stickers: NameStickerSet::ThatSticker,
+            letters: _,
+        }
         | QuantityRef::PreviousEffectAmount { .. }
         | QuantityRef::PreviousEffectCount
         | QuantityRef::TurnsTaken
@@ -7319,9 +7340,9 @@ fn rw_controller_ref(x: &ControllerRef) -> RwProfile {
 mod tests {
     use super::*;
     use crate::types::ability::{
-        AbilityKind, AggregateFunction, ChoiceType, Comparator, CountScope, PropertyAggregate,
-        PtValue, ReciprocalZoneChoiceRole, TargetSelectionMode, ZoneChoiceCandidateSource,
-        ZoneChoiceChooser, ZoneOwner,
+        AbilityKind, AggregateFunction, ChoiceType, Comparator, CountScope, LetterQuery,
+        PropertyAggregate, PtValue, ReciprocalZoneChoiceRole, TargetSelectionMode,
+        ZoneChoiceCandidateSource, ZoneChoiceChooser, ZoneOwner,
     };
 
     use crate::game::test_fixtures::mana_fixture_roles;
@@ -7956,6 +7977,10 @@ mod tests {
             QuantityRef::TurnsTaken,
             QuantityRef::DungeonsCompleted,
             QuantityRef::ExiledFromHandThisResolution,
+            QuantityRef::NameStickerLetterCount {
+                stickers: NameStickerSet::ThatSticker,
+                letters: LetterQuery::UniqueVowels,
+            },
         ] {
             assert!(
                 !rw_quantity_ref(&r).reads_member_bound,

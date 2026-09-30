@@ -2440,7 +2440,7 @@ pub(crate) fn is_source_blocked(
     // CR 509.1h: "blocked" is the attacker's `blocked` flag, not the presence of
     // blocker assignments — a creature made blocked by an effect (no blockers) is
     // still blocked, and a creature stays blocked even if all its blockers are
-    // removed. Mirrors `unblocked_attackers` / `FilterProp::Unblocked`, which read
+    // removed. Mirrors `combat::attacker_block_status` / `FilterProp::BlockStatus`, which read
     // the same flag.
     state.combat.as_ref().is_some_and(|combat| {
         combat

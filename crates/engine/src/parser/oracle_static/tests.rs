@@ -5,11 +5,11 @@ use super::restriction::*;
 use super::support::*;
 use super::*;
 use crate::types::ability::{
-    ActivationRestriction, AggregateFunction, AttackedYouScope, CardTypeSetSource,
-    CommanderOwnership, Comparator, CountScope, DamageKindFilter, Duration, Effect, FilterProp,
-    ObjectProperty, ObjectScope, PlayerFilter, PlayerRelation, PlayerScope, PtStat, PtValueScope,
-    QuantityExpr, QuantityRef, SharedQuality, SharedQualityRelation, SubtypeExclusion, TypeFilter,
-    ZoneRef,
+    ActivationRestriction, AggregateFunction, AttackedYouScope, AttackerBlockStatus,
+    CardTypeSetSource, CommanderOwnership, Comparator, CountScope, DamageKindFilter, Duration,
+    Effect, FilterProp, ObjectProperty, ObjectScope, PlayerFilter, PlayerRelation, PlayerScope,
+    PtStat, PtValueScope, QuantityExpr, QuantityRef, SharedQuality, SharedQualityRelation,
+    SubtypeExclusion, TypeFilter, ZoneRef,
 };
 use crate::types::counter::CounterType;
 use crate::types::keywords::{Keyword, WardCost};
@@ -17028,7 +17028,9 @@ fn static_unblocked_attacking_ninjas_you_control_have_lifelink() {
     if let Some(TargetFilter::Typed(tf)) = &def.affected {
         assert_eq!(tf.get_subtype(), Some("Ninja"));
         assert_eq!(tf.controller, Some(ControllerRef::You));
-        assert!(tf.properties.contains(&FilterProp::Unblocked));
+        assert!(tf.properties.contains(&FilterProp::BlockStatus {
+            status: AttackerBlockStatus::Unblocked
+        }));
         assert!(tf
             .properties
             .contains(&FilterProp::Attacking { defender: None }));
@@ -17055,7 +17057,9 @@ fn static_attacking_ninjas_you_control_have_deathtouch() {
         assert!(tf
             .properties
             .contains(&FilterProp::Attacking { defender: None }));
-        assert!(!tf.properties.contains(&FilterProp::Unblocked));
+        assert!(!tf.properties.contains(&FilterProp::BlockStatus {
+            status: AttackerBlockStatus::Unblocked
+        }));
     } else {
         panic!(
             "Expected Typed filter with Ninja subtype, got {:?}",

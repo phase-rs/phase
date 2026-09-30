@@ -1,6 +1,20 @@
 {
   "entries": [
     {
+      "id": 214,
+      "date": "2026-09-30",
+      "title": "Baldur’s Gate Wilderness opens",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "multiplayer"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Baldur’s Gate Wilderness is available as an optional 19-room dungeon for venture and initiative games\n• Modal Saga chapters now offer their printed choice instead of applying every option (Summon: Magus Sisters, Life of Toshiro Umezawa)\n• Sabin, Master Monk and Tenacious Underdog can use their printed Blitz costs from the graveyard, including discard and life payments\n• Yuna, Grand Summoner, Lifeblood Hydra, and The Eagles Are Coming! gain their printed counter, life, draw, and return effects\n\n🛠️ Cards That Now Work Right\n• Meld pairs now enter as their combined permanent instead of staying exiled, with the proper back face and artwork\n• Invasion of Ikoria can be cast transformed after its last defense counter is removed; Sephiroth’s transformation grants the lasting emblem\n• The Necrobloom grants working dredge to lands in your graveyard, and accepted Dredge replacements keep their follow-up effects and draw ownership\n• Rebound casts its exiled spell during the next upkeep trigger instead of leaving a permission that lingers through the turn\n• Telling Time places its remaining cards on the library’s top and bottom as chosen; Yuna’s Whistle and Calibrated Blast wait for their reveal before triggering the next effect\n• Doppelgang and other X-counted copies, coin flips, and die rolls use the X you chose; storage lands make mana equal to the counters removed\n• Ebondeath checks for the correctly named death before allowing a graveyard cast; Flash offers its reduced payment; Gut can sacrifice a noncreature artifact\n• Krark can copy the spell it refers to even if that spell left the stack; counters hit the spell they name instead of its cast trigger\n• Mephitic Ooze, Burning-Eye Zubera, Tangle Asp, and Pugnacious Hammerskull now respect their printed trigger and condition details\n• Reveal-as-additional-cost spells such as Wren’s Run Vanquisher can be cast by showing a card; “discard X cards” costs pay the announced X\n• Targeted cost reductions, extra costs, and kicked replacement effects use the chosen targets and charge the correct amount without counting a target twice\n\n⚔️ Combat & Gameplay\n• Paying life down to zero during a spell’s casting finishes the cast before the next game-loss check\n• Initiative changes hands once per damaging player in a combat-damage step, even if several creatures connect\n• Multi-part payments made while an effect resolves complete together, so a paused choice cannot leave a partial payment\n\n🖥️ Interface\n• Melded cards get a forge-and-flip animation, and dice ignored by a “roll extra, ignore the lowest” effect appear dimmed in the roll display\n• You can preview a dungeon card when choosing where to venture; large attacking token piles stay collapsed while blockers are assigned\n• Keyword mana costs show in card previews, mana-color choices remain reachable on desktop, and idle targeting details stay hidden\n• Commander deck estimates start at Bracket 2 while manual bracket labels remain visible; imported deck names with a real slash or final parenthesized word keep their correct cards\n• Joining a draft pod from the public lobby now takes you into that pod instead of leaving you on a waiting panel\n\n🌐 Multiplayer\n• Public web-lobby rooms with open seats appear in #looking-for-players and disappear when the room closes\n• A P2P player keeps their seat when a Concede action definitely failed to commit, so the game can recover cleanly",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1554919630068260939"
+    },
+    {
       "id": 213,
       "date": "2026-09-27",
       "title": "Freeform formats and Surge costs arrive",

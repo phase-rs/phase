@@ -9,7 +9,8 @@ use nom::multi::{many0, many1, separated_list1};
 use nom::sequence::{delimited, pair, preceded, terminated};
 use nom::Parser;
 
-use super::oracle_effect::conditions::source_saddled_filter;
+use super::oracle_effect::conditions::{source_saddled_filter, split_leading_conditional};
+use super::oracle_effect::gap_diagnosis::clause_gap_unimplemented;
 use super::oracle_effect::{
     attach_terminal_die_result_branches_before_finalization, condition_text_is_rehomeable,
     lower_effect_chain_ir, parse_effect_chain_ir, parse_player_relative_clause,
@@ -61,12 +62,13 @@ use crate::types::ability::{
     CastManaSpentMetric, CastVariantPaid, CoinFlipResult, Comparator, ControllerRef, CountScope,
     CounterTriggerFilter, DamageAmountScope, DamageAmountThreshold, DamageChannel,
     DamageKindFilter, DelayedTriggerCondition, DestinationConstraint, DieResultFilter, Effect,
-    EffectScope, FilterProp, ManaAbilityProducedFilter, ObjectScope, OriginConstraint,
-    ParsedCondition, PlayerFilter, PlayerRelation, PlayerScope, PropertyAggregate, PtStat,
-    PtValueScope, QuantityExpr, QuantityRef, RenownSubject, SacrificeAggregateStat, SacrificeCost,
-    SacrificeRequirement, SharedQuality, StaticCondition, SubAbilityLink, TapCreaturesRequirement,
-    TapStateChange, TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition,
-    TypeFilter, TypedFilter, UnlessPayModifier, ZoneChangeClause,
+    EffectScope, FilterProp, ManaAbilityProducedFilter, NameStickerSet, ObjectScope,
+    OriginConstraint, ParsedCondition, PlayerFilter, PlayerRelation, PlayerScope,
+    PropertyAggregate, PtStat, PtValueScope, QuantityExpr, QuantityRef, RenownSubject,
+    SacrificeAggregateStat, SacrificeCost, SacrificeRequirement, SharedQuality, StaticCondition,
+    SubAbilityLink, TapCreaturesRequirement, TapStateChange, TargetFilter, TriggerCondition,
+    TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
+    ZoneChangeClause,
 };
 use crate::types::card_type::{is_land_subtype, CoreType};
 use crate::types::counter::CounterType;
@@ -1590,11 +1592,13 @@ pub(crate) fn parse_trigger_line_with_index_ir(
         pending_meld_partner: meld_partner,
         pending_mana_symbol_count_color,
         actor: ctx.actor.clone(),
-        // CR 608.2k: nearest antecedent wins. An intervening-`if` that pins the
-        // source OFF the battlefield ("... if ~ is in your graveyard, return it")
-        // re-establishes the source card as the antecedent, and it sits nearer to
-        // the effect body than the trigger condition does — so it outranks the
-        // condition-derived antecedent, not the other way round.
+        // CR 608.2k says an effect still affects a specific untargeted object
+        // previously referred to by the trigger condition despite characteristic
+        // changes; it does not rank competing antecedents. Here an
+        // intervening-`if` that pins the source OFF the battlefield ("... if ~ is
+        // in your graveyard, return it") supplies a nearer source reference than
+        // the trigger condition. Choosing that reference is a parser heuristic
+        // grounded in English grammar, not a rule defined by CR 608.2k.
         //
         // The two were previously ordered condition-first. That was unobservable
         // while `parse_effect_chain_ir` discarded this field wholesale (see the
@@ -1661,6 +1665,9 @@ pub(crate) fn parse_trigger_line_with_index_ir(
     // temporarily rebind it via `with_player_scope`) so lowering sees the scope
     // the condition introduced, not a transient nested-clause value.
     let relative_player_scope = effect_ctx.relative_player_scope.clone();
+
+    // Constraint from full text (parsed during IR production so lowering has it)
+    let constraint = parse_trigger_constraint(&lower);
 
     // Parse the effect body
     let effect_for_parse_lower = effect_for_parse.to_lowercase();
@@ -1804,7 +1811,14 @@ pub(crate) fn parse_trigger_line_with_index_ir(
                 }
                 let ir =
                     parse_effect_chain_ir(&effect_for_parse, AbilityKind::Spell, &mut effect_ctx);
-                Some(TriggerBody::EffectChain(ir))
+                Some(TriggerBody::EffectChain(
+                    fail_closed_on_dropped_intervening_if(
+                        ir,
+                        &effect_for_parse,
+                        if_condition.as_ref(),
+                        &effect_ctx,
+                    ),
+                ))
             })
         }
     } else {
@@ -1815,9 +1829,6 @@ pub(crate) fn parse_trigger_line_with_index_ir(
 
     // Parse the condition to get TriggerMode + partial TriggerDefinition
     let (condition, partial_def) = parse_trigger_condition(condition_text, ctx);
-
-    // Constraint from full text (parsed during IR production so lowering has it)
-    let constraint = parse_trigger_constraint(&lower);
 
     TriggerIr {
         condition,
@@ -3299,6 +3310,10 @@ fn remap_self_scope_to_event_source_in_ref(qty: &mut QuantityRef) {
         | QuantityRef::ObjectManaValue { scope }
         | QuantityRef::ObjectColorCount { scope }
         | QuantityRef::ObjectNameWordCount { scope }
+        | QuantityRef::NameStickerLetterCount {
+            stickers: NameStickerSet::OnObject { scope },
+            letters: _,
+        }
         | QuantityRef::ObjectTypelineComponentCount { scope }
         | QuantityRef::ManaSymbolsInManaCost { scope, .. }
         | QuantityRef::CountersOn { scope, .. } => scope,
@@ -3874,6 +3889,14 @@ fn hoist_unless_pay_modifier(
         enclosing = after;
     }
     let unless_sentence_start = unless_pos - enclosing.len();
+    // CR 118.12a + CR 608.2c: an "unless" binds to the sentence that contains it.
+    // Hoisting one from a later sentence would gate the whole trigger — including
+    // the earlier sentences' instructions — on the payment (Delaying Shield: paying
+    // {1}{W} would skip removing the delay counters). Decline; the per-clause path
+    // (`extract_resolution_unless_pay_modifier`) attaches the cost to its own clause.
+    if unless_sentence_start > 0 {
+        return (text.to_string(), None);
+    }
     if crate::parser::oracle_effect::lower::strip_temporal_prefix(
         text[unless_sentence_start..].trim_start(),
     )
@@ -3890,8 +3913,12 @@ fn hoist_unless_pay_modifier(
     // effect parser (`parse_discard_unless_filter` in oracle_effect/imperative.rs)
     // encodes the unless-clause as a *type qualifier* on the mandatory discard,
     // not as an alternative cost on a different effect. Defer to that path.
-    let primary_is_discard = tag::<_, _, OracleError<'_>>("discard ")
-        .parse(lower[..unless_pos].trim_start())
+    // The unless-clause binds to the sentence that contains it, so test that
+    // sentence (`enclosing`), tolerating a leading "then" connective: in "draw
+    // two cards. Then discard two cards unless you discard ...", only the
+    // discard clause carries the alternative, and the draw stays unconditional.
+    let primary_is_discard = preceded(opt(tag::<_, _, OracleError<'_>>("then ")), tag("discard "))
+        .parse(enclosing.trim_start())
         .is_ok();
     if primary_is_discard
         && tag::<_, _, OracleError<'_>>("you discard ")
@@ -6493,6 +6520,99 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
 /// CR 603.4: the bare `if ` keyword token that opens a condition clause.
 fn parse_if_keyword(input: &str) -> OracleResult<'_, ()> {
     value((), tag("if ")).parse(input)
+}
+
+/// CR 603.4: a triggered ability "may read 'When/Whenever/At [trigger event], if
+/// [condition], [effect].'" and triggers only if the condition is true. When a
+/// LEADING `if` neither hoisted to the trigger condition nor became a condition
+/// on the effect chain's first clause, nothing represents it: the trigger would
+/// fire unconditionally. The swallow detector cannot be relied on to report
+/// that, because any unrelated `condition`/`constraint` slot in the unit (for
+/// example `OnlyDuringYourTurn` on every "your upkeep" trigger) discharges its
+/// slot probe. Replace the body with the clause gap so the trigger fails closed.
+///
+/// Only the LEADING position is intervening. A later-sentence `If` is a
+/// resolution-time instruction of its own and stays with the effect chain.
+fn fail_closed_on_dropped_intervening_if(
+    ir: EffectChainIr,
+    effect_text: &str,
+    hoisted: Option<&TriggerCondition>,
+    ctx: &ParseContext,
+) -> EffectChainIr {
+    let effect_text = effect_text.trim_start();
+    let effect_lower = effect_text.to_lowercase();
+    // CR 603.4: "if it's the Nth [type] spell you cast this turn" is represented by
+    // the fire-time ordinal constraint, not by a condition on the chain. Only the
+    // LEADING guard itself is exempt; a different unhoisted guard stays a gap.
+    let guard_is_ordinal_constraint =
+        parse_nth_spell_this_turn_intervening_if(&effect_lower).is_ok();
+    let leading_guard_dropped = hoisted.is_none()
+        && !guard_is_ordinal_constraint
+        && parse_if_keyword(&effect_lower).is_ok()
+        && split_leading_conditional(effect_text).is_some()
+        && ir.clauses.first().is_some_and(|clause| {
+            // A leading guard has no antecedent in intervening-if position, so a
+            // condition that reads a prior instruction's outcome is not the guard.
+            !clause
+                .condition
+                .iter()
+                .chain(clause.parsed.condition.iter())
+                .any(|condition| !condition_reads_prior_instruction(condition))
+                && clause.parsed.unlowered_guard.is_none()
+                && !matches!(clause.parsed.effect, Effect::Unimplemented { .. })
+        });
+    if !leading_guard_dropped {
+        return ir;
+    }
+    EffectChainIr::single_clause(
+        effect_text,
+        ir.kind,
+        parsed_clause(clause_gap_unimplemented(effect_text)),
+        None,
+        ctx.actor.clone(),
+        ctx.in_trigger,
+    )
+}
+
+/// CR 603.4: a triggered modal's header split leaves a trailing intervening-if
+/// on the trigger line ("Whenever X, if Y" before "choose one —"), and the modal
+/// payload later replaces the trigger body. When that guard did not hoist to the
+/// trigger condition (`intervening_if`) or the fire-time ordinal constraint,
+/// nothing represents it and the modal would fire unconditionally. Returns the
+/// clause-gap body that makes such a trigger fail closed; `None` when the guard
+/// was captured or there is no guard.
+pub(crate) fn unhoisted_modal_guard_body(trigger: &TriggerIr) -> Option<TriggerBody> {
+    let effect_lower = trigger.modifiers.effect_lower.trim_start();
+    let leading_guard_dropped = trigger.modifiers.intervening_if.is_none()
+        && parse_if_keyword(effect_lower).is_ok()
+        && parse_nth_spell_this_turn_intervening_if(effect_lower).is_err();
+    leading_guard_dropped.then(|| {
+        TriggerBody::EffectChain(EffectChainIr::single_clause(
+            effect_lower,
+            AbilityKind::Spell,
+            parsed_clause(clause_gap_unimplemented(effect_lower)),
+            None,
+            trigger.body_context.actor.clone(),
+            true,
+        ))
+    })
+}
+
+/// CR 608.2c: True when an ability condition reads the outcome of an earlier
+/// instruction in the same resolution ("if you don't", "if you do", "if it's a
+/// creature" after a reveal). A trigger's leading `if` has no earlier
+/// instruction, so such a condition can never be the captured intervening-if.
+fn condition_reads_prior_instruction(condition: &AbilityCondition) -> bool {
+    match condition {
+        AbilityCondition::EffectOutcome { .. }
+        | AbilityCondition::RevealedHasCardType { .. }
+        | AbilityCondition::ZoneChangedThisWay { .. } => true,
+        AbilityCondition::Not { condition } => condition_reads_prior_instruction(condition),
+        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+            conditions.iter().any(condition_reads_prior_instruction)
+        }
+        _ => false,
+    }
 }
 
 /// CR 608.2c: the connectors that open the ELSE branch of a written-order
@@ -12826,6 +12946,13 @@ fn parse_damage_to_qualifier_with_rest(after_verb: &str) -> OracleResult<'_, Tar
             alt((tag("a player or battle"), tag("a player or a battle"))),
         ),
         value(TargetFilter::Player, tag("a player")),
+        // CR 506.2: "defending player" names the player being attacked in combat,
+        // so damage dealt to them is damage to a player (CR 120.3) and the damaged
+        // player is the trigger's "that player".
+        value(
+            TargetFilter::Player,
+            preceded(opt(tag("the ")), tag("defending player")),
+        ),
         parse_opponent_or_battle_recipient,
         parse_opponent_player_recipient,
         value(TargetFilter::Controller, tag("you")),

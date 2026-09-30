@@ -5,8 +5,8 @@ use crate::types::ability::{
     CastCostModifier, CastTimingPermission, CastingPermission, ChoiceType, CombatRelationSubject,
     ContinuousModification, ControllerRef, CostObjectCount, CostPaidObjectSnapshot, CostReduction,
     CounterCostSelection, Duration, Effect, EffectKind, FilterProp, GameRestriction,
-    ModalSelectionCondition, ObjectScope, ParsedCondition, PlayerFilter, PlayerScope,
-    ProhibitedActivity, QuantityExpr, QuantityRef, ResolvedAbility, RestrictionExpiry,
+    ModalSelectionCondition, NameStickerSet, ObjectScope, ParsedCondition, PlayerFilter,
+    PlayerScope, ProhibitedActivity, QuantityExpr, QuantityRef, ResolvedAbility, RestrictionExpiry,
     RestrictionPlayerScope, StaticCondition, StaticDefinition, SubAbilityLink,
     TapCreaturesRequirement, TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
@@ -25427,6 +25427,10 @@ fn quantity_ref_is_board_state_relative(qty: &QuantityRef) -> bool {
         | QuantityRef::ObjectManaValue { scope }
         | QuantityRef::ObjectColorCount { scope }
         | QuantityRef::ObjectNameWordCount { scope }
+        | QuantityRef::NameStickerLetterCount {
+            stickers: NameStickerSet::OnObject { scope },
+            letters: _,
+        }
         | QuantityRef::ObjectTypelineComponentCount { scope } => {
             matches!(scope, ObjectScope::Source)
         }
@@ -28212,6 +28216,10 @@ fn quantity_ref_reads_target_object(qty: &QuantityRef, read: TargetRead) -> bool
         | QuantityRef::ObjectManaValue { scope }
         | QuantityRef::ObjectColorCount { scope }
         | QuantityRef::ObjectNameWordCount { scope }
+        | QuantityRef::NameStickerLetterCount {
+            stickers: NameStickerSet::OnObject { scope },
+            letters: _,
+        }
         | QuantityRef::ObjectTypelineComponentCount { scope }
         | QuantityRef::ManaSymbolsInManaCost { scope, .. } => {
             object_scope_reads_chosen_target(scope, read)
@@ -28312,6 +28320,10 @@ fn quantity_ref_reads_target_object(qty: &QuantityRef, read: TargetRead) -> bool
         | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::TrackedSetSize
         | QuantityRef::ExiledFromHandThisResolution
+        | QuantityRef::NameStickerLetterCount {
+            stickers: NameStickerSet::ThatSticker,
+            letters: _,
+        }
         | QuantityRef::PreviousEffectAmount { .. }
         | QuantityRef::PreviousEffectCount
         | QuantityRef::UnspentMana { .. }
@@ -28594,7 +28606,7 @@ fn filter_prop_reads_chosen_target(prop: &FilterProp, read: TargetRead) -> bool 
         | FilterProp::WasPlayed
         | FilterProp::Blocking
         | FilterProp::BlockingSource
-        | FilterProp::Unblocked
+        | FilterProp::BlockStatus { .. }
         | FilterProp::AttackingAlone
         | FilterProp::BlockingAlone
         | FilterProp::Tapped
