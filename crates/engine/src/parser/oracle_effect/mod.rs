@@ -39774,7 +39774,7 @@ pub(crate) fn parse_effect_chain_ir(
             match strip_target_comparative_pt_conditional(&text, producer.is_some()) {
                 ComparativePtGate::Parsed { condition, body } => {
                     comparative_gate_producer = producer;
-                    (Some(condition), body)
+                    (Some(*condition), body)
                 }
                 ComparativePtGate::Unbound => {
                     unimplemented_clause(
@@ -39786,7 +39786,7 @@ pub(crate) fn parse_effect_chain_ir(
                     continue;
                 }
                 ComparativePtGate::NotOwned => match strip_target_keyword_instead(&text) {
-                    KeywordConditionStrip::Parsed { condition, body } => (Some(condition), body),
+                    KeywordConditionStrip::Parsed { condition, body } => (Some(*condition), body),
                     KeywordConditionStrip::UnknownKeyword => {
                         unimplemented_clause(
                             &mut builder,

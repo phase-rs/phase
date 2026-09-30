@@ -2940,7 +2940,7 @@ pub(super) enum ComparativePtGate {
     NotOwned,
     /// The gate parsed and its "that creature" anaphor has a target referent.
     Parsed {
-        condition: AbilityCondition,
+        condition: Box<AbilityCondition>,
         body: String,
     },
     /// The gate parsed, but no earlier clause declares the object target the
@@ -2960,8 +2960,10 @@ pub(super) enum ComparativePtGate {
 /// "that creature" reads `ObjectScope::Target` — the object target an earlier
 /// clause of the same ability declared (the same slot `TargetHasKeywordInstead`
 /// reads for the sibling "if that creature has <keyword>" gate).
-/// `antecedent_is_target` is the chunk loop's own authority for whether such a
-/// target exists; without one the gate is `Unbound` and the caller fails closed.
+/// `antecedent_is_target` says whether the immediately preceding clause declares
+/// that target (the gate's producer, which the caller links to the gated clause
+/// through the chosen-group channel); without one the gate is `Unbound` and the
+/// caller fails closed.
 pub(super) fn strip_target_comparative_pt_conditional(
     text: &str,
     antecedent_is_target: bool,
@@ -2984,7 +2986,7 @@ pub(super) fn strip_target_comparative_pt_conditional(
     }
     match static_condition_to_ability_condition(&static_condition, &mut ParseContext::default()) {
         Some(condition) => ComparativePtGate::Parsed {
-            condition,
+            condition: Box::new(condition),
             body: body.trim().to_string(),
         },
         None => ComparativePtGate::NotOwned,
@@ -2998,7 +3000,7 @@ pub(super) enum KeywordConditionStrip {
     NotOwned,
     /// The gate names a real keyword.
     Parsed {
-        condition: AbilityCondition,
+        condition: Box<AbilityCondition>,
         body: String,
     },
     /// The gate's words are not a keyword (`Keyword::Unknown`): a counter,
@@ -3100,7 +3102,7 @@ pub(super) fn strip_target_keyword_instead(text: &str) -> KeywordConditionStrip 
     let body = body.strip_suffix(" instead").unwrap_or(body); // allow-noncombinator: effect-body suffix cleanup
     let body = body.strip_prefix("it ").unwrap_or(body); // allow-noncombinator: effect-body pronoun cleanup
     KeywordConditionStrip::Parsed {
-        condition,
+        condition: Box::new(condition),
         body: body.to_string(),
     }
 }
@@ -8948,7 +8950,7 @@ mod tests {
             panic!("toxic gate must parse, got {strip:?}");
         };
         assert!(matches!(
-            condition,
+            *condition,
             AbilityCondition::TargetHasKeywordInstead {
                 keyword: Keyword::Toxic(_)
             }
