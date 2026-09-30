@@ -300,6 +300,7 @@ describe("cardVfxSpecFor", () => {
       pace: 1,
       owningStepMs: 500,
       snapshotSeq: 1,
+      sweep: null,
     });
     expect(cardVfxSpecFor(zoneChanged("Stack", "Battlefield"), context(pre, post))?.kind).toBe("flight");
   });
@@ -473,5 +474,58 @@ describe("a counter", () => {
     expect(cardVfxSpecFor(countered, counterContext(["Blue"], 0))).toBeNull();
     // A counter that is not what resolves (none on the stack) has no ripple.
     expect(cardVfxSpecFor(countered, context(stateWith(), null))).toBeNull();
+  });
+});
+
+describe("a sweep", () => {
+  const SPELL = 40;
+  const OTHER = 41;
+  const other = gameObjectFactory.withId(OTHER).named("Hill Giant").creature(3, 3).ownedBy(1);
+  const bounced = (objectId: number): AnimationEvent => ({
+    type: "ZoneChanged",
+    data: { object_id: objectId, from: "Battlefield", to: "Hand" },
+  });
+  const destroyedEvent = (objectId: number): AnimationEvent => ({ type: "CreatureDestroyed", data: { object_id: objectId } });
+
+  /** A spell of `color` its controller, player 1, is resolving, over two creatures. */
+  function sweepContext(color: ManaColor[], step: readonly AnimationEvent[], to: Zone) {
+    const pre = buildGameState({
+      objects: buildObjectMap(
+        gameObjectFactory.withId(SPELL).named("Evacuation").instant().params({ zone: "Stack", color }).build(),
+        visible(card.onBattlefield().build()),
+        visible(other.onBattlefield().build()),
+      ),
+      stack: [buildStackEntry({ id: SPELL, source_id: SPELL, controller: 1 })],
+    });
+    const post = stateWith(visible(card.params({ zone: to }).build()), visible(other.params({ zone: to }).build()));
+    return context(pre, post, 1, step);
+  }
+
+  it("V15-1: a blue spell returning several permanents to hand sends a wave from its controller's side; each leaves as it arrives", () => {
+    const step = [bounced(X), bounced(OTHER)];
+    expect(cardFlightSpecFor(step[1], sweepContext(["Blue"], step, "Hand"))).toMatchObject({
+      objectId: OTHER,
+      delayMs: 0,
+      sweep: { look: "tsunami", casterId: 1, memberIds: [X, OTHER] },
+    });
+    // A spell of another colour, or a lone bounce, sends no wave; the batch keeps its stagger.
+    expect(cardFlightSpecFor(step[1], sweepContext(["Red"], step, "Hand"))).toMatchObject({ delayMs: 90, sweep: null });
+    expect(cardFlightSpecFor(step[0], sweepContext(["Blue"], [step[0]], "Hand"))?.sweep).toBeNull();
+  });
+
+  it("V15-2: a spell destroying several permanents sweeps light when white and smoke when black; other colours break them at once", () => {
+    const step = [zoneChanged("Battlefield", "Graveyard"), destroyedEvent(X), destroyedEvent(OTHER)];
+    const lookFor = (color: ManaColor[], events = step) => {
+      const spec = cardVfxSpecFor(destroyedEvent(X), sweepContext(color, events, "Graveyard"));
+      return spec?.kind === "shatter" ? spec.sweep?.look ?? null : undefined;
+    };
+    expect(lookFor(["White"])).toBe("light");
+    expect(lookFor(["Black"])).toBe("smoke");
+    expect(lookFor(["White", "Black"])).toBe("smoke");
+    expect(lookFor(["Red"])).toBeNull();
+    expect(lookFor(["White"], [destroyedEvent(X)])).toBeNull();
+    expect(cardVfxSpecFor(destroyedEvent(X), sweepContext(["White"], step, "Graveyard"))).toMatchObject({
+      sweep: { casterId: 1, memberIds: [X, OTHER] },
+    });
   });
 });

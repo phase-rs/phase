@@ -35,6 +35,7 @@ const LANDS = [22, 23, 24];
 const OPPONENT_HAND = [30, 31, 32];
 const HILL_GIANT_IN_HAND = 31;
 const WRATH = 33;
+const DAMNATION = 34;
 const OPPONENT_LIBRARY = [40, 41, 42, 43, 44];
 const DURESS = 45;
 const HILL_GIANT = 50;
@@ -94,6 +95,7 @@ export function galleryBoard(): GameState {
       }),
     ),
     card({ id: WRATH, name: "Wrath of God", owner: OPPONENT, zone: "Hand", colors: ["White"], kind: "sorcery", visible: false }),
+    card({ id: DAMNATION, name: "Damnation", owner: OPPONENT, zone: "Hand", colors: ["Black"], kind: "sorcery", visible: false }),
     ...OPPONENT_LIBRARY.map((id) => card({ id, name: "Swamp", owner: OPPONENT, zone: "Library", visible: false })),
     card({ id: DURESS, name: "Duress", owner: OPPONENT, zone: "Graveyard", colors: ["Black"], kind: "sorcery" }),
     card({ id: HILL_GIANT, name: "Hill Giant", owner: OPPONENT, zone: "Battlefield", colors: ["Red"], creature: [3, 3] }),
@@ -173,12 +175,13 @@ function cast(id: ObjectId, controller: number): GalleryBatch {
   };
 }
 
-/** Each of `ids` moving from `from` to `to`, with `event` reported before each move. */
+/** Each of `ids` moving from `from` to `to`, with `event` reported after each
+ *  move, as the engine reports a destruction after the move it makes. */
 function moveAll(ids: ObjectId[], from: Zone, to: Zone, event?: (id: ObjectId) => GameEvent): GalleryBatch {
   return (state) =>
     ids.flatMap((id) => {
       move(state, id, to);
-      return event ? [event(id), zoneChanged(id, from, to)] : [zoneChanged(id, from, to)];
+      return event ? [zoneChanged(id, from, to), event(id)] : [zoneChanged(id, from, to)];
     });
 }
 
@@ -263,12 +266,23 @@ export const GALLERY_SCENARIOS: Record<string, GalleryScenario> = {
   },
   boardWipe: {
     title: "Board wipe (Wrath of God)",
-    description: "The opponent casts Wrath of God, and every creature is destroyed.",
+    description: "The opponent casts Wrath of God, and a wall of light breaks every creature it passes.",
     batches: [
       cast(WRATH, OPPONENT),
       (state) => [
         ...moveAll(CREATURES, "Battlefield", "Graveyard", destroyed)(state),
         ...moveAll([WRATH], "Stack", "Graveyard")(state),
+      ],
+    ],
+  },
+  blackWipe: {
+    title: "Board wipe (Damnation)",
+    description: "The opponent casts Damnation, and smoke rolls over every creature.",
+    batches: [
+      cast(DAMNATION, OPPONENT),
+      (state) => [
+        ...moveAll(CREATURES, "Battlefield", "Graveyard", destroyed)(state),
+        ...moveAll([DAMNATION], "Stack", "Graveyard")(state),
       ],
     ],
   },
@@ -284,7 +298,7 @@ export const GALLERY_SCENARIOS: Record<string, GalleryScenario> = {
   },
   massBounce: {
     title: "Mass bounce (Evacuation)",
-    description: "Evacuation returns every creature to its owner's hand.",
+    description: "Evacuation sends a wave over the board, washing every creature back to its owner's hand.",
     batches: [
       cast(EVACUATION, YOU),
       (state) => {

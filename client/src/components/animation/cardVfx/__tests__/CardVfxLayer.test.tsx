@@ -20,7 +20,7 @@ import {
   RESOLVE_FLIGHT_MS,
   SETTLE_MS,
 } from "../cardFlight.ts";
-import type { CardFlightRoute, CardFlightSpec } from "../cardFlightSpecs.ts";
+import type { CardFlightRoute, CardFlightSpec, SweepSpec } from "../cardFlightSpecs.ts";
 import {
   CARD_FLIGHT_FACE_READY_MAX_MS,
   CardVfxLayer,
@@ -169,6 +169,7 @@ function spec(
     snapshotSeq: queuedSeq(),
     delayMs: 0,
     wash: null,
+    sweep: null,
   };
 }
 
@@ -1163,6 +1164,7 @@ describe("CardVfxLayer shatter", () => {
     pace: 1,
     owningStepMs: 500,
     snapshotSeq: queuedSeq(),
+    sweep: null,
   });
   const shatterRenders = () => calls("render").filter((call) => hasVisible(call, "card-shatter"));
   const commit = () =>
@@ -1452,7 +1454,7 @@ describe("CardVfxLayer damage strike", () => {
     addFace(anchor({ "data-permanent-card": String(Y), "data-grouped-ids": `${Y} ${X}` }, 300, 100));
 
     expect(present(atPermanent())).toHaveBeenCalledTimes(1);
-    expect(present({ kind: "shatter", objectId: X, face: face(X), pace: 1, owningStepMs: 400, snapshotSeq: queuedSeq() })).toHaveBeenCalledTimes(1);
+    expect(present({ kind: "shatter", objectId: X, face: face(X), pace: 1, owningStepMs: 400, snapshotSeq: queuedSeq(), sweep: null })).toHaveBeenCalledTimes(1);
   });
 
   it("V10-15: unmounting before the impact lands the hit once and releases the veil it takes", async () => {
@@ -1562,7 +1564,7 @@ describe("CardVfxLayer damage strike", () => {
     await advance(DAMAGE_CAUSE_IMPACT_MS + 2 * FRAME_MS);
     expect(veiled(X)).toBe(true);
 
-    present({ kind: "shatter", objectId: X, face: face(X), pace: 1, owningStepMs: 400, snapshotSeq: queuedSeq() });
+    present({ kind: "shatter", objectId: X, face: face(X), pace: 1, owningStepMs: 400, snapshotSeq: queuedSeq(), sweep: null });
     await loadFace();
     await frames(2);
     expect(hasVisible(last(calls("render")) as RendererCall, "damage-hit")).toBe(false);
@@ -1629,7 +1631,7 @@ describe("CardVfxLayer damage strike", () => {
     const onImpact = vi.fn();
     present(atPermanent(), vi.fn(), onImpact);
     await loadFace();
-    present({ kind: "shatter", objectId: X, face: face(X), pace: 1, owningStepMs: 400, snapshotSeq: queuedSeq() });
+    present({ kind: "shatter", objectId: X, face: face(X), pace: 1, owningStepMs: 400, snapshotSeq: queuedSeq(), sweep: null });
     await loadFace();
     expect(veiled(X)).toBe(true);
 
@@ -1694,5 +1696,98 @@ describe("CardVfxLayer counter ripple", () => {
     expect(flight()?.position).toEqual(resting);
     await advance(5 * FRAME_MS);
     expect(flight()?.position).not.toEqual(resting);
+  });
+});
+
+describe("CardVfxLayer board sweep", () => {
+  const sweep: SweepSpec = { look: "light", casterId: 1, memberIds: [X, Y] };
+  const swept = (objectId: number, cardName: string): CardShatterSpec => ({
+    kind: "shatter",
+    objectId,
+    face: face(objectId, cardName),
+    pace: 1,
+    owningStepMs: 400,
+    snapshotSeq: queuedSeq(),
+    sweep,
+  });
+  const lastRender = () => last(calls("render")) as RendererCall;
+  const fronts = () => (lastRender().children ?? []).filter((child) => child.name === "board-sweep" && child.visible);
+  /** How far the shatter of the permanent laid out at `top` has cracked. */
+  const cracked = (top: number) => {
+    const group = lastRender().children?.find(
+      (child) => child.name === "card-shatter" && child.position[1] === -(top + CARD_H / 2),
+    );
+    const shards = group?.object.getObjectByName("card-shatter-shards") as Mesh<never, ShaderMaterial> | undefined;
+    return shards?.material.uniforms.uProg.value as number | undefined;
+  };
+
+  async function loadFaces(...names: string[]) {
+    await act(async () => {
+      for (const name of names) {
+        const loader = faceLoader(name);
+        if (loader) fireEvent.load(loader);
+      }
+    });
+  }
+
+  it("V15-5: one front sets out from the caster's side and breaks each permanent as it reaches it", async () => {
+    const { present } = await readyLayer();
+    anchor({ "data-player-hud": "1" }, 400, 20);
+    addFace(anchor({ "data-permanent-card": String(X) }, 300, 450));
+    addFace(anchor({ "data-permanent-card": String(Y) }, 300, 150));
+    present(swept(X, "Llanowar Elves"));
+    present(swept(Y, "Hill Giant"));
+    await loadFaces("Llanowar Elves", "Hill Giant");
+    await frames(2);
+    expect(fronts()).toHaveLength(1);
+    // Both lie whole, veiled, until the front comes down from the HUD above.
+    expect(veiled(X) && veiled(Y)).toBe(true);
+    expect(cracked(150)).toBe(0);
+    expect(cracked(450)).toBe(0);
+    // The nearer card breaks first; the farther one still lies whole.
+    await advance(300);
+    expect(cracked(150)).toBeGreaterThan(0);
+    expect(cracked(450)).toBe(0);
+    await advance(400);
+    expect(cracked(450)).toBeGreaterThan(0);
+  });
+
+  it("V15-5: a wave sends each card home as it reaches it", async () => {
+    const { present } = await readyLayer();
+    const TO_HAND: CardFlightRoute = { from: "Battlefield", to: "Hand", ownerId: 0 };
+    anchor({ "data-player-hud": "0" }, 400, 700);
+    addFace(anchor({ "data-permanent-card": String(X) }, 300, 450));
+    addFace(anchor({ "data-permanent-card": String(Y) }, 300, 150));
+    const wave: SweepSpec = { look: "tsunami", casterId: 0, memberIds: [X, Y] };
+    for (const [objectId, cardName] of [[X, "Llanowar Elves"], [Y, "Hill Giant"]] as const) {
+      const faces = { startFace: face(objectId, cardName), endFace: face(objectId, cardName) };
+      present({ ...spec(objectId, TO_HAND, faces), sweep: wave });
+    }
+    await loadFaces("Llanowar Elves", "Hill Giant");
+    await frames(2);
+    expect(fronts()).toHaveLength(1);
+    const cards = () =>
+      (lastRender().children ?? [])
+        .filter((child) => child.name === "card-flight")
+        .map((child) => child.position.slice(0, 2));
+    const resting = cards();
+    // From the HUD below, the wave reaches the lower card first.
+    await advance(300);
+    const [lower, upper] = cards();
+    expect(lower).not.toEqual(resting[0]);
+    expect(upper).toEqual(resting[1]);
+  });
+
+  it("V15-5: with fewer than two members on the board there is no front, and the one there breaks at once", async () => {
+    const { present } = await readyLayer();
+    anchor({ "data-player-hud": "1" }, 400, 20);
+    addFace(anchor({ "data-permanent-card": String(X) }, 300, 450));
+    present(swept(X, "Llanowar Elves"));
+    expect(present(swept(Y, "Hill Giant"))).toHaveBeenCalledTimes(1);
+    await loadFaces("Llanowar Elves");
+    await frames(2);
+    await advance(100);
+    expect(fronts()).toHaveLength(0);
+    expect(cracked(450)).toBeGreaterThan(0);
   });
 });

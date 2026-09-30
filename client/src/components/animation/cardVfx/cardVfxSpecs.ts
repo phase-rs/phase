@@ -1,4 +1,4 @@
-import type { GameState, ObjectId, PlayerId, TargetRef } from "../../../adapter/types.ts";
+import type { GameState, ManaColor, ObjectId, PlayerId, TargetRef } from "../../../adapter/types.ts";
 import {
   type DamageCause,
   damageCauseOf,
@@ -16,6 +16,9 @@ import {
   flightPresents,
   type RippleLook,
   rippleLookFor,
+  type SweepLook,
+  type SweepSpec,
+  sweepOf,
 } from "./cardFlightSpecs.ts";
 import type { CounterChange } from "./tallyEffects.ts";
 
@@ -29,6 +32,8 @@ export interface CardShatterSpec {
   owningStepMs: number;
   /** As `CardFlightSpec.snapshotSeq`. */
   snapshotSeq: number;
+  /** The front that breaks it when it reaches it; `null` breaks it at once. */
+  sweep: SweepSpec | null;
 }
 
 /** A permanent exiled from the battlefield, dissolving where it lies. */
@@ -145,18 +150,34 @@ function coveredSpecFor(event: AnimationEvent, { post, pace }: CardFlightSpecCon
   return presented ? { kind: "covered", objectId } : null;
 }
 
+// A black spell's destruction rolls over the board as smoke, and a white
+// one's as light; a spell of both colours is smoke.
+function destructionLook(colors: readonly ManaColor[]): SweepLook | null {
+  if (colors.includes("Black")) return "smoke";
+  return colors.includes("White") ? "light" : null;
+}
+
 // CR 701.8a: a destroyed permanent moves from the battlefield to its owner's
-// graveyard; the shatter shows it breaking where it lay.
+// graveyard; the shatter shows it breaking where it lay. A spell destroying
+// several at once sweeps a front over them that breaks each in turn.
 function cardShatterSpecFor(
   event: AnimationEvent,
-  { pre, pace, owningStepMs, snapshotSeq }: CardFlightSpecContext,
+  { pre, pace, owningStepMs, snapshotSeq, stepEvents }: CardFlightSpecContext,
 ): CardShatterSpec | null {
   if (pace <= 0 || event.type !== "CreatureDestroyed") return null;
   const objectId = event.data.object_id;
   const object = pre?.objects[objectId];
-  return object
-    ? { kind: "shatter", objectId, face: visibleAnimationImageSnapshot(object), pace, owningStepMs, snapshotSeq }
-    : null;
+  if (!object) return null;
+  const destroyed = stepEvents.flatMap((other) => (other.type === "CreatureDestroyed" ? [other.data.object_id] : []));
+  return {
+    kind: "shatter",
+    objectId,
+    face: visibleAnimationImageSnapshot(object),
+    pace,
+    owningStepMs,
+    snapshotSeq,
+    sweep: sweepOf(destroyed, destructionLook, pre),
+  };
 }
 
 // CR 701.13a: an exiled object moves to the exile zone; the dissolve shows a

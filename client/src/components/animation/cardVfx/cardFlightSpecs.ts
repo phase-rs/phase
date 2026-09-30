@@ -1,4 +1,5 @@
 import type { GameState, ManaColor, ObjectId, PlayerId, Zone } from "../../../adapter/types.ts";
+import { resolvingEntry } from "../../../animation/damageCause.ts";
 import type { AnimationEvent } from "../../../animation/types.ts";
 import {
   type AnimationImageSnapshot,
@@ -66,6 +67,50 @@ export interface WashSpec {
   look: RippleLook;
 }
 
+/** How a front sweeping the board looks: a wave for a blue spell returning
+ *  permanents to hand, light or smoke for a white or black one destroying them. */
+export type SweepLook = "tsunami" | "light" | "smoke";
+
+/** A front the resolving spell sends across the board, reaching each of the
+ *  permanents it moves or destroys together in turn. */
+export interface SweepSpec {
+  look: SweepLook;
+  /** The spell's controller, from whose side the front comes. */
+  casterId: PlayerId;
+  /** Every permanent the front reaches, this one among them. */
+  memberIds: readonly ObjectId[];
+}
+
+/** CR 608.1 + CR 608.2c: the spell on top of the stack resolves, and its
+ *  controller follows its instructions; a front sweeps the permanents one of
+ *  them moves or destroys together, when there are several and the spell's
+ *  colours give it a look. */
+export function sweepOf(
+  memberIds: readonly ObjectId[],
+  lookFor: (colors: readonly ManaColor[]) => SweepLook | null,
+  pre: GameState | null,
+): SweepSpec | null {
+  if (memberIds.length < 2 || !pre) return null;
+  const entry = resolvingEntry(pre);
+  const source = entry && pre.objects[entry.source_id];
+  const look = source ? lookFor(source.color) : null;
+  return entry && look ? { look, casterId: entry.controller, memberIds } : null;
+}
+
+const tsunamiLook = (colors: readonly ManaColor[]): SweepLook | null => (colors.includes("Blue") ? "tsunami" : null);
+
+/** A blue spell returning several permanents to their owners' hands at once
+ *  sends a wave over them. */
+function tsunamiOf(route: CardFlightRoute, { pre, stepEvents }: CardFlightSpecContext): SweepSpec | null {
+  if (route.from !== "Battlefield" || route.to !== "Hand") return null;
+  const members = stepEvents.flatMap((event) =>
+    event.type === "ZoneChanged" && event.data.from === "Battlefield" && event.data.to === "Hand"
+      ? [event.data.object_id]
+      : [],
+  );
+  return sweepOf(members, tsunamiLook, pre);
+}
+
 /** The most flights one batch sends (a mass mill or graveyard exile); the
  *  rest present Classic. */
 export const FLIGHT_BATCH_MAX = 12;
@@ -96,6 +141,9 @@ export interface CardFlightSpec {
   delayMs: number;
   /** A countered spell's wash before it leaves; `null` for any other flight. */
   wash: WashSpec | null;
+  /** The front that sets the card off when it reaches it, after `delayMs`;
+   *  `null` when none does. */
+  sweep: SweepSpec | null;
 }
 
 export interface CardFlightSpecContext {
@@ -250,6 +298,7 @@ export function cardFlightSpecFor(event: AnimationEvent, context: CardFlightSpec
   const endFace = visibleAnimationImageSnapshot(endObject);
   // A token has no face before it exists; it comes out of its source already showing it.
   const startFace = routed.sourceId === objectId ? visibleAnimationImageSnapshot(pre?.objects[objectId]) : endFace;
+  const sweep = tsunamiOf(routed.route, context);
   return {
     kind: "flight",
     ...routed,
@@ -259,6 +308,11 @@ export function cardFlightSpecFor(event: AnimationEvent, context: CardFlightSpec
     pace,
     owningStepMs,
     snapshotSeq,
-    ...(counteredLeave(objectId, routed.route, context) ?? { delayMs: delayFor(batch, pace, owningStepMs), wash: null }),
+    // A swept card leaves when the front reaches it, not in its batch's turn.
+    ...(counteredLeave(objectId, routed.route, context) ?? {
+      delayMs: sweep ? 0 : delayFor(batch, pace, owningStepMs),
+      wash: null,
+    }),
+    sweep,
   };
 }

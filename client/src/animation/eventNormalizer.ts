@@ -1,5 +1,5 @@
 import type { GameEvent, GameState } from "../adapter/types";
-import type { AnimationStep, PacingCategory, StepEffect } from "./types";
+import type { AnimationEvent, AnimationStep, PacingCategory, StepEffect } from "./types";
 import {
   DEFAULT_DURATION,
   EVENT_DURATIONS,
@@ -84,9 +84,19 @@ interface NormalizeEventsOptions {
 
 type AnnouncementState = Pick<GameState, "stack" | "has_pending_cast">;
 
-/** Group consecutive events of the same type (e.g. multiple creatures dying). */
+/** A permanent's move off the battlefield. */
+function leavesBattlefield(event: AnimationEvent): boolean {
+  return event.type === "ZoneChanged" && event.data.from === "Battlefield";
+}
+
+/** Group a run of events of one type (e.g. multiple creatures dying) with the
+ *  moves off the battlefield reported among them: CR 701.8a / CR 701.21a, the
+ *  engine reports each destroyed or sacrificed permanent's move to its owner's
+ *  graveyard just before the destruction or sacrifice itself. */
 function sameTypeGrouping(effect: StepEffect, lastStep: AnimationStep): boolean {
-  return lastStep.effects[lastStep.effects.length - 1]?.event.type === effect.event.type;
+  return lastStep.effects.every(
+    ({ event }) => event.type === effect.event.type || leavesBattlefield(event),
+  );
 }
 
 /**

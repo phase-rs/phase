@@ -502,6 +502,9 @@ export interface CardShatterParams {
   tier: CardVfxTier;
   pace: number;
   pixelRatio: number;
+  /** When the break starts, on the frame clock (`performance.now()`); until
+   *  then the card lies whole. `null` starts it on its first frame. */
+  startMs: number | null;
   /** Runs once the last shard has faded. */
   onDone(): void;
 }
@@ -574,14 +577,15 @@ export const cardShatterKind: SceneEffectKind = {
 
 class CardShatter implements SceneEffect {
   private readonly group = new Group();
+  private startMs: number | null;
   private readonly shards: Mesh<BufferGeometry, ShaderMaterial>;
   private readonly extras: (Mesh<BufferGeometry, ShaderMaterial> | Points<BufferGeometry, ShaderMaterial>)[] = [];
-  private startMs: number | null = null;
 
   constructor(
     private readonly host: EffectHost,
     private readonly params: CardShatterParams,
   ) {
+    this.startMs = params.startMs;
     const { pose, surface, radius, impact, tier, pixelRatio } = params;
     const { w, h } = pose;
     const ix = impact.u * w;
@@ -620,7 +624,7 @@ class CardShatter implements SceneEffect {
 
   update(nowMs: number): boolean {
     this.startMs ??= nowMs;
-    const t = (nowMs - this.startMs) / 1000 / this.params.pace;
+    const t = Math.max(0, (nowMs - this.startMs) / 1000 / this.params.pace);
     const spreadS = SHATTER_CRACK_S * CRACK_SPREAD_FRACTION;
     // The cracks spread on a near-frozen clock; the break then runs in real time.
     const sim =

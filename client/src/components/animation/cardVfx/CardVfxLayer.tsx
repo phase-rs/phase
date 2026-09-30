@@ -38,7 +38,7 @@ import {
   zoneSurface,
 } from "./cardAnchors.ts";
 import type { CardVfxTier, FlightFlip } from "./cardFlight.ts";
-import type { CardFlightRoute, CardFlightSpec } from "./cardFlightSpecs.ts";
+import type { CardFlightRoute, CardFlightSpec, SweepSpec } from "./cardFlightSpecs.ts";
 import type { CardVfxScene, CardVfxSceneCallbacks } from "./cardVfxScene.ts";
 import type * as CardVfxSceneModule from "./cardVfxScene.ts";
 import type {
@@ -53,6 +53,7 @@ import type {
 } from "./cardVfxSpecs.ts";
 import type { LinkAim } from "./exileDissolve.ts";
 import { drawSurface, measureSurfaceLayout } from "./surfaceTexture.ts";
+import { sweepPath } from "./sweepPath.ts";
 
 /** An effect whose face has not loaded by this deadline presents Classic. */
 export const CARD_FLIGHT_FACE_READY_MAX_MS = 150;
@@ -176,6 +177,9 @@ class CardVfxController {
   private readonly boardEffects = new Map<ObjectId, number>();
   /** Holds released only once their snapshot commits, by holder. */
   private readonly commitWaits = new Map<number, () => void>();
+  /** When each running sweep reaches its permanents, on the frame clock, by
+   *  the snapshot it animates and its look. */
+  private readonly sweeps = new Map<string, ReadonlyMap<ObjectId, number>>();
 
   constructor(
     private readonly publishRequests: (requests: FaceRequest[]) => void,
@@ -273,7 +277,7 @@ class CardVfxController {
             return;
           case "shatter":
           case "dissolve":
-            this.presentBoardEffect(spec, classic);
+            this.presentBoardEffect(this.scene, spec, classic);
             return;
           case "covered":
             this.presentCovered(spec.objectId, classic);
@@ -379,6 +383,8 @@ class CardVfxController {
       return;
     }
     const presentedMs = performance.now();
+    const sweptAtMs = this.sweepArrivalMs(scene, spec);
+    if (sweptAtMs !== null) spec = { ...spec, delayMs: spec.delayMs + Math.max(0, sweptAtMs - presentedMs) };
     const face = spec.endFace ?? spec.startFace;
     if ((flipFor(spec) !== "none" || !face) && !scene.hasBack()) {
       classic();
@@ -440,13 +446,14 @@ class CardVfxController {
     );
   }
 
-  private presentBoardEffect(spec: BoardEffectSpec, classic: () => void) {
+  private presentBoardEffect(scene: CardVfxScene, spec: BoardEffectSpec, classic: () => void) {
     const { objectId } = spec;
     const el = ownPermanentSurface(objectId);
     if (!el) {
       classic();
       return;
     }
+    const sweptAtMs = spec.kind === "shatter" ? this.sweepArrivalMs(scene, spec) : null;
     // Covered events wait on this effect while its face loads.
     const covered: (() => void)[] = [];
     this.pendingBoard.set(objectId, covered);
@@ -464,7 +471,7 @@ class CardVfxController {
         const release = () => this.releaseAfterCommit(objectId, "board", holder, spec.snapshotSeq);
         switch (spec.kind) {
           case "shatter":
-            scene.startShatter({ ...board, impact: shatterImpact(), onDone: release });
+            scene.startShatter({ ...board, impact: shatterImpact(), startMs: sweptAtMs, onDone: release });
             break;
           case "dissolve":
             scene.startDissolve({ ...board, link: this.linkAimFor(spec), onArrive: release });
@@ -612,6 +619,43 @@ class CardVfxController {
       return;
     }
     pending.spec = merged;
+  }
+
+  /** When the front of `spec`'s sweep reaches its permanent, on the frame
+   *  clock; `null` when it has no sweep. The step's first swept permanent to
+   *  present measures every member where it lies now and sets the front out;
+   *  the rest take their times from it. Fewer than two members still on the
+   *  board make no front, and each then breaks or leaves at once. */
+  private sweepArrivalMs(
+    scene: CardVfxScene,
+    { objectId, sweep, snapshotSeq, pace }: { objectId: ObjectId; sweep: SweepSpec | null; snapshotSeq: number; pace: number },
+  ): number | null {
+    if (!sweep || !this.canvas) return null;
+    const key = `${snapshotSeq}:${sweep.look}`;
+    let arrivals = this.sweeps.get(key);
+    if (!arrivals) {
+      const origin = this.canvas.getBoundingClientRect();
+      const members = new Map(
+        sweep.memberIds.flatMap((id) => {
+          const el = ownPermanentSurface(id);
+          return el ? [[id, measureCardPose(el, origin)] as const] : [];
+        }),
+      );
+      arrivals = new Map();
+      if (members.size >= 2) {
+        const hud = playerHudSurface(sweep.casterId);
+        const path = sweepPath(hud && measureCardPose(hud, origin), members);
+        const startMs = performance.now();
+        scene.startBoardSweep({ path, look: sweep.look, tier: this.tier, pace, startMs });
+        arrivals = new Map(path.hits.map((hit) => [hit.objectId, startMs + hit.atS * 1000 * pace]));
+      }
+      // Only the step being animated can still present a member.
+      for (const other of this.sweeps.keys()) {
+        if (!other.startsWith(`${snapshotSeq}:`)) this.sweeps.delete(other);
+      }
+      this.sweeps.set(key, arrivals);
+    }
+    return arrivals.get(objectId) ?? null;
   }
 
   /** Where a held card's flakes go: its ghost under its holder, measured each frame. */

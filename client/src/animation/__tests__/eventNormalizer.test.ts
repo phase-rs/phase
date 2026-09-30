@@ -244,6 +244,32 @@ describe("normalizeEvents", () => {
     expect(steps[0].duration).toBe(400);
   });
 
+  it("V15-4: a board wipe in the engine's order, each move before its destruction, plays as one step", () => {
+    const events: GameEvent[] = [1, 2, 3].flatMap((object_id): GameEvent[] => [
+      { type: "ZoneChanged", data: { object_id, from: "Battlefield", to: "Graveyard" } },
+      { type: "CreatureDestroyed", data: { object_id } },
+    ]);
+
+    const steps = normalizeEvents(events);
+    expect(steps).toHaveLength(1);
+    expect(steps[0].effects).toHaveLength(6);
+    expect(steps[0].duration).toBe(400);
+  });
+
+  it("V15-4: a destruction does not join a step that holds anything but destructions and moves off the battlefield", () => {
+    const events: GameEvent[] = [
+      { type: "LifeChanged", data: { player_id: 0, amount: -2 } },
+      { type: "ZoneChanged", data: { object_id: 1, from: "Battlefield", to: "Graveyard" } },
+      { type: "CreatureDestroyed", data: { object_id: 1 } },
+    ];
+
+    const steps = normalizeEvents(events);
+    expect(steps.map((step) => step.effects.map((effect) => effect.event.type))).toEqual([
+      ["LifeChanged", "ZoneChanged"],
+      ["CreatureDestroyed"],
+    ]);
+  });
+
   it("ZoneChanged groups with preceding cause (SpellCast)", () => {
     const events: GameEvent[] = [
       { type: "SpellCast", data: { card_id: 1, controller: 0, object_id: 1 } },

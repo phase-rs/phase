@@ -30,6 +30,7 @@ function params(overrides: Partial<CardShatterParams> = {}): CardShatterParams {
     tier: "full",
     pace: 1,
     pixelRatio: 1,
+    startMs: null,
     onDone: vi.fn(),
     ...overrides,
   };

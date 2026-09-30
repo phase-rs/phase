@@ -28,6 +28,7 @@ import {
   createPlaceholderTexture,
   restingState,
 } from "./cardFlight.ts";
+import { type BoardSweepParams, boardSweepKind, createBoardSweep } from "./boardSweep.ts";
 import { type CardShatterParams, cardShatterKind, createCardShatter } from "./cardShatter.ts";
 import {
   createDamageBlow,
@@ -80,6 +81,7 @@ export const SCENE_EFFECT_KINDS: readonly SceneEffectKind[] = [
   exileDissolveKind,
   damageStrikeKind,
   counterRippleKind,
+  boardSweepKind,
 ];
 
 const CAMERA_FOV_DEG = 28;
@@ -142,6 +144,8 @@ export interface CardVfxScene {
   startDamageBlow(request: DamageBlowParams): void;
   /** A counter's ripple veils nothing: the countered spell's flight holds it. */
   startCounterRipple(request: CounterRippleParams): void;
+  /** A sweep veils nothing: the permanents it reaches hold their own. */
+  startBoardSweep(request: BoardSweepParams): void;
   /** Life and counter changes play over their surface and veil nothing. */
   startLifeChange(request: LifeChangeParams): void;
   startCounterChange(request: CounterChangeParams): void;
@@ -373,6 +377,10 @@ class CardVfxSceneRuntime implements CardVfxScene, EffectHost {
 
   startCounterRipple(request: CounterRippleParams) {
     this.add(createCounterRipple(this, request));
+  }
+
+  startBoardSweep(request: BoardSweepParams) {
+    this.add(createBoardSweep(this, request));
   }
 
   startLifeChange(request: LifeChangeParams) {

@@ -44,6 +44,7 @@ export const Discard: Story = { args: { scenario: "discard" } };
 export const Mill: Story = { args: { scenario: "mill" } };
 export const Destroy: Story = { args: { scenario: "destroy" } };
 export const BoardWipe: Story = { args: { scenario: "boardWipe" } };
+export const BlackWipe: Story = { args: { scenario: "blackWipe" } };
 export const Exile: Story = { args: { scenario: "exile" } };
 export const Bounce: Story = { args: { scenario: "bounce" } };
 export const MassBounce: Story = { args: { scenario: "massBounce" } };
