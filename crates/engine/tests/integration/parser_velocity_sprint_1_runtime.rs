@@ -5,12 +5,10 @@
 //! * `SourceAttackingAlone` vs an attached-subject gate (Gutter Shortcut, Dream Prowler)
 //! * a targeted `payer: Player` unless-payment repeated by "Repeat this process once"
 //!   (Remorseless Punishment)
-//! * announce-locked sentence-form X on an X-mana-cost ability (Voodoo Doll), failing closed
 //! * the revealed-or-controlled-as-cast gate (Draconic Roar)
 
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::Effect;
 use engine::types::actions::{GameAction, UnlessCostBranch};
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
@@ -182,41 +180,6 @@ fn remorseless_punishment_offers_the_targeted_opponent_the_choice_twice() {
         runner.state().waiting_for,
         WaitingFor::Priority { .. }
     ));
-}
-
-const VOODOO_DOLL: &str = "At the beginning of your upkeep, put a pin counter on this artifact.\nAt the beginning of your end step, if this artifact is untapped, destroy this artifact and it deals damage to you equal to the number of pin counters on it.\n{X}{X}, {T}: This artifact deals damage equal to the number of pin counters on it to any target. X is the number of pin counters on this artifact.";
-
-/// CR 601.2f + CR 602.2b: a sentence-defined X on an ability whose mana cost carries
-/// {X} (Voodoo Doll, Chromatic Armor, Elite Arcanist, Bargaining Table) cannot be
-/// activated: the announced value is published as `chosen_x`, which skips the
-/// `ChooseXValue` step that concretizes {X} and closes the X cost lock, so payment is
-/// refused ("an activation's cost must be locked before any of it is paid"). Until the
-/// engine settles a preset X, the sentence must surface as the named `where_x_binding`
-/// gap so the card does not count as supported while unusable.
-#[test]
-fn voodoo_doll_sentence_defined_cost_x_fails_closed() {
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    let doll = scenario
-        .add_artifact_from_oracle(P0, "Voodoo Doll", VOODOO_DOLL)
-        .id();
-    let runner = scenario.build();
-    let gaps: Vec<&str> = runner.state().objects[&doll]
-        .abilities
-        .iter()
-        .filter_map(|ability| match ability.effect.as_ref() {
-            Effect::Unimplemented { name, .. } => Some(name.as_str()),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(gaps, vec!["where_x_binding"]);
-    assert!(
-        runner.state().objects[&doll]
-            .abilities
-            .iter()
-            .all(|ability| ability.announced_x.is_none()),
-        "no announce-locked X may be published for an X-cost ability"
-    );
 }
 
 const DRACONIC_ROAR: &str = "As an additional cost to cast this spell, you may reveal a Dragon card from your hand.\nDraconic Roar deals 3 damage to target creature. If you revealed a Dragon card or controlled a Dragon as you cast this spell, Draconic Roar deals 3 damage to that creature's controller.";

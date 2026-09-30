@@ -38592,6 +38592,32 @@ fn attached_subject_cant_be_blocked_attacking_alone_gates_on_the_recipient() {
     assert_eq!(own.condition, Some(StaticCondition::SourceAttackingAlone));
 }
 
+/// CR 611.3a + CR 506.5: the recipient rebind is the attached-static authority
+/// (`rebind_source_object_quantities_to_recipient`), so it applies to every attached
+/// route and not just the evasion one: a continuous grant gated "as long as it's
+/// attacking alone", and its "unless" polarity wrapped in `Not`.
+#[test]
+fn attached_subject_attacking_alone_rebind_covers_grants_and_unless_gates() {
+    let recipient_gate = StaticCondition::RecipientMatchesFilter {
+        filter: TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::AttackingAlone]),
+        ),
+    };
+    let grant = parse_static_line("Enchanted creature gets +2/+0 as long as it's attacking alone.")
+        .expect("gated grant");
+    assert_eq!(grant.condition, Some(recipient_gate.clone()), "{grant:?}");
+    let unless =
+        parse_static_line("Enchanted creature can't be blocked unless it's attacking alone.")
+            .expect("unless form");
+    assert_eq!(
+        unless.condition,
+        Some(StaticCondition::Not {
+            condition: Box::new(recipient_gate)
+        }),
+        "{unless:?}"
+    );
+}
+
 /// CR 101.2 + CR 604.1: a leading "if <cond>," on "this spell can't be countered"
 /// attaches the typed condition instead of dropping it (Exquisite Firecraft class);
 /// a condition the static grammar cannot type, or an unmodeled tail after the
@@ -38611,7 +38637,6 @@ fn leading_if_gates_this_spell_cant_be_countered_or_fails_closed() {
     for text in [
         "If you revealed a Dragon card or controlled a Dragon as you cast this spell, this spell can't be countered.",
         "If X is 5 or more, this spell can't be countered and the damage can't be prevented.",
-        "Hellbent \u{2014} If you have no cards in hand, this spell can't be countered and the damage can't be prevented.",
     ] {
         let def = parse_static_line(text).unwrap_or_else(|| panic!("{text}: no static"));
         assert_eq!(def.mode, StaticMode::CantBeCountered, "{text}");

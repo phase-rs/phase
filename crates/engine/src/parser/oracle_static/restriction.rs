@@ -1,7 +1,7 @@
 // CR 601.3 — casting/activation restriction statics.
 
-use nom::combinator::{opt, verify};
-use nom::sequence::{pair, preceded, terminated};
+use nom::combinator::opt;
+use nom::sequence::{pair, preceded};
 
 #[allow(unused_imports)]
 use super::prelude::*;
@@ -207,20 +207,13 @@ fn legend_rule_permanent_type(word: &str) -> Option<crate::types::ability::TypeF
 }
 
 /// CR 604.1 + CR 207.2c: split a leading "if <condition>, " gate off a static line,
-/// returning the condition text (original case) and the remaining clause. An
-/// ability-word label ("Hellbent — If you have no cards in hand, …") is skipped
-/// first: it has no rules meaning, so the gate is the text after the dash. A line
+/// returning the condition text (original case) and the remaining clause. A line
 /// with no leading "if" yields `(None, tp)` unchanged. The condition ends at the
 /// first ", " — the same clause boundary the leading-conditional grammar uses.
 pub(crate) fn split_leading_if_gate<'a>(tp: &TextPair<'a>) -> (Option<&'a str>, TextPair<'a>) {
     let split = preceded(
-        opt(terminated(
-            verify(take_until(" \u{2014} "), |label: &str| {
-                label.split_whitespace().count() <= 4
-            }),
-            tag::<_, _, OracleError<'_>>(" \u{2014} "),
-        )),
-        preceded(tag("if "), pair(take_until(", "), tag(", "))),
+        tag::<_, _, OracleError<'_>>("if "),
+        pair(take_until(", "), tag(", ")),
     )
     .parse(tp.lower);
     let Ok((body_lower, (condition_lower, _))) = split else {

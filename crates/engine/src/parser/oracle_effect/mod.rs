@@ -36735,21 +36735,6 @@ fn apply_ability_shell_envelope(def: &mut AbilityDefinition, shell: &AbilityShel
     // CR 602.1a: the activation cost (everything before the colon).
     if let Some(cost) = &shell.cost {
         def.cost = Some(cost.clone());
-        // CR 601.2f + CR 602.2b: an announce-locked X on an ability whose MANA cost
-        // carries {X} cannot run. The activation pipeline publishes the announced
-        // value as `chosen_x`, which skips the `ChooseXValue` step that concretizes
-        // {X} in the cost and closes the X cost lock (`lock_activation_cost_at_x`),
-        // so payment is refused and the ability can never be activated (Voodoo Doll,
-        // Chromatic Armor, Elite Arcanist, Bargaining Table). Report the gap until the
-        // engine settles a preset X, rather than publish an ability that reads as
-        // supported and never works.
-        if def.announced_x.is_some() && crate::game::casting_costs::ability_cost_has_x(cost) {
-            def.announced_x = None;
-            *def.effect = Effect::unimplemented(
-                "where_x_binding",
-                shell.description.clone().unwrap_or_default(),
-            );
-        }
     }
     // CR 601.2f: an explicitly stamped reduction. A site that sets this must not
     // also list `ShellStage::ExtractCostReduction`, which derives the same field.
@@ -39098,24 +39083,6 @@ pub(crate) fn parse_effect_chain_ir(
             pending_repeat_until = Some(continuation);
             builder.note_repeated_process_boundary();
             continue;
-        }
-
-        // CR 107.3c + CR 602.2b: "X is <count>." as its own sentence defines the X
-        // of the ability's cost. It binds to the whole ability, so it patches the
-        // root clause instead of producing an effect. Skipped when an earlier
-        // effect reads X (a live value the announce lock would freeze).
-        if let Some(where_x) =
-            lower::parse_standalone_x_definition(normalized_text, kind).filter(|_| {
-                builder
-                    .clauses()
-                    .iter()
-                    .all(|clause| !lower::effect_retains_unbound_x(&clause.parsed.effect))
-            })
-        {
-            if let Some(root) = builder.clauses_mut().first_mut() {
-                root.where_x_expression = Some(where_x);
-                continue;
-            }
         }
 
         // CR 608.2c: "Repeat this process" — a loop-continuation

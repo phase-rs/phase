@@ -11599,7 +11599,7 @@ fn where_x_binds_to_placeholder(expression: &str) -> bool {
 /// by construction, so no cross-enum name collision is reachable. `QuantityRef` must
 /// never be probed unanchored — ten of its variant names are shared with other
 /// internally-tagged enums (see `swallow_evidence`).
-pub(super) fn effect_retains_unbound_x(effect: &Effect) -> bool {
+fn effect_retains_unbound_x(effect: &Effect) -> bool {
     crate::parser::swallow_evidence::UnitEvidence::of_effect(effect).any_quantity_ref(
         |qty| matches!(qty, QuantityRef::Variable { name } if name.eq_ignore_ascii_case("X")),
     )
@@ -12268,73 +12268,6 @@ fn strip_announce_lock(expression: &str) -> Option<&str> {
     let lower = bare.to_ascii_lowercase();
     let (_, prefix) = announce_locked_count(lower.as_str()).ok()?;
     Some(bare[..prefix.len()].trim_end())
-}
-
-/// CR 601.2b + CR 602.2b: True when a lowercase count names ONE player chosen at
-/// announcement through a singular possessive ("an opponent's hand", "target
-/// player's graveyard"). The typed `ObjectCount { Owned: Opponent }` scope for
-/// such a phrase sums over EVERY opponent, so binding it would overcharge in a
-/// multiplayer game (Bargaining Table's ruling: the opponent is chosen on
-/// announcement, before X is determined). The standalone-X path declines it and
-/// the sentence stays an honest gap until a chosen-player count has a typed home.
-fn names_singular_chosen_player(count_lower: &str) -> bool {
-    nom_primitives::scan_preceded(count_lower, |i| {
-        terminated(
-            alt((
-                tag::<_, _, OracleError<'_>>("an opponent"),
-                tag("target opponent"),
-                tag("target player"),
-                tag("that player"),
-                tag("chosen player"),
-            )),
-            alt((tag("'s "), tag("\u{2019}s "))),
-        )
-        .parse(i)
-    })
-    .is_some()
-}
-
-/// CR 107.3c + CR 601.2b + CR 602.2b: Recognize a standalone "X is <count>." sentence
-/// that DEFINES the X of an ability's cost (Bargaining Table: "{X}, {T}: Draw a card.
-/// X is the number of cards in an opponent's hand.") and return the where-X expression
-/// with the announce-lock qualifier appended, ready for
-/// [`apply_where_x_ability_expression`].
-///
-/// An X in a cost must have a definite value when the cost is paid, so a text-defined
-/// cost X is measured at announcement — the same moment the printed "as you activate
-/// this ability" / "as you cast this spell" qualifier names (CR 602.2b makes the two
-/// identical). Routing the sentence through that qualifier's existing consumer,
-/// `AbilityDefinition::announced_x`, reuses its single binding authority rather than
-/// re-implementing the announce-time lock.
-///
-/// Returns `None` (the sentence stays an honest gap) unless the count has a typed
-/// home. The caller additionally gates on the effect NOT consuming X: an effect that
-/// reads X ("… deals X damage. X is …") is a live value under CR 107.3c, which the
-/// announce lock would wrongly freeze.
-pub(super) fn parse_standalone_x_definition(text: &str, kind: AbilityKind) -> Option<String> {
-    let announcement = match kind {
-        AbilityKind::Activated => "activate this ability",
-        AbilityKind::Spell => "cast this spell",
-        AbilityKind::Database | AbilityKind::BeginGame | AbilityKind::Mulligan => return None,
-    };
-    let lower = text.to_lowercase();
-    let ((), rest) = nom_on_lower(text, &lower, |i| {
-        value((), tag::<_, _, OracleError<'_>>("x is ")).parse(i)
-    })?;
-    let count = rest.trim().trim_end_matches('.').trim();
-    if names_singular_chosen_player(&count.to_lowercase()) {
-        return None;
-    }
-    let quantity = parse_where_x_quantity_expression(count)?;
-    // The count is measured at announcement, before any resolution-time referent
-    // exists: an anaphoric object ("that card", "that spell") or a prior effect's
-    // result has nothing to read yet and would silently measure 0.
-    if crate::game::quantity::quantity_expr_uses_resolution_only_object_scope(&quantity)
-        || super::quantity_reads_chain_local_result(&quantity)
-    {
-        return None;
-    }
-    Some(format!("{count} as you {announcement}"))
 }
 
 pub(super) fn apply_where_x_ability_expression(

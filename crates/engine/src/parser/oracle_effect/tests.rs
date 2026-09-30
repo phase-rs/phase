@@ -76516,82 +76516,6 @@ fn compound_subject_each_over_a_disjunction_fails_closed() {
     assert_eq!(chunks.len(), 2, "{chunks:?}");
 }
 
-/// CR 107.3c + CR 602.2b: a standalone "X is <count>." sentence defines the X of the
-/// ability's cost and is measured at announcement (`announced_x`), the same
-/// consumer the printed "as you activate this ability" qualifier uses.
-#[test]
-fn standalone_x_definition_locks_cost_x_at_announcement() {
-    for (text, expected_kind) in [
-        (
-            "Draw a card. X is the number of artifacts you control.",
-            AbilityKind::Activated,
-        ),
-        (
-            "Draw a card. X is the number of creatures you control.",
-            AbilityKind::Spell,
-        ),
-    ] {
-        let def = parse_effect_chain(text, expected_kind);
-        assert!(
-            matches!(*def.effect, Effect::Draw { .. }),
-            "{text}: {def:?}"
-        );
-        assert!(
-            def.sub_ability.is_none(),
-            "{text}: sentence must be consumed"
-        );
-        assert!(
-            matches!(
-                &def.announced_x,
-                Some(QuantityExpr::Ref {
-                    qty: QuantityRef::ObjectCount { .. }
-                })
-            ),
-            "{text}: {:?}",
-            def.announced_x
-        );
-    }
-}
-
-/// Paired negative reach guard: the announce lock is not applied when the effect
-/// itself reads X (a live value under CR 107.3c), or when the count names a
-/// resolution-time referent that does not exist at announcement ("that card").
-#[test]
-fn standalone_x_definition_declines_live_or_anaphoric_counts() {
-    for text in [
-        "~ deals X damage to target creature. X is the number of creatures you control.",
-        "Create a token that's a copy of the exiled card. X is the mana value of that card.",
-    ] {
-        let def = parse_effect_chain(text, AbilityKind::Activated);
-        assert!(def.announced_x.is_none(), "{text}: {def:?}");
-    }
-}
-
-/// CR 601.2b + CR 602.2b: a count naming ONE player chosen at announcement through a
-/// singular possessive ("an opponent's hand", "target player's graveyard") is not
-/// bound. The typed opponent-scoped `ObjectCount` sums every opponent, so binding it
-/// would overcharge in multiplayer (Bargaining Table). Counts with no chosen-player
-/// referent (a plural "your opponents'", the source's own counters, the exiled card)
-/// still bind.
-#[test]
-fn standalone_x_definition_declines_singular_chosen_player_counts() {
-    for text in [
-        "Draw a card. X is the number of cards in an opponent's hand.",
-        "Draw a card. X is the number of cards in target player's hand.",
-        "Draw a card. X is the number of cards in target opponent\u{2019}s graveyard.",
-    ] {
-        let def = parse_effect_chain(text, AbilityKind::Activated);
-        assert!(def.announced_x.is_none(), "{text}: {def:?}");
-    }
-    for text in [
-        "Draw a card. X is the number of pin counters on this artifact.",
-        "Draw a card. X is the number of cards in your opponents' hands.",
-    ] {
-        let def = parse_effect_chain(text, AbilityKind::Activated);
-        assert!(def.announced_x.is_some(), "{text}: {def:?}");
-    }
-}
-
 /// CR 601.2b + CR 601.2h + CR 608.2c: "if you revealed a <type> card or controlled a
 /// <type> as you cast this spell" gates the following instruction on the optional
 /// reveal additional cost OR the cast-time battlefield snapshot. Two subtypes and two
@@ -76656,7 +76580,7 @@ fn revealed_or_controlled_without_the_cast_time_qualifier_builds_no_or_gate() {
     }
 }
 
-/// CR 601.2h + CR 608.2c: the cast-time battlefield snapshot is stamped only on the
+/// CR 601.2 + CR 608.2c: the cast-time battlefield snapshot is stamped only on the
 /// cast spell's own ability chain, never on a triggered ability. The same condition
 /// text is therefore accepted on a spell (both the plain and the disjunctive form)
 /// and declined inside a trigger, where it could never read true.
