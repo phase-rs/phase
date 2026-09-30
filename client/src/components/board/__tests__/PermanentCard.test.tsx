@@ -1794,6 +1794,16 @@ describe("PermanentCard", () => {
     expect(container.querySelector('[data-summoning-sickness-underwater="true"]')).toBeTruthy();
   });
 
+  it("marks an attacker with an arrow pointing at the defending side, and nothing else", () => {
+    const { container, unmount } = renderPermanent();
+    expect(container.querySelector("[data-attack-arrow]")).toBeNull();
+    unmount();
+
+    useUiStore.setState({ combatMode: "attackers", selectedAttackers: [1] });
+    const selected = renderPermanent();
+    expect(selected.container.querySelector("[data-attack-arrow]")?.getAttribute("data-attack-arrow")).toBe("up");
+  });
+
   it("does not render a selected attacker as tapped until the engine marks it tapped", () => {
     useUiStore.setState({
       combatMode: "attackers",

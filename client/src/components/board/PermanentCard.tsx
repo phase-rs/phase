@@ -625,7 +625,8 @@ export const PermanentCard = memo(function PermanentCard({
   // Attacker slide-forward: player creatures slide up, opponent creatures slide down.
   // Reduced on compact-height where 30px would overflow the small creature row.
   const attackSlideMagnitude = isCompactHeight ? 12 : 30;
-  const attackSlide = isAttacking ? (obj.controller === playerId ? -attackSlideMagnitude : attackSlideMagnitude) : 0;
+  const attacksUpward = obj.controller === playerId;
+  const attackSlide = isAttacking ? (attacksUpward ? -attackSlideMagnitude : attackSlideMagnitude) : 0;
 
   const handleClick = (e: React.MouseEvent) => {
     if (longPressFired.current) { longPressFired.current = false; return; }
@@ -818,6 +819,7 @@ export const PermanentCard = memo(function PermanentCard({
       onPointerEnter={handlePointerEnter}
       onPointerLeave={handlePointerLeave}
     >
+      {isAttacking && <AttackArrow upward={attacksUpward} />}
       {isManaPaymentPreviewSource && (
         <div
           aria-hidden
@@ -1293,3 +1295,29 @@ const ExileGhostCard = memo(function ExileGhostCard({ objectId, offset }: ExileG
     </div>
   );
 });
+
+/** MTGA-style attack marker: a pulsing chevron on the card's leading edge,
+ *  pointing toward the defending side. It tilts with the card. */
+function AttackArrow({ upward }: { upward: boolean }) {
+  return (
+    <motion.div
+      aria-hidden
+      data-attack-arrow={upward ? "up" : "down"}
+      className={`pointer-events-none absolute left-1/2 z-[60] -translate-x-1/2 ${upward ? "-top-6" : "-bottom-6"}`}
+      style={{ width: "clamp(18px, calc(var(--card-w) * 0.34), 34px)" }}
+      initial={{ opacity: 0, y: upward ? 6 : -6 }}
+      animate={{ opacity: 1, y: upward ? [0, -3, 0] : [0, 3, 0] }}
+      transition={{ opacity: { duration: 0.15 }, y: { duration: 1, repeat: Infinity, ease: "easeInOut" } }}
+    >
+      <svg viewBox="0 0 32 24" className={`block w-full drop-shadow-[0_0_6px_rgba(249,115,22,0.8)] ${upward ? "" : "rotate-180"}`}>
+        <path
+          d="M16 2 L30 14 L24 14 L16 7 L8 14 L2 14 Z M16 11 L30 22 L24 22 L16 16 L8 22 L2 22 Z"
+          fill="#f97316"
+          stroke="#431407"
+          strokeWidth="1.5"
+          strokeLinejoin="round"
+        />
+      </svg>
+    </motion.div>
+  );
+}
