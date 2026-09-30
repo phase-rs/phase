@@ -60,6 +60,9 @@ fn all_defs(parsed: &ParsedAbilities) -> Vec<&AbilityDefinition> {
         if let Some(other) = def.else_ability.as_deref() {
             push(other, out);
         }
+        for mode in &def.mode_abilities {
+            push(mode, out);
+        }
     }
     let mut out = Vec::new();
     for def in &parsed.abilities {
@@ -1249,6 +1252,101 @@ fn independent_abilities_and_modes_reset() {
         "the second mode is not governed:\n{dbg}"
     );
     assert!(dbg.contains("GainLife"), "reach: the second mode parsed");
+    // Reach, mode 1: its own chain holds the supported shape — the choice
+    // followed by the set destroy, and no gap.
+    let modal_defs = all_defs(&modal);
+    let mode_one = modal_defs
+        .iter()
+        .find(|d| {
+            matches!(
+                &*d.effect,
+                Effect::ChooseFromZone {
+                    zone_owner: ZoneOwner::Each(PerPlayerScope::Opponents),
+                    ..
+                }
+            )
+        })
+        .unwrap_or_else(|| panic!("mode 1's choice is reachable:\n{dbg}"));
+    let destroy = mode_one
+        .sub_ability
+        .as_deref()
+        .unwrap_or_else(|| panic!("mode 1 continues:\n{dbg}"));
+    assert!(
+        matches!(
+            &*destroy.effect,
+            Effect::DestroyAll {
+                target: TargetFilter::TrackedSet { .. },
+                ..
+            }
+        ),
+        "mode 1 binds its set destroy:\n{dbg}"
+    );
+    let mut node = Some(*mode_one);
+    while let Some(def) = node {
+        assert!(
+            !matches!(&*def.effect, Effect::Unimplemented { .. }),
+            "mode 1 has no gap:\n{dbg}"
+        );
+        node = def.sub_ability.as_deref();
+    }
+}
+
+/// A rejected trailing clause keeps no executable metadata: an optional "you
+/// may" or an unless-payment on it would otherwise still prompt at runtime.
+#[test]
+fn rejected_trailing_clause_prompts_no_one() {
+    for (text, seed) in [
+        (
+            "For each opponent, choose an artifact that player controls. You may draw a card.",
+            306,
+        ),
+        (
+            "For each opponent, choose an artifact that player controls. You gain 1 life unless you pay {2}.",
+            307,
+        ),
+    ] {
+        assert_strict(text);
+        let mut scenario = GameScenario::new_n_player(3, seed);
+        scenario.at_phase(Phase::PreCombatMain);
+        add_artifact(&mut scenario, P1, "P1 Relic");
+        add_artifact(&mut scenario, P2, "P2 Relic");
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Probe", false, text)
+            .id();
+        let mut runner = scenario.build();
+        let hand_before = runner
+            .state()
+            .players
+            .iter()
+            .find(|p| p.id == P0)
+            .unwrap()
+            .hand
+            .len();
+        let life_before = runner.state().players.iter().find(|p| p.id == P0).unwrap().life;
+        let card_id = runner.state().objects[&spell].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell,
+                card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("cast");
+        let prompts = resolve_with(&mut runner, |_, cards| vec![cards[0]], |_, _| {});
+        assert_eq!(prompts.len(), 2, "reach: the choice ran: {text}");
+        assert!(
+            !matches!(
+                runner.state().waiting_for,
+                WaitingFor::OptionalEffectChoice { .. } | WaitingFor::UnlessPayment { .. }
+            ),
+            "no prompt for the rejected clause: {text}: {:?}",
+            runner.state().waiting_for
+        );
+        assert!(runner.state().stack.is_empty(), "resolved: {text}");
+        let p0 = runner.state().players.iter().find(|p| p.id == P0).unwrap();
+        assert_eq!(p0.hand.len(), hand_before - 1, "no draw: {text}");
+        assert_eq!(p0.life, life_before, "no life change: {text}");
+    }
 }
 
 /// Merge-base parity: other per-player populations and zones are untouched.

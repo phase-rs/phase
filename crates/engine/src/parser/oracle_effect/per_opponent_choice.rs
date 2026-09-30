@@ -195,9 +195,14 @@ fn per_opponent_battlefield_choice_filter(effect: &Effect) -> Option<Option<&Tar
 /// Runs on every `EffectChainIr` `parse_effect_chain_ir` returns. A conditional
 /// body is parsed as its own chain and then absorbed flat into the enclosing
 /// chain, so the enclosing pass sees the choice together with every later
-/// clause; the rewrite is idempotent, so a body that already ran the pass is
-/// safe to re-check. Separate abilities, modes and trigger bodies are separate
-/// chains and never see another chain's choice.
+/// clause. Re-running the pass is safe: a clause it already rejected carries
+/// the gap and is never upgraded to supported, and a bound destroy is
+/// re-derived from its printed text. Separate abilities, modes and trigger
+/// bodies are separate chains and never see another chain's choice.
+///
+/// A rejected clause is reset through `ClauseIr::replace_with_gap`, so it
+/// keeps no optional gate, unless-payment, repeat count or other executable
+/// metadata: it prompts no one and does nothing.
 pub(super) fn enforce_per_opponent_choice_tail(ir: &mut EffectChainIr) {
     let Some(p) = ir
         .clauses
@@ -211,7 +216,16 @@ pub(super) fn enforce_per_opponent_choice_tail(ir: &mut EffectChainIr) {
         .cloned();
 
     let tail = &mut ir.clauses[p + 1..];
-    let supported_final_destroy = tail.len() == 1 && {
+    // A clause this pass already turned into a gap (a nested body's pass, whose
+    // clauses the enclosing chain then absorbs) never becomes supported again:
+    // the gap is irreversible on re-entry.
+    let already_rejected = tail.iter().any(|clause| {
+        matches!(
+            &clause.parsed.effect,
+            Effect::Unimplemented { name, .. } if name == TRAILING_CLAUSE_GAP
+        )
+    });
+    let supported_final_destroy = !already_rejected && tail.len() == 1 && {
         let clause = &tail[0];
         let lower = clause
             .source
@@ -219,7 +233,13 @@ pub(super) fn enforce_per_opponent_choice_tail(ir: &mut EffectChainIr) {
             .map(str::to_lowercase)
             .unwrap_or_default();
         clause.parsed.sub_ability.is_none()
-            && matches!(clause.disposition, ClauseDisposition::Emit { .. })
+            && matches!(
+                clause.disposition,
+                ClauseDisposition::Emit {
+                    followup: None,
+                    intrinsic: None
+                }
+            )
             && destroy_chosen_set(&lower).is_some_and(|(quantity, noun)| {
                 quantity == ChosenSetQuantity::Whole
                     && choice_filter
@@ -240,20 +260,12 @@ pub(super) fn enforce_per_opponent_choice_tail(ir: &mut EffectChainIr) {
     }
 
     for clause in tail.iter_mut() {
-        let fragment = clause
-            .source
-            .fragment()
-            .unwrap_or("clause after a per-opponent choice")
-            .to_string();
-        clause.parsed.effect =
-            Effect::unimplemented("per_opponent_choice_trailing_clause", fragment);
-        clause.parsed.sub_ability = None;
-        clause.disposition = ClauseDisposition::Emit {
-            followup: None,
-            intrinsic: None,
-        };
+        clause.replace_with_gap(TRAILING_CLAUSE_GAP);
     }
 }
+
+/// The gap name every clause this rule rejects carries.
+const TRAILING_CLAUSE_GAP: &str = "per_opponent_choice_trailing_clause";
 
 #[cfg(test)]
 mod tests {
@@ -313,6 +325,59 @@ mod tests {
             "destroy the chosen permanentsx.",
         ] {
             assert_eq!(destroy_chosen_set(text), None, "{text}");
+        }
+    }
+
+    /// Re-entry: a clause the pass rejected stays rejected when a later pass
+    /// sees it as the chain's only trailing clause (the shape an enclosing
+    /// chain's pass meets after absorbing a nested body whose own pass already
+    /// ran). Hand-built from a parsed chain: after the first pass rejects both
+    /// trailing clauses, drop the last one so the rejected "destroy the chosen
+    /// permanents" is now the only, final clause after the choice, and run the
+    /// pass again.
+    #[test]
+    fn a_rejected_clause_is_never_upgraded_on_re_entry() {
+        let mut ir = super::super::parse_effect_chain_ir(
+            "For each opponent, choose an artifact that player controls. Destroy the chosen permanents. You gain 1 life.",
+            crate::types::ability::AbilityKind::Spell,
+            &mut crate::parser::oracle_ir::context::ParseContext::default(),
+        );
+        let is_gap = |effect: &Effect| matches!(effect, Effect::Unimplemented { name, .. } if name == TRAILING_CLAUSE_GAP);
+        assert_eq!(ir.clauses.len(), 3, "reach: choice + two trailing clauses");
+        assert!(ir.clauses[1..].iter().all(|c| is_gap(&c.parsed.effect)));
+
+        ir.clauses.truncate(2);
+        enforce_per_opponent_choice_tail(&mut ir);
+        assert!(
+            is_gap(&ir.clauses[1].parsed.effect),
+            "the rejected destroy stays a gap: {:?}",
+            ir.clauses[1].parsed.effect
+        );
+    }
+
+    /// A rejected clause keeps no executable metadata: an optional "you may"
+    /// or an unless-payment would otherwise still prompt at runtime.
+    #[test]
+    fn a_rejected_clause_keeps_no_executable_metadata() {
+        for text in [
+            "For each opponent, choose an artifact that player controls. You may draw a card.",
+            "For each opponent, choose an artifact that player controls. You gain 1 life unless you pay {2}.",
+        ] {
+            let ir = super::super::parse_effect_chain_ir(
+                text,
+                crate::types::ability::AbilityKind::Spell,
+                &mut crate::parser::oracle_ir::context::ParseContext::default(),
+            );
+            let tail = ir.clauses.last().expect("trailing clause");
+            assert!(
+                matches!(&tail.parsed.effect, Effect::Unimplemented { name, .. } if name == TRAILING_CLAUSE_GAP),
+                "{text}: {:?}",
+                tail.parsed.effect
+            );
+            assert!(!tail.is_optional && !tail.parsed.optional, "{text}");
+            assert!(tail.unless_pay.is_none() && tail.parsed.unless_pay.is_none(), "{text}");
+            assert!(tail.repeat_for.is_none() && tail.player_scope.is_none(), "{text}");
+            assert!(tail.condition.is_none() && tail.parsed.sub_ability.is_none(), "{text}");
         }
     }
 

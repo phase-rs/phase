@@ -988,6 +988,78 @@ pub(crate) struct ClauseIr {
     _sealed: (),
 }
 
+impl ClauseIr {
+    /// CR 608.2c: turn this clause, in place, into an honest parser gap
+    /// (`Effect::unimplemented(name, <printed fragment>)`) that carries NO
+    /// executable metadata — exactly what [`ClauseIrBuilder::clause`] +
+    /// `Effect::unimplemented` would have minted for the same text. Identity,
+    /// printed source and boundary are kept; every field that assembly would
+    /// copy onto the lowered definition (optional gates, unless-payments,
+    /// repeat counts, player scopes, delayed markers, target metadata,
+    /// dispositions that patch other clauses, chosen-group links) is reset to
+    /// its draft default, so the gap resolves as nothing and prompts no one.
+    ///
+    /// Destructures every field without `..`, so a new `ClauseIr` field must be
+    /// classified here before this compiles.
+    pub(crate) fn replace_with_gap(&mut self, name: &str) {
+        let fragment = self.source.fragment().unwrap_or_default().to_string();
+        let ClauseIr {
+            id: _,
+            declares_chosen_clause,
+            reads_chosen_clause,
+            reads_return_result,
+            source: _,
+            disposition,
+            parsed,
+            boundary: _,
+            condition,
+            is_optional,
+            opponent_may_scope,
+            repeat_for,
+            player_scope,
+            starting_with,
+            delayed_condition,
+            prefix_delayed_condition,
+            multi_target,
+            where_x_expression,
+            unless_pay,
+            target_selection_mode,
+            target_chooser,
+            declared_target_choice_timing,
+            printed_color_choice,
+            chosen_color_grant,
+            placement,
+            _sealed: _,
+        } = self;
+        *declares_chosen_clause = None;
+        *reads_chosen_clause = None;
+        *reads_return_result = None;
+        *disposition = ClauseDisposition::Emit {
+            followup: None,
+            intrinsic: None,
+        };
+        *parsed =
+            crate::parser::oracle_ir::ast::parsed_clause(Effect::unimplemented(name, fragment));
+        *condition = None;
+        *is_optional = false;
+        *opponent_may_scope = None;
+        *repeat_for = None;
+        *player_scope = None;
+        *starting_with = None;
+        *delayed_condition = None;
+        *prefix_delayed_condition = None;
+        *multi_target = None;
+        *where_x_expression = None;
+        *unless_pay = None;
+        *target_selection_mode = TargetSelectionMode::Chosen;
+        *target_chooser = None;
+        *declared_target_choice_timing = None;
+        *printed_color_choice = None;
+        *chosen_color_grant = None;
+        *placement = ClausePlacement::Sibling;
+    }
+}
+
 impl ClauseDisposition {
     /// The self-patch continuation parsed from a clause's own text (formerly the
     /// `intrinsic_continuation` field): applied to this clause's own lowered def
