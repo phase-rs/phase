@@ -37,6 +37,12 @@ import {
   type DamageStrikeParams,
   damageStrikeKind,
 } from "./damageStrike.ts";
+import {
+  type CounterChangeParams,
+  createCounterChange,
+  createLifeChange,
+  type LifeChangeParams,
+} from "./tallyEffects.ts";
 import { createExileDissolve, type ExileDissolveParams, exileDissolveKind } from "./exileDissolve.ts";
 import { createLandingDust, landingDustKind } from "./landingDust.ts";
 
@@ -129,6 +135,9 @@ export interface CardVfxScene {
   startDamageStrike(request: DamageStrikeRequest): void;
   /** A blow happens to no one permanent: the DOM slam moves the struck card. */
   startDamageBlow(request: DamageBlowParams): void;
+  /** Life and counter changes play over their surface and veil nothing. */
+  startLifeChange(request: LifeChangeParams): void;
+  startCounterChange(request: CounterChangeParams): void;
   add(effect: SceneEffect): void;
   dispose(): void;
 }
@@ -353,6 +362,14 @@ class CardVfxSceneRuntime implements CardVfxScene, EffectHost {
 
   startDamageBlow(request: DamageBlowParams) {
     this.add(createDamageBlow(this, request));
+  }
+
+  startLifeChange(request: LifeChangeParams) {
+    this.add(createLifeChange(this, request));
+  }
+
+  startCounterChange(request: CounterChangeParams) {
+    this.add(createCounterChange(this, request));
   }
 
   /** Returns whether `effect` took over from one already running. */

@@ -10,23 +10,17 @@
 // with no light of its own: a puff of dust and a pale shock ring.
 
 import {
-  AddEquation,
   BufferGeometry,
-  CustomBlending,
   Float32BufferAttribute,
   Group,
-  InstancedBufferAttribute,
-  InstancedBufferGeometry,
   MathUtils,
   Mesh,
   type Object3D,
-  OneFactor,
   PlaneGeometry,
   ShaderMaterial,
   type Texture,
   Vector2,
   Vector3,
-  ZeroFactor,
 } from "three";
 
 import type { DamageCause } from "../../../animation/damageCause.ts";
@@ -34,7 +28,26 @@ import { DAMAGE_CAUSE_IMPACT_MS } from "../../../animation/types.ts";
 import type { CardPose } from "./cardAnchors.ts";
 import type { CardVfxTier } from "./cardFlight.ts";
 import type { EffectHost, SceneEffect, SceneEffectKind } from "./cardVfxScene.ts";
-import { CORNER_MASK_GLSL, VALUE_NOISE_GLSL } from "./glslChunks.ts";
+import { CORNER_MASK_GLSL } from "./glslChunks.ts";
+import {
+  ADDITIVE,
+  clamp01,
+  count,
+  type EffectFrame,
+  type EffectParts,
+  FBM_GLSL,
+  NORMAL,
+  PARTICLE_SHARE,
+  type Particle,
+  particleLayer,
+  place,
+  RAMP_GLSL,
+  rand,
+  sprite,
+  TimedEffect,
+  type Vec2,
+  type Vec3,
+} from "./vfxParticles.ts";
 
 /** The impact, in seconds before pace: both causes land together. */
 const IMPACT_S = DAMAGE_CAUSE_IMPACT_MS / 1000;
@@ -50,219 +63,8 @@ const TAIL_S: Record<DamageCause, number> = { fire: 1.4, lightning: 1.2 };
 export const HIT_S = 0.8;
 /** The lab's tuned glow, between the restrained look (0) and the reference (1). */
 const GLOW = 0.85;
-/** The share of the lab's particle counts each tier emits. */
-export const PARTICLE_SHARE: Record<CardVfxTier, number> = { full: 1, reduced: 0.5 };
 
-type Vec3 = [number, number, number];
-type Vec2 = [number, number];
-
-const ADDITIVE = {
-  transparent: true,
-  depthWrite: false,
-  depthTest: false,
-  blending: CustomBlending,
-  blendEquation: AddEquation,
-  blendSrc: OneFactor,
-  blendDst: OneFactor,
-  blendSrcAlpha: ZeroFactor,
-  blendDstAlpha: OneFactor,
-} as const;
-const NORMAL = { transparent: true, depthWrite: false, depthTest: false } as const;
-
-const rand = (lo: number, hi: number) => lo + Math.random() * (hi - lo);
-const clamp01 = (x: number) => MathUtils.clamp(x, 0, 1);
 const bezier = (a: number, b: number, c: number, u: number) => (1 - u) * (1 - u) * a + 2 * (1 - u) * u * b + u * u * c;
-
-const noiseChunk = /* glsl */ `
-  ${VALUE_NOISE_GLSL}
-  float fbm(vec2 p) { return vnoise(p) * 0.55 + vnoise(p * 2.1 + 3.7) * 0.3 + vnoise(p * 4.3 + 9.1) * 0.15; }`;
-
-// Fire cools white → yellow → orange → deep red; lightning cools white → blue.
-const rampChunk = /* glsl */ `
-  uniform float uPalette;
-  vec3 ramp(float h) {
-    h = clamp(h, 0.0, 1.0);
-    if (uPalette > 0.5) {
-      vec3 e = mix(vec3(0.08, 0.1, 0.35), vec3(0.35, 0.55, 1.0), smoothstep(0.0, 0.5, h));
-      return mix(e, vec3(0.92, 0.96, 1.0), smoothstep(0.55, 1.0, h));
-    }
-    vec3 c = mix(vec3(0.3, 0.03, 0.01), vec3(1.0, 0.32, 0.04), smoothstep(0.0, 0.45, h));
-    c = mix(c, vec3(1.0, 0.72, 0.28), smoothstep(0.4, 0.75, h));
-    return mix(c, vec3(1.0, 0.96, 0.84), smoothstep(0.78, 1.0, h));
-  }`;
-
-// ---------- Particles: one instanced quad each, all motion on the GPU ----------
-
-type ParticleKind = "FLAME" | "SPARK" | "SMOKE";
-
-interface Particle {
-  pos: Vec3;
-  vel: Vec3;
-  spawn: number;
-  life: number;
-  drag: number;
-  s0: number;
-  s1?: number;
-  heat?: number;
-  stretch?: number;
-}
-
-interface ParticleLook {
-  accZ: number;
-  gain: number;
-  cool?: number;
-  palette?: number;
-  /** SMOKE's colour. */
-  smoke?: Vec3;
-  order: number;
-}
-
-const particleVert = /* glsl */ `
-  attribute vec3 aPos; attribute vec3 aVel; attribute vec4 aTime; attribute vec4 aLook;
-  uniform float uTime, uAccZ;
-  varying vec2 vUv; varying float vA, vHeat, vSeed;
-  void main() {
-    float age = uTime - aTime.x;
-    float a = age / aTime.y;
-    if (age < 0.0 || a >= 1.0) { gl_Position = vec4(0.0, 0.0, 2.0, 1.0); return; }
-    float drag = aTime.z;
-    vec3 p = aPos + aVel * (1.0 - exp(-drag * age)) / drag;
-    p.z += 0.5 * uAccZ * age * age;
-    #ifdef SPARK
-    p.z = max(p.z, 0.0);
-    vec3 v = aVel * exp(-drag * age) + vec3(0.0, 0.0, uAccZ * age);
-    vec2 dir = length(v.xy) > 0.001 ? normalize(v.xy) : vec2(1.0, 0.0);
-    float len = max(length(v.xy) * aLook.w, aLook.x);
-    vec3 local = p + vec3(dir * (position.x - 0.5) * len + vec2(-dir.y, dir.x) * position.y * aLook.x, 0.0);
-    #else
-    float s = mix(aLook.x, aLook.y, 1.0 - (1.0 - a) * (1.0 - a));
-    float ang = aTime.w * 6.2831 + age * (aTime.w - 0.5) * 3.0;
-    vec3 local = p + vec3(mat2(cos(ang), sin(ang), -sin(ang), cos(ang)) * position.xy * s, 0.0);
-    #endif
-    vUv = position.xy + 0.5; vA = a; vHeat = aLook.z; vSeed = aTime.w;
-    gl_Position = projectionMatrix * modelViewMatrix * vec4(local, 1.0);
-  }`;
-
-const particleFrag = /* glsl */ `
-  uniform float uGain, uCool; uniform vec3 uSmoke;
-  varying vec2 vUv; varying float vA, vHeat, vSeed;
-  ${noiseChunk}
-  ${rampChunk}
-  void main() {
-    vec2 q = vUv * 2.0 - 1.0;
-    #if defined(SPARK)
-    float across = 1.0 - smoothstep(0.1, 1.0, abs(q.y));
-    float along = smoothstep(0.0, 1.0, vUv.x);
-    gl_FragColor = vec4(ramp(vHeat * (1.0 - 0.6 * vA)) * across * along * (1.0 - vA * vA) * uGain, 0.0);
-    #elif defined(SMOKE)
-    float r = length(q) + (vnoise(q * 2.2 + vSeed * 37.0) - 0.5) * 0.5;
-    float fade = smoothstep(0.0, 0.2, vA) * (1.0 - smoothstep(0.4, 1.0, vA));
-    gl_FragColor = vec4(uSmoke, (1.0 - smoothstep(0.3, 1.0, r)) * fade * uGain);
-    #else
-    float r = length(q) + (vnoise(q * 2.4 + vSeed * 37.0 + vA * 2.5) - 0.5) * 0.7;
-    float shape = pow(max(1.0 - r, 0.0), 1.5);
-    float fade = smoothstep(0.0, 0.1, vA) * (1.0 - vA);
-    gl_FragColor = vec4(ramp(vHeat * exp(-vA * uCool)) * shape * fade * uGain, 0.0);
-    #endif
-  }`;
-
-// FLAME and SPARK are additive light; SMOKE is ordinary alpha.
-function particleLayer(
-  list: readonly Particle[],
-  kind: ParticleKind,
-  clock: { value: number },
-  { accZ, gain, cool = 1.6, palette = 0, smoke = [0.09, 0.075, 0.065], order }: ParticleLook,
-): Mesh<InstancedBufferGeometry, ShaderMaterial> {
-  const n = list.length;
-  const base = new PlaneGeometry(1, 1);
-  const geometry = new InstancedBufferGeometry();
-  geometry.setIndex(base.index);
-  geometry.setAttribute("position", base.getAttribute("position"));
-  const pos = new Float32Array(n * 3);
-  const vel = new Float32Array(n * 3);
-  const time = new Float32Array(n * 4);
-  const look = new Float32Array(n * 4);
-  list.forEach((p, i) => {
-    pos.set(p.pos, i * 3);
-    vel.set(p.vel, i * 3);
-    time.set([p.spawn, p.life, Math.max(p.drag, 0.1), Math.random()], i * 4);
-    look.set([p.s0, p.s1 ?? p.s0, p.heat ?? 1, p.stretch ?? 0], i * 4);
-  });
-  geometry.setAttribute("aPos", new InstancedBufferAttribute(pos, 3));
-  geometry.setAttribute("aVel", new InstancedBufferAttribute(vel, 3));
-  geometry.setAttribute("aTime", new InstancedBufferAttribute(time, 4));
-  geometry.setAttribute("aLook", new InstancedBufferAttribute(look, 4));
-  geometry.instanceCount = n;
-  const mesh = new Mesh(
-    geometry,
-    new ShaderMaterial({
-      vertexShader: particleVert,
-      fragmentShader: particleFrag,
-      defines: { [kind]: "" },
-      uniforms: {
-        uTime: clock,
-        uAccZ: { value: accZ },
-        uGain: { value: gain },
-        uCool: { value: cool },
-        uPalette: { value: palette },
-        uSmoke: { value: new Vector3(...smoke) },
-      },
-      ...(kind === "SMOKE" ? NORMAL : ADDITIVE),
-    }),
-  );
-  mesh.frustumCulled = false;
-  mesh.renderOrder = order;
-  return mesh;
-}
-
-// ---------- Sprites: the few large lights the CPU moves each frame ----------
-
-type SpriteKind = "GLOW" | "RING" | "SHADOW";
-
-const spriteVert = /* glsl */ `
-  varying vec2 vUv;
-  void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`;
-
-const spriteFrag = /* glsl */ `
-  uniform vec3 uColor; uniform float uIntensity;
-  varying vec2 vUv;
-  void main() {
-    float r = length(vUv * 2.0 - 1.0);
-    #if defined(RING)
-    float a = exp(-pow((r - 0.82) / 0.05, 2.0)) * (1.0 - smoothstep(0.95, 1.0, r));
-    gl_FragColor = vec4(uColor * a * uIntensity, 0.0);
-    #elif defined(SHADOW)
-    gl_FragColor = vec4(0.0, 0.0, 0.0, exp(-r * r * 4.5) * (1.0 - smoothstep(0.9, 1.0, r)) * uIntensity);
-    #else
-    float a = (exp(-r * r * 6.0) + 0.6 * exp(-r * 14.0)) * (1.0 - smoothstep(0.8, 1.0, r));
-    gl_FragColor = vec4(uColor * a * uIntensity, 0.0);
-    #endif
-  }`;
-
-function sprite(unit: PlaneGeometry, kind: SpriteKind, color: Vec3, order: number): Mesh<PlaneGeometry, ShaderMaterial> {
-  const mesh = new Mesh(
-    unit,
-    new ShaderMaterial({
-      vertexShader: spriteVert,
-      fragmentShader: spriteFrag,
-      defines: kind === "GLOW" ? {} : { [kind]: "" },
-      uniforms: { uColor: { value: new Vector3(...color) }, uIntensity: { value: 0 } },
-      ...(kind === "SHADOW" ? NORMAL : ADDITIVE),
-    }),
-  );
-  mesh.renderOrder = order;
-  mesh.frustumCulled = false;
-  mesh.visible = false;
-  return mesh;
-}
-
-function place(mesh: Mesh<PlaneGeometry, ShaderMaterial>, x: number, y: number, z: number, size: number, intensity: number) {
-  mesh.visible = intensity > 0.002;
-  if (!mesh.visible) return;
-  mesh.position.set(x, y, z);
-  mesh.scale.setScalar(size);
-  mesh.material.uniforms.uIntensity.value = intensity;
-}
 
 // ---------- Lightning bolt ----------
 
@@ -404,7 +206,7 @@ const hitFrag = /* glsl */ `
   uniform sampler2D uMap; uniform float uRadius, uScorch;
   varying vec2 vCard, vUv; varying float vShade;
   uniform vec2 uSize;
-  ${noiseChunk}
+  ${FBM_GLSL}
   ${scorchChunk}
   ${CORNER_MASK_GLSL}
   void main() {
@@ -423,10 +225,10 @@ const hitGlowFrag = /* glsl */ `
   uniform float uRadius, uScorchGlow, uGain, uTime;
   uniform vec2 uSize;
   varying vec2 vCard;
-  ${noiseChunk}
+  ${FBM_GLSL}
   ${scorchChunk}
   ${CORNER_MASK_GLSL}
-  ${rampChunk}
+  ${RAMP_GLSL}
   void main() {
     float corner = cornerMask(vCard, uSize, uRadius);
     if (corner <= 0.0) discard;
@@ -615,17 +417,7 @@ function burst(T: Vec2, ti: number, scale: number, L: Layers, n: BurstCounts) {
   }
 }
 
-/** What a cause lends the strike: its per-frame update, given time in seconds. */
-type CauseFrame = (t: number) => void;
-
-/** What a strike's look draws with: the strike's group, shared quad and clock. */
-interface StrikeParts {
-  group: Group;
-  unit: PlaneGeometry;
-  clock: { value: number };
-}
-
-interface CauseContext extends StrikeParts {
+interface CauseContext extends EffectParts {
   S: Vec2;
   T: Vec2;
   /** The target's size for the impact ring: a card's width, a HUD's height. */
@@ -635,10 +427,8 @@ interface CauseContext extends StrikeParts {
   boardLight: boolean;
 }
 
-const count = (n: number, share: number) => Math.round(n * share);
-
 // The fireball gathers at its source, flies a bowed path, and bursts on the target.
-function fireCause({ group, unit, clock, S, T, span, scale, share, boardLight }: CauseContext): CauseFrame {
+function fireCause({ group, unit, clock, S, T, span, scale, share, boardLight }: CauseContext): EffectFrame {
   const dx = T[0] - S[0];
   const dy = T[1] - S[1];
   const dist = Math.hypot(dx, dy) || 1;
@@ -707,7 +497,7 @@ function fireCause({ group, unit, clock, S, T, span, scale, share, boardLight }:
 
 // The source crackles, then a bolt strikes the target and re-strikes twice on
 // fresh paths, like the flicker of a real discharge.
-function lightningCause({ group, unit, clock, S, T, span, scale, share, boardLight }: CauseContext): CauseFrame {
+function lightningCause({ group, unit, clock, S, T, span, scale, share, boardLight }: CauseContext): EffectFrame {
   const strikes = RESTRIKES_S.map((s) => IMPACT_S - STRIKE_REVEAL_S + s);
   const tStrike = strikes[0];
   const dist = Math.hypot(T[0] - S[0], T[1] - S[1]);
@@ -716,7 +506,7 @@ function lightningCause({ group, unit, clock, S, T, span, scale, share, boardLig
   group.add(
     particleLayer(L.smoke, "SMOKE", clock, { accZ: 40, gain: 0.3, order: 3 }),
     particleLayer(L.flames, "FLAME", clock, { accZ: 220, gain: 0.5 + 0.6 * GLOW, cool: 1.9, order: 5 }),
-    particleLayer(L.sparks, "SPARK", clock, { accZ: -1600, gain: 0.9 + 0.5 * GLOW, palette: 1, order: 6 }),
+    particleLayer(L.sparks, "SPARK", clock, { accZ: -1600, gain: 0.9 + 0.5 * GLOW, palette: "lightning", order: 6 }),
   );
   const material = boltMaterial();
   const bolt = new Mesh(new BufferGeometry(), material);
@@ -754,7 +544,7 @@ function lightningCause({ group, unit, clock, S, T, span, scale, share, boardLig
   };
 }
 
-const CAUSES: Record<DamageCause, (context: CauseContext) => CauseFrame> = {
+const CAUSES: Record<DamageCause, (context: CauseContext) => EffectFrame> = {
   fire: fireCause,
   lightning: lightningCause,
 };
@@ -768,7 +558,7 @@ const BLOW_TAIL_S = 1.2;
 const DUST: Vec3 = [0.46, 0.41, 0.34];
 const GRIT: Vec3 = [0.19, 0.16, 0.13];
 
-interface BlowContext extends StrikeParts {
+interface BlowContext extends EffectParts {
   T: Vec2;
   /** The blow's direction, or `null` (a flurry of hits) to throw dust all round. */
   dir: Vec2 | null;
@@ -780,7 +570,7 @@ interface BlowContext extends StrikeParts {
 
 // Dust thrown off the struck surface, most of it on along the blow, grit
 // flicked out with it, and a pale ring where the shock runs out.
-function blowFrame({ group, unit, clock, T, dir, span, scale, share, impactS }: BlowContext): CauseFrame {
+function blowFrame({ group, unit, clock, T, dir, span, scale, share, impactS }: BlowContext): EffectFrame {
   // Unit headings: any way round, or on along the blow within `spread`.
   const around = (): Vec2 => {
     const a = rand(0, Math.PI * 2);
@@ -821,62 +611,6 @@ function blowFrame({ group, unit, clock, T, dir, span, scale, share, impactS }: 
   };
 }
 
-/** When a strike lands and ends, in seconds before pace, and what runs as it lands. */
-interface StrikeTiming {
-  impactS: number;
-  endS: number;
-  pace: number;
-  onImpact(): void;
-}
-
-class DamageStrike implements SceneEffect {
-  private readonly group = new Group();
-  private readonly unit = new PlaneGeometry(1, 1);
-  private readonly clock = { value: 0 };
-  private readonly frame: CauseFrame;
-  private startMs: number | null = null;
-  private impacted = false;
-
-  constructor(
-    private readonly host: EffectHost,
-    name: string,
-    private readonly timing: StrikeTiming,
-    look: (parts: StrikeParts) => CauseFrame,
-  ) {
-    this.group.name = name;
-    this.frame = look({ group: this.group, unit: this.unit, clock: this.clock });
-    host.scene.add(this.group);
-  }
-
-  update(nowMs: number): boolean {
-    this.startMs ??= nowMs;
-    const t = (nowMs - this.startMs) / 1000 / this.timing.pace;
-    this.clock.value = t;
-    this.frame(t);
-    if (t >= this.timing.impactS) this.land();
-    return t < this.timing.endS;
-  }
-
-  private land() {
-    if (this.impacted) return;
-    this.impacted = true;
-    this.timing.onImpact();
-  }
-
-  // A strike cut short (context loss, unmount) still lands its hit once: the
-  // step it belongs to plays on.
-  dispose() {
-    this.land();
-    this.host.scene.remove(this.group);
-    this.group.traverse((object) => {
-      if (!(object instanceof Mesh)) return;
-      if (object.geometry !== this.unit) object.geometry.dispose();
-      (object.material as ShaderMaterial).dispose();
-    });
-    this.unit.dispose();
-  }
-}
-
 /** Creates a strike and, on a permanent, its hit. They share one clock start:
  *  the scene adds both in the same frame. */
 export function createDamageStrike(
@@ -891,8 +625,8 @@ export function createDamageStrike(
   const dist = Math.hypot(T[0] - S[0], T[1] - S[1]) || 1;
   const dir: Vec2 = [(T[0] - S[0]) / dist, (T[1] - S[1]) / dist];
   const { cause, to, tier, pace, onImpact } = params;
-  const timing = { impactS: IMPACT_S, endS: IMPACT_S + TAIL_S[cause], pace, onImpact };
-  const look = (parts: StrikeParts) =>
+  const timing = { endS: IMPACT_S + TAIL_S[cause], pace, impact: { atS: IMPACT_S, land: onImpact } };
+  const look = (parts: EffectParts) =>
     CAUSES[cause]({
       ...parts,
       S,
@@ -903,7 +637,7 @@ export function createDamageStrike(
       boardLight: tier === "full",
     });
   return {
-    strike: new DamageStrike(host, "damage-strike", timing, look),
+    strike: new TimedEffect(host, "damage-strike", timing, look),
     hit: hit && new DamageHit(host, hit, impact, dir, scale, params.amount, params.pace),
   };
 }
@@ -921,14 +655,14 @@ export interface DamageBlowParams {
 }
 
 /** Creates a creature's blow landing on `to` as its slam strikes. The slam
- *  lands the hit itself, so the blow reports nothing. */
+ *  lands the hit itself, so the blow has no impact of its own to report. */
 export function createDamageBlow(host: EffectHost, { from, to, amount, tier, pace, impactS }: DamageBlowParams): SceneEffect {
   const T = worldPoint(to, 0.5, 0.5);
   const S = from && worldPoint(from, 0.5, 0.5);
   const dist = S ? Math.hypot(T[0] - S[0], T[1] - S[1]) : 0;
   const dir: Vec2 | null = S && dist > 0 ? [(T[0] - S[0]) / dist, (T[1] - S[1]) / dist] : null;
-  const timing = { impactS, endS: impactS + BLOW_TAIL_S, pace, onImpact: () => {} };
-  const look = (parts: StrikeParts) =>
+  const timing = { endS: impactS + BLOW_TAIL_S, pace, impact: null };
+  const look = (parts: EffectParts) =>
     blowFrame({
       ...parts,
       T,
@@ -938,7 +672,7 @@ export function createDamageBlow(host: EffectHost, { from, to, amount, tier, pac
       share: PARTICLE_SHARE[tier],
       impactS,
     });
-  return new DamageStrike(host, "damage-blow", timing, look);
+  return new TimedEffect(host, "damage-blow", timing, look);
 }
 
 export const damageStrikeKind: SceneEffectKind = {

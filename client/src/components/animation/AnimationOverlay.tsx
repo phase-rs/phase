@@ -559,8 +559,16 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
               ]);
             }
 
-            if (amount > 0 && vfxQuality !== "minimal") {
-              particleRef.current?.healEffect(x, y, amount);
+            const heal = () => {
+              if (amount > 0 && vfxQuality !== "minimal") particleRef.current?.healEffect(x, y, amount);
+            };
+            // Under the New style the layer shows the change, unless damage
+            // this step already shows the loss it causes.
+            const layer = cardVfxRef.current;
+            if (layer && !hasDamageDealt && !groupedDamageEvent) {
+              layer.present({ kind: "life", playerId: player_id, amount, pace: speedMultiplier }, heal);
+            } else {
+              heal();
             }
           };
 

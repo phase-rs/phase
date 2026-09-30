@@ -5,6 +5,7 @@ import { useAnimationStore } from "../../../stores/animationStore.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { type AnimationImageSnapshot, visibleAnimationImageSnapshot } from "../ResolvedAnimationImage.tsx";
 import { type CardFlightSpec, type CardFlightSpecContext, cardFlightSpecFor, flightPresents } from "./cardFlightSpecs.ts";
+import type { CounterChange } from "./tallyEffects.ts";
 
 /** A permanent broken apart where it lies. */
 export interface CardShatterSpec {
@@ -60,6 +61,25 @@ export interface DamageBlowSpec {
   impactDelayMs: number;
 }
 
+/** A player's life total changing other than by damage a strike or blow shows. */
+export interface LifeChangeSpec {
+  kind: "life";
+  playerId: PlayerId;
+  /** Life gained (positive) or lost (negative). */
+  amount: number;
+  pace: number;
+}
+
+/** Counters put on a permanent or removed from it. */
+export interface CounterChangeSpec {
+  kind: "counter";
+  objectId: ObjectId;
+  counterType: string;
+  change: CounterChange;
+  count: number;
+  pace: number;
+}
+
 /** An event another event presents: a destruction or sacrifice a replacement
  *  sent elsewhere, whose zone change shows the move, or a token's entry from
  *  no zone, which its `TokenCreated` shows. */
@@ -68,7 +88,14 @@ export interface CoveredSpec {
 }
 
 /** Everything the card VFX layer presents, by `kind`. */
-export type CardVfxSpec = CardFlightSpec | BoardEffectSpec | DamageStrikeSpec | DamageBlowSpec | CoveredSpec;
+export type CardVfxSpec =
+  | CardFlightSpec
+  | BoardEffectSpec
+  | DamageStrikeSpec
+  | DamageBlowSpec
+  | LifeChangeSpec
+  | CounterChangeSpec
+  | CoveredSpec;
 
 /** The pre-event state `damageCauseOf` reads, when a card VFX layer presents
  *  damage causes; `null` when every hit presents Classic. Hit timing reads it
@@ -154,6 +181,22 @@ function damageStrikeSpecFor(
   return { kind: "damage", ...cause, target, amount, pace, owningStepMs };
 }
 
+// CR 122.1: a counter is a marker placed on an object; it plays where the
+// permanent it is put on or removed from lies.
+function counterChangeSpecFor(event: AnimationEvent, { pace }: CardFlightSpecContext): CounterChangeSpec | null {
+  if (pace <= 0) return null;
+  switch (event.type) {
+    case "CounterAdded":
+    case "CounterRemoved": {
+      const { object_id: objectId, counter_type: counterType, count } = event.data;
+      const change = event.type === "CounterAdded" ? "added" : "removed";
+      return { kind: "counter", objectId, counterType, change, count, pace };
+    }
+    default:
+      return null;
+  }
+}
+
 /** The card VFX presentation of `event`, or `null` when it has none (it then
  *  presents Classic). */
 export function cardVfxSpecFor(event: AnimationEvent, context: CardFlightSpecContext): CardVfxSpec | null {
@@ -162,6 +205,7 @@ export function cardVfxSpecFor(event: AnimationEvent, context: CardFlightSpecCon
     coveredSpecFor(event, context) ??
     cardShatterSpecFor(event, context) ??
     exileDissolveSpecFor(event, context) ??
-    damageStrikeSpecFor(event, context)
+    damageStrikeSpecFor(event, context) ??
+    counterChangeSpecFor(event, context)
   );
 }

@@ -40,7 +40,15 @@ import type { CardVfxTier, FlightFlip } from "./cardFlight.ts";
 import type { CardFlightRoute, CardFlightSpec } from "./cardFlightSpecs.ts";
 import type { CardVfxScene, CardVfxSceneCallbacks } from "./cardVfxScene.ts";
 import type * as CardVfxSceneModule from "./cardVfxScene.ts";
-import type { BoardEffectSpec, CardVfxSpec, DamageBlowSpec, DamageStrikeSpec, ExileDissolveSpec } from "./cardVfxSpecs.ts";
+import type {
+  BoardEffectSpec,
+  CardVfxSpec,
+  CounterChangeSpec,
+  DamageBlowSpec,
+  DamageStrikeSpec,
+  ExileDissolveSpec,
+  LifeChangeSpec,
+} from "./cardVfxSpecs.ts";
 import type { LinkAim } from "./exileDissolve.ts";
 import { drawSurface, measureSurfaceLayout } from "./surfaceTexture.ts";
 
@@ -233,6 +241,10 @@ class CardVfxController {
             return;
           case "blow":
             this.presentBlow(this.scene, spec, classic);
+            return;
+          case "life":
+          case "counter":
+            this.presentTally(this.scene, spec, classic);
             return;
           case "shatter":
           case "dissolve":
@@ -494,6 +506,25 @@ class CardVfxController {
       pace: spec.pace,
       impactS: spec.impactDelayMs / 1000 / spec.pace,
     });
+  }
+
+  // A life or counter change plays over its HUD or permanent where it is now.
+  private presentTally(scene: CardVfxScene, spec: LifeChangeSpec | CounterChangeSpec, classic: () => void) {
+    const el = spec.kind === "life" ? playerHudSurface(spec.playerId) : ownPermanentSurface(spec.objectId);
+    if (!el || !this.canvas || spec.pace <= 0) {
+      classic();
+      return;
+    }
+    const at = measureCardPose(el, this.canvas.getBoundingClientRect());
+    const { tier } = this;
+    switch (spec.kind) {
+      case "life":
+        scene.startLifeChange({ at, amount: spec.amount, tier, pace: spec.pace });
+        return;
+      case "counter":
+        scene.startCounterChange({ at, counterType: spec.counterType, change: spec.change, count: spec.count, tier, pace: spec.pace });
+        return;
+    }
   }
 
   // A cast and its resolution can share one step, so the resolution may

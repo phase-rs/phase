@@ -1327,6 +1327,30 @@ describe("CardVfxLayer damage strike", () => {
     expect(present(blow)).not.toHaveBeenCalled();
   });
 
+  it("V13-4: life and counter changes play over the HUD or the permanent now, veiling nothing", async () => {
+    const { present } = await readyLayer();
+    anchor({ "data-player-hud": "1" }, 400, 40);
+    anchor({ "data-permanent-card": String(Y) }, 300, 400);
+
+    const life = present({ kind: "life", playerId: 1, amount: 3, pace: 1 });
+    const counter = present({ kind: "counter", objectId: Y, counterType: "P1P1", change: "added", count: 1, pace: 1 });
+    await frames(1);
+
+    expect(life).not.toHaveBeenCalled();
+    expect(counter).not.toHaveBeenCalled();
+    const names = last(calls("render"))?.children?.map((child) => child.name);
+    expect(names).toEqual(expect.arrayContaining(["life-change", "counter-change"]));
+    expect(veiled(Y)).toBe(false);
+  });
+
+  it("V13-4: a life or counter change with nowhere to play, or at pace 0, presents Classic", async () => {
+    const { present } = await readyLayer();
+    expect(present({ kind: "life", playerId: 1, amount: 3, pace: 1 })).toHaveBeenCalledTimes(1);
+    expect(present({ kind: "counter", objectId: Y, counterType: "P1P1", change: "added", count: 1, pace: 1 })).toHaveBeenCalledTimes(1);
+    anchor({ "data-player-hud": "1" }, 400, 40);
+    expect(present({ kind: "life", playerId: 1, amount: 3, pace: 0 })).toHaveBeenCalledTimes(1);
+  });
+
   it("V10-16: readiness is published: not before init, while ready, not after unmount", async () => {
     const { unmount } = await renderLayer();
     expect(useAnimationStore.getState().cardVfxReady).toBe(false);

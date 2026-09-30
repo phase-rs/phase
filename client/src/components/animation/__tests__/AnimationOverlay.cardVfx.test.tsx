@@ -397,3 +397,50 @@ describe("AnimationOverlay combat blows", () => {
     expect(struck.style.rotate).toBeFalsy();
   });
 });
+
+describe("AnimationOverlay life changes", () => {
+  function seedLife(effects: AnimationStep["effects"]) {
+    act(() => {
+      useGameStore.setState({ gameState: buildGameState({ objects: buildObjectMap(elves.onBattlefield().build()) }) });
+      useAnimationStore.getState().enqueueSteps([{ effects, duration: 500 }]);
+    });
+  }
+
+  const gained = { type: "LifeChanged", data: { player_id: 1, amount: 3 } } as const;
+
+  it("V13-5: under the New style life gained is the layer's, with the heal particles as its Classic", () => {
+    layer.supported = true;
+    seedLife([{ event: gained, duration: 500 }]);
+
+    renderOverlay();
+
+    expect(layer.present.mock.calls.map(([spec]) => spec)).toEqual([{ kind: "life", playerId: 1, amount: 3, pace: 1 }]);
+    expect(particles.healEffect).not.toHaveBeenCalled();
+    act(() => layer.present.mock.calls[0][1]());
+    expect(particles.healEffect).toHaveBeenCalledTimes(1);
+  });
+
+  it("V13-5: a loss damage already shows is not presented again", () => {
+    layer.supported = true;
+    const hit = { type: "DamageDealt", data: { source_id: X, target: { Player: 1 }, amount: 2, is_combat: false } } as const;
+    const lost = { type: "LifeChanged", data: { player_id: 1, amount: -2 } } as const;
+    seedLife([
+      { event: hit, duration: 500 },
+      { event: lost, duration: 500 },
+    ]);
+
+    renderOverlay();
+
+    expect(layer.present.mock.calls.map(([spec]) => spec.kind)).not.toContain("life");
+  });
+
+  it("V13-5: the Classic style keeps the heal particles", () => {
+    usePreferencesStore.setState({ cardAnimationStyle: "classic" });
+    seedLife([{ event: gained, duration: 500 }]);
+
+    renderOverlay();
+
+    expect(layer.present).not.toHaveBeenCalled();
+    expect(particles.healEffect).toHaveBeenCalledTimes(1);
+  });
+});

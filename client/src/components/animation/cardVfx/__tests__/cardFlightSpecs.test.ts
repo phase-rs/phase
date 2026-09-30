@@ -325,6 +325,24 @@ describe("cardVfxSpecFor", () => {
   });
 });
 
+describe("cardVfxSpecFor counters", () => {
+  it("V13-3: counters put on or removed from a permanent play as a counter change; pace 0 has none", () => {
+    const added: AnimationEvent = { type: "CounterAdded", data: { object_id: X, counter_type: "P1P1", count: 2 } };
+    const removed: AnimationEvent = { type: "CounterRemoved", data: { object_id: X, counter_type: "loyalty", count: 1 } };
+
+    expect(cardVfxSpecFor(added, context(null, null))).toEqual({
+      kind: "counter",
+      objectId: X,
+      counterType: "P1P1",
+      change: "added",
+      count: 2,
+      pace: 1,
+    });
+    expect(cardVfxSpecFor(removed, context(null, null))).toMatchObject({ change: "removed", counterType: "loyalty" });
+    expect(cardVfxSpecFor(added, context(null, null, 0))).toBeNull();
+  });
+});
+
 describe("cardVfxSpecFor exile", () => {
   it("V9-5: a permanent exiled from the battlefield dissolves, toward the permanent holding it if any", () => {
     const pre = stateWith(visible(card.onBattlefield().build()));
