@@ -2038,6 +2038,32 @@ pub fn flatten_targets_in_chain(ability: &ResolvedAbility) -> Vec<TargetRef> {
     targets
 }
 
+/// CR 601.2c: The targets a chain declares, as [`flatten_targets_in_chain`]
+/// lists them except that a node delegating to a paid "instead" sub contributes
+/// only that sub's targets. When the additional cost was paid, the sub's targets
+/// are the spell's alternative targets (CR 601.2c, CR 702.174m, CR 702.194c) and
+/// the delegating node's own `targets` only mirror them
+/// (`assign_targets_recursive`), so they are not a second declaration.
+pub fn declared_targets_in_chain(ability: &ResolvedAbility) -> Vec<TargetRef> {
+    if let Some(sub_ability) = ability.sub_ability.as_deref().filter(|sub| {
+        ability.context.additional_cost_paid
+            && matches!(
+                sub.condition,
+                Some(AbilityCondition::AdditionalCostPaidInstead)
+            )
+    }) {
+        return declared_targets_in_chain(sub_ability);
+    }
+    let mut targets = chain_node_targets(ability);
+    if let Some(sub_ability) = ability.sub_ability.as_deref() {
+        targets.extend(declared_targets_in_chain(sub_ability));
+    }
+    if let Some(else_ability) = ability.else_ability.as_deref() {
+        targets.extend(declared_targets_in_chain(else_ability));
+    }
+    targets
+}
+
 /// CR 608.2b: The slots of `declared` — numbered exactly as
 /// [`flatten_targets_in_chain`] numbers them — whose target the resolution-time
 /// re-validation `validated` (the [`validate_targets_in_chain`] result for the

@@ -47,8 +47,9 @@ use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 
 use super::ability_utils::{
     assign_targets_in_chain, auto_select_targets_for_ability, begin_target_selection_for_ability,
-    build_target_slots, build_target_slots_labelled, flatten_targets_in_chain,
-    modal_choice_for_player, random_select_targets_for_ability, target_constraints_from_modal,
+    build_target_slots, build_target_slots_labelled, declared_targets_in_chain,
+    flatten_targets_in_chain, modal_choice_for_player, random_select_targets_for_ability,
+    target_constraints_from_modal,
 };
 use super::life_costs::PayLifeCostResult;
 
@@ -1849,7 +1850,7 @@ pub(crate) fn begin_deferred_target_selection(
             // announced through this deferred route.
             super::casting::emit_targeting_events(
                 state,
-                &flatten_targets_in_chain(&pending.ability),
+                &declared_targets_in_chain(&pending.ability),
                 pending.object_id,
                 pending.ability.controller,
                 events,
@@ -1881,7 +1882,7 @@ pub(crate) fn begin_deferred_target_selection(
             // announced through this deferred route.
             super::casting::emit_targeting_events(
                 state,
-                &flatten_targets_in_chain(&pending.ability),
+                &declared_targets_in_chain(&pending.ability),
                 pending.object_id,
                 pending.ability.controller,
                 events,
@@ -6399,7 +6400,7 @@ pub(super) fn push_activated_ability_to_stack(
     // as `handle_activate_ability`; never pay the suffix and reopen targets.
     if !matches!(target_selection, ActivationTargetSelection::Settled) {
         let target_slots = build_target_slots(state, &resolved)?;
-        let assigned_targets = flatten_targets_in_chain(&resolved);
+        let assigned_targets = declared_targets_in_chain(&resolved);
         if !target_slots.is_empty() {
             let pending = |resolved: ResolvedAbility| {
                 let mut pending = PendingCast::for_activation(
@@ -6444,7 +6445,7 @@ pub(super) fn push_activated_ability_to_stack(
                 pending.begin_activation_trigger_collection();
                 emit_targeting_events(
                     state,
-                    &flatten_targets_in_chain(&pending.ability),
+                    &declared_targets_in_chain(&pending.ability),
                     source_id,
                     player,
                     events,
@@ -6467,7 +6468,7 @@ pub(super) fn push_activated_ability_to_stack(
                 pending.begin_activation_trigger_collection();
                 emit_targeting_events(
                     state,
-                    &flatten_targets_in_chain(&pending.ability),
+                    &declared_targets_in_chain(&pending.ability),
                     source_id,
                     player,
                     events,
