@@ -132,7 +132,8 @@ export interface CardVfxScene {
    *  whose veil the new effect's completion then releases. */
   startShatter(request: CardShatterRequest): void;
   startDissolve(request: ExileDissolveRequest): void;
-  startDamageStrike(request: DamageStrikeRequest): void;
+  /** Returns whether the strike's hit took over a running board effect. */
+  startDamageStrike(request: DamageStrikeRequest): boolean;
   /** A blow happens to no one permanent: the DOM slam moves the struck card. */
   startDamageBlow(request: DamageBlowParams): void;
   /** Life and counter changes play over their surface and veil nothing. */
@@ -357,7 +358,9 @@ class CardVfxSceneRuntime implements CardVfxScene, EffectHost {
     this.add(strike);
     // A hit taking over from a running effect inherits its veil, so it shows
     // the permanent at rest until its own impact.
-    if (hit && request.hit && this.addBoardEffect(request.hit.objectId, hit)) hit.showAtRest();
+    const inherited = hit !== null && request.hit !== null && this.addBoardEffect(request.hit.objectId, hit);
+    if (inherited) hit.showAtRest();
+    return inherited;
   }
 
   startDamageBlow(request: DamageBlowParams) {

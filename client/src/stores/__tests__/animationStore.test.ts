@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { useAnimationStore } from "../animationStore";
+import { useGameStore } from "../gameStore";
 import type { AnimationStep } from "../../animation/types";
 import type { GameEvent } from "../../adapter/types";
 
@@ -19,9 +20,21 @@ describe("animationStore", () => {
       useAnimationStore.getState().enqueueSteps(steps);
 
       const state = useAnimationStore.getState();
-      expect(state.activeStep).toEqual(steps[0]);
+      expect(state.activeStep).toEqual(expect.objectContaining(steps[0]));
       expect(state.queue).toHaveLength(1);
       expect(state.isPlaying).toBe(true);
+    });
+
+    it("stamps each step with the engine commit epoch it was queued under", () => {
+      useGameStore.setState({ engineCommitEpoch: 3 });
+      useAnimationStore.getState().enqueueSteps([makeStep()]);
+      useGameStore.setState({ engineCommitEpoch: 4 });
+      useAnimationStore.getState().enqueueSteps([makeStep()]);
+
+      expect(useAnimationStore.getState().activeStep?.commitEpoch).toBe(3);
+      useAnimationStore.getState().advanceStep();
+      expect(useAnimationStore.getState().activeStep?.commitEpoch).toBe(4);
+      useGameStore.setState({ engineCommitEpoch: 0 });
     });
 
     it("appends to queue when already playing", () => {
@@ -110,11 +123,11 @@ describe("animationStore", () => {
       const step2 = makeStep(200);
       useAnimationStore.getState().enqueueSteps([step1, step2]);
 
-      expect(useAnimationStore.getState().activeStep).toEqual(step1);
+      expect(useAnimationStore.getState().activeStep).toEqual(expect.objectContaining(step1));
       expect(useAnimationStore.getState().isPlaying).toBe(true);
 
       useAnimationStore.getState().advanceStep();
-      expect(useAnimationStore.getState().activeStep).toEqual(step2);
+      expect(useAnimationStore.getState().activeStep).toEqual(expect.objectContaining(step2));
       expect(useAnimationStore.getState().isPlaying).toBe(true);
 
       useAnimationStore.getState().advanceStep();

@@ -337,6 +337,7 @@ describe("AnimationOverlay combat blows", () => {
       target: { Object: Y },
       amount: 3,
       pace: 1,
+      startMs: expect.any(Number),
       impactDelayMs: CARD_SLAM_FLIGHT_MS,
     });
     advance(CARD_SLAM_FLIGHT_MS + 60);
@@ -377,7 +378,7 @@ describe("AnimationOverlay combat blows", () => {
 
     const impactDelayMs = impactDelayMsForAnimationEvent(flurry);
     expect(layer.present.mock.calls.map(([spec]) => spec)).toEqual([
-      { kind: "blow", sourceId: null, target: { Player: 1 }, amount: 9, pace: 1, impactDelayMs },
+      { kind: "blow", sourceId: null, target: { Player: 1 }, amount: 9, pace: 1, startMs: expect.any(Number), impactDelayMs },
     ]);
     advance(impactDelayMs + 10);
     expect(particles.playerDamage).toHaveBeenCalledTimes(1);

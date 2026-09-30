@@ -396,6 +396,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
                 target: { Player: player_id },
                 amount: total_damage,
                 pace: speedMultiplier,
+                startMs: performance.now(),
                 impactDelayMs: impactDelay,
               },
               landBlow,
@@ -448,6 +449,8 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
             // Under the New style the struck card rocks back from the blow.
             const struckEl = cardVfxRef.current ? findCardElement(target.Object) : null;
             let landBlow = () => particleRef.current?.slamImpact(pos.x, pos.y, amount);
+            // One start for the slam and its blow, so both land on one frame.
+            const slamStartMs = performance.now();
             const slammed = sourceEl
               ? applyCardSlam(sourceEl, pos.x, pos.y, speedMultiplier, () => {
                   // Impact effects: SFX, shockwave, floating number, screen shake
@@ -456,7 +459,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
                     applyCardKnockback(struckEl, pos.x - sourceAt.x, pos.y - sourceAt.y, amount, speedMultiplier);
                   }
                   landDamageHit(pos, amount, false);
-                })
+                }, slamStartMs)
               : false;
             if (slammed) {
               landBlow = presentBlow(
@@ -466,6 +469,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
                   target,
                   amount,
                   pace: speedMultiplier,
+                  startMs: slamStartMs,
                   impactDelayMs: CARD_SLAM_FLIGHT_MS * speedMultiplier,
                 },
                 landBlow,
@@ -490,11 +494,12 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
             // Resolve via the group representative for a collapsed swarm member.
             const sourceEl = vfxQuality !== "minimal" ? findCardElement(source_id) : null;
             let landBlow = () => particleRef.current?.playerDamage(pos.x, pos.y, amount);
+            const slamStartMs = performance.now();
             const slammed = sourceEl
               ? applyCardSlam(sourceEl, pos.x, pos.y, speedMultiplier, () => {
                   landBlow();
                   landDamageHit(pos, amount, "Player" in target);
-                })
+                }, slamStartMs)
               : false;
             if (slammed) {
               landBlow = presentBlow(
@@ -504,6 +509,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
                   target,
                   amount,
                   pace: speedMultiplier,
+                  startMs: slamStartMs,
                   impactDelayMs: CARD_SLAM_FLIGHT_MS * speedMultiplier,
                 },
                 landBlow,
@@ -899,7 +905,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
   // Under the New style a mounted layer presents the event's card VFX, or runs
   // the Classic effect instead; never both, never neither.
   const processEffect = useCallback(
-    (effect: StepEffect, stepEffects: StepEffect[], owningStepMs: number) => {
+    (effect: StepEffect, stepEffects: StepEffect[], owningStepMs: number, commitEpoch: number) => {
       const classic = () => processClassicEffect(effect, stepEffects, owningStepMs);
       const layer = cardVfxRef.current;
       const spec = layer
@@ -908,6 +914,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
             post: useAnimationStore.getState().animationNewState,
             pace: speedMultiplier,
             owningStepMs,
+            commitEpoch,
             stepEvents: stepEffects.map((stepEffect) => stepEffect.event),
           })
         : null;
@@ -931,6 +938,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
         effect,
         activeStep.effects,
         activeStep.duration * speedMultiplier,
+        activeStep.commitEpoch,
       );
     }
 

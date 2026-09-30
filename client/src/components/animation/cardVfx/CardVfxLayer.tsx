@@ -98,8 +98,6 @@ interface PendingStart {
   spec: CardFlightSpec;
   from: CardPose | null;
   face: AnimationImageSnapshot;
-  /** The engine commit epoch when the flight was presented. */
-  commitEpoch: number;
   classics: (() => void)[];
 }
 
@@ -157,7 +155,9 @@ class CardVfxController {
   private readonly pending = new Map<ObjectId, PendingStart>();
   /** Board effects waiting for their face, each with the covered events' Classics. */
   private readonly pendingBoard = new Map<ObjectId, (() => void)[]>();
-  private readonly veiled = new Set<ObjectId>();
+  /** Each veiled object, by the effect holding its veil: only that effect
+   *  releases it, so one it took over from cannot unveil it. */
+  private readonly veilOwners = new Map<ObjectId, number>();
   /** Each veil released only once the engine commit lands, by object. */
   private readonly commitWaits = new Map<ObjectId, () => void>();
 
@@ -369,11 +369,9 @@ class CardVfxController {
       classic();
       return;
     }
-    // Read now: the commit may land while the face loads.
-    const commitEpoch = useGameStore.getState().engineCommitEpoch;
     if (!face) {
       // Back only: nothing to load, so the flight starts now.
-      this.start(scene, spec, from, null, commitEpoch, [classic]);
+      this.start(scene, spec, from, null, [classic]);
       return;
     }
     const token = this.requestFace(
@@ -383,7 +381,7 @@ class CardVfxController {
       (image) => this.finishPending(objectId, token, image),
       () => this.fallBack(objectId, token),
     );
-    this.pending.set(objectId, { token, spec, from, face, commitEpoch, classics: [classic] });
+    this.pending.set(objectId, { token, spec, from, face, classics: [classic] });
   }
 
   // The permanent's surface is measured now, while it is still on the board;
@@ -429,7 +427,6 @@ class CardVfxController {
       classic();
       return;
     }
-    const commitEpoch = useGameStore.getState().engineCommitEpoch;
     // Covered events wait on this effect while its face loads.
     const covered: (() => void)[] = [];
     this.pendingBoard.set(objectId, covered);
@@ -443,7 +440,8 @@ class CardVfxController {
       (scene, surface) => {
         settle();
         const board = { ...surface, objectId, tier: this.tier, pace: spec.pace };
-        const release = () => this.unveilAfterCommit(objectId, commitEpoch);
+        const owner = this.nextToken++;
+        const release = () => this.unveilAfterCommit(objectId, spec.commitEpoch, owner);
         switch (spec.kind) {
           case "shatter":
             scene.startShatter({ ...board, impact: shatterImpact(), onDone: release });
@@ -452,7 +450,7 @@ class CardVfxController {
             scene.startDissolve({ ...board, link: this.linkAimFor(spec), onArrive: release });
             break;
         }
-        this.veil(objectId);
+        this.veil(objectId, owner);
       },
       () => {
         settle();
@@ -468,7 +466,7 @@ class CardVfxController {
   private presentCovered(objectId: ObjectId, classic: () => void) {
     const waiting = this.pending.get(objectId)?.classics ?? this.pendingBoard.get(objectId);
     if (waiting) waiting.push(classic);
-    else if (!this.veiled.has(objectId)) classic();
+    else if (!this.veilOwners.has(objectId)) classic();
   }
 
   // Source and target are measured now: the source's stack entry leaves the
@@ -504,14 +502,18 @@ class CardVfxController {
       target.face,
       spec.owningStepMs,
       (liveScene, surface) => {
-        liveScene.startDamageStrike({
+        const owner = this.nextToken++;
+        const inherited = liveScene.startDamageStrike({
           ...strike,
-          hit: { ...surface, objectId, onDone: () => this.unveil(objectId) },
+          hit: { ...surface, objectId, onDone: () => this.unveil(objectId, owner) },
           onImpact: () => {
-            this.veil(objectId);
+            // An effect that took over before the impact keeps its veil.
+            if (!this.veilOwners.has(objectId)) this.veil(objectId, owner);
             onImpact();
           },
         });
+        // The effect the hit replaced never completes, so its veil is the hit's.
+        if (inherited) this.veil(objectId, owner);
       },
       classic,
     );
@@ -533,8 +535,7 @@ class CardVfxController {
       amount: spec.amount,
       tier: this.tier,
       pace: spec.pace,
-      // The slam started this tick, on the clock the frames run on.
-      startMs: performance.now(),
+      startMs: spec.startMs,
       impactS: spec.impactDelayMs / 1000 / spec.pace,
     });
   }
@@ -589,8 +590,8 @@ class CardVfxController {
       runAll(pending.classics);
       return;
     }
-    const { spec, from, commitEpoch, classics } = pending;
-    this.start(this.scene, spec, from, this.scene.uploadFace(image), commitEpoch, classics);
+    const { spec, from, classics } = pending;
+    this.start(this.scene, spec, from, this.scene.uploadFace(image), classics);
   }
 
   private takePending(objectId: ObjectId, token: number): PendingStart | null {
@@ -606,10 +607,10 @@ class CardVfxController {
     spec: CardFlightSpec,
     from: CardPose | null,
     front: Texture | null,
-    commitEpoch: number,
     classics: readonly (() => void)[],
   ) {
-    const { objectId, route } = spec;
+    const { objectId, route, commitEpoch } = spec;
+    const owner = this.nextToken++;
     const started = scene.startCardFlight({
       objectId,
       route,
@@ -621,41 +622,43 @@ class CardVfxController {
       tier: this.tier,
       landingColors: spec.endColors,
       aim: (origin) => this.aim(route, objectId, origin),
-      commitEpoch: () => useGameStore.getState().engineCommitEpoch,
+      committed: () => useGameStore.getState().engineCommitEpoch !== commitEpoch,
       // A pile stands in for its card before the commit moves it there, so
       // the card's old surface stays veiled until then.
-      onRelease: () => this.unveilAfterCommit(objectId, commitEpoch),
+      onRelease: () => this.unveilAfterCommit(objectId, commitEpoch, owner),
     });
     if (!started) {
       front?.dispose();
       runAll(classics);
       return;
     }
-    this.veil(objectId);
+    this.veil(objectId, owner);
   }
 
   // A handoff keeps the veil it already holds: no unveil in between. A new
-  // effect takes over a veil still waiting on a commit.
-  private veil(objectId: ObjectId) {
+  // effect takes over the veil, and any commit wait it was held under.
+  private veil(objectId: ObjectId, owner: number) {
     this.commitWaits.get(objectId)?.();
     this.commitWaits.delete(objectId);
-    if (this.veiled.has(objectId)) return;
-    this.veiled.add(objectId);
-    useAnimationStore.getState().veilFlight(objectId);
+    const held = this.veilOwners.has(objectId);
+    this.veilOwners.set(objectId, owner);
+    if (!held) useAnimationStore.getState().veilFlight(objectId);
   }
 
-  /** Unveils once the engine commit that follows `commitEpoch` has landed, so
-   *  an effect that ends first does not show the card's old surface again. */
-  private unveilAfterCommit(objectId: ObjectId, commitEpoch: number) {
+  /** Unveils once the engine commit after `commitEpoch` (the owning step's) has
+   *  landed, so an effect that ends first does not show the card's old surface
+   *  again. */
+  private unveilAfterCommit(objectId: ObjectId, commitEpoch: number, owner: number) {
+    if (this.veilOwners.get(objectId) !== owner) return;
     if (useGameStore.getState().engineCommitEpoch !== commitEpoch) {
-      this.unveil(objectId);
+      this.unveil(objectId, owner);
       return;
     }
     const stop = useGameStore.subscribe((state) => {
       if (state.engineCommitEpoch === commitEpoch) return;
       stop();
       this.commitWaits.delete(objectId);
-      this.unveil(objectId);
+      this.unveil(objectId, owner);
     });
     this.commitWaits.set(objectId, stop);
   }
@@ -674,8 +677,9 @@ class CardVfxController {
     return aim;
   }
 
-  private unveil(objectId: ObjectId) {
-    if (!this.veiled.delete(objectId)) return;
+  private unveil(objectId: ObjectId, owner: number) {
+    if (this.veilOwners.get(objectId) !== owner) return;
+    this.veilOwners.delete(objectId);
     useAnimationStore.getState().unveilFlight(objectId);
   }
 
@@ -690,8 +694,8 @@ class CardVfxController {
     for (const stop of this.commitWaits.values()) stop();
     this.commitWaits.clear();
     const { unveilFlight } = useAnimationStore.getState();
-    for (const objectId of this.veiled) unveilFlight(objectId);
-    this.veiled.clear();
+    for (const objectId of this.veilOwners.keys()) unveilFlight(objectId);
+    this.veilOwners.clear();
   }
 
   private publish() {

@@ -349,7 +349,8 @@ export interface CardFlightParams {
   delayMs: number;
   tier: CardVfxTier;
   aim: (origin: DOMRectReadOnly) => Aim;
-  commitEpoch: () => number;
+  /** Whether the engine has committed the state this flight moves to. */
+  committed: () => boolean;
   onRelease: (reason: FlightRelease) => void;
 }
 
@@ -389,7 +390,6 @@ class CardFlightEffect implements CardFlight {
   private readonly profile: FlightProfile;
   private readonly targetFlip: number;
   private readonly holdPose: CardPose;
-  private readonly startEpoch: number;
   private state: FlightState;
   private phase: FlightPhase = { kind: "flying" };
   private flightStartMs: number | null = null;
@@ -407,7 +407,6 @@ class CardFlightEffect implements CardFlight {
     this.targetFlip = flipAngle(params.flip, true);
     this.state = params.from;
     this.holdPose = { ...params.from, y: params.from.y - params.from.h * HOLD_RISE_FRACTION };
-    this.startEpoch = params.commitEpoch();
     const back = params.back ?? host.placeholderTexture;
     this.card = createCardMesh(params.front ?? back, back, 1);
     this.card.name = "card-flight";
@@ -486,7 +485,7 @@ class CardFlightEffect implements CardFlight {
 
     // The queue never waits: once the engine has committed, a destination that
     // still has no own node is abandoned, and so is any flight past its bound.
-    const committed = this.params.commitEpoch() !== this.startEpoch;
+    const committed = this.params.committed();
     this.absentAfterCommit = committed && aim.kind !== "own" ? this.absentAfterCommit + 1 : 0;
     if (
       this.absentAfterCommit >= ABSENT_FRAMES_AFTER_COMMIT ||

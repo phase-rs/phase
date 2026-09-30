@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import type { GameState } from "../adapter/types";
 import type { AnimationStep, PositionSnapshot } from "../animation/types";
+import { useGameStore } from "./gameStore";
 
 /**
  * Life totals to show while an animation window is open.
@@ -23,9 +24,16 @@ interface DisplayedLifeTotals {
   totals: Map<number, number>;
 }
 
+/** A step as queued, stamped with the `gameStore.engineCommitEpoch` it was
+ *  queued under: its own engine commit lands after it, so any later epoch
+ *  means the step's state (or a newer one) has committed. */
+export interface QueuedStep extends AnimationStep {
+  commitEpoch: number;
+}
+
 interface AnimationStoreState {
-  queue: AnimationStep[];
-  activeStep: AnimationStep | null;
+  queue: QueuedStep[];
+  activeStep: QueuedStep | null;
   activeGeneration: number;
   isPlaying: boolean;
   positionRegistry: Map<number, DOMRect>;
@@ -84,9 +92,11 @@ export const useAnimationStore = create<AnimationStore>()((set, get) => ({
   flightVeiledObjectIds: NO_VEILED_OBJECTS,
   cardVfxReady: false,
 
-  enqueueSteps: (steps) => {
-    if (steps.length === 0) return;
+  enqueueSteps: (unstamped) => {
+    if (unstamped.length === 0) return;
 
+    const { engineCommitEpoch } = useGameStore.getState();
+    const steps = unstamped.map((step) => ({ ...step, commitEpoch: engineCommitEpoch }));
     const { activeStep, queue } = get();
     if (activeStep) {
       // Already animating — append to queue

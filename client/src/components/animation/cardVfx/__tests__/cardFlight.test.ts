@@ -62,7 +62,7 @@ interface Harness {
 
 function fly(
   route: CardFlightRoute,
-  { aim, epoch = () => 0, pace = 1 }: { aim: () => Aim; epoch?: () => number; pace?: number },
+  { aim, committed = () => false, pace = 1 }: { aim: () => Aim; committed?: () => boolean; pace?: number },
 ): Harness {
   const releases: FlightRelease[] = [];
   const effectHost = host();
@@ -77,7 +77,7 @@ function fly(
     delayMs: 0,
     tier: "full",
     aim,
-    commitEpoch: epoch,
+    committed,
     onRelease: (reason) => releases.push(reason),
   });
   return {
@@ -207,14 +207,14 @@ describe("card flight effect", () => {
   });
 
   it("V3-6d (ii): after the commit, an own node missing for two frames abandons and fades out", () => {
-    let epoch = 0;
+    let committed = false;
     const pace = 1.5;
-    const harness = fly({ from: "Stack", to: "Battlefield", ownerId: 0 }, { aim: () => ({ kind: "hold" }), epoch: () => epoch, pace });
+    const harness = fly({ from: "Stack", to: "Battlefield", ownerId: 0 }, { aim: () => ({ kind: "hold" }), committed: () => committed, pace });
     harness.frame(0);
     harness.frame(FRAME_MS);
     expect(harness.releases).toEqual([]);
 
-    epoch = 1;
+    committed = true;
     let ms = FRAME_MS;
     for (let i = 1; i < ABSENT_FRAMES_AFTER_COMMIT; i += 1) {
       ms += FRAME_MS;
@@ -243,11 +243,11 @@ describe("card flight effect", () => {
   });
 
   it("V3-6d (iv): after the commit, a present own node is landed on, not abandoned", () => {
-    let epoch = 0;
+    let committed = false;
     const slot = own({ ...TO, w: CARD_W, h: CARD_H });
-    const harness = fly({ from: "Stack", to: "Battlefield", ownerId: 0 }, { aim: () => slot, epoch: () => epoch });
+    const harness = fly({ from: "Stack", to: "Battlefield", ownerId: 0 }, { aim: () => slot, committed: () => committed });
     harness.frame(0);
-    epoch = 1;
+    committed = true;
     for (let ms = FRAME_MS; ms <= RESOLVE_FLIGHT_MS + SETTLE_MS + 2 * FRAME_MS; ms += FRAME_MS) harness.frame(ms);
     expect(harness.releases).toEqual(["land"]);
   });

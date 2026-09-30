@@ -45,14 +45,14 @@ describe("applyCardKnockback", () => {
 
   it("V12-3: a card mid-slam is not knocked back, and a knocked-back card does not slam until it rests", () => {
     const slamming = card();
-    expect(applyCardSlam(slamming, 400, 0, 1, () => {})).toBe(true);
+    expect(applyCardSlam(slamming, 400, 0, 1, () => {}, performance.now())).toBe(true);
     expect(applyCardKnockback(slamming, 1, 0, 3, 1)).toBe(false);
 
     const struck = card();
     expect(applyCardKnockback(struck, 1, 0, 3, 1)).toBe(true);
-    expect(applyCardSlam(struck, 400, 0, 1, () => {})).toBe(false);
+    expect(applyCardSlam(struck, 400, 0, 1, () => {}, performance.now())).toBe(false);
     vi.advanceTimersByTime(CARD_KNOCKBACK_MS + FRAME_MS);
-    expect(applyCardSlam(struck, 400, 0, 1, () => {})).toBe(true);
+    expect(applyCardSlam(struck, 400, 0, 1, () => {}, performance.now())).toBe(true);
     vi.advanceTimersByTime(CARD_SLAM_FLIGHT_MS + 1000);
   });
 

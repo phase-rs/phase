@@ -19,6 +19,9 @@ const activeSlams = new WeakSet<HTMLElement>();
  * composes on top of Framer Motion's `transform` (rotate, opacity, y)
  * without conflict.
  *
+ * `start` is when the slam begins on the frame clock (`performance.now()`),
+ * so an effect given the same start lands on the same frame.
+ *
  * Returns `true` if the slam started (and will fire `onImpact`), or `false`
  * if the element is already mid-slam — letting the caller show a floating
  * number instead of dropping the hit entirely.
@@ -29,6 +32,7 @@ export function applyCardSlam(
   targetY: number,
   speedMultiplier: number,
   onImpact: () => void,
+  start: number,
 ): boolean {
   if (activeSlams.has(element)) return false;
   activeSlams.add(element);
@@ -43,7 +47,6 @@ export function applyCardSlam(
   const jitterMs = 300 * speedMultiplier;
   const returnMs = 250 * speedMultiplier;
   const totalMs = flightMs + jitterMs + returnMs;
-  const start = performance.now();
   let impactFired = false;
 
   // Elevate above other cards during animation
