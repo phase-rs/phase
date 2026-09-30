@@ -65,8 +65,7 @@ use super::lower::{
     rewrite_counter_instead_target_from_antecedent, rewrite_else_event_context_to_stable,
     rewrite_else_parent_target_to_self_ref, rewrite_player_anaphor_targets_in_definition,
     rewrite_those_tokens_from_antecedent, rewrite_two_target_counter_chain,
-    strict_fail_parent_target_after_per_player_choice, target_choice_timing_for_clause,
-    thread_chosen_damage_source_into_oneshot_effects,
+    target_choice_timing_for_clause, thread_chosen_damage_source_into_oneshot_effects,
 };
 use super::sequence::{apply_clause_continuation, def_bears_retargetable_copy};
 use super::{
@@ -3872,10 +3871,6 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     // CR 608.2c + CR 609.3: the same rule for a gated zone choice's tracked set
     // ("If …, for each opponent, choose …. Destroy the chosen permanents.").
     relink_gated_tracked_set_consumers(&mut defs);
-
-    // CR 608.2c: a per-player choice publishes only a tracked set; a following
-    // `ParentTarget` reader has no producer and is strict-failed.
-    strict_fail_parent_target_after_per_player_choice(&mut defs);
 
     // CR 707.12: "Copy [a card]. You may cast the copy ..." is not a stack
     // copy (CR 707.10). It creates a card copy in the source zone, then casts

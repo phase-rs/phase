@@ -9951,14 +9951,7 @@ pub(super) fn parse_destroy_ast(
         let (target, _rem) = parse_target_with_ctx(rest, ctx);
         #[cfg(debug_assertions)]
         assert_no_compound_remainder(_rem, text);
-        // CR 608.2c + CR 701.8a: after a zone-choice producer the chosen set lives
-        // only in the chain's tracked set (a per-player choice never writes the
-        // continuation's targets), and single-object `Destroy` reads targets. The
-        // set-wide `DestroyAll` over the tracked set destroys every chosen
-        // permanent at once.
-        let all = matches!(target, TargetFilter::TrackedSet { .. })
-            && ctx.pending_tracked_set_origin.is_some();
-        return Some(ZoneCounterImperativeAst::Destroy { target, all });
+        return Some(ZoneCounterImperativeAst::Destroy { target, all: false });
     }
     None
 }

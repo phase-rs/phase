@@ -8,6 +8,7 @@ pub(crate) mod imperative;
 pub(super) mod lower;
 pub(crate) mod mana;
 pub(crate) mod meld;
+mod per_opponent_choice;
 mod search;
 pub(crate) mod sequence;
 pub(crate) mod subject;
@@ -38180,7 +38181,21 @@ fn strip_trailing_coin_heads_quantifier(text: &str) -> Option<&str> {
     Some(text[..base.len()].trim_end())
 }
 
+/// Parse an effect chain into its IR. A thin wrapper around
+/// [`parse_effect_chain_ir_body`] so every one of its return paths passes
+/// through the per-opponent choice tail rule
+/// ([`per_opponent_choice::enforce_per_opponent_choice_tail`]).
 pub(crate) fn parse_effect_chain_ir(
+    text: &str,
+    kind: AbilityKind,
+    ctx: &mut ParseContext,
+) -> EffectChainIr {
+    let mut ir = parse_effect_chain_ir_body(text, kind, ctx);
+    per_opponent_choice::enforce_per_opponent_choice_tail(&mut ir);
+    ir
+}
+
+fn parse_effect_chain_ir_body(
     text: &str,
     kind: AbilityKind,
     ctx: &mut ParseContext,

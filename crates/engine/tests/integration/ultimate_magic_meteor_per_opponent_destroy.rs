@@ -814,10 +814,7 @@ fn chaos_defiler_random_consumer_stays_unsupported() {
     );
     let defs = all_defs(&parsed);
     assert!(
-        defs.iter().any(|d| matches!(
-            &*d.effect,
-            Effect::Unimplemented { name, .. } if name == "per_player_choice_parent_target"
-        )),
+        defs.iter().any(|d| is_trailing_gap(d)),
         "{:#?}",
         parsed.triggers
     );
@@ -855,7 +852,11 @@ fn highcliff_felidar_relative_superlative_stays_unsupported() {
 fn benthic_anomaly_copy_consumer_stays_unsupported() {
     let text = "Devoid (This card has no color.)\nWhen you cast this spell, for each opponent, choose a creature that player controls. Create a token that's a copy of one of those creatures, except its power is equal to the total power of those creatures, its toughness is equal to the total toughness of those creatures, and it's a colorless Eldrazi creature.";
     let parsed = parse(text, "Benthic Anomaly", &["Devoid"], &["Creature"]);
-    assert!(has_unimplemented(&parsed), "{:#?}", parsed.triggers);
+    assert!(
+        all_defs(&parsed).iter().any(|d| is_trailing_gap(d)),
+        "{:#?}",
+        parsed.triggers
+    );
 }
 
 /// The printed-`target` per-opponent form and a targeted "the chosen creatures"
@@ -913,67 +914,91 @@ fn targeted_forms_keep_their_parent_target_reading() {
 }
 
 // ---------------------------------------------------------------------------
-// T18 / T19: consumers the per-player set cannot express stay unsupported
+// T18+: the positional reader rule after a per-opponent choice
 // ---------------------------------------------------------------------------
 
-fn is_per_player_parent_target_gap(def: &AbilityDefinition) -> bool {
+fn is_trailing_gap(def: &AbilityDefinition) -> bool {
     matches!(
         &*def.effect,
-        Effect::Unimplemented { name, .. } if name == "per_player_choice_parent_target"
+        Effect::Unimplemented { name, .. } if name == "per_opponent_choice_trailing_clause"
     )
 }
 
-/// "Destroy the chosen artifacts" after "choose an artifact or land" names only
-/// the chosen artifacts. The bare tracked set would destroy a chosen land too
-/// (CR 608.2c + CR 608.2d), so the narrower noun is an honest gap — and at
-/// runtime a chosen land is never destroyed.
-#[test]
-fn narrower_noun_than_the_choice_is_strict_and_spares_a_chosen_land() {
-    for text in [
-        "For each opponent, choose an artifact or land that player controls. Destroy the chosen artifacts.",
-        "For each opponent, choose a creature or land that player controls. Destroy the chosen creatures.",
-    ] {
-        let parsed = parse(text, "Probe", &[], &["Sorcery"]);
-        let defs = all_defs(&parsed);
-        assert!(
-            defs.iter().any(|d| matches!(
-                &*d.effect,
-                Effect::ChooseFromZone {
-                    zone_owner: ZoneOwner::Each(PerPlayerScope::Opponents),
-                    ..
-                }
-            )),
-            "reach: the per-opponent choice parses: {text}"
-        );
-        assert!(
-            defs.iter().any(|d| is_per_player_parent_target_gap(d)),
-            "the narrower-noun consumer is strict: {:#?}",
-            parsed.abilities
-        );
-        assert!(
-            !defs.iter().any(|d| matches!(
-                &*d.effect,
-                Effect::DestroyAll {
-                    target: TargetFilter::TrackedSet { .. },
-                    ..
-                }
-            )),
-            "no unfiltered destroy of the whole chosen set: {text}"
-        );
-    }
-
-    let mut scenario = GameScenario::new_n_player(3, 301);
-    scenario.at_phase(Phase::PreCombatMain);
-    let p1_land = add_land(&mut scenario, P1, "P1 Land");
-    add_artifact(&mut scenario, P1, "P1 Relic");
-    add_artifact(&mut scenario, P2, "P2 Relic");
-    let spell = scenario
-        .add_spell_to_hand_from_oracle(
-            P0,
-            "Chosen Artifacts Probe",
-            false,
-            "For each opponent, choose an artifact or land that player controls. Destroy the chosen artifacts.",
+fn has_per_opponent_choice(parsed: &ParsedAbilities) -> bool {
+    all_defs(parsed).iter().any(|d| {
+        matches!(
+            &*d.effect,
+            Effect::ChooseFromZone {
+                zone_owner: ZoneOwner::Each(PerPlayerScope::Opponents),
+                zone: Zone::Battlefield,
+                ..
+            }
         )
+    })
+}
+
+fn has_set_destroy(parsed: &ParsedAbilities) -> bool {
+    all_defs(parsed).iter().any(|d| {
+        matches!(
+            &*d.effect,
+            Effect::DestroyAll {
+                target: TargetFilter::TrackedSet { .. },
+                ..
+            }
+        )
+    })
+}
+
+/// Parse `text` as a sorcery and assert the per-opponent choice parsed (reach)
+/// and every clause after it is an honest gap with no set destroy.
+fn assert_strict(text: &str) -> ParsedAbilities {
+    let parsed = parse(text, "Probe", &[], &["Sorcery"]);
+    assert!(
+        has_per_opponent_choice(&parsed),
+        "reach: the per-opponent choice parses: {text}\n{:#?}",
+        parsed.abilities
+    );
+    assert!(
+        all_defs(&parsed).iter().any(|d| is_trailing_gap(d)),
+        "the trailing clause is strict: {text}\n{:#?}",
+        parsed.abilities
+    );
+    assert!(
+        !has_set_destroy(&parsed),
+        "no supported destroy of the chosen set: {text}"
+    );
+    parsed
+}
+
+/// Parse `text` as a sorcery and assert the supported shape: the per-opponent
+/// choice followed by one set destroy, no gap.
+fn assert_supported(text: &str) {
+    let parsed = parse(text, "Probe", &[], &["Sorcery"]);
+    assert!(has_per_opponent_choice(&parsed), "{text}");
+    assert!(has_set_destroy(&parsed), "{text}\n{:#?}", parsed.abilities);
+    assert!(
+        !has_unimplemented(&parsed),
+        "{text}\n{:#?}",
+        parsed.abilities
+    );
+}
+
+/// Cast a zero-cost sorcery with `text` in a 3-player game where each opponent
+/// controls one artifact and one land, pick with `pick`, and return
+/// `(runner, prompts, [p1_art, p1_land, p2_art, p2_land])`.
+fn run_three_player(
+    text: &str,
+    seed: u64,
+    pick: impl FnMut(&GameRunner, &[ObjectId]) -> Vec<ObjectId>,
+) -> (GameRunner, Vec<Prompt>, [ObjectId; 4]) {
+    let mut scenario = GameScenario::new_n_player(3, seed);
+    scenario.at_phase(Phase::PreCombatMain);
+    let p1_art = add_artifact(&mut scenario, P1, "P1 Relic");
+    let p1_land = add_land(&mut scenario, P1, "P1 Land");
+    let p2_art = add_artifact(&mut scenario, P2, "P2 Relic");
+    let p2_land = add_land(&mut scenario, P2, "P2 Land");
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Probe", false, text)
         .id();
     let mut runner = scenario.build();
     let card_id = runner.state().objects[&spell].card_id;
@@ -985,89 +1010,276 @@ fn narrower_noun_than_the_choice_is_strict_and_spares_a_chosen_land() {
             payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast");
-    let prompts = resolve_with(
-        &mut runner,
-        |r, cards| {
-            if controller(r, cards[0]) == P1 {
-                vec![p1_land]
+    let prompts = resolve_with(&mut runner, pick, |_, _| {});
+    (runner, prompts, [p1_art, p1_land, p2_art, p2_land])
+}
+
+/// A narrower noun than the choice ("the chosen artifacts", "those creatures",
+/// "each artifact chosen this way" after "choose an artifact or land") names
+/// only part of the chosen set, which the bare set cannot express: strict, and
+/// at runtime a chosen land is never destroyed (CR 608.2c + CR 608.2d).
+#[test]
+fn narrower_noun_than_the_choice_is_strict_and_spares_a_chosen_land() {
+    for text in [
+        "For each opponent, choose an artifact or land that player controls. Destroy the chosen artifacts.",
+        "For each opponent, choose a creature or land that player controls. Destroy the chosen creatures.",
+        "For each opponent, choose a creature or land that player controls. Destroy those creatures.",
+        "For each opponent, choose an artifact or land that player controls. Destroy each artifact chosen this way.",
+    ] {
+        assert_strict(text);
+    }
+
+    for text in [
+        "For each opponent, choose an artifact or land that player controls. Destroy the chosen artifacts.",
+        "For each opponent, choose an artifact or land that player controls. Destroy each artifact chosen this way.",
+    ] {
+        let mut land = None;
+        let (runner, prompts, [_, p1_land, _, _]) = run_three_player(text, 301, |r, cards| {
+            let pick = if controller(r, cards[0]) == P1 {
+                *cards
+                    .iter()
+                    .find(|id| r.state().objects[id].card_types.core_types.contains(&CoreType::Land))
+                    .expect("P1's land is offered")
             } else {
-                vec![cards[0]]
+                cards[0]
+            };
+            if controller(r, cards[0]) == P1 {
+                land = Some(pick);
             }
+            vec![pick]
+        });
+        assert_eq!(prompts.len(), 2, "reach: both opponents prompted");
+        assert_eq!(land, Some(p1_land), "reach: the land was picked");
+        assert!(
+            on_battlefield(&runner, p1_land),
+            "a chosen land is not one of the named artifacts: {text}"
+        );
+    }
+}
+
+/// Implied nouns and Druid of Purification's distributive wording are the
+/// supported shape, and destroy every pick.
+#[test]
+fn implied_noun_and_distributive_forms_destroy_every_pick() {
+    for text in [
+        "For each opponent, choose a creature that player controls. Destroy the chosen creatures.",
+        "For each opponent, choose a creature that player controls. Destroy those creatures.",
+        "For each opponent, choose an artifact that player controls. Destroy each artifact chosen this way.",
+        "For each opponent, choose an artifact or land that player controls. Destroy each permanent chosen this way.",
+    ] {
+        assert_supported(text);
+    }
+    let (runner, prompts, [p1_art, p1_land, p2_art, p2_land]) = run_three_player(
+        "For each opponent, choose an artifact or land that player controls. Destroy each permanent chosen this way.",
+        302,
+        |r, cards| {
+            let want_land = controller(r, cards[0]) == P2;
+            vec![*cards
+                .iter()
+                .find(|id| {
+                    r.state().objects[id]
+                        .card_types
+                        .core_types
+                        .contains(&CoreType::Land)
+                        == want_land
+                })
+                .expect("candidate")]
         },
-        |_, _| {},
     );
-    assert_eq!(
-        prompts.len(),
-        2,
-        "reach: both opponents prompted: {prompts:?}"
+    assert_eq!(prompts.len(), 2);
+    assert_eq!(zone_of(&runner, p1_art), Some(Zone::Graveyard));
+    assert_eq!(zone_of(&runner, p2_land), Some(Zone::Graveyard));
+    assert!(on_battlefield(&runner, p1_land));
+    assert!(on_battlefield(&runner, p2_art));
+
+    let (runner, _, [p1_art, _, p2_art, _]) = run_three_player(
+        "For each opponent, choose an artifact that player controls. Destroy each artifact chosen this way.",
+        303,
+        |_, cards| vec![cards[0]],
     );
+    assert_eq!(zone_of(&runner, p1_art), Some(Zone::Graveyard));
+    assert_eq!(zone_of(&runner, p2_art), Some(Zone::Graveyard));
+}
+
+/// A singular definite ("the chosen artifact", "that artifact", "the artifact
+/// chosen this way") names one object; a per-opponent choice supplies one per
+/// opponent. Strict.
+#[test]
+fn singular_definite_reference_is_strict() {
+    for text in [
+        "For each opponent, choose an artifact that player controls. Destroy the chosen artifact.",
+        "For each opponent, choose an artifact that player controls. Destroy that artifact.",
+        "For each opponent, choose an artifact that player controls. Destroy the artifact chosen this way.",
+    ] {
+        assert_strict(text);
+    }
+}
+
+/// Any clause after the choice other than the single final destroy is strict,
+/// whatever it says or reads.
+#[test]
+fn every_other_trailing_clause_is_strict() {
+    for text in [
+        // R2b / CH1 / M2-R2: an instruction between the choice and the destroy.
+        "For each opponent, choose an artifact or land that player controls. You gain 1 life. Destroy the chosen permanents.",
+        "For each opponent, choose an artifact or land that player controls. Target player gains 1 life. Destroy the chosen permanents.",
+        "For each opponent, choose an artifact or land that player controls. Tap target creature. Destroy the chosen permanents.",
+        // Singular anaphor after an intervening clause.
+        "For each opponent, choose an artifact that player controls. You gain 1 life. Destroy that artifact.",
+        // Pronouns, adjacent and not.
+        "For each opponent, choose an artifact that player controls. Destroy them.",
+        "For each opponent, choose an artifact that player controls. You gain 1 life. Destroy them.",
+        "For each opponent, choose a creature that player controls. Destroy it.",
+        // A quantity reader.
+        "For each opponent, choose a creature that player controls. You gain 1 life. Create a 1/1 white Soldier creature token for each creature chosen this way.",
+        // A correct destroy that is not the last clause.
+        "For each opponent, choose an artifact or land that player controls. Destroy the chosen permanents. You gain 1 life.",
+        // An in-chain reflexive and an outer delayed trigger.
+        "For each opponent, choose an artifact that player controls. When you do, you gain 1 life.",
+        "For each opponent, choose an artifact that player controls. At the beginning of the next end step, destroy the chosen permanents.",
+    ] {
+        assert_strict(text);
+    }
+
+    // CH2: honesty over coverage — strict even though "it" could name the
+    // Equipment.
+    let ch2 = "When this creature enters, for each opponent, choose a creature that player controls. Attach up to one target Equipment you control to this creature. Destroy it.";
+    let parsed = parse(ch2, "Probe", &[], &["Creature"]);
+    assert!(has_per_opponent_choice(&parsed), "{:#?}", parsed.triggers);
     assert!(
-        prompts[0].cards.contains(&p1_land) || prompts[1].cards.contains(&p1_land),
-        "reach: the land was offered and picked"
-    );
-    assert!(
-        on_battlefield(&runner, p1_land),
-        "a chosen land is not one of \"the chosen artifacts\""
+        all_defs(&parsed).iter().any(|d| is_trailing_gap(d)),
+        "{:#?}",
+        parsed.triggers
     );
 }
 
-/// "The chosen permanents" separated from the per-opponent choice by another
-/// instruction does not bind the choice's tracked set (only the adjacent form
-/// does), and its `ParentTarget` reading has no producer — so it is an honest
-/// gap rather than a supported destroy that never fires.
+/// A correct destroy followed by another clause does not bind, and the chosen
+/// permanents are not destroyed at runtime.
 #[test]
-fn chosen_permanents_after_an_intervening_instruction_is_strict() {
-    let text = "Meteor Probe deals 7 damage to each creature. If this spell was cast from exile, for each opponent, choose an artifact or land that player controls. You gain 1 life. Destroy the chosen permanents.\nForetell {5}{R} (During your turn, you may pay {2} and exile this card from your hand face down. Cast it on a later turn for its foretell cost.)";
-    let parsed = parse(text, "Meteor Probe", &["Foretell"], &["Sorcery"]);
-    let defs = all_defs(&parsed);
-    assert!(
-        defs.iter().any(|d| matches!(
-            &*d.effect,
-            Effect::ChooseFromZone {
-                zone_owner: ZoneOwner::Each(PerPlayerScope::Opponents),
-                ..
-            }
-        )),
-        "reach: the per-opponent choice parses: {:#?}",
-        parsed.abilities
+fn destroy_that_is_not_last_is_not_bound_at_runtime() {
+    let (runner, prompts, [p1_art, _, p2_art, _]) = run_three_player(
+        "For each opponent, choose an artifact that player controls. Destroy the chosen permanents. You gain 1 life.",
+        304,
+        |_, cards| vec![cards[0]],
     );
-    assert!(
-        defs.iter()
-            .any(|d| matches!(&*d.effect, Effect::GainLife { .. })),
-        "reach: the intervening instruction parses: {:#?}",
-        parsed.abilities
-    );
-    assert!(
-        defs.iter().any(|d| is_per_player_parent_target_gap(d)),
-        "the non-adjacent consumer is strict: {:#?}",
+    assert_eq!(prompts.len(), 2, "reach: the choice ran");
+    assert!(on_battlefield(&runner, p1_art));
+    assert!(on_battlefield(&runner, p2_art));
+}
+
+/// Two per-opponent choices: the first one governs, so the second choice and
+/// the destroy are both strict. The destroy would otherwise act on only the
+/// second group (each choice starts a fresh tracked set).
+#[test]
+fn second_per_opponent_choice_is_strict() {
+    let text = "For each opponent, choose an artifact that player controls. For each opponent, choose a land that player controls. Destroy the chosen permanents.";
+    let parsed = assert_strict(text);
+    let gaps = all_defs(&parsed)
+        .iter()
+        .filter(|d| is_trailing_gap(d))
+        .count();
+    assert_eq!(
+        gaps, 2,
+        "the second choice and the destroy: {:#?}",
         parsed.abilities
     );
 
-    // Control: an intervening instruction that declares its own target is the
-    // nearer antecedent, so a following "it" keeps its `ParentTarget` reading.
-    let control = parse(
-        "For each opponent, choose an artifact that player controls. Tap target creature. Put a +1/+1 counter on it.",
+    let (runner, prompts, [p1_art, p1_land, p2_art, p2_land]) =
+        run_three_player(text, 305, |_, cards| vec![cards[0]]);
+    assert_eq!(prompts.len(), 2, "only the first choice prompts");
+    for id in [p1_art, p1_land, p2_art, p2_land] {
+        assert!(
+            on_battlefield(&runner, id),
+            "nothing is claimed as destroyed"
+        );
+    }
+}
+
+/// Conditional bodies that the chunker splits into several clauses are parsed
+/// as their own chain and absorbed into the enclosing one. With a per-opponent
+/// choice inside such a body the splitter separates "for each opponent" from
+/// "choose …", so the choice is never produced there and nothing is claimed as
+/// supported: the body stays an honest gap (Meteor's own conditional body is a
+/// single chunk — `meteor_conditional_body_is_a_single_chunk`).
+#[test]
+fn split_conditional_bodies_never_claim_a_set_destroy() {
+    for text in [
+        "If you control an artifact, for each opponent, choose a creature that player controls, then you gain 1 life. Destroy the chosen permanents.",
+        "If you control an artifact, you gain 1 life, then for each opponent, choose a creature that player controls. Destroy the chosen permanents.",
+    ] {
+        let parsed = parse(text, "Probe", &[], &["Sorcery"]);
+        assert!(!has_set_destroy(&parsed), "{text}\n{:#?}", parsed.abilities);
+        assert!(has_unimplemented(&parsed), "{text}\n{:#?}", parsed.abilities);
+    }
+}
+
+/// Separate abilities and modes are separate chains: the rule never reaches
+/// them.
+#[test]
+fn independent_abilities_and_modes_reset() {
+    let parsed = parse(
+        "When this creature enters, for each opponent, choose an artifact that player controls. Destroy the chosen permanents.\n{T}: You gain 1 life.",
+        "Probe",
+        &[],
+        &["Creature"],
+    );
+    assert!(has_set_destroy(&parsed), "reach: the trigger binds");
+    assert!(
+        !all_defs(&parsed).iter().any(|d| is_trailing_gap(d)),
+        "the activated ability is not governed: {:#?}",
+        parsed.abilities
+    );
+    assert!(
+        parsed
+            .abilities
+            .iter()
+            .any(|a| matches!(&*a.effect, Effect::GainLife { .. })),
+        "reach: the second ability parsed"
+    );
+
+    let modal = parse(
+        "Choose one —\n• For each opponent, choose an artifact that player controls. Destroy the chosen permanents.\n• You gain 1 life.",
         "Probe",
         &[],
         &["Sorcery"],
     );
+    let dbg = format!("{modal:#?}");
     assert!(
-        all_defs(&control).iter().any(|d| matches!(
-            &*d.effect,
-            Effect::PutCounter {
-                target: TargetFilter::ParentTarget,
-                ..
-            }
-        )),
-        "reach: the control's \"it\" reads ParentTarget: {:#?}",
-        control.abilities
+        !dbg.contains("per_opponent_choice_trailing_clause"),
+        "the second mode is not governed:\n{dbg}"
+    );
+    assert!(dbg.contains("GainLife"), "reach: the second mode parsed");
+}
+
+/// Merge-base parity: other per-player populations and zones are untouched.
+#[test]
+fn other_per_player_populations_are_untouched() {
+    let breach = parse(
+        "Each player mills ten cards. For each player, choose a creature or planeswalker card in that player's graveyard. Put those cards onto the battlefield under your control. Then each creature you control becomes a Phyrexian in addition to its other types.",
+        "Breach the Multiverse",
+        &[],
+        &["Sorcery"],
+    );
+    let dbg = format!("{breach:#?}");
+    assert!(
+        dbg.contains("AllPlayers"),
+        "reach: Breach's choice parses:\n{dbg}"
     );
     assert!(
-        !all_defs(&control)
-            .iter()
-            .any(|d| is_per_player_parent_target_gap(d)),
-        "a targeted intervening instruction is the antecedent: {:#?}",
-        control.abilities
+        !dbg.contains("per_opponent_choice_trailing_clause"),
+        "Breach is not governed:\n{dbg}"
+    );
+
+    let druid = parse(
+        "When this creature enters, starting with you, each player may choose an artifact or enchantment you don't control. Destroy each permanent chosen this way.",
+        "Druid of Purification",
+        &[],
+        &["Creature"],
+    );
+    let dbg = format!("{druid:#?}");
+    assert!(
+        !dbg.contains("per_opponent_choice_trailing_clause") && dbg.contains("DestroyAll"),
+        "Druid keeps its merge-base destroy:\n{dbg}"
     );
 }
 
