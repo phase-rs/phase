@@ -28,7 +28,7 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction,
     CastFromZoneDriver, CastingPermission, ChoiceType, ChosenGroupId, Comparator, ControllerRef,
     DamageChannel, Effect, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, ReturnResultId,
-    StaticCondition, SubAbilityLink, TapStateChange, TargetFilter,
+    SiblingCondition, StaticCondition, SubAbilityLink, TapStateChange, TargetFilter,
 };
 use crate::types::game_state::TargetSelectionConstraint;
 use crate::types::zones::Zone;
@@ -88,7 +88,8 @@ use super::{
     rewrite_grant_parent_to_filter, rewrite_parent_targets_to_tracked_set,
     rewrite_plural_library_recall_to_tracked_set, rewrite_rounding_mode,
     rewrite_singular_battlefield_recall_to_self, rewrite_that_type_mana_instead,
-    singular_battlefield_recall, stamp_delayed_returns, try_fold_token_repeat_into_count,
+    singular_battlefield_recall, stamp_delayed_returns, starts_with_plural_subject_anaphor,
+    starts_with_singular_subject_anaphor, try_fold_token_repeat_into_count,
     wire_optional_cast_decline_fallback, PrintedColorCarrier, PrintedColorCarrierScope,
 };
 
@@ -1920,6 +1921,21 @@ fn subject_anchored_optional_actor(
     }
 }
 
+/// Every node of `defs` and of their `sub_ability` chains, in written order.
+fn chain_nodes(defs: &[AbilityDefinition]) -> impl Iterator<Item = &AbilityDefinition> {
+    defs.iter()
+        .flat_map(|def| std::iter::successors(Some(def), |node| node.sub_ability.as_deref()))
+}
+
+/// CR 601.2c: an instruction that publishes its moved objects and declares a
+/// player-chosen object target (not a context reference or the untyped `Any`).
+fn declares_published_object_target(effect: &Effect) -> bool {
+    publishes_tracked_set_from_resolution(effect)
+        && effect
+            .target_filter()
+            .is_some_and(|filter| !filter.is_context_ref() && !matches!(filter, TargetFilter::Any))
+}
+
 /// CR 601.2c: a `Pump` whose target is its own declared target instance
 /// ("[up to one] [other] target creature gets +N/+M"), not an inherited anaphor.
 fn declares_pump_target(effect: &Effect) -> bool {
@@ -1930,6 +1946,54 @@ fn declares_pump_target(effect: &Effect) -> bool {
             ..
         }
     )
+}
+
+/// CR 601.2h: whether `condition` reads only the mana spent to cast the source
+/// ("if {C} was spent to cast this spell"), in either its canonical
+/// `QuantityCheck { ManaSpentToCast }` form or the legacy `ManaColorSpent` form.
+fn is_mana_spent_gate(condition: &AbilityCondition) -> bool {
+    match condition {
+        AbilityCondition::ManaColorSpent { .. } => true,
+        AbilityCondition::QuantityCheck {
+            lhs:
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ManaSpentToCast { .. },
+                },
+            ..
+        } => true,
+        AbilityCondition::Not { condition } => is_mana_spent_gate(condition),
+        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+            !conditions.is_empty() && conditions.iter().all(is_mana_spent_gate)
+        }
+        _ => false,
+    }
+}
+
+/// CR 608.2c + CR 601.2h: instructions are followed in the order written, each
+/// with its own gate. A clause gated on the mana spent to cast the spell that
+/// directly follows another such clause ("<A> if {R} was spent to cast this
+/// spell, and <B> if {G} was spent to cast this spell", or the same as two
+/// sentences) is an independent instruction: its gate reads the spell's payment,
+/// never the previous clause's effect or gate. Stamp it with the independent
+/// OR-branch marker (`SiblingCondition::ReplicatedOrBranch` on a
+/// `SequentialSibling`) so it is still evaluated when the previous clause's gate
+/// is false.
+///
+/// Only a gate that DIFFERS from the previous gated clause's (another color or
+/// another threshold) is independent. A clause repeating the same gate is the
+/// "then" continuation of one gated instruction ("if five or more mana was spent
+/// to cast that spell, you may exile ~, then return it to the battlefield") and
+/// keeps its `ContinuationStep` link so it still follows the first step.
+fn mark_independent_mana_spent_gates(defs: &mut [AbilityDefinition]) {
+    let mut previous_gate: Option<AbilityCondition> = None;
+    for def in defs {
+        let gate = def.condition.clone().filter(is_mana_spent_gate);
+        if gate.is_some() && previous_gate.is_some() && gate != previous_gate {
+            def.sub_link = SubAbilityLink::SequentialSibling;
+            def.sibling_condition = SiblingCondition::ReplicatedOrBranch;
+        }
+        previous_gate = gate;
+    }
 }
 
 pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
@@ -1952,7 +2016,16 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     // loop and execute them only after every later clause has performed its
     // top-level binding work against today's unchanged `defs` shape.
     let mut pending_relocations: Vec<PendingRelocation> = Vec::new();
+    // CR 608.2c: `defs` index where the most recent clause that emitted a def
+    // begins, and where the clause being assembled begins. A plural/singular
+    // subject anaphor binds against the previous clause's defs only.
+    let mut previous_clause_start = 0usize;
+    let mut this_clause_start = 0usize;
     for clause_ir in &ir.clauses {
+        if defs.len() > this_clause_start {
+            previous_clause_start = this_clause_start;
+        }
+        this_clause_start = defs.len();
         // "The arena mirrors `defs`" is load-bearing for every binding below, and it
         // is asserted HERE, at the one point every clause path must pass through.
         //
@@ -3521,6 +3594,48 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                             );
                         }
                     }
+                } else if starts_with_plural_subject_anaphor(&source_text_lower)
+                    || starts_with_singular_subject_anaphor(&source_text_lower)
+                {
+                    // CR 608.2c + CR 601.2c: a subject anaphor after a multi-slot
+                    // "return up to one target A, up to one target B, …" list. The
+                    // chain tracked set is chain-wide, so "They are 5/5 Elemental
+                    // creatures …" may bind it only when the previous clause's
+                    // slots are the chain's sole publishers (Relive the Past);
+                    // with an earlier producer it would animate that object too,
+                    // and a singular "It"/"That" names one slot of several. Both
+                    // have no faithful lowering and fail closed. A single mass
+                    // antecedent ("put a counter on each creature you control and
+                    // they gain …") keeps its binding, and only a grant binds the
+                    // set: "They reveal their hand" is a player subject.
+                    let previous_clause = &defs[previous_clause_start.min(defs.len())..];
+                    let list_slots = chain_nodes(previous_clause)
+                        .filter(|def| declares_published_object_target(&def.effect))
+                        .count();
+                    let list_is_sole_producer = list_slots >= 2
+                        && list_slots
+                            == chain_nodes(&defs)
+                                .filter(|def| publishes_tracked_set_from_resolution(&def.effect))
+                                .count();
+                    let plural = starts_with_plural_subject_anaphor(&source_text_lower);
+                    let mut unbindable = false;
+                    for current in &mut current_defs {
+                        let is_grant = matches!(&*current.effect, Effect::GenericEffect { .. });
+                        if plural && is_grant && list_is_sole_producer {
+                            rewrite_parent_targets_to_tracked_set(&mut current.effect, false);
+                        } else if list_slots >= 2 && (is_grant || !plural) {
+                            unbindable = true;
+                        }
+                    }
+                    if unbindable {
+                        current_defs.truncate(1);
+                        let head = &mut current_defs[0];
+                        *head.effect = Effect::unimplemented(
+                            "multi_slot_list_back_reference",
+                            clause_ir.source.fragment().unwrap_or_default(),
+                        );
+                        head.sub_ability = None;
+                    }
                 }
             } else if contains_explicit_tracked_set_pronoun(&source_text_lower) {
                 // CR 608.2c + CR 601.2c + CR 115.6: a plural anaphor ("those
@@ -3882,6 +3997,8 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     // `ChooseDamageSource` makes bare "it" in the lose-branch one-shot prevention
     // refer to the chosen source, not `SelfRef` (the instant on the stack).
     thread_chosen_damage_source_into_oneshot_effects(&mut defs);
+
+    mark_independent_mana_spent_gates(&mut defs);
 
     // Chain: last has no sub_ability, each earlier one chains to next.
     // When a def already has a sub_ability (e.g., TargetOnly with attached Explore),
@@ -5257,5 +5374,243 @@ mod arena_tests {
                 .map(|def| &*def.effect),
             Some(Effect::PutAtLibraryPosition { .. })
         ));
+    }
+
+    /// The `(sub_link, sibling_condition)` stamp of every mana-spent-gated node
+    /// in the first chain `text` parses to (a spell chain, else a trigger body).
+    fn mana_spent_gated_stamps(
+        text: &str,
+        card_types: &[&str],
+    ) -> Vec<(SubAbilityLink, SiblingCondition)> {
+        let card_types: Vec<String> = card_types.iter().map(|t| t.to_string()).collect();
+        let parsed = crate::parser::parse_oracle_text(text, "Gate Probe", &[], &card_types, &[]);
+        let root = parsed
+            .abilities
+            .first()
+            .or_else(|| {
+                parsed
+                    .triggers
+                    .first()
+                    .and_then(|trigger| trigger.execute.as_deref())
+            })
+            .unwrap_or_else(|| panic!("one chain expected: {text}"));
+        let mut stamps = Vec::new();
+        let mut node = Some(root);
+        while let Some(def) = node {
+            if def.condition.as_ref().is_some_and(is_mana_spent_gate) {
+                stamps.push((def.sub_link, def.sibling_condition));
+            }
+            node = def.sub_ability.as_deref();
+        }
+        stamps
+    }
+
+    /// CR 608.2c + CR 601.2h: two clauses gated on DIFFERENT spent mana (another
+    /// color) are independent instructions, and the later one is stamped so it
+    /// still runs when the earlier gate is false.
+    #[test]
+    fn distinct_mana_spent_gates_are_stamped_independent() {
+        for (text, name) in [
+            (
+                "You gain X life if {G} was spent to cast this spell and X life if {W} was spent to cast this spell. (Do both if {G}{W} was spent.)",
+                "Dawnglow Infusion shape",
+            ),
+            (
+                "Prevent all combat damage that would be dealt this turn if {W} was spent to cast this spell. Each player loses 1 life for each attacking creature they control if {B} was spent to cast this spell.",
+                "Batwing Brume shape",
+            ),
+        ] {
+            let stamps = mana_spent_gated_stamps(text, &["Instant"]);
+            assert_eq!(stamps.len(), 2, "{name}: two gated nodes expected");
+            assert_eq!(
+                stamps[1],
+                (
+                    SubAbilityLink::SequentialSibling,
+                    SiblingCondition::ReplicatedOrBranch
+                ),
+                "{name}: the second color's gate is independent"
+            );
+        }
+    }
+
+    /// CR 608.2c: a clause repeating the SAME gate is the "then" continuation of
+    /// one gated instruction (Phoenix of Iteration's exile-then-return; River's
+    /// Grasp's reveal-then-discard). It keeps its continuation link and is never
+    /// stamped as an independent OR-branch. The paired positive is the
+    /// distinct-gate test above; the reach guard here is that the gate does land
+    /// on a second node.
+    #[test]
+    fn same_mana_spent_gate_then_continuation_is_not_stamped() {
+        for (text, card_types, name) in [
+            (
+                "Whenever you cast an instant or sorcery spell, ~ perpetually gets +1/+1. If five or more mana was spent to cast that spell, you may exile ~, then return it to the battlefield tapped under its owner's control.",
+                &["Creature"][..],
+                "Phoenix of Iteration",
+            ),
+            (
+                "If {B} was spent to cast this spell, target player reveals their hand, you choose a nonland card from it, then that player discards that card.",
+                &["Instant"][..],
+                "River's Grasp discard step",
+            ),
+        ] {
+            let stamps = mana_spent_gated_stamps(text, card_types);
+            assert!(
+                stamps.len() >= 2,
+                "{name}: reach guard, the gate must land on the continuation too: {stamps:?}"
+            );
+            assert!(
+                stamps
+                    .iter()
+                    .all(|(_, sibling)| *sibling != SiblingCondition::ReplicatedOrBranch),
+                "{name}: a same-gate continuation must not be an independent branch: {stamps:?}"
+            );
+            assert!(
+                stamps[1..]
+                    .iter()
+                    .all(|(link, _)| *link != SubAbilityLink::SequentialSibling),
+                "{name}: the continuation keeps its ContinuationStep link: {stamps:?}"
+            );
+        }
+    }
+
+    /// CR 608.2c + CR 608.2d: "If N mana was spent to cast that spell, you may A,
+    /// then B" gates both steps on the same payment. Declining A must not run B,
+    /// so B stays a dependent `ContinuationStep` of A (skipped with a declined
+    /// optional parent), never an independent OR-branch that resolves anyway.
+    #[test]
+    fn declined_optional_head_keeps_same_gate_then_step_dependent() {
+        let text = "Whenever you cast an instant or sorcery spell, ~ perpetually gets +1/+1. If five or more mana was spent to cast that spell, you may exile ~, then return it to the battlefield tapped under its owner's control.";
+        let parsed = crate::parser::parse_oracle_text(
+            text,
+            "Gate Probe",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        let root = parsed
+            .triggers
+            .first()
+            .and_then(|trigger| trigger.execute.as_deref())
+            .expect("Phoenix-shaped trigger chain");
+        let mut gated = Vec::new();
+        let mut node = Some(root);
+        while let Some(def) = node {
+            if def.condition.as_ref().is_some_and(is_mana_spent_gate) {
+                gated.push(def);
+            }
+            node = def.sub_ability.as_deref();
+        }
+        assert!(
+            gated.len() >= 2,
+            "reach guard: the gate must land on both the optional head and the step: {gated:?}"
+        );
+        assert!(
+            gated[0].optional,
+            "the head is the optional \"you may\" step"
+        );
+        assert_eq!(gated[1].sub_link, SubAbilityLink::ContinuationStep);
+        assert_eq!(gated[1].sibling_condition, SiblingCondition::Dependent);
+    }
+
+    /// Whether the first spell chain `text` parses to contains an
+    /// `Effect::Unimplemented` node.
+    fn spell_chain_has_unimplemented(text: &str) -> bool {
+        let parsed = crate::parser::parse_oracle_text(
+            text,
+            "List Probe",
+            &[],
+            &["Sorcery".to_string()],
+            &[],
+        );
+        let root = parsed
+            .abilities
+            .first()
+            .unwrap_or_else(|| panic!("one spell chain expected: {text}"));
+        let mut node = Some(root);
+        while let Some(def) = node {
+            if def.effect.unimplemented_description().is_some() {
+                return true;
+            }
+            node = def.sub_ability.as_deref();
+        }
+        false
+    }
+
+    /// CR 608.2c: the chain tracked set also holds an earlier producer's object,
+    /// so a plural "They are ..." grant after a multi-slot list that is NOT the
+    /// chain's sole producer fails closed instead of animating the unrelated
+    /// earlier object too. Paired positive: the same list as sole producer binds.
+    #[test]
+    fn plural_grant_after_list_with_an_earlier_producer_is_an_honest_gap() {
+        let list = "Return up to one target artifact card and up to one target land card from your graveyard to the battlefield.";
+        let grant = "They are 5/5 Elemental creatures in addition to their other types.";
+        assert!(
+            !spell_chain_has_unimplemented(&format!("{list} {grant}")),
+            "reach guard: a sole-producer list must still bind the grant"
+        );
+        assert!(
+            spell_chain_has_unimplemented(&format!(
+                "Return target creature card from your graveyard to the battlefield. {list} {grant}"
+            )),
+            "the grant must not bind to the chain-wide tracked set"
+        );
+    }
+
+    /// CR 608.2c: a singular "Its controller ..." after a multi-slot list names
+    /// one of several slots, so it fails closed instead of binding the last slot
+    /// silently. Paired positive: a following sentence naming nothing earlier
+    /// leaves the list intact.
+    #[test]
+    fn singular_back_reference_after_list_is_an_honest_gap() {
+        let list = "Return up to one target artifact card and up to one target creature card from your graveyard to the battlefield.";
+        assert!(
+            !spell_chain_has_unimplemented(&format!("{list} Draw a card.")),
+            "reach guard: the list itself must lower cleanly"
+        );
+        assert!(
+            spell_chain_has_unimplemented(&format!("{list} Its controller gains 2 life.")),
+            "an anaphor that cannot bind to every slot must not lower silently"
+        );
+    }
+
+    /// CR 608.2c + CR 301.5: "Destroy target creature with flying and all Equipment
+    /// attached to that creature" must not lose the Equipment leg to the keyword
+    /// suffix, and the attachment relation has no filter form, so the leg fails
+    /// closed rather than destroying every Equipment. Paired positive: a
+    /// determiner-led second leg without the relation lowers to a second destroy.
+    #[test]
+    fn keyword_suffix_determiner_leg_is_kept_or_fails_closed() {
+        let destroys = |text: &str| -> (usize, bool) {
+            let parsed = crate::parser::parse_oracle_text(
+                text,
+                "Leg Probe",
+                &[],
+                &["Sorcery".to_string()],
+                &[],
+            );
+            let root = parsed.abilities.first().expect("one spell chain");
+            let effects: Vec<&Effect> =
+                std::iter::successors(Some(root), |node| node.sub_ability.as_deref())
+                    .map(|node| &*node.effect)
+                    .collect();
+            (
+                effects
+                    .iter()
+                    .filter(|e| matches!(e, Effect::Destroy { .. } | Effect::DestroyAll { .. }))
+                    .count(),
+                effects
+                    .iter()
+                    .any(|e| e.unimplemented_description().is_some()),
+            )
+        };
+        assert_eq!(
+            destroys("Destroy target creature with flying and target artifact."),
+            (2, false),
+            "reach guard: the determiner-led leg survives the keyword suffix"
+        );
+        let (_, has_gap) = destroys(
+            "Destroy target creature with flying and all Equipment attached to that creature.",
+        );
+        assert!(has_gap, "the attachment relation must fail closed");
     }
 }

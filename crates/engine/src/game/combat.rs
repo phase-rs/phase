@@ -7,7 +7,9 @@ use super::game_object::GameObject;
 use super::players;
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::functioning_abilities::static_kind_present;
-use crate::types::ability::{StaticCondition, StaticDefinition, TargetFilter, TargetRef};
+use crate::types::ability::{
+    AttackerBlockStatus, StaticCondition, StaticDefinition, TargetFilter, TargetRef,
+};
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{ExtraPhase, GameState};
@@ -6897,6 +6899,22 @@ pub fn unblocked_attackers(state: &GameState) -> Vec<ObjectId> {
         .filter(|a| is_attacker_in_play(state, a.object_id))
         .map(|a| a.object_id)
         .collect()
+}
+
+/// CR 509.1h: Whether an attacker still in combat is blocked or unblocked. Reads
+/// the sticky `blocked` flag; `None` if the object is not an attacker in play.
+pub fn attacker_block_status(state: &GameState, id: ObjectId) -> Option<AttackerBlockStatus> {
+    let attacker = state
+        .combat
+        .as_ref()?
+        .attackers
+        .iter()
+        .find(|a| a.object_id == id)?;
+    is_attacker_in_play(state, id).then_some(if attacker.blocked {
+        AttackerBlockStatus::Blocked
+    } else {
+        AttackerBlockStatus::Unblocked
+    })
 }
 
 /// CR 506.5: A creature is attacking alone if it's attacking but no other

@@ -46,6 +46,7 @@ use super::oracle_static::{parse_pt_mod, parse_static_line_ir};
 #[cfg(test)]
 use super::oracle_trigger::parse_trigger_lines;
 use super::oracle_trigger::parse_trigger_lines_at_index_ir;
+use super::oracle_trigger::unhoisted_modal_guard_body;
 use super::oracle_util::{parse_mana_symbols, strip_reminder_text, TextPair};
 use crate::parser::oracle_ir::ast::{
     parsed_clause, ModalHeaderAst, ModalOptionality, ModeAst, OracleBlockAst, ReflexiveModalParent,
@@ -149,6 +150,17 @@ pub(crate) fn parse_oracle_block(lines: &[&str], start: usize) -> Option<(Oracle
             // `WhenYouDo` sub carries the modal, instead of firing the modes
             // unconditionally on the trigger.
             let (trigger_line, reflexive_parent) = classify_reflexive_modal_parent(trigger_line);
+            // CR 603.4: the modal splitter accepts a header that opens with the
+            // trigger's intervening-if ("Whenever X, if Y, choose one —"), so the
+            // guard lands in `header.raw` and the plain-modal lowering, which
+            // replaces the trigger body, would never see it. Return it to the
+            // trigger line so the trigger parser hoists it or fails the trigger
+            // closed. A reflexive parent keeps it in the header for
+            // `reflexive_modal_connector`.
+            let trigger_line = match (&reflexive_parent, split_leading_conditional(&header.raw)) {
+                (None, Some((guard, _))) => format!("{trigger_line}, {guard}"),
+                _ => trigger_line,
+            };
             return Some((
                 OracleBlockAst::TriggeredModal {
                     trigger_line,
@@ -1217,6 +1229,13 @@ pub(crate) fn lower_oracle_block_ir(
             );
             ctx.diagnostics.extend(trigger_ctx.diagnostics);
             for trigger in &mut triggers {
+                // CR 603.4: a trailing "if <guard>" left on the trigger line that
+                // did not hoist would be silently dropped when the modal payload
+                // replaces the body; fail the trigger closed instead.
+                if let Some(gap_body) = unhoisted_modal_guard_body(trigger) {
+                    trigger.body = Some(gap_body);
+                    continue;
+                }
                 // `body_context` is captured before normal trigger-body parsing.
                 // Clone it per sibling: each mode receives all trigger-established
                 // facts, but no mode can leak chain-local state into another.

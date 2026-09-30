@@ -1,8 +1,9 @@
-use crate::parser::oracle_nom::error::{OracleError, OracleResult};
+use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
-use nom::bytes::complete::{tag, tag_no_case, take_till, take_until};
+use nom::bytes::complete::{is_not, tag, tag_no_case, take_till, take_until};
 use nom::character::complete::multispace1;
 use nom::combinator::{all_consuming, eof, map, map_opt, opt, recognize, rest, value};
+use nom::multi::separated_list1;
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
@@ -13,7 +14,9 @@ use super::super::oracle_nom::enters_under::{
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::primitives::parse_keyword_name;
 use super::super::oracle_target::{parse_target, parse_target_with_ctx, parse_type_phrase_folding};
-use super::super::oracle_util::{contains_possessive, parse_count_expr, parse_ordinal, TextPair};
+use super::super::oracle_util::{
+    contains_possessive, parse_count_expr, parse_ordinal, parse_subtype, TextPair,
+};
 use super::{apply_where_x_to_filter, strip_trailing_where_x};
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::context::ParseContext;
@@ -1664,6 +1667,12 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                                         exile_conjunct_prepend(&before_lower, remainder_trimmed)
                                     })
                                     .or_else(|| {
+                                        mana_spent_amount_conjunct_prepend(
+                                            before_and,
+                                            remainder_trimmed,
+                                        )
+                                    })
+                                    .or_else(|| {
                                         untap_restriction_conjunct_prepend(
                                             before_and,
                                             remainder_trimmed,
@@ -1988,6 +1997,23 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
         return Some((ClauseBoundary::Comma, whitespace_len));
     }
 
+    // CR 601.2h + CR 608.2c: "<effect A> if {C1} was spent to cast this
+    // spell, and <subject> <effect B> if {C2} was spent to cast this spell" — two
+    // independently mana-gated instructions. Each half owns its own condition, so
+    // the ", and" is a clause boundary even though the second half opens with a
+    // subject noun phrase (not a verb `starts_clause_text_or_conjugated` knows).
+    if starts_mana_spent_conjunct(&current_lower, &trimmed_lower) {
+        return Some((ClauseBoundary::Comma, whitespace_len));
+    }
+
+    // CR 608.2c: "<effect A>, and <noun phrase> perpetually gets <P/T>" — a
+    // sibling instruction whose subject is a noun phrase, not a verb the
+    // clause-start recognisers know (Thorna and Twigtooth's "and the topmost
+    // creature card in your library perpetually gets +X/+X").
+    if starts_perpetual_subject_conjunct(&trimmed_lower) {
+        return Some((ClauseBoundary::Comma, whitespace_len));
+    }
+
     if starts_prefix_clause(&current_lower) {
         return None;
     }
@@ -2112,13 +2138,13 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
         // (`try_parse_do_the_same_for_type`), so ONLY a clean pure-type
         // substitution is split off. Richer forms this PR does not model —
         // Gruesome Menagerie's "creature cards with mana value 2 and 3"
-        // (`FilterProp` predicate) and Grim Captain's Call's "Vampire, Dinosaur,
-        // and Merfolk" (type list) — fail the recognizer and stay glued exactly
+        // (`FilterProp` predicate) — fail the recognizer and stay glued exactly
         // as before, keeping this change's blast radius to the handled class.
         // The complete recognizer covers a terminal continuation. A following
         // comma-"then" clause (Glimpse of Tomorrow) is segmented by the same
         // grammar, so we do not weaken the pure-type whole-consumption rule.
         if try_parse_do_the_same_for_type(trimmed).is_some()
+            || try_parse_do_the_same_for_subtype_list(trimmed).is_some()
             || starts_do_the_same_for_type_before_then(after_then)
         {
             return Some((ClauseBoundary::Then, whitespace_len + "then ".len()));
@@ -2184,6 +2210,69 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
     }
 
     None
+}
+
+/// CR 601.2h: True when the closing chunk already carries an
+/// "if <mana> was spent to cast <it>" condition and the text after the comma is
+/// an "and"-joined conjunct carrying its own such condition. The conjunct ends
+/// at the next sentence boundary, so a later sentence's condition cannot make an
+/// ungated conjunct look gated.
+fn starts_mana_spent_conjunct(current_lower: &str, trimmed_lower: &str) -> bool {
+    tag::<_, _, OracleError<'_>>("and ")
+        .parse(trimmed_lower)
+        .is_ok()
+        && nom_primitives::scan_contains(current_lower, MANA_SPENT_TO_CAST)
+        && nom_primitives::scan_contains(
+            before_sentence_boundary(trimmed_lower),
+            MANA_SPENT_TO_CAST,
+        )
+}
+
+/// CR 608.2c: True when the text after the comma is an "and"-joined conjunct
+/// whose own subject takes "perpetually get(s)" ("and the top creature card of
+/// your library perpetually gets +1/+1"). The verb tail is owned by
+/// `split_perpetual_get_clause`; the conjunct ends at the next sentence
+/// boundary, so a later sentence's "perpetually" cannot promote an earlier
+/// conjunct, and a subject holding a comma or period is not one noun phrase.
+fn starts_perpetual_subject_conjunct(trimmed_lower: &str) -> bool {
+    preceded(
+        tag::<_, _, OracleError<'_>>("and "),
+        rest::<_, OracleError<'_>>,
+    )
+    .parse(before_sentence_boundary(trimmed_lower))
+    .ok()
+    .and_then(|(_, conjunct)| super::split_perpetual_get_clause(conjunct))
+    .is_some_and(|(subject, _)| {
+        all_consuming(is_not::<_, _, OracleError<'_>>(",."))
+            .parse(subject)
+            .is_ok()
+            && super::perpetual_conjunct_subject_opens_a_clause(subject)
+    })
+}
+
+/// Phrase shared by every "if {C} was spent to cast <it>" gate.
+const MANA_SPENT_TO_CAST: &str = "was spent to cast ";
+
+/// The text up to the first sentence boundary (". "), or all of it when the text
+/// holds a single sentence.
+fn before_sentence_boundary(text: &str) -> &str {
+    take_until::<_, _, OracleError<'_>>(". ")
+        .parse(text)
+        .map_or(text, |(_, sentence)| sentence)
+}
+
+/// CR 608.2c: "They / Those can't be regenerated" names every Destroy of the
+/// run it follows; any other subject ("It", "A creature destroyed this way")
+/// names the nearest one.
+fn cant_regenerate_scope(lower: &str) -> AnaphorNumber {
+    if alt((tag::<_, _, OracleError<'_>>("they "), tag("those ")))
+        .parse(lower)
+        .is_ok()
+    {
+        AnaphorNumber::Plural
+    } else {
+        AnaphorNumber::Singular
+    }
 }
 
 fn is_for_each_copy_token_continuation(
@@ -3637,6 +3726,57 @@ fn exile_conjunct_prepend(before_lower: &str, remainder_trimmed: &str) -> Option
     Some("exile ".to_string())
 }
 
+/// What a mana-gated conjunct's elided head hands out, which fixes the noun the
+/// conjunct's amount must be followed by.
+#[derive(Clone, Copy)]
+enum ElidedHeadNoun {
+    /// CR 120.2b: "<source> deals A damage to X".
+    Damage,
+    /// CR 119.3: "<player> gains/loses A life".
+    Life,
+}
+
+fn parse_elided_head_verb(input: &str) -> OracleResult<'_, ElidedHeadNoun> {
+    alt((
+        value(ElidedHeadNoun::Damage, tag("deals ")),
+        value(
+            ElidedHeadNoun::Life,
+            alt((tag("gains "), tag("gain "), tag("loses "), tag("lose "))),
+        ),
+    ))
+    .parse(input)
+}
+
+/// CR 601.2h + CR 608.2c: "<subject> <verb> A <noun> if {C1} was spent to cast
+/// this spell and B <noun> if {C2} was spent to cast this spell" — the second
+/// conjunct is a bare "<amount> <noun> …" tail that elides the "<subject> <verb>"
+/// head ("~ deals", "you gain") and carries its own mana-spent condition. Returns
+/// the head (through the verb) to prepend so the conjunct reaches its parser as
+/// its own gated clause. Requires both halves to carry a mana-spent condition
+/// within their own sentence, so an ungated multi-target damage chain keeps its
+/// own handling.
+fn mana_spent_amount_conjunct_prepend(before_and: &str, remainder_trimmed: &str) -> Option<String> {
+    let before_lower = before_and.to_ascii_lowercase();
+    let remainder_lower = remainder_trimmed.to_ascii_lowercase();
+    let remainder_sentence = before_sentence_boundary(&remainder_lower);
+    if !nom_primitives::scan_contains(&before_lower, MANA_SPENT_TO_CAST)
+        || !nom_primitives::scan_contains(remainder_sentence, MANA_SPENT_TO_CAST)
+    {
+        return None;
+    }
+    let (_, noun, after_head) =
+        nom_primitives::scan_preceded(&before_lower, parse_elided_head_verb)?;
+    let amount_matches = match noun {
+        ElidedHeadNoun::Damage => starts_with_damage_amount_continuation(remainder_sentence),
+        ElidedHeadNoun::Life => parse_count_expr(remainder_sentence)
+            .is_some_and(|(_, rest)| tag::<_, _, OracleError<'_>>("life").parse(rest).is_ok()),
+    };
+    if !amount_matches {
+        return None;
+    }
+    Some(before_and[..before_lower.len() - after_head.len()].to_string())
+}
+
 fn combat_requirement_conjunct_prepend(
     before_and: &str,
     remainder_trimmed: &str,
@@ -4927,21 +5067,53 @@ pub(super) fn apply_clause_continuation(
             ));
         }
         ContinuationAst::SelfCostKeywordCostClarification => {}
-        ContinuationAst::CantRegenerate => {
+        ContinuationAst::CantRegenerate { scope } => {
             // CR 608.2c: walk backward through the definition chain to find
             // the nearest Destroy/DestroyAll. The regen clause may not be
             // adjacent — e.g. Kirtar's Wrath threshold has a Token creation
             // between the DestroyAll and "Creatures destroyed this way can't
             // be regenerated."
-            let bound = env.resolve(
-                defs,
-                super::assembly::AntecedentSelector::LastWithRole(
-                    super::assembly::AntecedentRole::DestroyLike,
-                ),
-                None,
-                super::assembly::OnMiss::Ignore,
-            );
-            if let Some(bound_index) = bound {
+            //
+            // CR 608.2c + CR 701.19c: plural "They can't be regenerated" names
+            // every Destroy of the run it follows (Plague Spores: "Destroy
+            // target nonblack creature and target land. They can't be
+            // regenerated."), so it fans out over the contiguous run of
+            // DestroyLike defs ending at the nearest one; an earlier Destroy
+            // separated from that run by another instruction is not part of
+            // the antecedent.
+            let bound: Vec<usize> = match scope {
+                AnaphorNumber::Singular => env
+                    .resolve(
+                        defs,
+                        super::assembly::AntecedentSelector::LastWithRole(
+                            super::assembly::AntecedentRole::DestroyLike,
+                        ),
+                        None,
+                        super::assembly::OnMiss::Ignore,
+                    )
+                    .into_iter()
+                    .collect(),
+                AnaphorNumber::Plural => {
+                    let members = env.resolve_all(
+                        defs,
+                        super::assembly::AntecedentSelector::AllWithRole(
+                            super::assembly::AntecedentRole::DestroyLike,
+                        ),
+                        None,
+                        super::assembly::OnMiss::Ignore,
+                    );
+                    // The run ends at the nearest Destroy and extends back while
+                    // each earlier member sits directly before the next.
+                    let run_len = members
+                        .windows(2)
+                        .rev()
+                        .take_while(|pair| pair[0] + 1 == pair[1])
+                        .count()
+                        + usize::from(!members.is_empty());
+                    members[members.len() - run_len..].to_vec()
+                }
+            };
+            for bound_index in bound {
                 let def = &mut defs[bound_index];
                 // CR 608.2c: the DestroyLike antecedent may be nested inside a
                 // CreateDelayedTrigger wrapper (Merieke Ri Berit), so descend
@@ -6336,7 +6508,7 @@ pub(super) fn continuation_absorbs_current(
         ContinuationAst::SearchDestination { .. } => false,
         ContinuationAst::SuspectLastCreated => matches!(current_effect, Effect::Suspect { .. }),
         ContinuationAst::GoadLastCreated { .. } => true,
-        ContinuationAst::CantRegenerate => true,
+        ContinuationAst::CantRegenerate { .. } => true,
         // CR 116.2c: recognition was already gated on a preceding
         // continuous-effect-installing `GenericEffect`, so absorption is
         // unconditional. Full absorption is REQUIRED, not merely convenient: the
@@ -8489,7 +8661,9 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
                 && (nom_primitives::scan_contains(&lower, "can't be regenerated")
                     || nom_primitives::scan_contains(&lower, "cannot be regenerated")) =>
         {
-            Some(ContinuationAst::CantRegenerate)
+            Some(ContinuationAst::CantRegenerate {
+                scope: cant_regenerate_scope(&lower),
+            })
         }
         // CR 120.4a + CR 608.2c + CR 702: excess-damage redirect rider on a
         // `DealDamage` (Flame Spill, Gandalf's Sanction, Ravenous Tyrannosaurus),
@@ -8746,7 +8920,9 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
                 "destroyed this way cannot be regenerated",
             ) =>
         {
-            Some(ContinuationAst::CantRegenerate)
+            Some(ContinuationAst::CantRegenerate {
+                scope: AnaphorNumber::Singular,
+            })
         }
         // CR 122.6a + CR 614.1c: Token enters-with-counters continuation. Two forms:
         //   * Declarative: "The token enters with X +1/+1 counters on it[, where X is ...]"
@@ -9414,9 +9590,47 @@ pub(super) fn try_parse_do_the_same_for_type(text: &str) -> Option<Vec<TypeFilte
     // Menagerie's "creature cards with mana value 2 and 3") or a `controller`
     // scope — those need a full replacement-filter/cardinality grammar and must
     // stay strict-failing until it lands (CR #1: a flagged gap beats a misparse).
-    // The multi-type list form (Grim Captain's Call's "Vampire, Dinosaur, and
-    // Merfolk") is already rejected by the non-empty `remainder` guard above.
+    // The bare subtype list form (Grim Captain's Call's "Vampire, Dinosaur, and
+    // Merfolk") is rejected by the non-empty `remainder` guard above and handled
+    // by `try_parse_do_the_same_for_subtype_list`.
     pure_type_substitution(filter)
+}
+
+/// CR 608.2c: Parse "[then] do the same for A, B, and C." where the list is a
+/// bare creature/permanent subtype enumeration (Grim Captain's Call: "Return a
+/// Pirate card from your graveyard to your hand, then do the same for Vampire,
+/// Dinosaur, and Merfolk."). Returns one `Subtype` filter per listed entry; the
+/// chunk loop emits one clone-and-retype sibling of the antecedent per entry,
+/// exactly as the single-type form does. The list needs at least two entries —
+/// a lone type is the single-type form's job — and must consume the whole tail.
+pub(super) fn try_parse_do_the_same_for_subtype_list(text: &str) -> Option<Vec<TypeFilter>> {
+    let lower = text.to_lowercase();
+    let (subtypes, _) = nom_on_lower(text, &lower, |i| {
+        let (i, _) = opt(tag("then ")).parse(i)?;
+        let (i, _) = tag::<_, _, OracleError<'_>>("do the same for ").parse(i)?;
+        let (i, subtypes) = separated_list1(
+            alt((
+                tag(", and/or "),
+                tag(", and "),
+                tag(", or "),
+                tag(" and/or "),
+                tag(" and "),
+                tag(" or "),
+                tag(", "),
+            )),
+            parse_subtype_token,
+        )
+        .parse(i)?;
+        let (i, _) = terminated(opt(tag(".")), eof).parse(i)?;
+        Ok((i, subtypes))
+    })?;
+    (subtypes.len() >= 2).then(|| subtypes.into_iter().map(TypeFilter::Subtype).collect())
+}
+
+/// Nom adapter over `parse_subtype` (plural- and case-aware canonicalization).
+fn parse_subtype_token(input: &str) -> OracleResult<'_, String> {
+    let (subtype, consumed) = parse_subtype(input).ok_or_else(|| oracle_err(input))?;
+    Ok((&input[consumed..], subtype))
 }
 
 /// Recognize a pure type-substitution segment when it is immediately followed
@@ -9794,13 +10008,12 @@ mod tests {
     // or the broader "repeat this process for" family are NOT modeled by the
     // type-substitution path and must be rejected, so they stay strict-failing
     // until the full replacement-filter/cardinality grammar lands (Gruesome
-    // Menagerie, Grim Captain's Call, Firemind's Foresight) — CR #1: a flagged
+    // Menagerie, Firemind's Foresight) — CR #1: a flagged
     // gap beats a silent misparse.
     #[test]
     fn do_the_same_for_type_rejects_unmodeled_continuations() {
         for phrasing in [
             "do the same for creature cards with mana value 2 and 3",
-            "do the same for Vampire, Dinosaur, and Merfolk",
             "do the same for creature cards with flying",
             "repeat this process for instant cards",
         ] {
@@ -9808,6 +10021,49 @@ mod tests {
                 try_parse_do_the_same_for_type(phrasing),
                 None,
                 "must reject the unmodeled continuation {phrasing:?}"
+            );
+        }
+    }
+
+    // CR 608.2c: a bare subtype enumeration yields one `Subtype` substitution per
+    // entry, across comma / "and" / "and/or" list shapes.
+    #[test]
+    fn do_the_same_for_subtype_list_yields_one_filter_per_entry() {
+        let expected: Vec<TypeFilter> = ["Vampire", "Dinosaur", "Merfolk"]
+            .into_iter()
+            .map(|s| TypeFilter::Subtype(s.to_string()))
+            .collect();
+        for phrasing in [
+            "then do the same for Vampire, Dinosaur, and Merfolk.",
+            "do the same for Vampires, Dinosaurs and Merfolk",
+            "do the same for Vampire, Dinosaur, and/or Merfolk.",
+        ] {
+            assert_eq!(
+                try_parse_do_the_same_for_subtype_list(phrasing),
+                Some(expected.clone()),
+                "phrasing {phrasing:?}"
+            );
+        }
+        assert_eq!(
+            try_parse_do_the_same_for_subtype_list("do the same for Vampire and Merfolk")
+                .map(|v| v.len()),
+            Some(2)
+        );
+    }
+
+    // A lone type, a non-subtype list member, or trailing text is not this form.
+    #[test]
+    fn do_the_same_for_subtype_list_rejects_non_lists() {
+        for phrasing in [
+            "do the same for Aura cards",
+            "do the same for Vampire",
+            "do the same for Vampire, Dinosaur, and creature cards with flying",
+            "do the same for Vampire, Dinosaur, and Merfolk, then shuffle",
+        ] {
+            assert_eq!(
+                try_parse_do_the_same_for_subtype_list(phrasing),
+                None,
+                "must reject {phrasing:?}"
             );
         }
     }
@@ -11071,6 +11327,97 @@ mod tests {
             chunks.len(),
             chunks.iter().map(|c| &c.text).collect::<Vec<_>>()
         );
+    }
+
+    // CR 601.2h: two independently mana-gated conjuncts split at
+    // ", and" whatever the subject/verb of each half; a single gated clause with
+    // an ungated ", and" conjunct is left alone.
+    #[test]
+    fn mana_spent_conjuncts_split_at_comma_and() {
+        for (left, right) in [
+            (
+                "Creatures you control get +1/+0 until end of turn if {R} was spent to cast this spell",
+                "and creatures your opponents control lose flying until end of turn if {G} was spent to cast this spell",
+            ),
+            (
+                "Draw a card if {U} was spent to cast this spell",
+                "and target player gains 2 life if {W} was spent to cast this spell",
+            ),
+        ] {
+            let chunks = clause_texts(&format!("{left}, {right}"));
+            assert_eq!(chunks, vec![left.to_string(), right.to_string()]);
+        }
+    }
+
+    // CR 120.2b + CR 601.2h: a no-comma " and " between two mana-gated damage
+    // conjuncts restores the elided "<source> deals" head on the second half.
+    #[test]
+    fn mana_spent_damage_conjunct_restores_elided_head() {
+        let chunks = clause_texts(
+            "~ deals 3 damage to each creature without flying if {R} was spent to cast this spell and 2 damage to each creature with flying if {G} was spent to cast this spell",
+        );
+        assert_eq!(
+            chunks,
+            vec![
+                "~ deals 3 damage to each creature without flying if {R} was spent to cast this spell",
+                "~ deals 2 damage to each creature with flying if {G} was spent to cast this spell",
+            ]
+        );
+    }
+
+    // CR 119.3 + CR 601.2h: the elided "<subject> <verb>" head is restored for a
+    // gain-life conjunct too, not only for "deals".
+    #[test]
+    fn mana_spent_life_conjunct_restores_elided_head() {
+        for (verb, first, second) in [
+            ("gain", "You gain 2 life", "5 life"),
+            ("lose", "You lose 2 life", "5 life"),
+        ] {
+            let chunks = clause_texts(&format!(
+                "{first} if {{R}} was spent to cast this spell and {second} if {{G}} was spent to cast this spell"
+            ));
+            assert_eq!(
+                chunks,
+                vec![
+                    format!("{first} if {{R}} was spent to cast this spell"),
+                    format!("You {verb} {second} if {{G}} was spent to cast this spell"),
+                ]
+            );
+        }
+    }
+
+    // CR 601.2h: a "was spent to cast" in a LATER sentence does not gate this
+    // sentence's conjunct. Each negative is paired with the positive whose only
+    // difference is that the conjunct carries its own gate.
+    #[test]
+    fn mana_spent_split_stops_at_sentence_boundary() {
+        let later_sentence = "Draw a card if {G} was spent to cast this spell";
+        // Comma-and conjunct (subject-led second half).
+        let ungated = clause_texts(&format!(
+            "Creatures you control get +1/+0 until end of turn if {{R}} was spent to cast this spell, and creatures you control gain haste until end of turn. {later_sentence}"
+        ));
+        assert_eq!(ungated.len(), 2, "{ungated:?}");
+        let gated = clause_texts(&format!(
+            "Creatures you control get +1/+0 until end of turn if {{R}} was spent to cast this spell, and creatures you control gain haste until end of turn if {{U}} was spent to cast this spell. {later_sentence}"
+        ));
+        assert_eq!(gated.len(), 3, "{gated:?}");
+        // Elided-head conjunct.
+        let ungated = clause_texts(&format!(
+            "You gain 2 life if {{R}} was spent to cast this spell and 3 life. {later_sentence}"
+        ));
+        assert_eq!(ungated.len(), 2, "{ungated:?}");
+        let gated = clause_texts(&format!(
+            "You gain 2 life if {{R}} was spent to cast this spell and 3 life if {{U}} was spent to cast this spell. {later_sentence}"
+        ));
+        assert_eq!(gated.len(), 3, "{gated:?}");
+    }
+
+    #[test]
+    fn mana_spent_condition_without_second_condition_does_not_force_split() {
+        let chunks = clause_texts(
+            "Creatures you control get +1/+0 until end of turn if {R} was spent to cast this spell, and creatures you control gain haste until end of turn",
+        );
+        assert_eq!(chunks.len(), 1);
     }
 
     // --- Bare " and " splitting: damage clause patterns ---
@@ -15498,5 +15845,93 @@ mod leading_duration_guard_tests_7923 {
         assert!(!head_ends_with_dangling_phase_trigger(
             "target tapped creature doesn't untap during its controller's untap step"
         ));
+    }
+
+    /// CR 608.2c: ", and <noun phrase> perpetually get(s) <P/T>" opens a new
+    /// clause whatever the verb number or the subject's shape.
+    #[test]
+    fn comma_and_perpetual_subject_conjunct_opens_a_clause() {
+        let subjects = [
+            "the top creature card of your library",
+            "the topmost creature card in your library",
+            "target creature card in your hand",
+        ];
+        for subject in subjects {
+            for verb in ["gets", "get"] {
+                let text = format!("You gain 3 life, and {subject} perpetually {verb} +1/+1");
+                assert_eq!(
+                    split_clause_sequence(&text).len(),
+                    2,
+                    "{text:?} must split into the life gain and the perpetual edit"
+                );
+            }
+        }
+    }
+
+    /// CR 608.2c: a compound subject joined by a bare "and" is one noun phrase,
+    /// and only the ", and" that follows a sibling instruction is a boundary.
+    #[test]
+    fn perpetual_compound_subject_is_not_split() {
+        assert_eq!(
+            split_clause_sequence(
+                "Creatures you control and creature cards in your hand perpetually get +1/+1"
+            )
+            .len(),
+            1
+        );
+        assert_eq!(
+            split_clause_sequence(
+                "Draw a card, and creatures you control and creature cards in your hand \
+                 perpetually get +1/+1"
+            )
+            .len(),
+            2
+        );
+    }
+
+    /// CR 608.2c: a ", and" conjunct without "perpetually get(s)" gains no
+    /// boundary from this rule, and a later sentence's "perpetually" cannot
+    /// promote an earlier conjunct.
+    #[test]
+    fn perpetual_conjunct_boundary_is_bound_to_its_own_sentence() {
+        assert!(!starts_perpetual_subject_conjunct(
+            "and the top creature card of your library gets +1/+1"
+        ));
+        assert!(starts_perpetual_subject_conjunct(
+            "and the top creature card of your library perpetually gets +1/+1"
+        ));
+        assert!(!starts_perpetual_subject_conjunct(
+            "and draw a card. target creature perpetually gets +1/+1"
+        ));
+        assert!(!starts_perpetual_subject_conjunct(
+            "and draw a card, then target creature perpetually gets +1/+1"
+        ));
+    }
+
+    /// CR 608.2c: the last element of a serial list ("…in your hand, library,
+    /// and graveyard perpetually get +1/+1", Arming Gala) is not a subject, so
+    /// its ", and" is no clause boundary. The paired positive rows show the
+    /// same rule still opens a clause at a real noun-phrase subject, so the
+    /// negative cannot pass by the splitter having stopped firing.
+    #[test]
+    fn perpetual_conjunct_boundary_ignores_a_list_element() {
+        assert!(starts_perpetual_subject_conjunct(
+            "and the topmost creature card in your library perpetually gets +X/+X"
+        ));
+        assert!(starts_perpetual_subject_conjunct(
+            "and creature cards in your hand perpetually get +1/+1"
+        ));
+        assert!(!starts_perpetual_subject_conjunct(
+            "and graveyard perpetually get +1/+1"
+        ));
+        assert_eq!(
+            split_clause_sequence(
+                "Creatures you control and creature cards in your hand, library, and graveyard \
+                 perpetually get +1/+1"
+            )
+            .len(),
+            1,
+            "a serial-list subject is one clause"
+        );
     }
 }

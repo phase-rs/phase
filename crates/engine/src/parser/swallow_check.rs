@@ -5893,13 +5893,15 @@ mod tests {
     /// the leading-trigger position and the trailing position.
     #[test]
     fn condition_if_swallow_carries_the_rejected_guard() {
-        // Aggressive Detective (UNK) — the guard sits between a trigger condition and the
-        // effect.
+        // Aggressive Detective (UNK) — a guard leading a later sentence of a non-trigger
+        // ability. The same guard between a trigger condition and its effect is a CR 603.4
+        // intervening-if, which fails the trigger closed with a clause gap before this
+        // detector runs.
         let parsed = parse_named(
-            "Whenever Aggressive Detective attacks, if all your commanders have been \
-             revealed, Aggressive Detective deals 2 damage to each opponent.",
+            "Draw a card. If all your commanders have been revealed, Aggressive Detective \
+             deals 2 damage to each opponent.",
             "Aggressive Detective",
-            &["Creature"],
+            &["Sorcery"],
         );
         assert_eq!(
             only_swallow(&parsed, "Condition_If").gap(),

@@ -406,26 +406,33 @@ fn suicidal_charge_coerces_the_creatures_it_shrank() {
 /// LEG-1 ROW. The `Mill` already published the milled cards, so the mass pump is
 /// not the antecedent of "from among the milled cards" and must not join the
 /// set. (`leg1_witness_surge_to_victory_*` is the sharper revert probe for the
-/// same leg; this row covers the same leg on a `PumpAll` whose own enumeration
-/// happens to be empty.)
+/// same leg; this row covers the same leg on a `PumpAll` that follows a `Mill`.
+/// The printed "each creature card in your graveyard perpetually gets +1/+1" is an
+/// honest perpetual gap, so the fixture uses a non-perpetual mass pump.)
 #[test]
-fn elvish_elegy_keeps_the_milled_set_free_of_the_graveyard_pump() {
+fn elvish_elegy_keeps_the_milled_set_free_of_the_mass_pump() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_library_top(P0, &["Lib Elf", "Lib Land", "Lib Bear"]);
-    scenario.with_graveyard(P0, &["Yard Creature"]);
+    let bear = scenario.add_creature(P0, "Pumped Bear", 2, 2).id();
     let spell = scenario
         .add_spell_to_hand_from_oracle(
             P0,
             "Elvish Elegy",
             false,
-            "Mill three cards, then each creature card in your graveyard perpetually gets +1/+1. You may put an Elf or land card from among the milled cards into your hand.",
+            "Mill three cards, then creatures you control get +1/+1 until end of turn. You may put an Elf or land card from among the milled cards into your hand.",
         )
         .with_mana_cost(ManaCost::generic(0))
         .id();
     let mut runner: GameRunner = scenario.build();
     runner.cast(spell).resolve();
+    evaluate_layers(runner.state_mut());
 
+    assert_eq!(
+        runner.state().objects[&bear].power,
+        Some(3),
+        "non-vacuity: the mass pump ran over a non-empty population"
+    );
     let set = published_set(runner.state());
     assert_eq!(
         set.len(),

@@ -4925,12 +4925,12 @@ fn resolve_ref(
                         .as_ref()
                         .and_then(AppliedSticker::name_text),
                 ),
-                // CR 123.6d + CR 608.2h: the scoped object's current name
-                // stickers. A triggered source that has since become a new
-                // object (CR 400.7) or left its zone reads through
-                // `object_for_scope`'s exact-incarnation rule and yields no live
-                // object; LKI (`LKISnapshot`) records no stickers, so the read
-                // fails closed to 0.
+                // CR 123.6d: count letters in the scoped object's name stickers.
+                // The currently unsupported put-a-sticker trigger class needs
+                // source-sticker LKI before it can be enabled: CR 608.2h requires
+                // last known information when the source has left its zone.
+                // `LKISnapshot` currently records no stickers, so this unsupported
+                // stale-source path fails closed to 0.
                 NameStickerSet::OnObject { scope } => object_for_scope(state, *scope, ctx, targets)
                     .map_or(0, |object| {
                         letters
@@ -9487,9 +9487,10 @@ mod tests {
         AbilityCondition, AbilityDefinition, AbilityKind, ActivationRestriction, AggregateFunction,
         ChoiceValue, Comparator, ControllerRef, CountScope, DamageChannel, DamageKindFilter,
         DelayedTriggerCondition, DevotionColors, DieResultBranch, Duration, Effect, FilterProp,
-        KickerVariant, ModalSelectionCondition, ModalSelectionConstraint, ObjectProperty,
-        ObjectScope, PlayerRelation, RepeatContinuation, SharedQuality, StaticCondition,
-        TargetChoiceTiming, TargetFilter, TargetRef, ThisWayCause, TypeFilter, TypedFilter,
+        KickerVariant, LetterQuery, ModalSelectionCondition, ModalSelectionConstraint,
+        ObjectProperty, ObjectScope, PlayerRelation, RepeatContinuation, SharedQuality,
+        StaticCondition, TargetChoiceTiming, TargetFilter, TargetRef, ThisWayCause, TypeFilter,
+        TypedFilter,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::counter::{CounterMatch, CounterType};
@@ -18556,7 +18557,6 @@ mod tests {
     /// (CR 123.1), and another object's name sticker is not on it.
     #[test]
     fn name_sticker_letter_count_reads_only_name_stickers_on_the_scoped_object() {
-        use crate::types::ability::LetterQuery;
         let mut state = GameState::new_two_player(42);
         let source = create_object(
             &mut state,
@@ -18605,7 +18605,6 @@ mod tests {
     /// nothing when no sticker was placed.
     #[test]
     fn that_sticker_reads_the_resolution_record() {
-        use crate::types::ability::LetterQuery;
         let mut state = GameState::new_two_player(42);
         let source = create_object(
             &mut state,
@@ -18641,13 +18640,12 @@ mod tests {
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 0);
     }
 
-    /// CR 400.7 + CR 608.2h: a triggered ability whose source left and
-    /// returned reads no live object for "name stickers on ~" (the returned
-    /// object is a new object), and LKI carries no stickers, so the read is 0
-    /// even though the stickers were retained (CR 123.5).
+    /// Characterize the known unsupported source-sticker LKI path: the
+    /// put-a-sticker trigger class remains Unknown. CR 608.2h requires source
+    /// last known information before that trigger class can be enabled; this
+    /// fails-closed result is not the rules-correct result for that future class.
     #[test]
-    fn name_sticker_letter_count_on_a_stale_triggered_source_is_zero() {
-        use crate::types::ability::LetterQuery;
+    fn unsupported_name_sticker_source_lki_path_fails_closed() {
         let mut state = GameState::new_two_player(42);
         let source = create_object(
             &mut state,

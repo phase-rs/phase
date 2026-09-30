@@ -27,7 +27,7 @@ use super::super::oracle_util::{parse_comparison_suffix, parse_subtype, TextPair
 #[cfg(test)]
 use super::parse_effect_chain;
 use super::sequence::parse_dig_from_among;
-use super::{scan_contains_phrase, ParseContext};
+use super::{parse_effect_clause_inner, scan_contains_phrase, ParseContext};
 use crate::parser::oracle_ir::ast::{parsed_clause, ContinuationAst};
 use crate::parser::oracle_ir::context::TriggerZoneChangeProvenance;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
@@ -3754,8 +3754,29 @@ fn parse_mana_value_threshold(text: &str) -> Option<(Comparator, i32)> {
     Some((comparator, n as i32))
 }
 
-fn find_last_top_level_if(text: &str) -> Option<usize> {
-    let mut last_pos = None;
+/// CR 608.2c: Start of the trailing condition clause. Normally the last
+/// top-level " if "; when that " if " continues an " or if " chain ("…if it's a
+/// creature or if {G}{W} was spent to cast this spell"), the clause begins at the
+/// chain's FIRST " if " so `parse_or_if_disjunction` sees every disjunct instead
+/// of the effect text swallowing the leading ones.
+fn find_trailing_condition_start(text: &str) -> Option<usize> {
+    let mut positions = top_level_if_positions(text);
+    let mut start = positions.pop()?;
+    while let Some(previous) = positions.pop() {
+        let continues_or_if_chain = start
+            .checked_sub(" or".len())
+            .and_then(|or_pos| text.get(or_pos..))
+            .is_some_and(|tail| tag::<_, _, OracleError<'_>>(" or if ").parse(tail).is_ok());
+        if !continues_or_if_chain {
+            break;
+        }
+        start = previous;
+    }
+    Some(start)
+}
+
+fn top_level_if_positions(text: &str) -> Vec<usize> {
+    let mut positions = Vec::new();
     let mut paren_depth = 0u32;
     let mut in_quotes = false;
 
@@ -3765,12 +3786,12 @@ fn find_last_top_level_if(text: &str) -> Option<usize> {
             '(' if !in_quotes => paren_depth += 1,
             ')' if !in_quotes => paren_depth = paren_depth.saturating_sub(1),
             _ if !in_quotes && paren_depth == 0 && text[index..].starts_with(" if ") => {
-                last_pos = Some(index);
+                positions.push(index);
             }
             _ => {}
         }
     }
-    last_pos
+    positions
 }
 
 /// CR 603.4 + CR 608.2h: Condition-text prefixes that cannot be re-homed onto
@@ -3903,7 +3924,7 @@ pub(super) fn strip_suffix_conditional(
     ctx: &mut ParseContext,
 ) -> (Option<AbilityCondition>, String) {
     let lower = text.to_lowercase();
-    let Some(if_pos) = find_last_top_level_if(&lower) else {
+    let Some(if_pos) = find_trailing_condition_start(&lower) else {
         return (None, text.to_string());
     };
 
@@ -4024,10 +4045,37 @@ pub(super) fn strip_suffix_conditional(
         .or_else(|| parse_condition_text_in(condition_core, ctx))
         .or_else(|| parse_control_count_as_ability_condition(condition_core))
     {
+        // CR 608.2c + CR 109.2: in an " or if " chain on a targeting effect, a
+        // bare "it's a <type>" disjunct describes the effect's target, not a
+        // revealed card (`RevealedHasCardType` would never see the target).
+        let condition = match condition {
+            AbilityCondition::Or { conditions }
+                if effect_has_declared_target(effect_prefix, ctx) =>
+            {
+                AbilityCondition::Or {
+                    conditions: conditions
+                        .into_iter()
+                        .map(|c| card_type_condition_as_target_match(&c).unwrap_or(c))
+                        .collect(),
+                }
+            }
+            other => other,
+        };
         return (Some(condition), effect_text);
     }
 
     (None, text.to_string())
+}
+
+/// CR 115.1: True when the effect text lowers to an effect whose typed target
+/// filter is a player-chosen target (not a context reference or the untyped
+/// `Any` fallback). Parses on a throwaway context so the caller's is untouched.
+fn effect_has_declared_target(effect_text: &str, ctx: &ParseContext) -> bool {
+    let clause = parse_effect_clause_inner(effect_text, &mut ctx.clone_throwaway());
+    clause
+        .effect
+        .target_filter()
+        .is_some_and(|filter| !filter.is_context_ref() && !matches!(filter, TargetFilter::Any))
 }
 
 pub(super) fn parse_quantity_comparison(text: &str) -> Option<(Comparator, QuantityExpr)> {
@@ -6304,6 +6352,15 @@ fn parse_target_cast_variant_paid_condition_text(text: &str) -> Option<AbilityCo
     parsed
 }
 
+/// One disjunct of an " or if " chain. Beyond the shared dispatcher it accepts
+/// the target-anaphoric "it's a <type>" gate and the symbolic "{G}{W} was spent
+/// to cast this spell" gate, which the effect-suffix path owns.
+fn parse_or_if_disjunct(text: &str, ctx: &mut ParseContext) -> Option<AbilityCondition> {
+    try_nom_condition_as_ability_condition(text, ctx)
+        .or_else(|| parse_its_a_type_condition(text, ctx))
+        .or_else(|| parse_condition_text(text))
+}
+
 /// CR 608.2c: Parse an " or if "-connected disjunction of condition clauses into
 /// `AbilityCondition::Or`. Each disjunct is a full condition (the connective
 /// re-introduces "if"), so the clause is split on every " or if " boundary and
@@ -6328,19 +6385,13 @@ fn parse_or_if_disjunction(text: &str, ctx: &mut ParseContext) -> Option<Ability
     // The first split doubles as the guard: no " or if " connective means this is
     // not a disjunction, so the single-arm dispatchers should handle the clause.
     let (first_disjunct, mut remaining) = split_on_or_if(lower.as_str())?;
-    let mut conditions = vec![try_nom_condition_as_ability_condition(
-        first_disjunct.trim(),
-        ctx,
-    )?];
+    let mut conditions = vec![parse_or_if_disjunct(first_disjunct.trim(), ctx)?];
     loop {
         let (disjunct, rest) = match split_on_or_if(remaining) {
             Some((disjunct, rest)) => (disjunct, Some(rest)),
             None => (remaining, None),
         };
-        conditions.push(try_nom_condition_as_ability_condition(
-            disjunct.trim(),
-            ctx,
-        )?);
+        conditions.push(parse_or_if_disjunct(disjunct.trim(), ctx)?);
         match rest {
             Some(r) => remaining = r,
             None => break,
@@ -9177,6 +9228,41 @@ mod tests {
         );
         assert!(parse_source_pt_comparison_condition_text("its power is 2 or less").is_none());
         assert!(parse_source_pt_comparison_condition_text("its power is 2 or greater").is_none());
+    }
+
+    /// CR 608.2c: a trailing "if <A> or if <B>" chain keeps EVERY disjunct — the
+    /// leading target-type gate is not left behind in the effect text.
+    #[test]
+    fn trailing_or_if_chain_keeps_leading_disjunct() {
+        for (text, expected_effect) in [
+            (
+                "Destroy target nonland permanent if it's a creature or if {G}{W} was spent to cast this spell.",
+                "Destroy target nonland permanent",
+            ),
+            (
+                "Exile target permanent if it's an artifact or if {R} was spent to cast this spell.",
+                "Exile target permanent",
+            ),
+        ] {
+            let mut ctx = ParseContext::default();
+            let (cond, effect) = strip_suffix_conditional(text, &mut ctx);
+            let Some(AbilityCondition::Or { conditions }) = cond else {
+                panic!("expected Or disjunction for {text:?}, got {cond:?}");
+            };
+            assert_eq!(
+                effect, expected_effect,
+                "effect text must be stripped of the condition chain"
+            );
+            assert_eq!(conditions.len(), 2);
+            assert!(matches!(
+                &conditions[0],
+                AbilityCondition::TargetMatchesFilter { .. }
+            ));
+            assert!(matches!(
+                &conditions[1],
+                AbilityCondition::ManaColorSpent { .. } | AbilityCondition::And { .. }
+            ));
+        }
     }
 
     /// CR 608.2c: the " or if " disjunction (Reptilian Recruiter) lowers to

@@ -8,6 +8,7 @@ pub(crate) mod imperative;
 pub(super) mod lower;
 pub(crate) mod mana;
 pub(crate) mod meld;
+mod multi_target_list;
 mod search;
 pub(crate) mod sequence;
 pub(crate) mod subject;
@@ -73,7 +74,7 @@ use crate::parser::oracle_static::parse_passive_cant_be_cast_spell_filter;
 #[cfg(test)]
 use crate::parser::oracle_trigger::parse_trigger_line;
 use nom::branch::alt;
-use nom::bytes::complete::{tag, take_until};
+use nom::bytes::complete::{tag, take_till, take_until};
 use nom::character::complete::{anychar, multispace0, multispace1, space1};
 use nom::combinator::{
     all_consuming, eof, map, map_opt, not, opt, peek, recognize, rest, value, verify,
@@ -11659,6 +11660,183 @@ fn try_parse_perpetual_base_pt(tp: TextPair) -> Option<Effect> {
 /// crewed Vehicle). The clause tail must be fully consumed so compound riders
 /// on other perpetual forms fall through to `Unimplemented`.
 fn try_parse_perpetual_modify_pt(tp: TextPair) -> Option<Effect> {
+    try_parse_perpetual_modify_pt_single(tp).or_else(|| perpetual_modify_pt_gap(tp))
+}
+
+/// "<subject> perpetually get(s) " head used by the gap arm: splits
+/// the clause at the perpetual verb and returns `(subject, remainder after the
+/// verb)`. Rejects clauses with no `perpetually get(s)` so unrelated text never
+/// reaches the gap fallback.
+pub(super) fn split_perpetual_get_clause(lower: &str) -> Option<(&str, &str)> {
+    let (rest, subject) = take_until::<_, _, OracleError<'_>>(" perpetually get")
+        .parse(lower)
+        .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" perpetually get")
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("s "),
+        tag::<_, _, OracleError<'_>>(" "),
+    ))
+    .parse(rest)
+    .ok()?;
+    // A quote in the subject means the verb sits inside a quoted (granted)
+    // ability, whose own parse owns it — not this clause's subject.
+    let (unquoted, _) = take_till::<_, _, OracleError<'_>>(|c| c == '"')
+        .parse(subject)
+        .ok()?;
+    unquoted.is_empty().then_some((subject, rest))
+}
+
+/// True when `subject` belongs to the chain splitter / subject binder rather
+/// than to this clause: a bare "it" anaphor (the binder fails it closed when
+/// unbound), or a lead-in that is not ONE complete noun phrase AND carries a
+/// clause boundary the splitter or guard peel will break apart — a sibling
+/// clause joined by ", and" or a leading guard ("if it's a creature, it"). The
+/// splitter opens a clause at ", and <subject> perpetually get(s)"
+/// (`starts_perpetual_subject_conjunct`), so a sibling instruction never reaches
+/// this arm fused to the perpetual edit.
+///
+/// A lead-in with NO boundary of that kind has nothing left to split it, so it is
+/// this arm's to own or to refuse: a sibling joined by a bare " and it" ("~ can't
+/// be blocked this turn and it"), a "<A> and <B> each" pair, or an anaphoric
+/// "those <noun>" subject. Declining them would let the generic pump lower the
+/// clause and drop "perpetually", turning a permanent edit into a temporary one.
+fn perpetual_subject_is_chain_led(subject: &str) -> bool {
+    if all_consuming(tag::<_, _, OracleError<'_>>("it"))
+        .parse(subject)
+        .is_ok()
+    {
+        return true;
+    }
+    !(subject_is_complete_noun_phrase_list(subject)
+        || subject_is_unmodelled_noun_phrase(subject)
+        || subject_is_zone_list_fragment(subject)
+        || subject_has_no_clause_boundary(subject))
+}
+
+/// A serial zone list left over when an earlier splitter cut a subject inside its
+/// list ("library, and graveyard" of "…in your hand, library, and graveyard").
+/// It is no clause of its own and no splitter will rejoin it, so the arm records
+/// it as a gap instead of letting the generic pump lower the fragment.
+fn subject_is_zone_list_fragment(subject: &str) -> bool {
+    all_consuming(pair(
+        super::oracle_target::parse_zone_word,
+        parse_zone_list_tail,
+    ))
+    .parse(subject)
+    .is_ok()
+}
+
+/// True when `subject` holds no clause-boundary comma and opens with no guard
+/// ("if …"), so no splitter downstream can divide it.
+fn subject_has_no_clause_boundary(subject: &str) -> bool {
+    tag::<_, _, OracleError<'_>>("if ").parse(subject).is_err()
+        && take_until::<_, _, OracleError<'_>>(", ")
+            .parse(subject)
+            .is_err()
+}
+
+/// True when a ", and <subject> perpetually get(s)" conjunct opens with a real
+/// subject the perpetual arm can own (the same noun-phrase test the arm applies),
+/// rather than the last element of a serial list ("…in your hand, library, and
+/// graveyard perpetually get +1/+1"). `parse_target` reads a bare zone noun as
+/// "cards in that zone", so a lone zone name is rejected here explicitly: it is a
+/// list element, never a subject.
+pub(super) fn perpetual_conjunct_subject_opens_a_clause(subject: &str) -> bool {
+    all_consuming(super::oracle_target::parse_zone_word)
+        .parse(subject)
+        .is_err()
+        && (subject_is_complete_noun_phrase_list(subject)
+            || subject_is_unmodelled_noun_phrase(subject))
+}
+
+/// A determiner-led subject with no clause-boundary comma whose noun phrase
+/// `parse_target` cannot model whole ("the topmost creature card in your
+/// library"). It is still ONE subject, so the gap arm records it rather than
+/// letting the clause fall through to the generic until-end-of-turn pump; a
+/// sibling clause ("you gain X life, and …") or a leading guard ("if it's …, it")
+/// does not start with a determiner or carries a comma, and stays declined.
+fn subject_is_unmodelled_noun_phrase(subject: &str) -> bool {
+    let determiner_led = alt((
+        tag::<_, _, OracleError<'_>>("the "),
+        tag("a "),
+        tag("an "),
+        tag("each "),
+        tag("all "),
+    ))
+    .parse(subject)
+    .is_ok();
+    determiner_led
+        && take_until::<_, _, OracleError<'_>>(", ")
+            .parse(subject)
+            .is_err()
+}
+
+/// True when `subject` is one noun phrase `parse_target` consumes whole, or
+/// several joined by " and " ("creatures you control and creature cards in your
+/// hand"). A compound subject is still a gap, but only when every conjunct is
+/// itself a full noun phrase; a sibling clause is not.
+fn subject_is_complete_noun_phrase_list(subject: &str) -> bool {
+    let (filter, after_subject) = parse_target(subject);
+    if matches!(filter, TargetFilter::Any) {
+        return false;
+    }
+    after_subject.is_empty()
+        || all_consuming(parse_zone_list_tail)
+            .parse(after_subject)
+            .is_ok()
+        || tag::<_, _, OracleError<'_>>(" and ")
+            .parse(after_subject)
+            .is_ok_and(|(next, _)| subject_is_complete_noun_phrase_list(next))
+}
+
+/// The rest of a serial zone list after its first zone was consumed by the noun
+/// phrase ("creature cards in your hand" + ", library, and graveyard").
+fn parse_zone_list_tail(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        many1(preceded(
+            alt((
+                tag::<_, _, OracleError<'_>>(", and "),
+                tag(", "),
+                tag(" and "),
+            )),
+            super::oracle_target::parse_zone_word,
+        )),
+    )
+    .parse(input)
+}
+
+/// A "perpetually get(s) ±" clause no arm above can model faithfully (a dynamic
+/// "+X/+X where X is …" amount, a compound subject, a battlefield-wide or
+/// random/topmost subject, a trailing rider). `ModifyPowerToughness` carries
+/// fixed deltas and the resolver has no such subject binding, so lowering it to
+/// the generic pump would silently turn a permanent edit into an
+/// until-end-of-turn one. Fail closed instead.
+///
+/// Zone-wide subjects ("creature cards in your graveyard perpetually get +1/+1")
+/// land here too: `Effect::target_filter` surfaces any typed `ApplyPerpetual`
+/// filter as a stack target slot, so the resolver would edit the one chosen card
+/// instead of every matching card. They stay honest-red until the effect can
+/// express an untargeted population.
+fn perpetual_modify_pt_gap(tp: TextPair) -> Option<Effect> {
+    let (subject, rest) = split_perpetual_get_clause(tp.lower)?;
+    // Chain-splitter / subject-binder shapes keep their own handling.
+    (!perpetual_subject_is_chain_led(subject)).then_some(())?;
+    // Signed delta head only ("+1/+1", "+X/+X", "-2/-0"): the tail is what this
+    // gap exists to reject, so it is not parsed further.
+    peek(alt((
+        tag::<_, _, OracleError<'_>>("+"),
+        tag("-"),
+        tag("\u{2212}"),
+    )))
+    .parse(rest)
+    .ok()?;
+    Some(Effect::unimplemented("perpetual_modify_pt", tp.original))
+}
+
+fn try_parse_perpetual_modify_pt_single(tp: TextPair) -> Option<Effect> {
     fn tail_done(tail: &str) -> bool {
         tail.is_empty() || tail == "."
     }
@@ -18747,8 +18925,8 @@ fn lower_clause_ast(ast: ClauseAst, ctx: &mut ParseContext) -> ParsedEffectClaus
                             &clause_text,
                         ));
                     }
-                    // A STATE guard with no owner family falls through to the behaviour this
-                    // parser has always had — the guard is dropped, the body is emitted, and
+                    // Outside a trigger, a STATE guard with no owner family falls through to the
+                    // behaviour this parser has always had — the guard is dropped, the body is emitted, and
                     // the loss is reported by `swallow_check`'s Condition_If detector, the
                     // channel six in-tree tests assert by name. A gap here would suppress
                     // that detector for the whole unit (`swallow_check.rs`'s
@@ -19069,6 +19247,12 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
         return clause;
     }
     if let Some(clause) = try_split_targeted_compound(text, ctx) {
+        return clause;
+    }
+    // CR 601.2c: several target-led conjuncts of one instruction ("destroy up to
+    // one target A, up to one target B, and up to one target C") each open their
+    // own slot; runs after the bare-`and` splitter so its shapes keep priority.
+    if let Some(clause) = multi_target_list::try_split_multi_target_list(text, ctx) {
         return clause;
     }
 
@@ -20546,6 +20730,18 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
                 sub_clause = reparsed;
             }
         }
+    }
+
+    // CR 301.5 + CR 303.4: a mass leg qualified by an attachment relation ("and
+    // all Auras attached to it") names the Auras/Equipment attached to the
+    // primary object. No `TargetFilter` expresses that relation, so the
+    // carry-forward reparses above lower the leg to an unrestricted mass effect
+    // over EVERY such permanent. Fail closed instead of widening the population.
+    if imperative::mass_object_opens_attachment_qualifier(sub_text, &sub_lower, &continuation_ctx) {
+        sub_clause = parsed_clause(Effect::unimplemented(
+            imperative::ATTACHED_TO_QUALIFIER_GAP,
+            sub_text,
+        ));
     }
 
     // If the remainder contains anaphoric references ("it", "that creature", "them"),
@@ -27472,6 +27668,69 @@ fn parse_cast_quantifier_prefix(input: &str) -> OracleResult<'_, ()> {
     .parse(input)
 }
 
+/// CR 601.2c: the object of a cast clause that refers back to cards an earlier
+/// clause already fixed ("the copies", "those cards", "them", "cards exiled with
+/// ~", "one of them"), so its untyped `TargetFilter::Any` names no fresh pool.
+fn parse_cast_anaphoric_object(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((
+            // "the " alone would also accept a fresh typed pool ("the instant
+            // cards in your graveyard"); only a definite reference to cards an
+            // earlier clause fixed is an anaphor.
+            preceded(
+                tag::<_, _, OracleError<'_>>("the "),
+                alt((
+                    tag("copies"),
+                    tag("copy"),
+                    tag("exiled "),
+                    tag("cards exiled"),
+                    tag("chosen "),
+                    tag("revealed "),
+                    tag("discarded "),
+                    tag("other cards"),
+                )),
+            ),
+            tag("those "),
+            tag("that "),
+            tag("them"),
+            tag("cards exiled"),
+            tag("one of "),
+        )),
+    )
+    .parse(input)
+}
+
+/// CR 115.1 + CR 601.2c: does a cast remainder that Branch 2 could not type
+/// still name a restriction the bare `Any` fallback would drop? Two shapes do:
+/// a declared target with its optional cardinality ("target …", "up to one
+/// target …", "any number of target …", "another target …"), and a quantified
+/// pool whose noun is not an anaphor ("any number of spells from your hand",
+/// "any number of red instant and/or sorcery cards from your graveyard"). A
+/// quantifier over an anaphor ("any number of the copies") restricts nothing
+/// beyond the referenced cards, so those keep the fallback.
+fn cast_untyped_rest_names_a_restriction(rest: &str) -> bool {
+    alt((
+        value(
+            (),
+            (
+                opt(parse_cast_quantifier_prefix),
+                opt(tag::<_, _, OracleError<'_>>("another ")),
+                tag("target "),
+            ),
+        ),
+        value(
+            (),
+            (
+                parse_cast_quantifier_prefix,
+                not(parse_cast_anaphoric_object),
+            ),
+        ),
+    ))
+    .parse(rest)
+    .is_ok()
+}
+
 /// CR 601.3 + CR 205.2b + CR 109.2b: the card-type list carried by a cast
 /// clause subject — "an instant or sorcery spell", "instant and sorcery
 /// spells", "any number of instant and/or sorcery spells", "up to two sorcery
@@ -27832,6 +28091,13 @@ fn from_among_batch_bounds(rest: &str) -> Option<ResolutionCastWindow> {
 /// engine cannot carry. A single constant so the parser, the regression suite,
 /// and any later coverage audit all name the same gap.
 const UNREPRESENTABLE_CAST_CAP_GAP: &str = "unrepresentable_cast_cap";
+
+/// CR 115.1 + CR 601.2c: The parser gap name for a cast clause that names a
+/// declared target ("cast up to one target instant card and up to one target
+/// sorcery card ...") whose typed per-slot filters no cast shape here can
+/// carry. Lowering it to the bare `TargetFilter::Any` fallback would grant a
+/// free cast of ANY card, so the clause is refused instead.
+const CAST_TARGET_UNTYPED_GAP: &str = "cast_target_untyped";
 
 /// CR 608.2c + CR 608.2g: The single construction seam for every `from among`
 /// batch-cast arm.
@@ -29598,6 +29864,15 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
         };
         crate::parser::oracle_ir::ast::refuse_additional_cost_on_lingering_cast(&mut effect);
         return Some(effect);
+    }
+
+    // CR 115.1 + CR 601.2c: a cast clause that names declared targets ("up to one
+    // target instant card ...") or a quantified pool of cards ("any number of
+    // red instant and/or sorcery cards from your graveyard") but reached this
+    // untyped fallback has lost its type/zone filter; fail closed rather than
+    // grant a cast of any card.
+    if cast_untyped_rest_names_a_restriction(rest) {
+        return Some(Effect::unimplemented(CAST_TARGET_UNTYPED_GAP, rest));
     }
 
     // Branch 3: bare fallback.
@@ -32990,6 +33265,27 @@ fn contains_explicit_tracked_set_pronoun(lower: &str) -> bool {
         || scan_contains_phrase(lower, "the exiled card")
         || scan_contains_phrase(lower, "the exiled permanent")
         || scan_contains_phrase(lower, "the exiled creature")
+}
+
+/// CR 608.2c: a clause led by a plural subject anaphor ("They are 5/5 …",
+/// "Those permanents gain …") names the set the earlier instructions published.
+fn starts_with_plural_subject_anaphor(lower: &str) -> bool {
+    alt((tag::<_, _, OracleError<'_>>("they "), tag("those ")))
+        .parse(lower.trim_start())
+        .is_ok()
+}
+
+/// CR 608.2c: a clause led by a singular subject anaphor ("It gains …", "Its
+/// controller gains …", "That creature …") names one object of the earlier
+/// instructions.
+fn starts_with_singular_subject_anaphor(lower: &str) -> bool {
+    alt((
+        tag::<_, _, OracleError<'_>>("it "),
+        tag("its "),
+        tag("that "),
+    ))
+    .parse(lower.trim_start())
+    .is_ok()
 }
 
 /// CR 603.7: Detect implicit anaphora when preceded by an exile effect.
@@ -39092,20 +39388,33 @@ pub(crate) fn parse_effect_chain_ir(
             // or engine variant. Placed after the scoped/before the targeted
             // forms; the three subjects are disjoint ("each …" / "for <type>" /
             // "target opponent …").
-            if let Some(new_type_filters) =
-                sequence::try_parse_do_the_same_for_type(normalized_text)
-            {
-                let mut cloned = prev_effect;
-                // Retype every `Typed` target the antecedent exposes (Estrid's
-                // mass `ChangeZoneAll`). Only emit the clone when a substitution
-                // actually happened: an antecedent with no `Typed` target (an
-                // `Unimplemented` head, a bare player effect) must NOT be cloned
-                // verbatim — fall through to a documented strict-failure instead.
-                let mut swapped = false;
-                each_target_filter_mut(&mut cloned, &mut |tf| {
-                    swapped |= replace_type_filters(tf, &new_type_filters);
-                });
-                if swapped {
+            // A bare subtype list ("do the same for Vampire, Dinosaur, and
+            // Merfolk") is one retyped clone per listed subtype.
+            let substitutions: Vec<Vec<TypeFilter>> =
+                match sequence::try_parse_do_the_same_for_type(normalized_text) {
+                    Some(type_filters) => vec![type_filters],
+                    None => sequence::try_parse_do_the_same_for_subtype_list(normalized_text)
+                        .map(|subtypes| subtypes.into_iter().map(|s| vec![s]).collect())
+                        .unwrap_or_default(),
+                };
+            let clones: Vec<Effect> = substitutions
+                .iter()
+                .filter_map(|new_type_filters| {
+                    let mut cloned = prev_effect.clone();
+                    // Retype every `Typed` target the antecedent exposes (Estrid's
+                    // mass `ChangeZoneAll`). Only emit the clone when a substitution
+                    // actually happened: an antecedent with no `Typed` target (an
+                    // `Unimplemented` head, a bare player effect) must NOT be cloned
+                    // verbatim — fall through to a documented strict-failure instead.
+                    let mut swapped = false;
+                    each_target_filter_mut(&mut cloned, &mut |tf| {
+                        swapped |= replace_type_filters(tf, new_type_filters);
+                    });
+                    swapped.then_some(cloned)
+                })
+                .collect();
+            if !clones.is_empty() && clones.len() == substitutions.len() {
+                for cloned in clones {
                     builder
                         .clause(
                             normalized_text,
@@ -39117,8 +39426,8 @@ pub(crate) fn parse_effect_chain_ir(
                             },
                         )
                         .push();
-                    continue;
                 }
+                continue;
             }
         }
 
@@ -42588,6 +42897,12 @@ pub(crate) fn parse_effect_chain_ir(
                     ..
                 })
             );
+
+        // CR 601.2c + CR 608.2d: a multi-slot target list is one link per slot,
+        // and a shared "you may" over it has no per-link form.
+        if is_optional && multi_target_list::is_multi_slot_list(multi_target.as_ref(), &clause) {
+            multi_target_list::fail_closed_optional_list(&mut clause, normalized_text);
+        }
 
         // CR 603.6 + CR 608.2k: A reflexive zone-change trigger body ("When a
         // creature is put onto the battlefield this way, it deals damage equal to

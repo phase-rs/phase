@@ -210,6 +210,18 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 96 — QuantityRef.NameStickerLetterCount adds a tagged name-sticker statistic
+ *      to GameState ability definitions. A v95 peer cannot decode the new tag;
+ *      full-game peers and P2P move in lockstep (wire 78). Lobby messages are
+ *      unchanged.
+ * 95 — FilterProp.Unblocked is reshaped to FilterProp.BlockStatus { status:
+ *      AttackerBlockStatus } (Blocked | Unblocked), so "blocked creature"
+ *      filters (CR 509.1h: an attacking creature stays blocked for the rest of
+ *      combat once blocked) are expressible. The legacy "Unblocked" tag still
+ *      deserializes via a serde alias with a defaulted status, but a v94 peer
+ *      cannot parse the new "BlockStatus" tag carried in GameState ability
+ *      definitions. Full-game peers and P2P move in lockstep (wire 77); lobby
+ *      messages are unchanged.
  * 94 — SpellContext.creation_lookback_event carries the battlefield departure a
  *      phase-delayed triggered ability was created under (CR 603.7 + CR 603.10a
  *      + CR 608.2h), and TriggerSourceContext.mana_cost captures the observed
@@ -632,7 +644,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 94;
+export const PROTOCOL_VERSION = 96;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
