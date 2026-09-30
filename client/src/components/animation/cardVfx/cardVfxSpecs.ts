@@ -80,11 +80,11 @@ export interface CounterChangeSpec {
   pace: number;
 }
 
-/** An event another event presents: a destruction or sacrifice a replacement
- *  sent elsewhere, whose zone change shows the move, or a token's entry from
- *  no zone, which its `TokenCreated` shows. */
+/** A destruction or sacrifice a replacement sent elsewhere: its earlier zone
+ *  change shows the move, and it presents Classic only if that did not. */
 export interface CoveredSpec {
   kind: "covered";
+  objectId: ObjectId;
 }
 
 /** Everything the card VFX layer presents, by `kind`. */
@@ -104,24 +104,15 @@ export function damageCauseState(): GameState | null {
   return useAnimationStore.getState().cardVfxReady ? useGameStore.getState().gameState : null;
 }
 
+// CR 701.8a / CR 701.21a: a destroyed or sacrificed permanent moves to its
+// owner's graveyard, unless a replacement (CR 614.1a) sends it elsewhere. Its
+// move to exile then dissolves, and to a hand or library flies.
 function coveredSpecFor(event: AnimationEvent, { post, pace }: CardFlightSpecContext): CoveredSpec | null {
-  if (pace <= 0) return null;
-  switch (event.type) {
-    // CR 701.8a / CR 701.21a: a destroyed or sacrificed permanent moves to its
-    // owner's graveyard, unless a replacement (CR 614.1a) sends it elsewhere.
-    // Its move to exile then dissolves, and to a hand or library flies.
-    case "CreatureDestroyed":
-    case "PermanentSacrificed": {
-      const zone = post?.objects[event.data.object_id]?.zone;
-      const presented = zone === "Exile" || (zone !== undefined && flightPresents("Battlefield", zone));
-      return presented ? { kind: "covered" } : null;
-    }
-    // CR 111.1: a token enters the battlefield from no zone.
-    case "ZoneChanged":
-      return event.data.from === null && post?.objects[event.data.object_id]?.is_token ? { kind: "covered" } : null;
-    default:
-      return null;
-  }
+  if (pace <= 0 || (event.type !== "CreatureDestroyed" && event.type !== "PermanentSacrificed")) return null;
+  const objectId = event.data.object_id;
+  const zone = post?.objects[objectId]?.zone;
+  const presented = zone === "Exile" || (zone !== undefined && flightPresents("Battlefield", zone));
+  return presented ? { kind: "covered", objectId } : null;
 }
 
 // CR 701.8a: a destroyed permanent moves from the battlefield to its owner's

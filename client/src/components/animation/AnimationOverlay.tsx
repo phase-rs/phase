@@ -78,6 +78,7 @@ interface ActiveCastArc {
 interface ActiveMillReveal {
   id: number;
   cards: MillCard[];
+  startIndex: number;
   from: { x: number; y: number };
   to: { x: number; y: number };
 }
@@ -563,9 +564,12 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
               if (amount > 0 && vfxQuality !== "minimal") particleRef.current?.healEffect(x, y, amount);
             };
             // Under the New style the layer shows the change, unless damage
-            // this step already shows the loss it causes.
+            // this step already shows the loss it causes (CR 120.3a: damage
+            // to a player makes them lose that much life). A gain is never
+            // damage's, so it always shows.
             const layer = cardVfxRef.current;
-            if (layer && !hasDamageDealt && !groupedDamageEvent) {
+            const lossShownByDamage = amount < 0 && (hasDamageDealt || groupedDamageEvent !== undefined);
+            if (layer && !lossShownByDamage) {
               layer.present({ kind: "life", playerId: player_id, amount, pace: speedMultiplier }, heal);
             } else {
               heal();
@@ -711,43 +715,39 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
               ]);
             }
           } else if (fromZone === "Library" && toZone === "Graveyard") {
+            // CR 701.17a: each milled card goes from its owner's library to
+            // their graveyard. Every event presents its own card, leaving in
+            // its place in the step's order, so a card whose flight presents
+            // it is never shown twice and one that falls back is never dropped.
             if (vfxQuality !== "minimal") {
-              const newState = useAnimationStore.getState().animationNewState;
-              const millCards: MillCard[] = [];
-              for (const e of stepEffects) {
-                if (e.event.type !== "ZoneChanged") continue;
-                const d = e.event.data;
-                if (d.from !== "Library" || d.to !== "Graveyard") continue;
-                const object = newState?.objects[d.object_id];
-                const snapshot = visibleAnimationImageSnapshot(object);
-                millCards.push({
-                  objectId: d.object_id,
-                  snapshot,
-                  colors: snapshot ? getCardColors(object?.color ?? []) : [],
-                });
-              }
-
-              // Deduplicate: only process once per step (first Library→Graveyard event triggers the batch)
-              if (object_id === millCards[0]?.objectId && millCards.length > 0) {
-                const obj = newState?.objects[object_id];
-                const ownerId = obj?.owner ?? 0;
-
-                const libEl = document.querySelector(`[data-library-pile="${ownerId}"]`);
-                const gyEl = document.querySelector(`[data-graveyard-pile="${ownerId}"]`);
-                const libRect = libEl?.getBoundingClientRect();
-                const gyRect = gyEl?.getBoundingClientRect();
-
-                const hudFallback = getPlayerHudPosition(ownerId);
-                const fromPos = libRect
-                  ? { x: libRect.x + libRect.width / 2, y: libRect.y + libRect.height / 2 }
-                  : hudFallback;
-                const toPos = gyRect
-                  ? { x: gyRect.x + gyRect.width / 2, y: gyRect.y + gyRect.height / 2 }
-                  : hudFallback;
-
-                const id = ++millRevealIdCounter;
-                setActiveMillReveals((prev) => [...prev, { id, cards: millCards, from: fromPos, to: toPos }]);
-              }
+              const object = useAnimationStore.getState().animationNewState?.objects[object_id];
+              const snapshot = visibleAnimationImageSnapshot(object);
+              const card: MillCard = {
+                objectId: object_id,
+                snapshot,
+                colors: snapshot ? getCardColors(object?.color ?? []) : [],
+              };
+              const startIndex = stepEffects
+                .filter(
+                  ({ event: other }) =>
+                    other.type === "ZoneChanged" && other.data.from === "Library" && other.data.to === "Graveyard",
+                )
+                .indexOf(effect);
+              const ownerId = object?.owner ?? 0;
+              const libRect = document.querySelector(`[data-library-pile="${ownerId}"]`)?.getBoundingClientRect();
+              const gyRect = document.querySelector(`[data-graveyard-pile="${ownerId}"]`)?.getBoundingClientRect();
+              const hudFallback = getPlayerHudPosition(ownerId);
+              const id = ++millRevealIdCounter;
+              setActiveMillReveals((prev) => [
+                ...prev,
+                {
+                  id,
+                  cards: [card],
+                  startIndex: Math.max(startIndex, 0),
+                  from: libRect ? rectCenter(libRect) : hudFallback,
+                  to: gyRect ? rectCenter(gyRect) : hudFallback,
+                },
+              ]);
             }
           }
           break;
@@ -1062,6 +1062,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
         <MillRevealAnimation
           key={`mill-${mill.id}`}
           cards={mill.cards}
+          startIndex={mill.startIndex}
           from={mill.from}
           to={mill.to}
           onComplete={() => handleMillRevealComplete(mill.id)}

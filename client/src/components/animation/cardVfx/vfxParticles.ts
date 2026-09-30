@@ -268,16 +268,18 @@ export interface EffectTiming {
   endS: number;
   pace: number;
   impact: { atS: number; land(): void } | null;
+  /** When the effect's clock starts, on the frame clock (`performance.now()`);
+   *  `null` starts it on its first frame. */
+  startMs: number | null;
 }
 
-/** A look played once on its own clock, from its first frame. It removes
- *  itself after `endS`. */
+/** A look played once on its own clock. It removes itself after `endS`. */
 export class TimedEffect implements SceneEffect {
   private readonly group = new Group();
   private readonly unit = new PlaneGeometry(1, 1);
   private readonly clock = { value: 0 };
   private readonly frame: EffectFrame;
-  private startMs: number | null = null;
+  private startMs: number | null;
   private landed = false;
 
   constructor(
@@ -287,6 +289,7 @@ export class TimedEffect implements SceneEffect {
     look: (parts: EffectParts) => EffectFrame,
   ) {
     this.group.name = name;
+    this.startMs = timing.startMs;
     this.frame = look({ group: this.group, unit: this.unit, clock: this.clock });
     host.scene.add(this.group);
   }

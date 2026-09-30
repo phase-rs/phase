@@ -625,7 +625,7 @@ export function createDamageStrike(
   const dist = Math.hypot(T[0] - S[0], T[1] - S[1]) || 1;
   const dir: Vec2 = [(T[0] - S[0]) / dist, (T[1] - S[1]) / dist];
   const { cause, to, tier, pace, onImpact } = params;
-  const timing = { endS: IMPACT_S + TAIL_S[cause], pace, impact: { atS: IMPACT_S, land: onImpact } };
+  const timing = { endS: IMPACT_S + TAIL_S[cause], pace, impact: { atS: IMPACT_S, land: onImpact }, startMs: null };
   const look = (parts: EffectParts) =>
     CAUSES[cause]({
       ...parts,
@@ -650,18 +650,20 @@ export interface DamageBlowParams {
   amount: number;
   tier: CardVfxTier;
   pace: number;
-  /** When the slam lands, in seconds after the blow's first frame, before pace. */
+  /** When the slam started, on the frame clock (`performance.now()`). */
+  startMs: number;
+  /** When the slam lands, in seconds after it started, before pace. */
   impactS: number;
 }
 
 /** Creates a creature's blow landing on `to` as its slam strikes. The slam
  *  lands the hit itself, so the blow has no impact of its own to report. */
-export function createDamageBlow(host: EffectHost, { from, to, amount, tier, pace, impactS }: DamageBlowParams): SceneEffect {
+export function createDamageBlow(host: EffectHost, { from, to, amount, tier, pace, startMs, impactS }: DamageBlowParams): SceneEffect {
   const T = worldPoint(to, 0.5, 0.5);
   const S = from && worldPoint(from, 0.5, 0.5);
   const dist = S ? Math.hypot(T[0] - S[0], T[1] - S[1]) : 0;
   const dir: Vec2 | null = S && dist > 0 ? [(T[0] - S[0]) / dist, (T[1] - S[1]) / dist] : null;
-  const timing = { endS: impactS + BLOW_TAIL_S, pace, impact: null };
+  const timing = { endS: impactS + BLOW_TAIL_S, pace, impact: null, startMs };
   const look = (parts: EffectParts) =>
     blowFrame({
       ...parts,

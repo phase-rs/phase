@@ -31,6 +31,7 @@ import {
   exileGhostNode,
   measureCardPose,
   ownPermanentSurface,
+  permanentSurface,
   playerHudSurface,
   resolveAim,
   sourceElement,
@@ -97,6 +98,8 @@ interface PendingStart {
   spec: CardFlightSpec;
   from: CardPose | null;
   face: AnimationImageSnapshot;
+  /** The engine commit epoch when the flight was presented. */
+  commitEpoch: number;
   classics: (() => void)[];
 }
 
@@ -152,8 +155,11 @@ class CardVfxController {
   private nextToken = 0;
   private readonly faceRequests = new Map<number, FaceRequest>();
   private readonly pending = new Map<ObjectId, PendingStart>();
+  /** Board effects waiting for their face, each with the covered events' Classics. */
+  private readonly pendingBoard = new Map<ObjectId, (() => void)[]>();
   private readonly veiled = new Set<ObjectId>();
-  private readonly commitWaits = new Set<() => void>();
+  /** Each veil released only once the engine commit lands, by object. */
+  private readonly commitWaits = new Map<ObjectId, () => void>();
 
   constructor(
     private readonly publishRequests: (requests: FaceRequest[]) => void,
@@ -251,6 +257,7 @@ class CardVfxController {
             this.presentBoardEffect(spec, classic);
             return;
           case "covered":
+            this.presentCovered(spec.objectId, classic);
             return;
         }
     }
@@ -362,9 +369,11 @@ class CardVfxController {
       classic();
       return;
     }
+    // Read now: the commit may land while the face loads.
+    const commitEpoch = useGameStore.getState().engineCommitEpoch;
     if (!face) {
       // Back only: nothing to load, so the flight starts now.
-      this.start(scene, spec, from, null, [classic]);
+      this.start(scene, spec, from, null, commitEpoch, [classic]);
       return;
     }
     const token = this.requestFace(
@@ -374,7 +383,7 @@ class CardVfxController {
       (image) => this.finishPending(objectId, token, image),
       () => this.fallBack(objectId, token),
     );
-    this.pending.set(objectId, { token, spec, from, face, classics: [classic] });
+    this.pending.set(objectId, { token, spec, from, face, commitEpoch, classics: [classic] });
   }
 
   // The permanent's surface is measured now, while it is still on the board;
@@ -421,11 +430,18 @@ class CardVfxController {
       return;
     }
     const commitEpoch = useGameStore.getState().engineCommitEpoch;
+    // Covered events wait on this effect while its face loads.
+    const covered: (() => void)[] = [];
+    this.pendingBoard.set(objectId, covered);
+    const settle = () => {
+      if (this.pendingBoard.get(objectId) === covered) this.pendingBoard.delete(objectId);
+    };
     this.withBoardSurface(
       el,
       spec.face,
       spec.owningStepMs,
       (scene, surface) => {
+        settle();
         const board = { ...surface, objectId, tier: this.tier, pace: spec.pace };
         const release = () => this.unveilAfterCommit(objectId, commitEpoch);
         switch (spec.kind) {
@@ -438,8 +454,21 @@ class CardVfxController {
         }
         this.veil(objectId);
       },
-      classic,
+      () => {
+        settle();
+        classic();
+        runAll(covered);
+      },
     );
+  }
+
+  // A covered event's move is still loading: its Classic runs if the move
+  // falls back. A move that is running holds the object's veil. With neither,
+  // the move presented Classic, and so does the covered event.
+  private presentCovered(objectId: ObjectId, classic: () => void) {
+    const waiting = this.pending.get(objectId)?.classics ?? this.pendingBoard.get(objectId);
+    if (waiting) waiting.push(classic);
+    else if (!this.veiled.has(objectId)) classic();
   }
 
   // Source and target are measured now: the source's stack entry leaves the
@@ -491,26 +520,28 @@ class CardVfxController {
   // Both surfaces are measured now, before the slam moves its creature.
   private presentBlow(scene: CardVfxScene, spec: DamageBlowSpec, classic: () => void) {
     const { target, sourceId } = spec;
-    const targetEl = "Player" in target ? playerHudSurface(target.Player) : ownPermanentSurface(target.Object);
+    const targetEl = "Player" in target ? playerHudSurface(target.Player) : permanentSurface(target.Object);
     if (!targetEl || !this.canvas || spec.pace <= 0) {
       classic();
       return;
     }
     const canvasRect = this.canvas.getBoundingClientRect();
-    const sourceEl = sourceId === null ? null : ownPermanentSurface(sourceId);
+    const sourceEl = sourceId === null ? null : permanentSurface(sourceId);
     scene.startDamageBlow({
       from: sourceEl && measureCardPose(sourceEl, canvasRect),
       to: measureCardPose(targetEl, canvasRect),
       amount: spec.amount,
       tier: this.tier,
       pace: spec.pace,
+      // The slam started this tick, on the clock the frames run on.
+      startMs: performance.now(),
       impactS: spec.impactDelayMs / 1000 / spec.pace,
     });
   }
 
   // A life or counter change plays over its HUD or permanent where it is now.
   private presentTally(scene: CardVfxScene, spec: LifeChangeSpec | CounterChangeSpec, classic: () => void) {
-    const el = spec.kind === "life" ? playerHudSurface(spec.playerId) : ownPermanentSurface(spec.objectId);
+    const el = spec.kind === "life" ? playerHudSurface(spec.playerId) : permanentSurface(spec.objectId);
     if (!el || !this.canvas || spec.pace <= 0) {
       classic();
       return;
@@ -558,7 +589,8 @@ class CardVfxController {
       runAll(pending.classics);
       return;
     }
-    this.start(this.scene, pending.spec, pending.from, this.scene.uploadFace(image), pending.classics);
+    const { spec, from, commitEpoch, classics } = pending;
+    this.start(this.scene, spec, from, this.scene.uploadFace(image), commitEpoch, classics);
   }
 
   private takePending(objectId: ObjectId, token: number): PendingStart | null {
@@ -574,6 +606,7 @@ class CardVfxController {
     spec: CardFlightSpec,
     from: CardPose | null,
     front: Texture | null,
+    commitEpoch: number,
     classics: readonly (() => void)[],
   ) {
     const { objectId, route } = spec;
@@ -589,7 +622,9 @@ class CardVfxController {
       landingColors: spec.endColors,
       aim: (origin) => this.aim(route, objectId, origin),
       commitEpoch: () => useGameStore.getState().engineCommitEpoch,
-      onRelease: () => this.unveil(objectId),
+      // A pile stands in for its card before the commit moves it there, so
+      // the card's old surface stays veiled until then.
+      onRelease: () => this.unveilAfterCommit(objectId, commitEpoch),
     });
     if (!started) {
       front?.dispose();
@@ -599,8 +634,11 @@ class CardVfxController {
     this.veil(objectId);
   }
 
-  // A handoff keeps the veil it already holds: no unveil in between.
+  // A handoff keeps the veil it already holds: no unveil in between. A new
+  // effect takes over a veil still waiting on a commit.
   private veil(objectId: ObjectId) {
+    this.commitWaits.get(objectId)?.();
+    this.commitWaits.delete(objectId);
     if (this.veiled.has(objectId)) return;
     this.veiled.add(objectId);
     useAnimationStore.getState().veilFlight(objectId);
@@ -616,10 +654,10 @@ class CardVfxController {
     const stop = useGameStore.subscribe((state) => {
       if (state.engineCommitEpoch === commitEpoch) return;
       stop();
-      this.commitWaits.delete(stop);
+      this.commitWaits.delete(objectId);
       this.unveil(objectId);
     });
-    this.commitWaits.add(stop);
+    this.commitWaits.set(objectId, stop);
   }
 
   private measureSource(spec: CardFlightSpec): CardPose | null {
@@ -649,7 +687,7 @@ class CardVfxController {
     this.faceRequests.clear();
     this.publish();
     for (const request of waiting) request.failed();
-    for (const stop of this.commitWaits) stop();
+    for (const stop of this.commitWaits.values()) stop();
     this.commitWaits.clear();
     const { unveilFlight } = useAnimationStore.getState();
     for (const objectId of this.veiled) unveilFlight(objectId);

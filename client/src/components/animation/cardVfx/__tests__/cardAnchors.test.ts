@@ -92,9 +92,14 @@ describe("zone-scoped anchors", () => {
     const pile = mount({ "data-graveyard-pile": "0", "data-grouped-ids": String(X) });
     expect(sourceElement(castFrom("Graveyard"), X)).toBe(pile);
     expect(sourceElement(castFrom("Exile"), X)).toBeNull();
-    const fan = mount({ "data-zone-fan-card": "", "data-object-id": String(X) });
+    // A fan card is a surface only for the zone it is tagged with, so a
+    // graveyard card moving to exile never lands on its own origin.
+    const fan = mount({ "data-zone-fan-card": "Graveyard", "data-object-id": String(X) });
     expect(sourceElement(castFrom("Graveyard"), X)).toBe(fan);
+    expect(sourceElement(castFrom("Exile"), X)).toBeNull();
+    fan.setAttribute("data-zone-fan-card", "Exile");
     expect(sourceElement(castFrom("Exile"), X)).toBe(fan);
+    expect(sourceElement(castFrom("Graveyard"), X)).toBe(pile);
 
     const opponent = mount({ "data-opponent-hand-card": String(X) });
     expect(sourceElement(CAST, X)).toBe(opponent);
@@ -108,7 +113,9 @@ describe("zone-scoped anchors", () => {
     expect(ownNode(toExile, X)).toBeNull();
     const pile = mount({ "data-exile-pile": "1" });
     expect(ownNode(toExile, X)).toBe(pile);
-    const fan = mount({ "data-zone-fan-card": "", "data-object-id": String(X) });
+    mount({ "data-zone-fan-card": "Graveyard", "data-object-id": String(X) });
+    expect(ownNode(toExile, X)).toBe(pile);
+    const fan = mount({ "data-zone-fan-card": "Exile", "data-object-id": String(X) });
     expect(ownNode(toExile, X)).toBe(fan);
     const ghost = mount({ "data-exile-ghost": String(X) });
     expect(ownNode(toExile, X)).toBe(ghost);

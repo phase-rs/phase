@@ -302,8 +302,8 @@ describe("cardVfxSpecFor", () => {
     const sacrificed: AnimationEvent = { type: "PermanentSacrificed", data: { object_id: X, player_id: 0 } };
     for (const zone of ["Exile", "Hand", "Library"] as const) {
       const post = stateWith(visible(card.params({ zone }).build()));
-      expect(cardVfxSpecFor(destroyed, context(pre, post))).toEqual({ kind: "covered" });
-      expect(cardVfxSpecFor(sacrificed, context(pre, post))).toEqual({ kind: "covered" });
+      expect(cardVfxSpecFor(destroyed, context(pre, post))).toEqual({ kind: "covered", objectId: X });
+      expect(cardVfxSpecFor(sacrificed, context(pre, post))).toEqual({ kind: "covered", objectId: X });
     }
     // A destroyed token that ceased to exist still shatters; a sacrificed one presents Classic.
     expect(cardVfxSpecFor(destroyed, context(pre, stateWith()))?.kind).toBe("shatter");
@@ -311,11 +311,10 @@ describe("cardVfxSpecFor", () => {
     expect(cardVfxSpecFor(destroyed, context(pre, pre, 0))).toBeNull();
   });
 
-  it("V11-5: a token's entry from no zone is its creation's to present", () => {
+  it("V11-5: a token's entry from no zone has no card VFX; its creation flies it", () => {
     const entered: AnimationEvent = { type: "ZoneChanged", data: { object_id: X, from: null, to: "Battlefield" } };
     const token = stateWith(visible(card.onBattlefield().params({ is_token: true }).build()));
-    expect(cardVfxSpecFor(entered, context(null, token))).toEqual({ kind: "covered" });
-    expect(cardVfxSpecFor(entered, context(null, stateWith(visible(card.onBattlefield().build()))))).toBeNull();
+    expect(cardVfxSpecFor(entered, context(null, token))).toBeNull();
   });
 
   it("V8-9: no pre object or pace 0 has no shatter", () => {

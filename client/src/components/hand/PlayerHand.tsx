@@ -16,7 +16,7 @@ import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { getPlayerId, useCanActForWaitingState, usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
 import { previewAutomaticManaPayment } from "../../game/manaPaymentPreview.ts";
-import type { GameObject, ManaCost, ObjectId } from "../../adapter/types.ts";
+import type { GameObject, ManaCost, ObjectId, Zone } from "../../adapter/types.ts";
 import {
   collectObjectActions,
   resolveDirectPlayOrCastAction,
@@ -660,6 +660,7 @@ export function PlayerHand({ interactionDisabled = false }: PlayerHandProps) {
               <ZoneFanCard
                 key={obj.id}
                 objectId={obj.id}
+                zone="Exile"
                 cardName={obj.name}
                 manaCost={obj.mana_cost}
                 backFaceManaCost={obj.back_face?.mana_cost}
@@ -733,6 +734,7 @@ export function PlayerHand({ interactionDisabled = false }: PlayerHandProps) {
               <ZoneFanCard
                 key={obj.id}
                 objectId={obj.id}
+                zone="Graveyard"
                 cardName={obj.name}
                 manaCost={obj.mana_cost}
                 backFaceManaCost={obj.back_face?.mana_cost}
@@ -1090,6 +1092,9 @@ const HandCard = memo(function HandCard({
 
 interface ZoneFanCardProps {
   objectId: number;
+  /** The zone whose wing shows the card, so an anchor can tell a graveyard
+   *  card from an exiled one. */
+  zone: Zone;
   cardName: string;
   manaCost: ManaCost;
   backFaceManaCost?: ManaCost;
@@ -1121,6 +1126,7 @@ interface ZoneFanCardProps {
 // be flung up to cast but can never be dropped into the middle of the hand.
 const ZoneFanCard = memo(function ZoneFanCard({
   objectId,
+  zone,
   cardName,
   manaCost,
   backFaceManaCost,
@@ -1160,7 +1166,7 @@ const ZoneFanCard = memo(function ZoneFanCard({
 
   return (
     <motion.div
-      data-zone-fan-card
+      data-zone-fan-card={zone}
       data-object-id={objectId}
       // Marks the card as inspectable, which is what usePreviewDismiss's 300ms
       // `[data-card-hover]:hover` poll (and uiStore's 50ms deferred clear) test

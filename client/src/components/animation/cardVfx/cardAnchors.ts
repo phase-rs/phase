@@ -117,6 +117,12 @@ function firstRenderedOf(selectors: readonly string[]): HTMLElement | null {
   return null;
 }
 
+/** Permanent `id`'s card, else the collapsed group standing in for it. */
+const permanentSelectors = (id: ObjectId) => [
+  `[data-permanent-card="${id}"]`,
+  `[data-permanent-card][data-grouped-ids~="${id}"]`,
+];
+
 // Zone-scoped anchors (the phase 1 anchor contract). The generic
 // `[data-object-id]` matches one object in several zones at once.
 /** The selectors, in priority order, for object `id`'s surface in each zone.
@@ -126,17 +132,17 @@ const ZONE_SURFACES: Record<Zone, (id: ObjectId, ownerId: PlayerId) => readonly 
   Hand: (id) => [`[data-hand-card][data-object-id="${id}"]`, `[data-opponent-hand-card="${id}"]`],
   Library: (id, ownerId) => [`[data-library-pile] [data-grouped-ids~="${id}"]`, `[data-library-pile="${ownerId}"]`],
   Graveyard: (id, ownerId) => [
-    `[data-zone-fan-card][data-object-id="${id}"]`,
+    `[data-zone-fan-card="Graveyard"][data-object-id="${id}"]`,
     `[data-graveyard-pile="${ownerId}"][data-grouped-ids~="${id}"]`,
   ],
   // A face-down exiled card is only in its owner's pile's count.
   Exile: (id, ownerId) => [
     `[data-exile-ghost="${id}"]`,
-    `[data-zone-fan-card][data-object-id="${id}"]`,
+    `[data-zone-fan-card="Exile"][data-object-id="${id}"]`,
     `[data-exile-pile="${ownerId}"]`,
   ],
   Stack: (id) => [`[data-stack-entry="${id}"]`, `[data-stack-entry][data-grouped-ids~="${id}"]`],
-  Battlefield: (id) => [`[data-permanent-card="${id}"]`, `[data-permanent-card][data-grouped-ids~="${id}"]`],
+  Battlefield: permanentSelectors,
   Command: () => [],
 };
 
@@ -145,6 +151,12 @@ const ZONE_SURFACES: Record<Zone, (id: ObjectId, ownerId: PlayerId) => readonly 
  *  replaces, and a representative's veil belongs to another object. */
 export function ownPermanentSurface(id: ObjectId): HTMLElement | null {
   return firstRendered(`[data-permanent-card="${id}"]`);
+}
+
+/** Where an effect that veils nothing plays over permanent `id`: its own
+ *  laid-out surface, else its collapsed group's representative. */
+export function permanentSurface(id: ObjectId): HTMLElement | null {
+  return firstRenderedOf(permanentSelectors(id));
 }
 
 /** Player `id`'s HUD, where damage to them lands. */

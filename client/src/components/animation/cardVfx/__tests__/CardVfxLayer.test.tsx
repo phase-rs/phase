@@ -224,6 +224,12 @@ function veiled(objectId: number) {
   return useAnimationStore.getState().flightVeiledObjectIds.has(objectId);
 }
 
+/** The engine commits the step's state. */
+const commitEngine = () =>
+  act(() => {
+    useGameStore.setState({ engineCommitEpoch: useGameStore.getState().engineCommitEpoch + 1 });
+  });
+
 function canvas() {
   const element = document.querySelector<HTMLCanvasElement>("canvas[data-card-vfx]");
   if (!element) throw new Error("no overlay canvas");
@@ -588,8 +594,9 @@ describe("CardVfxLayer present contract", () => {
     expect(rafSpy.mock.calls.length).toBeGreaterThan(whileActive);
     expect(canvas().style.visibility).toBe("visible");
 
-    // The own node appears with its face already loaded; the flight lands and ends.
+    // The commit shows the own node with its face already loaded; the flight lands and ends.
     addFace(anchor({ "data-stack-entry": String(X) }, 700, 200));
+    commitEngine();
     await advance(RESOLVE_FLIGHT_MS + 10 * FRAME_MS);
     expect(veiled(X)).toBe(false);
     const idle = rafSpy.mock.calls.length;
@@ -722,12 +729,14 @@ describe("CardVfxLayer present contract", () => {
     present(spec(X, CAST));
     await frames(3);
     addFace(anchor({ "data-stack-entry": String(X) }, 700, 200));
+    commitEngine();
     await advance(CAST_FLIGHT_MS + 10 * FRAME_MS);
     expect(veiled(X)).toBe(false);
 
     addFace(anchor({ "data-graveyard-pile": "0", "data-grouped-ids": String(Y) }, 40, 700));
     anchor({ "data-stack-entry": String(Y) }, 700, 200);
     present(spec(Y, { from: "Stack", to: "Graveyard", ownerId: 0 }));
+    commitEngine();
     await advance(RESOLVE_FLIGHT_MS + SETTLE_MS + 10 * FRAME_MS);
     expect(veiled(Y)).toBe(false);
 
@@ -758,7 +767,7 @@ describe("CardVfxLayer present contract", () => {
   it.each([
     ["Library", { "data-library-pile": "1" }],
     ["Exile", { "data-exile-pile": "1" }],
-  ] as const)("V11-9: a card flies into its owner's %s pile and ends there, with no commit needed", async (to, pile) => {
+  ] as const)("V11-9: a card flies into its owner's %s pile and ends there, its old surface veiled until the commit", async (to, pile) => {
     const { present } = await readyLayer();
     handCard(X);
     anchor(pile, 40, 700);
@@ -769,20 +778,69 @@ describe("CardVfxLayer present contract", () => {
 
     // Well inside the await bound, so only a landing (not an abandon) ends it.
     await advance(RESOLVE_FLIGHT_MS + LAND_STATIONARY_WAIT_MAX_MS + LAND_REVEAL_WAIT_MAX_MS + 10 * FRAME_MS);
+    expect(canvas().style.visibility).toBe("hidden");
+    // The hand card is still in hand until the commit moves it.
+    expect(veiled(X)).toBe(true);
+    commitEngine();
     expect(veiled(X)).toBe(false);
     expect(unveilSpy).toHaveBeenCalledTimes(1);
-    expect(canvas().style.visibility).toBe("hidden");
   });
 
-  it("V11-8: an event another event presents shows nothing once ready, and runs Classic before", async () => {
+  it("V11-10: a flight that starts while a landed flight waits on the commit keeps the veil past it", async () => {
+    const { present } = await readyLayer();
+    handCard(X);
+    anchor({ "data-exile-pile": "1" }, 40, 700);
+    present(spec(X, { from: "Hand", to: "Exile", ownerId: 1 }));
+    await advance(RESOLVE_FLIGHT_MS + LAND_STATIONARY_WAIT_MAX_MS + LAND_REVEAL_WAIT_MAX_MS + 10 * FRAME_MS);
+    expect(veiled(X)).toBe(true);
+
+    present(spec(X, { from: "Exile", to: "Hand", ownerId: 1 }));
+    await frames(1);
+    commitEngine();
+    expect(veiled(X)).toBe(true);
+    expect(unveilSpy).not.toHaveBeenCalled();
+  });
+
+  it("V11-11: a flight whose commit lands while its face loads ends on its own node without another commit", async () => {
+    const { present } = await readyLayer();
+    handCard(X);
+    const classic = present(spec(X, CAST, { startFace: face(X), endFace: face(X) }));
+
+    commitEngine();
+    addFace(anchor({ "data-stack-entry": String(X) }, 700, 200));
+    await act(async () => {
+      const loader = faceLoader();
+      if (loader) fireEvent.load(loader);
+    });
+    await advance(CAST_FLIGHT_MS + LAND_STATIONARY_WAIT_MAX_MS + LAND_REVEAL_WAIT_MAX_MS + 10 * FRAME_MS);
+
+    expect(classic).not.toHaveBeenCalled();
+    expect(veiled(X)).toBe(false);
+  });
+
+  it("V11-8: a covered event shows nothing while its move flies, waits on one still loading, and is Classic otherwise", async () => {
     const { present } = await renderLayer();
-    expect(present({ kind: "covered" })).toHaveBeenCalledTimes(1);
+    expect(present({ kind: "covered", objectId: X })).toHaveBeenCalledTimes(1);
     loadBack();
     await frames(1);
     await advance(1);
     expect(gl.constructed).toBe(1);
 
-    expect(present({ kind: "covered" })).not.toHaveBeenCalled();
+    // No move of its own presented: Classic.
+    expect(present({ kind: "covered", objectId: X })).toHaveBeenCalledTimes(1);
+    // A flight under way holds the veil.
+    handCard(X);
+    present(spec(X, CAST));
+    expect(present({ kind: "covered", objectId: X })).not.toHaveBeenCalled();
+
+    // A flight still loading its face: the covered Classic runs only if it falls back.
+    anchor({ "data-permanent-card": String(Y) }, 300, 400);
+    const move = present(spec(Y, { from: "Battlefield", to: "Hand", ownerId: 0 }, { startFace: face(Y), endFace: face(Y) }));
+    const waiting = present({ kind: "covered", objectId: Y });
+    expect(waiting).not.toHaveBeenCalled();
+    await advance(CARD_FLIGHT_FACE_READY_MAX_MS + 10);
+    expect(move).toHaveBeenCalledTimes(1);
+    expect(waiting).toHaveBeenCalledTimes(1);
   });
 
   it("V3-1n (iii): a released card stays drawn until the destination shows its face", async () => {
@@ -917,6 +975,7 @@ describe("CardVfxLayer present contract", () => {
     const entry = anchor({ "data-stack-entry": String(X) }, 700, 200);
     addPulse(entry);
     addPip(entry);
+    commitEngine();
     await advance(CAST_FLIGHT_MS + 5 * FRAME_MS);
     expect(unveilSpy).toHaveBeenCalledWith(X);
     await frames(2);
@@ -1116,6 +1175,22 @@ describe("CardVfxLayer shatter", () => {
     present(shatter(Y, { ...face(Y, "Soldier"), isToken: true }));
 
     expect(sizes()).toEqual(expect.arrayContaining([["Llanowar Elves", "art_crop"], ["Soldier", "normal"]]));
+  });
+
+  it("V11-8: a covered event waits on a board effect loading its face: dropped if it starts, Classic if it falls back", async () => {
+    const { present } = await readyLayer();
+    addFace(anchor({ "data-permanent-card": String(X) }, 300, 400));
+    present(shatter(X));
+    const dropped = present({ kind: "covered", objectId: X });
+    await loadFace();
+    expect(dropped).not.toHaveBeenCalled();
+
+    addFace(anchor({ "data-permanent-card": String(Y) }, 500, 400));
+    const failed = present(shatter(Y));
+    const waiting = present({ kind: "covered", objectId: Y });
+    await advance(CARD_FLIGHT_FACE_READY_MAX_MS + 10);
+    expect(failed).toHaveBeenCalledTimes(1);
+    expect(waiting).toHaveBeenCalledTimes(1);
   });
 
   it("V8-3: unmounting mid-shatter releases the veil", async () => {
@@ -1341,6 +1416,21 @@ describe("CardVfxLayer damage strike", () => {
     const names = last(calls("render"))?.children?.map((child) => child.name);
     expect(names).toEqual(expect.arrayContaining(["life-change", "counter-change"]));
     expect(veiled(Y)).toBe(false);
+  });
+
+  it("V13-6: a counter or blow on a collapsed group's member plays over the group's representative", async () => {
+    const { present } = await readyLayer();
+    anchor({ "data-permanent-card": String(X), "data-grouped-ids": `${X} ${Y}` }, 300, 400);
+
+    const counter = present({ kind: "counter", objectId: Y, counterType: "P1P1", change: "added", count: 1, pace: 1 });
+    const blow = present({ kind: "blow", sourceId: null, target: { Object: Y }, amount: 3, pace: 1, impactDelayMs: 300 });
+    await frames(1);
+
+    expect(counter).not.toHaveBeenCalled();
+    expect(blow).not.toHaveBeenCalled();
+    const names = last(calls("render"))?.children?.map((child) => child.name);
+    expect(names).toEqual(expect.arrayContaining(["counter-change", "damage-blow"]));
+    expect(veiled(X)).toBe(false);
   });
 
   it("V13-4: a life or counter change with nowhere to play, or at pace 0, presents Classic", async () => {

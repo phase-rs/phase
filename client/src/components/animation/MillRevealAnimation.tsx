@@ -14,6 +14,8 @@ export interface MillCard {
 
 interface MillRevealAnimationProps {
   cards: MillCard[];
+  /** The first card's place in its step's mill order, which staggers it. */
+  startIndex?: number;
   from: { x: number; y: number };
   to: { x: number; y: number };
   onComplete: () => void;
@@ -149,6 +151,7 @@ function MillCardElement({
 
 export function MillRevealAnimation({
   cards,
+  startIndex = 0,
   from,
   to,
   onComplete,
@@ -158,7 +161,7 @@ export function MillRevealAnimation({
 
   // Safety timeout: if onAnimationComplete never fires, clean up after expected duration + buffer
   useEffect(() => {
-    const expectedMs = (displayedCards.length - 1) * STAGGER_MS + FLIGHT_DURATION * 1000 + 500;
+    const expectedMs = (startIndex + displayedCards.length - 1) * STAGGER_MS + FLIGHT_DURATION * 1000 + 500;
     const timer = setTimeout(() => {
       if (!completedRef.current) {
         completedRef.current = true;
@@ -166,7 +169,7 @@ export function MillRevealAnimation({
       }
     }, expectedMs);
     return () => clearTimeout(timer);
-  }, [displayedCards.length, onComplete]);
+  }, [displayedCards.length, onComplete, startIndex]);
 
   const handleComplete = () => {
     if (!completedRef.current) {
@@ -183,7 +186,7 @@ export function MillRevealAnimation({
           card={card}
           from={from}
           to={to}
-          index={i}
+          index={startIndex + i}
           isLast={i === displayedCards.length - 1}
           onComplete={handleComplete}
         />

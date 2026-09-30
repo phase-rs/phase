@@ -434,6 +434,21 @@ describe("AnimationOverlay life changes", () => {
     expect(layer.present.mock.calls.map(([spec]) => spec.kind)).not.toContain("life");
   });
 
+  it("V13-5: a gain in a step where damage hits the same player is still the layer's", () => {
+    layer.supported = true;
+    const hit = { type: "DamageDealt", data: { source_id: X, target: { Player: 1 }, amount: 2, is_combat: false } } as const;
+    seedLife([
+      { event: hit, duration: 500 },
+      { event: gained, duration: 500 },
+    ]);
+
+    renderOverlay();
+
+    expect(layer.present.mock.calls.map(([spec]) => spec).filter((spec) => spec.kind === "life")).toEqual([
+      { kind: "life", playerId: 1, amount: 3, pace: 1 },
+    ]);
+  });
+
   it("V13-5: the Classic style keeps the heal particles", () => {
     usePreferencesStore.setState({ cardAnimationStyle: "classic" });
     seedLife([{ event: gained, duration: 500 }]);

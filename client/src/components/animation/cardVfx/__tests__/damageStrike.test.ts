@@ -1,5 +1,5 @@
 import { type InstancedBufferGeometry, Mesh, type Object3D, Scene, type ShaderMaterial, Texture } from "three";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { DAMAGE_CAUSE_IMPACT_MS } from "../../../../animation/types.ts";
 import type { EffectHost } from "../cardVfxScene.ts";
@@ -142,8 +142,24 @@ describe("damage blow", () => {
   const FROM = { x: 100, y: 400, w: 63, h: 88, angleDeg: 0 };
   const TO = { x: 400, y: 400, w: 63, h: 88, angleDeg: 0 };
 
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   function blow(overrides: Partial<DamageBlowParams> = {}): DamageBlowParams {
-    return { from: FROM, to: TO, amount: 3, tier: "full", pace: 1, impactS: 0.3, ...overrides };
+    return { from: FROM, to: TO, amount: 3, tier: "full", pace: 1, startMs: 1000, impactS: 0.3, ...overrides };
+  }
+
+  /** Replaces `Math.random` with a fixed sequence (mulberry32), so a sampled
+   *  spread is the same on every run. */
+  function seedRandom(seed: number) {
+    let a = seed;
+    vi.spyOn(Math, "random").mockImplementation(() => {
+      a = (a + 0x6d2b79f5) | 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    });
   }
 
   function meshes(group: Object3D) {
@@ -186,6 +202,17 @@ describe("damage blow", () => {
     expect(effectHost.scene.children).toHaveLength(0);
   });
 
+  it("V12-1: a blow runs on the slam's clock, so a late first frame still lands at the slam's impact", () => {
+    const effectHost = host();
+    const effect = createDamageBlow(effectHost, blow());
+    const group = named(effectHost.scene, "damage-blow") as Object3D;
+    const ring = meshes(group).find((mesh) => "RING" in ((mesh.material as ShaderMaterial).defines ?? {}));
+
+    // The first frame arrives after the slam has already struck.
+    effect.update(1000 + 0.3 * 1000 + 40);
+    expect(ring?.visible).toBe(true);
+  });
+
   it("V12-1: a blow gives off no light: dust and grit only, and one pale ring", () => {
     const effectHost = host();
     createDamageBlow(effectHost, blow());
@@ -196,6 +223,7 @@ describe("damage blow", () => {
   });
 
   it("V12-2: dust is thrown on along the blow, and all round with no one direction", () => {
+    seedRandom(12);
     const along = host();
     createDamageBlow(along, blow());
     expect(meanPushX(named(along.scene, "damage-blow") as Object3D)).toBeGreaterThan(0.3);

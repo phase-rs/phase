@@ -139,7 +139,7 @@ const ANCHORS = {
   groupRepresentative: `[data-permanent-card][data-grouped-ids~="${X}"]`,
   permanentY: `[data-permanent-card="${Y}"]`,
 };
-const FAN_ANCHOR = `[data-zone-fan-card][data-object-id="${X}"]`;
+const FAN_ANCHOR = `[data-zone-fan-card="Graveyard"][data-object-id="${X}"]`;
 
 function only(container: HTMLElement, selector: string): HTMLElement {
   const matches = container.querySelectorAll<HTMLElement>(selector);

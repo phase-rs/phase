@@ -60,7 +60,7 @@ export function createLifeChange(host: EffectHost, { at, amount, tier, pace }: L
   const [x, y] = centre(at);
   const share = PARTICLE_SHARE[tier];
   const size = Math.min(Math.abs(amount), 10);
-  const timing = { endS: LIFE_CHANGE_S, pace, impact: null };
+  const timing = { endS: LIFE_CHANGE_S, pace, impact: null, startMs: null };
   const look = ({ group, unit, clock }: EffectParts): EffectFrame => {
     const motes: Particle[] = [];
     if (amount > 0) {
@@ -103,7 +103,7 @@ export function createCounterChange(
   const tint = counterTint(counterType);
   const span = Math.min(at.w, at.h);
   const share = PARTICLE_SHARE[tier];
-  const timing = { endS: COUNTER_CHANGE_S, pace, impact: null };
+  const timing = { endS: COUNTER_CHANGE_S, pace, impact: null, startMs: null };
   const look = ({ group, unit, clock }: EffectParts): EffectFrame => {
     const motes: Particle[] = [];
     for (let i = 0; i < count(10 + 4 * Math.min(changed, 5), share); i++) {
