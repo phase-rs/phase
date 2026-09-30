@@ -22,7 +22,7 @@ import {
 import type { ObjectId } from "../../../adapter/types.ts";
 import type { VfxQuality } from "../../../animation/types.ts";
 import type { Aim, CardPose } from "./cardAnchors.ts";
-import type { CardFlightRoute, FlightDestination } from "./cardFlightSpecs.ts";
+import type { CardFlightRoute, FlightDestination, RippleLook } from "./cardFlightSpecs.ts";
 import type { EffectHost, SceneEffect, SceneEffectKind } from "./cardVfxScene.ts";
 import { ROUNDED_BOX_GLSL } from "./glslChunks.ts";
 
@@ -238,16 +238,24 @@ const cardVert = /* glsl */ `
     vN = normalize(mat3(modelMatrix) * normal);
     gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
   }`;
+// A washed card (a countered spell) runs pale toward `uWashTint`, its ink
+// rippling while the wash runs through it.
 const cardFrag = /* glsl */ `
-  uniform sampler2D uFront, uBack; uniform vec2 uSize; uniform float uRadius, uAlpha;
+  uniform sampler2D uFront, uBack; uniform vec2 uSize; uniform float uRadius, uAlpha, uWash, uWashTime;
+  uniform vec3 uWashTint;
   varying vec2 vUv; varying vec3 vN;
   ${ROUNDED_BOX_GLSL}
   void main() {
     vec2 p = (vUv - 0.5) * uSize;
     float edge = clamp(0.5 - roundedBox(p, uSize * 0.5, uRadius), 0.0, 1.0);
     if (edge <= 0.0) discard;
+    vec2 c = vUv - 0.5;
+    float d = length(c);
+    vec2 uv = vUv + c / max(d, 0.001) * sin(d * 70.0 - uWashTime * 16.0) * 0.004 * uWash * (1.0 - uWash) * 4.0;
     vec3 n = gl_FrontFacing ? vN : -vN;
-    vec3 col = gl_FrontFacing ? texture2D(uFront, vUv).rgb : texture2D(uBack, vec2(1.0 - vUv.x, vUv.y)).rgb;
+    vec3 col = gl_FrontFacing ? texture2D(uFront, uv).rgb : texture2D(uBack, vec2(1.0 - uv.x, uv.y)).rgb;
+    float luma = dot(col, vec3(0.299, 0.587, 0.114));
+    col = mix(col, mix(vec3(luma), uWashTint, 0.55) * 0.5 + uWashTint * 0.45, uWash * 0.8);
     vec3 L = normalize(vec3(-0.35, 0.55, 0.76));
     vec3 H = normalize(L + vec3(0.0, 0.0, 1.0));
     float shade = 1.0 + 0.55 * (dot(n, L) - L.z);
@@ -286,6 +294,9 @@ function createCardMesh(front: Texture, back: Texture, alpha: number): Mesh<Plan
         uSize: { value: new Vector2(1, 1) },
         uRadius: { value: RADIUS_FRACTION },
         uAlpha: { value: alpha },
+        uWash: { value: 0 },
+        uWashTime: { value: 0 },
+        uWashTint: { value: new Vector3() },
       },
     }),
   );
@@ -336,6 +347,20 @@ export const cardFlightKind: SceneEffectKind = {
   },
 };
 
+/** The tint a washed card runs toward, by the ripple that washed it. */
+const WASH_TINTS: Record<RippleLook, [number, number, number]> = {
+  water: [0.72, 0.85, 0.94],
+  pale: [0.88, 0.88, 0.86],
+};
+
+/** A wash running through the card where it rests, before it leaves. */
+export interface FlightWash {
+  /** When it starts, on the frame clock (`performance.now()`). */
+  startMs: number;
+  durationMs: number;
+  look: RippleLook;
+}
+
 export interface CardFlightParams {
   objectId: ObjectId;
   route: CardFlightRoute;
@@ -345,8 +370,10 @@ export interface CardFlightParams {
   back: Texture | null;
   flip: FlightFlip;
   pace: number;
-  /** How long the card waits, unseen, before it leaves its source. */
+  /** How long the card waits, resting on its source, before it leaves. */
   delayMs: number;
+  /** A countered spell's wash; `null` for any other flight. */
+  wash: FlightWash | null;
   tier: CardVfxTier;
   aim: (origin: DOMRectReadOnly) => Aim;
   /** Whether the engine has committed the state this flight moves to. */
@@ -410,6 +437,7 @@ class CardFlightEffect implements CardFlight {
     const back = params.back ?? host.placeholderTexture;
     this.card = createCardMesh(params.front ?? back, back, 1);
     this.card.name = "card-flight";
+    if (params.wash) this.card.material.uniforms.uWashTint.value.set(...WASH_TINTS[params.wash.look]);
     host.scene.add(this.card);
     if (params.tier === "full") {
       this.shadow = createShadowMesh();
@@ -437,6 +465,7 @@ class CardFlightEffect implements CardFlight {
 
   update(nowMs: number): boolean {
     this.flightStartMs ??= nowMs + this.params.delayMs;
+    this.applyWash(nowMs);
     const { pace } = this.params;
     switch (this.phase.kind) {
       case "revealing":
@@ -454,10 +483,19 @@ class CardFlightEffect implements CardFlight {
         return true;
       }
       case "flying":
-        // A staggered card is still in its source until its turn to leave.
-        this.setVisible(nowMs >= this.flightStartMs);
-        return nowMs < this.flightStartMs || this.fly(nowMs, this.flightStartMs);
+        if (nowMs >= this.flightStartMs) return this.fly(nowMs, this.flightStartMs);
+        // A staggered card rests on its veiled source until its turn to leave.
+        this.draw(flightPose(this.profile.curve, 0, this.state, this.state, this.state.flip), 1, 1);
+        return true;
     }
+  }
+
+  private applyWash(nowMs: number) {
+    const { wash } = this.params;
+    if (!wash) return;
+    const uniforms = this.card.material.uniforms;
+    uniforms.uWash.value = smooth(0, 1, (nowMs - wash.startMs) / wash.durationMs);
+    uniforms.uWashTime.value = nowMs / 1000;
   }
 
   private fly(nowMs: number, flightStartMs: number): boolean {
@@ -571,11 +609,6 @@ class CardFlightEffect implements CardFlight {
   private release(reason: FlightRelease, next: FlightPhase) {
     this.phase = next;
     this.params.onRelease(reason);
-  }
-
-  private setVisible(visible: boolean) {
-    this.card.visible = visible;
-    if (this.shadow) this.shadow.visible = visible;
   }
 
   private draw(pose: FlightFrame, squash: number, alpha: number) {

@@ -43,6 +43,29 @@ export function flightPresents(from: Zone, to: Zone): boolean {
   return FLIGHT_ZONE_CHANGES[from]?.some((destination) => destination === to) ?? false;
 }
 
+/** How a counter's ripple looks: water from a blue source, otherwise a pale
+ *  disturbance with no water in it. */
+export type RippleLook = "water" | "pale";
+
+export function rippleLookFor(colors: readonly ManaColor[]): RippleLook {
+  return colors.includes("Blue") ? "water" : "pale";
+}
+
+/** A counter's ripple travels to the spell it counters in this long, before pace. */
+export const COUNTER_RIPPLE_MS = 380;
+/** The countered spell washes out over this long once the ripple reaches it,
+ *  before pace; then it leaves the stack. */
+export const COUNTER_WASH_MS = 300;
+
+/** A countered spell washing out where it lies before it leaves. */
+export interface WashSpec {
+  /** When the wash starts, after the flight is presented, already paced. */
+  atMs: number;
+  /** How long it takes to wash out, already paced. */
+  durationMs: number;
+  look: RippleLook;
+}
+
 /** The most flights one batch sends (a mass mill or graveyard exile); the
  *  rest present Classic. */
 export const FLIGHT_BATCH_MAX = 12;
@@ -68,9 +91,11 @@ export interface CardFlightSpec {
   owningStepMs: number;
   /** The snapshot the owning step animates (`QueuedStep.snapshotSeq`). */
   snapshotSeq: number;
-  /** How long after the step starts this flight leaves: draws in one step
+  /** How long after it is presented this flight leaves: draws in one step
    *  leave one after another, all inside the step's first half. */
   delayMs: number;
+  /** A countered spell's wash before it leaves; `null` for any other flight. */
+  wash: WashSpec | null;
 }
 
 export interface CardFlightSpecContext {
@@ -188,13 +213,33 @@ function delayFor({ index, size }: { index: number; size: number }, pace: number
   return index * gap;
 }
 
+/** CR 701.6a: a countered spell is removed from the stack and put into its
+ *  owner's graveyard. Its counter's ripple reaches it and washes it out before
+ *  it leaves, and the countering spell (CR 608.2n) leaves with it. `null` for
+ *  a move from the stack that no counter in the step made. */
+function counteredLeave(
+  objectId: ObjectId,
+  route: CardFlightRoute,
+  { pre, pace, stepEvents }: CardFlightSpecContext,
+): Pick<CardFlightSpec, "delayMs" | "wash"> | null {
+  if (route.from !== "Stack") return null;
+  for (const event of stepEvents) {
+    if (event.type !== "SpellCountered") continue;
+    const { object_id: countered, countered_by: counter } = event.data;
+    if (objectId !== countered && objectId !== counter) continue;
+    const delayMs = (COUNTER_RIPPLE_MS + COUNTER_WASH_MS) * pace;
+    if (objectId === counter) return { delayMs, wash: null };
+    const look = rippleLookFor(pre?.objects[counter]?.color ?? []);
+    return { delayMs, wash: { atMs: COUNTER_RIPPLE_MS * pace, durationMs: COUNTER_WASH_MS * pace, look } };
+  }
+  return null;
+}
+
 /** The card flight that presents `event`, or `null` when the event has no
  *  flight (it then presents Classic). A zero or negative pace has no flight,
  *  matching the step timers' instant mode. */
-export function cardFlightSpecFor(
-  event: AnimationEvent,
-  { pre, post, pace, owningStepMs, snapshotSeq, stepEvents }: CardFlightSpecContext,
-): CardFlightSpec | null {
+export function cardFlightSpecFor(event: AnimationEvent, context: CardFlightSpecContext): CardFlightSpec | null {
+  const { pre, post, pace, owningStepMs, snapshotSeq, stepEvents } = context;
   if (pace <= 0) return null;
   const routed = routedObjectFor(event, pre, post);
   if (!routed) return null;
@@ -214,6 +259,6 @@ export function cardFlightSpecFor(
     pace,
     owningStepMs,
     snapshotSeq,
-    delayMs: delayFor(batch, pace, owningStepMs),
+    ...(counteredLeave(objectId, routed.route, context) ?? { delayMs: delayFor(batch, pace, owningStepMs), wash: null }),
   };
 }

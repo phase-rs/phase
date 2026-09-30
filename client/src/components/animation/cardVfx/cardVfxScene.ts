@@ -43,6 +43,7 @@ import {
   createLifeChange,
   type LifeChangeParams,
 } from "./tallyEffects.ts";
+import { type CounterRippleParams, counterRippleKind, createCounterRipple } from "./counterRipple.ts";
 import { createExileDissolve, type ExileDissolveParams, exileDissolveKind } from "./exileDissolve.ts";
 import { createLandingDust, landingDustKind } from "./landingDust.ts";
 
@@ -78,6 +79,7 @@ export const SCENE_EFFECT_KINDS: readonly SceneEffectKind[] = [
   cardShatterKind,
   exileDissolveKind,
   damageStrikeKind,
+  counterRippleKind,
 ];
 
 const CAMERA_FOV_DEG = 28;
@@ -138,6 +140,8 @@ export interface CardVfxScene {
   startDamageStrike(request: DamageStrikeRequest): void;
   /** A blow happens to no one permanent: the DOM slam moves the struck card. */
   startDamageBlow(request: DamageBlowParams): void;
+  /** A counter's ripple veils nothing: the countered spell's flight holds it. */
+  startCounterRipple(request: CounterRippleParams): void;
   /** Life and counter changes play over their surface and veil nothing. */
   startLifeChange(request: LifeChangeParams): void;
   startCounterChange(request: CounterChangeParams): void;
@@ -365,6 +369,10 @@ class CardVfxSceneRuntime implements CardVfxScene, EffectHost {
 
   startDamageBlow(request: DamageBlowParams) {
     this.add(createDamageBlow(this, request));
+  }
+
+  startCounterRipple(request: CounterRippleParams) {
+    this.add(createCounterRipple(this, request));
   }
 
   startLifeChange(request: LifeChangeParams) {

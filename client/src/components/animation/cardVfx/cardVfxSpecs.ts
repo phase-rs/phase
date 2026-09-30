@@ -1,10 +1,22 @@
 import type { GameState, ObjectId, PlayerId, TargetRef } from "../../../adapter/types.ts";
-import { type DamageCause, damageCauseOf, type ResolvingOrigin } from "../../../animation/damageCause.ts";
+import {
+  type DamageCause,
+  damageCauseOf,
+  type ResolvingOrigin,
+  resolvingSourceOf,
+} from "../../../animation/damageCause.ts";
 import type { AnimationEvent } from "../../../animation/types.ts";
 import { useAnimationStore } from "../../../stores/animationStore.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { type AnimationImageSnapshot, visibleAnimationImageSnapshot } from "../ResolvedAnimationImage.tsx";
-import { type CardFlightSpec, type CardFlightSpecContext, cardFlightSpecFor, flightPresents } from "./cardFlightSpecs.ts";
+import {
+  type CardFlightSpec,
+  type CardFlightSpecContext,
+  cardFlightSpecFor,
+  flightPresents,
+  type RippleLook,
+  rippleLookFor,
+} from "./cardFlightSpecs.ts";
 import type { CounterChange } from "./tallyEffects.ts";
 
 /** A permanent broken apart where it lies. */
@@ -67,6 +79,17 @@ export interface DamageBlowSpec {
   impactDelayMs: number;
 }
 
+/** A counter's ripple, travelling from the countering spell or ability to the
+ *  spell it counters. */
+export interface CounterRippleSpec {
+  kind: "ripple";
+  origin: ResolvingOrigin;
+  /** The countered spell or ability's stack entry. */
+  targetId: ObjectId;
+  look: RippleLook;
+  pace: number;
+}
+
 /** A player's life total changing other than by damage a strike or blow shows. */
 export interface LifeChangeSpec {
   kind: "life";
@@ -99,6 +122,7 @@ export type CardVfxSpec =
   | BoardEffectSpec
   | DamageStrikeSpec
   | DamageBlowSpec
+  | CounterRippleSpec
   | LifeChangeSpec
   | CounterChangeSpec
   | CoveredSpec;
@@ -179,6 +203,16 @@ function damageStrikeSpecFor(
   return { kind: "damage", ...cause, target, amount, pace, owningStepMs };
 }
 
+// CR 701.6a: to counter a spell or ability is to cancel it, removing it from
+// the stack. The ripple leaves from what counters it, as its damage would.
+function counterRippleSpecFor(event: AnimationEvent, { pre, pace }: CardFlightSpecContext): CounterRippleSpec | null {
+  if (pace <= 0 || event.type !== "SpellCountered") return null;
+  const resolving = resolvingSourceOf(event.data.countered_by, pre);
+  if (!resolving) return null;
+  const { source, origin } = resolving;
+  return { kind: "ripple", origin, targetId: event.data.object_id, look: rippleLookFor(source.color), pace };
+}
+
 // CR 122.1: a counter is a marker placed on an object; it plays where the
 // permanent it is put on or removed from lies.
 function counterChangeSpecFor(event: AnimationEvent, { pace }: CardFlightSpecContext): CounterChangeSpec | null {
@@ -204,6 +238,7 @@ export function cardVfxSpecFor(event: AnimationEvent, context: CardFlightSpecCon
     cardShatterSpecFor(event, context) ??
     exileDissolveSpecFor(event, context) ??
     damageStrikeSpecFor(event, context) ??
+    counterRippleSpecFor(event, context) ??
     counterChangeSpecFor(event, context)
   );
 }

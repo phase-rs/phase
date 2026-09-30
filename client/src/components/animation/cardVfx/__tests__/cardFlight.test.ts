@@ -11,6 +11,7 @@ import {
   createCardFlight,
   flightPose,
   type FlightCurve,
+  type FlightWash,
   type FlightRelease,
   HOLD_RISE_FRACTION,
   LAND_REVEAL_WAIT_MAX_MS,
@@ -62,7 +63,13 @@ interface Harness {
 
 function fly(
   route: CardFlightRoute,
-  { aim, committed = () => false, pace = 1 }: { aim: () => Aim; committed?: () => boolean; pace?: number },
+  {
+    aim,
+    committed = () => false,
+    pace = 1,
+    delayMs = 0,
+    wash = null,
+  }: { aim: () => Aim; committed?: () => boolean; pace?: number; delayMs?: number; wash?: FlightWash | null },
 ): Harness {
   const releases: FlightRelease[] = [];
   const effectHost = host();
@@ -74,7 +81,8 @@ function fly(
     back: effectHost.backTexture,
     flip: "none",
     pace,
-    delayMs: 0,
+    delayMs,
+    wash,
     tier: "full",
     aim,
     committed,
@@ -91,6 +99,50 @@ function fly(
     },
   };
 }
+
+function card(effectHost: EffectHost) {
+  return effectHost.scene.getObjectByName("card-flight") as Mesh<never, ShaderMaterial>;
+}
+
+describe("a waiting flight", () => {
+  const GRAVEYARD: CardFlightRoute = { from: "Stack", to: "Graveyard", ownerId: 0 };
+
+  it("V14-1: a staggered card rests, drawn, on its source until its turn, then leaves", () => {
+    const target = own(TO);
+    const { frame, host: effectHost } = fly(GRAVEYARD, { aim: () => target, delayMs: 200 });
+    frame(1000);
+    frame(1150);
+    const mesh = card(effectHost);
+    expect(mesh.visible).toBe(true);
+    expect(mesh.position.x).toBeCloseTo(FROM.x, 6);
+    expect(mesh.position.y).toBeCloseTo(-FROM.y, 6);
+    frame(1200);
+    frame(1200 + RESOLVE_FLIGHT_MS / 2);
+    expect(Math.hypot(mesh.position.x - FROM.x, mesh.position.y + FROM.y)).toBeGreaterThan(20);
+  });
+
+  it("V14-2: a wash runs pale over its span from its start on the frame clock, and stays", () => {
+    const wash: FlightWash = { startMs: 1300, durationMs: 200, look: "water" };
+    const { frame, host: effectHost } = fly(GRAVEYARD, { aim: () => own(TO), delayMs: 600, wash });
+    const uniforms = card(effectHost).material.uniforms;
+    frame(1000);
+    frame(1290);
+    expect(uniforms.uWash.value).toBe(0);
+    frame(1400);
+    expect(uniforms.uWash.value).toBeGreaterThan(0.3);
+    expect(uniforms.uWash.value).toBeLessThan(0.7);
+    frame(1700);
+    expect(uniforms.uWash.value).toBe(1);
+    expect(uniforms.uWashTint.value.toArray()).toEqual([0.72, 0.85, 0.94]);
+  });
+
+  it("V14-2: an unwashed flight never washes", () => {
+    const { frame, host: effectHost } = fly(GRAVEYARD, { aim: () => own(TO) });
+    frame(1000);
+    frame(1500);
+    expect(card(effectHost).material.uniforms.uWash.value).toBe(0);
+  });
+});
 
 describe("flightPose", () => {
   it.each<FlightCurve>(["panel", "land"])("V3-6a: the %s profile starts on `from` and ends on `to`", (curve) => {

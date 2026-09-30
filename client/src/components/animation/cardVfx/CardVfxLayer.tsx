@@ -45,6 +45,7 @@ import type {
   BoardEffectSpec,
   CardVfxSpec,
   CounterChangeSpec,
+  CounterRippleSpec,
   DamageBlowSpec,
   DamageStrikeSpec,
   ExileDissolveSpec,
@@ -105,6 +106,9 @@ function committed(snapshotSeq: number) {
  *  join it: one flight from the first source to the last destination. */
 interface PendingStart {
   token: number;
+  /** When the flight was presented, on the frame clock: its delay and wash
+   *  count from here, however long its face takes to load. */
+  presentedMs: number;
   spec: CardFlightSpec;
   from: CardPose | null;
   face: AnimationImageSnapshot;
@@ -260,6 +264,9 @@ class CardVfxController {
           case "blow":
             this.presentBlow(this.scene, spec, classic);
             return;
+          case "ripple":
+            this.presentRipple(this.scene, spec, classic);
+            return;
           case "life":
           case "counter":
             this.presentTally(this.scene, spec, classic);
@@ -371,6 +378,7 @@ class CardVfxController {
       this.join(scene, pending, spec, classic);
       return;
     }
+    const presentedMs = performance.now();
     const face = spec.endFace ?? spec.startFace;
     if ((flipFor(spec) !== "none" || !face) && !scene.hasBack()) {
       classic();
@@ -383,7 +391,7 @@ class CardVfxController {
     }
     if (!face) {
       // Back only: nothing to load, so the flight starts now.
-      this.start(scene, spec, from, null, [classic]);
+      this.start(scene, spec, presentedMs, from, null, [classic]);
       return;
     }
     const token = this.requestFace(
@@ -393,7 +401,7 @@ class CardVfxController {
       (image) => this.finishPending(objectId, token, image),
       () => this.fallBack(objectId, token),
     );
-    this.pending.set(objectId, { token, spec, from, face, classics: [classic] });
+    this.pending.set(objectId, { token, presentedMs, spec, from, face, classics: [classic] });
   }
 
   // The permanent's surface is measured now, while it is still on the board;
@@ -554,6 +562,25 @@ class CardVfxController {
     });
   }
 
+  // Both stack entries are measured now: the commit takes them off the stack.
+  private presentRipple(scene: CardVfxScene, spec: CounterRippleSpec, classic: () => void) {
+    const { origin } = spec;
+    const source = zoneSurface(origin.zone, origin.objectId, origin.ownerId);
+    const target = zoneSurface("Stack", spec.targetId, origin.ownerId);
+    if (!source || !target || !this.canvas) {
+      classic();
+      return;
+    }
+    const canvasRect = this.canvas.getBoundingClientRect();
+    scene.startCounterRipple({
+      from: measureCardPose(source, canvasRect),
+      to: measureCardPose(target, canvasRect),
+      look: spec.look,
+      tier: this.tier,
+      pace: spec.pace,
+    });
+  }
+
   // A life or counter change plays over its HUD or permanent where it is now.
   private presentTally(scene: CardVfxScene, spec: LifeChangeSpec | CounterChangeSpec, classic: () => void) {
     const el = spec.kind === "life" ? playerHudSurface(spec.playerId) : permanentSurface(spec.objectId);
@@ -604,8 +631,8 @@ class CardVfxController {
       runAll(pending.classics);
       return;
     }
-    const { spec, from, classics } = pending;
-    this.start(this.scene, spec, from, this.scene.uploadFace(image), classics);
+    const { spec, presentedMs, from, classics } = pending;
+    this.start(this.scene, spec, presentedMs, from, this.scene.uploadFace(image), classics);
   }
 
   private takePending(objectId: ObjectId, token: number): PendingStart | null {
@@ -619,11 +646,12 @@ class CardVfxController {
   private start(
     scene: CardVfxScene,
     spec: CardFlightSpec,
+    presentedMs: number,
     from: CardPose | null,
     front: Texture | null,
     classics: readonly (() => void)[],
   ) {
-    const { objectId, route, snapshotSeq } = spec;
+    const { objectId, route, snapshotSeq, wash } = spec;
     const holder = this.nextToken++;
     const started = scene.startCardFlight({
       objectId,
@@ -632,7 +660,8 @@ class CardVfxController {
       front,
       flip: flipFor(spec),
       pace: spec.pace,
-      delayMs: spec.delayMs,
+      delayMs: Math.max(0, presentedMs + spec.delayMs - performance.now()),
+      wash: wash && { startMs: presentedMs + wash.atMs, durationMs: wash.durationMs, look: wash.look },
       tier: this.tier,
       landingColors: spec.endColors,
       aim: (origin) => this.aim(route, objectId, origin),

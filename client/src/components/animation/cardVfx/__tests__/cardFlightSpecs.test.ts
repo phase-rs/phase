@@ -1,10 +1,16 @@
 import { describe, expect, it } from "vitest";
 
-import type { GameObject, GameState, TargetRef, Zone } from "../../../../adapter/types.ts";
+import type { GameObject, GameState, ManaColor, TargetRef, Zone } from "../../../../adapter/types.ts";
 import type { AnimationEvent } from "../../../../animation/types.ts";
 import { buildObjectMap, gameObjectFactory } from "../../../../test/factories/gameObjectFactory.ts";
 import { buildGameState, buildStackEntry } from "../../../../test/factories/gameStateFactory.ts";
-import { cardFlightSpecFor, type CardFlightSpecContext, FLIGHT_BATCH_MAX } from "../cardFlightSpecs.ts";
+import {
+  cardFlightSpecFor,
+  type CardFlightSpecContext,
+  COUNTER_RIPPLE_MS,
+  COUNTER_WASH_MS,
+  FLIGHT_BATCH_MAX,
+} from "../cardFlightSpecs.ts";
 import { cardVfxSpecFor } from "../cardVfxSpecs.ts";
 
 const X = 7;
@@ -401,5 +407,71 @@ describe("cardVfxSpecFor damage", () => {
     expect(cardVfxSpecFor(damage({ Player: 1 }, true), context(pre, pre))).toBeNull();
     expect(cardVfxSpecFor(damage({ Object: 99 }), context(pre, pre))).toBeNull();
     expect(cardVfxSpecFor(damage({ Player: 1 }), context(pre, pre, 0))).toBeNull();
+  });
+});
+
+describe("a counter", () => {
+  const COUNTER = 20;
+  const OTHER = 30;
+  const counterspell = (color: ManaColor[]) =>
+    gameObjectFactory.withId(COUNTER).named("Counterspell").instant().params({ zone: "Stack", color });
+  const giant = gameObjectFactory.withId(X).named("Hill Giant").creature(3, 3).ownedBy(1);
+  const other = gameObjectFactory.withId(OTHER).named("Opt").instant();
+  const countered: AnimationEvent = { type: "SpellCountered", data: { object_id: X, countered_by: COUNTER } };
+  const toGraveyard = (objectId: number): AnimationEvent => ({
+    type: "ZoneChanged",
+    data: { object_id: objectId, from: "Stack", to: "Graveyard" },
+  });
+  const step = [countered, toGraveyard(X), toGraveyard(OTHER), toGraveyard(COUNTER)];
+
+  function counterContext(color: ManaColor[], pace = 1) {
+    const pre = buildGameState({
+      objects: buildObjectMap(
+        counterspell(color).build(),
+        visible(giant.params({ zone: "Stack" }).build()),
+        visible(other.params({ zone: "Stack" }).build()),
+      ),
+      stack: [buildStackEntry({ id: X, source_id: X }), buildStackEntry({ id: COUNTER, source_id: COUNTER })],
+    });
+    const post = stateWith(
+      counterspell(color).inGraveyard().build(),
+      visible(giant.inGraveyard().build()),
+      visible(other.inGraveyard().build()),
+    );
+    return context(pre, post, pace, step);
+  }
+
+  it("V14-3: the countered spell waits for the ripple, washes out in its counter's look, then leaves", () => {
+    const wait = (COUNTER_RIPPLE_MS + COUNTER_WASH_MS) * 2;
+    expect(cardFlightSpecFor(toGraveyard(X), counterContext(["Blue"], 2))).toMatchObject({
+      route: { from: "Stack", to: "Graveyard", ownerId: 1 },
+      delayMs: wait,
+      wash: { atMs: COUNTER_RIPPLE_MS * 2, durationMs: COUNTER_WASH_MS * 2, look: "water" },
+    });
+    expect(cardFlightSpecFor(toGraveyard(X), counterContext(["White"]))?.wash?.look).toBe("pale");
+  });
+
+  it("V14-3: the counter leaves with the spell it countered, unwashed; other moves keep their stagger", () => {
+    const ctx = counterContext(["Blue"]);
+    expect(cardFlightSpecFor(toGraveyard(COUNTER), ctx)).toMatchObject({
+      delayMs: COUNTER_RIPPLE_MS + COUNTER_WASH_MS,
+      wash: null,
+    });
+    // Second in the step's Stack→Graveyard batch: one stagger gap.
+    expect(cardFlightSpecFor(step[2], ctx)).toMatchObject({ objectId: OTHER, delayMs: 90, wash: null });
+  });
+
+  it("V14-4: a counter's ripple leaves from the resolving counter to the countered entry", () => {
+    expect(cardVfxSpecFor(countered, counterContext(["Blue"]))).toEqual({
+      kind: "ripple",
+      origin: { zone: "Stack", objectId: COUNTER, ownerId: 0 },
+      targetId: X,
+      look: "water",
+      pace: 1,
+    });
+    expect(cardVfxSpecFor(countered, counterContext(["Black"]))).toMatchObject({ look: "pale" });
+    expect(cardVfxSpecFor(countered, counterContext(["Blue"], 0))).toBeNull();
+    // A counter that is not what resolves (none on the stack) has no ripple.
+    expect(cardVfxSpecFor(countered, context(stateWith(), null))).toBeNull();
   });
 });

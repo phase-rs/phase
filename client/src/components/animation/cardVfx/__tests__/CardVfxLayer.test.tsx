@@ -33,6 +33,7 @@ import { type CardVfxScene, SCENE_EFFECT_KINDS } from "../cardVfxScene.ts";
 import type {
   CardShatterSpec,
   CardVfxSpec,
+  CounterRippleSpec,
   DamageBlowSpec,
   DamageStrikeSpec,
   DamageStrikeTarget,
@@ -167,6 +168,7 @@ function spec(
     owningStepMs,
     snapshotSeq: queuedSeq(),
     delayMs: 0,
+    wash: null,
   };
 }
 
@@ -736,11 +738,14 @@ describe("CardVfxLayer present contract", () => {
     const draw = { ...spec(X, { from: "Library", to: "Hand", ownerId: 0 }), delayMs: 100 };
     present(draw);
     await frames(2);
-    // Veiled at once, so the hand never shows the card before its flight.
+    // Veiled at once, so the hand never shows the card before its flight;
+    // until its turn it rests on the pile it leaves from.
     expect(veiled(X)).toBe(true);
-    expect(flightRenders()).toHaveLength(0);
-    await advance(100);
-    expect(flightRenders().length).toBeGreaterThan(0);
+    const flightAt = () => last(flightRenders())?.children?.find((child) => child.name === "card-flight")?.position;
+    const pile = flightAt();
+    expect(pile?.[1]).toBeCloseTo(-(700 + CARD_H / 2), 0);
+    await advance(100 + 5 * FRAME_MS);
+    expect(flightAt()).not.toEqual(pile);
 
     addFace(anchor({ "data-hand-card": "", "data-object-id": String(X) }, 200, 760));
     act(() => {
@@ -1633,5 +1638,61 @@ describe("CardVfxLayer damage strike", () => {
     expect(veiled(X)).toBe(true);
     commitEngine();
     expect(veiled(X)).toBe(false);
+  });
+});
+
+describe("CardVfxLayer counter ripple", () => {
+  const COUNTER = 20;
+  const ripple: CounterRippleSpec = {
+    kind: "ripple",
+    origin: { zone: "Stack", objectId: COUNTER, ownerId: 0 },
+    targetId: X,
+    look: "water",
+    pace: 1,
+  };
+  const rippleRenders = () => calls("render").filter((call) => hasVisible(call, "counter-ripple"));
+  const TO_GRAVEYARD: CardFlightRoute = { from: "Stack", to: "Graveyard", ownerId: 0 };
+
+  it("V14-5: a ripple runs between the two stack entries, veiling neither; with either missing it presents Classic", async () => {
+    const { present } = await readyLayer();
+    anchor({ "data-stack-entry": String(X) }, 700, 200);
+    expect(present(ripple)).toHaveBeenCalledTimes(1);
+
+    anchor({ "data-stack-entry": String(COUNTER) }, 700, 320);
+    const classic = present(ripple);
+    await frames(2);
+    expect(rippleRenders().length).toBeGreaterThan(0);
+    expect(veiled(X) || veiled(COUNTER)).toBe(false);
+    expect(classic).not.toHaveBeenCalled();
+  });
+
+  it("V14-6: a countered spell's wait and wash count from its presentation, however long its face takes", async () => {
+    const { present } = await readyLayer();
+    anchor({ "data-stack-entry": String(X) }, 700, 200);
+    addFace(anchor({ "data-graveyard-pile": "0", "data-grouped-ids": String(X) }, 40, 700));
+    const leaving = {
+      ...spec(X, TO_GRAVEYARD, { startFace: face(X), endFace: face(X) }),
+      delayMs: 300,
+      wash: { atMs: 100, durationMs: 100, look: "water" as const },
+    };
+    present(leaving);
+    await advance(80);
+    const loader = faceLoader();
+    await act(async () => {
+      if (loader) fireEvent.load(loader);
+    });
+    await frames(2);
+    const flight = () => last(flightRenders())?.children?.find((child) => child.name === "card-flight");
+    const resting = flight()?.position;
+    // Half way through its wash, 150 ms after it was presented.
+    await advance(150 - 80 - 2 * FRAME_MS);
+    const uniforms = (flight()?.object as Mesh<never, ShaderMaterial>).material.uniforms;
+    expect(uniforms.uWash.value).toBeGreaterThan(0.2);
+    expect(uniforms.uWash.value).toBeLessThan(0.8);
+    // Still resting just before 300 ms; on its way just after.
+    await advance(300 - 150 - 2 * FRAME_MS);
+    expect(flight()?.position).toEqual(resting);
+    await advance(5 * FRAME_MS);
+    expect(flight()?.position).not.toEqual(resting);
   });
 });
