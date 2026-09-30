@@ -1234,9 +1234,14 @@ fn collect_direct_zone_cards(
         .collect())
 }
 
-/// CR 101.4: The players a [`ZoneOwner::Each`] iteration walks, in APNAP order.
-/// One authority for every population leaf, so a new leaf is a match arm here
-/// rather than a new `ZoneOwner` sibling.
+/// CR 101.4 + CR 101.4c: The players a [`ZoneOwner::Each`] iteration walks, in
+/// seat order from the active player. One authority for every population leaf,
+/// so a new leaf is a match arm here rather than a new `ZoneOwner` sibling.
+/// When one player makes every per-player choice (the controller choosing for
+/// each opponent), CR 101.4c lets that player order the choices; the fixed walk
+/// is an implementation detail that cannot change the result, because each
+/// iterated pool is only that player's own zone and the picks are acted on
+/// together afterwards.
 fn per_player_iteration_population(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -1252,6 +1257,16 @@ fn per_player_iteration_population(
             .into_iter()
             .filter(|&p| p != ability.controller)
             .collect(),
+        // CR 102.2 + CR 102.3: "each opponent" is team-relative — a teammate is
+        // not an opponent — and a player who has left the game is no longer one
+        // (`players::opponents` filters on `is_alive`, CR 800.4a).
+        PerPlayerScope::Opponents => {
+            let opponents = crate::game::players::opponents(state, ability.controller);
+            apnap
+                .into_iter()
+                .filter(|p| opponents.contains(p))
+                .collect()
+        }
         // CR 115.1: the iterated set is the ability's CHOSEN `Player` targets.
         // CR 601.2c: an "up to N" selection may be empty — the loop then
         // disposes immediately and the parked continuation runs with an empty

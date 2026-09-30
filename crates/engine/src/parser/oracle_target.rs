@@ -1450,6 +1450,41 @@ pub fn parse_target_with_syntax<'a>(
         );
     }
 
+    // CR 608.2c + CR 603.7: "the chosen <plural noun>" right after a zone-choice
+    // producer (`ChooseFromZone`, signalled by `pending_tracked_set_origin`) names
+    // the set that choice published. A per-player choice ("for each opponent,
+    // choose …") never writes the continuation's targets — every pick is
+    // accumulated into the chain tracked set — so `ParentTarget` would have no
+    // producer there. After a targeted antecedent ("choose … target creatures")
+    // the phrase keeps its `ParentTarget` reading below.
+    if ctx.pending_tracked_set_origin.is_some() {
+        if let Ok((rest, _)) = terminated(
+            preceded(
+                tag::<_, _, OracleError<'_>>("the chosen "),
+                alt((
+                    tag("permanents"),
+                    tag("creatures"),
+                    tag("artifacts"),
+                    tag("lands"),
+                    tag("enchantments"),
+                    tag("planeswalkers"),
+                    tag("cards"),
+                )),
+            ),
+            not(nom::character::complete::alphanumeric1),
+        )
+        .parse(lower.as_str())
+        {
+            return (
+                TargetFilter::TrackedSet {
+                    id: TrackedSetId(0),
+                },
+                &text[lower.len() - rest.len()..],
+                syntax,
+            );
+        }
+    }
+
     // CR 603.7: Anaphoric tracked-set pronouns
     static TRACKED_SET_PHRASES: &[&str] = &[
         "the chosen cards",
@@ -1525,6 +1560,9 @@ pub fn parse_target_with_syntax<'a>(
         "the chosen card",
         "the chosen players",
         "the chosen player",
+        // Plural before singular: a bare `tag("the chosen permanent")` would
+        // match "the chosen permanents" and leave a stray "s".
+        "the chosen permanents",
         "the chosen permanent",
         "the last chosen card",
         "the revealed card",

@@ -8265,6 +8265,14 @@ fn attach_unless_slots(
 }
 
 #[tracing::instrument(level = "debug")]
+/// CR 102.2 + CR 608.2c: Is this clause a per-opponent battlefield choice
+/// ("for each opponent, choose … that player controls")? The two `for each`
+/// repeat peels (the chunk loop and `clause_shell::peel_clause`) consult it so
+/// the opponent population is not reduced to a bare repeat count.
+pub(crate) fn is_for_each_opponent_choose_controlled(lower: &str) -> bool {
+    imperative::is_for_each_opponent_choose_controlled(lower)
+}
+
 pub(crate) fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectClause {
     // CR 611.2a + CR 611.2c + CR 701.26a + CR 508.1f: "Until your next turn, those
     // creatures can't become tapped unless they're being declared as attackers."
@@ -10100,6 +10108,18 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     }
     if counter_unless_payment_is_unsupported(text) {
         return parsed_unless_payment_unsupported_clause(text);
+    }
+    // CR 102.2 + CR 102.3 + CR 608.2c: "For each opponent, choose [up to one]
+    // <type> that player controls" — the controller chooses one permanent per
+    // opponent (Ultimate Magic: Meteor). Lowers to `ChooseFromZone { zone_owner:
+    // Each(Opponents) }`, accumulating the picks into the chain tracked set for
+    // the following "the chosen permanents" instruction. Dispatched first: the
+    // generic "choose …" arms below would read the relative "that player
+    // controls" against the controller and drop the per-opponent population.
+    if let Some(clause) =
+        imperative::parse_for_each_opponent_choose_controlled(&text.to_lowercase(), ctx)
+    {
+        return clause;
     }
     // CR 608.2c: Self-ref continuation adverb. "also" after a self-ref subject
     // is a natural-language additive connector with no semantic weight — it
@@ -40089,6 +40109,10 @@ pub(crate) fn parse_effect_chain_ir(
         let (repeat_for, text, for_each_reference_target, repeat_for_difference) =
             if try_parse_proliferate_target(&text).is_some()
                 || try_parse_for_each_counter_kind_adjust_target(&text).is_some()
+                // CR 102.2 + CR 608.2c: "for each opponent, choose … that player
+                // controls" is a per-opponent choice, not a repeat count; peeling
+                // the prefix would lose the population "that player" refers to.
+                || is_for_each_opponent_choose_controlled(&text.to_lowercase())
             {
                 (None, text, None, None)
             } else if let Some(stripped) = strip_redundant_flip_win_quantifier(&text) {

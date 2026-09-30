@@ -3565,6 +3565,122 @@ pub(super) fn relink_gated_token_referent_consumers(defs: &mut [AbilityDefinitio
     }
 }
 
+/// CR 608.2c + CR 609.3: Re-link the clause that acts on the set a GATED
+/// zone-choice just published, so it is skipped together with its gate.
+///
+/// "If this spell was cast from exile, for each opponent, choose an artifact or
+/// land that player controls. Destroy the chosen permanents." (Ultimate Magic:
+/// Meteor). When the condition is false nothing is chosen, so "the chosen
+/// permanents" is empty and the destroy can do nothing. Left a
+/// `SequentialSibling`, the resolver's condition-false descent resolves it
+/// anyway, and its `TrackedSet(0)` sentinel then binds whatever set the chain
+/// published before the gate — for Meteor, the creatures its own damage step
+/// dealt damage to (a set published because the gated choice below it reads the
+/// tracked set) — and destroys them.
+///
+/// Mirrors [`relink_gated_token_referent_consumers`], narrowed to the shape the
+/// hazard was established for: the IMMEDIATELY preceding definition is a
+/// conditional `ChooseFromZone`, the candidate reads the tracked-set sentinel
+/// directly, and [`gated_instruction_reaches`] holds.
+pub(super) fn relink_gated_tracked_set_consumers(defs: &mut [AbilityDefinition]) {
+    for i in 1..defs.len() {
+        let publisher = &defs[i - 1];
+        if !matches!(&*publisher.effect, Effect::ChooseFromZone { .. })
+            || publisher.condition.is_none()
+        {
+            continue;
+        }
+        if !gated_instruction_reaches(&defs[i - 1..i]) {
+            continue;
+        }
+        if defs[i].sub_link == SubAbilityLink::SequentialSibling
+            && effect_reads_tracked_set_sentinel(&defs[i].effect)
+        {
+            defs[i].sub_link = SubAbilityLink::ContinuationStep;
+        }
+    }
+}
+
+/// CR 608.2c: Does this effect act directly on the chain's tracked set (the
+/// `TrackedSet(0)` sentinel, bare or filtered)? Covers the single-slot family
+/// through `Effect::target_filter` and the population family that carries its
+/// own `target`.
+fn effect_reads_tracked_set_sentinel(effect: &Effect) -> bool {
+    fn is_sentinel(filter: &TargetFilter) -> bool {
+        matches!(
+            filter,
+            TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }
+        )
+    }
+    if effect.target_filter().is_some_and(is_sentinel) {
+        return true;
+    }
+    match effect {
+        Effect::PumpAll { target, .. }
+        | Effect::PutCounterAll { target, .. }
+        | Effect::ChangeZoneAll { target, .. }
+        | Effect::DestroyAll { target, .. }
+        | Effect::BounceAll { target, .. }
+        | Effect::CounterAll { target, .. }
+        | Effect::GainControlAll { target, .. }
+        | Effect::GoadAll { target, .. }
+        | Effect::DamageAll { target, .. }
+        | Effect::DoublePTAll { target, .. } => is_sentinel(target),
+        _ => false,
+    }
+}
+
+/// CR 608.2c: A per-player zone choice (`ChooseFromZone { zone_owner: Each(_) }`)
+/// accumulates every pick into the chain's tracked set and never writes the
+/// continuation's targets, so an instruction right after it that reads
+/// `ParentTarget` has no producer and would silently do nothing. Chaos Defiler
+/// ("Destroy one of them chosen at random") and Benthic Anomaly ("a copy of one
+/// of those creatures") have that shape; their consumers are not built, so
+/// strict-fail the consumer instead of letting the card claim support.
+pub(super) fn strict_fail_parent_target_after_per_player_choice(defs: &mut [AbilityDefinition]) {
+    for i in 1..defs.len() {
+        let after_per_player_choice = matches!(
+            &*defs[i - 1].effect,
+            Effect::ChooseFromZone {
+                zone_owner: crate::types::ability::ZoneOwner::Each(_),
+                ..
+            }
+        );
+        if after_per_player_choice && effect_reads_parent_target(&defs[i].effect) {
+            let fragment = defs[i]
+                .description
+                .clone()
+                .unwrap_or_else(|| "one of the permanents chosen for each player".to_string());
+            *defs[i].effect = Effect::unimplemented("per_player_choice_parent_target", fragment);
+        }
+    }
+}
+
+/// CR 608.2c: Does this effect act on `ParentTarget`? `Effect::target_filter`
+/// surfaces the single target slot, but a copy effect whose source is a context
+/// reference surfaces its token owner instead, and the population family
+/// carries its own `target` — both are read here too.
+fn effect_reads_parent_target(effect: &Effect) -> bool {
+    let is_parent = |filter: &TargetFilter| matches!(filter, TargetFilter::ParentTarget);
+    if effect.target_filter().is_some_and(is_parent) {
+        return true;
+    }
+    match effect {
+        Effect::CopyTokenOf { target, .. }
+        | Effect::PumpAll { target, .. }
+        | Effect::PutCounterAll { target, .. }
+        | Effect::ChangeZoneAll { target, .. }
+        | Effect::DestroyAll { target, .. }
+        | Effect::BounceAll { target, .. }
+        | Effect::CounterAll { target, .. }
+        | Effect::GainControlAll { target, .. }
+        | Effect::GoadAll { target, .. }
+        | Effect::DamageAll { target, .. }
+        | Effect::DoublePTAll { target, .. } => is_parent(target),
+        _ => false,
+    }
+}
+
 /// CR 608.2c: Is the clause following `slice` still inside the gated
 /// publisher's own instruction?
 ///

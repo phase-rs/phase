@@ -5747,6 +5747,15 @@ fn parse_controlled_battlefield_body(
     if type_phrase.is_empty() {
         return None;
     }
+    // CR 608.2c: when the head noun carries an "among <noun>" superlative ("a
+    // creature with the greatest power among creatures that player controls" —
+    // Highcliff Felidar), the "that player controls" clause restricts the
+    // embedded noun, not the head. The comparison population is per iterated
+    // player, which the search filter cannot express, so decline rather than
+    // compare against every creature in the game.
+    if nom_primitives::scan_contains(type_phrase, "among ") {
+        return None;
+    }
 
     let mut filter = super::search::parse_search_filter(type_phrase, ctx);
     if matches!(filter, TargetFilter::Any) {
@@ -5837,6 +5846,68 @@ pub(super) fn parse_for_each_player_exile_controlled(
     let mut clause = parsed_clause(choose);
     clause.sub_ability = Some(Box::new(sub));
     Some(clause)
+}
+
+/// CR 102.2 + CR 102.3 + CR 608.2c + CR 608.2d: "For each opponent, choose [up
+/// to one] [other] `<type-phrase>` that player controls" — Ultimate Magic:
+/// Meteor. The spell's controller chooses, for every opponent, one permanent
+/// matching `<type-phrase>` that THAT opponent controls. The choice is made on
+/// resolution and is not a target (CR 115.10a). Each pick accumulates into the
+/// chain's tracked set, which a following instruction ("Destroy the chosen
+/// permanents") acts on as a whole.
+///
+/// Only the opponent population is accepted here. "For each player, choose …
+/// that player controls" stays out for the payload reasons recorded in
+/// `parse_for_each_player_choose_from_zone`, and the printed-`target` form is
+/// rejected by `parse_controlled_battlefield_body`.
+pub(super) fn parse_for_each_opponent_choose_controlled(
+    lower: &str,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
+    type E<'a> = OracleError<'a>;
+
+    let (after_verb, _) = (
+        alt((
+            tag::<_, _, E>("for each opponent, "),
+            tag("for each opponent "),
+        )),
+        tag("choose "),
+    )
+        .parse(lower)
+        .ok()?;
+    let (up_to, filter) = parse_controlled_battlefield_body(after_verb, ctx)?;
+    // Nothing may follow "that player controls": a trailing instruction on the
+    // same clause would otherwise be dropped silently.
+    let (_, tail) = nom_primitives::scan_split_at_phrase(after_verb, |i| {
+        value((), tag::<_, _, E>("that player controls")).parse(i)
+    })?;
+    let (after_clause, _) = tag::<_, _, E>("that player controls").parse(tail).ok()?;
+    if !terminal_punctuation_only(after_clause) {
+        return None;
+    }
+
+    Some(parsed_clause(Effect::ChooseFromZone {
+        count: 1,
+        zone: Zone::Battlefield,
+        additional_zones: Vec::new(),
+        zone_owner: ZoneOwner::Each(PerPlayerScope::Opponents),
+        filter: Some(filter),
+        chooser: Chooser::Controller.into(),
+        candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
+        reciprocal_role: None,
+        up_to,
+        selection: CardSelectionMode::Chosen,
+        constraint: None,
+    }))
+}
+
+/// Recognizer for [`parse_for_each_opponent_choose_controlled`], probed on a
+/// throwaway context. The chunk loop consults it before the generic
+/// "for each <X>, " repeat peel, which would otherwise turn the opponent
+/// population into a bare repeat count and lose "that player".
+pub(super) fn is_for_each_opponent_choose_controlled(lower: &str) -> bool {
+    let mut probe = ParseContext::default();
+    parse_for_each_opponent_choose_controlled(lower, &mut probe).is_some()
 }
 
 /// Append a `FilterProp` (deduplicated) to a `Typed` filter. Non-`Typed` filters
@@ -9880,7 +9951,14 @@ pub(super) fn parse_destroy_ast(
         let (target, _rem) = parse_target_with_ctx(rest, ctx);
         #[cfg(debug_assertions)]
         assert_no_compound_remainder(_rem, text);
-        return Some(ZoneCounterImperativeAst::Destroy { target, all: false });
+        // CR 608.2c + CR 701.8a: after a zone-choice producer the chosen set lives
+        // only in the chain's tracked set (a per-player choice never writes the
+        // continuation's targets), and single-object `Destroy` reads targets. The
+        // set-wide `DestroyAll` over the tracked set destroys every chosen
+        // permanent at once.
+        let all = matches!(target, TargetFilter::TrackedSet { .. })
+            && ctx.pending_tracked_set_origin.is_some();
+        return Some(ZoneCounterImperativeAst::Destroy { target, all });
     }
     None
 }

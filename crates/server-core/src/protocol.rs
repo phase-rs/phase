@@ -3318,6 +3318,10 @@ mod tests {
         }
     }
 
+    /// `PerPlayerScope::Opponents` (CR 102.2 + CR 102.3) is a new value inside
+    /// serialized `ZoneOwner`, carried by every ability with a "for each
+    /// opponent, choose …" choice; a v94 peer cannot deserialize it, so it must
+    /// be refused before it receives v95 state.
     /// `SpellContext.creation_lookback_event` and `TriggerSourceContext.mana_cost`
     /// are new in serialized full-game state (CR 603.7 + CR 603.10a + CR 608.2h,
     /// CR 707.2); a v93 peer would drop both and resolve a phase-delayed
@@ -3356,8 +3360,8 @@ mod tests {
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_94_for_delayed_departure_lookback() {
-        assert_eq!(PROTOCOL_VERSION, 94);
+    fn protocol_version_is_95_for_per_opponent_zone_choice() {
+        assert_eq!(PROTOCOL_VERSION, 95);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3368,7 +3372,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_94_for_delayed_departure_lookback` stays
+    /// `protocol_version_is_95_for_per_opponent_zone_choice` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

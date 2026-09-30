@@ -210,6 +210,11 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 95 — PerPlayerScope gains Opponents (CR 102.2 + CR 102.3), written inside
+ *      ZoneOwner as {"Each":"Opponents"} on abilities with a "for each
+ *      opponent, choose …" choice. A v94 peer cannot deserialize it; the
+ *      exact-match handshake refuses the pairing. P2P moves in lockstep
+ *      (wire 77); lobby messages are unchanged.
  * 94 — SpellContext.creation_lookback_event carries the battlefield departure a
  *      phase-delayed triggered ability was created under (CR 603.7 + CR 603.10a
  *      + CR 608.2h), and TriggerSourceContext.mana_cost captures the observed
@@ -632,7 +637,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 94;
+export const PROTOCOL_VERSION = 95;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
