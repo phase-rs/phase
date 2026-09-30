@@ -31,6 +31,7 @@ import {
   exileGhostNode,
   firstRendered,
   measureCardPose,
+  ownPermanentSurface,
   resolveAim,
   sourceElement,
   zoneSurface,
@@ -158,7 +159,7 @@ class CardVfxController {
     const lifecycle = { disposed: false };
     this.lifecycle = lifecycle;
     this.canvas = canvas;
-    this.state = "idle";
+    this.setState("idle");
     this.initScheduled = false;
     // Prefetch: fetch, parse and evaluate the scene module now, so the first
     // init pays none of it. Loading it creates no renderer.
@@ -169,7 +170,7 @@ class CardVfxController {
         this.scheduleInit();
       },
       () => {
-        if (!lifecycle.disposed) this.state = "failed";
+        if (!lifecycle.disposed) this.setState("failed");
       },
     );
   }
@@ -178,16 +179,25 @@ class CardVfxController {
     this.lifecycle.disposed = true;
     cancelAnimationFrame(this.initFrame);
     clearTimeout(this.initTask);
-    this.releaseAll();
+    // The scene first: disposing a strike that has not landed lands it, and
+    // releasing then drops the veil that landing takes.
     this.scene?.dispose();
     this.scene = null;
+    this.releaseAll();
     this.canvas = null;
-    this.state = "idle";
+    this.setState("idle");
   }
 
   setTier(tier: CardVfxTier) {
     this.tier = tier;
     this.scene?.setPixelRatio(pixelRatioFor(tier));
+  }
+
+  // Publishes readiness, so hit timing and spell announcements follow the
+  // presentation this layer will actually give.
+  private setState(state: LayerState) {
+    this.state = state;
+    useAnimationStore.getState().setCardVfxReady(state === "ready");
   }
 
   readonly backSettled = (image: HTMLImageElement | null) => {
@@ -201,7 +211,7 @@ class CardVfxController {
       case "idle":
         // The first effect of a mount presents Classic and starts init.
         classic();
-        this.state = "initializing";
+        this.setState("initializing");
         this.scheduleInit();
         return;
       case "initializing":
@@ -294,18 +304,18 @@ class CardVfxController {
         }
         this.scene = scene;
         scene.setPixelRatio(pixelRatioFor(this.tier));
-        this.state = "ready";
+        this.setState("ready");
       },
       onFailed: () => {
-        if (!lifecycle.disposed) this.state = "failed";
+        if (!lifecycle.disposed) this.setState("failed");
       },
       onContextLost: () => {
         if (lifecycle.disposed) return;
-        this.state = "lost";
+        this.setState("lost");
         this.releaseAll();
       },
       onContextRestored: () => {
-        if (!lifecycle.disposed) this.state = "initializing";
+        if (!lifecycle.disposed) this.setState("initializing");
       },
     };
   }
@@ -388,7 +398,7 @@ class CardVfxController {
 
   private presentBoardEffect(spec: BoardEffectSpec, classic: () => void) {
     const { objectId } = spec;
-    const el = zoneSurface("Battlefield", objectId, spec.ownerId);
+    const el = ownPermanentSurface(objectId);
     if (!el) {
       classic();
       return;
@@ -424,7 +434,7 @@ class CardVfxController {
     const targetEl =
       target.kind === "player"
         ? firstRendered(`[data-player-hud="${target.playerId}"]`)
-        : zoneSurface("Battlefield", target.objectId, target.ownerId);
+        : ownPermanentSurface(target.objectId);
     if (!source || !targetEl || !this.canvas) {
       classic();
       return;
@@ -476,12 +486,12 @@ class CardVfxController {
   }
 
   /** Where a held card's flakes go: its ghost under its holder, measured each frame. */
-  private linkAimFor({ objectId, holderId, ownerId }: ExileDissolveSpec) {
+  private linkAimFor({ objectId, holderId }: ExileDissolveSpec) {
     if (holderId === null) return null;
     const measure = (el: HTMLElement | null, origin: DOMRectReadOnly) => el && measureCardPose(el, origin);
     return (origin: DOMRectReadOnly): LinkAim => ({
       ghost: measure(exileGhostNode(objectId), origin),
-      holder: measure(zoneSurface("Battlefield", holderId, ownerId), origin),
+      holder: measure(ownPermanentSurface(holderId), origin),
     });
   }
 

@@ -337,10 +337,13 @@ class CardVfxSceneRuntime implements CardVfxScene, EffectHost {
   startDamageStrike(request: DamageStrikeRequest) {
     const { strike, hit } = createDamageStrike(this, request);
     this.add(strike);
-    if (hit && request.hit) this.addBoardEffect(request.hit.objectId, hit);
+    // A hit taking over from a running effect inherits its veil, so it shows
+    // the permanent at rest until its own impact.
+    if (hit && request.hit && this.addBoardEffect(request.hit.objectId, hit)) hit.showAtRest();
   }
 
-  private addBoardEffect(objectId: ObjectId, effect: SceneEffect) {
+  /** Returns whether `effect` took over from one already running. */
+  private addBoardEffect(objectId: ObjectId, effect: SceneEffect): boolean {
     const previous = this.boardEffects.get(objectId);
     if (previous) {
       this.active.delete(previous);
@@ -348,6 +351,7 @@ class CardVfxSceneRuntime implements CardVfxScene, EffectHost {
     }
     this.boardEffects.set(objectId, effect);
     this.add(effect);
+    return previous !== undefined;
   }
 
   add(effect: SceneEffect) {

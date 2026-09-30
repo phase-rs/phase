@@ -52,6 +52,12 @@ describe("damageCauseOf", () => {
     expect(damageCauseOf(damage(PINGER), gone)?.origin).toEqual({ zone: "Stack", objectId: ABILITY, ownerId: 0 });
   });
 
+  it("V10-5: a resolution resuming after a choice is the engine's resolving entry, not the stack's top", () => {
+    const other = buildStackEntry({ id: 40, source_id: 41 });
+    const resumed = { ...state([pinger.build()], [other]), resolving_stack_entry: pingerAbility };
+    expect(damageCauseOf(damage(PINGER), resumed)?.origin).toEqual({ zone: "Battlefield", objectId: PINGER, ownerId: 0 });
+  });
+
   it.each<[readonly ManaColor[], string]>([
     [["Red"], "fire"],
     [["Black", "Red"], "fire"],

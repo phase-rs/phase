@@ -476,7 +476,7 @@ export interface DamageStrikeParams {
   amount: number;
   tier: CardVfxTier;
   pace: number;
-  /** The hit lands. */
+  /** The hit lands; exactly once, early if the strike is cut short. */
   onImpact(): void;
 }
 
@@ -488,13 +488,21 @@ function worldPoint(pose: CardPose, u: number, v: number): Vec2 {
   return [pose.x + ox * Math.cos(a) - oy * Math.sin(a), -(pose.y + ox * Math.sin(a) + oy * Math.cos(a))];
 }
 
-class DamageHit implements SceneEffect {
+/** A struck permanent's copy. It stays hidden until the impact unless it
+ *  takes over from a copy already showing, whose veil it inherits. */
+export interface DamageHitEffect extends SceneEffect {
+  /** Shows the copy at rest from now until its own impact. */
+  showAtRest(): void;
+}
+
+class DamageHit implements DamageHitEffect {
   private readonly group = new Group();
   private readonly geometry: PlaneGeometry;
   private readonly materials: ReturnType<typeof hitMaterials>;
   private readonly clock = { value: 0 };
   private readonly local: Vec2;
   private startMs: number | null = null;
+  private atRest = false;
 
   constructor(
     private readonly host: EffectHost,
@@ -537,8 +545,8 @@ class DamageHit implements SceneEffect {
     const t = (nowMs - this.startMs) / 1000 / this.pace;
     this.clock.value = t;
     const k = t - IMPACT_S;
+    this.group.visible = this.atRest || k >= 0;
     if (k < 0) return true;
-    this.group.visible = true;
     const U = this.materials.uniforms;
     // Knocked back along the damage's path: the far edge dips, then a damped rock back to rest.
     U.uTiltA.value = Math.min(0.1 + 0.03 * this.amount, 0.3) * Math.exp(-k * 8) * Math.sin(k * 22);
@@ -548,6 +556,11 @@ class DamageHit implements SceneEffect {
     U.uScorch.value = Math.min(k / 0.05, 1) * (1 - MathUtils.smoothstep(k, 0.25, 0.75));
     U.uScorchGlow.value = Math.exp(-k / 0.2) * Math.min(k / 0.02, 1);
     return k < HIT_S;
+  }
+
+  showAtRest() {
+    this.atRest = true;
+    this.group.visible = true;
   }
 
   dispose(silent: boolean) {
@@ -774,14 +787,20 @@ class DamageStrike implements SceneEffect {
     const t = (nowMs - this.startMs) / 1000 / this.params.pace;
     this.clock.value = t;
     this.frame(t);
-    if (!this.impacted && t >= IMPACT_S) {
-      this.impacted = true;
-      this.params.onImpact();
-    }
+    if (t >= IMPACT_S) this.land();
     return t < IMPACT_S + TAIL_S[this.params.cause];
   }
 
+  private land() {
+    if (this.impacted) return;
+    this.impacted = true;
+    this.params.onImpact();
+  }
+
+  // A strike cut short (context loss, unmount) still lands its hit once: the
+  // step it belongs to plays on.
   dispose() {
+    this.land();
     this.host.scene.remove(this.group);
     this.group.traverse((object) => {
       if (!(object instanceof Mesh)) return;
@@ -797,7 +816,7 @@ class DamageStrike implements SceneEffect {
 export function createDamageStrike(
   host: EffectHost,
   { hit, ...params }: DamageStrikeParams,
-): { strike: SceneEffect; hit: SceneEffect | null } {
+): { strike: SceneEffect; hit: DamageHitEffect | null } {
   // The hit lands somewhere central on a card, and in the middle of a HUD.
   const impact = hit ? { u: rand(0.35, 0.65), v: rand(0.3, 0.55) } : { u: 0.5, v: 0.5 };
   const S = worldPoint(params.from, 0.5, 0.5);

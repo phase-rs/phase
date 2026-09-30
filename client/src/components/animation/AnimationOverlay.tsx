@@ -37,6 +37,7 @@ import {
 } from "./ResolvedAnimationImage.tsx";
 import { applyScreenShake } from "./ScreenShake.tsx";
 import { CardVfxLayer, type CardVfxLayerHandle, cardVfxSupported } from "./cardVfx/CardVfxLayer.tsx";
+import { castAnnounced } from "./cardVfx/cardFlightSpecs.ts";
 import { cardVfxSpecFor, damageCauseState } from "./cardVfx/cardVfxSpecs.ts";
 
 
@@ -226,10 +227,6 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
     vfxQuality !== "minimal" &&
     !reduceMotion &&
     cardVfxSupported();
-  useEffect(() => {
-    useAnimationStore.getState().setCardFlightsActive(cardVfxMounted);
-    return () => useAnimationStore.getState().setCardFlightsActive(false);
-  }, [cardVfxMounted]);
 
   const getObjectRect = useCallback(
     (objectId: number): DOMRect | null =>
@@ -572,14 +569,21 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
             const snapshot = visiblePostEventSnapshot(object_id);
             const colors = snapshot ? newObject?.color ?? [] : [];
             const burstColor = getCardColors(colors)[0] ?? "#06b6d4";
+            // Under the New style a spell announced in an earlier batch
+            // already flew to the stack; only the burst marks its cast.
+            const flown =
+              useAnimationStore.getState().cardVfxReady &&
+              castAnnounced(object_id, useGameStore.getState().gameState);
             if (vfxQuality !== "minimal") {
               particleRef.current?.spellImpact(pos.x, pos.y, hexToRgb(burstColor));
-              const stackPos = { x: window.innerWidth * 0.75, y: window.innerHeight * 0.4 };
-              const id = ++castArcIdCounter;
-              setActiveCastArcs((previous) => [
-                ...previous,
-                { id, from: pos, to: stackPos, snapshot, mode: "cast" },
-              ]);
+              if (!flown) {
+                const stackPos = { x: window.innerWidth * 0.75, y: window.innerHeight * 0.4 };
+                const id = ++castArcIdCounter;
+                setActiveCastArcs((previous) => [
+                  ...previous,
+                  { id, from: pos, to: stackPos, snapshot, mode: "cast" },
+                ]);
+              }
             }
           }
           break;

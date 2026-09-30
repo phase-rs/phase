@@ -130,7 +130,7 @@ let inFlightLocalAction: {
 /** The post-event state the normalizer reads spell announcements from, when a
  *  card-flight layer will present them. */
 function announcementStateFor(state: GameState): GameState | null {
-  return useAnimationStore.getState().cardFlightsActive ? state : null;
+  return useAnimationStore.getState().cardVfxReady ? state : null;
 }
 
 function isCurrentDispatchGeneration(generation: number): boolean {

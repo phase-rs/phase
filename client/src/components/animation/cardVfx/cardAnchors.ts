@@ -135,6 +135,13 @@ const ZONE_SURFACES: Record<Zone, (id: ObjectId, ownerId: PlayerId) => readonly 
   Command: () => [],
 };
 
+/** Permanent `id`'s own laid-out surface, never a collapsed group's
+ *  representative standing in for it: a board effect veils the node it
+ *  replaces, and a representative's veil belongs to another object. */
+export function ownPermanentSurface(id: ObjectId): HTMLElement | null {
+  return firstRendered(`[data-permanent-card="${id}"]`);
+}
+
 /** Object `id`'s ghost under the permanent holding it in exile, veil-aware. */
 export function exileGhostNode(id: ObjectId): HTMLElement | null {
   return firstRendered(`[data-exile-ghost="${id}"]`);

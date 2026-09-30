@@ -971,7 +971,6 @@ describe("CardVfxLayer shatter", () => {
   const shatter = (objectId: number, cardFace: AnimationImageSnapshot | null = face(objectId)): CardShatterSpec => ({
     kind: "shatter",
     objectId,
-    ownerId: 0,
     face: cardFace,
     pace: 1,
     owningStepMs: 500,
@@ -1076,7 +1075,6 @@ describe("CardVfxLayer exile dissolve", () => {
   const dissolve = (objectId: number, holderId: number | null = null): ExileDissolveSpec => ({
     kind: "dissolve",
     objectId,
-    ownerId: 0,
     face: face(objectId),
     holderId,
     pace: 1,
@@ -1132,7 +1130,7 @@ describe("CardVfxLayer damage strike", () => {
   });
   const atPlayer = strike({ kind: "player", playerId: 1 });
   const atPermanent = (cardFace: AnimationImageSnapshot | null = face(X)) =>
-    strike({ kind: "permanent", objectId: X, ownerId: 1, face: cardFace });
+    strike({ kind: "permanent", objectId: X, face: cardFace });
   const strikeRenders = () => calls("render").filter((call) => hasVisible(call, "damage-strike"));
   const hitRenders = () => calls("render").filter((call) => hasVisible(call, "damage-hit"));
 
@@ -1198,6 +1196,56 @@ describe("CardVfxLayer damage strike", () => {
     expect(strikeRenders()).toHaveLength(0);
   });
 
+  it("V10-13: a hit taking over from a running hit shows the permanent at rest until its own impact", async () => {
+    const { present } = await readyLayer();
+    anchor({ "data-stack-entry": String(SPELL) }, 600, 300);
+    addFace(anchor({ "data-permanent-card": String(X) }, 300, 100));
+    present(atPermanent());
+    await loadFace();
+    await advance(DAMAGE_CAUSE_IMPACT_MS + 2 * FRAME_MS);
+    expect(veiled(X)).toBe(true);
+
+    present(atPermanent());
+    await loadFace();
+    await frames(2);
+    expect(veiled(X)).toBe(true);
+    expect(hasVisible(last(calls("render")) as RendererCall, "damage-hit")).toBe(true);
+  });
+
+  it("V10-14: a collapsed group member with no card of its own presents Classic", async () => {
+    const { present } = await readyLayer();
+    anchor({ "data-stack-entry": String(SPELL) }, 600, 300);
+    addFace(anchor({ "data-permanent-card": String(Y), "data-grouped-ids": `${Y} ${X}` }, 300, 100));
+
+    expect(present(atPermanent())).toHaveBeenCalledTimes(1);
+    expect(present({ kind: "shatter", objectId: X, face: face(X), pace: 1, owningStepMs: 400 })).toHaveBeenCalledTimes(1);
+  });
+
+  it("V10-15: unmounting before the impact lands the hit once and releases the veil it takes", async () => {
+    const { present, unmount } = await readyLayer();
+    anchor({ "data-stack-entry": String(SPELL) }, 600, 300);
+    addFace(anchor({ "data-permanent-card": String(X) }, 300, 100));
+    const onImpact = vi.fn();
+    present(atPermanent(), vi.fn(), onImpact);
+    await loadFace();
+    await frames(2);
+
+    unmount();
+    expect(onImpact).toHaveBeenCalledTimes(1);
+    expect(veiled(X)).toBe(false);
+  });
+
+  it("V10-16: readiness is published: not before init, while ready, not after unmount", async () => {
+    const { unmount } = await renderLayer();
+    expect(useAnimationStore.getState().cardVfxReady).toBe(false);
+    unmount();
+
+    const ready = await readyLayer();
+    expect(useAnimationStore.getState().cardVfxReady).toBe(true);
+    ready.unmount();
+    expect(useAnimationStore.getState().cardVfxReady).toBe(false);
+  });
+
   it("V10-10: a shatter on a struck permanent ends its hit, and the permanent stays veiled for the shatter", async () => {
     const { present } = await readyLayer();
     anchor({ "data-stack-entry": String(SPELL) }, 600, 300);
@@ -1207,7 +1255,7 @@ describe("CardVfxLayer damage strike", () => {
     await advance(DAMAGE_CAUSE_IMPACT_MS + 2 * FRAME_MS);
     expect(veiled(X)).toBe(true);
 
-    present({ kind: "shatter", objectId: X, ownerId: 1, face: face(X), pace: 1, owningStepMs: 400 });
+    present({ kind: "shatter", objectId: X, face: face(X), pace: 1, owningStepMs: 400 });
     await loadFace();
     await frames(2);
     expect(hasVisible(last(calls("render")) as RendererCall, "damage-hit")).toBe(false);

@@ -95,29 +95,30 @@ const shadowFrag = /* glsl */ `
 // the same spot on the ghost card.
 const flakeVert = /* glsl */ `
   attribute vec2 aUv; attribute vec3 aRand;
-  uniform sampler2D uMap; uniform vec2 uSize; uniform float uT, uCross, uTravel, uLift, uDpr, uHeld, uAngle, uGhostScale;
+  uniform sampler2D uMap; uniform vec2 uSize; uniform float uT, uCross, uTravel, uLift, uDpr, uHeld, uAngle, uGhostScale, uGhostAngle, uHolderAngle;
   uniform vec3 uCardPos; uniform vec3 uGhostPos; uniform vec4 uHolder;
   varying vec3 vCol; varying float vA;
   ${dissolveChunk}
+  // Counter-clockwise by a (world y up), as a mesh's rotation.z turns.
+  vec2 turn(vec2 v, float a) { float c = cos(a), s = sin(a); return vec2(c * v.x - s * v.y, s * v.x + c * v.y); }
   void main() {
     float birth = (dissolveKey(aUv) + 0.03) / 1.06 * uCross;
     float age = uT - birth;
     float life = uTravel * (0.7 + 0.6 * aRand.z);
     float k = clamp(age / life, 0.0, 1.0);
     vec2 offset = (aUv - 0.5) * uSize;
-    float c = cos(uAngle), s = sin(uAngle);
-    vec3 start = uCardPos + vec3(c * offset.x - s * offset.y, s * offset.x + c * offset.y, uLift);
+    vec3 start = uCardPos + vec3(turn(offset, uAngle), uLift);
     vec3 pos;
     float alpha;
     if (uHeld > 0.5) {
       // Arc to the same spot on the ghost card, lifting over the board on the way.
-      vec3 end = uGhostPos + vec3(offset * uGhostScale, 0.0);
+      vec3 end = uGhostPos + vec3(turn(offset * uGhostScale, uGhostAngle), 0.0);
       float e = k * k * (3.0 - 2.0 * k);
       vec3 mid = mix(start, end, 0.5) + vec3((aRand.x - 0.5) * 28.0, (aRand.y - 0.5) * 20.0, 80.0 + aRand.z * 50.0);
       pos = mix(mix(start, mid, e), mix(mid, end, e), e);
       alpha = 1.0;
       // Flakes landing where the holder card covers the ghost tuck under it.
-      vec2 d = abs(pos.xy - uHolder.xy) - uHolder.zw;
+      vec2 d = abs(turn(pos.xy - uHolder.xy, -uHolderAngle)) - uHolder.zw;
       float inside = 1.0 - smoothstep(-3.0, 1.0, max(d.x, d.y));
       alpha *= 1.0 - inside * smoothstep(0.55, 0.9, k);
       alpha *= 1.0 - smoothstep(0.9, 1.0, k) * 0.9;
@@ -243,6 +244,8 @@ function createFlakeMaterial(surface: Texture, w: number, h: number, first: Vect
       uHeld: { value: 0 },
       uAngle: { value: 0 },
       uGhostScale: { value: 1 },
+      uGhostAngle: { value: 0 },
+      uHolderAngle: { value: 0 },
       uCardPos: { value: new Vector3() },
       uGhostPos: { value: new Vector3() },
       uHolder: { value: OFFSCREEN.clone() },
@@ -308,6 +311,7 @@ class ExileDissolve implements SceneEffect {
     uniforms.uCardPos.value.set(pose.x, -pose.y, 0);
     uniforms.uGhostPos.value.set(pose.x, -pose.y, 0);
     uniforms.uAngle.value = this.card.rotation.z;
+    uniforms.uGhostAngle.value = this.card.rotation.z;
     uniforms.uHeld.value = link ? 1 : 0;
     this.flakes.frustumCulled = false;
     this.flakes.renderOrder = 3;
@@ -346,10 +350,17 @@ class ExileDissolve implements SceneEffect {
   private aimLink({ ghost, holder }: LinkAim) {
     const flakes = this.flakes.material.uniforms;
     const target = ghost ?? holder;
-    if (target) flakes.uGhostPos.value.set(target.x, -target.y, 0);
+    if (target) {
+      flakes.uGhostPos.value.set(target.x, -target.y, 0);
+      flakes.uGhostAngle.value = -MathUtils.degToRad(target.angleDeg);
+    }
     if (ghost) flakes.uGhostScale.value = ghost.w / this.params.pose.w;
-    if (holder) flakes.uHolder.value.set(holder.x, -holder.y, holder.w / 2, holder.h / 2);
-    else flakes.uHolder.value.copy(OFFSCREEN);
+    if (holder) {
+      flakes.uHolder.value.set(holder.x, -holder.y, holder.w / 2, holder.h / 2);
+      flakes.uHolderAngle.value = -MathUtils.degToRad(holder.angleDeg);
+    } else {
+      flakes.uHolder.value.copy(OFFSCREEN);
+    }
   }
 
   private arrive() {

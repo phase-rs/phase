@@ -207,7 +207,6 @@ describe("cardVfxSpecFor", () => {
     expect(cardVfxSpecFor(destroyed, context(pre, post))).toEqual({
       kind: "shatter",
       objectId: X,
-      ownerId: 0,
       face: expect.objectContaining({ cardName: "Llanowar Elves" }),
       pace: 1,
       owningStepMs: 500,
@@ -230,7 +229,6 @@ describe("cardVfxSpecFor exile", () => {
     expect(cardVfxSpecFor(zoneChanged("Battlefield", "Exile"), context(pre, post))).toEqual({
       kind: "dissolve",
       objectId: X,
-      ownerId: 0,
       face: expect.objectContaining({ cardName: "Llanowar Elves" }),
       holderId: null,
       pace: 1,
@@ -272,7 +270,7 @@ describe("cardVfxSpecFor damage", () => {
       owningStepMs: 500,
     });
     expect(cardVfxSpecFor(damage({ Object: X }), context(pre, pre))).toMatchObject({
-      target: { kind: "permanent", objectId: X, ownerId: 1, face: expect.objectContaining({ cardName: "Llanowar Elves" }) },
+      target: { kind: "permanent", objectId: X, face: expect.objectContaining({ cardName: "Llanowar Elves" }) },
     });
   });
 

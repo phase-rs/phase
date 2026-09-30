@@ -9,7 +9,7 @@ import { useAnimationStore } from "../../../stores/animationStore.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../../stores/preferencesStore.ts";
 import { buildObjectMap, gameObjectFactory } from "../../../test/factories/gameObjectFactory.ts";
-import { buildGameState } from "../../../test/factories/gameStateFactory.ts";
+import { buildGameState, buildStackEntry } from "../../../test/factories/gameStateFactory.ts";
 import { AnimationOverlay } from "../AnimationOverlay.tsx";
 import { CardRevealBurst } from "../CardRevealBurst.tsx";
 import { CastArcAnimation } from "../CastArcAnimation.tsx";
@@ -124,6 +124,8 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  useAnimationStore.getState().setCardVfxReady(false);
+  layer.present.mockReset();
   useAnimationStore.getState().clearQueue();
   useGameStore.getState().reset();
   currentSnapshot.clear();
@@ -240,5 +242,38 @@ describe("AnimationOverlay step timing under both styles", () => {
       vi.advanceTimersByTime(1);
     });
     expect(useAnimationStore.getState().activeStep).toBeNull();
+  });
+});
+
+describe("AnimationOverlay announced casts", () => {
+  function seedAnnouncedCast() {
+    seedCast();
+    const pre = useGameStore.getState().gameState as GameState;
+    act(() => {
+      useGameStore.setState({
+        gameState: { ...pre, stack: [buildStackEntry({ id: X, source_id: X })] },
+      });
+    });
+  }
+
+  it("V10-12: a spell announced under a ready layer bursts on the stack at its cast without flying again", () => {
+    layer.supported = true;
+    layer.present.mockImplementation((_spec, classic) => classic());
+    useAnimationStore.getState().setCardVfxReady(true);
+    seedAnnouncedCast();
+
+    renderOverlay();
+
+    expect(castArcs()).toEqual([]);
+    expect(particles.spellImpact).toHaveBeenCalledTimes(1);
+  });
+
+  it("V10-12: without a ready layer the announced cast keeps its Classic arc", () => {
+    usePreferencesStore.setState({ cardAnimationStyle: "classic" });
+    seedAnnouncedCast();
+
+    renderOverlay();
+
+    expectClassicCast();
   });
 });

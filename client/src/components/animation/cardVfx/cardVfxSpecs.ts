@@ -10,7 +10,6 @@ import { type CardFlightSpec, type CardFlightSpecContext, cardFlightSpecFor } fr
 export interface CardShatterSpec {
   kind: "shatter";
   objectId: ObjectId;
-  ownerId: PlayerId;
   /** The face the viewer saw before the event; `null` shows the card back. */
   face: AnimationImageSnapshot | null;
   pace: number;
@@ -21,7 +20,6 @@ export interface CardShatterSpec {
 export interface ExileDissolveSpec {
   kind: "dissolve";
   objectId: ObjectId;
-  ownerId: PlayerId;
   /** The face the viewer saw before the event; `null` shows the card back. */
   face: AnimationImageSnapshot | null;
   /** The permanent holding the card in exile (linked exile), if any. */
@@ -36,7 +34,7 @@ export type BoardEffectSpec = CardShatterSpec | ExileDissolveSpec;
 /** Who a damage strike hits: a player at their HUD, or a permanent where it lies. */
 export type DamageStrikeTarget =
   | { kind: "player"; playerId: PlayerId }
-  | { kind: "permanent"; objectId: ObjectId; ownerId: PlayerId; face: AnimationImageSnapshot | null };
+  | { kind: "permanent"; objectId: ObjectId; face: AnimationImageSnapshot | null };
 
 /** A spell or ability's damage travelling from its source to its target. */
 export interface DamageStrikeSpec {
@@ -56,7 +54,7 @@ export type CardVfxSpec = CardFlightSpec | BoardEffectSpec | DamageStrikeSpec;
  *  damage causes; `null` when every hit presents Classic. Hit timing reads it
  *  too, so a life total ticks when the strike lands. */
 export function damageCauseState(): GameState | null {
-  return useAnimationStore.getState().cardFlightsActive ? useGameStore.getState().gameState : null;
+  return useAnimationStore.getState().cardVfxReady ? useGameStore.getState().gameState : null;
 }
 
 // CR 701.8a: a destroyed permanent moves from the battlefield to its owner's
@@ -69,7 +67,7 @@ function cardShatterSpecFor(
   const objectId = event.data.object_id;
   const object = pre?.objects[objectId];
   return object
-    ? { kind: "shatter", objectId, ownerId: object.owner, face: visibleAnimationImageSnapshot(object), pace, owningStepMs }
+    ? { kind: "shatter", objectId, face: visibleAnimationImageSnapshot(object), pace, owningStepMs }
     : null;
 }
 
@@ -90,7 +88,6 @@ function exileDissolveSpecFor(
   return {
     kind: "dissolve",
     objectId,
-    ownerId: object.owner,
     face: visibleAnimationImageSnapshot(object),
     holderId: holder === undefined ? null : Number(holder),
     pace,
@@ -112,7 +109,7 @@ function damageStrikeSpecFor(
   } else {
     const object = pre?.objects[ref.Object];
     if (!object) return null;
-    target = { kind: "permanent", objectId: ref.Object, ownerId: object.owner, face: visibleAnimationImageSnapshot(object) };
+    target = { kind: "permanent", objectId: ref.Object, face: visibleAnimationImageSnapshot(object) };
   }
   return { kind: "damage", ...cause, target, amount, pace, owningStepMs };
 }

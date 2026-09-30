@@ -25,11 +25,13 @@ function causeFor(colors: readonly ManaColor[]): DamageCause {
 /** CR 120.2b: damage dealt as the effect of a spell or ability comes from the
  *  object it names. Damage the resolving spell or ability deals from itself or
  *  its own source travels to its target as a cause. Other damage has none:
- *  combat damage, a mana ability's, or a creature a spell makes deal damage. */
+ *  combat damage, a mana ability's, or a creature a spell makes deal damage.
+ *  The resolving entry is the engine's, when a resolution resumes after a
+ *  choice; otherwise the top of the stack, which resolves next (CR 608.1). */
 export function damageCauseOf(event: AnimationEvent, pre: GameState | null): DamageCauseOf | null {
   if (event.type !== "DamageDealt" || event.data.is_combat || !pre) return null;
   const sourceId = event.data.source_id;
-  const resolving = pre.stack[pre.stack.length - 1];
+  const resolving = pre.resolving_stack_entry ?? pre.stack[pre.stack.length - 1];
   if (!resolving || (resolving.id !== sourceId && resolving.source_id !== sourceId)) return null;
   const source = pre.objects[sourceId];
   if (!source) return null;

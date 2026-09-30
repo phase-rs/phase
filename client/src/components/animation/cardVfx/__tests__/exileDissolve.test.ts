@@ -89,6 +89,18 @@ describe("exile dissolve", () => {
     expect(onArrive).toHaveBeenCalledTimes(1);
   });
 
+  it("V9-7: flakes land in a tapped ghost's frame and tuck under a tapped holder's footprint", () => {
+    const effectHost = host();
+    const holder = { x: 500, y: 400, w: 63, h: 88, angleDeg: 90 };
+    const ghost = { x: 510, y: 420, w: 63, h: 88, angleDeg: 90 };
+    const dissolve = createExileDissolve(effectHost, params({ link: () => ({ ghost, holder }) }));
+    const uniforms = flakeUniforms(effectHost.scene);
+
+    dissolve.update(0);
+    expect(uniforms.uGhostAngle.value).toBeCloseTo(-Math.PI / 2);
+    expect(uniforms.uHolderAngle.value).toBeCloseTo(-Math.PI / 2);
+  });
+
   it("V9-3: reduced has no shadow; a silent dispose reports nothing", () => {
     const effectHost = host();
     const onArrive = vi.fn();
