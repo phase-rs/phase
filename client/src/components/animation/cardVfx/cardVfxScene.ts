@@ -280,7 +280,7 @@ class CardVfxSceneRuntime implements CardVfxScene, EffectHost {
       from,
       back: this.backTexture,
       onRelease: (reason) => {
-        if (reason === "land" && request.route.kind === "resolveToBattlefield" && request.tier === "full") {
+        if (reason === "land" && request.route.to === "Battlefield" && request.tier === "full") {
           this.add(
             createLandingDust(this, flight.currentState(), landingColors, request.pace, this.pixelRatio),
           );

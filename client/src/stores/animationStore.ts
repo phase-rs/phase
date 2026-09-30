@@ -44,6 +44,8 @@ interface AnimationStoreState {
    * outlive its step. Only `clearQueue` resets it.
    */
   flightVeiledObjectIds: ReadonlySet<number>;
+  /** Whether a card-flight layer is mounted to present steps (the New style). */
+  cardFlightsActive: boolean;
 }
 
 interface AnimationStoreActions {
@@ -61,6 +63,7 @@ interface AnimationStoreActions {
   veilFlight: (objectId: number) => void;
   /** Release a flight veil. */
   unveilFlight: (objectId: number) => void;
+  setCardFlightsActive: (active: boolean) => void;
   clearQueue: () => void;
 }
 
@@ -78,6 +81,7 @@ export const useAnimationStore = create<AnimationStore>()((set, get) => ({
   displayedLife: null,
   veiledObjectIds: NO_VEILED_OBJECTS,
   flightVeiledObjectIds: NO_VEILED_OBJECTS,
+  cardFlightsActive: false,
 
   enqueueSteps: (steps) => {
     if (steps.length === 0) return;
@@ -171,6 +175,8 @@ export const useAnimationStore = create<AnimationStore>()((set, get) => ({
       return { flightVeiledObjectIds: next };
     });
   },
+
+  setCardFlightsActive: (active) => set({ cardFlightsActive: active }),
 
   clearQueue: () => set((state) => ({
     queue: [],

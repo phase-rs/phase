@@ -2,18 +2,22 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { objectAnchorSelector } from "../../../../utils/objectAnchorSelector.ts";
 import {
-  castSourceElement,
   faceImagesSettled,
   measureCardPose,
   measureSurface,
   ownNode,
   provisionalNode,
   resolveAim,
-  stackSourceElement,
+  sourceElement,
 } from "../cardAnchors.ts";
+import type { CardFlightRoute } from "../cardFlightSpecs.ts";
 
 const X = 7;
 const ORIGIN = new DOMRect(0, 0, 1000, 800);
+const CAST: CardFlightRoute = { from: "Hand", to: "Stack", ownerId: 0 };
+const RESOLVE: CardFlightRoute = { from: "Stack", to: "Battlefield", ownerId: 0 };
+/** A cast from `from` by player 0. */
+const castFrom = (from: CardFlightRoute["from"]): CardFlightRoute => ({ ...CAST, from });
 
 interface Box {
   left: number;
@@ -50,18 +54,18 @@ describe("zone-scoped anchors", () => {
     // Positive control: the generic selector really does collide.
     expect(document.querySelectorAll(objectAnchorSelector(X)).length).toBeGreaterThan(1);
 
-    expect(castSourceElement(X)).toBe(hand);
-    expect(stackSourceElement(X)).toBe(stack);
-    expect(ownNode({ kind: "cast" }, X)).toBe(stack);
-    expect(ownNode({ kind: "resolveToBattlefield" }, X)).toBe(permanent);
-    expect(ownNode({ kind: "resolveToGraveyard", ownerId: 1 }, X)).toBe(pile);
+    expect(sourceElement(CAST, X)).toBe(hand);
+    expect(sourceElement(RESOLVE, X)).toBe(stack);
+    expect(ownNode(CAST, X)).toBe(stack);
+    expect(ownNode(RESOLVE, X)).toBe(permanent);
+    expect(ownNode({ from: "Stack", to: "Graveyard", ownerId: 1 }, X)).toBe(pile);
   });
 
   it("V3-5a: a coalesced stack entry stands in for its member", () => {
     const representative = mount({ "data-stack-entry": "9", "data-grouped-ids": `9 ${X}` });
 
-    expect(ownNode({ kind: "cast" }, X)).toBe(representative);
-    expect(stackSourceElement(X)).toBe(representative);
+    expect(ownNode(CAST, X)).toBe(representative);
+    expect(sourceElement(RESOLVE, X)).toBe(representative);
   });
 
   it("V3-5b: a held (zero-width) hand card, command-zone and drawer ids, and a pending stack entry are no cast source", () => {
@@ -70,52 +74,60 @@ describe("zone-scoped anchors", () => {
     mount({ "data-object-id": String(X), "data-mobile-hand-drawer": "" });
     mount({ "data-stack-entry": String(X) });
 
-    expect(castSourceElement(X)).toBeNull();
+    expect(sourceElement(CAST, X)).toBeNull();
+    expect(sourceElement(castFrom("Command"), X)).toBeNull();
 
     // Reach guard: a laid-out hand card is found.
     const visibleHand = mount({ "data-hand-card": "", "data-object-id": String(X) });
-    expect(castSourceElement(X)).toBe(visibleHand);
+    expect(sourceElement(CAST, X)).toBe(visibleHand);
   });
 
-  it("V3-5b: the cast sources are tried in priority order", () => {
+  it("V3-5b: each origin zone's surface is its card, else what stands in for it, in priority order", () => {
     const library = mount({ "data-library-pile": "0" });
+    expect(sourceElement(castFrom("Library"), X)).toBe(library);
     const top = mount({ "data-grouped-ids": String(X) }, undefined, library);
-    expect(castSourceElement(X)).toBe(top);
+    expect(sourceElement(castFrom("Library"), X)).toBe(top);
+
     const pile = mount({ "data-graveyard-pile": "0", "data-grouped-ids": String(X) });
-    expect(castSourceElement(X)).toBe(pile);
-    const opponent = mount({ "data-opponent-hand-card": String(X) });
-    expect(castSourceElement(X)).toBe(opponent);
+    expect(sourceElement(castFrom("Graveyard"), X)).toBe(pile);
+    expect(sourceElement(castFrom("Exile"), X)).toBeNull();
     const fan = mount({ "data-zone-fan-card": "", "data-object-id": String(X) });
-    expect(castSourceElement(X)).toBe(fan);
+    expect(sourceElement(castFrom("Graveyard"), X)).toBe(fan);
+    expect(sourceElement(castFrom("Exile"), X)).toBe(fan);
+
+    const opponent = mount({ "data-opponent-hand-card": String(X) });
+    expect(sourceElement(CAST, X)).toBe(opponent);
+    const hand = mount({ "data-hand-card": "", "data-object-id": String(X) });
+    expect(sourceElement(CAST, X)).toBe(hand);
   });
 
   it("V3-5c: of two permanent nodes the first laid out one wins, in document order", () => {
     const collapsed = mount({ "data-permanent-card": String(X) }, { left: 0, top: 0, width: 0, height: 0 });
     const overview = mount({ "data-permanent-card": String(X) });
-    expect(ownNode({ kind: "resolveToBattlefield" }, X)).toBe(overview);
+    expect(ownNode(RESOLVE, X)).toBe(overview);
 
     layOut(collapsed, { left: 5, top: 5, width: 63, height: 88 });
-    expect(ownNode({ kind: "resolveToBattlefield" }, X)).toBe(collapsed);
+    expect(ownNode(RESOLVE, X)).toBe(collapsed);
   });
 
   it("V3-5d: provisional aims stand in until the own node exists", () => {
     const origin = ORIGIN;
-    const hold = resolveAim({ kind: "cast" }, X, origin, null);
+    const hold = resolveAim(CAST, X, origin, null);
     expect(hold).toEqual({ kind: "hold" });
 
     const remembered = { x: 1, y: 2, w: 63, h: 88, angleDeg: 0 };
-    expect(resolveAim({ kind: "cast" }, X, origin, remembered))
+    expect(resolveAim(CAST, X, origin, remembered))
       .toEqual({ kind: "provisional", el: null, pose: remembered });
-    // Only the cast route remembers a stack pose.
-    expect(resolveAim({ kind: "resolveToBattlefield" }, X, origin, remembered)).toEqual({ kind: "hold" });
+    // Only a flight onto the stack remembers a stack pose.
+    expect(resolveAim(RESOLVE, X, origin, remembered)).toEqual({ kind: "hold" });
 
     mount({ "data-stack-entry": "1" });
     const last = mount({ "data-stack-entry": "2" });
-    expect(provisionalNode({ kind: "cast" })).toBe(last);
-    expect(resolveAim({ kind: "cast" }, X, origin, remembered)).toMatchObject({ kind: "provisional", el: last });
+    expect(provisionalNode(CAST)).toBe(last);
+    expect(resolveAim(CAST, X, origin, remembered)).toMatchObject({ kind: "provisional", el: last });
 
     const pile = mount({ "data-graveyard-pile": "1", "data-grouped-ids": "3" });
-    const route = { kind: "resolveToGraveyard", ownerId: 1 } as const;
+    const route = { from: "Stack", to: "Graveyard", ownerId: 1 } as const;
     expect(resolveAim(route, X, origin, null)).toMatchObject({ kind: "provisional", el: pile });
     expect(ownNode(route, X)).toBeNull();
     pile.setAttribute("data-grouped-ids", `3 ${X}`);
@@ -164,13 +176,13 @@ describe("surface measurement", () => {
     const plain = mount({ "data-permanent-card": String(X) });
     expect(measureSurface(plain, ORIGIN).opacity).toBe(1);
 
-    const own = resolveAim({ kind: "cast" }, X, ORIGIN, null);
+    const own = resolveAim(CAST, X, ORIGIN, null);
     expect(own).toMatchObject({ kind: "own", el: node, faceImagesSettled: false });
     expect(own.kind === "own" && own.opacity).toBeCloseTo(0.4, 9);
     // A provisional aim carries neither field.
     node.removeAttribute("data-stack-entry");
     mount({ "data-stack-entry": "9" });
-    const provisional = resolveAim({ kind: "cast" }, X, ORIGIN, null);
+    const provisional = resolveAim(CAST, X, ORIGIN, null);
     expect(provisional.kind).toBe("provisional");
     expect(provisional).not.toHaveProperty("opacity");
     expect(provisional).not.toHaveProperty("faceImagesSettled");

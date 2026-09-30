@@ -225,6 +225,10 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
     vfxQuality !== "minimal" &&
     !reduceMotion &&
     cardVfxSupported();
+  useEffect(() => {
+    useAnimationStore.getState().setCardFlightsActive(cardVfxMounted);
+    return () => useAnimationStore.getState().setCardFlightsActive(false);
+  }, [cardVfxMounted]);
 
   const getObjectRect = useCallback(
     (objectId: number): DOMRect | null =>

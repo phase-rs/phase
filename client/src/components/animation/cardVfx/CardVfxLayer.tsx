@@ -343,13 +343,13 @@ class CardVfxController {
     const el = sourceElement(spec.route, spec.objectId);
     if (!el || !this.canvas) return null;
     const pose = measureCardPose(el, this.canvas.getBoundingClientRect());
-    if (spec.route.kind !== "cast") this.lastStackPose = pose;
+    if (spec.route.from === "Stack") this.lastStackPose = pose;
     return pose;
   }
 
   private aim(route: CardFlightRoute, objectId: ObjectId, origin: DOMRectReadOnly): Aim {
     const aim = resolveAim(route, objectId, origin, this.lastStackPose);
-    if (route.kind === "cast" && aim.kind !== "hold" && aim.el) this.lastStackPose = aim.pose;
+    if (route.to === "Stack" && aim.kind !== "hold" && aim.el) this.lastStackPose = aim.pose;
     return aim;
   }
 

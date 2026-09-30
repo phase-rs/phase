@@ -47,7 +47,7 @@ describe("cardFlightSpecFor", () => {
 
     const spec = cardFlightSpecFor(spellCast, context(pre, post));
 
-    expect(spec).toMatchObject({ objectId: X, route: { kind: "cast" }, pace: 1, owningStepMs: 500 });
+    expect(spec).toMatchObject({ objectId: X, route: { from: "Hand", to: "Stack", ownerId: 0 }, pace: 1, owningStepMs: 500 });
     expect(spec?.startFace).toMatchObject({ objectId: X, cardName: "Llanowar Elves" });
     expect(spec?.endFace).toMatchObject({ objectId: X, cardName: "Llanowar Elves" });
   });
@@ -57,7 +57,7 @@ describe("cardFlightSpecFor", () => {
     const post = stateWith(visible(card.onBattlefield().build()));
 
     expect(cardFlightSpecFor(zoneChanged("Stack", "Battlefield"), context(pre, post))?.route)
-      .toEqual({ kind: "resolveToBattlefield" });
+      .toEqual({ from: "Stack", to: "Battlefield", ownerId: 0 });
   });
 
   it("V3-4c: a Stack→Graveyard move goes to the owner's pile, not the controller's", () => {
@@ -66,7 +66,7 @@ describe("cardFlightSpecFor", () => {
     const post = stateWith(visible(instant.inGraveyard().build()));
 
     expect(cardFlightSpecFor(zoneChanged("Stack", "Graveyard"), context(pre, post))?.route)
-      .toEqual({ kind: "resolveToGraveyard", ownerId: 1 });
+      .toEqual({ from: "Stack", to: "Graveyard", ownerId: 1 });
     // No post object means no owner to route by.
     expect(cardFlightSpecFor(zoneChanged("Stack", "Graveyard"), context(pre, stateWith()))).toBeNull();
   });
@@ -84,7 +84,7 @@ describe("cardFlightSpecFor", () => {
       spellCast,
       context(pre, stateWith(hidden(card.params({ zone: "Stack" }).build()))),
     );
-    expect(bothHidden).toMatchObject({ route: { kind: "cast" }, startFace: null, endFace: null });
+    expect(bothHidden).toMatchObject({ route: { from: "Hand", to: "Stack", ownerId: 0 }, startFace: null, endFace: null });
   });
 
   it("V4-3: the landing tint takes the engine's colours, and a hidden face gets none", () => {
@@ -100,7 +100,7 @@ describe("cardFlightSpecFor", () => {
   it("V5-1: a draw flies from the owner's library to their hand, face up only when the engine shows it", () => {
     const pre = stateWith(hidden(card.params({ zone: "Library" }).build()));
     const own = cardFlightSpecFor(zoneChanged("Library", "Hand"), context(pre, stateWith(visible(card.inHand().build()))));
-    expect(own).toMatchObject({ route: { kind: "draw", ownerId: 0 }, startFace: null, delayMs: 0 });
+    expect(own).toMatchObject({ route: { from: "Library", to: "Hand", ownerId: 0 }, startFace: null, delayMs: 0 });
     expect(own?.endFace).toMatchObject({ cardName: "Llanowar Elves" });
 
     const opponentCard = gameObjectFactory.withId(X).named("Secret Draw").ownedBy(1);
@@ -108,7 +108,7 @@ describe("cardFlightSpecFor", () => {
       zoneChanged("Library", "Hand"),
       context(pre, stateWith(hidden(opponentCard.inHand().build()))),
     );
-    expect(opponent).toMatchObject({ route: { kind: "draw", ownerId: 1 }, startFace: null, endFace: null });
+    expect(opponent).toMatchObject({ route: { from: "Library", to: "Hand", ownerId: 1 }, startFace: null, endFace: null });
     expect(JSON.stringify(opponent)).not.toContain("Secret Draw");
 
     // A revealed library top starts face up, so the card does not turn over.
@@ -138,13 +138,13 @@ describe("cardFlightSpecFor", () => {
     }
   });
 
-  it("V3-4e: land plays, other zone moves and other events have no flight", () => {
+  it("V3-4e: zone moves without a flight and other events have no flight", () => {
     const pre = stateWith(visible(card.inHand().build()));
     const post = stateWith(visible(card.onBattlefield().build()));
     const ctx = context(pre, post);
 
-    expect(cardFlightSpecFor(zoneChanged("Hand", "Battlefield"), ctx)).toBeNull();
     expect(cardFlightSpecFor(zoneChanged("Stack", "Exile"), ctx)).toBeNull();
+    expect(cardFlightSpecFor(zoneChanged("Battlefield", "Graveyard"), ctx)).toBeNull();
     expect(cardFlightSpecFor({ type: "TokenCreated", data: { object_id: X, name: "Elf", source_id: 3 } }, ctx)).toBeNull();
     expect(
       cardFlightSpecFor(
@@ -154,6 +154,29 @@ describe("cardFlightSpecFor", () => {
     ).toBeNull();
     // Reach guard: the same context does route a Stack→Battlefield move.
     expect(cardFlightSpecFor(zoneChanged("Stack", "Battlefield"), ctx)).not.toBeNull();
+  });
+
+  it("V7-1: a land played from the hand lands on the battlefield face up", () => {
+    const pre = stateWith(visible(card.inHand().build()));
+    const post = stateWith(visible(card.onBattlefield().build()));
+
+    expect(cardFlightSpecFor(zoneChanged("Hand", "Battlefield"), context(pre, post))).toMatchObject({
+      route: { from: "Hand", to: "Battlefield", ownerId: 0 },
+      startFace: { cardName: "Llanowar Elves" },
+      endFace: { cardName: "Llanowar Elves" },
+    });
+  });
+
+  it("V7-2: a cast flies from the zone it is cast from, announced or cast", () => {
+    const post = stateWith(visible(card.params({ zone: "Stack" }).build()));
+    const announced: AnimationEvent = { type: "StackPushed", data: { object_id: X } };
+
+    expect(cardFlightSpecFor(announced, context(stateWith(visible(card.inHand().build())), post))?.route)
+      .toEqual({ from: "Hand", to: "Stack", ownerId: 0 });
+    expect(cardFlightSpecFor(spellCast, context(stateWith(visible(card.params({ zone: "Graveyard" }).build())), post))?.route)
+      .toEqual({ from: "Graveyard", to: "Stack", ownerId: 0 });
+    // No pre object means no zone to fly from.
+    expect(cardFlightSpecFor(announced, context(null, post))).toBeNull();
   });
 
   it("V3-4f: pace 0 has no flight; any other pace is carried on the spec", () => {

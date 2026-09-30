@@ -1,4 +1,4 @@
-import type { GameEvent } from "../adapter/types";
+import type { GameEvent, GameState } from "../adapter/types";
 import type { AnimationStep, PacingCategory, StepEffect } from "./types";
 import {
   DEFAULT_DURATION,
@@ -75,7 +75,14 @@ interface NormalizeEventsOptions {
    *  `eventCategory()` and the matching multiplier scales its base duration.
    *  Defaults to neutral pacing (1.0) for every category. */
   pacingMultipliers?: Record<PacingCategory, number>;
+  /** The post-event state, when card flights present steps. A spell announced
+   *  onto the stack (CR 601.2a) whose cast then pauses for a choice is cast in
+   *  a later batch, after the card has left where it was cast from; its
+   *  announcement gets a step of its own so the flight lifts the card from there. */
+  announcementState?: AnnouncementState | null;
 }
+
+type AnnouncementState = Pick<GameState, "stack" | "has_pending_cast">;
 
 /** Group consecutive events of the same type (e.g. multiple creatures dying). */
 function sameTypeGrouping(effect: StepEffect, lastStep: AnimationStep): boolean {
@@ -788,6 +795,20 @@ function findFallbackRun(
   };
 }
 
+/** The spells announced in `events` whose cast is still pending after them. */
+function pausedSpellAnnouncements(events: GameEvent[], state: AnnouncementState | null | undefined): Set<number> {
+  if (!state?.has_pending_cast) return new Set();
+  const spells = new Set(state.stack.filter((entry) => entry.kind.type === "Spell").map((entry) => entry.id));
+  const cast = new Set(events.flatMap((event) => (event.type === "SpellCast" ? [event.data.object_id] : [])));
+  return new Set(
+    events.flatMap((event) =>
+      event.type === "StackPushed" && spells.has(event.data.object_id) && !cast.has(event.data.object_id)
+        ? [event.data.object_id]
+        : [],
+    ),
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Main normalizer
 // ---------------------------------------------------------------------------
@@ -803,6 +824,7 @@ export function normalizeEvents(
     aggregateReplacements.map((replacement) => [replacement.aggregateIndex, replacement]),
   );
   const skipIndices = meldPresentedZoneChanges(events);
+  const announcements = pausedSpellAnnouncements(events, options?.announcementState);
   for (const replacement of aggregateReplacements) {
     for (const index of replacement.skipIndices) skipIndices.add(index);
   }
@@ -831,11 +853,12 @@ export function normalizeEvents(
     }
 
     const event = events[index];
-    if (NON_VISUAL_EVENTS.has(event.type)) continue;
+    const isAnnouncement = event.type === "StackPushed" && announcements.has(event.data.object_id);
+    if (NON_VISUAL_EVENTS.has(event.type) && !isAnnouncement) continue;
 
     const effect = toEffect(event, pacingMultipliers);
 
-    if (OWN_STEP_TYPES.has(event.type)) {
+    if (OWN_STEP_TYPES.has(event.type) || isAnnouncement) {
       steps.push({ effects: [effect], duration: effect.duration });
       continue;
     }

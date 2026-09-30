@@ -22,7 +22,7 @@ import {
 import type { ObjectId } from "../../../adapter/types.ts";
 import type { VfxQuality } from "../../../animation/types.ts";
 import type { Aim, CardPose } from "./cardAnchors.ts";
-import type { CardFlightRoute } from "./cardFlightSpecs.ts";
+import type { CardFlightRoute, FlightDestination } from "./cardFlightSpecs.ts";
 import type { EffectHost, SceneEffect, SceneEffectKind } from "./cardVfxScene.ts";
 
 /** The tiers that mount the overlay; `minimal` never does. */
@@ -84,11 +84,12 @@ export interface FlightProfile {
   durationMs: number;
 }
 
-export const FLIGHT_PROFILES: Record<CardFlightRoute["kind"], FlightProfile> = {
-  cast: { curve: "panel", durationMs: CAST_FLIGHT_MS },
-  resolveToBattlefield: { curve: "land", durationMs: RESOLVE_FLIGHT_MS },
-  resolveToGraveyard: { curve: "panel", durationMs: RESOLVE_FLIGHT_MS },
-  draw: { curve: "panel", durationMs: DRAW_FLIGHT_MS },
+/** How a flight moves, by the zone it lands in. */
+export const FLIGHT_PROFILES: Record<FlightDestination, FlightProfile> = {
+  Stack: { curve: "panel", durationMs: CAST_FLIGHT_MS },
+  Battlefield: { curve: "land", durationMs: RESOLVE_FLIGHT_MS },
+  Graveyard: { curve: "panel", durationMs: RESOLVE_FLIGHT_MS },
+  Hand: { curve: "panel", durationMs: DRAW_FLIGHT_MS },
 };
 
 /** A card pose in flight: height above the table, how far the tilt and lean
@@ -402,7 +403,7 @@ class CardFlightEffect implements CardFlight {
     private readonly params: CardFlightParams,
   ) {
     this.objectId = params.objectId;
-    this.profile = FLIGHT_PROFILES[params.route.kind];
+    this.profile = FLIGHT_PROFILES[params.route.to];
     this.targetFlip = flipAngle(params.flip, true);
     this.state = params.from;
     this.holdPose = { ...params.from, y: params.from.y - params.from.h * HOLD_RISE_FRACTION };

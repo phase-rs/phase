@@ -191,7 +191,7 @@ describe("AnimationOverlay card VFX seam", () => {
     expect(layer.present).toHaveBeenCalledTimes(1);
     expect(layer.present.mock.calls[0][0]).toMatchObject({
       objectId: X,
-      route: { kind: "cast" },
+      route: { from: "Hand", to: "Stack", ownerId: 0 },
       pace: 1,
       owningStepMs: 500,
     });

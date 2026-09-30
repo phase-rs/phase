@@ -1,5 +1,5 @@
-import type { ObjectId } from "../../../adapter/types.ts";
-import type { CardFlightRoute } from "./cardFlightSpecs.ts";
+import type { ObjectId, PlayerId, Zone } from "../../../adapter/types.ts";
+import type { CardFlightRoute, FlightDestination } from "./cardFlightSpecs.ts";
 
 /** A card's on-screen pose in canvas-local CSS px: centre, laid-out size with
  *  every ancestor scale applied, and clockwise rotation in degrees. */
@@ -104,81 +104,55 @@ function firstRenderedOf(selectors: readonly string[]): HTMLElement | null {
 
 // Zone-scoped anchors (the phase 1 anchor contract). The generic
 // `[data-object-id]` matches one object in several zones at once.
-const stackEntrySelectors = (id: ObjectId) => [
-  `[data-stack-entry="${id}"]`,
-  `[data-stack-entry][data-grouped-ids~="${id}"]`,
-];
-const permanentSelectors = (id: ObjectId) => [
-  `[data-permanent-card="${id}"]`,
-  `[data-permanent-card][data-grouped-ids~="${id}"]`,
-];
-const castSourceSelectors = (id: ObjectId) => [
-  `[data-hand-card][data-object-id="${id}"]`,
-  `[data-zone-fan-card][data-object-id="${id}"]`,
-  `[data-opponent-hand-card="${id}"]`,
-  `[data-graveyard-pile][data-grouped-ids~="${id}"]`,
-  `[data-library-pile] [data-grouped-ids~="${id}"]`,
-];
-const handCardSelectors = (id: ObjectId) => [
-  `[data-hand-card][data-object-id="${id}"]`,
-  `[data-opponent-hand-card="${id}"]`,
-];
+/** The selectors, in priority order, for object `id`'s surface in each zone.
+ *  A zone with none (the command zone) has no surface to fly from or to. A
+ *  hidden library card shows as its owner's pile. */
+const ZONE_SURFACES: Record<Zone, (id: ObjectId, ownerId: PlayerId) => readonly string[]> = {
+  Hand: (id) => [`[data-hand-card][data-object-id="${id}"]`, `[data-opponent-hand-card="${id}"]`],
+  Library: (id, ownerId) => [`[data-library-pile] [data-grouped-ids~="${id}"]`, `[data-library-pile="${ownerId}"]`],
+  Graveyard: (id, ownerId) => [
+    `[data-zone-fan-card][data-object-id="${id}"]`,
+    `[data-graveyard-pile="${ownerId}"][data-grouped-ids~="${id}"]`,
+  ],
+  Exile: (id) => [`[data-zone-fan-card][data-object-id="${id}"]`],
+  Stack: (id) => [`[data-stack-entry="${id}"]`, `[data-stack-entry][data-grouped-ids~="${id}"]`],
+  Battlefield: (id) => [`[data-permanent-card="${id}"]`, `[data-permanent-card][data-grouped-ids~="${id}"]`],
+  Command: () => [],
+};
 
-/** Where a cast flight starts: the card's veil-aware surface in a cast-source
- *  zone. `null` (a pending cast already on the stack, a command-zone cast, the
- *  held mobile card) presents Classic. */
-export function castSourceElement(id: ObjectId): HTMLElement | null {
-  return firstRenderedOf(castSourceSelectors(id));
+/** Nodes that stand in for a destination before the object's own node exists. */
+const PROVISIONAL_SURFACES: Record<FlightDestination, (ownerId: PlayerId) => HTMLElement | null> = {
+  Stack: () => lastRendered("[data-stack-entry]"),
+  Graveyard: (ownerId) => firstRendered(`[data-graveyard-pile="${ownerId}"]`),
+  Battlefield: () => null,
+  Hand: () => null,
+};
+
+/** Object `id`'s laid-out surface in `zone`: its veil-aware card, or the
+ *  owner's pile standing in for it. */
+function zoneSurface(zone: Zone, id: ObjectId, ownerId: PlayerId): HTMLElement | null {
+  return firstRenderedOf(ZONE_SURFACES[zone](id, ownerId));
 }
 
-/** Where a resolve flight starts: the object's stack entry. */
-export function stackSourceElement(id: ObjectId): HTMLElement | null {
-  return firstRenderedOf(stackEntrySelectors(id));
-}
-
-/** The source surface for a flight on `route`. */
+/** The surface a flight on `route` starts from. `null` (a pending cast already
+ *  on the stack, a command-zone cast, the held mobile card) presents Classic. */
 export function sourceElement(route: CardFlightRoute, id: ObjectId): HTMLElement | null {
-  switch (route.kind) {
-    case "cast":
-      return castSourceElement(id);
-    case "resolveToBattlefield":
-    case "resolveToGraveyard":
-      return stackSourceElement(id);
-    case "draw":
-      return firstRendered(`[data-library-pile="${route.ownerId}"]`);
-  }
+  return zoneSurface(route.from, id, route.ownerId);
 }
 
 /** The object's own surface in the route's destination zone — the only node a
  *  flight lands on. It exists only once the engine commit has moved the object. */
 export function ownNode(route: CardFlightRoute, id: ObjectId): HTMLElement | null {
-  switch (route.kind) {
-    case "cast":
-      return firstRenderedOf(stackEntrySelectors(id));
-    case "resolveToBattlefield":
-      return firstRenderedOf(permanentSelectors(id));
-    case "resolveToGraveyard":
-      return firstRendered(`[data-graveyard-pile="${route.ownerId}"][data-grouped-ids~="${id}"]`);
-    case "draw":
-      return firstRenderedOf(handCardSelectors(id));
-  }
+  return zoneSurface(route.to, id, route.ownerId);
 }
 
 /** A node that stands in for the destination before the own node exists. */
 export function provisionalNode(route: CardFlightRoute): HTMLElement | null {
-  switch (route.kind) {
-    case "cast":
-      return lastRendered("[data-stack-entry]");
-    case "resolveToBattlefield":
-    case "draw":
-      return null;
-    case "resolveToGraveyard":
-      return firstRendered(`[data-graveyard-pile="${route.ownerId}"]`);
-  }
+  return PROVISIONAL_SURFACES[route.to](route.ownerId);
 }
 
 /** This frame's aim for object `id` on `route`: its own node, else a
- *  provisional node, else — for a cast — the last stack pose measured, else hold. */
+ *  provisional node, else — onto the stack — the last stack pose measured, else hold. */
 export function resolveAim(
   route: CardFlightRoute,
   id: ObjectId,
@@ -191,7 +165,7 @@ export function resolveAim(
   if (provisional) {
     return { kind: "provisional", el: provisional, pose: measureCardPose(provisional, origin) };
   }
-  if (route.kind === "cast" && lastStackPose) {
+  if (route.to === "Stack" && lastStackPose) {
     return { kind: "provisional", el: null, pose: lastStackPose };
   }
   return { kind: "hold" };

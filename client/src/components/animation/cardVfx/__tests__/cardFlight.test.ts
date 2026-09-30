@@ -138,7 +138,7 @@ describe("flightPose", () => {
 describe("card flight effect", () => {
   it("V3-6d (i): a new target element rebases from the current pose and lands only on the own node", () => {
     let aim: Aim = { kind: "hold" };
-    const harness = fly({ kind: "resolveToBattlefield" }, { aim: () => aim });
+    const harness = fly({ from: "Stack", to: "Battlefield", ownerId: 0 }, { aim: () => aim });
     const positions: Array<{ x: number; y: number; z: number }> = [];
     const record = () => {
       const { x, y, z } = harness.flight.currentState();
@@ -176,7 +176,7 @@ describe("card flight effect", () => {
     const pile = document.createElement("div");
     let kind: "provisional" | "own" = "provisional";
     const slot = { ...TO, w: CARD_W, h: CARD_H };
-    const harness = fly({ kind: "resolveToGraveyard", ownerId: 1 }, {
+    const harness = fly({ from: "Stack", to: "Graveyard", ownerId: 1 }, {
       aim: () =>
         kind === "own"
           ? { kind, el: pile, pose: { ...slot }, opacity: 1, faceImagesSettled: true }
@@ -198,7 +198,7 @@ describe("card flight effect", () => {
   });
 
   it("V3-6d (i): a hold that reaches its end keeps hovering rather than landing", () => {
-    const harness = fly({ kind: "resolveToBattlefield" }, { aim: () => ({ kind: "hold" }) });
+    const harness = fly({ from: "Stack", to: "Battlefield", ownerId: 0 }, { aim: () => ({ kind: "hold" }) });
     for (let ms = 0; ms <= RESOLVE_FLIGHT_MS + LAND_STATIONARY_WAIT_MAX_MS + 4 * FRAME_MS; ms += FRAME_MS) {
       expect(harness.frame(ms)).toBe(true);
     }
@@ -209,7 +209,7 @@ describe("card flight effect", () => {
   it("V3-6d (ii): after the commit, an own node missing for two frames abandons and fades out", () => {
     let epoch = 0;
     const pace = 1.5;
-    const harness = fly({ kind: "resolveToBattlefield" }, { aim: () => ({ kind: "hold" }), epoch: () => epoch, pace });
+    const harness = fly({ from: "Stack", to: "Battlefield", ownerId: 0 }, { aim: () => ({ kind: "hold" }), epoch: () => epoch, pace });
     harness.frame(0);
     harness.frame(FRAME_MS);
     expect(harness.releases).toEqual([]);
@@ -234,7 +234,7 @@ describe("card flight effect", () => {
 
   it("V3-6d (iii): with no commit, the flight abandons at the await bound", () => {
     const pace = 0.5;
-    const harness = fly({ kind: "resolveToBattlefield" }, { aim: () => ({ kind: "hold" }), pace });
+    const harness = fly({ from: "Stack", to: "Battlefield", ownerId: 0 }, { aim: () => ({ kind: "hold" }), pace });
     harness.frame(0);
     harness.frame(CARD_FLIGHT_MAX_AWAIT_MS * pace - 1);
     expect(harness.releases).toEqual([]);
@@ -245,7 +245,7 @@ describe("card flight effect", () => {
   it("V3-6d (iv): after the commit, a present own node is landed on, not abandoned", () => {
     let epoch = 0;
     const slot = own({ ...TO, w: CARD_W, h: CARD_H });
-    const harness = fly({ kind: "resolveToBattlefield" }, { aim: () => slot, epoch: () => epoch });
+    const harness = fly({ from: "Stack", to: "Battlefield", ownerId: 0 }, { aim: () => slot, epoch: () => epoch });
     harness.frame(0);
     epoch = 1;
     for (let ms = FRAME_MS; ms <= RESOLVE_FLIGHT_MS + SETTLE_MS + 2 * FRAME_MS; ms += FRAME_MS) harness.frame(ms);
@@ -256,7 +256,7 @@ describe("card flight effect", () => {
     const target = { ...TO, w: CARD_W, h: CARD_H };
     const el = document.createElement("div");
     let moving = true;
-    const harness = fly({ kind: "cast" }, {
+    const harness = fly({ from: "Hand", to: "Stack", ownerId: 0 }, {
       aim: () => {
         if (moving) target.x += 10;
         return { kind: "own", el, pose: { ...target }, opacity: 1, faceImagesSettled: true };
@@ -274,7 +274,7 @@ describe("card flight effect", () => {
     // Still moving: the wait bound lands it anyway.
     const drifting = { ...TO, w: CARD_W, h: CARD_H };
     const pace = 2;
-    const second = fly({ kind: "cast" }, {
+    const second = fly({ from: "Hand", to: "Stack", ownerId: 0 }, {
       aim: () => {
         drifting.x += 10;
         return { kind: "own", el, pose: { ...drifting }, opacity: 1, faceImagesSettled: true };
@@ -292,7 +292,7 @@ describe("card flight effect", () => {
 
   it("V3-6f: a card-shaped slot settles opaque before release; any other shape releases at once and fades", () => {
     const cardSlot = own({ ...TO, w: CARD_W, h: CARD_H });
-    const card = fly({ kind: "resolveToBattlefield" }, { aim: () => cardSlot });
+    const card = fly({ from: "Stack", to: "Battlefield", ownerId: 0 }, { aim: () => cardSlot });
     card.frame(0);
     card.frame(RESOLVE_FLIGHT_MS);
     expect(card.releases).toEqual([]);
@@ -307,7 +307,7 @@ describe("card flight effect", () => {
     // shows its face, then fades out over it.
     const state = { settled: false };
     const squareEl = document.createElement("div");
-    const square = fly({ kind: "resolveToBattlefield" }, {
+    const square = fly({ from: "Stack", to: "Battlefield", ownerId: 0 }, {
       aim: () => ({
         kind: "own",
         el: squareEl,
@@ -344,7 +344,7 @@ describe("card flight effect", () => {
       return { kind: "own", el, pose: { ...slot }, opacity: state.opacity, faceImagesSettled: true };
     };
     // Geometry is still but the opacity is rising: an entrance tail, no release.
-    const rising = fly({ kind: "cast" }, { aim: ownAim });
+    const rising = fly({ from: "Hand", to: "Stack", ownerId: 0 }, { aim: ownAim });
     let ms = 0;
     for (; ms <= CAST_FLIGHT_MS + 3 * FRAME_MS; ms += FRAME_MS) rising.frame(ms);
     expect(rising.releases).toEqual([]);
@@ -354,7 +354,7 @@ describe("card flight effect", () => {
     expect(rising.releases).toEqual(["land"]);
 
     // A steady translucent node lands on its first stationary frame.
-    const steady = fly({ kind: "cast" }, {
+    const steady = fly({ from: "Hand", to: "Stack", ownerId: 0 }, {
       aim: () => ({ kind: "own", el, pose: { ...slot }, opacity: 0.5, faceImagesSettled: true }),
     });
     let landedAt: number | null = null;
@@ -366,7 +366,7 @@ describe("card flight effect", () => {
 
     // An opacity that never stops changing: the wait bound lands it anyway.
     let drift = 0.3;
-    const changing = fly({ kind: "cast" }, {
+    const changing = fly({ from: "Hand", to: "Stack", ownerId: 0 }, {
       aim: () => {
         drift += 0.01;
         return { kind: "own", el, pose: { ...slot }, opacity: drift, faceImagesSettled: true };
@@ -407,7 +407,7 @@ const CARD_SLOT: CardPose = { ...TO, w: CARD_W, h: CARD_H };
 const SQUARE_SLOT: CardPose = { ...TO, w: 100, h: 100 };
 
 describe("card flight reveal hold", () => {
-  it.each<CardFlightRoute>([{ kind: "cast" }, { kind: "resolveToBattlefield" }])(
+  it.each<CardFlightRoute>([{ from: "Hand", to: "Stack", ownerId: 0 }, { from: "Stack", to: "Battlefield", ownerId: 0 }])(
     "V3-6g: the %o profile keeps drawing the card opaque until the face settles",
     (route) => {
       const { harness, state, releasedAt } = landOn(route, CARD_SLOT);
@@ -426,17 +426,17 @@ describe("card flight reveal hold", () => {
   );
 
   it("V3-6g: a node already settled after release disposes on the first frame after it", () => {
-    const { harness, releasedAt } = landOn({ kind: "cast" }, CARD_SLOT);
+    const { harness, releasedAt } = landOn({ from: "Hand", to: "Stack", ownerId: 0 }, CARD_SLOT);
     expect(harness.frame(releasedAt + FRAME_MS)).toBe(false);
   });
 
   it.each([1, 1.5])("V3-6h: an unsettled face is held for the fixed bound at pace %d", (pace) => {
-    const { harness, state, releasedAt } = landOn({ kind: "cast" }, CARD_SLOT, { pace });
+    const { harness, state, releasedAt } = landOn({ from: "Hand", to: "Stack", ownerId: 0 }, CARD_SLOT, { pace });
     state.settled = false;
     expect(harness.frame(releasedAt + LAND_REVEAL_WAIT_MAX_MS - 1)).toBe(true);
     expect(harness.frame(releasedAt + LAND_REVEAL_WAIT_MAX_MS)).toBe(false);
 
-    const square = landOn({ kind: "cast" }, SQUARE_SLOT, { pace });
+    const square = landOn({ from: "Hand", to: "Stack", ownerId: 0 }, SQUARE_SLOT, { pace });
     square.state.settled = false;
     expect(square.harness.frame(square.releasedAt + LAND_REVEAL_WAIT_MAX_MS - 1)).toBe(true);
     expect(square.harness.alpha()).toBe(1);
@@ -450,7 +450,7 @@ describe("card flight reveal hold", () => {
   });
 
   it("V3-6i: the card follows a moving node during the hold and leaves when the node is gone", () => {
-    const { harness, state, releasedAt } = landOn({ kind: "cast" }, CARD_SLOT);
+    const { harness, state, releasedAt } = landOn({ from: "Hand", to: "Stack", ownerId: 0 }, CARD_SLOT);
     state.settled = false;
     state.pose = { ...CARD_SLOT, x: CARD_SLOT.x + 10 };
     expect(harness.frame(releasedAt + FRAME_MS)).toBe(true);
@@ -470,18 +470,18 @@ describe("card flight reveal hold", () => {
       return { harness, results, releasedAt };
     };
     // A fall ends the hold on the frame it happens.
-    expect(run({ kind: "cast" }, CARD_SLOT, [1, 1, 0.95]).results).toEqual([true, true, false]);
+    expect(run({ from: "Hand", to: "Stack", ownerId: 0 }, CARD_SLOT, [1, 1, 0.95]).results).toEqual([true, true, false]);
     // The cross-fade path enters its fade on that frame.
-    const fading = run({ kind: "cast" }, SQUARE_SLOT, [1, 1, 0.95]);
+    const fading = run({ from: "Hand", to: "Stack", ownerId: 0 }, SQUARE_SLOT, [1, 1, 0.95]);
     expect(fading.results).toEqual([true, true, true]);
     expect(fading.harness.frame(fading.releasedAt + 3 * FRAME_MS + LANDING_CROSSFADE_MS / 2)).toBe(true);
     expect(fading.harness.alpha()).toBeCloseTo(0.5, 2);
     // A steady node, a rising tail and a fall below the bound keep the hold.
-    expect(run({ kind: "cast" }, CARD_SLOT, [0.5, 0.5, 0.5, 0.5]).results).toEqual([true, true, true, true]);
-    expect(run({ kind: "cast" }, CARD_SLOT, [0.96, 0.98, 1]).results).toEqual([true, true, true]);
-    expect(run({ kind: "cast" }, CARD_SLOT, [1, 0.999]).results).toEqual([true, true]);
+    expect(run({ from: "Hand", to: "Stack", ownerId: 0 }, CARD_SLOT, [0.5, 0.5, 0.5, 0.5]).results).toEqual([true, true, true, true]);
+    expect(run({ from: "Hand", to: "Stack", ownerId: 0 }, CARD_SLOT, [0.96, 0.98, 1]).results).toEqual([true, true, true]);
+    expect(run({ from: "Hand", to: "Stack", ownerId: 0 }, CARD_SLOT, [1, 0.999]).results).toEqual([true, true]);
     // A slow fade, each frame below the bound, still ends it once the total fall
     // passes the bound from the first revealing frame's opacity.
-    expect(run({ kind: "cast" }, CARD_SLOT, [0.9985, 0.997, 0.9955]).results).toEqual([true, true, false]);
+    expect(run({ from: "Hand", to: "Stack", ownerId: 0 }, CARD_SLOT, [0.9985, 0.997, 0.9955]).results).toEqual([true, true, false]);
   });
 });

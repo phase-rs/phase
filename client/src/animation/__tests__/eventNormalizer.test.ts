@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import type { GameEvent } from "../../adapter/types";
+import type { GameEvent, StackEntry } from "../../adapter/types";
+import { buildStackEntry } from "../../test/factories/gameStateFactory";
 import type { AnimationStep } from "../types";
 import { normalizeEvents } from "../eventNormalizer";
 import {
@@ -402,6 +403,33 @@ describe("normalizeEvents", () => {
     ];
 
     expect(normalizeEvents(events)).toEqual([]);
+  });
+
+  describe("spell announcements", () => {
+    const spell = buildStackEntry({ id: 7, source_id: 7 });
+    const ability = buildStackEntry({
+      id: 8,
+      source_id: 3,
+      kind: { type: "ActivatedAbility", data: { source_id: 3, ability: { targets: [] } } },
+    } as Partial<StackEntry>);
+    const pushed = (objectId: number): GameEvent => ({ type: "StackPushed", data: { object_id: objectId } });
+    const cast: GameEvent = { type: "SpellCast", data: { card_id: 7, controller: 0, object_id: 7 } };
+    const paused = { stack: [spell, ability], has_pending_cast: true };
+
+    it("V7-3: a spell whose cast pauses after its announcement gets a step of its own", () => {
+      const steps = normalizeEvents([pushed(7)], { announcementState: paused });
+
+      expect(steps).toHaveLength(1);
+      expect(steps[0].effects.map((effect) => effect.event)).toEqual([pushed(7)]);
+    });
+
+    it("V7-3: an announcement is skipped once cast in the same batch, for an ability, with no pending cast, or without flights", () => {
+      expect(normalizeEvents([pushed(7), cast], { announcementState: paused }).flatMap((step) => step.effects))
+        .toEqual([expect.objectContaining({ event: cast })]);
+      expect(normalizeEvents([pushed(8)], { announcementState: paused })).toEqual([]);
+      expect(normalizeEvents([pushed(7)], { announcementState: { ...paused, has_pending_cast: false } })).toEqual([]);
+      expect(normalizeEvents([pushed(7)], { announcementState: null })).toEqual([]);
+    });
   });
 
   it("groups large aggregate combat damage with following LifeChanged pairs into one flurry step", () => {

@@ -127,6 +127,12 @@ let inFlightLocalAction: {
   waitingFor: WaitingFor | null;
 } | null = null;
 
+/** The post-event state the normalizer reads spell announcements from, when a
+ *  card-flight layer will present them. */
+function announcementStateFor(state: GameState): GameState | null {
+  return useAnimationStore.getState().cardFlightsActive ? state : null;
+}
+
 function isCurrentDispatchGeneration(generation: number): boolean {
   return generation === dispatchGeneration;
 }
@@ -547,7 +553,7 @@ async function processAction(
 
   // 6. Normalize events into animation steps
   const pacingMultipliers = usePreferencesStore.getState().pacingMultipliers;
-  const steps = normalizeEvents(events, { pacingMultipliers });
+  const steps = normalizeEvents(events, { pacingMultipliers, announcementState: announcementStateFor(newState) });
 
   // 7. Play animations (unless instant — multiplier === 0). Fold in stack
   //    pressure so per-resolution timing collapses under depth OR recent churn —
@@ -907,7 +913,7 @@ async function processRemoteUpdateInner(
 
   // 3. Normalize events into animation steps
   const pacingMultipliers = usePreferencesStore.getState().pacingMultipliers;
-  const steps = normalizeEvents(events, { pacingMultipliers });
+  const steps = normalizeEvents(events, { pacingMultipliers, announcementState: announcementStateFor(state) });
 
   // 4. Play animations (unless instant — multiplier === 0)
   const multiplier = usePreferencesStore.getState().animationSpeedMultiplier;

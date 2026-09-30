@@ -140,8 +140,8 @@ function spec(
   return { objectId, route, ...faces, endColors: null, pace: 1, owningStepMs, delayMs: 0 };
 }
 
-const CAST: CardFlightRoute = { kind: "cast" };
-const RESOLVE: CardFlightRoute = { kind: "resolveToBattlefield" };
+const CAST: CardFlightRoute = { from: "Hand", to: "Stack", ownerId: 0 };
+const RESOLVE: CardFlightRoute = { from: "Stack", to: "Battlefield", ownerId: 0 };
 
 /** Adds a laid-out anchor node: happy-dom reports zero size for every node. */
 function anchor(attributes: Record<string, string>, left = 40, top = 600) {
@@ -684,7 +684,7 @@ describe("CardVfxLayer present contract", () => {
   it("V5-3: a draw leaves the library after its stagger and lands in the veiled hand slot", async () => {
     const { present } = await readyLayer();
     anchor({ "data-library-pile": "0" }, 40, 700);
-    const draw = { ...spec(X, { kind: "draw", ownerId: 0 }), delayMs: 100 };
+    const draw = { ...spec(X, { from: "Library", to: "Hand", ownerId: 0 }), delayMs: 100 };
     present(draw);
     await frames(2);
     // Veiled at once, so the hand never shows the card before its flight.
@@ -713,7 +713,7 @@ describe("CardVfxLayer present contract", () => {
 
     addFace(anchor({ "data-graveyard-pile": "0", "data-grouped-ids": String(Y) }, 40, 700));
     anchor({ "data-stack-entry": String(Y) }, 700, 200);
-    present(spec(Y, { kind: "resolveToGraveyard", ownerId: 0 }));
+    present(spec(Y, { from: "Stack", to: "Graveyard", ownerId: 0 }));
     await advance(RESOLVE_FLIGHT_MS + SETTLE_MS + 10 * FRAME_MS);
     expect(veiled(Y)).toBe(false);
 
