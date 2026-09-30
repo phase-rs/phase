@@ -12,14 +12,14 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction,
     AttackSubject, BounceSelection, CardSelectionMode, CardTypeSetSource, CastingPermission,
     ChosenAttribute, CombatHistoryScope, Comparator, ContinuousModification, ControllerRef,
-    CopyChooseScope, CopyRetargetPermission, CountScope, DamageAmountScope, DamageAmountThreshold,
-    DamageChannel, DamageModification, DamageSource, DelayedTriggerCondition, DiscardSelfScope,
-    Duration, Effect, EffectScope, FilterProp, ManaContribution, ManaProduction,
-    ManaSpendPermission, ModalChoice, ObjectProperty, ObjectScope, PerpetualModification,
-    PlayerFilter, PlayerScope, PropertyAggregate, PtStat, PtValue, PtValueScope, QuantityExpr,
-    QuantityRef, SeatDirection, SharedQuality, SiblingCondition, SubAbilityLink, TapStateChange,
-    TargetFilter, TriggerCondition, TriggerDefinition, TurnJournalKind, TypeFilter, TypedFilter,
-    ZoneRef,
+    CopyChooseScope, CopyRetargetPermission, CountScope, CounterTransferMode, DamageAmountScope,
+    DamageAmountThreshold, DamageChannel, DamageModification, DamageSource,
+    DelayedTriggerCondition, DiscardSelfScope, Duration, Effect, EffectScope, FilterProp,
+    ManaContribution, ManaProduction, ManaSpendPermission, ModalChoice, ObjectProperty,
+    ObjectScope, PerpetualModification, PlayerFilter, PlayerScope, PropertyAggregate, PtStat,
+    PtValue, PtValueScope, QuantityExpr, QuantityRef, RoundingMode, SeatDirection, SharedQuality,
+    SiblingCondition, SubAbilityLink, TapStateChange, TargetFilter, TriggerCondition,
+    TriggerDefinition, TurnJournalKind, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::{CounterMatch, CounterType};
@@ -28,6 +28,7 @@ use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use crate::types::replacements::ReplacementEvent;
 use crate::types::statics::{CastFrequency, StaticMode};
+use crate::types::zones::Zone;
 
 /// CR 608.2c: Karona's scoped upkeep player is the grammatical subject of the
 /// immediately following conjugated control clause, so it receives control of
@@ -69,6 +70,509 @@ fn trigger_chain_effects(trigger: &TriggerDefinition) -> Vec<&Effect> {
     std::iter::successors(trigger.execute.as_deref(), |def| def.sub_ability.as_deref())
         .map(|def| def.effect.as_ref())
         .collect()
+}
+
+/// The trigger's ability chain, head first, following `sub_ability` links.
+fn trigger_chain_abilities(trigger: &TriggerDefinition) -> Vec<&AbilityDefinition> {
+    std::iter::successors(trigger.execute.as_deref(), |def| def.sub_ability.as_deref()).collect()
+}
+
+fn find_in_execute_chain(
+    mut ability: &AbilityDefinition,
+    pred: impl Fn(&Effect) -> bool,
+) -> Option<&Effect> {
+    loop {
+        if pred(ability.effect.as_ref()) {
+            return Some(ability.effect.as_ref());
+        }
+        ability = ability.sub_ability.as_deref()?;
+    }
+}
+
+fn assert_owner_relative_loss_scope(ability: &AbilityDefinition) {
+    assert!(matches!(
+        ability.effect.as_ref(),
+        Effect::LoseLife {
+            amount: QuantityExpr::Fixed { value: 1 }
+                | QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount
+                        | QuantityRef::CountersOn {
+                            scope: ObjectScope::EventSource,
+                            ..
+                        }
+                },
+            ..
+        }
+    ));
+    assert_eq!(
+        ability.player_scope,
+        Some(PlayerFilter::AllExcept {
+            exclude: Box::new(PlayerFilter::ParentObjectTargetOwner)
+        })
+    );
+}
+
+/// CR 108.3 + CR 119.3 + CR 121.1 + CR 603.2 + CR 603.10a + CR 608.2c: a dies
+/// trigger body can bind "each other player" to the departed object's owner
+/// antecedent from the immediately previous clause.
+#[test]
+fn dies_trigger_owner_subject_anchors_each_other_player_scope() {
+    let trigger = parse_trigger_line(
+        "When this creature dies, its owner draws a card and each other player loses 1 life.",
+        "Synthetic Owner Anchor",
+    );
+
+    assert_eq!(trigger.mode, TriggerMode::ChangesZone);
+    assert_eq!(trigger.origin, Some(Zone::Battlefield));
+    assert_eq!(trigger.destination, Some(Zone::Graveyard));
+    let execute = trigger.execute.as_deref().expect("dies trigger body");
+    assert_no_unimplemented(execute);
+
+    let Effect::Draw { target, count } = execute.effect.as_ref() else {
+        panic!("expected owner draw head, got {:?}", execute.effect);
+    };
+    assert_eq!(*target, TargetFilter::ParentTargetOwner);
+    assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+
+    let lose = execute
+        .sub_ability
+        .as_deref()
+        .expect("loss clause follows owner draw");
+    assert!(matches!(
+        lose.effect.as_ref(),
+        Effect::LoseLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            ..
+        }
+    ));
+    assert_eq!(
+        lose.player_scope,
+        Some(PlayerFilter::AllExcept {
+            exclude: Box::new(PlayerFilter::ParentObjectTargetOwner)
+        })
+    );
+}
+
+/// CR 108.3 + CR 608.2c: After phase 3 extracts the intervening-if head, the
+/// remaining Goat-shaped body must still bind "each other player" to the owner
+/// subject immediately preceding it.
+#[test]
+fn goat_post_extraction_body_owner_subject_anchors_each_other_player_scope() {
+    let trigger = parse_trigger_line(
+        "When this creature dies, its owner draws that many cards and each other player loses that much life.",
+        "Oft-Nabbed Goat",
+    );
+
+    assert_eq!(trigger.mode, TriggerMode::ChangesZone);
+    assert_eq!(trigger.origin, Some(Zone::Battlefield));
+    assert_eq!(trigger.destination, Some(Zone::Graveyard));
+    let execute = trigger.execute.as_deref().expect("dies trigger body");
+    assert_no_unimplemented(execute);
+
+    let Effect::Draw { target, count } = execute.effect.as_ref() else {
+        panic!("expected owner draw head, got {:?}", execute.effect);
+    };
+    assert_eq!(*target, TargetFilter::ParentTargetOwner);
+    assert_eq!(
+        *count,
+        QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount
+        }
+    );
+
+    let lose = execute
+        .sub_ability
+        .as_deref()
+        .expect("loss clause follows owner draw");
+    assert_owner_relative_loss_scope(lose);
+}
+
+/// CR 122.1 + CR 603.4: the positive quantity axis — "one or more" and the
+/// singular article each assert "at least one counter", which is exactly the
+/// `HadCounters` predicate, composed with the any/typed axis.
+#[test]
+fn extract_had_counters_positive_quantifier_composes_with_type_axis() {
+    for (text, expected_type) in [
+        ("if it had one or more counters on it, draw a card", None),
+        (
+            "if it had one or more +1/+1 counters on it, draw a card",
+            Some(CounterType::Plus1Plus1),
+        ),
+        (
+            "if it had one or more -1/-1 counters on it, draw a card",
+            Some(CounterType::Minus1Minus1),
+        ),
+        ("if it had a counter on it, draw a card", None),
+    ] {
+        let (cleaned, cond) = extract_if_condition(text);
+        assert_eq!(
+            cleaned, "draw a card",
+            "{text:?} must strip the whole clause"
+        );
+        assert_eq!(
+            cond,
+            Some(TriggerCondition::HadCounters {
+                counter_type: expected_type,
+            }),
+            "{text:?} must be a positive HadCounters gate"
+        );
+    }
+}
+
+/// Binding-rule unit test for `positive_had_counter_gate_qty`: only a positive
+/// `HadCounters` (directly, or as an agreeing `And` conjunct) establishes the
+/// event-source counter read; `Not`, `Or`, and ambiguous `And`s never bind.
+#[test]
+fn positive_had_counter_gate_qty_binds_only_positive_gates() {
+    let any = TriggerCondition::HadCounters { counter_type: None };
+    let plus = TriggerCondition::HadCounters {
+        counter_type: Some(CounterType::Plus1Plus1),
+    };
+    let any_read = QuantityRef::CountersOn {
+        scope: ObjectScope::EventSource,
+        counter_type: None,
+    };
+
+    assert_eq!(positive_had_counter_gate_qty(&any), Some(any_read.clone()));
+    assert_eq!(
+        positive_had_counter_gate_qty(&TriggerCondition::And {
+            conditions: vec![TriggerCondition::LostLifeLastTurn, any.clone()],
+        }),
+        Some(any_read),
+        "an intervening-if ANDed onto a pre-existing condition still binds"
+    );
+    assert_eq!(
+        positive_had_counter_gate_qty(&TriggerCondition::Not {
+            condition: Box::new(any.clone()),
+        }),
+        None,
+        "\"if it had no counters\" measured nothing — never an antecedent"
+    );
+    assert_eq!(
+        positive_had_counter_gate_qty(&TriggerCondition::Or {
+            conditions: vec![any.clone(), TriggerCondition::LostLifeLastTurn],
+        }),
+        None,
+        "a disjunction does not establish which operand held"
+    );
+    assert_eq!(
+        positive_had_counter_gate_qty(&TriggerCondition::And {
+            conditions: vec![any, plus],
+        }),
+        None,
+        "two disagreeing counter gates are ambiguous and fail closed"
+    );
+    assert_eq!(
+        positive_had_counter_gate_qty(&TriggerCondition::LostLifeLastTurn),
+        None
+    );
+}
+
+/// SHAPE — real Oft-Nabbed Goat's typed -1/-1 HadCounters gate binds both the
+/// owner draw and the owner-excluding loss amount to the departed Goat's LKI
+/// -1/-1 counter count.
+#[test]
+fn real_oft_nabbed_goat_binds_owner_draw_and_each_other_loss_to_lki_counters() {
+    let parsed = parse_oracle_text(
+        "{1}: Draw a card. Gain control of this creature and put a -1/-1 counter on it. Only your opponents may activate this ability and only as a sorcery.\nWhen this creature dies, if it had one or more -1/-1 counters on it, its owner draws that many cards and each other player loses that much life.",
+        "Oft-Nabbed Goat",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "real Goat must not keep a swallowed Condition_If gap: {:?}",
+        parsed.parse_warnings
+    );
+
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|candidate| {
+            candidate.mode == TriggerMode::ChangesZone
+                && candidate.origin == Some(Zone::Battlefield)
+                && candidate.destination == Some(Zone::Graveyard)
+        })
+        .expect("real Goat dies trigger");
+    assert_eq!(
+        trigger.condition,
+        Some(TriggerCondition::HadCounters {
+            counter_type: Some(CounterType::Minus1Minus1),
+        })
+    );
+    let execute = trigger.execute.as_deref().expect("real Goat trigger body");
+    assert_no_unimplemented(execute);
+    let event_source_minus_counters = QuantityExpr::Ref {
+        qty: QuantityRef::CountersOn {
+            scope: ObjectScope::EventSource,
+            counter_type: Some(CounterType::Minus1Minus1),
+        },
+    };
+
+    let Effect::Draw { target, count } = execute.effect.as_ref() else {
+        panic!("expected owner draw head, got {:?}", execute.effect);
+    };
+    assert_eq!(*target, TargetFilter::ParentTargetOwner);
+    assert_eq!(
+        count, &event_source_minus_counters,
+        "the owner draw must read the Goat's -1/-1 counters as it died"
+    );
+
+    let loss = trigger_chain_abilities(trigger)
+        .into_iter()
+        .find(|ability| matches!(ability.effect.as_ref(), Effect::LoseLife { .. }))
+        .expect("real Goat loss clause remains production-visible");
+    assert_owner_relative_loss_scope(loss);
+    assert_eq!(loss.effect.count_expr(), Some(&event_source_minus_counters));
+}
+
+/// SHAPE — CR 603.6c + CR 608.2c + CR 122.8: a dies trigger body preserves the
+/// same-chain created-token destination for `MoveCounters`.
+#[test]
+fn dies_trigger_move_counters_that_token_binds_last_created() {
+    let trigger = parse_trigger_line(
+        "When this creature dies, create a 0/0 green and blue Fractal creature token, then put this creature's counters on that token.",
+        "Synthetic Ambitious Augmenter",
+    );
+
+    assert_eq!(trigger.mode, TriggerMode::ChangesZone);
+    assert_eq!(trigger.origin, Some(Zone::Battlefield));
+    assert_eq!(trigger.destination, Some(Zone::Graveyard));
+    let execute = trigger.execute.as_deref().expect("dies trigger body");
+    assert_no_unimplemented(execute);
+    assert!(matches!(execute.effect.as_ref(), Effect::Token { .. }));
+    let move_counters = execute
+        .sub_ability
+        .as_deref()
+        .expect("MoveCounters follows token creation");
+    let Effect::MoveCounters {
+        source,
+        counter_type,
+        count,
+        mode,
+        target,
+        ..
+    } = move_counters.effect.as_ref()
+    else {
+        panic!("expected MoveCounters tail, got {:?}", move_counters.effect);
+    };
+    assert_eq!(source, &TargetFilter::SelfRef);
+    assert_eq!(counter_type, &None);
+    assert_eq!(count, &None);
+    assert_eq!(*mode, CounterTransferMode::Put);
+    assert_eq!(target, &TargetFilter::LastCreated);
+}
+
+/// SHAPE — Yuna, Grand Summoner's second ability (verbatim Oracle line). The
+/// positive "one or more counters" intervening-if hoists to the trigger as
+/// `HadCounters { None }`, and the body's "that number of" anaphor binds to
+/// the same any-kind event-source counter read.
+#[test]
+fn yuna_grand_summoner_counter_lookback_binds_any_kind_event_source_count() {
+    let def = parse_trigger_line(
+        "Whenever another permanent you control is put into a graveyard from the battlefield, \
+         if it had one or more counters on it, you may put that number of +1/+1 counters on \
+         target creature.",
+        "Yuna, Grand Summoner",
+    );
+    assert_eq!(def.mode, TriggerMode::ChangesZone);
+    assert_eq!(def.origin, Some(Zone::Battlefield));
+    assert_eq!(def.destination, Some(Zone::Graveyard));
+    assert_eq!(
+        def.condition,
+        Some(TriggerCondition::HadCounters { counter_type: None }),
+        "CR 603.4: the positive intervening-if must hoist to the trigger condition"
+    );
+    assert!(def.optional, "\"you may\" makes the trigger optional");
+    let execute = def.execute.as_deref().expect("Yuna trigger execute");
+    assert_no_unimplemented(execute);
+    let Effect::PutCounter {
+        counter_type,
+        count,
+        target,
+    } = execute.effect.as_ref()
+    else {
+        panic!("body must parse to PutCounter, got {:?}", execute.effect);
+    };
+    assert_eq!(*counter_type, CounterType::Plus1Plus1);
+    assert_eq!(
+        *count,
+        QuantityExpr::Ref {
+            qty: QuantityRef::CountersOn {
+                scope: ObjectScope::EventSource,
+                counter_type: None,
+            },
+        },
+        "\"that number of\" must read every counter the departed permanent had"
+    );
+    assert!(
+        !target.is_context_ref(),
+        "\"target creature\" is a chosen target, not an event anaphor: {target:?}"
+    );
+}
+
+/// SHAPE — Reyhan, Last of the Abzan (verbatim Oracle line). The typed positive
+/// gate binds "that many" to the +1/+1-only event-source read. Only the dies
+/// branch's counter binding is claimed here; command-zone support remains a
+/// separate backlog item.
+#[test]
+fn reyhan_typed_counter_lookback_binds_typed_event_source_count() {
+    let plus_read = QuantityRef::CountersOn {
+        scope: ObjectScope::EventSource,
+        counter_type: Some(CounterType::Plus1Plus1),
+    };
+    let defs = parse_trigger_lines(
+        "Whenever a creature you control dies or is put into the command zone, if it had one \
+         or more +1/+1 counters on it, you may put that many +1/+1 counters on target creature.",
+        "Reyhan, Last of the Abzan",
+    );
+    let mut put_counter_defs = 0;
+    for def in &defs {
+        let Some(execute) = def.execute.as_deref() else {
+            continue;
+        };
+        let Effect::PutCounter { count, .. } = execute.effect.as_ref() else {
+            continue;
+        };
+        put_counter_defs += 1;
+        assert_eq!(
+            def.condition
+                .as_ref()
+                .and_then(positive_had_counter_gate_qty),
+            Some(plus_read.clone()),
+            "the +1/+1 intervening-if must hoist as a positive typed gate: {:?}",
+            def.condition
+        );
+        assert_eq!(
+            *count,
+            QuantityExpr::Ref {
+                qty: plus_read.clone()
+            },
+            "\"that many\" must read the departed creature's +1/+1 counters"
+        );
+    }
+    assert!(
+        put_counter_defs > 0,
+        "reach-guard: Reyhan must yield at least one PutCounter trigger, got {defs:?}"
+    );
+}
+
+/// SHAPE — Nikara, Lair Scavenger. The "one or more counters" LTB
+/// intervening-if hoists to `HadCounters { None }`, while the existing `Draw`
+/// + `LoseLife` body chain remains intact.
+#[test]
+fn nikara_lair_scavenger_counter_lookback_preserves_draw_lose_chain() {
+    let parsed = parse_oracle_text(
+        "Partner with Yannik, Scavenging Sentinel (When this creature enters, target player may \
+         put Yannik into their hand from their library, then shuffle.)\nMenace\nWhenever another \
+         creature you control leaves the battlefield, if it had one or more counters on it, you \
+         draw a card and you lose 1 life.",
+        "Nikara, Lair Scavenger",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let def = parsed
+        .triggers
+        .iter()
+        .find(|def| def.condition == Some(TriggerCondition::HadCounters { counter_type: None }))
+        .unwrap_or_else(|| {
+            panic!(
+                "expected Nikara's LTB trigger to hoist HadCounters(None), got {:?}",
+                parsed.triggers
+            )
+        });
+    assert_eq!(def.mode, TriggerMode::LeavesBattlefield);
+    let execute = def.execute.as_deref().expect("Nikara trigger execute");
+    assert_no_unimplemented(execute);
+    assert!(
+        find_in_execute_chain(execute, |effect| matches!(effect, Effect::Draw { .. })).is_some(),
+        "Nikara's existing draw clause must stay in the trigger body"
+    );
+    assert!(
+        find_in_execute_chain(execute, |effect| matches!(effect, Effect::LoseLife { .. }))
+            .is_some(),
+        "Nikara's existing lose-life clause must stay in the trigger body"
+    );
+}
+
+/// SHAPE — Ambitious Augmenter's dies trigger. The HadCounters gate, Fractal
+/// token creation, and `that token` → `LastCreated` counter-transfer tail all
+/// survive in one trigger body.
+#[test]
+fn ambitious_augmenter_dies_counter_condition_and_transfer_shape() {
+    let def = parse_trigger_line(
+        "When this creature dies, if it had one or more counters on it, create a 0/0 green and \
+         blue Fractal creature token, then put this creature's counters on that token.",
+        "Ambitious Augmenter",
+    );
+    assert_eq!(def.mode, TriggerMode::ChangesZone);
+    assert_eq!(def.origin, Some(Zone::Battlefield));
+    assert_eq!(def.destination, Some(Zone::Graveyard));
+    assert_eq!(
+        def.condition,
+        Some(TriggerCondition::HadCounters { counter_type: None }),
+        "Ambitious Augmenter's dies intervening-if must hoist as HadCounters(None)"
+    );
+    let execute = def.execute.as_deref().expect("Ambitious trigger execute");
+    assert_no_unimplemented(execute);
+    assert!(matches!(execute.effect.as_ref(), Effect::Token { .. }));
+    let move_counters = execute
+        .sub_ability
+        .as_deref()
+        .expect("MoveCounters follows token creation");
+    let Effect::MoveCounters {
+        source,
+        counter_type,
+        count,
+        mode,
+        target,
+        ..
+    } = move_counters.effect.as_ref()
+    else {
+        panic!("expected MoveCounters tail, got {:?}", move_counters.effect);
+    };
+    assert_eq!(source, &TargetFilter::SelfRef);
+    assert_eq!(counter_type, &None);
+    assert_eq!(count, &None);
+    assert_eq!(*mode, CounterTransferMode::Put);
+    assert_eq!(target, &TargetFilter::LastCreated);
+}
+
+/// Negative (synthetic): a negated gate establishes no antecedent, so the
+/// body's "that many" must not be rebound to the event-source counter read.
+/// Reach-guard: the negated condition hoisted and the body parsed to a real
+/// `PutCounter` whose count is observable.
+#[test]
+fn negated_had_counters_gate_does_not_bind_that_many() {
+    let def = parse_trigger_line(
+        "Whenever another creature you control dies, if it had no counters on it, put that \
+         many +1/+1 counters on target creature.",
+        "Synthetic Negated HadCounters",
+    );
+    assert_eq!(
+        def.condition,
+        Some(TriggerCondition::Not {
+            condition: Box::new(TriggerCondition::HadCounters { counter_type: None }),
+        }),
+        "reach-guard: the negated gate must hoist"
+    );
+    let execute = def.execute.as_deref().expect("execute");
+    let Effect::PutCounter { count, .. } = execute.effect.as_ref() else {
+        panic!(
+            "reach-guard: body must parse to PutCounter, got {:?}",
+            execute.effect
+        );
+    };
+    assert_eq!(
+        *count,
+        QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        },
+        "a Not(HadCounters) gate must leave \"that many\" unbound"
+    );
 }
 
 const GUT_TRUE_SOUL_ZEALOT_ORACLE: &str = "Whenever you attack, you may sacrifice another creature or an artifact. If you do, create a 4/1 black Skeleton creature token with menace that's tapped and attacking. (It can't be blocked except by two or more creatures.)\nChoose a Background (You can have a Background as a second commander.)";
@@ -7685,12 +8189,10 @@ fn parse_ezio_damage_trigger_verbatim_oracle_text() {
 /// event-bound trigger and resolves to 0 — the reported silent no-op).
 #[test]
 fn parse_unstoppable_slasher_combat_damage_half_life() {
-    use crate::types::ability::{Effect, PlayerScope, QuantityExpr, QuantityRef, RoundingMode};
-
     let def = parse_trigger_line(
-            "Whenever this creature deals combat damage to a player, they lose half their life, rounded up.",
-            "Unstoppable Slasher",
-        );
+        "Whenever this creature deals combat damage to a player, they lose half their life, rounded up.",
+        "Unstoppable Slasher",
+    );
 
     let execute = def.execute.as_ref().expect("execute must be Some");
     match &*execute.effect {
@@ -7709,14 +8211,94 @@ fn parse_unstoppable_slasher_combat_damage_half_life() {
                     assert_eq!(*divisor, 2, "half ⇒ divisor 2");
                     assert_eq!(*rounding, RoundingMode::Up, "rounded up");
                     assert_eq!(
-                            **inner,
-                            QuantityExpr::Ref {
-                                qty: QuantityRef::LifeTotal {
-                                    player: PlayerScope::ScopedPlayer,
-                                },
+                        **inner,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::LifeTotal {
+                                player: PlayerScope::ScopedPlayer,
                             },
-                            "inner amount must read the event player's life (ScopedPlayer), got {inner:?}",
-                        );
+                        },
+                        "inner amount must read the event player's life (ScopedPlayer), got {inner:?}",
+                    );
+                }
+                other => panic!("amount must be DivideRounded, got {other:?}"),
+            }
+        }
+        other => panic!("effect must be LoseLife, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_virtus_the_veiled_combat_damage_half_life() {
+    let def = parse_trigger_line(
+        "Whenever Virtus the Veiled deals combat damage to a player, that player loses half their life, rounded up.",
+        "Virtus the Veiled",
+    );
+
+    let execute = def.execute.as_ref().expect("execute must be Some");
+    match &*execute.effect {
+        Effect::LoseLife { amount, target } => {
+            assert_eq!(
+                target.as_ref(),
+                Some(&TargetFilter::TriggeringPlayer),
+                "LoseLife.target must be TriggeringPlayer (the damaged player)",
+            );
+            match amount {
+                QuantityExpr::DivideRounded {
+                    inner,
+                    divisor,
+                    rounding,
+                } => {
+                    assert_eq!(*divisor, 2, "half ⇒ divisor 2");
+                    assert_eq!(*rounding, RoundingMode::Up, "rounded up");
+                    assert_eq!(
+                        **inner,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::LifeTotal {
+                                player: PlayerScope::ScopedPlayer,
+                            },
+                        },
+                        "inner amount must read ScopedPlayer, got {inner:?}",
+                    );
+                }
+                other => panic!("amount must be DivideRounded, got {other:?}"),
+            }
+        }
+        other => panic!("effect must be LoseLife, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_raving_dead_combat_damage_half_life() {
+    let def = parse_trigger_line(
+        "Whenever Raving Dead deals combat damage to a player, that player loses half their life, rounded down.",
+        "Raving Dead",
+    );
+
+    let execute = def.execute.as_ref().expect("execute must be Some");
+    match &*execute.effect {
+        Effect::LoseLife { amount, target } => {
+            assert_eq!(
+                target.as_ref(),
+                Some(&TargetFilter::TriggeringPlayer),
+                "LoseLife.target must be TriggeringPlayer (the damaged player)",
+            );
+            match amount {
+                QuantityExpr::DivideRounded {
+                    inner,
+                    divisor,
+                    rounding,
+                } => {
+                    assert_eq!(*divisor, 2, "half ⇒ divisor 2");
+                    assert_eq!(*rounding, RoundingMode::Down, "rounded down");
+                    assert_eq!(
+                        **inner,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::LifeTotal {
+                                player: PlayerScope::ScopedPlayer,
+                            },
+                        },
+                        "inner amount must read ScopedPlayer, got {inner:?}",
+                    );
                 }
                 other => panic!("amount must be DivideRounded, got {other:?}"),
             }
@@ -21495,7 +22077,7 @@ fn balefire_dragon_damages_creatures_controlled_by_damaged_player() {
             assert_eq!(
                 *target,
                 TargetFilter::Typed(
-                    TypedFilter::creature().controller(ControllerRef::TargetPlayer)
+                    TypedFilter::creature().controller(ControllerRef::TriggeringPlayer)
                 )
             );
         }
@@ -29096,9 +29678,7 @@ fn walk_to_fight_sub_ability(
 /// test for #1667 — ensures the DefendingPlayer fix doesn't break
 /// damage-to-player triggers.
 #[test]
-fn damage_to_player_trigger_uses_target_player() {
-    use crate::types::ability::Effect;
-
+fn damage_to_player_trigger_uses_triggering_player() {
     let def = parse_trigger_line(
         "Whenever ~ deals combat damage to a player, destroy target creature that player controls.",
         "Test Card",
@@ -29109,8 +29689,8 @@ fn damage_to_player_trigger_uses_target_player() {
         Effect::Destroy { target, .. } => match target {
             TargetFilter::Typed(t) => assert_eq!(
                 t.controller,
-                Some(ControllerRef::TargetPlayer),
-                "Damage-to-player trigger should use TargetPlayer, not DefendingPlayer",
+                Some(ControllerRef::TriggeringPlayer),
+                "Damage-to-player trigger should use TriggeringPlayer",
             ),
             other => panic!("expected Typed target filter, got {other:?}"),
         },
@@ -29118,23 +29698,22 @@ fn damage_to_player_trigger_uses_target_player() {
     }
 }
 
-/// CR 120.3: Damage-to-opponent triggers introduce the damaged player,
-/// which remains TargetPlayer even though attack-to-opponent triggers use
-/// DefendingPlayer.
+/// Damage-to-opponent triggers introduce the damaged opponent, which uses
+/// TriggeringPlayer (the event player), not DefendingPlayer or TargetPlayer.
 #[test]
-fn damage_to_opponent_trigger_uses_target_player() {
+fn damage_to_opponent_trigger_uses_triggering_player() {
     let def = parse_trigger_line(
-            "Whenever ~ deals combat damage to an opponent, destroy target creature that player controls.",
-            "Test Card",
-        );
+        "Whenever ~ deals combat damage to an opponent, destroy target creature that player controls.",
+        "Test Card",
+    );
     assert_eq!(def.mode, TriggerMode::DamageDone);
     let execute = def.execute.as_deref().expect("execute ability");
     match execute.effect.as_ref() {
         Effect::Destroy { target, .. } => match target {
             TargetFilter::Typed(t) => assert_eq!(
                 t.controller,
-                Some(ControllerRef::TargetPlayer),
-                "Damage-to-opponent trigger should use TargetPlayer, not DefendingPlayer",
+                Some(ControllerRef::TriggeringPlayer),
+                "Damage-to-opponent trigger should use TriggeringPlayer",
             ),
             other => panic!("expected Typed target filter, got {other:?}"),
         },
@@ -29148,8 +29727,6 @@ fn damage_to_opponent_trigger_uses_target_player() {
 /// `ControllerRef::You`. Guards against accidental scope leakage.
 #[test]
 fn non_attack_player_trigger_does_not_emit_target_player() {
-    use crate::types::ability::Effect;
-
     let def = parse_trigger_line(
         "Whenever you draw a card, tap target creature that player controls.",
         "Test Card",
@@ -34781,6 +35358,67 @@ fn split_graveyard_origin_owner_axes() {
             }
         );
     }
+}
+/// CR 120.3a + CR 109.4 + CR 603.2: Emissary of Despair and Emissary of Hope
+/// combat-damage triggers establish TriggeringPlayer as the relative player
+/// scope for "that player" / "they" references in their effect bodies.
+#[test]
+fn emissary_of_despair_and_hope_trigger_definitions() {
+    let despair = parse_trigger_line(
+        "Whenever this creature deals combat damage to a player, that player loses 1 life for each artifact they control.",
+        "Emissary of Despair",
+    );
+    assert_eq!(despair.mode, TriggerMode::DamageDone);
+    let despair_exec = despair.execute.as_deref().expect("despair body");
+    let Effect::LoseLife { amount, target } = &*despair_exec.effect else {
+        panic!("expected LoseLife, got {:?}", despair_exec.effect);
+    };
+    assert_eq!(
+        target.as_ref(),
+        Some(&TargetFilter::TriggeringPlayer),
+        "damaged player must be the directed life loss target"
+    );
+    assert_eq!(
+        amount,
+        &QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Artifact],
+                    controller: Some(ControllerRef::TriggeringPlayer),
+                    properties: Vec::new(),
+                })
+            }
+        },
+        "artifact count must be scoped to TriggeringPlayer"
+    );
+
+    let hope = parse_trigger_line(
+        "Whenever this creature deals combat damage to a player, you gain 1 life for each artifact that player controls.",
+        "Emissary of Hope",
+    );
+    assert_eq!(hope.mode, TriggerMode::DamageDone);
+    let hope_exec = hope.execute.as_deref().expect("hope body");
+    let Effect::GainLife { amount, player } = &*hope_exec.effect else {
+        panic!("expected GainLife, got {:?}", hope_exec.effect);
+    };
+    assert_eq!(
+        player,
+        &TargetFilter::Controller,
+        "ability controller gains the life"
+    );
+    assert_eq!(
+        amount,
+        &QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Artifact],
+                    controller: Some(ControllerRef::TriggeringPlayer),
+                    properties: Vec::new(),
+                })
+            }
+        },
+        "artifact count must be scoped to TriggeringPlayer"
+    );
 }
 
 /// CR 608.2c + CR 608.2d: a hand reveal that parks a card choice introduces the

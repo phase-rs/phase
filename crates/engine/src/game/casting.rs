@@ -9985,10 +9985,11 @@ fn prepare_spell_cast_announced(
 /// whenever the cast has no accepted reduction and no election).
 #[derive(Debug, Clone, Default)]
 pub(super) struct CostFinalizeContext {
-    /// Reductions that are not derivable from the board at this seam. Today
-    /// this is exactly the accepted Defiler-cycle life payment (CR 601.2b),
-    /// whose acceptance lives in the answer to `WaitingFor::DefilerPayment`
-    /// rather than in any static.
+    /// Reductions that are not derivable from the board at this seam: the
+    /// accepted Defiler-cycle life payment (CR 601.2b), whose acceptance lives
+    /// in the answer to `WaitingFor::DefilerPayment` rather than in any static,
+    /// and the reduction an Emerge or Offering sacrifice earned before a
+    /// deferred target declaration (CR 702.119a + CR 702.48c).
     extra: Vec<CostModification>,
     /// The caster's CR 601.2b + CR 601.2f election, once made.
     election: Option<CostReductionElection>,
@@ -10007,8 +10008,10 @@ impl CostFinalizeContext {
     /// that must agree with it) has to run under this rather than
     /// [`CostFinalizeContext::PREVIEW`], or it silently replaces the caster's
     /// elected order with the caster-optimal default and drops an accepted
-    /// Defiler reduction.
-    fn from_pending(pending: &PendingCast) -> Self {
+    /// Defiler reduction. The additional-cost declaration preview runs under it
+    /// too, so an optional cost is offered against the total the kept
+    /// sacrifice reduction will lock in.
+    pub(super) fn from_pending(pending: &PendingCast) -> Self {
         Self {
             extra: pending
                 .accepted_cost_reductions
@@ -24148,7 +24151,9 @@ pub(crate) fn removable_counter_count_for_cost_selection(
 ) -> u32 {
     match (counter_type, selection) {
         (crate::types::counter::CounterMatch::Any, CounterCostSelection::AmongObjects) => {
-            obj.counters.values().copied().sum()
+            // CR 122.1: exact total clamped to u32. This bounds how many counters
+            // may be selected, an availability ("at least N") use only.
+            u32::try_from(crate::types::counter::counter_total(&obj.counters)).unwrap_or(u32::MAX)
         }
         _ => removable_counter_count(obj, counter_type),
     }

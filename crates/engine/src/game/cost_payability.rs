@@ -1106,7 +1106,11 @@ fn counter_on_object(
         return 0;
     };
     match kind {
-        crate::types::counter::CounterMatch::Any => obj.counters.values().copied().sum(),
+        // CR 122.1: exact total clamped to u32. The count feeds only "can remove
+        // at least N" availability checks, so clamping preserves every such answer.
+        crate::types::counter::CounterMatch::Any => {
+            u32::try_from(kind.count_in(&obj.counters)).unwrap_or(u32::MAX)
+        }
         crate::types::counter::CounterMatch::OfType(t) => obj.counters.get(t).copied().unwrap_or(0),
     }
 }

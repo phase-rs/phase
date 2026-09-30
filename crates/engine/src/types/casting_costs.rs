@@ -48,8 +48,9 @@ fn is_zero_u32(value: &u32) -> bool {
 /// one: the day a printed Affinity-shaped or one-shot reduction carries a shard,
 /// the entry needs a name that is not a fabricated `ObjectId`. Every other
 /// variant is constructed: `Static`, `Defiler` and `CastingPermission` by the
-/// spell election, `Static`, `AbilityCostRider` and `TransientEffect` by the
-/// activation election.
+/// spell election, `SacrificedForCost` by an Emerge or Offering sacrifice
+/// chosen before a deferred target declaration, and `Static`,
+/// `AbilityCostRider` and `TransientEffect` by the activation election.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum ReductionProvenance {
@@ -88,6 +89,11 @@ pub enum ReductionProvenance {
     /// `effect` is the installing `TransientContinuousEffect::id`; `ordinal`
     /// is the reducer's index among that effect's `AddStaticMode` reducers.
     TransientEffect { effect: u64, ordinal: u8 },
+    /// CR 601.2f + CR 702.119a + CR 702.48c: the reduction an Emerge or
+    /// Offering cost earns from the permanent sacrificed to pay it, recorded
+    /// when that cost is taken before the spell's deferred target declaration
+    /// so the total is locked with it exactly once.
+    SacrificedForCost(crate::types::game_state::SpellCostSource),
 }
 
 /// CR 601.2b + CR 601.2f: everything the caster elects at the cost-determination

@@ -31,7 +31,8 @@
 use engine::game::ability_utils::build_resolved_from_def_with_targets;
 use engine::game::effects::resolve_ability_chain;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::game::zones::create_object;
+use engine::game::triggers::process_triggers;
+use engine::game::zones::{create_object, move_to_zone};
 use engine::types::ability::{
     AbilityDefinition, AbilityKind, Effect, ResolvedAbility, TargetFilter, TargetRef,
 };
@@ -40,6 +41,7 @@ use engine::types::counter::CounterType;
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::keywords::KeywordKind;
 use engine::types::mana::ManaColor;
+use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
@@ -50,6 +52,7 @@ const MATCH_THE_ODDS: &str =
 const GRIST_PLUS_ONE: &str = "Create a 1/1 black and green Insect creature token, then mill two cards. Put a deathtouch counter on the token if a black card was milled this way.";
 const APPLIED_GEOMETRY: &str = "Create a token that's a copy of target non-Aura permanent you control, except it's a 0/0 Fractal creature in addition to its other types. Put six +1/+1 counters on it.";
 const LONGSTALK_BRAWL: &str = "Gift a tapped Fish (You may promise an opponent a gift as you cast this spell. If you do, they create a tapped 1/1 blue Fish creature token before its other effects.)\nChoose target creature you control and target creature you don't control. Put a +1/+1 counter on the creature you control if the gift was promised. Then those creatures fight each other.";
+const SYNTHETIC_AUGMENTER: &str = "When this creature dies, create a 0/0 green and blue Fractal creature token, then put this creature's counters on that token.";
 
 fn p1p1(runner: &GameRunner, id: ObjectId) -> u32 {
     runner.state().objects[&id]
@@ -63,6 +66,14 @@ fn deathtouch(runner: &GameRunner, id: ObjectId) -> u32 {
     runner.state().objects[&id]
         .counters
         .get(&CounterType::Keyword(KeywordKind::Deathtouch))
+        .copied()
+        .unwrap_or(0)
+}
+
+fn flying(runner: &GameRunner, id: ObjectId) -> u32 {
+    runner.state().objects[&id]
+        .counters
+        .get(&CounterType::Keyword(KeywordKind::Flying))
         .copied()
         .unwrap_or(0)
 }
@@ -112,6 +123,84 @@ fn resolve(
     let resolved = build_resolved_from_def_with_targets(def, source, P0, targets);
     let mut events = Vec::new();
     resolve_ability_chain(runner.state_mut(), &resolved, &mut events, 0).expect("chain resolves");
+}
+
+/// CR 603.6c + CR 603.10 + CR 400.7 + CR 122.8: a self dies trigger reads the
+/// departed source's LKI counters and puts matching counters onto the token it
+/// just created via "that token" (`LastCreated`), not onto the graveyard object
+/// or an unrelated permanent.
+#[test]
+fn dies_trigger_puts_departed_source_counters_on_created_token() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Synthetic Ambitious Augmenter",
+            3,
+            3,
+            SYNTHETIC_AUGMENTER,
+        )
+        .id();
+    let decoy = scenario.add_creature(P0, "Unrelated Creature", 2, 2).id();
+    let mut runner = scenario.build();
+    {
+        let source_obj = runner
+            .state_mut()
+            .objects
+            .get_mut(&source)
+            .expect("source exists");
+        source_obj.counters.insert(CounterType::Plus1Plus1, 2);
+        source_obj
+            .counters
+            .insert(CounterType::Keyword(KeywordKind::Flying), 1);
+    }
+
+    let mut events = Vec::new();
+    move_to_zone(runner.state_mut(), source, Zone::Graveyard, &mut events);
+    process_triggers(runner.state_mut(), &events);
+    runner.advance_until_stack_empty();
+
+    let token = last_token(&runner);
+    let token_obj = &runner.state().objects[&token];
+    assert!(
+        token_obj.is_token
+            && token_obj
+                .card_types
+                .subtypes
+                .iter()
+                .any(|subtype| subtype == "Fractal"),
+        "reach guard: trigger created the Fractal token, got {token_obj:?}"
+    );
+    assert_eq!(
+        runner.state().objects[&source].zone,
+        Zone::Graveyard,
+        "source left the battlefield before the counter transfer resolves"
+    );
+    assert!(
+        runner.state().objects[&source].counters.is_empty(),
+        "CR 122.2: live counters cease on zone change; transfer must use LKI"
+    );
+    assert_eq!(
+        p1p1(&runner, token),
+        2,
+        "created Fractal receives the departed source's +1/+1 counters"
+    );
+    assert_eq!(
+        flying(&runner, token),
+        1,
+        "created Fractal receives the departed source's keyword counter too"
+    );
+    assert_eq!(
+        p1p1(&runner, decoy),
+        0,
+        "unrelated creature gets no counters"
+    );
+    assert_eq!(
+        flying(&runner, decoy),
+        0,
+        "unrelated creature gets no keyword counters"
+    );
 }
 
 /// Call site B (for-each dispatch) — LOAD-BEARING FLIP. "Put a +1/+1 counter on

@@ -489,6 +489,12 @@ pub struct TriggerSourceContext {
     pub is_token: bool,
     #[serde(default)]
     pub face_down: bool,
+    /// CR 202.1 + CR 707.2 + CR 708.2a: The observed object's layered mana cost
+    /// (copy effects applied; a face-down permanent has none). `LKISnapshot`
+    /// records only the mana value, so a look-back read of the departed
+    /// object's mana symbols answers from this capture.
+    #[serde(default)]
+    pub mana_cost: ManaCost,
     #[serde(default)]
     pub transformed: bool,
     #[serde(default)]
@@ -7260,7 +7266,9 @@ pub struct PendingCast {
     pub declared_mana_additions: Vec<ManaCost>,
     /// CR 601.2b + CR 601.2f: Cost reductions the caster has affirmatively
     /// accepted for this cast and that no static on the board can reproduce —
-    /// today exactly the Defiler cycle's optional life payment. They join the
+    /// the Defiler cycle's optional life payment, and the reduction an Emerge
+    /// or Offering sacrifice earned before a deferred target declaration
+    /// (CR 702.119a + CR 702.48c). They join the
     /// ordered reduction set at the CR 601.2f lock seam, so they are ordered
     /// against the board's reductions instead of being shaved off an
     /// already-floored total.
@@ -9941,7 +9949,7 @@ pub enum CostResume {
 /// CR 601.2h + CR 702.48c: Identifies which spell-cost component a
 /// `WaitingFor::PayCost` choice is paying when the same `AbilityCost` shape can
 /// come from different rules.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SpellCostSource {
     #[default]
     Other,

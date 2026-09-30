@@ -573,20 +573,19 @@ describe("Discard cost modal", () => {
       .closest(".card-scale-reset")?.parentElement;
     expect(dialog).toHaveClass("w-full", "lg:w-fit", "max-w-md");
 
-    const green = screen.getByRole("button", { name: "Green" });
-    expect(green.parentElement).toHaveClass(
+    const colorless = screen.getByRole("button", { name: "Colorless" });
+    expect(colorless.parentElement).toHaveClass(
       "w-full",
       "flex-wrap",
       "lg:w-fit",
-      "lg:flex-nowrap",
     );
 
-    fireEvent.click(green);
+    fireEvent.click(colorless);
     fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
 
     expect(dispatchMock).toHaveBeenCalledWith({
       type: "ChooseManaColor",
-      data: { choice: { type: "SingleColor", data: "Green" }, count: 1 },
+      data: { choice: { type: "SingleColor", data: "Colorless" }, count: 1 },
     });
   });
 

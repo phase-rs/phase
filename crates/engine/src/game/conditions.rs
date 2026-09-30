@@ -15,7 +15,7 @@ use crate::types::triggers::AttackTargetFilter;
 use crate::types::zones::Zone;
 
 /// CR 122.1: True when `obj` has at least `minimum` (and at most `maximum` if specified)
-/// counters matching `counters`. `CounterMatch::Any` sums all counter types;
+/// counters matching `counters`. `CounterMatch::Any` totals all counter types;
 /// `CounterMatch::OfType(ct)` matches only that counter type.
 /// Used for HasCounters evaluation in StaticCondition and TriggerCondition.
 pub(crate) fn counter_condition_matches(
@@ -24,11 +24,7 @@ pub(crate) fn counter_condition_matches(
     minimum: u32,
     maximum: Option<u32>,
 ) -> bool {
-    let count: u32 = match counters {
-        CounterMatch::Any => obj.counters.values().sum(),
-        CounterMatch::OfType(ct) => obj.counters.get(ct).copied().unwrap_or(0),
-    };
-    count >= minimum && maximum.is_none_or(|max| count <= max)
+    counter_count_within_bounds(counters.count_in(&obj.counters), minimum, maximum)
 }
 
 /// CR 122.1 + CR 608.2h: LKI counterpart to [`counter_condition_matches`]
@@ -40,11 +36,14 @@ pub(crate) fn counter_condition_matches_lki(
     minimum: u32,
     maximum: Option<u32>,
 ) -> bool {
-    let count: u32 = match counters {
-        CounterMatch::Any => lki.counters.values().sum(),
-        CounterMatch::OfType(counter_type) => lki.counters.get(counter_type).copied().unwrap_or(0),
-    };
-    count >= minimum && maximum.is_none_or(|max| count <= max)
+    counter_count_within_bounds(counters.count_in(&lki.counters), minimum, maximum)
+}
+
+/// CR 122.1: Compare an exact counter total against a threshold band. The
+/// comparison is done in `u64` so a total above `u32::MAX` is never equated
+/// with an upper bound it actually exceeds.
+pub(crate) fn counter_count_within_bounds(count: u64, minimum: u32, maximum: Option<u32>) -> bool {
+    count >= u64::from(minimum) && maximum.is_none_or(|max| count <= u64::from(max))
 }
 
 /// CR 110.5b + CR 110.5d: True when the source object is on the battlefield AND tapped.
@@ -260,6 +259,7 @@ pub(crate) fn eval_source_attached_to_controlled_creature(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::types::counter::CounterType;
     use crate::types::game_state::GameState;
     use crate::types::player::PlayerId;
     use crate::types::CardId;
@@ -272,6 +272,47 @@ mod tests {
         };
         assert!(eval_is_initiative(&state, PlayerId(0)));
         assert!(!eval_is_initiative(&state, PlayerId(1)));
+    }
+
+    /// CR 122.1: an upper-bound counter predicate compares the EXACT total. With
+    /// one kind at `u32::MAX` plus one more marker the object has `u32::MAX + 1`
+    /// counters, which exceeds a `u32::MAX` maximum; a saturated or wrapped sum
+    /// would equal (or undershoot) the bound and wrongly answer true.
+    #[test]
+    fn counter_condition_upper_bound_uses_exact_total() {
+        let mut state = GameState::new_two_player(42);
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Test".to_string(),
+            Zone::Battlefield,
+        );
+        let charge = CounterType::Generic("charge".to_string());
+        let oil = CounterType::Generic("oil".to_string());
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.counters.insert(charge.clone(), u32::MAX);
+        assert!(counter_condition_matches(
+            obj,
+            &CounterMatch::Any,
+            0,
+            Some(u32::MAX)
+        ));
+        obj.counters.insert(oil, 1);
+        assert!(!counter_condition_matches(
+            obj,
+            &CounterMatch::Any,
+            0,
+            Some(u32::MAX)
+        ));
+        let lki = obj.snapshot_public_characteristics();
+        assert!(!counter_condition_matches_lki(
+            &lki,
+            &CounterMatch::Any,
+            0,
+            Some(u32::MAX)
+        ));
+        assert!(counter_condition_matches(obj, &CounterMatch::Any, 1, None));
     }
 
     /// CR 110.5d: eval_source_is_tapped_on_battlefield must return false when the

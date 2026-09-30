@@ -60,16 +60,31 @@ pub struct TournamentRequestId(pub u64);
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
-/// 93 — `ResolvedAbility.target_reads` and `AbilityDefinition.target_reads`
+/// 95 — `ResolvedAbility.target_reads` and `AbilityDefinition.target_reads`
 ///      (`TargetReadOrigin`, `#[serde(default, skip_serializing_if = ...)]`) are
 ///      new: `ParentAnnouncement` marks an instruction whose `Target` reads name
 ///      the object the immediately preceding instruction announced (CR 115.1 +
 ///      CR 608.2c — Conformer Shuriken's "If that creature has greater power
 ///      than this creature, …"), so it announces no target slot of its own and
-///      inherits its parent's validated target. A v92 peer silently defaults the
+///      inherits its parent's validated target. A v94 peer silently defaults the
 ///      field, rebuilds the extra slot or reads the wrong object, and desyncs.
-///      Full-game peers and P2P move in lockstep (wire 75); lobby messages are
+///      Full-game peers and P2P move in lockstep (wire 77); lobby messages are
 ///      unchanged.
+/// 94 — `SpellContext.creation_lookback_event` (`#[serde(default,
+///      skip_serializing_if = "Option::is_none")]`) carries the battlefield
+///      departure a phase-delayed triggered ability was created under (CR 603.7
+///      + CR 603.10a + CR 608.2h: "that many", "its power" and "this creature's
+///      counters" read the departed object), and `TriggerSourceContext.mana_cost`
+///      (`#[serde(default)]`) captures the observed object's layered mana cost
+///      (CR 707.2 + CR 708.2a). A v93 peer would drop both and resolve the
+///      delayed ability differently, so the exact-match handshake refuses the
+///      pairing. Full-game peers and P2P move in lockstep (wire 76); lobby
+///      messages are unchanged.
+/// 93 — `ReductionProvenance` gains `SacrificedForCost(SpellCostSource)`, the
+///      reduction an Emerge or Offering sacrifice earns before a deferred
+///      target declaration (CR 601.2f + CR 702.119a + CR 702.48c). It reaches
+///      `WaitingFor::OrderCostReductions` and `PendingCast`, and a v92 peer
+///      cannot deserialize it. Full-game and P2P move in lockstep: wire 75.
 /// 92 — `ResolvedAbility.parent_target_missing_reason` is now serialized
 ///      (`#[serde(default, skip_serializing_if = "Option::is_none")]`, it was
 ///      `#[serde(skip)]`) and `ParentTargetMissingReason` gains `RevealUntil`
@@ -777,7 +792,7 @@ pub struct TournamentRequestId(pub u64);
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 93;
+pub const PROTOCOL_VERSION: u32 = 95;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -2018,12 +2033,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 93);
+        assert_eq!(PROTOCOL_VERSION, 95);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which refuses an older full-game peer that cannot preserve the exact
         // Full-session identity across draft match attachment and follow-ups.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 92);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 94);
     }
 
     #[test]

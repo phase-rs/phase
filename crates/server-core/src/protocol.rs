@@ -3319,9 +3319,18 @@ mod tests {
     }
 
     /// `ResolvedAbility.target_reads` and `AbilityDefinition.target_reads`
-    /// (`TargetReadOrigin`, CR 115.1 + CR 608.2c) are serialized; a v92 peer
+    /// (`TargetReadOrigin`, CR 115.1 + CR 608.2c) are serialized; a v94 peer
     /// would default the field and rebuild a target slot the rules do not
-    /// announce, so it must be refused before it receives v93 state.
+    /// announce, so it must be refused before it receives v95 state.
+    /// `SpellContext.creation_lookback_event` and `TriggerSourceContext.mana_cost`
+    /// are new in serialized full-game state (CR 603.7 + CR 603.10a + CR 608.2h,
+    /// CR 707.2); a v93 peer would drop both and resolve a phase-delayed
+    /// departure look-back differently, so it must be refused before it
+    /// receives v94 state.
+    /// `ReductionProvenance` gains `SacrificedForCost`, the reduction an Emerge
+    /// or Offering sacrifice earns before a deferred target declaration; v92
+    /// state cannot decode a v93 provenance, so it must be refused before
+    /// state delivery.
     /// `ResolvedAbility.parent_target_missing_reason` is serialized and gains
     /// `ParentTargetMissingReason::RevealUntil`, and `EffectOutcomeSignal` gains
     /// `RevealUntilMatched`, and the CR 701.20a reveal lease adds
@@ -3351,8 +3360,8 @@ mod tests {
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_93_for_target_read_origin() {
-        assert_eq!(PROTOCOL_VERSION, 93);
+    fn protocol_version_is_95_for_target_read_origin() {
+        assert_eq!(PROTOCOL_VERSION, 95);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3363,7 +3372,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_93_for_target_read_origin` stays
+    /// `protocol_version_is_95_for_target_read_origin` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

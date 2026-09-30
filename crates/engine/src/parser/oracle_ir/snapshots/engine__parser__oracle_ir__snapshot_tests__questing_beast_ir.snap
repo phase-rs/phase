@@ -277,7 +277,7 @@ expression: "&ir"
                           "type_filters": [
                             "Planeswalker"
                           ],
-                          "controller": "TargetPlayer",
+                          "controller": "TriggeringPlayer",
                           "properties": []
                         }
                       },
@@ -323,7 +323,7 @@ expression: "&ir"
               "constraint": null,
               "has_up_to": false,
               "effect_lower": "it deals that much damage to target planeswalker that player controls.",
-              "relative_player_scope": "TargetPlayer"
+              "relative_player_scope": "TriggeringPlayer"
             },
             "source_text": "Whenever ~ deals combat damage to an opponent, it deals that much damage to target planeswalker that player controls.",
             "die_results": []

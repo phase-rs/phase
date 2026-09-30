@@ -1337,7 +1337,9 @@ pub(super) fn try_parse_move_counters<'a>(
 
     // Compute byte offset into original `text` for parse_target.
     let offset_in_text = text.len() - after_on.len();
-    let (target, remainder) = parse_target(&text[offset_in_text..]);
+    let (parsed_target, remainder) = parse_target(&text[offset_in_text..]);
+    let target =
+        counter_anaphor_created_token_binding(after_on.trim(), ctx).unwrap_or(parsed_target);
 
     Some((
         Effect::MoveCounters {
@@ -3809,6 +3811,62 @@ mod tests {
         assert_eq!(count, None);
         assert_eq!(mode, CounterTransferMode::Put);
         assert!(matches!(target, TargetFilter::ParentTarget));
+        assert!(rem.is_empty());
+    }
+
+    /// CR 608.2c + CR 111.1 + CR 122.8: after a token-creation instruction in
+    /// the same chain, "that token" names the just-created token destination
+    /// while the departed object's counters are still sourced through LKI.
+    #[test]
+    fn move_counters_that_token_binds_last_created_after_token_context() {
+        let lower = "put this creature's counters on that token";
+        let mut ctx = default_ctx();
+        ctx.token_created_in_chain = true;
+        let result = try_parse_move_counters(lower, lower, &mut ctx);
+        let Some((
+            Effect::MoveCounters {
+                source,
+                counter_type,
+                count,
+                mode,
+                target,
+                ..
+            },
+            rem,
+        )) = result
+        else {
+            panic!("expected MoveCounters, got {result:?}");
+        };
+        assert_eq!(source, TargetFilter::SelfRef);
+        assert_eq!(counter_type, None);
+        assert_eq!(count, None);
+        assert_eq!(mode, CounterTransferMode::Put);
+        assert_eq!(target, TargetFilter::LastCreated);
+        assert!(rem.is_empty());
+    }
+
+    /// CR 608.2c: the created-token anaphor helper is gated by same-chain token
+    /// provenance; without that antecedent, "that token" keeps the legacy parent
+    /// binding rather than reading stale `last_created_token_ids`.
+    #[test]
+    fn move_counters_that_token_without_token_context_stays_parent_target() {
+        let lower = "put this creature's counters on that token";
+        let result = try_parse_move_counters(lower, lower, &mut default_ctx());
+        let Some((
+            Effect::MoveCounters {
+                source,
+                mode,
+                target,
+                ..
+            },
+            rem,
+        )) = result
+        else {
+            panic!("expected MoveCounters, got {result:?}");
+        };
+        assert_eq!(source, TargetFilter::SelfRef);
+        assert_eq!(mode, CounterTransferMode::Put);
+        assert_eq!(target, TargetFilter::ParentTarget);
         assert!(rem.is_empty());
     }
 

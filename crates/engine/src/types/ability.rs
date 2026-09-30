@@ -2130,9 +2130,8 @@ pub enum CastFromZoneDriver {
     /// and return — the controller casts the card later, during the granting
     /// effect's own (or a future) priority window. The default for every
     /// permission-granting cast-from-zone effect: Discover/Nashi/Jeleva-style
-    /// "you may cast those exiled cards" and Rebound's next-upkeep recast offer
-    /// (CR 702.88a), whose `duration: Some(UntilEndOfTurn)` then prunes the
-    /// unused permission.
+    /// "you may cast those exiled cards", whose `duration` then governs how
+    /// long the unused permission survives.
     #[default]
     LingeringPermission,
     /// CR 608.2g: Cast the card *as the granting ability resolves* — the card
@@ -2140,7 +2139,9 @@ pub enum CastFromZoneDriver {
     /// and the CR 608.2g timing bypass (sorcery-speed / empty-stack /
     /// active-player gates do not apply) is armed. Set by Suspend's
     /// last-time-counter trigger (CR 702.62a) so a suspended sorcery recast at
-    /// upkeep is not blocked by the sorcery-speed gate (issue #1520).
+    /// upkeep is not blocked by the sorcery-speed gate (issue #1520), and by
+    /// Rebound's next-upkeep arming hook (CR 702.88a) for the same reason
+    /// (issue #6461).
     DuringResolution,
     /// CR 608.2g: Open a RESOLUTION-SCOPED free-cast window over the batch of
     /// cards the same resolution just produced ("… from among them") — the
@@ -4698,11 +4699,9 @@ pub enum CastingPermission {
         /// Suspend, Discover, Cascade, etc., handled by
         /// `zones::apply_zone_exit_cleanup`).
         ///
-        /// CR 702.88a (Rebound): used by the Rebound recast permission with
-        /// `Duration::UntilEndOfTurn` so the granted "cast this card from
-        /// exile without paying its mana cost" offer expires at the cleanup
-        /// step of the upkeep on which it was offered if the controller
-        /// declines or fails to cast.
+        /// Durational grants (Emry-class "you may cast that card this turn"
+        /// offers) carry `Some(...)` here so the permission expires at the
+        /// stated boundary if the controller declines or fails to cast.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         duration: Option<Duration>,
         /// CR 611.2a + CR 400.7: Identity of the permanent whose continued
@@ -18646,17 +18645,19 @@ pub enum Effect {
         /// CR 611.2a: Optional durational scope propagated onto the granted
         /// `CastingPermission::ExileWithAltCost { duration, .. }` so the
         /// permission is pruned by the standard layer prune helpers.
-        /// CR 702.88a (Rebound): set to `Some(Duration::UntilEndOfTurn)` by
-        /// the Rebound arming flow so the next-upkeep recast offer expires
-        /// at end of turn if not used. `None` for all standing cast-from-zone
-        /// grants (Discover, Suspend, Nashi, etc.).
+        /// Carried by timed grants (Emry-class "you may cast that card this
+        /// turn" offers). `None` for all standing cast-from-zone grants
+        /// (Discover, Nashi, Jeleva, etc.) and for during-resolution casts
+        /// (Suspend's last-counter cast, Rebound's upkeep recast), which
+        /// grant no lingering permission at all.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         duration: Option<Duration>,
         /// CR 608.2g vs CR 118.9: Which casting mechanism this effect drives —
-        /// cast the card as the granting ability resolves (`DuringResolution`,
-        /// Suspend's last-counter cast per CR 702.62a) versus grant a lingering
-        /// permission the controller acts on at a later priority window
-        /// (`LingeringPermission`, the default for Discover/Nashi/Rebound). The
+        /// cast the card as the granting ability resolves (`DuringResolution`:
+        /// Suspend's last-counter cast per CR 702.62a, Rebound's upkeep
+        /// recast per CR 702.88a) versus grant a lingering permission the
+        /// controller acts on at a later priority window
+        /// (`LingeringPermission`, the default for Discover/Nashi). The
         /// router in `cast_from_zone::resolve` reads THIS field, not `duration`
         /// (which is CR 611.2a permission-expiry and means nothing about the
         /// casting mechanism). See issue #1520.
@@ -28018,6 +28019,16 @@ pub struct SpellContext {
     /// ordinary ability-chain handoffs without widening every ability literal.
     #[serde(default, skip_serializing_if = "ExileConcealment::is_public")]
     pub face_down_in_exile: ExileConcealment,
+    /// CR 603.7 + CR 603.10a + CR 608.2h: The battlefield-departure event a
+    /// phase-delayed triggered ability was created under ("When this creature
+    /// dies, at the beginning of the next end step, …"). The later phase event
+    /// that fires the ability names no object, so object look-back reads ("that
+    /// many", "its power", "this creature's counters") resolve against this
+    /// departure's last-known information instead. Stamped only by
+    /// `delayed_trigger::resolve`; `None` everywhere else, including every
+    /// event-delayed trigger, which reads the event that fires it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creation_lookback_event: Option<Box<crate::types::events::GameEvent>>,
     /// CR 608.2c: The immediate `forward_result` producer's complete ordered
     /// result. `None` means no producer has run in this resolution; `Some([])`
     /// is a completed producer that moved no objects and intentionally blocks
@@ -33698,6 +33709,39 @@ impl ResolvedAbility {
         }
     }
 
+    /// CR 603.7 + CR 603.10a: Record the battlefield-departure event this
+    /// phase-delayed ability was created under on every node of its chain, so
+    /// a node that resolves without a parent hand-off still carries it.
+    pub fn set_creation_lookback_event_recursive(
+        &mut self,
+        event: &crate::types::events::GameEvent,
+    ) {
+        self.context.creation_lookback_event = Some(Box::new(event.clone()));
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.set_creation_lookback_event_recursive(event);
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.set_creation_lookback_event_recursive(event);
+        }
+    }
+
+    /// Visit every carried creation look-back event in this chain. Used by the
+    /// viewer projection to redact hidden-zone records (CR 400.2).
+    pub fn for_each_creation_lookback_event_mut(
+        &mut self,
+        f: &mut impl FnMut(&mut crate::types::events::GameEvent),
+    ) {
+        if let Some(event) = self.context.creation_lookback_event.as_deref_mut() {
+            f(event);
+        }
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.for_each_creation_lookback_event_mut(f);
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.for_each_creation_lookback_event_mut(f);
+        }
+    }
+
     /// CR 608.2c: Updates the owned source projection for the current
     /// resolution segment without rebinding its source/controller or crossing
     /// an independent sequential instruction.
@@ -35092,6 +35136,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::events::GameEvent;
+    use crate::types::game_state::{DelayedTrigger, GameState, ZoneChangeRecord};
     use crate::types::mana::ZoneSpendPolarity;
     use crate::types::zones::Zone;
 
@@ -35366,6 +35412,61 @@ mod tests {
             serde_json::from_value::<SpellContext>(wire).expect("attachment bindings round-trip"),
             populated
         );
+    }
+
+    #[test]
+    fn spell_context_creation_lookback_round_trips() {
+        let event = GameEvent::ZoneChanged {
+            object_id: ObjectId(7),
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            record: Box::new(ZoneChangeRecord::test_minimal(
+                ObjectId(7),
+                Some(Zone::Battlefield),
+                Zone::Graveyard,
+            )),
+        };
+
+        let populated = SpellContext {
+            creation_lookback_event: Some(Box::new(event.clone())),
+            ..SpellContext::default()
+        };
+        let round_tripped: SpellContext =
+            serde_json::from_value(serde_json::to_value(&populated).expect("context serializes"))
+                .expect("context deserializes");
+        assert_eq!(round_tripped, populated);
+
+        let absent = SpellContext::default();
+        let absent_round_tripped: SpellContext =
+            serde_json::from_value(serde_json::to_value(&absent).expect("context serializes"))
+                .expect("context deserializes");
+        assert_eq!(absent_round_tripped, absent);
+        assert!(serde_json::to_value(&absent)
+            .expect("context serializes")
+            .get("creation_lookback_event")
+            .is_none());
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            crate::types::player::PlayerId(0),
+        );
+        ability.context = populated;
+
+        let mut state = GameState::new_two_player(42);
+        state.delayed_triggers.push(DelayedTrigger::new(
+            DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+            Box::new(ability),
+            crate::types::player::PlayerId(0),
+            ObjectId(1),
+            true,
+        ));
+        let cloned = state.clone();
+        assert_eq!(cloned, state);
     }
 
     /// CR 102.1 — `TargetFilter::PlayerMatching::is_player_scope()` is a DECIDED

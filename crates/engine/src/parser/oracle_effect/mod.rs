@@ -4120,6 +4120,22 @@ fn try_parse_inline_delayed_trigger(
     let condition_text = &tp.lower["when ".len()..comma];
     let effect_text = &tp.original[comma + 2..];
 
+    // CR 603.7b + CR 608.2c: an "another <type phrase> …" subject names a
+    // DIFFERENT object that must match the delayed trigger's own event ("when
+    // another creature you control dies this turn"). No delayed condition here
+    // models a typed other-object subject, and the definite-self fallback below
+    // would silently turn it into a trigger on this object. Fail the whole
+    // clause closed so the card stays honestly unsupported.
+    if tag::<_, _, OracleError<'_>>("another ")
+        .parse(condition_text)
+        .is_ok()
+    {
+        return Some(parsed_clause(Effect::unimplemented(
+            "delayed_trigger_other_subject",
+            tp.original,
+        )));
+    }
+
     // CR 603.6 + CR 603.7c: A self-referential disjunctive condition ("when ~
     // <eventA> or <eventB>, …") embeds two triggers; the demonstrative inner
     // subject binds to the parent target (rebound below). Detect it before the
@@ -7174,6 +7190,14 @@ fn try_parse_choose_one_of_inline(
         return None;
     }
 
+    // CR 608.2c + CR 109.5: a compound-subject distribution ("you and defending
+    // player each discard a card or sacrifice a permanent") scopes over the WHOLE
+    // disjunction. A two-branch split would leave the second alternative without
+    // the shared subject, so decline and let the distribution parser see it whole.
+    if text_is_compound_subject_distribution(tp.original) {
+        return None;
+    }
+
     // Find the first top-level " or " split. Prefer a comma-qualified ", or "
     // as the clearer form; fall back to bare " or " when the text is short
     // enough that misreading intra-phrase "or" is unlikely. Each needle
@@ -8310,6 +8334,13 @@ pub(crate) fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedE
     // See `data/parser-swallow-progress.md` for the full architecture and
     // `crates/engine/src/parser/clause_shell.rs` for the slot machinery.
     let (peeled_text, peel_ctx) = super::clause_shell::peel_clause(text);
+    // CR 601.2 + CR 608.2c: the shell peels with a context-free condition parse, so a
+    // cast-time snapshot gate would be accepted here even inside a trigger, where the
+    // snapshot is never stamped and the gate could never open. Fail closed rather
+    // than publish either the dead gate or the ungated effect.
+    if ctx.in_trigger && peel_ctx.condition().is_some_and(reads_cast_time_snapshot) {
+        return parsed_clause(Effect::unimplemented("cast_time_snapshot_in_trigger", text));
+    }
     if peel_ctx.is_empty() {
         return attach_unless_slots(
             parse_effect_clause_inner(text, ctx),
@@ -18281,24 +18312,26 @@ fn thread_for_each_subject(effect: Effect, original: &str, ctx: &mut ParseContex
             filter,
         },
         // CR 119.3 + CR 608.2c (issue #6381): "target player gains N life for
-        // each X" (issue #1508) needs an actual CR 601.2c target declaration
-        // (`is_targeted`); "that player gains N life for each X" is instead a
-        // resolution-scoped anaphor to a player chosen by an earlier "Choose an
-        // opponent."/"Choose a player." instruction (the "Offering" cycle:
-        // Benevolent/Infernal/Intellectual/Sylvan Offering) and never sets
-        // `application.target`. Accept either so both recipient-binding shapes
-        // rebind away from the no-subject `Controller` default.
+        // each X" / "that player gains N life for each X" — rebind away from
+        // the no-subject `Controller` default whenever the subject identifies
+        // a player (targeted, chosen-player anaphor, triggering/event-bound player).
         Effect::GainLife {
             amount,
             player: TargetFilter::Controller,
-        } if target_filter_can_target_player(&target)
-            && (is_targeted || is_chosen_player_anaphor(&target)) =>
-        {
-            Effect::GainLife {
-                amount,
-                player: target,
-            }
-        }
+        } if target_filter_can_target_player(&target) => Effect::GainLife {
+            amount,
+            player: target,
+        },
+        // CR 119.3 + CR 115.1d + CR 608.2c: "that player loses N life for each X" /
+        // "target player loses N life for each X" — inject the subject's player reference
+        // (e.g. TriggeringPlayer, TargetPlayer) into LoseLife.target.
+        Effect::LoseLife {
+            amount,
+            target: None,
+        } if target_filter_can_target_player(&target) => Effect::LoseLife {
+            amount,
+            target: Some(target),
+        },
         // CR 115.1a/c + CR 701.17a + CR 608.2c: "Target opponent/player sacrifices
         // a [typed] permanent ... for each X" (Urborg Justice, Din of the Fireherd,
         // Rakdos Riteknife). The for-each interception strips the dynamic count
@@ -22440,21 +22473,36 @@ struct CompoundSubjectPrefix {
     declares_target: Option<TargetFilter>,
 }
 
+/// CR 109.5 + CR 115.1: Second-subject axis of a static compound-subject prefix —
+/// the recipient named after "you and " / "~ and " and before " each ". Shared with
+/// the clause chunker (`remainder_trimmed_starts_with_compound_subject_each`) so
+/// its no-split guard and this distributor recognize the same forms.
+fn parse_static_compound_second_subject(lower: &str) -> OracleResult<'_, TargetFilter> {
+    alt((
+        value(
+            TargetFilter::ScopedPlayer,
+            tag::<_, _, OracleError<'_>>("that player each "),
+        ),
+        value(
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+            tag("target opponent each "),
+        ),
+        value(TargetFilter::Player, tag("target player each ")),
+        value(TargetFilter::ParentTarget, tag("that creature each ")),
+        // CR 508.5: the defending player of the source's attack (Cait, Cage
+        // Brawler; The River Warlock). Resolved from combat state.
+        value(
+            TargetFilter::DefendingPlayer,
+            (opt(tag("the ")), tag("defending player each ")),
+        ),
+    ))
+    .parse(lower)
+}
+
 fn parse_static_compound_subject_prefix(lower: &str) -> Option<CompoundSubjectPrefix> {
     let (remaining, (first, second)) = (
         parse_compound_first_subject,
-        alt((
-            value(
-                TargetFilter::ScopedPlayer,
-                tag::<_, _, OracleError<'_>>("that player each "),
-            ),
-            value(
-                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
-                tag("target opponent each "),
-            ),
-            value(TargetFilter::Player, tag("target player each ")),
-            value(TargetFilter::ParentTarget, tag("that creature each ")),
-        )),
+        parse_static_compound_second_subject,
     )
         .parse(lower)
         .ok()?;
@@ -25767,6 +25815,36 @@ fn player_scope_from_parent_target_subject(affected: &TargetFilter) -> Option<Pl
     }
 }
 
+/// CR 608.2c + CR 108.3: When an immediately preceding owner-subject clause
+/// establishes the anchor, "each other player" excludes that owner rather than
+/// the ability controller. This helper only strips the subject; the caller owns
+/// the chain-local antecedent and stamps the player scope.
+fn strip_owner_relative_each_other_player_subject(text: &str) -> Option<&str> {
+    nom_on_lower(text, &text.to_lowercase(), |i| {
+        value((), tag("each other player ")).parse(i)
+    })
+    .map(|(_, rest)| rest)
+}
+
+/// CR 603.4 + CR 608.2c + CR 108.3: Phase 1 deliberately leaves unsupported
+/// intervening-if text represented by the existing `Condition_If` diagnostic,
+/// but the following conjunct still needs the English owner antecedent for
+/// "each other player". Detect only that antecedent; do not strip or model the
+/// condition here.
+fn deferred_leading_condition_has_parent_target_owner_subject(
+    text: &str,
+    ctx: &ParseContext,
+) -> bool {
+    let Some((_condition_fragment, body)) = conditions::split_leading_conditional(text) else {
+        return false;
+    };
+    let mut probe_ctx = ctx.clone_throwaway();
+    matches!(
+        subject::parse_leading_subject_application(&body, &mut probe_ctx),
+        Some(application) if application.affected == TargetFilter::ParentTargetOwner
+    )
+}
+
 /// CR 701.16a + CR 400.7: Parse a "for each <filter> <cause> this way" SUFFIX
 /// (lowercased predicate text) into a `repeat_for` count for a count-less effect
 /// like `Effect::Investigate`. Routes the tail through the shared
@@ -26471,24 +26549,6 @@ fn head_carries_player_subject(head: &str, ctx: &ParseContext) -> bool {
         .as_ref()
         .and_then(CarriedPlayerSubject::from_leading_subject)
         .is_some()
-}
-
-/// CR 608.2c: true when `filter` is the resolution-scoped "that player"/"that
-/// opponent" anaphor to a player chosen earlier in the same resolution by a
-/// `Choose(Player)`/`Choose(Opponent)` instruction, encoded as the player-only
-/// `TargetFilter::Typed` carrying `ControllerRef::ChosenPlayer { index }`
-/// (mirrors `retarget_effect_to_chosen_player`'s encoding). Distinct from a
-/// CR 601.2c cast-time target declaration ("target player"), which sets
-/// `SubjectApplication.target` instead.
-fn is_chosen_player_anaphor(filter: &TargetFilter) -> bool {
-    matches!(
-        filter,
-        TargetFilter::Typed(TypedFilter {
-            controller: Some(ControllerRef::ChosenPlayer { .. }),
-            type_filters,
-            ..
-        }) if type_filters.is_empty()
-    )
 }
 
 fn wrap_target_subject_damage(
@@ -34329,6 +34389,17 @@ pub(crate) fn rewrite_event_anchored_zone_counts_to_scoped(def: &mut AbilityDefi
 
     fn rewrite_ref(qty: &mut QuantityRef) {
         match qty {
+            QuantityRef::LifeTotal { player }
+            | QuantityRef::HandSize { player }
+            | QuantityRef::GraveyardSize { player }
+            | QuantityRef::StartingLifeTotal { player }
+            | QuantityRef::LifeLostThisTurn { player }
+            | QuantityRef::LifeGainedThisTurn { player }
+            | QuantityRef::PartySize { player }
+                if *player == PlayerScope::Target =>
+            {
+                *player = PlayerScope::ScopedPlayer;
+            }
             // CR 115.1 + CR 601.2c: rebind only anaphoric counts ("their …").
             // An explicit "target player's/opponent's …" count declares its
             // own announcement and must survive for the slot machinery —
@@ -34484,12 +34555,22 @@ fn resolve_difference_anaphor_in_effect(effect: &mut Effect, bound: Option<&Quan
     }
 }
 
-/// CR 608.2h: rebind a bare `EventContextAmount` "that many" count placeholder
-/// in a `PutCounter` effect to the concrete `QuantityRef` a leading
-/// counter-threshold gate measured. Sibling of
+/// CR 608.2h: rebind an `EventContextAmount` "that many" / "that much" /
+/// "that number of" count placeholder to the concrete `QuantityRef` a
+/// governing counter gate measured. Sibling of
 /// `resolve_difference_anaphor_in_effect` above — same call site, same
 /// `effective_condition` read — but a ONE-operand counter-gate operand rather
-/// than a two-operand difference.
+/// than a two-operand difference. Two gates feed it: a spell's leading
+/// counter-threshold clause ("If that artifact had counters on it, …" —
+/// Dismantle) and a trigger's positive past-tense intervening-if ("if it had
+/// one or more counters on it, …" — Yuna, Grand Summoner; bound from
+/// `lower_trigger_ir`).
+///
+/// The effect's own direct count/amount slot (`Effect::count_expr_mut`, the
+/// uniform accessor for `Draw`/`LoseLife`/`PutCounter`/`Token`/… magnitudes) is
+/// rebound first, through `QuantityExpr::rebind_event_context_amount` so an
+/// arithmetic wrapper ("twice that many") keeps its shape. That covers every
+/// count-bearing effect uniformly instead of one hand-written arm per variant.
 ///
 /// The descent below is the UNION of `resolve_difference_anaphor_in_effect`'s
 /// carrier set (`CreateDrawReplacement` / `CreateDelayedTrigger`) and every
@@ -34528,19 +34609,13 @@ fn resolve_difference_anaphor_in_effect(effect: &mut Effect, bound: Option<&Quan
 /// resolution, so they are leaves here too, explicitly listed alongside the
 /// module's own leaf set below rather than folded into it silently.
 fn rebind_event_context_amount_counts(effect: &mut Effect, gate_qty: &QuantityRef) {
+    // CR 608.2c + CR 608.2h: the effect's own magnitude slot. Leaves any
+    // non-placeholder quantity untouched (`rebind_event_context_amount` only
+    // rewrites `EventContextAmount` leaves).
+    if let Some(count) = effect.count_expr_mut() {
+        count.rebind_event_context_amount(gate_qty);
+    }
     match effect {
-        Effect::PutCounter { count, .. } => {
-            if matches!(
-                count,
-                QuantityExpr::Ref {
-                    qty: QuantityRef::EventContextAmount
-                }
-            ) {
-                *count = QuantityExpr::Ref {
-                    qty: gate_qty.clone(),
-                };
-            }
-        }
         Effect::ChooseOneOf { branches, .. } => {
             for branch in branches {
                 rebind_event_context_amount_counts_in_ability(branch, gate_qty);
@@ -34638,7 +34713,10 @@ fn rebind_event_context_amount_counts(effect: &mut Effect, gate_qty: &QuantityRe
         | Effect::Counter { .. } => {}
         // Leaf effects with no nested ability/effect carrier — verbatim from
         // `ability_visit::visit_effect_scoped`'s own leaf-arm enumeration.
-        Effect::StartYourEngines { .. }
+        // `PutCounter`'s direct `count` slot was already rebound above via
+        // `count_expr_mut`; it carries no nested payload.
+        Effect::PutCounter { .. }
+        | Effect::StartYourEngines { .. }
         | Effect::ChangeSpeed { .. }
         | Effect::DealDamage { .. }
         | Effect::ApplyPostReplacementDamage { .. }
@@ -35993,6 +36071,12 @@ fn try_parse_repeat_until_stop_conditions(
 ///   (`Offset(inner, +1)` = "once + q more"), stamped onto the root clause's
 ///   `repeat_for` so the ungated whole-chain driver loops the exile→return process
 ///   q+1 times (CR 608.2c). No stop predicate — it is a plain count.
+/// - `CappedRepeat(q)` — an unconditional "once / twice / three times" cap
+///   (Remorseless Punishment). `q` is the TOTAL run count, as for `FixedCount`, but
+///   it is only representable on a single-clause process: the runtime loops a
+///   `repeat_for` root together with its own unless-payment / player-scope gate,
+///   while a following sentence is an independent sibling that runs once after the
+///   loop. A multi-clause process therefore keeps the consume-only outcome.
 /// - `ConsumeOnly` — the bare / "if you do" form (Primal Surge) is recognized so
 ///   the directive is consumed rather than producing an `Unimplemented` gap, but
 ///   it sets no predicate (its game-state-predicate semantics stay deferred).
@@ -36000,6 +36084,7 @@ fn try_parse_repeat_until_stop_conditions(
 enum RepeatProcessOutcome {
     Continuation(crate::types::ability::RepeatContinuation),
     FixedCount(QuantityExpr),
+    CappedRepeat(QuantityExpr),
     ConsumeOnly,
 }
 
@@ -36055,7 +36140,7 @@ fn try_parse_repeat_process_directive(
         let (i, you_may) = opt(tag::<_, _, OracleError<'_>>("you may ")).parse(i)?;
         // The bare/"if you do" forms have no condition and no "you may" — keep
         // them recognized (consume-only) so they don't leak Unimplemented gaps.
-        let (i, _) = opt(alt((
+        let (i, if_you_do) = opt(alt((
             tag::<_, _, OracleError<'_>>("if you do, "),
             tag("if you do "),
         )))
@@ -36087,10 +36172,10 @@ fn try_parse_repeat_process_directive(
         let cap = cap.flatten();
         let (i, _) = opt(tag(".")).parse(i)?;
         eof(i)?;
-        Ok((i, (cap, you_may.is_some(), more_times)))
+        Ok((i, (cap, you_may.is_some(), if_you_do.is_some(), more_times)))
     })?;
 
-    let (cap, you_may, more_times) = parsed_directive;
+    let (cap, you_may, if_you_do, more_times) = parsed_directive;
     if let Some(condition) = condition {
         return Some(RepeatProcessOutcome::Continuation(
             RepeatContinuation::WhileCondition {
@@ -36110,6 +36195,19 @@ fn try_parse_repeat_process_directive(
         return Some(RepeatProcessOutcome::Continuation(
             RepeatContinuation::ControllerChoice,
         ));
+    }
+    // CR 608.2c: an unconditional, mandatory "repeat this process once / twice /
+    // three times" re-follows the whole process `cap` additional times (Remorseless
+    // Punishment). The total run count is `cap + 1`, the same `Offset` shape as the
+    // "<q> more times" form above. A conditional ("if you do, …") form stays
+    // consume-only.
+    if let (Some(additional), false) = (cap, if_you_do) {
+        return Some(RepeatProcessOutcome::CappedRepeat(QuantityExpr::Offset {
+            inner: Box::new(QuantityExpr::Fixed {
+                value: additional as i32,
+            }),
+            offset: 1,
+        }));
     }
     Some(RepeatProcessOutcome::ConsumeOnly)
 }
@@ -38324,6 +38422,11 @@ pub(crate) fn parse_effect_chain_ir(
     // recipient through it) rather than boundary-cleared, preventing leak into
     // an unrelated later sentence.
     let mut chain_parent_target_controller_scope: Option<ControllerRef> = None;
+    // CR 608.2c + CR 108.3: Chain-spanning "its owner" antecedent for the
+    // immediately following "each other player" chunk. The next nonempty chunk
+    // consumes or clears this single-shot scope before generic player-scope
+    // peeling, so an owner-relative "other" reading cannot leak further.
+    let mut chain_parent_target_owner_scope: Option<PlayerFilter> = None;
     // CR 611.2a: carried across iterations — (clause count when the stamp was set, the
     // stamping chunk's text). The residual this closes is a chunk that carries a
     // distributed leading duration but pushes NO clause at all (it instead mutates an
@@ -38371,6 +38474,7 @@ pub(crate) fn parse_effect_chain_ir(
         if normalized_text.is_empty() {
             continue;
         }
+        let chain_parent_target_owner_scope_for_chunk = chain_parent_target_owner_scope.take();
         let previous_is_multi_coin_flip = builder
             .clauses()
             .iter()
@@ -39089,6 +39193,32 @@ pub(crate) fn parse_effect_chain_ir(
                 RepeatProcessOutcome::FixedCount(qty) => {
                     if let Some(first) = builder.clauses_mut().first_mut() {
                         first.repeat_for = Some(qty);
+                    }
+                }
+                // CR 608.2c: only a single-clause process can carry the count on
+                // its root (see `RepeatProcessOutcome::CappedRepeat`).
+                // A multi-clause process cannot (the runtime repeats only the root
+                // instruction of a `repeat_for` chain), so surface a named gap
+                // rather than silently dropping the cap (Calamity, Galloping
+                // Inferno).
+                RepeatProcessOutcome::CappedRepeat(qty) => {
+                    if let [only] = builder.clauses_mut() {
+                        only.repeat_for = Some(qty);
+                    } else {
+                        builder
+                            .clause(
+                                normalized_text,
+                                parsed_clause(Effect::unimplemented(
+                                    "repeat_process_multi_clause",
+                                    normalized_text.to_string(),
+                                )),
+                                chunk.boundary_after,
+                                ClauseDisposition::Emit {
+                                    followup: None,
+                                    intrinsic: None,
+                                },
+                            )
+                            .push();
                     }
                 }
                 RepeatProcessOutcome::ConsumeOnly => {}
@@ -40102,18 +40232,22 @@ pub(crate) fn parse_effect_chain_ir(
             // conditional strip ("a number of times equal to the difference").
             .or(difference_repeat)
             .or_else(|| pending_repeat_for.take());
-        let (player_scope, text, subject_worded_exile) = match early_player_scope {
-            Some(scope) => (Some(scope), text, false),
-            None => {
-                let subject_worded = nom_on_lower(&text, &text.to_lowercase(), |i| {
-                    value((), tag("each ")).parse(i)
-                })
-                .is_some();
-                let (scope, stripped) = super::clause_shell::peel_player_scope_subject(&text);
-                let subject_worded_exile = subject_worded && scope.is_some();
-                (scope, stripped, subject_worded_exile)
-            }
-        };
+        let owner_relative_player_scope = chain_parent_target_owner_scope_for_chunk
+            .zip(strip_owner_relative_each_other_player_subject(&text));
+        let (player_scope, text, subject_worded_exile) =
+            match (early_player_scope, owner_relative_player_scope) {
+                (Some(scope), _) => (Some(scope), text, false),
+                (None, Some((scope, stripped))) => (Some(scope), stripped.to_string(), true),
+                (None, None) => {
+                    let subject_worded = nom_on_lower(&text, &text.to_lowercase(), |i| {
+                        value((), tag("each ")).parse(i)
+                    })
+                    .is_some();
+                    let (scope, stripped) = super::clause_shell::peel_player_scope_subject(&text);
+                    let subject_worded_exile = subject_worded && scope.is_some();
+                    (scope, stripped, subject_worded_exile)
+                }
+            };
         let pending_player_scope_for_clause = pending_player_scope.take();
         let carried_player_scope = if player_scope.is_none()
             && !sequence::starts_clause_text(&text)
@@ -40775,6 +40909,8 @@ pub(crate) fn parse_effect_chain_ir(
             chain_parent_target_controller_scope = None;
         }
         let leading_subject_application = subject::parse_leading_subject_application(&text, ctx);
+        let deferred_leading_owner_subject = leading_subject_application.is_none()
+            && deferred_leading_condition_has_parent_target_owner_subject(&text, ctx);
         // CR 608.2c + CR 109.5: A chained clause whose explicit subject is the caster
         // ("you"/"you may") switches the acting player back to the ability controller
         // (CR 109.5: "you"/"your" refer to the object's controller). A non-caster
@@ -42627,6 +42763,15 @@ pub(crate) fn parse_effect_chain_ir(
             Some(app) if app.is_optional && app.affected == TargetFilter::ParentTargetController
         ) {
             chain_parent_target_controller_scope = Some(ControllerRef::ParentTargetController);
+        }
+        if matches!(
+            leading_subject_application.as_ref(),
+            Some(app) if app.affected == TargetFilter::ParentTargetOwner
+        ) || deferred_leading_owner_subject
+        {
+            chain_parent_target_owner_scope = Some(PlayerFilter::AllExcept {
+                exclude: Box::new(PlayerFilter::ParentObjectTargetOwner),
+            });
         }
 
         // CR 608.2e: The decline-consequence rebind scope ends at the sentence
