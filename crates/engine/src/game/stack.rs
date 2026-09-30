@@ -2193,12 +2193,16 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     *enter_tapped = crate::types::proposed_event::EtbTapState::Tapped;
                 }
             }
-            // CR 712.14a + CR 310.12b: If this spell was finalized from an
-            // ExileWithAltCost permission with `cast_transformed`, the permanent
-            // enters the battlefield transformed (resolving to its back face).
-            // The finalized stack-paid snapshot is authoritative here; the
-            // mutable permission list is casting-time authorization, not
-            // resolution-time cast metadata.
+            // CR 712.8c + CR 712.11a + CR 712.13 + CR 310.12b: if this spell was
+            // finalized from an ExileWithAltCost permission with
+            // `cast_transformed`, the permanent enters the battlefield
+            // transformed (resolving to its back face) — a spell cast
+            // transformed has its back face up with only its back face's
+            // characteristics and resolves onto the battlefield with that face
+            // up; the engine keeps the front face up on the stack and swaps to
+            // the back face at entry. The finalized stack-paid snapshot is
+            // authoritative here; the mutable permission list is casting-time
+            // authorization, not resolution-time cast metadata.
             if let Some(obj) = state.objects.get(&entry.id) {
                 // CR 107.3m + CR 707.10: a resolving copied spell has no new
                 // payment snapshot, but inherits the original spell's chosen
@@ -2225,17 +2229,22 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 // the ZoneChange ProposedEvent so Doubling-Season-class
                 // AddCounter replacements (CR 614.1a) see and modify them as
                 // the replacement pipeline runs.
-                // CR 712.14a: For cast_transformed (Craft / ExileWithAltCost) the
-                // spell is on the stack with the front face but enters as the back
-                // face — read loyalty/defense from the back face directly so the
-                // replacement pipeline sees the correct counter count.
+                // CR 712.8c + CR 712.11a + CR 712.13: for cast_transformed (Craft /
+                // ExileWithAltCost / a Siege's victory cast), a spell cast
+                // transformed has its back face up with only its back face's
+                // characteristics and resolves onto the battlefield with that
+                // face up; the engine keeps the front face up on the stack and
+                // swaps to the back face at entry — read loyalty/defense from
+                // the back face directly so the replacement pipeline sees the
+                // correct counter count. Lore is not seeded — the back face's
+                // own CR 714.3a replacement applies through the CR 614.12
+                // projection (`replacement::stage_transformed_entry_projection`).
                 let intrinsic = match (cast_transformed, obj.back_face.as_ref()) {
-                    (true, Some(back)) => super::printed_cards::intrinsic_entry_counters_for_face(
+                    (true, Some(back)) => super::printed_cards::intrinsic_face_entry_counters(
                         back.printed_loyalty,
                         back.loyalty,
                         resolving_spell_x,
                         back.defense,
-                        &back.card_types,
                     ),
                     _ => super::printed_cards::intrinsic_etb_counters(obj, resolving_spell_x),
                 };

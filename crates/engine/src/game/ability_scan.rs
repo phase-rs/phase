@@ -4095,6 +4095,7 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes {
             acc = acc.or(scan_trigger_condition(condition, mode));
             acc
         }
+        TriggerCondition::EventTime { condition } => scan_trigger_condition(condition, mode),
     }
 }
 

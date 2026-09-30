@@ -5,7 +5,7 @@ use crate::types::ability::{
     SpellCastingOptionKind, TargetFilter, TypeFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
-use crate::types::counter::{CounterMatch, CounterType};
+use crate::types::counter::CounterType;
 use crate::types::game_state::{BattlefieldEntryRecord, CastOccurrence, CastingVariant};
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost};
@@ -1208,15 +1208,14 @@ fn activation_restriction_applies(
             minimum,
             maximum,
         } => {
-            let count: u32 = state
+            // CR 122.1: exact total, compared in u64 so an upper bound is never
+            // satisfied by a count that actually exceeds it.
+            let count = state
                 .objects
                 .get(&source_id)
-                .map(|obj| match counters {
-                    CounterMatch::Any => obj.counters.values().sum(),
-                    CounterMatch::OfType(ct) => obj.counters.get(ct).copied().unwrap_or(0),
-                })
+                .map(|obj| counters.count_in(&obj.counters))
                 .unwrap_or(0);
-            count >= *minimum && maximum.is_none_or(|max| count <= max)
+            crate::game::conditions::counter_count_within_bounds(count, *minimum, *maximum)
         }
     }
 }

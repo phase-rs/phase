@@ -13,7 +13,8 @@ use super::oracle_effect::conditions::source_saddled_filter;
 use super::oracle_effect::{
     attach_terminal_die_result_branches_before_finalization, condition_text_is_rehomeable,
     lower_effect_chain_ir, parse_effect_chain_ir, parse_player_relative_clause,
-    try_parse_reanimator_aura_etb_effect_ir, try_parse_reanimator_aura_grant_etb_effect_ir,
+    rebind_event_context_amount_counts_in_ability, try_parse_reanimator_aura_etb_effect_ir,
+    try_parse_reanimator_aura_grant_etb_effect_ir,
 };
 use super::oracle_ir::ast::parsed_clause;
 use super::oracle_ir::context::{ParseContext, TriggerConditionScope, TriggerZoneChangeProvenance};
@@ -358,6 +359,11 @@ fn collect_trigger_condition_source_zones(condition: &TriggerCondition, out: &mu
             for inner in conditions {
                 collect_trigger_condition_source_zones(inner, out);
             }
+        }
+        // CR 508.1m: a "while ~ is in your graveyard" event-time gate pins the
+        // source's zone exactly like an intervening "if" does.
+        TriggerCondition::EventTime { condition } => {
+            collect_trigger_condition_source_zones(condition, out);
         }
         _ => {}
     }
@@ -788,6 +794,7 @@ fn quantity_comparison_operands(cond: &TriggerCondition) -> Option<(&QuantityExp
         TriggerCondition::And { conditions } | TriggerCondition::Or { conditions } => {
             conditions.iter().find_map(quantity_comparison_operands)
         }
+        TriggerCondition::EventTime { condition } => quantity_comparison_operands(condition),
         _ => None,
     }
 }
@@ -1329,8 +1336,16 @@ fn is_damage_done_trigger_pattern(cond_lower: &str) -> bool {
     .map(|(rest, _)| rest)
     .unwrap_or(input);
 
-    // Check for "deals damage to a player" or "deals combat damage to a player"
-    let Ok((rest, _)) = parse_damage_source_subject(input) else {
+    // Check for "deals damage to a player" or "deals combat damage to a player".
+    // Accepts self-references ("~", "this creature", "this permanent") as well as
+    // external damage sources parsed by `parse_damage_source_subject`.
+    let Ok((rest, _)) = alt((
+        value((), tag::<_, _, OracleError<'_>>("~ ")),
+        value((), tag("this creature ")),
+        value((), tag("this permanent ")),
+        value((), parse_damage_source_subject),
+    ))
+    .parse(input) else {
         return false;
     };
     let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("deals ").parse(rest) else {
@@ -2191,6 +2206,25 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     // not the spell that caused a SpellCast trigger.
     rebind_source_counter_condition_recipient(&mut def);
 
+    // CR 603.4 + CR 603.10a + CR 608.2h: a positive past-tense counter
+    // intervening-if ("if it had one or more counters on it") measures the
+    // triggering object as it last existed, and the body's immediate count
+    // anaphor ("put that number of +1/+1 counters", "draws that many cards")
+    // is that measured quantity. Bind the `EventContextAmount` placeholder to
+    // the same event-source counter read the condition checks (LKI on a
+    // battlefield departure, per CR 122.2 the live counters are gone). Only a
+    // positive gate establishes an antecedent: "if it had no counters on it"
+    // measured nothing, so a `Not` gate never binds.
+    if let Some(gate_qty) = def
+        .condition
+        .as_ref()
+        .and_then(positive_had_counter_gate_qty)
+    {
+        if let Some(execute) = def.execute.as_deref_mut() {
+            rebind_event_context_amount_counts_in_ability(execute, &gate_qty);
+        }
+    }
+
     // CR 601.2h + CR 400.7d: On a spell-cast-family trigger, an intervening-if
     // anaphor "mana spent to cast it"/"...this spell" denotes the *triggering
     // spell*, not the ability's source permanent. The bare anaphor parses to
@@ -2617,7 +2651,29 @@ fn condition_contains_source_counter(condition: &TriggerCondition) -> bool {
             conditions.iter().any(condition_contains_source_counter)
         }
         TriggerCondition::Not { condition } => condition_contains_source_counter(condition),
+        TriggerCondition::EventTime { condition } => condition_contains_source_counter(condition),
         _ => false,
+    }
+}
+
+/// CR 603.4 + CR 603.10a + CR 608.2h: the counter read a positive past-tense
+/// `HadCounters` intervening-if establishes as the antecedent of the body's
+/// count anaphor — `CountersOn { scope: EventSource, counter_type }`, the same
+/// event-source (LKI on a battlefield departure) counter set the condition
+/// itself checks. `counter_type: None` sums every kind.
+fn positive_had_counter_gate_qty(condition: &TriggerCondition) -> Option<QuantityRef> {
+    match condition {
+        TriggerCondition::HadCounters { counter_type } => Some(QuantityRef::CountersOn {
+            scope: ObjectScope::EventSource,
+            counter_type: counter_type.clone(),
+        }),
+        TriggerCondition::And { conditions } => {
+            let mut gates = conditions.iter().filter_map(positive_had_counter_gate_qty);
+            let first = gates.next()?;
+            gates.all(|gate| gate == first).then_some(first)
+        }
+        TriggerCondition::Not { .. } | TriggerCondition::Or { .. } => None,
+        _ => None,
     }
 }
 
@@ -5508,6 +5564,9 @@ fn remap_self_cast_scope_to_triggering_spell(cond: &mut TriggerCondition) {
                 .for_each(remap_self_cast_scope_to_triggering_spell);
         }
         TriggerCondition::Not { condition } => remap_self_cast_scope_to_triggering_spell(condition),
+        TriggerCondition::EventTime { condition } => {
+            remap_self_cast_scope_to_triggering_spell(condition)
+        }
         // All other variants are leaves that cannot carry a `ManaSpentToCast`
         // quantity ref — nothing to remap.
         _ => {}
@@ -5654,6 +5713,9 @@ fn rebind_attack_anaphor_to_defending_player(cond: &mut TriggerCondition) {
                 .for_each(rebind_attack_anaphor_to_defending_player);
         }
         TriggerCondition::Not { condition } => rebind_attack_anaphor_to_defending_player(condition),
+        TriggerCondition::EventTime { condition } => {
+            rebind_attack_anaphor_to_defending_player(condition)
+        }
         // All other variants are leaves that carry no `PlayerScope`, which
         // `TriggerCondition::designation_player_anchor` enforces exhaustively
         // for the designation family — nothing to rebind.
@@ -9343,8 +9405,9 @@ fn try_extract_not_completed_dungeon(
     None
 }
 
-/// CR 400.7 + CR 603.10: Extract "if it had [no] [a <type>] counter(s) on it"
-/// past-state counter conditions from the source's last-known information.
+/// CR 400.7 + CR 603.10: Extract "if it had [no | one or more | a] [<type>]
+/// counter(s) on it" past-state counter conditions from the source's
+/// last-known information.
 ///
 /// Composed along two orthogonal axes rather than enumerated as verbatim
 /// phrases (CLAUDE.md "compose nom combinators, don't enumerate permutations"):
@@ -9353,13 +9416,18 @@ fn try_extract_not_completed_dungeon(
 ///     class ("if it had no counters on it", which gates the recursion-return so
 ///     a creature that returned with stun counters does not return a second
 ///     time).
-///   * type axis — an optional `"a <type> "` discriminator selects a single
+///   * positive quantity axis — on the un-negated form, an optional
+///     `"one or more "` / `"a "` / `"an "` quantifier. It asserts "at least
+///     one", which is exactly what `HadCounters` tests, so it adds no new
+///     predicate.
+///   * type axis — an optional `"<type> "` discriminator selects a single
 ///     counter type (`HadCounters { counter_type: Some(_) }`); its absence
 ///     means any counter (`counter_type: None`).
 ///
 /// Recognized forms: "if it had counters on it", "if it had no counters on it",
-/// "if it had a +1/+1 counter on it", "if it had no +1/+1 counters on it", etc.
-/// The trailing `" on it"` is optional grammatical filler.
+/// "if it had one or more counters on it", "if it had a +1/+1 counter on it",
+/// "if it had one or more -1/-1 counters on it", "if it had no +1/+1 counters
+/// on it", etc. The trailing `" on it"` is optional grammatical filler.
 fn try_extract_had_counter_condition(
     tp: &TextPair<'_>,
     lower: &str,
@@ -9385,24 +9453,27 @@ fn try_extract_had_counter_condition(
 }
 
 /// Parse the body that follows `"if it had "`: an optional `"no "` negation, an
-/// optional `"a <type> "` type discriminator, then `"counter(s)[ on it]"`.
-/// Returns `(negated, counter_type)` where `counter_type` is `Some` only for the
-/// typed form. The type discriminator is whatever non-empty token precedes
-/// `" counter"`, with an optional leading article (`"a "` / `"an "`) consumed —
-/// so "a +1/+1 counter on it" and the negated plural "no +1/+1 counters on it"
-/// both classify the type, while the bare "counters on it" form yields `None`.
+/// optional positive quantifier (`"one or more "` / `"a "` / `"an "`, only on
+/// the un-negated form), an optional `"<type> "` type discriminator, then
+/// `"counter(s)[ on it]"`. Returns `(negated, counter_type)` where
+/// `counter_type` is `Some` only for the typed form.
 fn parse_had_counters_body(input: &str) -> OracleResult<'_, (bool, Option<CounterType>)> {
     let (input, negated) = opt(tag("no ")).parse(input)?;
     let negated = negated.is_some();
 
-    // Typed form: "[a |an ]<type> counter(s) [on it]". `take_until(" counter")`
-    // is anchored on the literal " counter" so the type token cannot bleed past
-    // it. The article is optional grammatical filler (present in the singular
-    // "a +1/+1 counter", absent in the plural "no +1/+1 counters").
-    let (after_article, _) = opt(alt((tag("a "), tag("an ")))).parse(input)?;
-    if let Ok((rest, type_text)) =
-        take_until::<_, _, OracleError<'_>>(" counter").parse(after_article)
-    {
+    // CR 122.1: positive quantity axis. "one or more" / "a" / "an" each assert
+    // at least one counter — the same predicate `HadCounters` already tests —
+    // so the quantifier is consumed without changing the condition. It never
+    // follows "no ".
+    let (input, _) = if negated {
+        (input, None)
+    } else {
+        opt(parse_had_counters_positive_quantifier).parse(input)?
+    };
+
+    // Typed form: "<type> counter(s) [on it]". `take_until(" counter")` is
+    // anchored on the literal " counter" so the type token cannot bleed past it.
+    if let Ok((rest, type_text)) = take_until::<_, _, OracleError<'_>>(" counter").parse(input) {
         if let Some(counter_type) = crate::types::counter::try_parse_counter_type(type_text) {
             // `take_until` stops before the leading space of " counter"; consume
             // it so `parse_counter_word_tail` starts on the bare word.
@@ -9415,6 +9486,12 @@ fn parse_had_counters_body(input: &str) -> OracleResult<'_, (bool, Option<Counte
     // Any-counter form: "counter(s) [on it]".
     let (rest, _) = parse_counter_word_tail(input)?;
     Ok((rest, (negated, None)))
+}
+
+/// CR 122.1: the positive "at least one" quantifier before a past-tense counter
+/// noun — `"one or more "`, or the singular article `"a "` / `"an "`.
+fn parse_had_counters_positive_quantifier(input: &str) -> OracleResult<'_, ()> {
+    value((), alt((tag("one or more "), tag("a "), tag("an ")))).parse(input)
 }
 
 /// CR 603.4 + CR 122.1: Extract source-scoped present-tense counter conditions —
@@ -11428,8 +11505,16 @@ pub(crate) fn parse_trigger_condition(
                 // Subject-ful state gate ("while ~ is attacking") — AND onto the
                 // parsed trigger's condition so the rest of the event clause
                 // parses exactly as it would unqualified.
+                // CR 508.1m + CR 603.4: the gate is read at the trigger event,
+                // not rechecked on resolution — wrap it as `EventTime` so an
+                // intervening `if` beside it keeps its own recheck.
                 let (mode, mut def) = parse_trigger_condition(&stripped, ctx);
-                def.condition = Some(and_trigger_conditions(def.condition.take(), while_cond));
+                def.condition = Some(and_trigger_conditions(
+                    def.condition.take(),
+                    TriggerCondition::EventTime {
+                        condition: Box::new(while_cond),
+                    },
+                ));
                 return (mode, def);
             }
             WhileStateGate::AttackSubjectState(filter) => {
@@ -12017,7 +12102,9 @@ fn trigger_object_pronoun_ref_for_intervening_if(
             TriggerCondition::And { conditions } | TriggerCondition::Or { conditions } => {
                 conditions.iter().any(pins_source_off_battlefield)
             }
-            TriggerCondition::Not { condition } => pins_source_off_battlefield(condition),
+            TriggerCondition::Not { condition } | TriggerCondition::EventTime { condition } => {
+                pins_source_off_battlefield(condition)
+            }
             _ => false,
         }
     }

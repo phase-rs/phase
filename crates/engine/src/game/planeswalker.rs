@@ -9,7 +9,7 @@ use crate::types::player::PlayerId;
 
 use super::ability_utils::{
     assign_targets_in_chain, auto_select_targets_for_ability, begin_target_selection_for_ability,
-    build_target_slots, flatten_targets_in_chain, random_select_targets_for_ability,
+    build_target_slots, declared_targets_in_chain, random_select_targets_for_ability,
 };
 use super::casting::emit_targeting_events;
 use super::engine::EngineError;
@@ -474,7 +474,7 @@ fn complete_loyalty_activation(
     let record = super::casting::take_activation_record(&mut resolved, player)?;
     record_loyalty_activation(state, pw_id, player);
 
-    let assigned_targets = flatten_targets_in_chain(&resolved);
+    let assigned_targets = declared_targets_in_chain(&resolved);
     let crime_candidate = super::casting::targets_commit_crime(state, &assigned_targets, player);
     emit_targeting_events(state, &assigned_targets, pw_id, player, events);
 

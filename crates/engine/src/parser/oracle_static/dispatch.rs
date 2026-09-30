@@ -2718,12 +2718,27 @@ pub(crate) fn parse_static_line_inner(
                 "Unconsumed conditional in 'can't be countered' catch-all — parser may need extension"
             );
         } else {
-            let affected = parse_cant_be_countered_subject(&tp);
-            return Some(
-                StaticDefinition::new(StaticMode::CantBeCountered)
-                    .affected(affected)
-                    .description(text.to_string()),
-            );
+            // CR 101.2 + CR 604.1: a leading "if <cond>," gates the whole static
+            // (Dragonlord's Prerogative, Banefire). A typed condition is attached
+            // through the single gate authority. A condition the static grammar
+            // does not type, or a line with text beyond "<subject> can't be
+            // countered" (Banefire's "and the damage can't be prevented"), keeps the
+            // static but gates it on the always-inert, coverage-visible marker, so
+            // the card reads as an unsupported gap instead of an unconditional
+            // "can't be countered".
+            let (gate_text, body) = split_leading_if_gate(&tp);
+            let mut def = StaticDefinition::new(StaticMode::CantBeCountered)
+                .affected(parse_cant_be_countered_subject(&body))
+                .description(text.to_string());
+            if let Some(gate_text) = gate_text {
+                match parse_static_condition(gate_text)
+                    .filter(|_| is_bare_cant_be_countered_clause(body.lower))
+                {
+                    Some(condition) => attach_gated_condition(&mut def, condition, gate_text),
+                    None => def.condition = Some(unenforceable_gate_marker(gate_text)),
+                }
+            }
+            return Some(def);
         }
     }
 

@@ -489,6 +489,12 @@ pub struct TriggerSourceContext {
     pub is_token: bool,
     #[serde(default)]
     pub face_down: bool,
+    /// CR 202.1 + CR 707.2 + CR 708.2a: The observed object's layered mana cost
+    /// (copy effects applied; a face-down permanent has none). `LKISnapshot`
+    /// records only the mana value, so a look-back read of the departed
+    /// object's mana symbols answers from this capture.
+    #[serde(default)]
+    pub mana_cost: ManaCost,
     #[serde(default)]
     pub transformed: bool,
     #[serde(default)]
@@ -7260,7 +7266,9 @@ pub struct PendingCast {
     pub declared_mana_additions: Vec<ManaCost>,
     /// CR 601.2b + CR 601.2f: Cost reductions the caster has affirmatively
     /// accepted for this cast and that no static on the board can reproduce —
-    /// today exactly the Defiler cycle's optional life payment. They join the
+    /// the Defiler cycle's optional life payment, and the reduction an Emerge
+    /// or Offering sacrifice earned before a deferred target declaration
+    /// (CR 702.119a + CR 702.48c). They join the
     /// ordered reduction set at the CR 601.2f lock seam, so they are ordered
     /// against the board's reductions instead of being shaved off an
     /// already-floored total.
@@ -9941,7 +9949,7 @@ pub enum CostResume {
 /// CR 601.2h + CR 702.48c: Identifies which spell-cost component a
 /// `WaitingFor::PayCost` choice is paying when the same `AbilityCost` shape can
 /// come from different rules.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SpellCostSource {
     #[default]
     Other,
@@ -19181,7 +19189,10 @@ pub enum LiminalEntrant {
     /// dispositions ("remains in its current zone", or the stack's
     /// owner's-graveyard placement) are decided on that path — which
     /// re-proposes the graveyard placement as a fresh, replacement-consulted
-    /// event (CR 614.6).
+    /// event (CR 614.6). Also carries the [`LiminalEntryKind::TransformedEntry`]
+    /// back-face projection of a double-faced card entering transformed
+    /// (CR 614.12); that entrant's prior zone is the stack or wherever the
+    /// effect moves it from.
     Card(GameObject),
 }
 
@@ -19286,6 +19297,13 @@ pub enum LiminalEntryKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         attack_target: Option<AttackTarget>,
     },
+    /// CR 614.12 + CR 712.8c + CR 712.11a + CR 712.13 + CR 712.14a: the
+    /// back-face projection of a double-faced card entering the battlefield
+    /// transformed while its stored object is still front face up (on the
+    /// stack or in another zone). Staged and released only by
+    /// `replacement::replace_event` / `continue_replacement`; never present
+    /// at delivery.
+    TransformedEntry,
 }
 
 #[derive(Debug, Clone, Serialize)]

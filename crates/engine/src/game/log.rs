@@ -4,7 +4,7 @@ use crate::game::combat::AttackTarget;
 use crate::game::planechase::PlanarDieFace;
 use crate::types::ability::{AbilityTag, TargetRef};
 use crate::types::events::{GameEvent, PlayerActionKind};
-use crate::types::game_state::{GameState, ZoneChangeRecord};
+use crate::types::game_state::{GameState, StackObjectClass, ZoneChangeRecord};
 use crate::types::identifiers::ObjectId;
 use crate::types::log::{
     GameLogEntry, LogBoundary, LogCategory, LogImportance, LogPresentation, LogSegment, LogTone,
@@ -48,6 +48,7 @@ pub fn resolve_log_entries(
                 && !is_concealed_move(events, index, &batch, after))
             .then(|| {
                 let mut segments = format_segments(event, after);
+                name_ability_entries_by_source(&mut segments, before, after);
                 name_at_event_time(&mut segments, &batch, index + 1);
                 (!segments.is_empty()).then(|| GameLogEntry {
                     seq: 0, // Assigned by frontend
@@ -738,6 +739,26 @@ fn should_exclude_event(event: &GameEvent) -> bool {
         // not be narrated as an attack against the default defender.
         GameEvent::AttackersDeclared { attacker_ids, .. } if attacker_ids.is_empty() => true,
         _ => false,
+    }
+}
+
+/// CR 113.7: a segment citing an activated or triggered ability's stack entry
+/// cites that ability's source instead. Read from `before`, because a
+/// countered ability has already left `after`'s stack.
+fn name_ability_entries_by_source(
+    segments: &mut [LogSegment],
+    before: &GameState,
+    after: &GameState,
+) {
+    for segment in segments {
+        let LogSegment::CardName { object_id, .. } = segment else {
+            continue;
+        };
+        if let Some(entry) = before.stack.iter().find(|entry| {
+            entry.id == *object_id && matches!(entry.kind.class(), StackObjectClass::Ability(_))
+        }) {
+            *segment = card_seg(after, entry.source_id);
+        }
     }
 }
 
@@ -2296,6 +2317,7 @@ mod tests {
         start_game, start_game_skip_mulligan, start_game_with_starting_player,
     };
     use crate::game::zones::create_object;
+    use crate::types::game_state::StackEntryKind;
     use crate::types::identifiers::CardId;
 
     /// CR 701.17a + CR 701.17c: the paired `ZoneChanged` names the milled card, so the
@@ -2709,6 +2731,153 @@ mod tests {
             excess: 0,
         };
         assert_eq!(categorize(&event), LogCategory::Combat);
+    }
+
+    /// A segment citing an ability's stack entry that was on the stack when the
+    /// batch began names the ability's source.
+    #[test]
+    fn stack_ability_segments_name_the_ability_source() {
+        use crate::types::ability::{Effect, ResolvedAbility};
+        use crate::types::game_state::StackEntry;
+        let mut after = GameState::new_two_player(42);
+        let pinger = create_object(
+            &mut after,
+            CardId(1),
+            PlayerId(0),
+            "Pinger".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        let countered_by = create_object(
+            &mut after,
+            CardId(2),
+            PlayerId(1),
+            "Stifle".to_string(),
+            crate::types::zones::Zone::Graveyard,
+        );
+        let entry = ObjectId(after.next_object_id);
+        after.next_object_id += 1;
+        let mut before = after.clone();
+        before.stack.push_back(StackEntry {
+            id: entry,
+            source_id: pinger,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: pinger,
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::NoOp,
+                    vec![],
+                    pinger,
+                    PlayerId(0),
+                )),
+            },
+        });
+        let events = [
+            GameEvent::BecomesTarget {
+                target: TargetRef::Object(entry),
+                source_id: countered_by,
+                source_controller: PlayerId(1),
+            },
+            GameEvent::SpellCountered {
+                object_id: entry,
+                countered_by,
+                countered_by_controller: PlayerId(1),
+            },
+        ];
+        let entries = resolve_log_entries(&events, &before, &after);
+        let cards: Vec<Vec<(&str, ObjectId)>> = entries
+            .iter()
+            .map(|entry| {
+                entry
+                    .segments
+                    .iter()
+                    .filter_map(|segment| match segment {
+                        LogSegment::CardName { name, object_id } => {
+                            Some((name.as_str(), *object_id))
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            cards,
+            vec![
+                vec![("Pinger", pinger), ("Stifle", countered_by)],
+                vec![("Stifle", countered_by), ("Pinger", pinger)],
+            ]
+        );
+    }
+
+    /// Only an ability's entry is renamed to its source: an entry that is
+    /// neither a spell nor an ability keeps the id the segment cites.
+    #[test]
+    fn combat_damage_entry_segment_is_not_renamed_to_a_source() {
+        use crate::types::ability::{Effect, ResolvedAbility};
+        use crate::types::game_state::{CombatDamageSubStep, StackEntry};
+        let mut state = GameState::new_two_player(42);
+        let pinger = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Pinger".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        let attacker = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Attacker".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        let ability_entry = ObjectId(state.next_object_id);
+        let damage_entry = ObjectId(state.next_object_id + 1);
+        state.next_object_id += 2;
+        state.stack.push_back(StackEntry {
+            id: ability_entry,
+            source_id: pinger,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: pinger,
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::NoOp,
+                    vec![],
+                    pinger,
+                    PlayerId(0),
+                )),
+            },
+        });
+        state.stack.push_back(StackEntry {
+            id: damage_entry,
+            source_id: attacker,
+            controller: PlayerId(0),
+            kind: StackEntryKind::CombatDamage {
+                sub_step: CombatDamageSubStep::Regular,
+                assignments: vec![],
+            },
+        });
+        let mut segments = [
+            LogSegment::CardName {
+                name: "ability entry".to_string(),
+                object_id: ability_entry,
+            },
+            LogSegment::CardName {
+                name: "damage entry".to_string(),
+                object_id: damage_entry,
+            },
+        ];
+        name_ability_entries_by_source(&mut segments, &state, &state);
+        assert!(
+            matches!(&segments[0], LogSegment::CardName { name, object_id }
+                if name == "Pinger" && *object_id == pinger),
+            "the ability entry names its source: {:?}",
+            segments[0]
+        );
+        assert!(
+            matches!(&segments[1], LogSegment::CardName { name, object_id }
+                if name == "damage entry" && *object_id == damage_entry),
+            "the combat-damage entry is left as cited: {:?}",
+            segments[1]
+        );
     }
 
     #[test]

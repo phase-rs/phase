@@ -24,9 +24,10 @@ use engine::types::ability::{
     CardSelectionMode, ChooseFromZoneConstraint, Chooser, Effect, ResolvedAbility, TargetFilter,
     ZoneChoiceCandidateSource, ZoneOwner,
 };
+use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{GameState, WaitingFor};
-use engine::types::identifiers::{CardId, TrackedSetId};
+use engine::types::identifiers::{CardId, ObjectId, TrackedSetId};
 use engine::types::zones::Zone;
 
 const ATRAXA_ETB: &str = "Flying, vigilance, deathtouch, lifelink\n\
@@ -85,10 +86,14 @@ fn atraxa_parser_wires_reveal_top_to_distinct_card_type_choose() {
     );
 }
 
-/// Runtime regression: after RevealTop resolves, the choice modal must list the
-/// ten revealed library cards — never a stale graveyard tracked set.
-#[test]
-fn atraxa_etb_choice_offers_revealed_library_not_graveyard() {
+/// Build the runtime fixture shared by the offering test and the
+/// decline/rejection test: a P0 Atraxa source, ten revealed library cards
+/// alternating creature/instant, one bottom-of-library card, and a stale
+/// graveyard tracked set. The chain is resolved so the state parks at
+/// `WaitingFor::ChooseFromZoneChoice`.
+///
+/// Returns `(state, library_top, padding, graveyard_trap)`.
+fn atraxa_choice_fixture() -> (GameState, Vec<ObjectId>, ObjectId, ObjectId) {
     let mut state = GameState::new_two_player(42);
     let source = create_object(
         &mut state,
@@ -193,6 +198,15 @@ fn atraxa_etb_choice_offers_revealed_library_not_graveyard() {
     resolve_ability_chain(&mut state, &reveal, &mut events, 0)
         .expect("Atraxa ETB reveal/choose chain must resolve");
 
+    (state, library_top, padding, graveyard_trap)
+}
+
+/// Runtime regression: after RevealTop resolves, the choice modal must list the
+/// ten revealed library cards — never a stale graveyard tracked set.
+#[test]
+fn atraxa_etb_choice_offers_revealed_library_not_graveyard() {
+    let (state, library_top, padding, graveyard_trap) = atraxa_choice_fixture();
+
     match state.waiting_for {
         WaitingFor::ChooseFromZoneChoice { cards, up_to, .. } => {
             assert!(up_to, "per-card-type picks are optional (up_to)");
@@ -218,4 +232,69 @@ fn atraxa_etb_choice_offers_revealed_library_not_graveyard() {
         }
         other => panic!("expected ChooseFromZoneChoice for Atraxa ETB, got {other:?}"),
     }
+}
+
+/// CR 608.2d: choosing ZERO cards from the per-card-type `ChooseFromZone`
+/// (`up_to: true`) is the legal decline — the very optionality the swallow
+/// auditor reads as evidence. The production `GameAction::SelectCards` path must
+/// therefore accept an empty selection, while a selection that violates the
+/// `DistinctCardTypes` constraint is rejected and leaves the prompt pending.
+#[test]
+fn atraxa_etb_decline_choose_zero_cards_is_accepted() {
+    let (mut state, library_top, _padding, _graveyard_trap) = atraxa_choice_fixture();
+
+    // Reach guard: the production prompt is pending with the ten revealed cards —
+    // the same assertion the offering test makes — so the submissions below are
+    // answered by the real resolution-choice handler.
+    match &state.waiting_for {
+        WaitingFor::ChooseFromZoneChoice {
+            player,
+            cards,
+            up_to,
+            ..
+        } => {
+            assert_eq!(*player, P0);
+            assert!(*up_to, "per-card-type picks are optional (up_to)");
+            assert_eq!(
+                cards.len(),
+                10,
+                "choice pool must be the ten revealed cards"
+            );
+        }
+        other => panic!("expected the Atraxa ChooseFromZoneChoice prompt, got {other:?}"),
+    }
+
+    // Paired negative: two cards of the SAME card type admit no injective
+    // assignment to distinct card types, so `choose_from_zone::selection_satisfies_constraint`
+    // rejects the submission and the prompt stays pending.
+    let creature_a = library_top[0];
+    let creature_b = library_top[2];
+    assert!(
+        state.objects[&creature_a].card_types.core_types == vec![CoreType::Creature]
+            && state.objects[&creature_b].card_types.core_types == vec![CoreType::Creature],
+        "reach: the negative needs two same-type cards"
+    );
+    let rejected = engine::game::engine::apply(
+        &mut state,
+        P0,
+        GameAction::SelectCards {
+            cards: vec![creature_a, creature_b],
+        },
+    );
+    assert!(
+        rejected.is_err(),
+        "two cards of the same card type must violate DistinctCardTypes, got {rejected:?}"
+    );
+    assert!(
+        matches!(state.waiting_for, WaitingFor::ChooseFromZoneChoice { .. }),
+        "a rejected selection must leave the prompt pending"
+    );
+
+    // The decline: zero cards is a legal `up_to` selection.
+    engine::game::engine::apply(&mut state, P0, GameAction::SelectCards { cards: vec![] })
+        .expect("declining the per-card-type choice (zero cards) must be accepted");
+    assert!(
+        !matches!(state.waiting_for, WaitingFor::ChooseFromZoneChoice { .. }),
+        "the answered prompt must not remain pending"
+    );
 }

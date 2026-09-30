@@ -315,7 +315,7 @@ pub(crate) fn strip_leading_general_conditional(
         if let Some(condition) = player_damage_scry
             .or(effect_discard_drain)
             .or_else(|| try_nom_condition_as_ability_condition(cond_text, ctx))
-            .or_else(|| parse_condition_text(cond_text))
+            .or_else(|| parse_condition_text_in(cond_text, ctx))
             .or_else(|| parse_control_count_as_ability_condition(cond_text))
             .or_else(|| parse_and_conjunction_condition(cond_text, ctx))
         {
@@ -347,7 +347,7 @@ fn parse_and_conjunction_condition(
     for part in parts {
         let part = part.trim();
         let condition = try_nom_condition_as_ability_condition(part, ctx)
-            .or_else(|| parse_condition_text(part))
+            .or_else(|| parse_condition_text_in(part, ctx))
             .or_else(|| parse_control_count_as_ability_condition(part))?;
         conditions.push(condition);
     }
@@ -4021,7 +4021,7 @@ pub(super) fn strip_suffix_conditional(
 
     if let Some(condition) = parse_triggering_spell_targets_filter_ability_condition(condition_core)
         .or_else(|| try_nom_condition_as_ability_condition(condition_core, ctx))
-        .or_else(|| parse_condition_text(condition_core))
+        .or_else(|| parse_condition_text_in(condition_core, ctx))
         .or_else(|| parse_control_count_as_ability_condition(condition_core))
     {
         return (Some(condition), effect_text);
@@ -4243,6 +4243,83 @@ fn parse_target_controller_poison_threshold(input: &str) -> OracleResult<'_, i32
     .parse(input)
 }
 
+/// CR 601.2 + CR 608.2c: `parse_condition_text` for a clause in a known parse
+/// context. A cast-time battlefield snapshot (`ControllerControlledMatchingAsCast`)
+/// is stamped only on the cast spell's own ability chain
+/// (`stamp_controller_controlled_as_cast`); a triggered ability's resolved
+/// ability never receives it, so the gate would always read false. Inside a
+/// trigger the condition is therefore declined rather than published as a gate
+/// that can never open.
+pub(super) fn parse_condition_text_in(text: &str, ctx: &ParseContext) -> Option<AbilityCondition> {
+    parse_condition_text(text)
+        .filter(|condition| !(ctx.in_trigger && reads_cast_time_snapshot(condition)))
+}
+
+pub(super) fn reads_cast_time_snapshot(condition: &AbilityCondition) -> bool {
+    match condition {
+        AbilityCondition::ControllerControlledMatchingAsCast { .. } => true,
+        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+            conditions.iter().any(reads_cast_time_snapshot)
+        }
+        AbilityCondition::Not { condition }
+        | AbilityCondition::ConditionInstead { inner: condition } => {
+            reads_cast_time_snapshot(condition)
+        }
+        AbilityCondition::WhenYouDo
+        | AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
+        | AbilityCondition::AdditionalCostPaidInstead
+        | AbilityCondition::AlternativeManaCostPaid
+        | AbilityCondition::EffectOutcome { .. }
+        | AbilityCondition::EventOutcomeWon
+        | AbilityCondition::SourceEnteredThisTurn
+        | AbilityCondition::HasMaxSpeed
+        | AbilityCondition::IsMonarch
+        | AbilityCondition::IsInitiative
+        | AbilityCondition::HasCityBlessing
+        | AbilityCondition::HasEnduringStory
+        | AbilityCondition::ControlsCommander { .. }
+        | AbilityCondition::DiscardedCardMatchesFilter { .. }
+        | AbilityCondition::IsRingBearer
+        | AbilityCondition::HasObjectTarget
+        | AbilityCondition::IsYourTurn
+        | AbilityCondition::FirstCombatPhaseOfTurn
+        | AbilityCondition::FirstEndStepOfTurn
+        | AbilityCondition::SourceIsTapped
+        | AbilityCondition::SourceAttachedToCreature
+        | AbilityCondition::DayNightIsNeither
+        | AbilityCondition::AdditionalCostPaid { .. }
+        | AbilityCondition::CoinFlipOutcome { .. }
+        | AbilityCondition::WasCast { .. }
+        | AbilityCondition::CastDuringPhase { .. }
+        | AbilityCondition::CurrentPhaseIs { .. }
+        | AbilityCondition::CastTimingPermission { .. }
+        | AbilityCondition::ManaColorSpent { .. }
+        | AbilityCondition::RevealedHasCardType { .. }
+        | AbilityCondition::ObjectsShareQuality { .. }
+        | AbilityCondition::TargetSharesNameWithOtherExiledThisWay { .. }
+        | AbilityCondition::CastVariantPaid { .. }
+        | AbilityCondition::CastVariantPaidInstead { .. }
+        | AbilityCondition::QuantityCheck { .. }
+        | AbilityCondition::PreviousEffectAmount { .. }
+        | AbilityCondition::CompletedDungeon { .. }
+        | AbilityCondition::TargetHasKeywordInstead { .. }
+        | AbilityCondition::TargetMatchesFilter { .. }
+        | AbilityCondition::TriggeringSpellTargetsFilter { .. }
+        | AbilityCondition::SourceMatchesFilter { .. }
+        | AbilityCondition::PostReplacementDamageSourceMatchesFilter { .. }
+        | AbilityCondition::ZoneChangeObjectMatchesFilter { .. }
+        | AbilityCondition::ControllerControlsMatching { .. }
+        | AbilityCondition::WasStartingPlayer { .. }
+        | AbilityCondition::SpellCastWithVariantThisTurn { .. }
+        | AbilityCondition::ZoneChangedThisWay { .. }
+        | AbilityCondition::CostPaidObjectMatchesFilter { .. }
+        | AbilityCondition::DayNightIs { .. }
+        | AbilityCondition::AbilityUseCountThisTurn { .. }
+        | AbilityCondition::SourceLacksKeyword { .. }
+        | AbilityCondition::ScopedPlayerMatches { .. } => false,
+    }
+}
+
 pub(super) fn parse_condition_text(text: &str) -> Option<AbilityCondition> {
     let text = text.trim().trim_end_matches('.');
 
@@ -4271,6 +4348,10 @@ pub(super) fn parse_condition_text(text: &str) -> Option<AbilityCondition> {
     }
 
     if let Some(condition) = parse_controller_controlled_as_cast_condition_text(text) {
+        return Some(condition);
+    }
+
+    if let Some(condition) = parse_revealed_or_controlled_as_cast_condition_text(text) {
         return Some(condition);
     }
 
@@ -4488,7 +4569,15 @@ fn parse_controller_controlled_as_cast_condition(
     input: &str,
 ) -> OracleResult<'_, AbilityCondition> {
     let (rest, _) = tag("you controlled ").parse(input)?;
-    let (filter, remainder) = parse_type_phrase_folding(rest);
+    parse_controlled_as_cast_body(rest)
+}
+
+/// CR 601.2 + CR 608.2c: The "<type phrase> as you cast this spell" body shared by
+/// the plain "you controlled …" gate and the "you revealed … or controlled …"
+/// disjunction. A cast-time snapshot of the controller's battlefield, not a
+/// resolution-time read.
+fn parse_controlled_as_cast_body(input: &str) -> OracleResult<'_, AbilityCondition> {
+    let (filter, remainder) = parse_type_phrase_folding(input);
     if matches!(filter, TargetFilter::Any) {
         return Err(nom::Err::Error(OracleError::new(
             input,
@@ -4500,6 +4589,48 @@ fn parse_controller_controlled_as_cast_condition(
         rest,
         AbilityCondition::ControllerControlledMatchingAsCast {
             filter: inject_controller_you(filter),
+        },
+    ))
+}
+
+fn parse_revealed_or_controlled_as_cast_condition_text(text: &str) -> Option<AbilityCondition> {
+    let lower = text.to_ascii_lowercase();
+    nom_parse_lower(&lower, |input| {
+        all_consuming(parse_revealed_or_controlled_as_cast_condition).parse(input)
+    })
+}
+
+/// CR 601.2b + CR 601.2h + CR 608.2c: "you revealed a <type> card or controlled a
+/// <type> as you cast this spell" (Draconic Roar, Foul-Tongue Invocation). The
+/// revealed half is the spell's optional "you may reveal a <type> card from your
+/// hand" additional cost, so it reads the same cast-time additional-cost-paid flag
+/// as "if it was kicked"; the controlled half is the cast-time battlefield
+/// snapshot. Either satisfies the gate, so the two compose as an `Or` rather than
+/// a bespoke variant.
+///
+/// The revealed noun phrase must itself be a well-formed type phrase, so a
+/// reveal of something this grammar does not model declines the whole clause.
+fn parse_revealed_or_controlled_as_cast_condition(
+    input: &str,
+) -> OracleResult<'_, AbilityCondition> {
+    let (rest, _) = tag("you revealed ").parse(input)?;
+    let (rest, revealed) = terminated(
+        take_until::<_, _, OracleError<'_>>(" or "),
+        alt((tag(" or you controlled "), tag(" or controlled "))),
+    )
+    .parse(rest)?;
+    let (revealed_filter, revealed_remainder) = parse_type_phrase_folding(revealed);
+    if matches!(revealed_filter, TargetFilter::Any) || !revealed_remainder.trim().is_empty() {
+        return Err(nom::Err::Error(OracleError::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    let (rest, controlled) = parse_controlled_as_cast_body(rest)?;
+    Ok((
+        rest,
+        AbilityCondition::Or {
+            conditions: vec![AbilityCondition::additional_cost_paid_any(), controlled],
         },
     ))
 }
@@ -4904,7 +5035,7 @@ pub(crate) fn lower_instead_condition(
     ctx: &mut ParseContext,
 ) -> Option<AbilityCondition> {
     try_nom_condition_as_ability_condition(cond_text, ctx)
-        .or_else(|| parse_condition_text(cond_text))
+        .or_else(|| parse_condition_text_in(cond_text, ctx))
         .or_else(|| parse_control_count_as_ability_condition(cond_text))
 }
 
@@ -5127,7 +5258,7 @@ pub(crate) fn try_parse_dig_instead_alternative(
     // ordering is purely defensive.
     let condition = parse_additional_cost_instead_condition_fragment(&cond_text)
         .or_else(|| try_nom_condition_as_ability_condition(&cond_text, ctx))
-        .or_else(|| parse_condition_text(&cond_text))
+        .or_else(|| parse_condition_text_in(&cond_text, ctx))
         .or_else(|| parse_control_count_as_ability_condition(&cond_text))
         .or_else(|| parse_cast_using_teamwork_condition_text(&cond_text))?;
 

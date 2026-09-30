@@ -2038,6 +2038,49 @@ pub fn flatten_targets_in_chain(ability: &ResolvedAbility) -> Vec<TargetRef> {
     targets
 }
 
+/// CR 601.2c: The targets a chain declares, as [`flatten_targets_in_chain`]
+/// lists them except that a node delegating to a paid "instead" sub contributes
+/// only that sub's targets. When the additional cost was paid, the sub's targets
+/// are the spell's alternative targets (CR 601.2c, CR 702.174m, CR 702.194c) and
+/// the delegating node's own `targets` only mirror them
+/// (`assign_targets_recursive`), so they are not a second declaration.
+pub fn declared_targets_in_chain(ability: &ResolvedAbility) -> Vec<TargetRef> {
+    if let Some(sub_ability) = paid_instead_delegate(ability) {
+        return declared_targets_in_chain(sub_ability);
+    }
+    let mut targets = chain_node_targets(ability);
+    if let Some(sub_ability) = ability.sub_ability.as_deref() {
+        targets.extend(declared_targets_in_chain(sub_ability));
+    }
+    if let Some(else_ability) = ability.else_ability.as_deref() {
+        targets.extend(declared_targets_in_chain(else_ability));
+    }
+    targets
+}
+
+/// CR 601.2c: Whether `sub` is the "instead" replacement its parent delegates
+/// to. When the parent's additional cost was paid (kicked, CR 702.33d; gift
+/// promised, CR 702.174m; cast using teamwork, CR 702.194c), the sub's targets
+/// are the spell's alternative targets and the parent's own `targets` only
+/// mirror them. Takes the parent's context rather than the parent so callers
+/// holding `&mut` to the parent's `sub_ability` can still ask.
+fn is_paid_instead_sub(parent_context: &SpellContext, sub: &ResolvedAbility) -> bool {
+    parent_context.additional_cost_paid
+        && matches!(
+            sub.condition,
+            Some(AbilityCondition::AdditionalCostPaidInstead)
+        )
+}
+
+/// The paid "instead" sub `ability` delegates to, if any (see
+/// [`is_paid_instead_sub`]).
+fn paid_instead_delegate(ability: &ResolvedAbility) -> Option<&ResolvedAbility> {
+    ability
+        .sub_ability
+        .as_deref()
+        .filter(|sub| is_paid_instead_sub(&ability.context, sub))
+}
+
 /// CR 608.2b: The slots of `declared` — numbered exactly as
 /// [`flatten_targets_in_chain`] numbers them — whose target the resolution-time
 /// re-validation `validated` (the [`validate_targets_in_chain`] result for the
@@ -3300,12 +3343,7 @@ fn collect_target_slots_inner(
     ability: &ResolvedAbility,
     acc: &mut SlotAccumulator,
 ) -> Result<(), TargetSlotBuildError> {
-    if let Some(sub_ability) = ability.sub_ability.as_deref().filter(|sub| {
-        matches!(
-            sub.condition,
-            Some(AbilityCondition::AdditionalCostPaidInstead)
-        )
-    }) {
+    if let Some(sub_ability) = paid_instead_delegate(ability) {
         // CR 601.2b/c + CR 702.194c: the broad "instead" override is surfaced
         // here only when `additional_cost_paid` is set at slot-build time.
         // RESOLVED (finding #1): cast-time propagation of that flag used to be
@@ -3315,10 +3353,8 @@ fn collect_target_slots_inner(
         // effective queue (Teamwork/Bargain today), not just Kicker. This
         // function's own logic (reading `additional_cost_paid` variant-
         // agnostically) was already correct and needed no change.
-        if ability.context.additional_cost_paid {
-            collect_target_slots(state, sub_ability, acc)?;
-            return Ok(());
-        }
+        collect_target_slots(state, sub_ability, acc)?;
+        return Ok(());
     }
 
     if target_slot_construction_needs_chosen_x_at_announcement(state, ability) {
@@ -6057,16 +6093,9 @@ fn collect_target_slot_specs(
     specs: &mut Vec<TargetSlotSpec>,
     next_instance: &mut usize,
 ) {
-    if let Some(sub_ability) = ability.sub_ability.as_deref().filter(|sub| {
-        matches!(
-            sub.condition,
-            Some(AbilityCondition::AdditionalCostPaidInstead)
-        )
-    }) {
-        if ability.context.additional_cost_paid {
-            collect_target_slot_specs(state, sub_ability, specs, next_instance);
-            return;
-        }
+    if let Some(sub_ability) = paid_instead_delegate(ability) {
+        collect_target_slot_specs(state, sub_ability, specs, next_instance);
+        return;
     }
 
     // CR 609.7 + CR 601.2c: Mirror the source-scoped `PreventDamage` slot from
@@ -8585,19 +8614,15 @@ fn assign_targets_recursive(
     targets: &[TargetRef],
     next_target: &mut usize,
 ) -> Result<(), EngineError> {
-    if let Some(sub_ability) = ability.sub_ability.as_mut().filter(|sub| {
-        matches!(
-            sub.condition,
-            Some(AbilityCondition::AdditionalCostPaidInstead)
-        )
-    }) {
-        if ability.context.additional_cost_paid {
-            assign_targets_recursive(state, sub_ability, targets, next_target)?;
-            ability.targets = sub_ability.targets.clone();
-            ability.context.attach_target_bindings =
-                sub_ability.context.attach_target_bindings.clone();
-            return Ok(());
-        }
+    if let Some(sub_ability) = ability
+        .sub_ability
+        .as_deref_mut()
+        .filter(|sub| is_paid_instead_sub(&ability.context, sub))
+    {
+        assign_targets_recursive(state, sub_ability, targets, next_target)?;
+        ability.targets = sub_ability.targets.clone();
+        ability.context.attach_target_bindings = sub_ability.context.attach_target_bindings.clone();
+        return Ok(());
     }
 
     if let Effect::MoveCounters {
@@ -9039,19 +9064,15 @@ fn assign_selected_slots_recursive(
     selected_slots: &[Option<TargetRef>],
     next_slot: &mut usize,
 ) -> Result<(), EngineError> {
-    if let Some(sub_ability) = ability.sub_ability.as_mut().filter(|sub| {
-        matches!(
-            sub.condition,
-            Some(AbilityCondition::AdditionalCostPaidInstead)
-        )
-    }) {
-        if ability.context.additional_cost_paid {
-            assign_selected_slots_recursive(state, sub_ability, selected_slots, next_slot)?;
-            ability.targets = sub_ability.targets.clone();
-            ability.context.attach_target_bindings =
-                sub_ability.context.attach_target_bindings.clone();
-            return Ok(());
-        }
+    if let Some(sub_ability) = ability
+        .sub_ability
+        .as_deref_mut()
+        .filter(|sub| is_paid_instead_sub(&ability.context, sub))
+    {
+        assign_selected_slots_recursive(state, sub_ability, selected_slots, next_slot)?;
+        ability.targets = sub_ability.targets.clone();
+        ability.context.attach_target_bindings = sub_ability.context.attach_target_bindings.clone();
+        return Ok(());
     }
 
     if let Effect::MoveCounters {
@@ -10389,16 +10410,10 @@ pub fn chain_retarget_slots(ability: &ResolvedAbility) -> Vec<RetargetSlotBindin
         ability: &ResolvedAbility,
         path: Vec<ChainStep>,
     ) -> (&ResolvedAbility, Vec<ChainStep>) {
-        if let Some(sub) = ability.sub_ability.as_deref() {
-            if matches!(
-                sub.condition,
-                Some(AbilityCondition::AdditionalCostPaidInstead)
-            ) && ability.context.additional_cost_paid
-            {
-                let mut new_path = path;
-                new_path.push(ChainStep::SubAbility);
-                return resolve_base_exposed(sub, new_path);
-            }
+        if let Some(sub) = paid_instead_delegate(ability) {
+            let mut new_path = path;
+            new_path.push(ChainStep::SubAbility);
+            return resolve_base_exposed(sub, new_path);
         }
         (ability, path)
     }
@@ -10469,11 +10484,7 @@ pub(crate) fn restamp_derived_chain_targets(ability: &mut ResolvedAbility) {
     fn remirror(ability: &mut ResolvedAbility) {
         if let Some(sub) = ability.sub_ability.as_deref_mut() {
             remirror(sub);
-            if matches!(
-                sub.condition,
-                Some(AbilityCondition::AdditionalCostPaidInstead)
-            ) && ability.context.additional_cost_paid
-            {
+            if is_paid_instead_sub(&ability.context, sub) {
                 ability.targets = sub.targets.clone();
                 ability.context.attach_target_bindings = sub.context.attach_target_bindings.clone();
             }
@@ -10498,17 +10509,9 @@ fn restamp_chosen_group_targets(ability: &mut ResolvedAbility) {
         node: &ResolvedAbility,
         groups: &mut HashMap<crate::types::ability::ChosenGroupId, GroupTargets>,
     ) {
-        let instead = node.sub_ability.as_deref().filter(|sub| {
-            matches!(
-                sub.condition,
-                Some(AbilityCondition::AdditionalCostPaidInstead)
-            )
-        });
-        if let Some(sub) = instead {
-            if node.context.additional_cost_paid {
-                collect(sub, groups);
-                return;
-            }
+        if let Some(sub) = paid_instead_delegate(node) {
+            collect(sub, groups);
+            return;
         }
         if let Some(id) = node.declares_chosen_group {
             groups.insert(
@@ -10520,7 +10523,12 @@ fn restamp_chosen_group_targets(ability: &mut ResolvedAbility) {
             );
         }
         if let Some(sub) = node.sub_ability.as_deref() {
-            if instead.is_some() {
+            // An unpaid "instead" sub declares nothing; only its sequential
+            // tail still runs.
+            if matches!(
+                sub.condition,
+                Some(AbilityCondition::AdditionalCostPaidInstead)
+            ) {
                 if let Some(tail) = sub.sub_ability.as_deref() {
                     if tail.sub_link == SubAbilityLink::SequentialSibling {
                         collect(tail, groups);

@@ -3,8 +3,8 @@
 Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
 
 - **Canonical root causes:** 29
-- **Distinct cards implicated:** 4576
-- **Total card appearances across root causes:** 4609 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Distinct cards implicated:** 4568
+- **Total card appearances across root causes:** 4601 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
 
 > Counting method: both figures count the per-root-cause card bullets only — the
 > three metadata bullets above are excluded — and are the source of truth.
@@ -16,9 +16,9 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | # | Root cause | # cards | Fix hint (where it likely lives) |
 |---|------------|--------:|----------------------------------|
 | 1 | Relative-clause / filter restriction on target dropped | 736 | oracle_target.rs / game/filter.rs — extend TargetFilter property extraction for trailing relative clauses |
-| 2 | Dropped intervening-if / gating condition (condition: null) | 582 | oracle_nom/condition.rs parse_inner_condition — trigger/static parsers must delegate condition extraction here |
-| 3 | Anaphor bound to wrong referent | 403 | oracle_quantity.rs context-ref resolution + game/ability_utils.rs forward_result wiring |
-| 4 | Conjoined / chained second effect clause dropped | 385 | oracle.rs effect-chain composition — split on 'and'/'then'/sentence boundaries and build sub_ability chain |
+| 2 | Dropped intervening-if / gating condition (condition: null) | 577 | oracle_nom/condition.rs parse_inner_condition — trigger/static parsers must delegate condition extraction here |
+| 3 | Anaphor bound to wrong referent | 402 | oracle_quantity.rs context-ref resolution + game/ability_utils.rs forward_result wiring |
+| 4 | Conjoined / chained second effect clause dropped | 383 | oracle.rs effect-chain composition — split on 'and'/'then'/sentence boundaries and build sub_ability chain |
 | 5 | Dropped 'for each' / dynamic count collapsed to Fixed | 332 | oracle_quantity.rs parse_for_each_clause / parse_quantity_ref — thread ForEach/ObjectCount into the effect count field |
 | 6 | Disjunctive (or-list) collapsed to first branch | 226 | oracle_nom/filter.rs + oracle_target.rs — build TargetFilter::Or across all alt() branches |
 | 7 | Wrong / dropped zone parameters on zone-change effect | 208 | game/zones.rs + oracle parser zone routing — derive correct origin/destination/owner from Oracle |
@@ -45,7 +45,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | 30 | Token/named-card name corrupted by normalization or overrun | 7 | oracle_util.rs SELF_REF normalization + Named-filter parsing — guard literal 'named X' spans |
 | 31 | Other / uncategorized misparse | 4 | manual triage |
 
-> The top **5** root causes cover 2438/4609 ≈ 53% of all misparse appearances; the top 10 cover 3429/4609 ≈ 74%. Fix these first.
+> The top **5** root causes cover 2430/4601 ≈ 53% of all misparse appearances; the top 10 cover 3421/4601 ≈ 74%. Fix these first.
 
 ## Full card lists per root cause
 
@@ -796,7 +796,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 2. Dropped intervening-if / gating condition (condition: null)  (582 cards)
+### 2. Dropped intervening-if / gating condition (condition: null)  (577 cards)
 
 **Signature.** Trigger/static/replacement/spell condition left null though Oracle has an 'if/while/as long as/unless' game-state gate; the effect resolves unconditionally (CR 603.4 / 608.2c).
 
@@ -1092,7 +1092,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Lashwhip Predator
 - Latchkey Faerie
 - Lava Burst
-- Leader's Talent
 - Lethal Throwdown
 - Liberating Combustion
 - Liberator, Urza's Battlethopter
@@ -1149,7 +1148,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Nefarox, Overlord of Grixis
 - Negative Zone Portal
 - Nightshade Assassin
-- Nikara, Lair Scavenger
 - Nimbus Champion
 - Nine-Lives Familiar
 - No Quarter
@@ -1193,7 +1191,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Promising Stairs
 - Prompto Argentum
 - Prowling Geistcatcher
-- Pugnacious Hammerskull
 - Pulse of the Hunter Maze
 - Qasali Ambusher
 - Quest for the Nihil Stone
@@ -1387,7 +1384,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 3. Anaphor bound to wrong referent  (403 cards)
+### 3. Anaphor bound to wrong referent  (402 cards)
 
 **Signature.** A pronoun/demonstrative ('it', 'that creature/player', 'them', 'they') resolves to the wrong slot (Self/Source/Controller/Any/ParentTarget) instead of the bound parent target, forwarded result, or triggering player (CR 608.2k). Includes the runtime half of the same defect class, where the referent slot is bound correctly but resolves to a STALE prior answer.
 
@@ -1638,7 +1635,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Numbing Dose
 - Ob Nixilis, Unshackled
 - Oblation
-- Oft-Nabbed Goat
 - Ondu Rising
 - Opal Gargoyle
 - Opal Titan
@@ -1801,7 +1797,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 4. Conjoined / chained second effect clause dropped  (385 cards)
+### 4. Conjoined / chained second effect clause dropped  (383 cards)
 
 **Signature.** A multi-clause effect ('X and Y' / 'then Z') emits only the first conjunct; sub_ability is null and the trailing imperative/effect chain is omitted.
 
@@ -1816,7 +1812,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Akroma, Angel of Wrath Avatar
 - Alien Symbiosis
 - All Shall Smolder in My Wake
-- Ambitious Augmenter
 - Amnesia
 - An-Havva Inn
 - Anavolver
@@ -2072,7 +2067,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Rootwater Shaman
 - Rothga, Bonded Engulfer
 - Rout
-- Rufus Shinra
 - Rune-Brand Juggler
 - Ryan Sinclair
 - Rysorian Badger

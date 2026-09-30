@@ -905,15 +905,15 @@ pub fn resolve(
     // (Bring to Light, `target != source` but in the controller's own exile)
     // must reach this path.
     //
-    // FOLLOW-UP (#1520 twin): Rebound (CR 702.88a) is still a
-    // `LingeringPermission` driver because its recast permission legitimately
-    // needs `duration: Some(UntilEndOfTurn)` to prune on decline (see the
-    // `consuming_vapors_rebound` suite). A rebounding SORCERY recast at upkeep
-    // therefore still passes through the lingering path; whether it hits the
-    // sorcery-speed gate is tracked separately. Routing Rebound through
-    // `DuringResolution` would regress that durational-prune contract, so it is
-    // intentionally left on the permission path under the explicit `driver`
-    // signal rather than forced through during-resolution here.
+    // CR 702.88a + CR 608.2g: Rebound's next-upkeep recast offer (issue
+    // #6461) is a `DuringResolution` driver like Suspend's last-counter
+    // cast — the "you may cast this card from exile" instruction names no
+    // duration, so it executes AS the delayed trigger resolves. The
+    // `UntilEndOfTurn` lingering permission this used to grant let the
+    // recast happen at any later priority window, and left rebounding
+    // SORCERY recasts to face the sorcery-speed gate at upkeep; both are
+    // fixed by routing through this path (the CR 608.2g timing bypass is
+    // armed by the resolution-cast cleanup marker).
     //
     // Nashi/Jeleva-style "you may cast [other] exiled cards" (target != source,
     // `ExiledBySource` filter, or an `alt_ability_cost`) are also
@@ -2317,10 +2317,9 @@ fn record_lingering_permissions(
                     granted_to,
                     resolution_cleanup: None,
                     // CR 611.2a: continuous-effect duration plumbing.
-                    // CR 702.88a: Rebound's upkeep recast permission expires.
                     // Forward `duration` from the `Effect::CastFromZone` so
-                    // durational grants (Rebound's `UntilEndOfTurn` upkeep
-                    // recast offer) are pruned at the correct boundary.
+                    // durational grants (Emry-class "you may cast that card
+                    // this turn" offers) are pruned at the correct boundary.
                     // `None` (the common case) preserves the standing
                     // semantics used by Discover, Suspend, Nashi, etc., whose
                     // cards are exiled and stay castable until they leave exile

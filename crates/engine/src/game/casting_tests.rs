@@ -24683,7 +24683,7 @@ fn pay_and_push_emits_targeting_events_for_chained_spell_targets() {
         &mut events,
     );
 
-    let waiting_for = crate::game::casting_costs::pay_and_push(
+    let waiting_for = crate::game::casting_costs::pay_and_push_with_lock(
         &mut state,
         PlayerId(0),
         object_id,
@@ -24700,6 +24700,7 @@ fn pay_and_push_emits_targeting_events_for_chained_spell_targets() {
         None,
         Zone::Hand,
         CastPaymentMode::Auto,
+        crate::game::casting_costs::CostLockInput::default(),
         &mut events,
     )
     .expect("spell with chained targets should cast");

@@ -247,6 +247,8 @@ fn trigger_graveyard_type_threshold(condition: &TriggerCondition) -> Option<u32>
             all_graveyard_thresholds_min(conditions.iter().map(trigger_graveyard_type_threshold))
         }
         TriggerCondition::Not { .. } => None,
+        // CR 508.1m: an event-time "while" gate carries its predicate inside.
+        TriggerCondition::EventTime { condition } => trigger_graveyard_type_threshold(condition),
         _ => None,
     }
 }

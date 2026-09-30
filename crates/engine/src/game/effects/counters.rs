@@ -12,9 +12,9 @@ use crate::types::counter::parse_counter_type;
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    CounterAddedRecord, CounterMoveChoice, CounterRemoveChoice, DelayedTrigger, GameState,
-    PendingCounterAddition, PendingCounterAdditionQueue, PendingCounterMove,
-    PendingCounterMoveQueue, PendingCounterPostAction, PendingCounterRemoval,
+    BattlefieldDepartureSourceContext, CounterAddedRecord, CounterMoveChoice, CounterRemoveChoice,
+    DelayedTrigger, GameState, PendingCounterAddition, PendingCounterAdditionQueue,
+    PendingCounterMove, PendingCounterMoveQueue, PendingCounterPostAction, PendingCounterRemoval,
     PendingCounterRemovalQueue, PendingEffectResolutionEvent, PendingEffectResolved, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
@@ -2596,8 +2596,13 @@ pub fn resolve_move(
         // pipeline rather than the atomic move-counter path.
         let mut additions = Vec::new();
         for source_id in source_ids {
-            let source_counters =
-                counter_transfer_source_counters(state, source_id, mode, counter_type_filter);
+            let source_counters = counter_transfer_source_counters(
+                state,
+                source_id,
+                mode,
+                counter_type_filter,
+                ability.context.creation_lookback_event.as_deref(),
+            );
             if source_counters.is_empty() {
                 continue;
             }
@@ -2638,8 +2643,13 @@ pub fn resolve_move(
     }
 
     for source_id in source_ids {
-        let source_counters =
-            counter_transfer_source_counters(state, source_id, mode, counter_type_filter);
+        let source_counters = counter_transfer_source_counters(
+            state,
+            source_id,
+            mode,
+            counter_type_filter,
+            ability.context.creation_lookback_event.as_deref(),
+        );
 
         if source_counters.is_empty() {
             continue;
@@ -2710,6 +2720,7 @@ fn resolve_move_distribution(
         source_id,
         CounterTransferMode::Move,
         counter_type_filter,
+        ability.context.creation_lookback_event.as_deref(),
     );
     let destinations =
         resolution_counter_move_destinations(state, ability, target_filter, source_id);
@@ -2760,6 +2771,7 @@ fn resolve_stack_target_move_distribution(
         source_id,
         CounterTransferMode::Move,
         counter_type_filter,
+        ability.context.creation_lookback_event.as_deref(),
     );
 
     if available.is_empty() || destinations.is_empty() {
@@ -2908,6 +2920,20 @@ fn resolve_counter_transfer_destinations(
         return vec![ability.source_id];
     }
 
+    if matches!(target_filter, TargetFilter::LastCreated) {
+        return crate::game::targeting::resolve_event_context_targets(
+            state,
+            target_filter,
+            ability.source_id,
+        )
+        .into_iter()
+        .filter_map(|target| match target {
+            TargetRef::Object(id) => Some(id),
+            TargetRef::Player(_) => None,
+        })
+        .collect();
+    }
+
     if let Some(TargetRef::Object(id)) = crate::game::targeting::resolve_event_context_target(
         state,
         target_filter,
@@ -2933,14 +2959,30 @@ fn counter_transfer_source_counters(
     source_id: ObjectId,
     mode: CounterTransferMode,
     counter_type_filter: Option<&CounterType>,
+    creation_lookback_event: Option<&GameEvent>,
 ) -> Vec<(CounterType, u32)> {
-    let mut counters = state
-        .objects
-        .get(&source_id)
-        .map(|obj| obj.counters.clone())
-        .unwrap_or_default();
+    let departure_counters = (mode == CounterTransferMode::Put)
+        .then(|| {
+            departure_counters_for_counter_reproduction(state, source_id, creation_lookback_event)
+        })
+        .flatten();
+    let mut counters = if mode == CounterTransferMode::Put {
+        departure_counters.clone().unwrap_or_else(|| {
+            state
+                .objects
+                .get(&source_id)
+                .map(|obj| obj.counters.clone())
+                .unwrap_or_default()
+        })
+    } else {
+        state
+            .objects
+            .get(&source_id)
+            .map(|obj| obj.counters.clone())
+            .unwrap_or_default()
+    };
 
-    if counters.is_empty() && mode == CounterTransferMode::Put {
+    if counters.is_empty() && mode == CounterTransferMode::Put && departure_counters.is_none() {
         counters = state
             .lki_cache
             .get(&source_id)
@@ -2952,6 +2994,45 @@ fn counter_transfer_source_counters(
         .into_iter()
         .filter(|(ct, count)| *count > 0 && counter_type_filter.is_none_or(|filter| filter == ct))
         .collect()
+}
+
+/// CR 122.8 + CR 603.7 + CR 603.10a: the departure a counter reproduction reads.
+/// A phase-delayed ability carries the departure it was created under
+/// (`creation_lookback_event`) because the phase event that fires it names no
+/// object; every other resolution reads the event that fired it.
+fn departure_counters_for_counter_reproduction(
+    state: &GameState,
+    source_id: ObjectId,
+    creation_lookback_event: Option<&GameEvent>,
+) -> Option<std::collections::HashMap<CounterType, u32>> {
+    let Some(
+        event @ GameEvent::ZoneChanged {
+            object_id,
+            from: Some(Zone::Battlefield),
+            ..
+        },
+    ) = creation_lookback_event.or(state.current_trigger_event.as_ref())
+    else {
+        return None;
+    };
+    if *object_id != source_id {
+        return None;
+    }
+
+    // CR 122.8 + CR 400.7 + CR 608.2h: a dies trigger that puts the departed
+    // object's counters on another object reproduces the old incarnation's LKI
+    // counters, not counters on a same-id object that later returned.
+    Some(
+        match crate::types::game_state::battlefield_departure_trigger_source_context(event) {
+            BattlefieldDepartureSourceContext::Present(context) => context.lki.counters.clone(),
+            BattlefieldDepartureSourceContext::Absent => state
+                .lki_cache
+                .get(object_id)
+                .map(|lki| lki.counters.clone())
+                .unwrap_or_default(),
+            BattlefieldDepartureSourceContext::Malformed => Default::default(),
+        },
+    )
 }
 
 /// CR 122.5 + CR 608.2d: an optional fixed stack-target counter move is
@@ -2994,6 +3075,7 @@ pub(crate) fn move_counters_optional_is_infeasible(
             source_id,
             CounterTransferMode::Move,
             counter_type.as_ref(),
+            ability.context.creation_lookback_event.as_deref(),
         )
         .into_iter()
         .any(|(counter_type, available)| {

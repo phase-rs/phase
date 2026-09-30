@@ -1598,11 +1598,11 @@ mod tests {
         assert_eq!(
             swallowed_clause_gap(
                 SwallowedAxis::Quantity,
-                "pirates you control get +1/+1 until end of turn for each time you've cast \
-                 a commander from the command zone this game."
+                "creatures you control get +1/+0 until end of turn for each lore counter \
+                 among sagas you control."
             ),
             Some(ClauseGap::Quantity {
-                operand: "time you've cast a commander from the command zone this game".to_string()
+                operand: "lore counter among sagas you control".to_string()
             })
         );
     }

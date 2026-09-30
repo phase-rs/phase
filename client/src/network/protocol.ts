@@ -106,6 +106,14 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
+ *  76 — game_setup and state_update carry GameState, whose delayed triggered
+ *       abilities now serialize SpellContext.creation_lookback_event and whose
+ *       trigger source contexts serialize TriggerSourceContext.mana_cost. A v75
+ *       peer would drop both and resolve differently, so first contact rejects
+ *       the skew. Bumped in lockstep with full-game protocol 94.
+ *  75 — ReductionProvenance gains SacrificedForCost, carried by GameState's
+ *       PendingCast and WaitingFor.OrderCostReductions. Bumped with full-game
+ *       protocol 93 so first contact rejects the new provenance.
  *  74 — game_setup and state_update carry GameState, whose paused
  *       continuations now serialize ResolvedAbility.parent_target_missing_reason
  *       including the new RevealUntil reason (a reveal-until whiff), whose
@@ -482,7 +490,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 74 as const;
+export const WIRE_PROTOCOL_VERSION = 76 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

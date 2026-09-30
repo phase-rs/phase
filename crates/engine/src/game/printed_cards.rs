@@ -447,10 +447,33 @@ fn intrinsic_saga_lore_counter(card_types: &CardType) -> Option<(CounterType, u3
     }
 }
 
+/// CR 306.5b + CR 310.4b: loyalty/defense a face enters with. A Saga's
+/// CR 714.3a lore counter is NOT seeded here — it is the Saga face's own
+/// replacement (`parse_saga_chapters`), which the pipeline applies through
+/// CR 614.12.
+///
+/// `printed_loyalty` is authoritative when present: in particular, an
+/// explicit printed X must remain zero outside the resolving-spell path.
+/// Older serialized objects and lightweight engine constructors predate that
+/// provenance field, but their fixed `loyalty` baseline is still the printed
+/// loyalty number required by CR 306.5b.
+pub fn intrinsic_face_entry_counters(
+    printed_loyalty: Option<PrintedLoyalty>,
+    fallback_loyalty: Option<u32>,
+    resolving_spell_x: Option<u32>,
+    defense: Option<u32>,
+) -> Vec<(CounterType, u32)> {
+    let loyalty = printed_loyalty
+        .map(|value| value.entry_counter_count(resolving_spell_x))
+        .or(fallback_loyalty);
+    intrinsic_face_counters(loyalty, defense)
+}
+
 /// CR 306.5b + CR 310.4b + CR 714.3a: Intrinsic counters for the face a
 /// permanent will have on entry — loyalty/defense from the entering face plus
-/// the Saga lore counter when the entering face is a Saga (CR 712.14a
-/// transformed entry reads the back face here before the physical swap).
+/// the Saga lore counter when the entering face is a Saga (an "enters as a
+/// copy" entry reads the copied face's values here; a transformed entry uses
+/// [`intrinsic_face_entry_counters`] instead, see CR 614.12).
 pub fn intrinsic_entry_counters_for_face(
     printed_loyalty: Option<PrintedLoyalty>,
     fallback_loyalty: Option<u32>,
@@ -458,15 +481,12 @@ pub fn intrinsic_entry_counters_for_face(
     defense: Option<u32>,
     card_types: &CardType,
 ) -> Vec<(CounterType, u32)> {
-    // `printed_loyalty` is authoritative when present: in particular, an
-    // explicit printed X must remain zero outside the resolving-spell path.
-    // Older serialized objects and lightweight engine constructors predate that
-    // provenance field, but their fixed `loyalty` baseline is still the printed
-    // loyalty number required by CR 306.5b.
-    let loyalty = printed_loyalty
-        .map(|value| value.entry_counter_count(resolving_spell_x))
-        .or(fallback_loyalty);
-    let mut counters = intrinsic_face_counters(loyalty, defense);
+    let mut counters = intrinsic_face_entry_counters(
+        printed_loyalty,
+        fallback_loyalty,
+        resolving_spell_x,
+        defense,
+    );
     if let Some(lore) = intrinsic_saga_lore_counter(card_types) {
         counters.push(lore);
     }

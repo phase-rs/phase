@@ -793,8 +793,7 @@ pub(crate) fn parse_enchanted_equipped_predicate(
                     // scoped-designation or payment-continuation leaf reaching
                     // THIS path would still be a false green.
                     def.condition = Some(
-                        parse_static_condition(condition_text)
-                            .or_else(|| parse_attached_static_condition(condition_text))
+                        parse_attached_static_condition(condition_text)
                             .map(|condition| gate_cant_untap_condition(condition, condition_text))
                             .unwrap_or_else(|| {
                                 unparsed_gate_condition(
@@ -856,7 +855,8 @@ pub(crate) fn parse_enchanted_equipped_predicate(
     {
         (
             body_tp,
-            super::shared::parse_unless_static_condition(&pred_tp, Some(&affected)),
+            super::shared::parse_unless_static_condition(&pred_tp, Some(&affected))
+                .map(rebind_source_object_quantities_to_recipient),
             condition_tp
                 .original
                 .trim()

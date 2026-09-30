@@ -5616,10 +5616,18 @@ fn parse_your_opponents_control_no(input: &str) -> OracleResult<'_, StaticCondit
     ))
 }
 
-/// Parse "you don't control a/an [type]" → Not(IsPresent).
+/// Parse "you don't control a/an/another [type]" → Not(IsPresent).
+///
+/// The article is PEEKED, not consumed — the same shape as
+/// `parse_you_control_a` — so "another " reaches `parse_type_phrase_folding`,
+/// which maps it to `FilterProp::Another` (Pugnacious Hammerskull: "attacks
+/// while you don't control another Dinosaur"). Consuming "a "/"an " only made
+/// "another" fail here and the whole while-gate was dropped, so the trigger
+/// fired unconditionally.
 fn parse_you_dont_control_a(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = (tag("you "), parse_dont, tag(" control ")).parse(input)?;
-    let (rest, _) = parse_article(rest)?;
+    let (rest, _) =
+        nom::combinator::peek(alt((tag("a "), tag("an "), tag("another ")))).parse(rest)?;
     let (filter, remainder) = parse_type_phrase_folding(rest);
     if matches!(filter, TargetFilter::Any) {
         return Err(nom::Err::Error(nom::error::Error::new(
@@ -14113,6 +14121,30 @@ mod tests {
         let (rest, c) = parse_inner_condition("you don't control a creature").unwrap();
         assert_eq!(rest, "");
         assert!(matches!(c, StaticCondition::Not { .. }));
+    }
+
+    /// "another" survives the negated presence gate as `FilterProp::Another`
+    /// (Pugnacious Hammerskull, The Majestic Duo). Before, only "a "/"an " were accepted
+    /// and the whole condition failed to parse.
+    #[test]
+    fn test_you_dont_control_another_dinosaur() {
+        let (rest, c) = parse_inner_condition("you don't control another Dinosaur").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::Not { condition } => match *condition {
+                StaticCondition::IsPresent {
+                    filter: Some(TargetFilter::Typed(ref tf)),
+                } => {
+                    assert!(
+                        tf.properties.contains(&FilterProp::Another),
+                        "expected FilterProp::Another, got {tf:?}"
+                    );
+                    assert_eq!(tf.controller, Some(ControllerRef::You));
+                }
+                other => panic!("expected IsPresent(Typed), got {other:?}"),
+            },
+            other => panic!("expected Not(IsPresent), got {other:?}"),
+        }
     }
 
     #[test]

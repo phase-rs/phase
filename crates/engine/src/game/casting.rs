@@ -53,7 +53,7 @@ use super::ability_utils::{
     assign_targets_in_chain, auto_select_targets, auto_select_targets_for_ability,
     begin_target_selection, begin_target_selection_for_ability, build_resolved_from_def,
     build_target_slots, build_target_slots_for_announcement, compute_unavailable_modes,
-    filter_references_target_player, flatten_targets_in_chain,
+    declared_targets_in_chain, filter_references_target_player, flatten_targets_in_chain,
     has_legal_target_assignment_for_ability, modal_choice_for_player,
     simple_legal_target_assignment_exists_for_ability, target_constraints_from_modal,
     unresolved_x_target_construction_error, TargetSlotBuildOutcome,
@@ -9985,10 +9985,11 @@ fn prepare_spell_cast_announced(
 /// whenever the cast has no accepted reduction and no election).
 #[derive(Debug, Clone, Default)]
 pub(super) struct CostFinalizeContext {
-    /// Reductions that are not derivable from the board at this seam. Today
-    /// this is exactly the accepted Defiler-cycle life payment (CR 601.2b),
-    /// whose acceptance lives in the answer to `WaitingFor::DefilerPayment`
-    /// rather than in any static.
+    /// Reductions that are not derivable from the board at this seam: the
+    /// accepted Defiler-cycle life payment (CR 601.2b), whose acceptance lives
+    /// in the answer to `WaitingFor::DefilerPayment` rather than in any static,
+    /// and the reduction an Emerge or Offering sacrifice earned before a
+    /// deferred target declaration (CR 702.119a + CR 702.48c).
     extra: Vec<CostModification>,
     /// The caster's CR 601.2b + CR 601.2f election, once made.
     election: Option<CostReductionElection>,
@@ -10007,8 +10008,10 @@ impl CostFinalizeContext {
     /// that must agree with it) has to run under this rather than
     /// [`CostFinalizeContext::PREVIEW`], or it silently replaces the caster's
     /// elected order with the caster-optimal default and drops an accepted
-    /// Defiler reduction.
-    fn from_pending(pending: &PendingCast) -> Self {
+    /// Defiler reduction. The additional-cost declaration preview runs under it
+    /// too, so an optional cost is offered against the total the kept
+    /// sacrifice reduction will lock in.
+    pub(super) fn from_pending(pending: &PendingCast) -> Self {
         Self {
             extra: pending
                 .accepted_cost_reductions
@@ -10904,7 +10907,7 @@ pub(super) fn lock_in_total_cost(
     extra: &[CostReductionEntry],
     election: Option<&CostReductionElection>,
 ) -> CostLockOutcome {
-    // Hot path. `pay_and_push` runs this on EVERY cast, including the simulated
+    // Hot path. `pay_and_push_with_lock` runs this on EVERY cast, including the simulated
     // ones the AI search drives, so the overwhelmingly common board — no
     // `ModifyCost` static anywhere and nothing accepted — must not pay for a
     // second round of modifier collection. Behaviour-neutral: with no reduction
@@ -18448,7 +18451,7 @@ fn continue_with_prepared(
                 assign_targets_in_chain(state, &mut resolved, &targets)?;
                 emit_targeting_events(
                     state,
-                    &flatten_targets_in_chain(&resolved),
+                    &declared_targets_in_chain(&resolved),
                     prepared.object_id,
                     player,
                     events,
@@ -18534,7 +18537,7 @@ fn continue_with_prepared(
             assign_targets_in_chain(state, &mut resolved, &targets)?;
             emit_targeting_events(
                 state,
-                &flatten_targets_in_chain(&resolved),
+                &declared_targets_in_chain(&resolved),
                 prepared.object_id,
                 player,
                 events,
@@ -18931,7 +18934,7 @@ fn continue_with_prepared(
             assign_targets_in_chain(state, &mut resolved, &targets)?;
             emit_targeting_events(
                 state,
-                &flatten_targets_in_chain(&resolved),
+                &declared_targets_in_chain(&resolved),
                 prepared.object_id,
                 player,
                 events,
@@ -23400,7 +23403,14 @@ pub(crate) fn resolve_non_self_discard_requirement_with_ability(
     let Some((count, filter, _selection)) = find_non_self_discard(cost) else {
         return Ok(None);
     };
-    let count = super::quantity::resolve_quantity(state, count, player, source_id).max(0) as usize;
+    // CR 107.3a: the ability carries the announced X that a "discard X cards"
+    // count reads; without it X would resolve to 0 and the cost would be skipped.
+    let count = ability
+        .map_or_else(
+            || super::quantity::resolve_quantity(state, count, player, source_id),
+            |ability| super::quantity::resolve_quantity_with_targets(state, count, ability),
+        )
+        .max(0) as usize;
     // CR 601.2h + CR 701.9a: A resolved zero-card discard is paid by doing nothing — never
     // surface a dead selection prompt for it.
     if count == 0 {
@@ -24137,7 +24147,9 @@ pub(crate) fn removable_counter_count_for_cost_selection(
 ) -> u32 {
     match (counter_type, selection) {
         (crate::types::counter::CounterMatch::Any, CounterCostSelection::AmongObjects) => {
-            obj.counters.values().copied().sum()
+            // CR 122.1: exact total clamped to u32. This bounds how many counters
+            // may be selected, an availability ("at least N") use only.
+            u32::try_from(crate::types::counter::counter_total(&obj.counters)).unwrap_or(u32::MAX)
         }
         _ => removable_counter_count(obj, counter_type),
     }
@@ -27031,7 +27043,7 @@ fn activate_with_cost_carrier(
             // declares targets before any activation cost is paid.
             emit_targeting_events(
                 state,
-                &flatten_targets_in_chain(&resolved),
+                &declared_targets_in_chain(&resolved),
                 source_id,
                 player,
                 events,
@@ -27154,7 +27166,7 @@ fn activate_with_cost_carrier(
     let record = take_activation_record(&mut resolved, player)?;
     let entry_id = ObjectId(state.next_object_id);
     state.next_object_id += 1;
-    let announced_targets = flatten_targets_in_chain(&resolved);
+    let announced_targets = declared_targets_in_chain(&resolved);
     let crime_candidate = targets_commit_crime(state, &announced_targets, player);
 
     stack::push_to_stack(

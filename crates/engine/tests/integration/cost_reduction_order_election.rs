@@ -966,7 +966,7 @@ fn the_ordering_prompt_survives_visibility_filtering_for_every_viewer() {
 /// CR 601.2f: "The total cost is the mana cost ... plus all additional costs
 /// and cost increases, and minus all cost reductions."
 ///
-/// The lock seam rebuilds a probe `PendingCast` from `pay_and_push`'s exploded
+/// The lock seam rebuilds a probe `PendingCast` from `pay_and_push_with_lock`'s exploded
 /// parameters, and every recomputing branch rebuilds the total from
 /// `base_cost` — which is the ANNOUNCEMENT-time base and therefore does NOT
 /// contain a declared additional mana cost. A probe that drops
@@ -1187,7 +1187,7 @@ fn an_elected_order_survives_x_selection() {
 /// application path. That path reads the board in four counted places — the
 /// target-independent and target-dependent modifier collectors, and the two
 /// cost-floor channels — so a naive implementation pays `n! * 4` full walks of
-/// `game_functioning_statics` inside a single `pay_and_push`. Four shard-bearing
+/// `game_functioning_statics` inside a single `pay_and_push_with_lock`. Four shard-bearing
 /// reducers (legal outside singleton: four copies of one card) is `4! = 24`
 /// orders, i.e. 96 walks that all produce the same collected set.
 ///
