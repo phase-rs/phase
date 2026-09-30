@@ -5935,14 +5935,13 @@ If you sang a song the whole time you were searching and shuffling, you may unta
     /// `DynamicQty` reports the rejected operand.
     #[test]
     fn dynamic_qty_swallow_carries_the_rejected_operand() {
-        // Captain Vargus Wrath (CMR). The operand is spanned by the marker's own
-        // `OperandSpan` and bounded by its own `end_bounds`; a hand-rolled split would
-        // produce a different string.
+        // Chong and Lily, Nomads (second mode, standalone). The operand
+        // is spanned by the marker's own `OperandSpan` and bounded by its own
+        // `end_bounds`; a hand-rolled split would produce a different string.
         let parsed = parse_named(
-            "Whenever Captain Vargus Wrath attacks, Pirates you control get +1/+1 until \
-             end of turn for each time you've cast a commander from the command zone this \
-             game.",
-            "Captain Vargus Wrath",
+            "Whenever one or more Bards you control attack, creatures you control get \
+             +1/+0 until end of turn for each lore counter among Sagas you control.",
+            "Chong and Lily, Nomads",
             &["Creature"],
         );
         let warning = only_swallow(&parsed, "DynamicQty");
@@ -5950,7 +5949,7 @@ If you sang a song the whole time you were searching and shuffling, you may unta
         assert_eq!(
             warning.gap(),
             Some(&ClauseGap::Quantity {
-                operand: "time you've cast a commander from the command zone this game".to_string()
+                operand: "lore counter among sagas you control".to_string()
             }),
             "full warning: {warning:?}"
         );
