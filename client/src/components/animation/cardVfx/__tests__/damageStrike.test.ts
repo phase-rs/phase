@@ -1,4 +1,4 @@
-import { type InstancedBufferGeometry, Mesh, type Object3D, Scene, type ShaderMaterial, Texture } from "three";
+import { type InstancedBufferGeometry, Mesh, NormalBlending, type Object3D, Scene, type ShaderMaterial, Texture } from "three";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { DAMAGE_CAUSE_IMPACT_MS } from "../../../../animation/types.ts";
@@ -58,7 +58,7 @@ function strikeLoad(group: Object3D) {
 }
 
 describe("damage strike", () => {
-  it.each(["fire", "lightning"] as const)(
+  it.each(["fire", "lightning", "water"] as const)(
     "V10-1: a %s strike lands once, at the impact scaled by pace, then ends and removes itself",
     (cause) => {
       const effectHost = host();
@@ -120,9 +120,31 @@ describe("damage strike", () => {
     expect(reducedLoad.meshes).toBeLessThan(fullLoad.meshes);
   });
 
-  it("V10-4: the warm-up builds every particle, light, bolt and hit program", () => {
+  it("V13-1: water draws in ordinary alpha, thins at reduced, and soaks the struck copy", () => {
+    const full = host();
+    const reduced = host();
+    const { hit: struck } = createDamageStrike(full, params({ cause: "water", tier: "full", hit: hit() }));
+    createDamageStrike(reduced, params({ cause: "water", tier: "reduced" }));
+    const strike = named(full.scene, "damage-strike") as Object3D;
+    const materials: ShaderMaterial[] = [];
+    strike.traverse((object) => {
+      if (object instanceof Mesh) materials.push(object.material as ShaderMaterial);
+    });
+    // Water is not light: nothing in its strike is added over the board.
+    expect(materials.every((material) => material.blending === NormalBlending)).toBe(true);
+    const [fullLoad, reducedLoad] = [full, reduced].map((h) => strikeLoad(named(h.scene, "damage-strike") as Object3D));
+    expect(reducedLoad.particles).toBeLessThan(fullLoad.particles * 0.6);
+
+    struck?.dispose(true);
+    const soaked = createDamageStrike(host(), params({ cause: "water", hit: hit() })).hit as unknown as { materials: { card: ShaderMaterial } };
+    const scorched = createDamageStrike(host(), params({ cause: "fire", hit: hit() })).hit as unknown as { materials: { card: ShaderMaterial } };
+    expect(soaked.materials.card.defines).toEqual({ WET: "" });
+    expect(scorched.materials.card.defines).toEqual({});
+  });
+
+  it("V10-4: the warm-up builds every particle, light, bolt, jet and hit program", () => {
     const warm = damageStrikeKind.warmUp(host());
-    expect(warm).toHaveLength(9);
+    expect(warm).toHaveLength(14);
     expect(warm.every((object) => object instanceof Mesh)).toBe(true);
     const programs = new Set(
       warm.map((object) => {
@@ -134,7 +156,7 @@ describe("damage strike", () => {
         return JSON.stringify([vertexShader, fragmentShader, defines]);
       }),
     );
-    expect(programs.size).toBe(9);
+    expect(programs.size).toBe(14);
   });
 });
 

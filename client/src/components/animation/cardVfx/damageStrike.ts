@@ -6,6 +6,8 @@
 // was hit, which rocks back to rest. Light is colour written with alpha 0,
 // which the browser adds over the DOM board, so no bloom pass is needed.
 // `full` adds the light the fire casts on the board and the fireball's shadow.
+// Water is not light: its jet breaks over the target in a splash, and the
+// struck copy is soaked rather than scorched.
 // A creature's blow (`createDamageBlow`) lands where its DOM slam strikes,
 // with no light of its own: a puff of dust and a pale shock ring.
 
@@ -48,6 +50,7 @@ import {
   type Vec2,
   type Vec3,
 } from "./vfxParticles.ts";
+import { jetGeometry, jetLength, jetMaterial, jetPoint, litSide, MIST, splash, WATER } from "./waterEffects.ts";
 
 /** The impact, in seconds before pace: both causes land together. */
 const IMPACT_S = DAMAGE_CAUSE_IMPACT_MS / 1000;
@@ -58,7 +61,9 @@ const STRIKE_REVEAL_S = 0.035;
 /** Re-strikes after the first, each on a fresh path, in seconds. */
 const RESTRIKES_S = [0, 0.075, 0.16];
 /** The burst outlives the impact by this long, by cause. */
-const TAIL_S: Record<DamageCause, number> = { fire: 1.4, lightning: 1.2 };
+const TAIL_S: Record<DamageCause, number> = { fire: 1.4, lightning: 1.2, water: 1.1 };
+/** A jet's tail runs into its target over this long after the impact. */
+const WATER_DRAIN_S = 0.22;
 /** The struck card rocks back to rest over this long after the impact. */
 export const HIT_S = 0.8;
 /** The lab's tuned glow, between the restrained look (0) and the reference (1). */
@@ -201,7 +206,8 @@ const hitVert = /* glsl */ `
     gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
   }`;
 
-// The scorch where the damage hit: a browned halo around a charred core.
+// The mark where the damage hit: a browned halo around a charred core, or
+// (WET) paper soaked dark and cool where the water struck.
 const hitFrag = /* glsl */ `
   uniform sampler2D uMap; uniform float uRadius, uScorch;
   varying vec2 vCard, vUv; varying float vShade;
@@ -213,16 +219,21 @@ const hitFrag = /* glsl */ `
     float corner = cornerMask(vCard, uSize, uRadius);
     if (corner <= 0.0) discard;
     vec3 col = texture2D(uMap, vUv).rgb;
+    #ifdef WET
+    col = mix(col, col * vec3(0.64, 0.72, 0.8), scorchMask(vCard) * uScorch * 0.75);
+    #else
     float halo = 1.0 - smoothstep(0.0, 1.0, distance(vCard, uImpact) / (uScorchR * 1.7));
     col = mix(col, col * vec3(0.62, 0.42, 0.26), halo * uScorch * 0.6);
     col = mix(col, vec3(0.012, 0.008, 0.006), scorchMask(vCard) * uScorch * 0.88);
+    #endif
     gl_FragColor = vec4(col * clamp(vShade, 0.3, 1.5), corner);
     #include <colorspace_fragment>
   }`;
 
-// A second, additive pass: the light the fresh scorch gives off as it cools.
+// A second, additive pass: the light the fresh scorch gives off as it cools,
+// or (WET) the light above caught in the soaked patch's film of water.
 const hitGlowFrag = /* glsl */ `
-  uniform float uRadius, uScorchGlow, uGain, uTime;
+  uniform float uRadius, uScorch, uScorchGlow, uGain, uTime;
   uniform vec2 uSize;
   varying vec2 vCard;
   ${FBM_GLSL}
@@ -232,19 +243,36 @@ const hitGlowFrag = /* glsl */ `
   void main() {
     float corner = cornerMask(vCard, uSize, uRadius);
     if (corner <= 0.0) discard;
-    float flick = 0.7 + 0.6 * vnoise(vCard * 0.12 + vec2(uTime * 7.0, -uTime * 5.0));
     float m = scorchMask(vCard);
+    #ifdef WET
+    float sheen = smoothstep(0.55, 0.9, vnoise(vCard * 0.06 + vec2(0.0, uTime * 0.7))) * m;
+    gl_FragColor = vec4(vec3(0.85, 0.92, 1.0) * sheen * uScorch * 0.3 * corner, 0.0);
+    #else
+    float flick = 0.7 + 0.6 * vnoise(vCard * 0.12 + vec2(uTime * 7.0, -uTime * 5.0));
     vec3 e = ramp(0.65) * (m * (1.0 - m) * 4.0 + m * 0.35) * uScorchGlow * flick;
     gl_FragColor = vec4(e * uGain * corner, 0.0);
+    #endif
   }`;
 
-function hitMaterials(surface: Texture, w: number, h: number, radius: number, impact: Vector2, scale: number, clock: { value: number }) {
+function hitMaterials(
+  surface: Texture,
+  w: number,
+  h: number,
+  radius: number,
+  impact: Vector2,
+  scale: number,
+  clock: { value: number },
+  cause: DamageCause,
+) {
+  // Water soaks a wider patch than fire scorches.
+  const wet = cause === "water";
+  const defines = wet ? { WET: "" } : {};
   const uniforms = {
     uMap: { value: surface },
     uSize: { value: new Vector2(w, h) },
     uRadius: { value: radius },
     uImpact: { value: impact },
-    uScorchR: { value: Math.min(w, h) * 0.3 * Math.min(scale, 1.3) },
+    uScorchR: { value: Math.min(w, h) * (wet ? 0.42 : 0.3) * Math.min(scale, 1.3) },
     uScorch: { value: 0 },
     uScorchGlow: { value: 0 },
     uGain: { value: 0.6 + 0.7 * GLOW },
@@ -257,8 +285,8 @@ function hitMaterials(surface: Texture, w: number, h: number, radius: number, im
   };
   return {
     uniforms,
-    card: new ShaderMaterial({ vertexShader: hitVert, fragmentShader: hitFrag, uniforms, ...NORMAL }),
-    glow: new ShaderMaterial({ vertexShader: hitVert, fragmentShader: hitGlowFrag, uniforms, ...ADDITIVE }),
+    card: new ShaderMaterial({ vertexShader: hitVert, fragmentShader: hitFrag, defines, uniforms, ...NORMAL }),
+    glow: new ShaderMaterial({ vertexShader: hitVert, fragmentShader: hitGlowFrag, defines, uniforms, ...ADDITIVE }),
   };
 }
 
@@ -318,6 +346,7 @@ class DamageHit implements DamageHitEffect {
     private readonly scale: number,
     private readonly amount: number,
     private readonly pace: number,
+    cause: DamageCause,
   ) {
     const { pose, surface, radius } = params;
     const a = MathUtils.degToRad(pose.angleDeg);
@@ -331,6 +360,7 @@ class DamageHit implements DamageHitEffect {
       new Vector2(impact.u * pose.w, impact.v * pose.h),
       scale,
       this.clock,
+      cause,
     );
     this.materials.uniforms.uTiltAxis.value.set(-this.local[1], this.local[0], 0);
     this.geometry = new PlaneGeometry(pose.w, pose.h);
@@ -544,9 +574,73 @@ function lightningCause({ group, unit, clock, S, T, span, scale, share, boardLig
   };
 }
 
+// The water gathers at its source, then a jet drives along a shallow bow into
+// the target and breaks over it, its tail running in after it. Rings of
+// ripples spread where it struck.
+function waterCause({ group, unit, clock, S, T, span, scale, share }: CauseContext): EffectFrame {
+  const dx = T[0] - S[0];
+  const dy = T[1] - S[1];
+  const dist = Math.hypot(dx, dy) || 1;
+  const dir: Vec2 = [dx / dist, dy / dist];
+  const up: Vec2 = dx >= 0 ? [-dir[1], dir[0]] : [dir[1], -dir[0]];
+  const bow = dist * 0.06;
+  const path = { S, C: [(S[0] + T[0]) / 2 + up[0] * bow, (S[1] + T[1]) / 2 + up[1] * bow] as Vec2, T };
+  const headAt = (t: number) => clamp01((t - FIRE_CHARGE_S) / (IMPACT_S - FIRE_CHARGE_S)) ** 1.15;
+  const tailAt = (t: number) => clamp01((t - IMPACT_S) / WATER_DRAIN_S) ** 1.4;
+
+  const drops: Particle[] = [];
+  const mist: Particle[] = [];
+  for (let i = 0; i < count(18, share); i++) {
+    const a = rand(0, Math.PI * 2);
+    const r = rand(14, 30) * scale;
+    drops.push({ pos: [S[0] + Math.cos(a) * r, S[1] + Math.sin(a) * r, 8], vel: [-Math.cos(a) * r * 3, -Math.sin(a) * r * 3, 0], spawn: rand(0, FIRE_CHARGE_S * 0.7), life: rand(0.15, 0.22), drag: 3, s0: rand(2, 3.5) * scale });
+  }
+  // Spray shed off the head as it drives in.
+  const nSpray = count(70, share);
+  for (let i = 0; i < nSpray; i++) {
+    const ts = FIRE_CHARGE_S + ((i + Math.random()) / nSpray) * (IMPACT_S - FIRE_CHARGE_S);
+    const [px, py] = jetPoint(path, headAt(ts));
+    const side = (Math.random() < 0.5 ? -1 : 1) * rand(40, 150);
+    const on = rand(40, 120);
+    drops.push({ pos: [px, py, 12], vel: [up[0] * side + dir[0] * on, up[1] * side + dir[1] * on, rand(20, 120)], spawn: ts, life: rand(0.3, 0.5), drag: 4, s0: rand(1.8, 3.2) * scale });
+  }
+  splash(T, IMPACT_S, dir, scale, share, { drops, mist });
+  // The stream keeps breaking over the target while its tail runs in.
+  splash(T, IMPACT_S + WATER_DRAIN_S * 0.5, dir, scale * 0.6, share, { drops, mist });
+  group.add(
+    particleLayer(mist, "SMOKE", clock, { accZ: 20, gain: 0.28, tint: MIST, order: 3 }),
+    particleLayer(drops, "DROP", clock, { accZ: -900, gain: 1, tint: WATER, order: 6 }),
+  );
+  const jet = new Mesh(jetGeometry(path, 11 * scale), jetMaterial(clock, jetLength(path), 16 * scale, litSide(dir)));
+  jet.renderOrder = 5;
+  jet.frustumCulled = false;
+  const swell = sprite(unit, "RIPPLE", [0.92, 0.96, 1], 4);
+  const rings = RIPPLE_RINGS_S.map(() => sprite(unit, "RIPPLE", [0.92, 0.96, 1], 4));
+  group.add(jet, swell, ...rings);
+  const U = jet.material.uniforms;
+
+  return (t) => {
+    U.uHead.value = headAt(t);
+    U.uTail.value = tailAt(t);
+    jet.visible = t >= FIRE_CHARGE_S && U.uTail.value < 1;
+    const kc = clamp01(t / FIRE_CHARGE_S);
+    const gathered = 1 - clamp01((t - FIRE_CHARGE_S) / 0.2);
+    place(swell, S[0], S[1], 2, (0.6 + 0.8 * kc) * 48 * scale, 0.6 * kc * gathered);
+    rings.forEach((ring, i) => {
+      const rp = clamp01((t - IMPACT_S - RIPPLE_RINGS_S[i]) / 0.6);
+      const on = t >= IMPACT_S + RIPPLE_RINGS_S[i] && rp < 1;
+      place(ring, T[0], T[1], 2, (0.4 + 2.4 * (1 - (1 - rp) ** 2)) * span * scale, on ? (1 - rp) ** 1.5 * 0.9 : 0);
+    });
+  };
+}
+
+/** When each ring of ripples starts spreading from a jet's impact, after it. */
+const RIPPLE_RINGS_S = [0, 0.09, 0.2];
+
 const CAUSES: Record<DamageCause, (context: CauseContext) => EffectFrame> = {
   fire: fireCause,
   lightning: lightningCause,
+  water: waterCause,
 };
 
 // ---------- The blow: a creature's slam landing ----------
@@ -598,8 +692,8 @@ function blowFrame({ group, unit, clock, T, dir, span, scale, share, impactS }: 
     grit.push({ pos: [T[0], T[1], 4], vel: [hx * speed, hy * speed, 0], spawn: impactS + rand(0, 0.03), life: rand(0.25, 0.45), drag: 5, s0: rand(2, 3.5) * scale, s1: rand(1.5, 2.5) * scale });
   }
   group.add(
-    particleLayer(dust, "SMOKE", clock, { accZ: 30, gain: 0.55, smoke: DUST, order: 3 }),
-    particleLayer(grit, "SMOKE", clock, { accZ: 0, gain: 0.9, smoke: GRIT, order: 4 }),
+    particleLayer(dust, "SMOKE", clock, { accZ: 30, gain: 0.55, tint: DUST, order: 3 }),
+    particleLayer(grit, "SMOKE", clock, { accZ: 0, gain: 0.9, tint: GRIT, order: 4 }),
   );
   const ring = sprite(unit, "RING", [0.92, 0.88, 0.8], 6);
   group.add(ring);
@@ -638,7 +732,7 @@ export function createDamageStrike(
     });
   return {
     strike: new TimedEffect(host, "damage-strike", timing, look),
-    hit: hit && new DamageHit(host, hit, impact, dir, scale, params.amount, params.pace),
+    hit: hit && new DamageHit(host, hit, impact, dir, scale, params.amount, params.pace, cause),
   };
 }
 
@@ -687,13 +781,18 @@ export const damageStrikeKind: SceneEffectKind = {
       particleLayer(dead, "FLAME", clock, { accZ: 0, gain: 0, order: 5 }),
       particleLayer(dead, "SPARK", clock, { accZ: 0, gain: 0, order: 6 }),
       particleLayer(dead, "SMOKE", clock, { accZ: 0, gain: 0, order: 3 }),
+      particleLayer(dead, "DROP", clock, { accZ: 0, gain: 0, order: 6 }),
       sprite(unit, "GLOW", [0, 0, 0], 8),
       sprite(unit, "RING", [0, 0, 0], 6),
       sprite(unit, "SHADOW", [0, 0, 0], 0),
+      sprite(unit, "RIPPLE", [0, 0, 0], 4),
       new Mesh(boltGeometry([0, 0], [1, 0]), boltMaterial()),
+      new Mesh(jetGeometry({ S: [0, 0], C: [1, 0], T: [2, 0] }, 1), jetMaterial(clock, 2, 1, 1)),
     ];
-    const { card, glow } = hitMaterials(host.placeholderTexture, 2, 2, 0, new Vector2(), 1, clock);
-    objects.push(new Mesh(unit, card), new Mesh(unit, glow));
+    for (const cause of ["fire", "water"] as const) {
+      const { card, glow } = hitMaterials(host.placeholderTexture, 2, 2, 0, new Vector2(), 1, clock, cause);
+      objects.push(new Mesh(unit, card), new Mesh(unit, glow));
+    }
     objects.forEach((object, i) => {
       object.name = `damage-strike-warmup-${i}`;
     });

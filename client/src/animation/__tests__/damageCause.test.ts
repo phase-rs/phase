@@ -44,7 +44,7 @@ describe("damageCauseOf", () => {
   it("V10-5: a resolving ability's damage leaves from its source permanent, or its entry once the source has gone", () => {
     const pre = state([pinger.params({ color: ["Blue"] }).build()], [pingerAbility]);
     expect(damageCauseOf(damage(PINGER), pre)).toEqual({
-      cause: "lightning",
+      cause: "water",
       origin: { zone: "Battlefield", objectId: PINGER, ownerId: 0 },
     });
 
@@ -61,6 +61,8 @@ describe("damageCauseOf", () => {
   it.each<[readonly ManaColor[], string]>([
     [["Red"], "fire"],
     [["Black", "Red"], "fire"],
+    [["Blue"], "water"],
+    [["White", "Blue"], "water"],
     [["Blue", "Red"], "lightning"],
     [[], "lightning"],
   ])("V10-5: a %j source's damage is %s", (color, cause) => {

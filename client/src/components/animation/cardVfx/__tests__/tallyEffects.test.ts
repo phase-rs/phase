@@ -104,7 +104,7 @@ describe("counter change", () => {
       const effectHost = host();
       createCounterChange(effectHost, counter({ counterType }));
       const smoke = meshes(effectHost.scene).find((mesh) => "SMOKE" in ((mesh.material as ShaderMaterial).defines ?? {}));
-      return (smoke?.material as ShaderMaterial).uniforms.uSmoke.value.toArray();
+      return (smoke?.material as ShaderMaterial).uniforms.uTint.value.toArray();
     };
     expect(tintOf("P1P1")).toEqual(counterTint("P1P1"));
     expect(tintOf("M1M1")).toEqual(counterTint("M1M1"));

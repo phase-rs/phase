@@ -79,7 +79,9 @@ export const RAMP_GLSL = /* glsl */ `
 
 // ---------- Particles: one instanced quad each, all motion on the GPU ----------
 
-export type ParticleKind = "FLAME" | "SPARK" | "SMOKE";
+/** FLAME and SPARK are light; SMOKE is a soft cloud and DROP a bead of
+ *  water, both ordinary alpha in their `tint`. */
+export type ParticleKind = "FLAME" | "SPARK" | "SMOKE" | "DROP";
 
 export interface Particle {
   pos: Vec3;
@@ -98,8 +100,8 @@ export interface ParticleLook {
   gain: number;
   cool?: number;
   palette?: Palette;
-  /** SMOKE's colour. */
-  smoke?: Vec3;
+  /** SMOKE's colour, or the water DROP shows through its body. */
+  tint?: Vec3;
   order: number;
 }
 
@@ -114,23 +116,31 @@ const particleVert = /* glsl */ `
     float drag = aTime.z;
     vec3 p = aPos + aVel * (1.0 - exp(-drag * age)) / drag;
     p.z += 0.5 * uAccZ * age * age;
-    #ifdef SPARK
+    #if defined(SPARK) || defined(DROP)
+    // Sparks and drops fall to the table and stay on it.
     p.z = max(p.z, 0.0);
+    #endif
+    #ifdef SPARK
     vec3 v = aVel * exp(-drag * age) + vec3(0.0, 0.0, uAccZ * age);
     vec2 dir = length(v.xy) > 0.001 ? normalize(v.xy) : vec2(1.0, 0.0);
     float len = max(length(v.xy) * aLook.w, aLook.x);
     vec3 local = p + vec3(dir * (position.x - 0.5) * len + vec2(-dir.y, dir.x) * position.y * aLook.x, 0.0);
     #else
     float s = mix(aLook.x, aLook.y, 1.0 - (1.0 - a) * (1.0 - a));
+    #ifdef DROP
+    // A drop does not turn: its highlight stays on the side facing the light.
+    vec3 local = p + vec3(position.xy * s, 0.0);
+    #else
     float ang = aTime.w * 6.2831 + age * (aTime.w - 0.5) * 3.0;
     vec3 local = p + vec3(mat2(cos(ang), sin(ang), -sin(ang), cos(ang)) * position.xy * s, 0.0);
+    #endif
     #endif
     vUv = position.xy + 0.5; vA = a; vHeat = aLook.z; vSeed = aTime.w;
     gl_Position = projectionMatrix * modelViewMatrix * vec4(local, 1.0);
   }`;
 
 const particleFrag = /* glsl */ `
-  uniform float uGain, uCool; uniform vec3 uSmoke;
+  uniform float uGain, uCool; uniform vec3 uTint;
   varying vec2 vUv; varying float vA, vHeat, vSeed;
   ${FBM_GLSL}
   ${RAMP_GLSL}
@@ -143,7 +153,17 @@ const particleFrag = /* glsl */ `
     #elif defined(SMOKE)
     float r = length(q) + (vnoise(q * 2.2 + vSeed * 37.0) - 0.5) * 0.5;
     float fade = smoothstep(0.0, 0.2, vA) * (1.0 - smoothstep(0.4, 1.0, vA));
-    gl_FragColor = vec4(uSmoke, (1.0 - smoothstep(0.3, 1.0, r)) * fade * uGain);
+    gl_FragColor = vec4(uTint, (1.0 - smoothstep(0.3, 1.0, r)) * fade * uGain);
+    #elif defined(DROP)
+    // A bead of water: a clear body, a rim darkened where it bends the light,
+    // and the highlight of the light above. It thins out as it spreads.
+    float r = length(q);
+    if (r >= 1.0) discard;
+    float fade = smoothstep(0.0, 0.05, vA) * (1.0 - smoothstep(0.5, 1.0, vA));
+    float rim = smoothstep(0.6, 0.95, r) * (1.0 - smoothstep(0.95, 1.0, r));
+    float glint = 1.0 - smoothstep(0.05, 0.3, length(q - vec2(-0.3, 0.35)));
+    vec3 col = mix(mix(uTint, uTint * 0.4, rim), vec3(1.0), glint);
+    gl_FragColor = vec4(col, (0.22 + 0.5 * rim + 0.75 * glint) * fade * uGain);
     #else
     float r = length(q) + (vnoise(q * 2.4 + vSeed * 37.0 + vA * 2.5) - 0.5) * 0.7;
     float shape = pow(max(1.0 - r, 0.0), 1.5);
@@ -152,12 +172,11 @@ const particleFrag = /* glsl */ `
     #endif
   }`;
 
-// FLAME and SPARK are additive light; SMOKE is ordinary alpha.
 export function particleLayer(
   list: readonly Particle[],
   kind: ParticleKind,
   clock: { value: number },
-  { accZ, gain, cool = 1.6, palette = "fire", smoke = [0.09, 0.075, 0.065], order }: ParticleLook,
+  { accZ, gain, cool = 1.6, palette = "fire", tint = [0.09, 0.075, 0.065], order }: ParticleLook,
 ): Mesh<InstancedBufferGeometry, ShaderMaterial> {
   const n = list.length;
   const base = new PlaneGeometry(1, 1);
@@ -191,9 +210,9 @@ export function particleLayer(
         uGain: { value: gain },
         uCool: { value: cool },
         uPalette: { value: PALETTE_INDEX[palette] },
-        uSmoke: { value: new Vector3(...smoke) },
+        uTint: { value: new Vector3(...tint) },
       },
-      ...(kind === "SMOKE" ? NORMAL : ADDITIVE),
+      ...(kind === "SMOKE" || kind === "DROP" ? NORMAL : ADDITIVE),
     }),
   );
   mesh.frustumCulled = false;
@@ -203,7 +222,10 @@ export function particleLayer(
 
 // ---------- Sprites: the few large lights the CPU moves each frame ----------
 
-export type SpriteKind = "GLOW" | "RING" | "SHADOW";
+/** GLOW and RING are light; SHADOW darkens the table; RIPPLE is a ring-shaped
+ *  swell on water, lit in `color` on its slopes facing the light and shaded on
+ *  those facing away. */
+export type SpriteKind = "GLOW" | "RING" | "SHADOW" | "RIPPLE";
 
 const spriteVert = /* glsl */ `
   varying vec2 vUv;
@@ -219,6 +241,14 @@ const spriteFrag = /* glsl */ `
     gl_FragColor = vec4(uColor * a * uIntensity, 0.0);
     #elif defined(SHADOW)
     gl_FragColor = vec4(0.0, 0.0, 0.0, exp(-r * r * 4.5) * (1.0 - smoothstep(0.9, 1.0, r)) * uIntensity);
+    #elif defined(RIPPLE)
+    // The swell's slope across the ring, turned toward or away from the light
+    // above the table's top left: the cards' own light.
+    float d = (r - 0.8) / 0.08;
+    vec2 outward = r > 0.0 ? (vUv * 2.0 - 1.0) / r : vec2(0.0);
+    float lit = 1.7 * d * exp(-d * d) * (0.3 + 0.7 * dot(outward, normalize(vec2(-0.55, 0.83))));
+    float a = clamp(abs(lit), 0.0, 1.0) * (1.0 - smoothstep(0.95, 1.0, r)) * uIntensity;
+    gl_FragColor = vec4(lit > 0.0 ? uColor : vec3(0.0), a);
     #else
     float a = (exp(-r * r * 6.0) + 0.6 * exp(-r * 14.0)) * (1.0 - smoothstep(0.8, 1.0, r));
     gl_FragColor = vec4(uColor * a * uIntensity, 0.0);
@@ -233,7 +263,7 @@ export function sprite(unit: PlaneGeometry, kind: SpriteKind, color: Vec3, order
       fragmentShader: spriteFrag,
       defines: kind === "GLOW" ? {} : { [kind]: "" },
       uniforms: { uColor: { value: new Vector3(...color) }, uIntensity: { value: 0 } },
-      ...(kind === "SHADOW" ? NORMAL : ADDITIVE),
+      ...(kind === "SHADOW" || kind === "RIPPLE" ? NORMAL : ADDITIVE),
     }),
   );
   mesh.renderOrder = order;

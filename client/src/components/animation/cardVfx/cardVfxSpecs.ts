@@ -1,5 +1,5 @@
 import type { GameState, ObjectId, PlayerId, TargetRef } from "../../../adapter/types.ts";
-import { type DamageCause, type DamageCauseOrigin, damageCauseOf } from "../../../animation/damageCause.ts";
+import { type DamageCause, damageCauseOf, type ResolvingOrigin } from "../../../animation/damageCause.ts";
 import type { AnimationEvent } from "../../../animation/types.ts";
 import { useAnimationStore } from "../../../stores/animationStore.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
@@ -45,7 +45,7 @@ export type DamageStrikeTarget =
 export interface DamageStrikeSpec {
   kind: "damage";
   cause: DamageCause;
-  origin: DamageCauseOrigin;
+  origin: ResolvingOrigin;
   target: DamageStrikeTarget;
   amount: number;
   pace: number;

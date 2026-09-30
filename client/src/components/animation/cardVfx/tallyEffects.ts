@@ -75,7 +75,7 @@ export function createLifeChange(host: EffectHost, { at, amount, tier, pace }: L
     for (let i = 0; i < count(14 + 2 * size, share); i++) {
       motes.push({ pos: [x + rand(-0.4, 0.4) * at.w, y + rand(-0.2, 0.3) * at.h, 6], vel: [rand(-12, 12), -rand(35, 80), 0], spawn: rand(0, 0.3), life: rand(0.8, 1.1), drag: 1.2, s0: rand(6, 10), s1: rand(24, 38) });
     }
-    group.add(particleLayer(motes, "SMOKE", clock, { accZ: 0, gain: 0.55, smoke: DRAWN, order: 3 }));
+    group.add(particleLayer(motes, "SMOKE", clock, { accZ: 0, gain: 0.55, tint: DRAWN, order: 3 }));
     return () => {};
   };
   return new TimedEffect(host, "life-change", timing, look);
@@ -118,7 +118,7 @@ export function createCounterChange(
           : { pos: [x + cx * r * 0.3, y + cy * r * 0.3, 6], vel: [cx * speed, cy * speed + 30, 0], spawn: rand(0, 0.12), life: rand(0.45, 0.7), drag: 2, s0: rand(3, 5), s1: rand(8, 12) },
       );
     }
-    group.add(particleLayer(motes, "SMOKE", clock, { accZ: 0, gain: 0.8, smoke: tint, order: 3 }));
+    group.add(particleLayer(motes, "SMOKE", clock, { accZ: 0, gain: 0.8, tint: tint, order: 3 }));
     const ring = sprite(unit, "RING", tint, 6);
     group.add(ring);
     return (t) => {
