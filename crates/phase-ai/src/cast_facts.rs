@@ -550,7 +550,6 @@ fn effect_requires_targets(effect: &Effect) -> bool {
         | Effect::Regenerate { target, .. }
         | Effect::RemoveAllDamage { target, .. }
         | Effect::DoublePT { target, .. }
-        | Effect::PreventDamage { target, .. }
         | Effect::Animate { target, .. }
         // CR 113.1a + CR 611.2: the donor whose activated abilities are gained
         // (Quicksilver Elemental) is a real declared target.
@@ -562,6 +561,15 @@ fn effect_requires_targets(effect: &Effect) -> bool {
         // `TapAll`/`UntapAll`.
         Effect::SetTapState {
             scope: EffectScope::Single,
+            target,
+            ..
+        } => !matches!(target, TargetFilter::None),
+        // CR 115.1a + CR 115.10a: only a declared prevention recipient ("prevent
+        // all damage that would be dealt to target creature") declares a target.
+        // The mass (`All`) scope ("...to creatures this turn", Blinding Fog) is an
+        // untargeted population, so it falls through to `false`.
+        Effect::PreventDamage {
+            recipient_scope: EffectScope::Single,
             target,
             ..
         } => !matches!(target, TargetFilter::None),
@@ -624,7 +632,8 @@ mod tests {
     use engine::game::game_object::GameObject;
     use engine::game::zones::create_object;
     use engine::types::ability::{
-        AbilityDefinition, AbilityKind, QuantityExpr, TargetFilter, TypedFilter,
+        AbilityDefinition, AbilityKind, PreventionAmount, PreventionScope, QuantityExpr,
+        TargetFilter, TypedFilter,
     };
     use engine::types::actions::GameAction;
     use engine::types::game_state::GameState;
@@ -915,6 +924,30 @@ mod tests {
         assert!(
             !effect_requires_targets(&mass),
             "mass Unsuspect{{All}} (Absolving Lammasu) must not be target-requiring"
+        );
+    }
+
+    // CR 115.10a: a mass prevention recipient ("prevent all damage that would be
+    // dealt to creatures this turn", Blinding Fog) declares no target; only the
+    // `Single` (declared) recipient does.
+    #[test]
+    fn mass_prevent_damage_is_not_target_requiring() {
+        let prevent = |recipient_scope| Effect::PreventDamage {
+            amount: PreventionAmount::All,
+            amount_dynamic: None,
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            recipient_scope,
+            scope: PreventionScope::AllDamage,
+            damage_source_filter: None,
+            prevention_duration: None,
+        };
+        assert!(
+            effect_requires_targets(&prevent(EffectScope::Single)),
+            "declared-recipient PreventDamage must be target-requiring"
+        );
+        assert!(
+            !effect_requires_targets(&prevent(EffectScope::All)),
+            "mass PreventDamage{{All}} must not be target-requiring"
         );
     }
 

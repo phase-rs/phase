@@ -5803,6 +5803,7 @@ fn rw_effect(
         Effect::PreventDamage {
             amount_dynamic,
             target: _,
+            recipient_scope: _,
             damage_source_filter: _,
             prevention_duration: _,
             amount: _,

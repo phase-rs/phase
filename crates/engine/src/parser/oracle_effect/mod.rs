@@ -3683,6 +3683,7 @@ fn try_parse_conditional_damage_prevention_with_followup(text: &str) -> Option<P
             amount: PreventionAmount::All,
             amount_dynamic: None,
             target,
+            recipient_scope: EffectScope::Single,
             scope: PreventionScope::AllDamage,
             damage_source_filter: None,
             prevention_duration: None,

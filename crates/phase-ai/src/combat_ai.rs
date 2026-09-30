@@ -3432,7 +3432,7 @@ mod tests {
     use crate::projection::ProjectionKey;
     use engine::game::zones::create_object;
     use engine::types::ability::{
-        Effect, PreventionAmount, PreventionScope, ResolvedAbility, TargetFilter,
+        Effect, EffectScope, PreventionAmount, PreventionScope, ResolvedAbility, TargetFilter,
     };
     use engine::types::game_state::WaitingFor;
     use engine::types::identifiers::CardId;
@@ -3471,6 +3471,7 @@ mod tests {
                 amount: PreventionAmount::All,
                 amount_dynamic: None,
                 target: TargetFilter::Controller,
+                recipient_scope: EffectScope::Single,
                 scope: PreventionScope::CombatDamage,
                 damage_source_filter: None,
                 prevention_duration: None,

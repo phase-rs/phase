@@ -12,6 +12,9 @@ expression: "&lowered"
         "target": {
           "type": "Any"
         },
+        "recipient_scope": {
+          "type": "Single"
+        },
         "scope": "CombatDamage"
       },
       "cost": null,

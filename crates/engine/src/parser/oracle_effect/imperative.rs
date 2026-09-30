@@ -7673,20 +7673,28 @@ pub(super) fn parse_prevention_amount(rest: &str) -> PreventionAmount {
 ///
 /// Returns `None` only when neither tier recognizes the phrase — the caller
 /// then falls back to the pre-existing `Any` default.
+///
+/// CR 115.1a + CR 115.10a: the returned [`EffectScope`] records whether the
+/// recipient is declared or untargeted. Tiers 0 and 1 are singular references
+/// (`Single`). Tier 2 classifies through `parse_target_with_syntax`: a phrase
+/// with the "target" keyword is a declared recipient (`Single`); a descriptor
+/// phrase ("creatures", "players", "creatures you control", "enchanted
+/// creature") is an untargeted population (`All`), except the `TrackedSet`
+/// sentinel ("those creatures"), a frozen antecedent reference (`Single`).
 pub(super) fn resolve_prevent_recipient(
     recipient: TextPair<'_>,
     parent_target_available: bool,
-) -> Option<TargetFilter> {
+) -> Option<(TargetFilter, EffectScope)> {
     // CR 201.5 + CR 109.5: tier 0 — the ungated printed-name self-reference.
     if let Some((filter, _)) =
         crate::parser::oracle_target::parse_source_anaphoric_pronoun_ref(recipient.original)
     {
-        return Some(filter);
+        return Some((filter, EffectScope::Single));
     }
     if let Some((filter, _)) =
         parse_anaphoric_target_ref(recipient.original, parent_target_available)
     {
-        return Some(filter);
+        return Some((filter, EffectScope::Single));
     }
     // CR 608.2c: `ParentTarget`/`TriggeringSource`/`CostPaidObject`/`SelfRef`
     // are inherited-reference filters naming a specific already-established
@@ -7695,9 +7703,39 @@ pub(super) fn resolve_prevent_recipient(
     // this tier must reject them explicitly — otherwise a standalone recipient
     // anaphor with `parent_target_available == false` would leak through here
     // as an ungated `ParentTarget` binding to a nonexistent chosen target.
-    let (filter, _) = parse_target(recipient.original);
-    (!matches!(filter, TargetFilter::Any) && super::is_broadcast_population_filter(&filter))
-        .then_some(filter)
+    let (filter, _, syntax) =
+        parse_target_with_syntax(recipient.original, &mut ParseContext::default());
+    if matches!(filter, TargetFilter::Any) || !super::is_broadcast_population_filter(&filter) {
+        return None;
+    }
+    let scope = match syntax {
+        TargetSyntax::TargetKeyword => EffectScope::Single,
+        TargetSyntax::Descriptor if filter.is_context_ref() => EffectScope::Single,
+        TargetSyntax::Descriptor => EffectScope::All,
+    };
+    Some((filter, scope))
+}
+
+/// CR 601.2c + CR 115.6: the declared recipient's announced count in a prevent
+/// clause ("prevent all damage that would be dealt this turn to up to two
+/// target creatures" — Redeem). `Some` only when a leading quantifier
+/// ("up to N" / "any number of") is directly followed by the "target" keyword
+/// after the "dealt [this turn] to" recipient marker.
+pub(super) fn parse_prevent_recipient_count(text: &str) -> Option<MultiTargetSpec> {
+    let lower = text.to_lowercase();
+    let (_, _, recipient) = nom_primitives::scan_preceded(&lower, |i| {
+        (
+            tag::<_, _, OracleError<'_>>("dealt "),
+            opt(tag("this turn ")),
+            tag("to "),
+        )
+            .parse(i)
+    })?;
+    let (after_quantifier, spec) = strip_leading_quantifier(recipient);
+    peek(tag::<_, _, OracleError<'_>>("target "))
+        .parse(after_quantifier)
+        .ok()?;
+    spec
 }
 
 /// CR 615: Parse "prevent" damage effects into `Effect::PreventDamage`.
@@ -7768,6 +7806,7 @@ fn parse_prevent_effect(text: &str, parent_target_available: bool) -> Effect {
             amount,
             amount_dynamic: None,
             target: TargetFilter::Any,
+            recipient_scope: EffectScope::Single,
             scope,
             damage_source_filter: Some(TargetFilter::And {
                 filters: vec![TargetFilter::ParentTargetSlot { index: 0 }, source_filter],
@@ -7787,6 +7826,7 @@ fn parse_prevent_effect(text: &str, parent_target_available: bool) -> Effect {
                 amount,
                 amount_dynamic: None,
                 target: TargetFilter::Any,
+                recipient_scope: EffectScope::Single,
                 scope,
                 damage_source_filter: Some(source_filter),
                 prevention_duration,
@@ -7795,7 +7835,10 @@ fn parse_prevent_effect(text: &str, parent_target_available: bool) -> Effect {
         };
     }
 
-    // Determine target
+    // Determine target. CR 115.1a + CR 115.10a: `recipient_scope` records
+    // whether the recipient is declared (`Single`) or an untargeted population
+    // (`All`); only the descriptor recipient resolved below can be `All`.
+    let mut recipient_scope = EffectScope::Single;
     let target = if nom_primitives::scan_contains(rest, "any target") {
         TargetFilter::Any
     } else if nom_primitives::scan_contains(rest, "target creature")
@@ -7834,6 +7877,8 @@ fn parse_prevent_effect(text: &str, parent_target_available: bool) -> Effect {
         .strip_after("dealt to ")
         .and_then(|tp| resolve_prevent_recipient(tp, parent_target_available))
     {
+        let (filter, scope) = filter;
+        recipient_scope = scope;
         // CR 608.2c + CR 611.2c + CR 615.11 (issue #6682): see
         // `resolve_prevent_recipient` — a chosen-target anaphor or any other
         // recipient phrase `parse_target` recognizes. Strict superset of the
@@ -7858,6 +7903,7 @@ fn parse_prevent_effect(text: &str, parent_target_available: bool) -> Effect {
         amount,
         amount_dynamic: None,
         target,
+        recipient_scope,
         scope,
         damage_source_filter,
         prevention_duration,
@@ -15256,12 +15302,24 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             // Fallback: standard prevent with no distribution.
             // lower_utility_imperative_ast is defined in THIS file (imperative.rs),
             // called unqualified — NOT super::lower::lower_utility_imperative_ast.
-            parsed_clause(lower_utility_imperative_ast(
-                UtilityImperativeAst::Prevent {
-                    text: text.clone(),
-                    parent_target_available,
-                },
-            ))
+            let effect = lower_utility_imperative_ast(UtilityImperativeAst::Prevent {
+                text: text.clone(),
+                parent_target_available,
+            });
+            // CR 601.2c + CR 115.6: only a declared recipient carries an announced
+            // count ("up to two target creatures" — Redeem).
+            let multi_target = matches!(
+                effect,
+                Effect::PreventDamage {
+                    recipient_scope: EffectScope::Single,
+                    ..
+                }
+            )
+            .then(|| parse_prevent_recipient_count(text))
+            .flatten();
+            let mut clause = parsed_clause(effect);
+            clause.multi_target = multi_target;
+            clause
         }
         // CR 701.40a: "manifest a card from your hand" (Scroll of Fate). The
         // manifest twin of the cloak from-hand arm below: the controller
@@ -25995,7 +26053,7 @@ mod tests {
         let tp = TextPair::new(text, &lower);
         assert_eq!(
             resolve_prevent_recipient(tp, true),
-            Some(TargetFilter::ParentTarget),
+            Some((TargetFilter::ParentTarget, EffectScope::Single)),
             "a chosen-target anaphor must resolve to ParentTarget"
         );
 
@@ -26003,12 +26061,25 @@ mod tests {
         let text = "creatures this turn.";
         let lower = text.to_lowercase();
         let tp = TextPair::new(text, &lower);
-        let resolved =
+        let (resolved, scope) =
             resolve_prevent_recipient(tp, false).expect("bare \"creatures\" must resolve");
         assert!(
             matches!(&resolved, TargetFilter::Typed(tf) if tf.type_filters.contains(&TypeFilter::Creature)),
             "bare \"creatures\" must resolve to a Typed(Creature) filter, got {resolved:?}"
         );
+        assert_eq!(
+            scope,
+            EffectScope::All,
+            "a descriptor recipient is an untargeted population (CR 115.10a)"
+        );
+
+        // A recipient carrying the "target" keyword is declared (CR 115.1a).
+        let text = "target creature this turn.";
+        let lower = text.to_lowercase();
+        let tp = TextPair::new(text, &lower);
+        let (_, scope) =
+            resolve_prevent_recipient(tp, false).expect("\"target creature\" must resolve");
+        assert_eq!(scope, EffectScope::Single);
 
         // Tier 2 also recognizes "those permanents"/"those creatures" via
         // `parse_target`'s own tracked-set dispatch — covers BOTH the
@@ -26023,9 +26094,12 @@ mod tests {
         let tp = TextPair::new(text, &lower);
         assert_eq!(
             resolve_prevent_recipient(tp, false),
-            Some(TargetFilter::TrackedSet {
-                id: crate::types::identifiers::TrackedSetId(0)
-            }),
+            Some((
+                TargetFilter::TrackedSet {
+                    id: crate::types::identifiers::TrackedSetId(0)
+                },
+                EffectScope::Single
+            )),
             "\"those creatures\" must bind via parse_target's tracked-set dispatch"
         );
 

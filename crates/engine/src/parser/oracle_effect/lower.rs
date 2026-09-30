@@ -9105,6 +9105,7 @@ pub(super) fn try_parse_prevent_distribute(text: &str) -> Option<ParsedEffectCla
             amount,
             amount_dynamic,
             target,
+            recipient_scope: EffectScope::Single,
             scope: PreventionScope::AllDamage,
             damage_source_filter: None,
             prevention_duration: None,
@@ -9170,7 +9171,7 @@ pub(super) fn try_parse_bidirectional_prevent(
     // with no prior target-selecting clause must NOT split into ParentTarget
     // shields.
     let anaphor_tp = TextPair::new(text, &lower).strip_after("dealt to and dealt by ")?;
-    let anaphor_filter =
+    let (anaphor_filter, anaphor_scope) =
         super::imperative::resolve_prevent_recipient(anaphor_tp, parent_target_available)?;
 
     // CR 615: the recipient ("to") shield — scoped to the chosen creature as
@@ -9179,6 +9180,7 @@ pub(super) fn try_parse_bidirectional_prevent(
         amount,
         amount_dynamic: None,
         target: anaphor_filter.clone(),
+        recipient_scope: anaphor_scope,
         scope,
         damage_source_filter: None,
         prevention_duration: prevention_duration.clone(),
@@ -9208,6 +9210,7 @@ pub(super) fn try_parse_bidirectional_prevent(
             amount,
             amount_dynamic: None,
             target: TargetFilter::Any,
+            recipient_scope: EffectScope::Single,
             scope,
             damage_source_filter: Some(anaphor_filter),
             prevention_duration,

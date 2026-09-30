@@ -61143,7 +61143,12 @@ fn blinding_fog_prevent_binds_to_bare_creatures_recipient() {
          control gain hexproof until end of turn.",
         AbilityKind::Spell,
     );
-    let Effect::PreventDamage { target, .. } = &*def.effect else {
+    let Effect::PreventDamage {
+        target,
+        recipient_scope,
+        ..
+    } = &*def.effect
+    else {
         panic!("expected PreventDamage, got {:?}", def.effect);
     };
     assert!(
@@ -61153,6 +61158,11 @@ fn blinding_fog_prevent_binds_to_bare_creatures_recipient() {
                 if tf.type_filters.contains(&TypeFilter::Creature) && tf.controller.is_none()
         ),
         "bare \"creatures\" must resolve to an unqualified Typed(Creature) filter, got {target:?}"
+    );
+    assert_eq!(
+        *recipient_scope,
+        EffectScope::All,
+        "CR 115.10a: a bare mass recipient is untargeted"
     );
 }
 
@@ -61165,11 +61175,144 @@ fn defend_the_hearth_prevent_binds_to_bare_players_recipient() {
         "Prevent all combat damage that would be dealt to players this turn.",
         AbilityKind::Spell,
     );
-    let Effect::PreventDamage { target, scope, .. } = &*def.effect else {
+    let Effect::PreventDamage {
+        target,
+        scope,
+        recipient_scope,
+        ..
+    } = &*def.effect
+    else {
         panic!("expected PreventDamage, got {:?}", def.effect);
     };
     assert_eq!(*target, TargetFilter::Player);
     assert_eq!(*scope, PreventionScope::CombatDamage);
+    assert_eq!(
+        *recipient_scope,
+        EffectScope::All,
+        "CR 115.10a: a bare mass recipient is untargeted"
+    );
+}
+
+/// CR 115.1a + CR 115.10a + CR 601.2c: the prevention recipient is classified
+/// by its phrase. A "target" phrase is declared (`Single`, mints a slot, and
+/// carries its announced count); a descriptor population is untargeted (`All`,
+/// mints no slot); a singular or context reference is `Single` but mints no
+/// slot. The slot column is read through `extract_target_filter_from_effect`,
+/// the single authority the stack-time slot builder consults.
+#[test]
+fn prevent_recipient_scope_classification() {
+    use crate::game::triggers::extract_target_filter_from_effect;
+
+    // (oracle clause, scope, mints a declared slot, expected announced count)
+    let rows: [(&str, EffectScope, bool, Option<MultiTargetSpec>); 8] = [
+        (
+            "Prevent all damage that would be dealt to target creature this turn.",
+            EffectScope::Single,
+            true,
+            None,
+        ),
+        (
+            "Prevent all damage that would be dealt this turn to up to two target creatures.",
+            EffectScope::Single,
+            true,
+            Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 2 })),
+        ),
+        (
+            "Prevent the next 1 damage that would be dealt to target player or planeswalker this turn.",
+            EffectScope::Single,
+            true,
+            None,
+        ),
+        (
+            "Prevent the next 1 damage that would be dealt to target player, planeswalker, or Sliver creature this turn.",
+            EffectScope::Single,
+            true,
+            None,
+        ),
+        (
+            "Prevent all combat damage that would be dealt to creatures you control this turn.",
+            EffectScope::All,
+            false,
+            None,
+        ),
+        (
+            "Prevent the next 1 damage that would be dealt to enchanted creature this turn.",
+            EffectScope::All,
+            false,
+            None,
+        ),
+        (
+            "Prevent all combat damage that would be dealt to players this turn.",
+            EffectScope::All,
+            false,
+            None,
+        ),
+        (
+            "Prevent all damage that would be dealt to artifact creatures this turn.",
+            EffectScope::All,
+            false,
+            None,
+        ),
+    ];
+    for (text, scope, declares_slot, count) in rows {
+        let clause = parse_effect_chain(text, AbilityKind::Spell);
+        let Effect::PreventDamage {
+            recipient_scope, ..
+        } = &*clause.effect
+        else {
+            panic!(
+                "expected PreventDamage for {text:?}, got {:?}",
+                clause.effect
+            );
+        };
+        assert_eq!(*recipient_scope, scope, "{text}");
+        assert_eq!(
+            extract_target_filter_from_effect(&clause.effect).is_some(),
+            declares_slot,
+            "{text}"
+        );
+        assert_eq!(
+            clause.effect.target_filter().is_some(),
+            scope == EffectScope::Single,
+            "{text}"
+        );
+        assert_eq!(clause.multi_target, count, "{text}");
+    }
+
+    // Singular references are `Single` but mint no slot: Gideon's printed-name
+    // self-reference and Energy Arc's frozen tracked set.
+    let gideon = parse_effect_chain(
+        "Prevent all damage that would be dealt to him this turn.",
+        AbilityKind::Spell,
+    );
+    assert!(matches!(
+        &*gideon.effect,
+        Effect::PreventDamage {
+            target: TargetFilter::SelfRef,
+            recipient_scope: EffectScope::Single,
+            ..
+        }
+    ));
+    assert!(extract_target_filter_from_effect(&gideon.effect).is_none());
+
+    let arc = parse_effect_chain(
+        "Untap any number of target creatures. Prevent all combat damage that would be \
+         dealt to and dealt by those creatures this turn.",
+        AbilityKind::Spell,
+    );
+    let to_half = arc
+        .sub_ability
+        .as_deref()
+        .expect("the prevent clause chains after the untap");
+    assert!(matches!(
+        &*to_half.effect,
+        Effect::PreventDamage {
+            target: TargetFilter::TrackedSet { .. },
+            recipient_scope: EffectScope::Single,
+            ..
+        }
+    ));
+    assert!(extract_target_filter_from_effect(&to_half.effect).is_none());
 }
 
 /// CR 608.2c + CR 615 (issue #6682): Energy Arc's bidirectional "dealt to and

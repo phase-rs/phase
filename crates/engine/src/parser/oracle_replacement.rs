@@ -7465,6 +7465,7 @@ pub(crate) fn parse_oneshot_damage_replacement(
             // creature") is intentionally left as `Any` here (unchanged), since
             // it takes `target_filter == None`.
             target: damage_target_filter_to_prevent_target(target_filter.as_ref()),
+            recipient_scope: crate::types::ability::EffectScope::Single,
             scope: combat_scope
                 .map(|_| crate::types::ability::PreventionScope::CombatDamage)
                 .unwrap_or(crate::types::ability::PreventionScope::AllDamage),
@@ -7628,6 +7629,7 @@ fn parse_oneshot_target_source_prevent(norm_lower: &str, ctx: &ParseContext) -> 
         // `Any` here means "no additional recipient scope" and is not consulted
         // on the source-scoped prevent path.
         target: TargetFilter::Any,
+        recipient_scope: crate::types::ability::EffectScope::Single,
         scope,
         damage_source_filter: Some(TargetFilter::And {
             filters: vec![
