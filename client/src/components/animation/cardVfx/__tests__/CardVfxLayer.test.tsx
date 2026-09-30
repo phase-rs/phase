@@ -867,9 +867,16 @@ describe("CardVfxLayer present contract", () => {
     handCard(X);
     anchor({ "data-exile-pile": "1" }, 40, 700);
 
-    present({ ...spec(X, { from: "Hand", to: "Exile", ownerId: 1 }), snapshotSeq: queuedSeq() - 1 });
+    commitEngine();
+    commitEngine();
+
+    // The step animates the snapshot before the committed one.
+    const classic = present({ ...spec(X, { from: "Hand", to: "Exile", ownerId: 1 }), snapshotSeq: queuedSeq() - 2 });
+    await frames(1);
+    expect(veiled(X)).toBe(true);
     await advance(RESOLVE_FLIGHT_MS + LAND_STATIONARY_WAIT_MAX_MS + LAND_REVEAL_WAIT_MAX_MS + 10 * FRAME_MS);
 
+    expect(classic).not.toHaveBeenCalled();
     expect(veiled(X)).toBe(false);
   });
 
@@ -1557,6 +1564,20 @@ describe("CardVfxLayer damage strike", () => {
     expect(hasVisible(last(calls("render")) as RendererCall, "card-shatter")).toBe(true);
     await advance(HIT_S * 1000);
     expect(veiled(X)).toBe(true);
+  });
+
+  it("V10-20: a hit replacing one still before its impact stays hidden, with the permanent unveiled, until its own", async () => {
+    const { present } = await readyLayer();
+    anchor({ "data-stack-entry": String(SPELL) }, 600, 300);
+    addFace(anchor({ "data-permanent-card": String(X) }, 300, 100));
+    present(atPermanent());
+    await loadFace();
+    present(atPermanent());
+    await loadFace();
+    await frames(2);
+
+    expect(veiled(X)).toBe(false);
+    expect(hasVisible(last(calls("render")) as RendererCall, "damage-hit")).toBe(false);
   });
 
   it("V10-18: a strike whose hit was replaced lands after the replacement ends without veiling again", async () => {

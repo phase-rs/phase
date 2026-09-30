@@ -514,12 +514,14 @@ class CardVfxController {
       target.face,
       spec.owningStepMs,
       (liveScene, surface) => {
-        // The effect this hit replaces never completes; its hold stands until
-        // the hit's impact takes it over.
+        // A board effect this hit replaces never completes. While its hold
+        // stands, until the hit's impact takes it over, the hit shows the
+        // permanent in its place.
+        const atRest = this.veilHolds.get(objectId)?.board != null;
         const holder = this.startBoardEffect(objectId);
         liveScene.startDamageStrike({
           ...strike,
-          hit: { ...surface, objectId, onDone: () => this.release(objectId, "board", holder) },
+          hit: { ...surface, objectId, atRest, onDone: () => this.release(objectId, "board", holder) },
           onImpact: () => {
             // A hit already replaced has no copy left to hold for.
             if (this.boardEffects.get(objectId) === holder) this.hold(objectId, "board", holder);

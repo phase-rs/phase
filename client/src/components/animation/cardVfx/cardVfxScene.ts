@@ -110,8 +110,11 @@ interface OnPermanent {
 export type CardShatterRequest = Omit<CardShatterParams, "pixelRatio"> & OnPermanent;
 /** A dissolve to start; the scene supplies the pixel ratio. */
 export type ExileDissolveRequest = Omit<ExileDissolveParams, "pixelRatio"> & OnPermanent;
+/** A struck permanent's hit; `atRest` when it takes over the veil of the
+ *  board effect it replaces, so it shows the permanent until its impact. */
+type DamageHitRequest = DamageHitParams & OnPermanent & { atRest: boolean };
 /** A damage strike to start; a hit names the permanent it lands on. */
-export type DamageStrikeRequest = Omit<DamageStrikeParams, "hit"> & { hit: (DamageHitParams & OnPermanent) | null };
+export type DamageStrikeRequest = Omit<DamageStrikeParams, "hit"> & { hit: DamageHitRequest | null };
 
 export interface CardVfxScene {
   setPixelRatio(ratio: number): void;
@@ -355,9 +358,9 @@ class CardVfxSceneRuntime implements CardVfxScene, EffectHost {
   startDamageStrike(request: DamageStrikeRequest) {
     const { strike, hit } = createDamageStrike(this, request);
     this.add(strike);
-    // A hit taking over from a running effect inherits its veil, so it shows
-    // the permanent at rest until its own impact.
-    if (hit && request.hit && this.addBoardEffect(request.hit.objectId, hit)) hit.showAtRest();
+    if (!hit || !request.hit) return;
+    this.addBoardEffect(request.hit.objectId, hit);
+    if (request.hit.atRest) hit.showAtRest();
   }
 
   startDamageBlow(request: DamageBlowParams) {
@@ -372,8 +375,7 @@ class CardVfxSceneRuntime implements CardVfxScene, EffectHost {
     this.add(createCounterChange(this, request));
   }
 
-  /** Returns whether `effect` took over from one already running. */
-  private addBoardEffect(objectId: ObjectId, effect: SceneEffect): boolean {
+  private addBoardEffect(objectId: ObjectId, effect: SceneEffect) {
     const previous = this.boardEffects.get(objectId);
     if (previous) {
       this.active.delete(previous);
@@ -381,7 +383,6 @@ class CardVfxSceneRuntime implements CardVfxScene, EffectHost {
     }
     this.boardEffects.set(objectId, effect);
     this.add(effect);
-    return previous !== undefined;
   }
 
   add(effect: SceneEffect) {
