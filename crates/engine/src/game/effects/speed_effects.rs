@@ -331,13 +331,8 @@ pub(crate) fn players_for_filter(
                         value,
                         controller,
                         crate::game::quantity::QuantityContext {
-                            entering: None,
-                            source: source_id,
-                            trigger_source: None,
-                            recipient: None,
                             scoped_player: Some(player.id),
-                            damage_source: None,
-                            event_amount: None,
+                            ..crate::game::quantity::QuantityContext::new(source_id)
                         },
                     );
                     crate::game::effects::candidate_player_scalar_with_state(

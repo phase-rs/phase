@@ -2208,13 +2208,8 @@ fn collect_matching_players(
                             value,
                             source_controller,
                             crate::game::quantity::QuantityContext {
-                                entering: None,
-                                source: source_id,
-                                trigger_source: None,
-                                recipient: None,
                                 scoped_player: Some(p.id),
-                                damage_source: None,
-                                event_amount: None,
+                                ..crate::game::quantity::QuantityContext::new(source_id)
                             },
                         );
                         crate::game::players::matches_relation(
@@ -2483,13 +2478,9 @@ pub fn resolve_each_player(
                             value,
                             ability.controller,
                             crate::game::quantity::QuantityContext {
-                                entering: None,
-                                source: ability.source_id,
-                                trigger_source: None,
-                                recipient: None,
                                 scoped_player: Some(p.id),
-                                damage_source: None,
-                                event_amount: None,
+                                granting_object: ability.context.granting_object,
+                                ..crate::game::quantity::QuantityContext::new(ability.source_id)
                             },
                         );
                         crate::game::players::matches_relation(

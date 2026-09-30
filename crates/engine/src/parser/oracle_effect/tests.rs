@@ -69893,11 +69893,11 @@ fn consign_to_the_pit_constant_damage_keeps_the_spell_as_source() {
 #[test]
 fn amount_reads_the_antecedent_accepts_only_anaphoric_subject_scopes() {
     macro_rules! every_object_scope {
-        ($($scope:ident),+ $(,)?) => {{
+        ($($scope:ident $({ $field:ident: $value:expr $(,)? })?),+ $(,)?) => {{
             let _exhaustive = |scope: ObjectScope| match scope {
-                $(ObjectScope::$scope)|+ => {}
+                $(ObjectScope::$scope $({ $field: _ })?)|+ => {}
             };
-            [$((stringify!($scope), ObjectScope::$scope)),+]
+            [$((stringify!($scope), ObjectScope::$scope $({ $field: $value })?)),+]
         }};
     }
     let power = |scope| QuantityExpr::Ref {
@@ -69920,6 +69920,13 @@ fn amount_reads_the_antecedent_accepts_only_anaphoric_subject_scopes() {
         OwnedLinkedExileCard,
         BatchSource,
         ChainRootTarget,
+        GrantingObject,
+        SpecificObject {
+            object: crate::types::identifiers::ObjectIncarnationRef::of(
+                crate::types::identifiers::ObjectId(1),
+                0,
+            ),
+        },
     )
     .into_iter()
     .map(|(name, scope)| (format!("Power{{{name}}}"), power(scope)))

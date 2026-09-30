@@ -8566,11 +8566,17 @@ pub(crate) fn parse_attachment_kind_disjunction(
 /// Aura/Equipment has left, CR 608.2h + CR 113.7a). The adjective comes from
 /// `parse_attachment_kind_disjunction`; its compound "enchanted or equipped"
 /// forms are refused, leaving the suffix unconsumed. The host noun is the
-/// closed singular set of `parse_attached_host_noun`.
+/// closed singular set of `parse_attached_host_noun`. CR 201.5a: a granted
+/// body's own card name excludes the granting object (`FilterProp::DistinctFrom`).
 fn parse_other_than_exclusion(input: &str) -> OracleResult<'_, FilterProp> {
     preceded(
         tag("other than "),
         alt((
+            map(nom_target::parse_granting_object_ref, |reference| {
+                FilterProp::DistinctFrom {
+                    reference: Box::new(reference),
+                }
+            }),
             map(nom_target::parse_self_reference, |_| FilterProp::Another),
             map_opt(
                 (

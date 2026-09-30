@@ -583,6 +583,9 @@ pub struct TriggerSourceContext {
     pub additional_cost_payments: Vec<AdditionalCostInstancePayment>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cast_cost_paid_object: Option<CostPaidObjectSnapshot>,
+    /// CR 201.5a: the granter stamped on the trigger definition this context was handed with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub granting_object: Option<ObjectIncarnationRef>,
 }
 
 impl std::fmt::Debug for TriggerSourceContext {
@@ -659,8 +662,11 @@ impl std::fmt::Debug for TriggerSourceContext {
                 &self.additional_cost_payment_count,
             )
             .field("additional_cost_payments", &self.additional_cost_payments)
-            .field("cast_cost_paid_object", &self.cast_cost_paid_object)
-            .finish()
+            .field("cast_cost_paid_object", &self.cast_cost_paid_object);
+        if self.granting_object.is_some() {
+            debug.field("granting_object", &self.granting_object);
+        }
+        debug.finish()
     }
 }
 
@@ -22621,14 +22627,16 @@ pub struct EndEffectPermission {
 
 /// Exact object bindings captured when a transient continuous effect begins.
 ///
-/// CR 400.7 + CR 611.2b: both fields name the particular objects the resolved
-/// effect may affect or whose state may sustain its duration.  They travel in
-/// the same journaled install command as the rest of the effect, rather than
-/// being attached after installation, so replay cannot observe a partial TCE.
+/// CR 400.7 + CR 611.2b: `affected_recipient` and `duration_subject` name the
+/// particular objects the resolved effect may affect or whose state may sustain
+/// its duration.  They travel in the same journaled install command as the rest
+/// of the effect, rather than being attached after installation, so replay
+/// cannot observe a partial TCE.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TransientContinuousEffectBindings {
     pub affected_recipient: Option<ObjectIncarnationRef>,
     pub duration_subject: Option<ObjectIncarnationRef>,
+    pub granting_object: Option<ObjectIncarnationRef>,
 }
 
 /// A runtime-generated continuous effect stored at state level.
@@ -22675,12 +22683,15 @@ pub struct TransientContinuousEffect {
     pub duration_event_source: Option<Box<TriggerSourceContext>>,
     /// CR 116.2c: see [`EndEffectPermission`]. `None` for every effect with no
     /// printed termination permission. Set inside the single construction
-    /// authority (`add_transient_continuous_effect_with_end_permission`), so it
+    /// authority (`add_transient_continuous_effect_inner`), so it
     /// rides inside the journaled `ResolvedContinuousEffectCommand` rather than
     /// being post-stamped. Backward-compatible across the WASM/multiplayer
     /// serialization boundary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub end_permission: Option<EndEffectPermission>,
+    /// CR 201.5a: the object that granted the ability that created this effect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub granting_object: Option<ObjectIncarnationRef>,
     /// Snapshot of the originating object's or dungeon's name, captured at construction.
     /// The originating spell/ability typically moves to a new zone (graveyard,
     /// stack→exile, etc.) with a new ObjectId per CR 400.7 after resolution,
@@ -28026,7 +28037,7 @@ impl GameState {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn add_transient_continuous_effect_inner(
+    pub(crate) fn add_transient_continuous_effect_inner(
         &mut self,
         source_id: ObjectId,
         controller: PlayerId,
@@ -28108,6 +28119,7 @@ impl GameState {
                 duration_subject: bindings.duration_subject,
                 duration_event_source,
                 end_permission,
+                granting_object: bindings.granting_object,
                 source_name,
             },
             expected_installed_count: self.transient_continuous_effects.len(),
@@ -32090,6 +32102,7 @@ mod tests {
             condition: None,
             duration_subject: Some(ObjectIncarnationRef::of(ObjectId(9), 3)),
             end_permission: None,
+            granting_object: None,
             duration_event_source: None,
             source_name: String::new(),
         };
@@ -41394,6 +41407,7 @@ mod tests {
             TransientContinuousEffectBindings {
                 affected_recipient: Some(recipient),
                 duration_subject: Some(copy_source),
+                granting_object: None,
             },
         );
         crate::game::printed_cards::apply_copiable_values(
@@ -41487,6 +41501,7 @@ mod tests {
             TransientContinuousEffectBindings {
                 affected_recipient: Some(recipient_ref),
                 duration_subject: Some(source_ref),
+                granting_object: None,
             },
         );
         crate::game::printed_cards::apply_copiable_values(

@@ -166,6 +166,7 @@ pub fn append_battlefield_pt_sticker_effects(
                 condition: None,
                 mode: crate::types::statics::StaticMode::Continuous,
                 characteristic_defining: false,
+                granter: None,
             });
             bucket.push(ActiveContinuousEffect {
                 source_id: id,
@@ -182,6 +183,7 @@ pub fn append_battlefield_pt_sticker_effects(
                 condition: None,
                 mode: crate::types::statics::StaticMode::Continuous,
                 characteristic_defining: false,
+                granter: None,
             });
         }
     }

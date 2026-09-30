@@ -9915,8 +9915,8 @@ fn demote_sweeps_in_ability(def: &mut AbilityDefinition) {
 }
 
 /// CR 201.5a: The DISPLAY-channel authority for [`GRANTING_SELF_PLACEHOLDER`] —
-/// the mirror of the typed channel's Layer-6 concretization
-/// (`game::ability_utils::concretize_granting_object`).
+/// the mirror of the typed channel's Layer-6 granter stamp
+/// (`game::layers::stamp_granter`).
 ///
 /// The masker inserts the marker into verb-object self-ref positions so the
 /// self-ref combinators can map it to `TargetFilter::GrantingObject`. After

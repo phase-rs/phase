@@ -35,6 +35,7 @@ use crate::types::ability::{
     StaticCondition, StaticDefinition, TargetFilter, TriggerGrantProducerKey,
     TriggerProducerOrigin, TypedFilter,
 };
+use crate::types::ability_visit::{nodes_mut, DefinitionNodeMut};
 use crate::types::attribution::EffectRef;
 use crate::types::card_type::{
     is_land_subtype, noncreature_subtype_set, CoreType, SubtypeSet, Supertype,
@@ -2119,13 +2120,8 @@ fn evaluate_condition_inner(
                     expr,
                     controller,
                     QuantityContext {
-                        entering: None,
-                        source: source_id,
-                        trigger_source: None,
                         recipient: context.recipient,
-                        scoped_player: None,
-                        damage_source: None,
-                        event_amount: None,
+                        ..QuantityContext::new(source_id)
                     },
                 )
             };
@@ -2361,6 +2357,8 @@ fn evaluate_condition_inner(
             | crate::types::ability::ObjectScope::Demonstrative
             | crate::types::ability::ObjectScope::AmassedArmy
             | crate::types::ability::ObjectScope::ChainRootTarget
+            | crate::types::ability::ObjectScope::GrantingObject
+            | crate::types::ability::ObjectScope::SpecificObject { .. }
             | crate::types::ability::ObjectScope::BatchSource => false,
         },
         // CR 702.171b + CR 110.5d: off-battlefield permanents have no saddled designation.
@@ -3165,7 +3163,7 @@ pub fn evaluate_layers(state: &mut GameState) {
         }
     }
 
-    let stickers_applied = apply_room_names_then_stickers(state, &bf_ids);
+    let stickers_applied = finish_layer_one(state, &bf_ids);
 
     // Both producers say the same thing: layer 1 can turn a non-generator into a
     // continuous static source mid-pass, and the top-of-pass index was built from
@@ -6093,9 +6091,40 @@ fn derive_room_battlefield_names(state: &mut GameState, ids: &[ObjectId]) {
 /// name. The full and incremental paths must share this exact ordering or a
 /// stickered Room can have different characteristics depending on the flush
 /// path. Ability stickers ride the same existing sticker pass.
-fn apply_room_names_then_stickers(state: &mut GameState, ids: &[ObjectId]) -> bool {
+fn finish_layer_one(state: &mut GameState, ids: &[ObjectId]) -> bool {
     derive_room_battlefield_names(state, ids);
-    crate::game::stickers::apply_battlefield_name_and_ability_stickers(state, ids)
+    let stickers_applied =
+        crate::game::stickers::apply_battlefield_name_and_ability_stickers(state, ids);
+    // CR 201.5a: the reseed and copy effects write live statics only in layer 1, so
+    // binding here reaches every later reader.
+    bind_live_static_granters(state, ids);
+    stickers_applied
+}
+
+/// CR 201.5a + CR 707.2: a live static stamped with its granter (a created token's static
+/// naming its creator, or a copy of one) names that object.
+fn bind_live_static_granters(state: &mut GameState, ids: &[ObjectId]) {
+    for &id in ids {
+        let Some(statics) = state
+            .objects
+            .get(&id)
+            .map(|obj| obj.static_definitions.clone())
+            .filter(|statics| statics.iter_all().any(|def| def.granting_object.is_some()))
+        else {
+            continue;
+        };
+        let bound = statics
+            .iter_all()
+            .cloned()
+            .map(|mut def| {
+                bind_static_granter(state, &mut def);
+                def
+            })
+            .collect();
+        if let Some(obj) = state.objects.get_mut(&id) {
+            obj.static_definitions = bound;
+        }
+    }
 }
 
 fn apply_layers_incremental(state: &mut GameState, prepared: PreparedIncrementalFlush) {
@@ -6137,7 +6166,7 @@ fn apply_layers_incremental(state: &mut GameState, prepared: PreparedIncremental
     }
 
     let recipient_vec: Vec<ObjectId> = recipient_ids.iter().copied().collect();
-    let stickers_changed = apply_room_names_then_stickers(state, &recipient_vec);
+    let stickers_changed = finish_layer_one(state, &recipient_vec);
     // CR 613.2a + CR 613.2c: deliberately no copy disjunct on this rebuild, unlike
     // the full pass. A copy applied here could only add a generator by landing on
     // a recipient, and it cannot: `recipient_ids` is `entered_ids` alone, because
@@ -6444,6 +6473,7 @@ fn gather_ring_emblem_continuous_effects(
             condition: None,
             mode: StaticMode::Continuous,
             characteristic_defining: false,
+            granter: None,
         });
     }
 }
@@ -6834,6 +6864,7 @@ fn active_continuous_effects_from_static_definitions(
                 condition: retained_condition.clone(),
                 mode: def.mode.clone(),
                 characteristic_defining: def.characteristic_defining,
+                granter: def.granting_object,
             });
         }
     }
@@ -6877,6 +6908,14 @@ fn expand_granted_static_effects(
     if inner.mode != StaticMode::Continuous {
         return Vec::new();
     }
+    // CR 201.5a: the host static's object granted `inner`, so its by-name
+    // references bind to that object.
+    let mut stamped = inner.clone();
+    if let Some(host) = state.objects.get(&host_source_id) {
+        stamp_static_granter(&mut stamped, ObjectIncarnationRef::from_object(host));
+    }
+    bind_static_granter(state, &mut stamped);
+    let inner = &stamped;
     let inner_affected = inner.affected.clone().unwrap_or(TargetFilter::Any);
     let ctx = crate::game::filter::FilterContext::from_source(state, host_source_id);
     let mut out = Vec::new();
@@ -6930,10 +6969,279 @@ fn expand_granted_static_effects(
                 condition: retained_inner_condition.clone(),
                 mode: inner.mode.clone(),
                 characteristic_defining: inner.characteristic_defining,
+                granter: inner.granting_object,
             });
         }
     }
     out
+}
+
+/// CR 201.5a: whether a granted body names its granter; only such a body is stamped.
+// Completeness comes from the types' Serialize impls; the typed alternative would be a hand-maintained field mirror.
+fn references_granting_object(body: &impl serde::Serialize) -> bool {
+    fn names_granter(value: &serde_json::Value) -> bool {
+        match value {
+            serde_json::Value::Object(map) => {
+                is_granter_symbol(value) || map.values().any(names_granter)
+            }
+            serde_json::Value::Array(items) => items.iter().any(names_granter),
+            serde_json::Value::Null
+            | serde_json::Value::Bool(_)
+            | serde_json::Value::Number(_)
+            | serde_json::Value::String(_) => false,
+        }
+    }
+    serde_json::to_value(body).is_ok_and(|value| names_granter(&value))
+}
+
+fn is_granter_symbol(value: &serde_json::Value) -> bool {
+    value.get("type").is_some_and(|tag| tag == "GrantingObject")
+}
+
+fn replace_granter_symbols(value: &mut serde_json::Value, bound: &serde_json::Value) -> bool {
+    if is_granter_symbol(value) {
+        *value = bound.clone();
+        return true;
+    }
+    match value {
+        serde_json::Value::Object(map) => map.values_mut().fold(false, |hit, inner| {
+            replace_granter_symbols(inner, bound) | hit
+        }),
+        serde_json::Value::Array(items) => items.iter_mut().fold(false, |hit, inner| {
+            replace_granter_symbols(inner, bound) | hit
+        }),
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_) => false,
+    }
+}
+
+/// RFC 6901 pointers to every granter symbol in `value`.
+fn granter_symbol_pointers(value: &serde_json::Value, path: String, out: &mut Vec<String>) {
+    if is_granter_symbol(value) {
+        out.push(path);
+        return;
+    }
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, inner) in map {
+                let key = key.replace('~', "~0").replace('/', "~1");
+                granter_symbol_pointers(inner, format!("{path}/{key}"), out);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for (index, inner) in items.iter().enumerate() {
+                granter_symbol_pointers(inner, format!("{path}/{index}"), out);
+            }
+        }
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_) => {}
+    }
+}
+
+/// CR 201.5a + CR 400.7: binds the granter symbols in `body` to `granter` — an `ObjectScope`
+/// position from any stamp, a filter position (which names only an id) only from a current one.
+// Completeness comes from Serialize, as in `references_granting_object`. The merged encoding
+// deserializes in either position; the scope-only encoding only in an `ObjectScope` one.
+fn bind_granter_symbols<T>(state: &GameState, body: &mut T, granter: ObjectIncarnationRef)
+where
+    T: serde::Serialize + serde::de::DeserializeOwned,
+{
+    let Ok(mut value) = serde_json::to_value(&*body) else {
+        return;
+    };
+    let (Ok(serde_json::Value::Object(mut bound)), Ok(serde_json::Value::Object(filter))) = (
+        serde_json::to_value(crate::types::ability::ObjectScope::SpecificObject {
+            object: granter,
+        }),
+        serde_json::to_value(TargetFilter::SpecificObject {
+            id: granter.object_id,
+        }),
+    ) else {
+        unreachable!("both SpecificObject forms serialize as tagged maps");
+    };
+    if granter.is_current(state) {
+        bound.extend(filter);
+        if replace_granter_symbols(&mut value, &serde_json::Value::Object(bound)) {
+            *body = serde_json::from_value(value)
+                .expect("a bound granter deserializes in filter and quantity positions alike");
+        }
+        return;
+    }
+    let scope = serde_json::Value::Object(bound);
+    let mut symbols = Vec::new();
+    granter_symbol_pointers(&value, String::new(), &mut symbols);
+    let mut rebound = false;
+    for pointer in &symbols {
+        let Some(slot) = value.pointer_mut(pointer) else {
+            continue;
+        };
+        let symbol = std::mem::replace(slot, scope.clone());
+        if T::deserialize(&value).is_ok() {
+            rebound = true;
+        } else if let Some(slot) = value.pointer_mut(pointer) {
+            *slot = symbol;
+        }
+    }
+    if rebound {
+        *body = serde_json::from_value(value).expect("every kept rewrite deserialized");
+    }
+}
+
+/// CR 201.5a + CR 400.7 + CR 611.2b: rewrites the granter symbols in every `Duration`
+/// inside `body` to `granter`, which reads exactly what the stamp reads, because no
+/// reader of a duration consults a granter stamp.
+// Completeness comes from Serialize, as in `references_granting_object`; a node is a
+// duration iff it deserializes as `Duration`, so no field or variant list is kept.
+pub(crate) fn bind_granter_durations<T>(body: &mut T, granter: ObjectIncarnationRef)
+where
+    T: serde::Serialize + serde::de::DeserializeOwned,
+{
+    let (Ok(mut value), Ok(scope)) = (
+        serde_json::to_value(&*body),
+        serde_json::to_value(crate::types::ability::ObjectScope::SpecificObject {
+            object: granter,
+        }),
+    ) else {
+        return;
+    };
+    if bind_duration_nodes(&mut value, &scope) {
+        if let Ok(bound) = serde_json::from_value(value) {
+            *body = bound;
+        }
+    }
+}
+
+fn bind_duration_nodes(value: &mut serde_json::Value, scope: &serde_json::Value) -> bool {
+    use serde::Deserialize;
+    if value.is_object() && Duration::deserialize(&*value).is_ok() {
+        let mut bound = value.clone();
+        // An `ObjectId` cannot name an incarnation, so a duration naming the granter in a
+        // filter position stays as it is.
+        let bindable =
+            replace_granter_symbols(&mut bound, scope) && Duration::deserialize(&bound).is_ok();
+        if bindable {
+            *value = bound;
+        }
+        return bindable;
+    }
+    match value {
+        serde_json::Value::Object(map) => map
+            .values_mut()
+            .fold(false, |hit, inner| bind_duration_nodes(inner, scope) | hit),
+        serde_json::Value::Array(items) => items
+            .iter_mut()
+            .fold(false, |hit, inner| bind_duration_nodes(inner, scope) | hit),
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_) => false,
+    }
+}
+
+/// A modification that holds a definition node (a grant or a copy) is left to
+/// that node's own stamping and binding.
+fn bind_granter_in_modification(
+    state: &GameState,
+    modification: &mut ContinuousModification,
+    granter: ObjectIncarnationRef,
+) {
+    let holds_definition =
+        nodes_mut::visit_continuous_mod(modification, &mut |_| std::ops::ControlFlow::Break(()))
+            .is_break();
+    if !holds_definition {
+        bind_granter_symbols(state, modification, granter);
+    }
+}
+
+fn bind_static_granter(state: &GameState, def: &mut StaticDefinition) {
+    let Some(granter) = def.granting_object else {
+        return;
+    };
+    if let Some(affected) = def.affected.as_mut() {
+        bind_granter_symbols(state, affected, granter);
+    }
+    if let Some(condition) = def.condition.as_mut() {
+        bind_granter_symbols(state, condition, granter);
+    }
+    bind_granter_symbols(state, &mut def.mode, granter);
+    for modification in def.modifications.iter_mut() {
+        bind_granter_in_modification(state, modification, granter);
+    }
+}
+
+/// The execute and decline bodies and the tokens a replacement creates outlive the
+/// pass, so they keep the read-time stamp.
+fn bind_replacement_granter(
+    state: &GameState,
+    def: &mut crate::types::ability::ReplacementDefinition,
+) {
+    let Some(granter) = def.granting_object else {
+        return;
+    };
+    let latched = (
+        def.execute.take(),
+        def.runtime_execute.take(),
+        std::mem::take(&mut def.mode),
+        def.additional_token_spec.take(),
+        def.ensure_token_specs.take(),
+    );
+    bind_granter_symbols(state, def, granter);
+    (
+        def.execute,
+        def.runtime_execute,
+        def.mode,
+        def.additional_token_spec,
+        def.ensure_token_specs,
+    ) = latched;
+}
+
+fn bind_effect_granter(state: &GameState, effect: &mut ActiveContinuousEffect) {
+    let Some(granter) = effect.granter else {
+        return;
+    };
+    bind_granter_symbols(state, &mut effect.affected_filter, granter);
+    if let Some(condition) = effect.condition.as_mut() {
+        bind_granter_symbols(state, condition, granter);
+    }
+    bind_granter_symbols(state, &mut effect.mode, granter);
+    bind_granter_in_modification(state, &mut effect.modification, granter);
+}
+
+/// CR 201.5a + CR 613.1f: the stamping rule. Every definition node of a granted
+/// body names `granter`; a node that already names one keeps it, because a granted
+/// ability copied onto a new object still refers to its original source.
+fn stamp_granter(
+    granter: ObjectIncarnationRef,
+) -> impl FnMut(DefinitionNodeMut<'_>) -> std::ops::ControlFlow<()> {
+    move |node| {
+        match node {
+            DefinitionNodeMut::Ability(def) => {
+                def.granting_object.get_or_insert(granter);
+            }
+            DefinitionNodeMut::Trigger(trigger) => {
+                trigger.granting_object.get_or_insert(granter);
+            }
+            DefinitionNodeMut::Static(static_def) => {
+                static_def.granting_object.get_or_insert(granter);
+            }
+            DefinitionNodeMut::Replacement(replacement) => {
+                replacement.granting_object.get_or_insert(granter);
+            }
+        }
+        std::ops::ControlFlow::Continue(())
+    }
+}
+
+/// CR 201.5a: the stamping rule for a static installed on an object other than
+/// `granter` — a granted static or a created token's static.
+pub(crate) fn stamp_static_granter(def: &mut StaticDefinition, granter: ObjectIncarnationRef) {
+    if references_granting_object(def) {
+        let _ = nodes_mut::visit_static(def, &mut stamp_granter(granter));
+    }
 }
 
 /// CR 613.1f + CR 113.3: Expand a `GrantAllActivatedAbilitiesOf { source }` host
@@ -7062,6 +7370,7 @@ fn expand_granted_activated_abilities(
                     condition: None,
                     mode: StaticMode::Continuous,
                     characteristic_defining: false,
+                    granter: None,
                 });
                 next_mod_index += 1;
             }
@@ -7162,6 +7471,7 @@ fn expand_granted_triggered_abilities(
                     condition: None,
                     mode: StaticMode::Continuous,
                     characteristic_defining: false,
+                    granter: None,
                 });
                 next_mod_index += 1;
             }
@@ -7327,7 +7637,7 @@ pub(crate) fn gather_transient_continuous_effects(
                     }),
                 ));
             }
-            effects.push(ActiveContinuousEffect {
+            let mut effect = ActiveContinuousEffect {
                 source_id: tce.source_id,
                 controller: tce.controller,
                 def_index: None,
@@ -7345,7 +7655,10 @@ pub(crate) fn gather_transient_continuous_effects(
                 condition: retained_condition.clone(),
                 mode: StaticMode::Continuous,
                 characteristic_defining: false,
-            });
+                granter: tce.granting_object,
+            };
+            bind_effect_granter(state, &mut effect);
+            effects.push(effect);
         }
     }
 }
@@ -8818,6 +9131,11 @@ fn apply_continuous_effect_filtered(
         .unwrap_or(PlayerId(0));
     let dynamic_uses_recipient =
         dynamic_pt_expr.is_some_and(crate::game::quantity::quantity_expr_uses_recipient);
+    // CR 201.5a: the effect's static names its granter when it was granted.
+    let quantity_ctx = QuantityContext {
+        granting_object: effect.granter,
+        ..QuantityContext::new(effect.source_id)
+    };
     // The shared value is read ONLY by the per-recipient loop below (`for &id in
     // affected_ids`, its single reader), so an effect whose affected set is
     // empty on this pass has nothing to spend it on. No CR annotation: the
@@ -8855,11 +9173,11 @@ fn apply_continuous_effect_filtered(
         (Some(value), false) if !affected_ids.is_empty() => {
             #[cfg(test)]
             record_shared_dynamic_quantity_resolution();
-            Some(crate::game::quantity::resolve_quantity(
+            Some(crate::game::quantity::resolve_quantity_with_ctx(
                 state,
                 value,
                 effect_controller,
-                effect.source_id,
+                quantity_ctx.clone(),
             ))
         }
         _ => None,
@@ -8925,6 +9243,48 @@ fn apply_continuous_effect_filtered(
         None
     };
     let all_creature_types = state.all_creature_types.clone();
+    // CR 201.5a: a granted body's by-name references bind to the granting object.
+    let granter = state
+        .objects
+        .get(&effect.source_id)
+        .map(ObjectIncarnationRef::from_object);
+    // CR 201.5a: the body is identical for every recipient; stamp and bind it once, and only if one exists.
+    let stamped_modification = granter
+        .filter(|_| {
+            !affected_ids.is_empty()
+                && match &effect.modification {
+                    ContinuousModification::GrantAbility { definition } => {
+                        references_granting_object(definition)
+                    }
+                    ContinuousModification::GrantTrigger { trigger } => {
+                        references_granting_object(trigger)
+                    }
+                    ContinuousModification::GrantStaticAbility { definition } => {
+                        references_granting_object(definition)
+                    }
+                    ContinuousModification::GrantReplacement { replacement } => {
+                        references_granting_object(replacement)
+                    }
+                    _ => false,
+                }
+        })
+        .map(|granter| {
+            let mut modification = effect.modification.clone();
+            let _ = nodes_mut::visit_continuous_mod(&mut modification, &mut stamp_granter(granter));
+            match &mut modification {
+                ContinuousModification::GrantStaticAbility { definition } => {
+                    bind_static_granter(state, definition)
+                }
+                ContinuousModification::GrantReplacement { replacement } => {
+                    bind_replacement_granter(state, replacement)
+                }
+                _ => {}
+            }
+            modification
+        });
+    let modification = stamped_modification
+        .as_ref()
+        .unwrap_or(&effect.modification);
 
     for &id in affected_ids {
         // CR 613.4c: When the dynamic modification's QuantityExpr depends on
@@ -8932,12 +9292,14 @@ fn apply_continuous_effect_filtered(
         // The immutable read finishes before the mutable borrow of `obj` below.
         let dynamic_pt = if dynamic_uses_recipient {
             dynamic_pt_expr.map(|value| {
-                crate::game::quantity::resolve_quantity_with_recipient(
+                crate::game::quantity::resolve_quantity_with_ctx(
                     state,
                     value,
                     effect_controller,
-                    effect.source_id,
-                    id,
+                    QuantityContext {
+                        recipient: Some(id),
+                        ..quantity_ctx.clone()
+                    },
                 )
             })
         } else {
@@ -8949,7 +9311,7 @@ fn apply_continuous_effect_filtered(
             None => continue,
         };
 
-        match &effect.modification {
+        match modification {
             // CR 707.2c + CR 613.1a: `CopyChosen` is a parse-time marker for
             // Metamorphic Alteration's "enchanted creature is a copy of the
             // chosen creature" static. The copy is materialized exactly once —
@@ -9456,16 +9818,11 @@ fn apply_continuous_effect_filtered(
             // GrantAbility — whether from a single static with repeated
             // modifications (e.g., Ragost parses the "have ..." clause twice)
             // or from multiple sources granting the same ability — must not
-            // stack. Structural equality dedup keeps the grant idempotent.
+            // stack, unless a granter stamp (CR 201.5a) keeps each granter's copy
+            // apart (CR 113.2c). Structural equality dedup keeps the grant
+            // idempotent.
             ContinuousModification::GrantAbility { definition } => {
-                // CR 201.5a + CR 613.1f: concretize any granter by-name
-                // self-reference (`GrantingObject`) in the cloned body to the
-                // live granting object (`effect.source_id`) before dedup/push,
-                // so "Exile/Sacrifice/Return <granter-name>" acts on the
-                // equipment/aura, not on the host it was granted to. Re-minted
-                // each layer pass (CR 613.1f). Dedup on the concretized value.
-                let mut granted = *definition.clone();
-                super::ability_utils::concretize_granting_object(&mut granted, effect.source_id);
+                let granted = *definition.clone();
                 if !obj.abilities.iter().any(|a| a == &granted) {
                     // CR 613.1f + CR 607.1: layer-6 grants follow the
                     // characteristic prefix; the first one marks its end.
@@ -9487,15 +9844,7 @@ fn apply_continuous_effect_filtered(
             // CR 604.1: Push granted trigger to trigger_definitions so
             // the trigger's event matching and condition metadata is preserved.
             ContinuousModification::GrantTrigger { trigger } => {
-                // CR 201.5a + CR 613.1f: concretize a granter by-name
-                // self-reference inside the granted trigger's execute chain
-                // (e.g. "you may sacrifice <granter>") to the live granting
-                // object before dedup/push. Re-minted each layer pass (CR 613.1f).
-                let mut granted = *trigger.clone();
-                super::ability_utils::concretize_granting_object_in_trigger(
-                    &mut granted,
-                    effect.source_id,
-                );
+                let granted = *trigger.clone();
                 let producer = effect
                     .expanded_trigger_provider
                     .as_ref()
@@ -9513,19 +9862,16 @@ fn apply_continuous_effect_filtered(
             // CR 113.3d + CR 604.1 + CR 613.1f: Grant a full static ability to the
             // recipient. The inner static's `affected`/`condition`/`modifications`
             // are independent of the recipient (e.g. "Other commanders you control
-            // get +2/+2 and have lifelink") and are preserved verbatim, so the
-            // granted static operates against its own scope under CR 611.2c once
-            // it's installed on the recipient's `static_definitions`. Dedup by
-            // structural equality so repeated layer passes don't multiply the
-            // grant (mirrors the `GrantAbility` / `GrantTrigger` / `AddStaticMode`
-            // idempotency invariant in this match).
+            // get +2/+2 and have lifelink") and are preserved apart from the granter
+            // stamp (CR 201.5a), so the granted static operates against
+            // its own scope under CR 611.2c once it's installed on the recipient's
+            // `static_definitions`. Dedup by structural equality so repeated layer
+            // passes don't multiply the grant (mirrors the `GrantAbility` /
+            // `GrantTrigger` / `AddStaticMode` idempotency invariant in this match).
             ContinuousModification::GrantStaticAbility { definition } => {
-                if !obj
-                    .static_definitions
-                    .iter_all()
-                    .any(|sd| sd == definition.as_ref())
-                {
-                    obj.static_definitions.push(*definition.clone());
+                let granted = *definition.clone();
+                if !obj.static_definitions.iter_all().any(|sd| sd == &granted) {
+                    obj.static_definitions.push(granted);
                 }
             }
             // CR 614.1a + CR 614.6 + CR 613.1f: Grant an object-hosted replacement
@@ -9536,14 +9882,16 @@ fn apply_continuous_effect_filtered(
             // each layer pass (`obj.replacement_definitions` was reset to base at
             // the start of the pass); structural-equality dedup keeps repeated
             // grants (multiple sources, or a single static parsed twice)
-            // idempotent, matching the GrantTrigger / GrantStaticAbility invariant.
+            // idempotent, matching the GrantTrigger / GrantStaticAbility invariant;
+            // a granter stamp (CR 201.5a) keeps each granter's copy apart.
             ContinuousModification::GrantReplacement { replacement } => {
+                let granted = *replacement.clone();
                 if !obj
                     .replacement_definitions
                     .iter_all()
-                    .any(|rd| rd == replacement.as_ref())
+                    .any(|rd| rd == &granted)
                 {
-                    obj.replacement_definitions.push(*replacement.clone());
+                    obj.replacement_definitions.push(granted);
                 }
             }
             ContinuousModification::AddStaticMode { mode } => {
@@ -9980,6 +10328,89 @@ pub(crate) fn compute_current_copiable_values(
 
 #[cfg(test)]
 mod tests {
+
+    /// CR 201.5a: the predicate is true exactly for grant bodies that name their granter.
+    #[test]
+    fn granting_object_reference_decides_the_stamp() {
+        use crate::game::scenario::{GameScenario, P0};
+        let grants = |body: &str| {
+            let mut scenario = GameScenario::new();
+            let granter = scenario
+                .add_artifact_from_oracle(
+                    P0,
+                    "Foo Bar",
+                    &format!("Equipped creature has \"{body}\"\nEquip {{1}}"),
+                )
+                .with_subtypes(vec!["Equipment"])
+                .id();
+            let runner = scenario.build();
+            runner.state().objects[&granter]
+                .static_definitions
+                .iter_all()
+                .flat_map(|sd| sd.modifications.iter())
+                .filter_map(|m| match m {
+                    ContinuousModification::GrantAbility { definition } => {
+                        Some(references_granting_object(definition))
+                    }
+                    ContinuousModification::GrantTrigger { trigger } => {
+                        Some(references_granting_object(trigger))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        for body in [
+            "{T}: Draw a card if you control an artifact other than Foo Bar.",
+            "{T}: Put a +1/+1 counter on this creature for each artifact you control other than Foo Bar.",
+            "{T}: This creature gets +X/+0 until end of turn, where X is the number of +1/+1 counters on Foo Bar.",
+            "Whenever this creature attacks, put a +1/+1 counter on it for each artifact you control other than Foo Bar.",
+        ] {
+            assert_eq!(grants(body), vec![true], "{body}");
+        }
+        assert_eq!(grants("{T}: Draw a card."), vec![false]);
+        assert!(!references_granting_object(&ragost_food_ability()));
+    }
+
+    #[test]
+    fn stamp_granter_fills_every_node_and_keeps_an_existing_stamp() {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, Effect, ReplacementDefinition,
+        };
+        use crate::types::ability_visit::nodes_mut;
+        let granter = ObjectIncarnationRef::of(ObjectId(5), 1);
+        let earlier = ObjectIncarnationRef::of(ObjectId(9), 4);
+        let mut nested = AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp);
+        nested.granting_object = Some(earlier);
+        let mut body = AbilityDefinition::new(AbilityKind::Activated, Effect::NoOp)
+            .sub_ability(AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp));
+        body.else_ability = Some(Box::new(nested));
+        let _ = nodes_mut::visit_ability_def(&mut body, &mut stamp_granter(granter));
+        assert_eq!(body.granting_object, Some(granter));
+        assert_eq!(body.sub_ability.unwrap().granting_object, Some(granter));
+        assert_eq!(body.else_ability.unwrap().granting_object, Some(earlier));
+
+        let mut trigger = TriggerDefinition::new(TriggerMode::Attacks)
+            .execute(AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp));
+        let _ = nodes_mut::visit_trigger(&mut trigger, &mut stamp_granter(granter));
+        assert_eq!(trigger.granting_object, Some(granter));
+        assert_eq!(trigger.execute.unwrap().granting_object, Some(granter));
+
+        let nested = ReplacementDefinition::new(ReplacementEvent::Destroy);
+        assert!(!references_granting_object(&nested));
+        let mut body = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::AddTargetReplacement {
+                replacement: Box::new(nested),
+                target: TargetFilter::GrantingObject,
+            },
+        );
+        assert!(references_granting_object(&body));
+        let _ = nodes_mut::visit_ability_def(&mut body, &mut stamp_granter(granter));
+        let Effect::AddTargetReplacement { replacement, .. } = &*body.effect else {
+            unreachable!()
+        };
+        assert_eq!(replacement.granting_object, Some(granter));
+    }
 
     /// CR 514.2 + CR 109.4: `prune_until_next_turn_effects` arms an
     /// `UntilEndOfNextTurnOf { SpecificPlayer }` effect on the SNAPSHOTTED
@@ -18558,6 +18989,7 @@ mod tests {
                 condition: None,
                 duration_subject: None,
                 end_permission: None,
+                granting_object: None,
                 duration_event_source: None,
                 source_name: String::new(),
             });
@@ -18593,6 +19025,7 @@ mod tests {
                 condition: None,
                 duration_subject: None,
                 end_permission: None,
+                granting_object: None,
                 duration_event_source: None,
                 source_name: String::new(),
             });
@@ -18640,6 +19073,7 @@ mod tests {
                     condition: None,
                     duration_subject: None,
                     end_permission: None,
+                    granting_object: None,
                     duration_event_source: None,
                     source_name: String::new(),
                 });
@@ -22127,6 +22561,7 @@ mod tests {
         state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
+        assert_eq!(state.objects[&artifact].abilities.len(), 1);
         assert_eq!(
             count_food_abilities(&state.objects[&artifact]),
             1,

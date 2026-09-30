@@ -663,13 +663,22 @@ fn build_token_spec(
     fallback_toughness: &PtValue,
     tapped: bool,
     enters_attacking: bool,
-    static_abilities: Vec<crate::types::ability::StaticDefinition>,
+    mut static_abilities: Vec<crate::types::ability::StaticDefinition>,
     enter_with_counters: Vec<(CounterType, u32)>,
     attach_to: TokenHostRequest,
     ability: &ResolvedAbility,
     state: &GameState,
 ) -> TokenSpec {
     use crate::types::proposed_event::TokenCharacteristics;
+
+    // CR 201.5a + CR 400.7: the token's statics name the incarnation that
+    // created it, so a creator that later changes zones is a different object.
+    if let Some(incarnation) = ability.source_incarnation {
+        let creator = ObjectIncarnationRef::of(ability.source_id, incarnation);
+        for static_def in static_abilities.iter_mut() {
+            crate::game::layers::stamp_static_granter(static_def, creator);
+        }
+    }
 
     let (display_name, power, toughness, core_types, subtypes, supertypes, colors, keywords) =
         if let Some(attrs) = parsed {
@@ -9163,13 +9172,16 @@ mod tests {
             .position(|a| a.cost.as_ref().and_then(sacrifice_target).is_some())
             .expect("host must carry Rock's granted sacrifice-cost ability after evaluate_layers");
 
+        let granted = &runner.state().objects[&host].abilities[idx];
         assert_eq!(
-            runner.state().objects[&host].abilities[idx]
-                .cost
-                .as_ref()
-                .and_then(sacrifice_target),
-            Some(&TargetFilter::SpecificObject { id: rock_id }),
-            "CR 201.5a: the sacrifice cost must target Rock (the granting object), not the host"
+            granted.cost.as_ref().and_then(sacrifice_target),
+            Some(&TargetFilter::GrantingObject)
+        );
+        assert_eq!(
+            granted.granting_object,
+            Some(ObjectIncarnationRef::from_object(
+                &runner.state().objects[&rock_id]
+            ))
         );
         assert!(
             !runner.state().objects[&host].abilities[idx]

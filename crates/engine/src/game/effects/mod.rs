@@ -592,13 +592,8 @@ pub(crate) fn matches_player_scope(
                                     value,
                                     controller,
                                     crate::game::quantity::QuantityContext {
-                                        entering: None,
-                                        source: source_id,
-                                        trigger_source: None,
-                                        recipient: None,
                                         scoped_player: Some(p.id),
-                                        damage_source: None,
-                                        event_amount: None,
+                                        ..crate::game::quantity::QuantityContext::new(source_id)
                                     },
                                 );
                                 candidate_player_scalar_with_state(state, p, controller, attr)
@@ -5478,6 +5473,7 @@ fn static_binds_nothing(static_ability: &StaticDefinition) -> bool {
         bypass_beneficiary,
         protection_does_not_remove,
         room_door,
+        granting_object,
     } = static_ability;
     condition.is_none()
         && per_player_condition.is_none()
@@ -5491,6 +5487,7 @@ fn static_binds_nothing(static_ability: &StaticDefinition) -> bool {
         && bypass_beneficiary.is_none()
         && protection_does_not_remove.is_none()
         && room_door.is_none()
+        && granting_object.is_none()
 }
 
 /// CR 608.2c: the one object class a static ability granted by a
@@ -11996,11 +11993,20 @@ fn ability_with_event_context_targets(
     if pending.targets.is_empty() {
         if let Some(filter) = pending.effect.target_filter() {
             if filter.is_context_ref() {
-                if let Some(target) = crate::game::targeting::resolve_event_context_target(
-                    state,
-                    filter,
-                    pending.source_id,
-                ) {
+                // CR 201.5a: only the ability carries the stamp that names its granter.
+                let target = match filter {
+                    TargetFilter::GrantingObject => {
+                        crate::game::targeting::resolved_targets(&pending, filter, state)
+                            .into_iter()
+                            .next()
+                    }
+                    _ => crate::game::targeting::resolve_event_context_target(
+                        state,
+                        filter,
+                        pending.source_id,
+                    ),
+                };
+                if let Some(target) = target {
                     pending.targets.push(target);
                 }
             }
@@ -19013,6 +19019,8 @@ pub(crate) fn evaluate_condition(
             | crate::types::ability::ObjectScope::EventTarget
             | crate::types::ability::ObjectScope::AmassedArmy
             | crate::types::ability::ObjectScope::ChainRootTarget
+            | crate::types::ability::ObjectScope::GrantingObject
+            | crate::types::ability::ObjectScope::SpecificObject { .. }
             | crate::types::ability::ObjectScope::BatchSource => false,
         },
         AbilityCondition::AlternativeManaCostPaid => ability.context.alternative_mana_cost_paid,
@@ -19278,6 +19286,8 @@ pub(crate) fn evaluate_condition(
                 | crate::types::ability::ObjectScope::EventTarget
                 | crate::types::ability::ObjectScope::AmassedArmy
                 | crate::types::ability::ObjectScope::ChainRootTarget
+                | crate::types::ability::ObjectScope::GrantingObject
+                | crate::types::ability::ObjectScope::SpecificObject { .. }
                 | crate::types::ability::ObjectScope::BatchSource => None,
             };
             object_id
@@ -19334,11 +19344,15 @@ pub(crate) fn evaluate_condition(
                     state.last_effect_amount.unwrap_or(0)
                 }
             };
-            let r = crate::game::quantity::resolve_quantity(
+            // CR 201.5a: the rhs reads the granter the ability is stamped with.
+            let r = crate::game::quantity::resolve_quantity_with_ctx(
                 state,
                 rhs,
                 ability.controller,
-                ability.source_id,
+                crate::game::quantity::QuantityContext {
+                    granting_object: ability.context.granting_object,
+                    ..crate::game::quantity::QuantityContext::new(ability.source_id)
+                },
             );
             comparator.evaluate(l, r)
         }

@@ -6,7 +6,7 @@ use crate::types::ability::{
     QuantityRef, ResolvedAbility, StaticCondition, StaticDefinition, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{EndEffectPermission, GameState};
+use crate::types::game_state::{EndEffectPermission, GameState, TransientContinuousEffectBindings};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 
@@ -255,32 +255,26 @@ fn evaluate_static_condition_for_ability(
 fn install_transient(
     state: &mut GameState,
     end_permission: Option<&EndEffectPermission>,
-    source_id: ObjectId,
-    controller: PlayerId,
+    ability: &ResolvedAbility,
     duration: Duration,
     affected: TargetFilter,
     modifications: Vec<ContinuousModification>,
     condition: Option<StaticCondition>,
 ) -> u64 {
-    match end_permission {
-        Some(permission) => state.add_transient_continuous_effect_with_end_permission(
-            source_id,
-            controller,
-            duration,
-            affected,
-            modifications,
-            condition,
-            permission.clone(),
-        ),
-        None => state.add_transient_continuous_effect(
-            source_id,
-            controller,
-            duration,
-            affected,
-            modifications,
-            condition,
-        ),
-    }
+    state.add_transient_continuous_effect_inner(
+        ability.source_id,
+        ability.controller,
+        duration,
+        affected,
+        modifications,
+        condition,
+        end_permission.cloned(),
+        // CR 201.5a: a granted ability's effect names the object that granted it.
+        TransientContinuousEffectBindings {
+            granting_object: ability.context.granting_object,
+            ..TransientContinuousEffectBindings::default()
+        },
+    )
 }
 
 fn register_transient_effect(
@@ -317,8 +311,7 @@ fn register_transient_effect(
             install_transient(
                 state,
                 end_permission,
-                ability.source_id,
-                ability.controller,
+                ability,
                 duration.clone(),
                 affected,
                 modifications,
@@ -355,8 +348,7 @@ fn register_transient_effect(
             install_transient(
                 state,
                 end_permission,
-                ability.source_id,
-                ability.controller,
+                ability,
                 duration.clone(),
                 affected,
                 modifications,
@@ -389,8 +381,7 @@ fn register_transient_effect(
             install_transient(
                 state,
                 end_permission,
-                ability.source_id,
-                ability.controller,
+                ability,
                 duration.clone(),
                 affected,
                 modifications,
@@ -444,8 +435,7 @@ fn register_transient_effect(
                 install_transient(
                     state,
                     end_permission,
-                    ability.source_id,
-                    ability.controller,
+                    ability,
                     duration.clone(),
                     affected,
                     modifications,
@@ -478,8 +468,7 @@ fn register_transient_effect(
         install_transient(
             state,
             end_permission,
-            ability.source_id,
-            ability.controller,
+            ability,
             duration.clone(),
             TargetFilter::SpecificObject {
                 id: ability.source_id,
@@ -501,8 +490,7 @@ fn register_transient_effect(
             install_transient(
                 state,
                 end_permission,
-                ability.source_id,
-                ability.controller,
+                ability,
                 duration.clone(),
                 TargetFilter::SpecificObject { id: obj_id },
                 modifications.clone(),
@@ -538,8 +526,7 @@ fn register_transient_effect(
             install_transient(
                 state,
                 end_permission,
-                ability.source_id,
-                ability.controller,
+                ability,
                 duration.clone(),
                 TargetFilter::SpecificObject { id: obj_id },
                 modifications,
@@ -622,8 +609,7 @@ fn register_transient_effect(
             install_transient(
                 state,
                 end_permission,
-                ability.source_id,
-                ability.controller,
+                ability,
                 duration.clone(),
                 bound_filter,
                 modifications.clone(),
@@ -641,8 +627,7 @@ fn register_transient_effect(
             install_transient(
                 state,
                 end_permission,
-                ability.source_id,
-                ability.controller,
+                ability,
                 duration.clone(),
                 TargetFilter::SpecificPlayer { id: player_id },
                 modifications.clone(),
@@ -661,8 +646,7 @@ fn register_transient_effect(
             install_transient(
                 state,
                 end_permission,
-                ability.source_id,
-                ability.controller,
+                ability,
                 duration.clone(),
                 TargetFilter::SpecificPlayer {
                     id: ability.controller,
@@ -676,8 +660,7 @@ fn register_transient_effect(
             install_transient(
                 state,
                 end_permission,
-                ability.source_id,
-                ability.controller,
+                ability,
                 duration.clone(),
                 TargetFilter::SpecificPlayer { id: *id },
                 modifications.clone(),
@@ -767,8 +750,7 @@ fn register_transient_effect(
                 install_transient(
                     state,
                     end_permission,
-                    ability.source_id,
-                    ability.controller,
+                    ability,
                     duration.clone(),
                     TargetFilter::SpecificObject { id },
                     modifications.clone(),
@@ -802,8 +784,7 @@ fn register_transient_effect(
                 install_transient(
                     state,
                     end_permission,
-                    ability.source_id,
-                    ability.controller,
+                    ability,
                     duration.clone(),
                     TargetFilter::SpecificObject { id },
                     modifications.clone(),
@@ -821,8 +802,7 @@ fn register_transient_effect(
                 install_transient(
                     state,
                     end_permission,
-                    ability.source_id,
-                    ability.controller,
+                    ability,
                     duration.clone(),
                     TargetFilter::SpecificObject { id: obj_id },
                     modifications.clone(),
@@ -849,8 +829,7 @@ fn register_transient_effect(
                 install_transient(
                     state,
                     end_permission,
-                    ability.source_id,
-                    ability.controller,
+                    ability,
                     duration.clone(),
                     TargetFilter::SpecificObject { id: obj_id },
                     modifications.clone(),

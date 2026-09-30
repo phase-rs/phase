@@ -615,36 +615,36 @@ fn condition_refs_source_object(condition: &AbilityCondition) -> bool {
     }
 }
 
-/// CR 122.1 + CR 608.2c: Bind a source-defaulted counter condition to the
-/// prior chosen target only for the leading bare-pronoun grammar. Conditions
-/// belong to `ClauseIr` until lowering, so this is the single authority before
-/// a continuous grant receives its final `StaticCondition`.
-fn rebind_source_counter_condition_to_recipient(condition: &mut AbilityCondition) {
+/// CR 122.1 + CR 608.2c: Rebind a source-defaulted counter condition's
+/// `Source` counter reads to `to`, the antecedent of the leading bare pronoun.
+/// Conditions belong to `ClauseIr` until lowering, so this is the single
+/// authority before a continuous grant receives its final `StaticCondition`.
+fn rebind_source_counter_condition(condition: &mut AbilityCondition, to: ObjectScope) {
     match condition {
         AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
-            rebind_source_counter_quantity_expr_to_recipient(lhs);
-            rebind_source_counter_quantity_expr_to_recipient(rhs);
+            rebind_source_counter_quantity_expr(lhs, to);
+            rebind_source_counter_quantity_expr(rhs, to);
         }
         AbilityCondition::Not { condition }
         | AbilityCondition::ConditionInstead { inner: condition } => {
-            rebind_source_counter_condition_to_recipient(condition);
+            rebind_source_counter_condition(condition, to);
         }
         AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
             for condition in conditions {
-                rebind_source_counter_condition_to_recipient(condition);
+                rebind_source_counter_condition(condition, to);
             }
         }
         _ => {}
     }
 }
 
-fn rebind_source_counter_quantity_expr_to_recipient(expr: &mut QuantityExpr) {
+fn rebind_source_counter_quantity_expr(expr: &mut QuantityExpr, to: ObjectScope) {
     match expr {
         QuantityExpr::Fixed { .. } => {}
         QuantityExpr::Ref { qty } => {
             if let QuantityRef::CountersOn { scope, .. } = qty {
                 if *scope == ObjectScope::Source {
-                    *scope = ObjectScope::Recipient;
+                    *scope = to;
                 }
             }
         }
@@ -652,20 +652,20 @@ fn rebind_source_counter_quantity_expr_to_recipient(expr: &mut QuantityExpr) {
         | QuantityExpr::Offset { inner, .. }
         | QuantityExpr::ClampMin { inner, .. }
         | QuantityExpr::Multiply { inner, .. } => {
-            rebind_source_counter_quantity_expr_to_recipient(inner);
+            rebind_source_counter_quantity_expr(inner, to);
         }
         QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
             for expr in exprs {
-                rebind_source_counter_quantity_expr_to_recipient(expr);
+                rebind_source_counter_quantity_expr(expr, to);
             }
         }
-        QuantityExpr::UpTo { max } => rebind_source_counter_quantity_expr_to_recipient(max),
+        QuantityExpr::UpTo { max } => rebind_source_counter_quantity_expr(max, to),
         QuantityExpr::Power { exponent, .. } => {
-            rebind_source_counter_quantity_expr_to_recipient(exponent);
+            rebind_source_counter_quantity_expr(exponent, to);
         }
         QuantityExpr::Difference { left, right } => {
-            rebind_source_counter_quantity_expr_to_recipient(left);
-            rebind_source_counter_quantity_expr_to_recipient(right);
+            rebind_source_counter_quantity_expr(left, to);
+            rebind_source_counter_quantity_expr(right, to);
         }
     }
 }
@@ -24214,6 +24214,16 @@ fn has_typed_target_widened(effect: &Effect) -> bool {
     filter_introduces_typed_object(target)
 }
 
+/// CR 608.2c + CR 201.5a: when the immediately prior clause names the granter,
+/// the bare "it" of a leading counter gate reads the granter, whether or not
+/// that clause ran.
+fn prior_clause_granter_referent(clauses: &[ClauseIr]) -> Option<ObjectScope> {
+    clauses
+        .last()
+        .filter(|prev| prev.parsed.effect.target_filter() == Some(&TargetFilter::GrantingObject))
+        .map(|_| ObjectScope::GrantingObject)
+}
+
 /// CR 608.2c: Does an earlier clause in the chain establish a typed (chosen)
 /// object referent that the current anaphor binds to — looking PAST intermediate
 /// clauses that merely carry that referent forward via `ParentTarget`?
@@ -39937,13 +39947,18 @@ pub(crate) fn parse_effect_chain_ir(
                 (None, text)
             };
         let prior_typed_referent = chain_has_prior_typed_referent(builder.clauses(), false);
-        if prior_typed_referent
-            && has_bare_recipient_counter_gate
-            && condition.as_ref().is_some_and(condition_refs_source_object)
-        {
-            rebind_source_counter_condition_to_recipient(
-                condition.as_mut().expect("condition checked above"),
-            );
+        let bare_gate_referent = prior_typed_referent
+            .then_some(ObjectScope::Recipient)
+            .or_else(|| prior_clause_granter_referent(builder.clauses()));
+        if let Some(scope) = bare_gate_referent {
+            if has_bare_recipient_counter_gate
+                && condition.as_ref().is_some_and(condition_refs_source_object)
+            {
+                rebind_source_counter_condition(
+                    condition.as_mut().expect("condition checked above"),
+                    scope,
+                );
+            }
         }
         // CR 701.34a + CR 122.1: keep the whole "for each kind of counter on
         // target permanent or player, give … another counter of that kind"

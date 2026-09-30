@@ -42,6 +42,9 @@
 //! would change replacement behavior). Neither is migrated here, because either
 //! migration would change behavior.
 //!
+//! The effect-axis walk is one `define_walk!` body, expanded as the shared
+//! `&Effect` walk here and as the exclusive definition-node walk in [`nodes_mut`].
+//!
 //! # [`ResolutionScope`] — the own-resolution boundary
 //!
 //! Some callers need to know only what an ability does during **its own**
@@ -157,58 +160,6 @@ fn debug_assert_own_resolution_unreachable(scope: ResolutionScope, fn_name: &str
     );
 }
 
-/// Effect-axis wrapper over [`scope_prunes_nested_ability`]. Every recursion
-/// into a nested `AbilityDefinition` that is *not* already behind a boundary
-/// gate goes through here.
-fn visit_nested_ability_def_scoped<F>(
-    def: &AbilityDefinition,
-    scope: ResolutionScope,
-    visit: &mut F,
-) -> ControlFlow<()>
-where
-    F: FnMut(&Effect) -> ControlFlow<()>,
-{
-    if scope_prunes_nested_ability(def, scope) {
-        return ControlFlow::Continue(());
-    }
-    visit_ability_def_scoped(def, scope, visit)
-}
-
-pub fn visit_ability_def<F>(def: &AbilityDefinition, visit: &mut F) -> ControlFlow<()>
-where
-    F: FnMut(&Effect) -> ControlFlow<()>,
-{
-    visit_ability_def_scoped(def, ResolutionScope::IncludeRegisteredLater, visit)
-}
-
-pub(crate) fn visit_ability_def_scoped<F>(
-    def: &AbilityDefinition,
-    scope: ResolutionScope,
-    visit: &mut F,
-) -> ControlFlow<()>
-where
-    F: FnMut(&Effect) -> ControlFlow<()>,
-{
-    visit_effect_scoped(&def.effect, scope, visit)?;
-    if let Some(cost) = &def.cost {
-        visit_cost_scoped(cost, scope, visit)?;
-    }
-    if let Some(sub) = &def.sub_ability {
-        visit_nested_ability_def_scoped(sub, scope, visit)?;
-    }
-    if let Some(else_ability) = &def.else_ability {
-        visit_nested_ability_def_scoped(else_ability, scope, visit)?;
-    }
-    for mode in &def.mode_abilities {
-        visit_nested_ability_def_scoped(mode, scope, visit)?;
-    }
-    // "unless [player] pays {cost}" — the cost may be an EffectCost that conjures.
-    if let Some(unless_pay) = &def.unless_pay {
-        visit_cost_scoped(&unless_pay.cost, scope, visit)?;
-    }
-    ControlFlow::Continue(())
-}
-
 /// CR 605.1a "its cost and effect" — the COST axis companion to
 /// [`visit_ability_def_scoped`].
 ///
@@ -293,53 +244,113 @@ where
     ControlFlow::Continue(())
 }
 
-pub fn visit_trigger<F>(trigger: &TriggerDefinition, visit: &mut F) -> ControlFlow<()>
+/// The effect-axis walk, written once and expanded in two borrow modes so both
+/// descend the one carrier list: shared (every `Effect`) at this module's root,
+/// exclusive (every definition node) in [`nodes_mut`].
+macro_rules! define_walk {
+    ([$($mut_:tt)?]; [$($bound:tt)+]; $on_effect:ident; $on_node:ident; $arc_iter:ident) => {
+/// Effect-axis wrapper over [`scope_prunes_nested_ability`]. Every recursion
+/// into a nested `AbilityDefinition` that is *not* already behind a boundary
+/// gate goes through here.
+fn visit_nested_ability_def_scoped<F>(
+    def: &$($mut_)? AbilityDefinition,
+    scope: ResolutionScope,
+    visit: &mut F,
+) -> ControlFlow<()>
 where
-    F: FnMut(&Effect) -> ControlFlow<()>,
+    F: $($bound)+,
+{
+    if scope_prunes_nested_ability(def, scope) {
+        return ControlFlow::Continue(());
+    }
+    visit_ability_def_scoped(def, scope, visit)
+}
+
+pub fn visit_ability_def<F>(def: &$($mut_)? AbilityDefinition, visit: &mut F) -> ControlFlow<()>
+where
+    F: $($bound)+,
+{
+    visit_ability_def_scoped(def, ResolutionScope::IncludeRegisteredLater, visit)
+}
+
+pub(crate) fn visit_ability_def_scoped<F>(
+    def: &$($mut_)? AbilityDefinition,
+    scope: ResolutionScope,
+    visit: &mut F,
+) -> ControlFlow<()>
+where
+    F: $($bound)+,
+{
+    $on_node!(visit, Ability, def);
+    visit_effect_scoped(&$($mut_)? def.effect, scope, visit)?;
+    if let Some(cost) = &$($mut_)? def.cost {
+        visit_cost_scoped(cost, scope, visit)?;
+    }
+    if let Some(sub) = &$($mut_)? def.sub_ability {
+        visit_nested_ability_def_scoped(sub, scope, visit)?;
+    }
+    if let Some(else_ability) = &$($mut_)? def.else_ability {
+        visit_nested_ability_def_scoped(else_ability, scope, visit)?;
+    }
+    for mode in &$($mut_)? def.mode_abilities {
+        visit_nested_ability_def_scoped(mode, scope, visit)?;
+    }
+    // "unless [player] pays {cost}" — the cost may be an EffectCost that conjures.
+    if let Some(unless_pay) = &$($mut_)? def.unless_pay {
+        visit_cost_scoped(&$($mut_)? unless_pay.cost, scope, visit)?;
+    }
+    ControlFlow::Continue(())
+}
+
+pub fn visit_trigger<F>(trigger: &$($mut_)? TriggerDefinition, visit: &mut F) -> ControlFlow<()>
+where
+    F: $($bound)+,
 {
     visit_trigger_scoped(trigger, ResolutionScope::IncludeRegisteredLater, visit)
 }
 
 pub(crate) fn visit_trigger_scoped<F>(
-    trigger: &TriggerDefinition,
+    trigger: &$($mut_)? TriggerDefinition,
     scope: ResolutionScope,
     visit: &mut F,
 ) -> ControlFlow<()>
 where
-    F: FnMut(&Effect) -> ControlFlow<()>,
+    F: $($bound)+,
 {
     debug_assert_own_resolution_unreachable(scope, "visit_trigger_scoped");
-    if let Some(execute) = &trigger.execute {
+    $on_node!(visit, Trigger, trigger);
+    if let Some(execute) = &$($mut_)? trigger.execute {
         visit_ability_def_scoped(execute, scope, visit)?;
     }
-    if let Some(unless_pay) = &trigger.unless_pay {
-        visit_cost_scoped(&unless_pay.cost, scope, visit)?;
+    if let Some(unless_pay) = &$($mut_)? trigger.unless_pay {
+        visit_cost_scoped(&$($mut_)? unless_pay.cost, scope, visit)?;
     }
     ControlFlow::Continue(())
 }
 
-pub fn visit_replacement<F>(replacement: &ReplacementDefinition, visit: &mut F) -> ControlFlow<()>
+pub fn visit_replacement<F>(replacement: &$($mut_)? ReplacementDefinition, visit: &mut F) -> ControlFlow<()>
 where
-    F: FnMut(&Effect) -> ControlFlow<()>,
+    F: $($bound)+,
 {
     visit_replacement_scoped(replacement, ResolutionScope::IncludeRegisteredLater, visit)
 }
 
 pub(crate) fn visit_replacement_scoped<F>(
-    replacement: &ReplacementDefinition,
+    replacement: &$($mut_)? ReplacementDefinition,
     scope: ResolutionScope,
     visit: &mut F,
 ) -> ControlFlow<()>
 where
-    F: FnMut(&Effect) -> ControlFlow<()>,
+    F: $($bound)+,
 {
     debug_assert_own_resolution_unreachable(scope, "visit_replacement_scoped");
-    if let Some(execute) = &replacement.execute {
+    $on_node!(visit, Replacement, replacement);
+    if let Some(execute) = &$($mut_)? replacement.execute {
         visit_ability_def_scoped(execute, scope, visit)?;
     }
     // The mode carries the decline continuation (and, for MayCost, a cost),
     // either of which may conjure. Descend into both.
-    match &replacement.mode {
+    match &$($mut_)? replacement.mode {
         ReplacementMode::MayCost { cost, decline } => {
             visit_cost_scoped(cost, scope, visit)?;
             if let Some(decline) = decline {
@@ -358,45 +369,46 @@ where
     ControlFlow::Continue(())
 }
 
-pub fn visit_static<F>(static_def: &StaticDefinition, visit: &mut F) -> ControlFlow<()>
+pub fn visit_static<F>(static_def: &$($mut_)? StaticDefinition, visit: &mut F) -> ControlFlow<()>
 where
-    F: FnMut(&Effect) -> ControlFlow<()>,
+    F: $($bound)+,
 {
     visit_static_scoped(static_def, ResolutionScope::IncludeRegisteredLater, visit)
 }
 
 pub(crate) fn visit_static_scoped<F>(
-    static_def: &StaticDefinition,
+    static_def: &$($mut_)? StaticDefinition,
     scope: ResolutionScope,
     visit: &mut F,
 ) -> ControlFlow<()>
 where
-    F: FnMut(&Effect) -> ControlFlow<()>,
+    F: $($bound)+,
 {
     debug_assert_own_resolution_unreachable(scope, "visit_static_scoped");
-    for modification in &static_def.modifications {
+    $on_node!(visit, Static, static_def);
+    for modification in &$($mut_)? static_def.modifications {
         visit_continuous_mod_scoped(modification, scope, visit)?;
     }
     ControlFlow::Continue(())
 }
 
 pub fn visit_continuous_mod<F>(
-    modification: &ContinuousModification,
+    modification: &$($mut_)? ContinuousModification,
     visit: &mut F,
 ) -> ControlFlow<()>
 where
-    F: FnMut(&Effect) -> ControlFlow<()>,
+    F: $($bound)+,
 {
     visit_continuous_mod_scoped(modification, ResolutionScope::IncludeRegisteredLater, visit)
 }
 
 pub(crate) fn visit_continuous_mod_scoped<F>(
-    modification: &ContinuousModification,
+    modification: &$($mut_)? ContinuousModification,
     scope: ResolutionScope,
     visit: &mut F,
 ) -> ControlFlow<()>
 where
-    F: FnMut(&Effect) -> ControlFlow<()>,
+    F: $($bound)+,
 {
     debug_assert_own_resolution_unreachable(scope, "visit_continuous_mod_scoped");
     match modification {
@@ -477,51 +489,51 @@ where
     ControlFlow::Continue(())
 }
 
-pub fn visit_copiable_values<F>(values: &CopiableValues, visit: &mut F) -> ControlFlow<()>
+pub fn visit_copiable_values<F>(values: &$($mut_)? CopiableValues, visit: &mut F) -> ControlFlow<()>
 where
-    F: FnMut(&Effect) -> ControlFlow<()>,
+    F: $($bound)+,
 {
     visit_copiable_values_scoped(values, ResolutionScope::IncludeRegisteredLater, visit)
 }
 
 pub(crate) fn visit_copiable_values_scoped<F>(
-    values: &CopiableValues,
+    values: &$($mut_)? CopiableValues,
     scope: ResolutionScope,
     visit: &mut F,
 ) -> ControlFlow<()>
 where
-    F: FnMut(&Effect) -> ControlFlow<()>,
+    F: $($bound)+,
 {
     debug_assert_own_resolution_unreachable(scope, "visit_copiable_values_scoped");
-    for ability in values.abilities.iter() {
+    for ability in $arc_iter!(values.abilities) {
         visit_ability_def_scoped(ability, scope, visit)?;
     }
-    for trigger in values.trigger_definitions.iter() {
+    for trigger in $arc_iter!(values.trigger_definitions) {
         visit_trigger_scoped(trigger, scope, visit)?;
     }
-    for static_def in values.static_definitions.iter() {
+    for static_def in $arc_iter!(values.static_definitions) {
         visit_static_scoped(static_def, scope, visit)?;
     }
-    for replacement in values.replacement_definitions.iter() {
+    for replacement in $arc_iter!(values.replacement_definitions) {
         visit_replacement_scoped(replacement, scope, visit)?;
     }
     ControlFlow::Continue(())
 }
 
-pub fn visit_cost<F>(cost: &AbilityCost, visit: &mut F) -> ControlFlow<()>
+pub fn visit_cost<F>(cost: &$($mut_)? AbilityCost, visit: &mut F) -> ControlFlow<()>
 where
-    F: FnMut(&Effect) -> ControlFlow<()>,
+    F: $($bound)+,
 {
     visit_cost_scoped(cost, ResolutionScope::IncludeRegisteredLater, visit)
 }
 
 pub(crate) fn visit_cost_scoped<F>(
-    cost: &AbilityCost,
+    cost: &$($mut_)? AbilityCost,
     scope: ResolutionScope,
     visit: &mut F,
 ) -> ControlFlow<()>
 where
-    F: FnMut(&Effect) -> ControlFlow<()>,
+    F: $($bound)+,
 {
     match cost {
         AbilityCost::EffectCost { effect } => visit_effect_scoped(effect, scope, visit)?,
@@ -576,22 +588,22 @@ where
 /// `ai_support::targeted_exchange::tests::predicate_sees_a_fight_in_every_nested_carrier`
 /// are the complementary safety nets for those cases — extend both whenever a
 /// carrier is added.
-pub fn visit_effect<F>(effect: &Effect, visit: &mut F) -> ControlFlow<()>
+pub fn visit_effect<F>(effect: &$($mut_)? Effect, visit: &mut F) -> ControlFlow<()>
 where
-    F: FnMut(&Effect) -> ControlFlow<()>,
+    F: $($bound)+,
 {
     visit_effect_scoped(effect, ResolutionScope::IncludeRegisteredLater, visit)
 }
 
 pub(crate) fn visit_effect_scoped<F>(
-    effect: &Effect,
+    effect: &$($mut_)? Effect,
     scope: ResolutionScope,
     visit: &mut F,
 ) -> ControlFlow<()>
 where
-    F: FnMut(&Effect) -> ControlFlow<()>,
+    F: $($bound)+,
 {
-    visit(effect)?;
+    $on_effect!(visit, effect);
     match effect {
         Effect::Intensify { .. } => {}
         Effect::ApplyPerpetual { .. } => {}
@@ -718,7 +730,7 @@ where
         }
         Effect::RollDie { results, .. } => {
             for branch in results {
-                visit_nested_ability_def_scoped(&branch.effect, scope, visit)?;
+                visit_nested_ability_def_scoped(&$($mut_)? branch.effect, scope, visit)?;
             }
         }
         Effect::ChooseOneOf { branches, .. } => {
@@ -1039,4 +1051,50 @@ where
         | Effect::Unimplemented { .. } => {}
     }
     ControlFlow::Continue(())
+}
+    };
+}
+
+macro_rules! visit_each_effect {
+    ($visit:ident, $effect:ident) => {
+        $visit($effect)?
+    };
+}
+macro_rules! skip_effects {
+    ($visit:ident, $effect:ident) => {};
+}
+macro_rules! skip_nodes {
+    ($visit:ident, $kind:ident, $node:ident) => {};
+}
+macro_rules! visit_each_node {
+    ($visit:ident, $kind:ident, $node:ident) => {
+        $visit(DefinitionNodeMut::$kind(&mut *$node))?
+    };
+}
+macro_rules! shared_iter {
+    ($vec:expr) => {
+        $vec.iter()
+    };
+}
+macro_rules! exclusive_iter {
+    ($vec:expr) => {
+        std::sync::Arc::make_mut(&mut $vec).iter_mut()
+    };
+}
+
+define_walk!([]; [FnMut(&Effect) -> ControlFlow<()>]; visit_each_effect; skip_nodes; shared_iter);
+
+/// A definition node surfaced by the exclusive walk.
+pub enum DefinitionNodeMut<'a> {
+    Ability(&'a mut AbilityDefinition),
+    Trigger(&'a mut TriggerDefinition),
+    Static(&'a mut StaticDefinition),
+    Replacement(&'a mut ReplacementDefinition),
+}
+
+/// The exclusive walk: visits every definition node the shared walk descends.
+pub mod nodes_mut {
+    use super::*;
+
+    define_walk!([mut]; [FnMut(DefinitionNodeMut<'_>) -> ControlFlow<()>]; skip_effects; visit_each_node; exclusive_iter);
 }

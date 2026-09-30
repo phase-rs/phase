@@ -302,7 +302,7 @@ fn gate_rejects(ctx: &PolicyContext<'_>) -> Option<PolicyReason> {
     // controller check plus the can't-sacrifice-as-a-cost static. Do NOT
     // re-derive it here.
     let eligible =
-        find_eligible_sacrifice_targets(ctx.state, ctx.ai_player, object.id, &cost.target);
+        find_eligible_sacrifice_targets(ctx.state, ctx.ai_player, object.id, None, &cost.target);
 
     // CR 107.3a + CR 118.3: the engine's own minimum for this cost. Delegating is
     // what is structural — the u32::MAX sentinel encoding is never re-spelled
