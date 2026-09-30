@@ -2009,3 +2009,7 @@ mod starting_intensity_keyword;
 mod tidebinder_source_type_gate;
 
 mod search_result_missing_referent;
+
+mod celes_kotis_graveyard_origin_batch;
+mod squall_attack_batch_chosen_number;
+mod tifa_additional_combat;

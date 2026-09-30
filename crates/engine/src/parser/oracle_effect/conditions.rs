@@ -7162,11 +7162,31 @@ fn try_unrouted_nom_condition_tail(text: &str, ctx: &mut ParseContext) -> Option
         return Some(AbilityCondition::DayNightIsNeither);
     }
 
-    if tag::<_, _, OracleError<'_>>("it's the first combat phase of the turn")
-        .parse(lower.as_str())
-        .is_ok()
+    // CR 500.8 + CR 506.1 + CR 109.5 + CR 608.2c: "it's the first combat phase
+    // of your turn" — the possessive axis on the phase-occurrence gate composes
+    // `IsYourTurn` ("your" = the ability's controller, CR 109.5) with
+    // `FirstCombatPhaseOfTurn`, so the phase is added only on the controller's
+    // own turn (the `CurrentPhaseIs` possessive precedent in
+    // `game/effects/mod.rs`). The non-possessive "of the turn" arm is unchanged.
+    if let Ok((_, possessive)) = alt((
+        value(
+            false,
+            tag::<_, _, OracleError<'_>>("it's the first combat phase of the turn"),
+        ),
+        value(true, tag("it's the first combat phase of your turn")),
+    ))
+    .parse(lower.as_str())
     {
-        return Some(AbilityCondition::FirstCombatPhaseOfTurn);
+        return Some(if possessive {
+            AbilityCondition::And {
+                conditions: vec![
+                    AbilityCondition::IsYourTurn,
+                    AbilityCondition::FirstCombatPhaseOfTurn,
+                ],
+            }
+        } else {
+            AbilityCondition::FirstCombatPhaseOfTurn
+        });
     }
 
     // CR 500.8 + CR 513.1: "it's the first end step of the turn" — end-step
