@@ -25,12 +25,21 @@ import { useAnimationStore } from "../../../stores/animationStore.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../../stores/preferencesStore.ts";
 import { type AnimationImageSnapshot, ResolvedAnimationImage } from "../ResolvedAnimationImage.tsx";
-import { type Aim, type CardPose, measureCardPose, resolveAim, sourceElement, zoneSurface } from "./cardAnchors.ts";
+import {
+  type Aim,
+  type CardPose,
+  exileGhostNode,
+  measureCardPose,
+  resolveAim,
+  sourceElement,
+  zoneSurface,
+} from "./cardAnchors.ts";
 import type { CardVfxTier, FlightFlip } from "./cardFlight.ts";
 import type { CardFlightRoute, CardFlightSpec } from "./cardFlightSpecs.ts";
 import type { CardVfxScene, CardVfxSceneCallbacks } from "./cardVfxScene.ts";
 import type * as CardVfxSceneModule from "./cardVfxScene.ts";
-import type { CardShatterSpec, CardVfxSpec } from "./cardVfxSpecs.ts";
+import type { BoardEffectSpec, CardVfxSpec, ExileDissolveSpec } from "./cardVfxSpecs.ts";
+import type { LinkAim } from "./exileDissolve.ts";
 import { drawSurface, measureSurfaceLayout } from "./surfaceTexture.ts";
 
 /** An effect whose face has not loaded by this deadline presents Classic. */
@@ -194,7 +203,7 @@ class CardVfxController {
       case "ready":
         if (!this.scene) classic();
         else if (spec.kind === "flight") this.presentFlight(this.scene, spec, classic);
-        else this.presentShatter(spec, classic);
+        else this.presentBoardEffect(spec, classic);
         return;
     }
   }
@@ -323,7 +332,7 @@ class CardVfxController {
   // The permanent's surface is measured now, while it is still on the board;
   // its face loads in the size the board shows, and the surface is redrawn
   // from both so the first GL frame matches the card it replaces.
-  private presentShatter(spec: CardShatterSpec, classic: () => void) {
+  private presentBoardEffect(spec: BoardEffectSpec, classic: () => void) {
     const { objectId } = spec;
     const el = zoneSurface("Battlefield", objectId, spec.ownerId);
     const layout = el && measureSurfaceLayout(el);
@@ -332,7 +341,9 @@ class CardVfxController {
       return;
     }
     const pose = measureCardPose(el, this.canvas.getBoundingClientRect());
-    const size = usePreferencesStore.getState().battlefieldCardDisplay === "art_crop" ? "art_crop" : "normal";
+    // The board shows art crops except for tokens, whose art-crop tiles use the full image.
+    const artCrop = usePreferencesStore.getState().battlefieldCardDisplay === "art_crop" && !spec.face.isToken;
+    const size = artCrop ? "art_crop" : "normal";
     const commitEpoch = useGameStore.getState().engineCommitEpoch;
     this.requestFace(
       spec.face,
@@ -344,16 +355,22 @@ class CardVfxController {
           classic();
           return;
         }
-        const surface = scene.uploadFace(drawSurface(layout, image, pixelRatioFor(this.tier)));
-        scene.startShatter({
+        const board = {
           pose,
-          surface,
+          surface: scene.uploadFace(drawSurface(layout, image, pixelRatioFor(this.tier))),
           radius: layout.radius,
-          impact: shatterImpact(),
           tier: this.tier,
           pace: spec.pace,
-          onDone: () => this.unveilAfterCommit(objectId, commitEpoch),
-        });
+        };
+        const release = () => this.unveilAfterCommit(objectId, commitEpoch);
+        switch (spec.kind) {
+          case "shatter":
+            scene.startShatter({ ...board, impact: shatterImpact(), onDone: release });
+            break;
+          case "dissolve":
+            scene.startDissolve({ ...board, link: this.linkAimFor(spec), onArrive: release });
+            break;
+        }
         this.veil(objectId);
       },
       classic,
@@ -372,6 +389,16 @@ class CardVfxController {
       return;
     }
     pending.spec = merged;
+  }
+
+  /** Where a held card's flakes go: its ghost under its holder, measured each frame. */
+  private linkAimFor({ objectId, holderId, ownerId }: ExileDissolveSpec) {
+    if (holderId === null) return null;
+    const measure = (el: HTMLElement | null, origin: DOMRectReadOnly) => el && measureCardPose(el, origin);
+    return (origin: DOMRectReadOnly): LinkAim => ({
+      ghost: measure(exileGhostNode(objectId), origin),
+      holder: measure(zoneSurface("Battlefield", holderId, ownerId), origin),
+    });
   }
 
   private finishPending(objectId: ObjectId, token: number, image: HTMLImageElement) {

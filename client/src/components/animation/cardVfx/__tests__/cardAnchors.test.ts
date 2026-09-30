@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { objectAnchorSelector } from "../../../../utils/objectAnchorSelector.ts";
 import {
+  faceImages,
   faceImagesSettled,
   measureCardPose,
   measureSurface,
@@ -132,6 +133,26 @@ describe("zone-scoped anchors", () => {
     expect(ownNode(route, X)).toBeNull();
     pile.setAttribute("data-grouped-ids", `3 ${X}`);
     expect(resolveAim(route, X, origin, null)).toMatchObject({ kind: "own", el: pile });
+  });
+
+  it("V8-10: a permanent's face excludes its attachments' and exile ghosts' faces", () => {
+    const host = mount({ "data-permanent-card": String(X) });
+    const attachment = mount({ "data-permanent-card": "9" }, undefined, host);
+    const ghost = mount({ "data-exile-ghost": "10" }, undefined, host);
+    const face = (parent: HTMLElement) => {
+      const img = document.createElement("img");
+      layOut(img, { left: 0, top: 0, width: 63, height: 88 });
+      parent.appendChild(img);
+      return img;
+    };
+    face(attachment);
+    face(ghost);
+    expect(faceImages(host)).toEqual([]);
+
+    const own = face(host);
+    expect(faceImages(host)).toEqual([own]);
+    // A surface with no nested card keeps every face, as a pile does.
+    expect(faceImages(attachment)).toHaveLength(1);
   });
 
   it("V3-5e: a pose is canvas-local, scaled and rotated by its ancestors", () => {

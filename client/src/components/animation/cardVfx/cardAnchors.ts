@@ -78,11 +78,20 @@ export function faceImagesSettled(el: HTMLElement): boolean {
   return faces.length > 0 && faces.every((img) => img.complete);
 }
 
+/** Card surfaces that can nest inside another: a permanent's attachments and
+ *  the cards it holds in exile render inside its own node. */
+const NESTED_SURFACES = "[data-permanent-card], [data-exile-ghost]";
+
 /** The face `<img>`s in `el`: those whose layout box covers at least
- *  `FACE_IMAGE_MIN_AREA_FRACTION` of `el`'s, in document order. */
+ *  `FACE_IMAGE_MIN_AREA_FRACTION` of `el`'s, in document order, excluding the
+ *  faces of card surfaces nested inside it. */
 export function faceImages(el: HTMLElement): HTMLImageElement[] {
   const minArea = FACE_IMAGE_MIN_AREA_FRACTION * el.offsetWidth * el.offsetHeight;
-  return [...el.querySelectorAll("img")].filter((img) => img.offsetWidth * img.offsetHeight >= minArea);
+  return [...el.querySelectorAll("img")].filter((img) => {
+    const surface = img.closest(NESTED_SURFACES);
+    const nested = surface !== null && surface !== el && el.contains(surface);
+    return !nested && img.offsetWidth * img.offsetHeight >= minArea;
+  });
 }
 
 /** The first match in document order that is laid out (non-zero width). A
@@ -125,6 +134,11 @@ const ZONE_SURFACES: Record<Zone, (id: ObjectId, ownerId: PlayerId) => readonly 
   Battlefield: (id) => [`[data-permanent-card="${id}"]`, `[data-permanent-card][data-grouped-ids~="${id}"]`],
   Command: () => [],
 };
+
+/** Object `id`'s ghost under the permanent holding it in exile, veil-aware. */
+export function exileGhostNode(id: ObjectId): HTMLElement | null {
+  return firstRendered(`[data-exile-ghost="${id}"]`);
+}
 
 /** Nodes that stand in for a destination before the object's own node exists. */
 const PROVISIONAL_SURFACES: Record<FlightDestination, (ownerId: PlayerId) => HTMLElement | null> = {

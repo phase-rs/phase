@@ -29,6 +29,7 @@ import {
   restingState,
 } from "./cardFlight.ts";
 import { type CardShatterParams, cardShatterKind, createCardShatter } from "./cardShatter.ts";
+import { createExileDissolve, type ExileDissolveParams, exileDissolveKind } from "./exileDissolve.ts";
 import { createLandingDust, landingDustKind } from "./landingDust.ts";
 
 /** One running effect. `update` draws a frame and returns whether it is still
@@ -57,7 +58,12 @@ export interface SceneEffectKind {
   warmUp(host: EffectHost): Object3D[];
 }
 
-export const SCENE_EFFECT_KINDS: readonly SceneEffectKind[] = [cardFlightKind, landingDustKind, cardShatterKind];
+export const SCENE_EFFECT_KINDS: readonly SceneEffectKind[] = [
+  cardFlightKind,
+  landingDustKind,
+  cardShatterKind,
+  exileDissolveKind,
+];
 
 const CAMERA_FOV_DEG = 28;
 
@@ -83,6 +89,8 @@ export interface CardFlightRequest extends Omit<CardFlightParams, "from" | "back
 
 /** A shatter to start; the scene supplies the pixel ratio. */
 export type CardShatterRequest = Omit<CardShatterParams, "pixelRatio">;
+/** A dissolve to start; the scene supplies the pixel ratio. */
+export type ExileDissolveRequest = Omit<ExileDissolveParams, "pixelRatio">;
 
 export interface CardVfxScene {
   setPixelRatio(ratio: number): void;
@@ -99,6 +107,7 @@ export interface CardVfxScene {
    *  fading). A later presentation of the object supersedes its landing. */
   dropReleasedFlight(objectId: ObjectId): void;
   startShatter(request: CardShatterRequest): void;
+  startDissolve(request: ExileDissolveRequest): void;
   add(effect: SceneEffect): void;
   dispose(): void;
 }
@@ -300,6 +309,10 @@ class CardVfxSceneRuntime implements CardVfxScene, EffectHost {
 
   startShatter(request: CardShatterRequest) {
     this.add(createCardShatter(this, { ...request, pixelRatio: this.pixelRatio }));
+  }
+
+  startDissolve(request: ExileDissolveRequest) {
+    this.add(createExileDissolve(this, { ...request, pixelRatio: this.pixelRatio }));
   }
 
   add(effect: SceneEffect) {

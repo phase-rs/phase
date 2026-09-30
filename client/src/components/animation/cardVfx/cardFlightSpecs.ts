@@ -93,6 +93,11 @@ function zoneChangeOf(event: AnimationEvent, post: GameState | null): RoutedObje
 function routedObjectFor(event: AnimationEvent, pre: GameState | null, post: GameState | null): RoutedObject | null {
   switch (event.type) {
     case "SpellCast":
+      // CR 601.2a: a spell announced in an earlier batch, whose cast paused for
+      // a choice, already went to the stack at its announcement.
+      return pre?.stack.some((entry) => entry.id === event.data.object_id)
+        ? null
+        : castOf(event.data.object_id, pre, post);
     case "StackPushed":
       return castOf(event.data.object_id, pre, post);
     default:

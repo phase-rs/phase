@@ -1262,6 +1262,7 @@ const ExileGhostCard = memo(function ExileGhostCard({ objectId, offset }: ExileG
   const obj = useGameStore((s) => s.gameState?.objects[objectId]);
   const { handlers: hoverHandlers } = useCardHover(objectId);
   const battlefieldCardDisplay = usePreferencesStore((s) => s.battlefieldCardDisplay);
+  const flightHidden = useFlightVeil(objectId);
   const controllerIdentity = useGameStore(
     (s) => obj && s.gameState?.players?.find((p) => p.id === obj.controller)?.commander_color_identity,
   );
@@ -1281,8 +1282,9 @@ const ExileGhostCard = memo(function ExileGhostCard({ objectId, offset }: ExileG
 
   return (
     <div
+      data-exile-ghost={objectId}
       className="absolute z-0 cursor-default opacity-70"
-      style={{ bottom: `-${offset}px`, left: `${offset}px` }}
+      style={{ bottom: `-${offset}px`, left: `${offset}px`, visibility: flightHidden ? "hidden" : undefined }}
       {...hoverHandlers}
     >
       {/* Purple exile tint */}

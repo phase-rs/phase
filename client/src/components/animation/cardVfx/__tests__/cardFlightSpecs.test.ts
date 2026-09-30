@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { GameObject, GameState, Zone } from "../../../../adapter/types.ts";
 import type { AnimationEvent } from "../../../../animation/types.ts";
 import { buildObjectMap, gameObjectFactory } from "../../../../test/factories/gameObjectFactory.ts";
-import { buildGameState } from "../../../../test/factories/gameStateFactory.ts";
+import { buildGameState, buildStackEntry } from "../../../../test/factories/gameStateFactory.ts";
 import { cardFlightSpecFor, type CardFlightSpecContext } from "../cardFlightSpecs.ts";
 import { cardVfxSpecFor } from "../cardVfxSpecs.ts";
 
@@ -180,6 +180,13 @@ describe("cardFlightSpecFor", () => {
     expect(cardFlightSpecFor(announced, context(null, post))).toBeNull();
   });
 
+  it("V7-4: a cast completing after a paused announcement has no second flight", () => {
+    const announced = { ...stateWith(visible(card.inHand().build())), stack: [buildStackEntry({ id: X, source_id: X })] };
+    const post = stateWith(visible(card.params({ zone: "Stack" }).build()));
+
+    expect(cardFlightSpecFor(spellCast, context(announced, post))).toBeNull();
+  });
+
   it("V3-4f: pace 0 has no flight; any other pace is carried on the spec", () => {
     const pre = stateWith(visible(card.inHand().build()));
     const post = stateWith(visible(card.params({ zone: "Stack" }).build()));
@@ -212,5 +219,32 @@ describe("cardVfxSpecFor", () => {
     const pre = stateWith(visible(card.onBattlefield().build()));
     expect(cardVfxSpecFor(destroyed, context(null, pre))).toBeNull();
     expect(cardVfxSpecFor(destroyed, context(pre, pre, 0))).toBeNull();
+  });
+});
+
+describe("cardVfxSpecFor exile", () => {
+  it("V9-5: a permanent exiled from the battlefield dissolves, toward the permanent holding it if any", () => {
+    const pre = stateWith(visible(card.onBattlefield().build()));
+    const post = stateWith(visible(card.params({ zone: "Exile" }).build()));
+
+    expect(cardVfxSpecFor(zoneChanged("Battlefield", "Exile"), context(pre, post))).toEqual({
+      kind: "dissolve",
+      objectId: X,
+      ownerId: 0,
+      face: expect.objectContaining({ cardName: "Llanowar Elves" }),
+      holderId: null,
+      pace: 1,
+      owningStepMs: 500,
+    });
+
+    const held = { ...post, derived: { ...post.derived, linked_exile_ids: { "3": [9, X] } } } as GameState;
+    expect(cardVfxSpecFor(zoneChanged("Battlefield", "Exile"), context(pre, held))).toMatchObject({ holderId: 3 });
+  });
+
+  it("V9-5: exile from another zone, a missing pre object or pace 0 has no dissolve", () => {
+    const pre = stateWith(visible(card.inHand().build()));
+    expect(cardVfxSpecFor(zoneChanged("Hand", "Exile"), context(pre, pre))).toBeNull();
+    expect(cardVfxSpecFor(zoneChanged("Battlefield", "Exile"), context(null, pre))).toBeNull();
+    expect(cardVfxSpecFor(zoneChanged("Battlefield", "Exile"), context(pre, pre, 0))).toBeNull();
   });
 });

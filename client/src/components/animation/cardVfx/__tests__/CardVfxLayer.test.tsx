@@ -8,6 +8,7 @@ import { CARD_BACK_URL } from "../../../../services/scryfall.ts";
 import { assetKey, catalogRoot, packId } from "../../../../services/visualPacks/types.ts";
 import { useAnimationStore } from "../../../../stores/animationStore.ts";
 import { useGameStore } from "../../../../stores/gameStore.ts";
+import { usePreferencesStore } from "../../../../stores/preferencesStore.ts";
 import type { AnimationImageSnapshot } from "../../ResolvedAnimationImage.tsx";
 import {
   ABANDON_FADE_MS,
@@ -27,7 +28,8 @@ import {
 } from "../CardVfxLayer.tsx";
 import { SHATTER_CRACK_S, SHATTER_FALL_S } from "../cardShatter.ts";
 import { type CardVfxScene, SCENE_EFFECT_KINDS } from "../cardVfxScene.ts";
-import type { CardShatterSpec, CardVfxSpec } from "../cardVfxSpecs.ts";
+import type { CardShatterSpec, CardVfxSpec, ExileDissolveSpec } from "../cardVfxSpecs.ts";
+import { DISSOLVE_CROSS_S, DISSOLVE_LIFT_S, DISSOLVE_TRAVEL_S } from "../exileDissolve.ts";
 
 interface RecordedChild {
   name: string;
@@ -1043,6 +1045,19 @@ describe("CardVfxLayer shatter", () => {
     expect(shatterRenders()).toHaveLength(0);
   });
 
+  it("V8-11: in art-crop mode a card loads its art crop and a token its full image, as the board shows them", async () => {
+    usePreferencesStore.setState({ battlefieldCardDisplay: "art_crop" });
+    const { present } = await readyLayer();
+    addFace(anchor({ "data-permanent-card": String(X) }, 300, 400));
+    addFace(anchor({ "data-permanent-card": String(Y) }, 500, 400));
+    const sizes = () => vi.mocked(useCardImage).mock.calls.map(([name, options]) => [name, options?.size]);
+
+    present(shatter(X));
+    present(shatter(Y, { ...face(Y, "Soldier"), isToken: true }));
+
+    expect(sizes()).toEqual(expect.arrayContaining([["Llanowar Elves", "art_crop"], ["Soldier", "normal"]]));
+  });
+
   it("V8-3: unmounting mid-shatter releases the veil", async () => {
     const { present, unmount } = await readyLayer();
     addFace(anchor({ "data-permanent-card": String(X) }, 300, 400));
@@ -1051,6 +1066,53 @@ describe("CardVfxLayer shatter", () => {
     expect(veiled(X)).toBe(true);
 
     unmount();
+    expect(veiled(X)).toBe(false);
+  });
+});
+
+describe("CardVfxLayer exile dissolve", () => {
+  const dissolve = (objectId: number, holderId: number | null = null): ExileDissolveSpec => ({
+    kind: "dissolve",
+    objectId,
+    ownerId: 0,
+    face: face(objectId),
+    holderId,
+    pace: 1,
+    owningStepMs: 500,
+  });
+
+  async function loadFace() {
+    const loader = faceLoader();
+    expect(loader).not.toBeNull();
+    await act(async () => {
+      if (loader) fireEvent.load(loader);
+    });
+  }
+
+  it("V9-6: a held card shows as its ghost once its flakes arrive and the commit lands", async () => {
+    const { present } = await readyLayer();
+    addFace(anchor({ "data-permanent-card": String(X) }, 300, 400));
+    anchor({ "data-permanent-card": "3" }, 500, 400);
+
+    const classic = present(dissolve(X, 3));
+    await loadFace();
+    expect(classic).not.toHaveBeenCalled();
+    expect(veiled(X)).toBe(true);
+    await frames(2);
+    expect(calls("render").some((call) => hasVisible(call, "exile-dissolve"))).toBe(true);
+
+    anchor({ "data-exile-ghost": String(X) }, 510, 420);
+    act(() => {
+      useGameStore.setState({ engineCommitEpoch: useGameStore.getState().engineCommitEpoch + 1 });
+    });
+    await advance((DISSOLVE_LIFT_S + DISSOLVE_CROSS_S + DISSOLVE_TRAVEL_S * 0.85) * 1000 + 5 * FRAME_MS);
+    expect(veiled(X)).toBe(false);
+  });
+
+  it("V9-6: a permanent with no face on the board presents Classic", async () => {
+    const { present } = await readyLayer();
+    anchor({ "data-permanent-card": String(X) }, 300, 400);
+    expect(present(dissolve(X))).toHaveBeenCalledTimes(1);
     expect(veiled(X)).toBe(false);
   });
 });
