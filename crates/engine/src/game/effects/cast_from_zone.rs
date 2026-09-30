@@ -1927,11 +1927,17 @@ fn resolution_cast_request_for_single_target(
         delayed_trigger_receipts: Vec::new(),
     };
     let graveyard_replacement = cast_from_zone_graveyard_destination(ability);
+    // CR 608.2c + CR 611.2a: the gains-modifications rider (Strago and Relm's
+    // "…it gains haste and \"At the beginning of the end step, sacrifice this
+    // creature.\"") is attached to this `CastFromZone` as its sub-ability and
+    // rides the elected resolution permission into cast finalization.
+    let enters_with_modifications = cast_from_zone_enters_with_modifications(ability);
     crate::game::casting::ResolutionCastRequest {
         face_policy,
         cast_transformed,
         cleanup,
         graveyard_replacement,
+        enters_with_modifications,
         cost,
     }
 }
@@ -2170,6 +2176,20 @@ fn cast_from_zone_graveyard_destination(
 /// event that does not exist when the permission-granting ability resolves).
 pub(crate) fn is_enters_with_counter_rider_subability(ability: &ResolvedAbility) -> bool {
     matches!(&ability.effect, Effect::AddPendingETBCounters { .. })
+}
+
+/// CR 608.2c + CR 611.2a + CR 611.2c: Strago and Relm class — the parser
+/// represents "If you cast a [quality] spell this way, it gains …" as a
+/// sequential `AddPendingEntersModifications` rider on `CastFromZone` (and,
+/// recorded not applied, on `CastCopyOfCard`). Like the counter rider, the
+/// modifications target the *future* cast spell via the granted permission, so
+/// the rider is consumed as permission metadata and skipped in ability
+/// resolution rather than resolved in place.
+pub(crate) fn is_enters_with_modifications_rider_subability(ability: &ResolvedAbility) -> bool {
+    matches!(
+        &ability.effect,
+        Effect::AddPendingEntersModifications { .. }
+    )
 }
 
 /// Extract the counter the cast-this-way creature enters with, if the

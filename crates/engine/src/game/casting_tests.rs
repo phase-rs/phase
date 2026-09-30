@@ -21739,6 +21739,237 @@ fn exact_permission_does_not_inherit_sibling_permanent_modification() {
     );
 }
 
+/// CR 608.2c + CR 611.2a + CR 611.2c: the during-resolution cast request's
+/// `enters_with_modifications` rider (Strago and Relm) must thread through
+/// `install_resolution_cast_permission` into the elected `ExileWithAltCost`
+/// permission and apply EXACTLY ONCE at finalization, as a
+/// `Duration::Permanent` continuous effect scoped to the cast object.
+///
+/// Positive/negative pair on one setup: a request carrying
+/// `[AddKeyword(Haste)]` grants haste through exactly one matching transient
+/// effect; a request with an empty vector grants nothing. Reverting the
+/// request-field threading turns the positive red.
+#[test]
+fn resolution_cast_request_mods_apply_exactly_once() {
+    use crate::types::ability::{ContinuousModification, ResolutionCastCost};
+    use crate::types::keywords::KeywordKind;
+
+    fn cast_exiled_creature_with_mods(
+        mods: Vec<ContinuousModification>,
+    ) -> (crate::types::game_state::GameState, ObjectId) {
+        let mut state = setup_game_at_main_phase();
+        let creature = create_object(
+            &mut state,
+            CardId(8301),
+            PlayerId(0),
+            "Rider Creature".to_string(),
+            Zone::Exile,
+        );
+        {
+            let obj = state.objects.get_mut(&creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.mana_cost = ManaCost::zero();
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.base_power = obj.power;
+            obj.base_toughness = obj.toughness;
+        }
+        let face_policy = crate::types::ability::ResolutionCastFacePolicy::new(
+            TargetFilter::Any,
+            creature,
+            PlayerId(0),
+            None,
+        );
+        let cleanup = crate::types::ability::ResolutionCastCleanup {
+            source_id: creature,
+            offer_id: None,
+            face_policy: face_policy.clone(),
+            exiled_misses: Vec::new(),
+            reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
+            success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
+            delayed_trigger_receipts: Vec::new(),
+        };
+        let initiation = initiate_cast_during_resolution(
+            &mut state,
+            PlayerId(0),
+            creature,
+            ResolutionCastRequest {
+                face_policy,
+                cast_transformed: false,
+                cleanup,
+                graveyard_replacement: None,
+                enters_with_modifications: mods,
+                cost: ResolutionCastCost::Free,
+            },
+            &mut Vec::new(),
+        )
+        .expect("free during-resolution cast must begin");
+        assert!(
+            matches!(initiation, ResolutionCastInitiation::WaitingFor(_)),
+            "a legal free cast must not take the rejection path"
+        );
+        assert_eq!(
+            state.objects[&creature].zone,
+            Zone::Stack,
+            "reach guard: the free cast must reach the stack during resolution"
+        );
+        (state, creature)
+    }
+
+    // Positive — the request's rider applies once and the permanent has haste.
+    let (mut state, creature) =
+        cast_exiled_creature_with_mods(vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Haste,
+        }]);
+    stack::resolve_top(&mut state, &mut Vec::new());
+    crate::game::layers::evaluate_layers(&mut state);
+    assert_eq!(state.objects[&creature].zone, Zone::Battlefield);
+    assert!(
+        crate::game::keywords::object_has_effective_keyword_kind(
+            &state,
+            creature,
+            KeywordKind::Haste,
+        ),
+        "the request's rider must apply to the cast creature"
+    );
+    let applied: Vec<_> = state
+        .transient_continuous_effects
+        .iter()
+        .filter(|effect| {
+            effect.affected == TargetFilter::SpecificObject { id: creature }
+                && effect.modifications
+                    == vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Haste,
+                    }]
+        })
+        .collect();
+    assert_eq!(
+        applied.len(),
+        1,
+        "the rider must apply exactly once, got {} matching transient effects",
+        applied.len()
+    );
+
+    // Negative — an empty rider applies nothing (paired on the same setup).
+    let (mut state, creature) = cast_exiled_creature_with_mods(Vec::new());
+    stack::resolve_top(&mut state, &mut Vec::new());
+    crate::game::layers::evaluate_layers(&mut state);
+    assert_eq!(state.objects[&creature].zone, Zone::Battlefield);
+    assert!(
+        !crate::game::keywords::object_has_effective_keyword_kind(
+            &state,
+            creature,
+            KeywordKind::Haste,
+        ),
+        "an empty rider must not grant haste"
+    );
+    assert!(
+        state.transient_continuous_effects.iter().all(|effect| {
+            !(effect.affected == TargetFilter::SpecificObject { id: creature }
+                && effect.modifications
+                    == vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Haste,
+                    }])
+        }),
+        "an empty rider must install no haste modification"
+    );
+}
+
+/// CR 608.2c: two sibling casting permissions on one object with DIFFERENT
+/// `enters_with_modifications` riders — the elected exact index applies only
+/// its own set. Mirrors `exact_permission_does_not_inherit_sibling_permanent_modification`
+/// for the during-resolution request shape the phase threads.
+#[test]
+fn resolution_request_mods_do_not_leak_from_sibling_permission() {
+    use crate::types::ability::ContinuousModification;
+    use crate::types::keywords::KeywordKind;
+
+    let mut state = setup_game_at_main_phase();
+    let creature = create_object(
+        &mut state,
+        CardId(8303),
+        PlayerId(0),
+        "Two Rider Creature".to_string(),
+        Zone::Graveyard,
+    );
+    {
+        let obj = state.objects.get_mut(&creature).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.base_card_types = obj.card_types.clone();
+        obj.mana_cost = ManaCost::zero();
+        obj.power = Some(2);
+        obj.toughness = Some(2);
+        for (index, keyword) in [Keyword::Flying, Keyword::Haste].into_iter().enumerate() {
+            obj.casting_permissions
+                .push(CastingPermission::ExileWithAltCost {
+                    source_id: None,
+                    cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
+                    cost: ManaCost::zero(),
+                    cast_transformed: false,
+                    constraint: None,
+                    granted_to: Some(PlayerId(0)),
+                    resolution_cleanup: (index == 1).then(|| {
+                        crate::types::ability::ResolutionCastCleanup {
+                            source_id: creature,
+                            offer_id: None,
+                            face_policy: crate::types::ability::ResolutionCastFacePolicy::new(
+                                TargetFilter::Any,
+                                creature,
+                                PlayerId(0),
+                                None,
+                            ),
+                            exiled_misses: Vec::new(),
+                            reject_action:
+                                crate::types::ability::ResolutionMvRejectAction::RemainExiled,
+                            success_action:
+                                crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
+                            delayed_trigger_receipts: Vec::new(),
+                        }
+                    }),
+                    duration: Some(Duration::UntilEndOfTurn),
+                    graveyard_replacement: None,
+                    enters_with_counter: None,
+                    enters_with_modifications: vec![ContinuousModification::AddKeyword { keyword }],
+                    mana_spend_permission: None,
+                    cast_cost_modifier: None,
+                });
+        }
+    }
+    let prepared = prepare_spell_cast_with_variant_override_inner(
+        &state,
+        PlayerId(0),
+        creature,
+        None,
+        None,
+        Some(CastingPermissionIndex(1)),
+        CastingMode::Actual,
+    )
+    .expect("the exact second permission must prepare");
+    continue_with_prepared(&mut state, PlayerId(0), prepared, &mut Vec::new())
+        .expect("the exact cast must finalize");
+    stack::resolve_top(&mut state, &mut Vec::new());
+    crate::game::layers::evaluate_layers(&mut state);
+
+    assert_eq!(state.objects[&creature].zone, Zone::Battlefield);
+    assert!(
+        crate::game::keywords::object_has_effective_keyword_kind(
+            &state,
+            creature,
+            KeywordKind::Haste,
+        ),
+        "the elected permission's Haste rider must apply"
+    );
+    assert!(
+        !crate::game::keywords::object_has_effective_keyword_kind(
+            &state,
+            creature,
+            KeywordKind::Flying,
+        ),
+        "the non-elected sibling's Flying rider must not leak onto this cast"
+    );
+}
+
 #[test]
 fn hand_alt_cost_permission_overrides_printed_mana_cost() {
     let mut state = setup_game_at_main_phase();
@@ -55991,6 +56222,7 @@ fn free_during_resolution_cast_auto_resolves_with_empty_pool() {
             cast_transformed: false,
             cleanup,
             graveyard_replacement: None,
+            enters_with_modifications: Vec::new(),
             cost: crate::types::ability::ResolutionCastCost::Free,
         },
         &mut Vec::new(),
@@ -56097,6 +56329,7 @@ fn resolution_test_request(filter: TargetFilter) -> ResolutionCastRequest {
         face_policy,
         cast_transformed: false,
         graveyard_replacement: None,
+        enters_with_modifications: Vec::new(),
         cost: crate::types::ability::ResolutionCastCost::Free,
     }
 }
@@ -57061,6 +57294,7 @@ fn exact_resolution_offer_does_not_inherit_sibling_cast_transformed() {
             cast_transformed: false,
             cleanup,
             graveyard_replacement: None,
+            enters_with_modifications: Vec::new(),
             cost: crate::types::ability::ResolutionCastCost::Free,
         },
         &mut Vec::new(),
@@ -57136,6 +57370,7 @@ fn exact_resolution_offer_does_not_consume_sibling_once_per_turn_permission() {
             cast_transformed: false,
             cleanup,
             graveyard_replacement: None,
+            enters_with_modifications: Vec::new(),
             cost: crate::types::ability::ResolutionCastCost::Free,
         },
         &mut Vec::new(),

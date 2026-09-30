@@ -58,6 +58,10 @@ pub(in crate::game) fn free_cast_window_resolution_request(
         cast_transformed: false,
         cleanup,
         graveyard_replacement: None,
+        // This window route translates only the graveyard-destination rider
+        // today; if a gains-modifications rider-bearing `CastFromZone` is ever
+        // proven reachable here, the field threads from the ability.
+        enters_with_modifications: Vec::new(),
         cost: crate::types::ability::ResolutionCastCost::Free,
     }
 }
