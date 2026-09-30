@@ -11851,8 +11851,8 @@ mod tests {
     /// CR 608.2c: a non-targeted MASS player subject ("each opponent") stated
     /// once at the head of a same-sentence verb list must govern every
     /// subjectless conjugated continuation after it, exactly like the
-    /// targeted (`CarriedPlayerSubject::Targeted`) and phase-scoped
-    /// (`::Scoped`) cases already covered by
+    /// declared (`CarriedPlayerSubject::Declared`) and phase-scoped
+    /// (`Reference { filter: ScopedPlayer, .. }`) cases already covered by
     /// `targeted_player_subject_carries_to_conjugated_predicates` above. This
     /// carry does NOT run through `CarriedPlayerSubject` — "each opponent " is
     /// peeled off the chunk's leading text before subject-application parsing

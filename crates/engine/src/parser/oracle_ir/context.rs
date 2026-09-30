@@ -551,6 +551,13 @@ pub(crate) struct ParseContext {
     /// lowered through them). `None` on the first chunk of every chain and on
     /// every standalone parse. Never serialized.
     pub chain_declared_object_target: Option<TargetFilter>,
+    /// CR 608.2c: the reference to the player slot an ENCLOSING effect chain
+    /// already declared, for a nested `parse_effect_chain_ir` whose own builder
+    /// starts empty (a conditional body re-parsed as its own chain: "If you do,
+    /// that player discards that card, then draws a card"). Set by the caller
+    /// immediately before that one call; the callee `take`s it on entry, so it is
+    /// `None` everywhere else. Never serialized.
+    pub enclosing_declared_player: Option<TargetFilter>,
     /// CR 608.2c + CR 400.7: Source zone of the tracked set that a downstream
     /// "put those cards / put them onto the battlefield" anaphor (a
     /// `TargetFilter::TrackedSet`) must scan. Set by a producer clause that
