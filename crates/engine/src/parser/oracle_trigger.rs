@@ -13688,6 +13688,22 @@ fn try_parse_event(
                     preceded(tag(" "), parse_one_of_your_opponents),
                 ),
                 value(AttackTargetFilter::Player, tag(" a player")),
+                // CR 102.1 + CR 508.1b: "attacks the player with the most life or
+                // tied for most life" (Preacher of the Schism, Seraphic
+                // Greatsword, Undercover Butler). Only matched when the whole
+                // superlative-or-tie qualifier follows, so "the player" never
+                // binds the broad Player scope on its own; the qualifier
+                // becomes `valid_target` below.
+                value(
+                    AttackTargetFilter::Player,
+                    terminated(
+                        tag(" the player"),
+                        peek(preceded(
+                            tag(" with the "),
+                            crate::parser::oracle_nom::quantity::parse_most_or_tied_for_most,
+                        )),
+                    ),
+                ),
                 value(AttackTargetFilter::Player, tag(" you")),
                 // CR 303.4e: "attacks enchanted player" — a Curse Aura trigger
                 // scoped to the player this permanent is attached to (whose
@@ -13797,11 +13813,33 @@ fn try_parse_event(
                 // is a real clause boundary, checked with the shared
                 // `peek_clause_terminator` authority; anything else falls into
                 // the SAME declined branch as a total parse failure.
-                let modelled = parse_player_relative_clause(after_noun, relation, ctx)
-                    .ok()
-                    .filter(|(remainder, _)| {
-                        nom_primitives::peek_clause_terminator(remainder).is_ok()
-                    });
+                // CR 102.1 + CR 508.1b: "the player with the most life or tied
+                // for most life" — the defender's life must be ≥ the highest
+                // life total among ALL players, read once at declaration (the
+                // same `valid_target` home as the `who` clauses, so CR 603.4's
+                // resolution re-check does not apply).
+                let most_life = preceded(
+                    tag::<_, _, OracleError<'_>>("with the "),
+                    crate::parser::oracle_nom::quantity::parse_most_or_tied_for_most,
+                )
+                .parse(after_noun)
+                .ok()
+                .and_then(|(remainder, property)| {
+                    nom_primitives::peek_clause_terminator(remainder).ok()?;
+                    let player =
+                        crate::parser::oracle_nom::quantity::player_property_leader_filter(
+                            property,
+                            PlayerRelation::All,
+                        )?;
+                    Some((remainder, player))
+                });
+                let modelled = most_life.or_else(|| {
+                    parse_player_relative_clause(after_noun, relation, ctx)
+                        .ok()
+                        .filter(|(remainder, _)| {
+                            nom_primitives::peek_clause_terminator(remainder).is_ok()
+                        })
+                });
                 match modelled {
                     Some((_, player)) => {
                         def.valid_target = Some(TargetFilter::PlayerMatching {
