@@ -1,4 +1,4 @@
-import type { GameObject } from "../adapter/types.ts";
+import type { GameObject, Keyword } from "../adapter/types.ts";
 import type { TokenSearchFilters } from "./scryfall.ts";
 
 /**
@@ -90,22 +90,70 @@ export function cardImageLookup(
 }
 
 /**
+ * Reduce an engine keyword to the base name Scryfall's `kw:` predicate
+ * matches ("FirstStrike" → "first strike", `{Protection: …}` →
+ * "protection"). Parameterization is dropped deliberately: art selection
+ * only needs the keyword family, and a name Scryfall does not know just
+ * misses its rung and degrades down the query ladder.
+ */
+function scryfallKeywordName(kw: Keyword): string | null {
+  if (typeof kw !== "string") {
+    const keys = Object.keys(kw);
+    if (keys.length === 0) return null;
+    if (keys[0] === "Unknown") {
+      const inner = String(kw[keys[0]] ?? "").trim().toLowerCase();
+      return inner || null;
+    }
+    return splitKeywordPascalCase(keys[0]);
+  }
+  return splitKeywordPascalCase(kw);
+}
+
+function splitKeywordPascalCase(raw: string): string | null {
+  const name = raw
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .trim()
+    .toLowerCase();
+  return name || null;
+}
+
+/**
  * Build the Scryfall token-search filters for an engine game object.
+ *
+ * Art follows PRINTED characteristics (`base_*`), not live ones: a
+ * Giant-Growth-pumped 1/1 is still a 1/1 in every printing, and an
+ * anthem-granted keyword must not steer art to a natively-keyworded
+ * variant. The engine populates `base_*` from the token body at creation;
+ * each axis falls back to the live value for legacy paths that lack it.
  *
  * `hasAbilities` is derived purely from engine-provided fields — no rules
  * inference. A vanilla token (e.g. a 1/1 white Human from Wedding Announcement)
  * yields `hasAbilities: false`, narrowing art selection to a vanilla printing;
  * a Spirit token with flying yields `true`. See issue #502.
+ *
+ * Note: `abilities` has no printed counterpart on the wire, so a GRANTED
+ * activated/triggered ability still flips `hasAbilities` to true (losing
+ * the vanilla narrowing, as before). Keyword grants are handled: they are
+ * read from `base_keywords`, so a vanilla token under an anthem keeps its
+ * vanilla art.
  */
 export function tokenFiltersForObject(obj: GameObject): TokenSearchFilters {
+  const keywords = [
+    ...new Set(
+      (obj.base_keywords ?? obj.keywords ?? [])
+        .map(scryfallKeywordName)
+        .filter((k): k is string => k !== null),
+    ),
+  ];
   return {
-    power: obj.power,
-    toughness: obj.toughness,
-    colors: obj.color,
+    power: obj.base_power ?? obj.power,
+    toughness: obj.base_toughness ?? obj.toughness,
+    colors: obj.base_color ?? obj.color,
     subtypes: obj.card_types?.subtypes,
+    keywords: keywords.length > 0 ? keywords : undefined,
     hasAbilities:
-      obj.keywords.length > 0 ||
-      obj.abilities.length > 0 ||
+      keywords.length > 0 ||
+      (obj.abilities?.length ?? 0) > 0 ||
       (obj.token_rules_text?.length ?? 0) > 0,
   };
 }

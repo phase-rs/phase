@@ -571,6 +571,7 @@ function imagePresentationKey(
   filterColors: string,
   filterSubtypes: string,
   filterHasAbilities: boolean | null,
+  filterKeywords: string,
   tokenImageRefKey: string,
   oracleId: string,
   faceName: string,
@@ -601,6 +602,7 @@ function imagePresentationKey(
     filterColors,
     filterSubtypes,
     String(filterHasAbilities),
+    filterKeywords,
     tokenImageRefKey,
     artLocaleKey,
     repositoryRevision,
@@ -621,6 +623,7 @@ function imageRequestKey(
   filterColors: string,
   filterSubtypes: string,
   filterHasAbilities: boolean | null,
+  filterKeywords: string,
   tokenImageRefKey: string,
   oracleId: string,
   faceName: string,
@@ -644,6 +647,7 @@ function imageRequestKey(
     filterColors,
     filterSubtypes,
     filterHasAbilities,
+    filterKeywords,
     tokenImageRefKey,
     oracleId,
     faceName,
@@ -678,6 +682,7 @@ async function acquireCachedImageSrc(
   filterColors: string,
   filterSubtypes: string,
   filterHasAbilities: boolean | null,
+  filterKeywords: string,
   tokenImageRef: TokenImageRef | null,
   oracleId: string,
   faceName: string,
@@ -717,6 +722,7 @@ async function acquireCachedImageSrc(
         colors: filterColors ? filterColors.split(",") : undefined,
         subtypes: filterSubtypes ? filterSubtypes.split(",") : undefined,
         hasAbilities: filterHasAbilities ?? undefined,
+        keywords: filterKeywords ? filterKeywords.split(",") : undefined,
       });
       asset = remoteAsset(
         remoteSrc,
@@ -812,6 +818,7 @@ export function useCardImage(
   const filterSubtypes = tokenFilters?.subtypes?.join(",") ?? "";
   const filterColors = tokenFilters?.colors?.join(",") ?? "";
   const filterHasAbilities = tokenFilters?.hasAbilities ?? null;
+  const filterKeywords = tokenFilters?.keywords?.join(",") ?? "";
 
   const artOverrides = usePreferencesStore((s) => s.artOverrides);
   const artChain = usePreferencesStore((s) => s.artChain);
@@ -899,6 +906,7 @@ export function useCardImage(
     filterColors,
     filterSubtypes,
     filterHasAbilities,
+    filterKeywords,
     tokenImageRefKey,
     oracleId,
     faceName,
@@ -922,6 +930,7 @@ export function useCardImage(
     filterColors,
     filterSubtypes,
     filterHasAbilities,
+    filterKeywords,
     tokenImageRefKey,
     oracleId,
     faceName,
@@ -1094,6 +1103,7 @@ export function useCardImage(
               filterColors,
               filterSubtypes,
               filterHasAbilities,
+              filterKeywords,
               stableTokenImageRef,
               oracleId,
               faceName,

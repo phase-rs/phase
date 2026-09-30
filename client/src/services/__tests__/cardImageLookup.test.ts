@@ -1,5 +1,22 @@
 import { describe, expect, it } from "vitest";
-import { cardImageLookup } from "../cardImageLookup.ts";
+import type { GameObject } from "../../adapter/types.ts";
+import { cardImageLookup, tokenFiltersForObject } from "../cardImageLookup.ts";
+
+function tokenObj(overrides: Record<string, unknown>): GameObject {
+  return {
+    power: null,
+    toughness: null,
+    base_power: null,
+    base_toughness: null,
+    color: [],
+    base_color: [],
+    card_types: { subtypes: [] },
+    keywords: [],
+    base_keywords: [],
+    abilities: [],
+    ...overrides,
+  } as unknown as GameObject;
+}
 
 describe("cardImageLookup", () => {
   it("returns front-face lookup for a plain (non-transformed) card", () => {
@@ -149,5 +166,94 @@ describe("cardImageLookup", () => {
       name: "Kuruk, the Mastodon",
       faceIndex: 1,
     });
+  });
+});
+
+describe("tokenFiltersForObject", () => {
+  it("reads P/T and colors from printed base_* values, not pumped live ones", () => {
+    // A 1/1 white Soldier under Giant Growth + a color setter is still a
+    // 1/1 white Soldier in every printing — art must follow the base body.
+    expect(
+      tokenFiltersForObject(
+        tokenObj({
+          power: 4,
+          toughness: 4,
+          base_power: 1,
+          base_toughness: 1,
+          color: ["Blue"],
+          base_color: ["White"],
+          card_types: { subtypes: ["Soldier"] },
+        }),
+      ),
+    ).toEqual({
+      power: 1,
+      toughness: 1,
+      colors: ["White"],
+      subtypes: ["Soldier"],
+      keywords: undefined,
+      hasAbilities: false,
+    });
+  });
+
+  it("falls back to live values when base_* axes are absent (legacy paths)", () => {
+    expect(
+      tokenFiltersForObject(
+        tokenObj({
+          power: 2,
+          toughness: 2,
+          base_power: null,
+          base_toughness: null,
+          color: ["Green"],
+          base_color: undefined,
+        }),
+      ),
+    ).toEqual(
+      expect.objectContaining({ power: 2, toughness: 2, colors: ["Green"] }),
+    );
+  });
+
+  it("extracts Scryfall keyword names from printed base_keywords", () => {
+    expect(
+      tokenFiltersForObject(
+        tokenObj({
+          base_keywords: [
+            "Flying",
+            "FirstStrike",
+            { Protection: { from: "red" } },
+            "Flying",
+          ],
+          keywords: ["Flying", "FirstStrike"],
+        }),
+      ).keywords,
+    ).toEqual(["flying", "first strike", "protection"]);
+  });
+
+  it("omits keywords for vanilla tokens", () => {
+    expect(tokenFiltersForObject(tokenObj({})).keywords).toBeUndefined();
+  });
+
+  it("ignores granted keywords for hasAbilities so anthems keep vanilla art", () => {
+    // Live keywords include the anthem grant; printed base has none.
+    expect(
+      tokenFiltersForObject(tokenObj({ keywords: ["Flying"], base_keywords: [] }))
+        .hasAbilities,
+    ).toBe(false);
+    expect(
+      tokenFiltersForObject(tokenObj({ base_keywords: ["Flying"] })).hasAbilities,
+    ).toBe(true);
+  });
+
+  it("treats abilities and token rules text as abilities", () => {
+    expect(
+      tokenFiltersForObject(tokenObj({ abilities: [{}, {}] as never }))
+        .hasAbilities,
+    ).toBe(true);
+    expect(
+      tokenFiltersForObject(
+        tokenObj({
+          token_rules_text: "{T}, Sacrifice this token: Add one mana.",
+        }),
+      ).hasAbilities,
+    ).toBe(true);
   });
 });
