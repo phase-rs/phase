@@ -7252,21 +7252,33 @@ fn parse_damage_modification_static(
     Some(def)
 }
 
-/// CR 615.1a + CR 602.2a: Bridge the recipient scope recognized from a "would
-/// deal damage to X" clause into `Effect::PreventDamage`'s `target` field. Only
-/// `Player { Controller }` ("to you") is proven needed by any in-corpus one-shot
-/// prevention card today (Mercenaries and its Circle/Rune-of-Protection sibling
-/// class); every other `DamageTargetFilter` shape is left as `Any` — matching
-/// prior behavior — rather than silently "fixed" without a card to verify
-/// against. For an activated ability "you" is the activator (CR 602.2a), which
-/// `TargetFilter::Controller` resolves to at runtime via
-/// `resolve_player_for_context_ref`.
-fn damage_target_filter_to_prevent_target(filter: Option<&DamageTargetFilter>) -> TargetFilter {
+/// CR 615.1a + CR 120.1 + CR 602.2a: The single authority bridging the recipient
+/// scope recognized from a one-shot prevention's "would deal damage [to X]"
+/// clause into `Effect::PreventDamage`'s `target` field. The recipient is an
+/// untargeted SCOPE (CR 115.10a), never a target slot.
+///
+/// - no recipient phrase → `Any` (the shield covers every recipient);
+/// - "to one or more players" / "to a player" (`Player { Any }`) → `Player`;
+/// - "to you" (`Player { Controller }`) → `Controller`. For an activated ability
+///   "you" is the activator (CR 602.2a), which `TargetFilter::Controller`
+///   resolves to at runtime via `resolve_player_for_context_ref`.
+///
+/// Every other recipient scope has no in-corpus one-shot prevention card and
+/// returns `None` (unsupported); each caller decides how to lower that.
+fn damage_target_filter_to_prevent_target(
+    filter: Option<&DamageTargetFilter>,
+) -> Option<TargetFilter> {
     match filter {
-        Some(DamageTargetFilter::Player {
-            player: DamageTargetPlayerScope::Controller,
-        }) => TargetFilter::Controller,
-        _ => TargetFilter::Any,
+        None => Some(TargetFilter::Any),
+        Some(DamageTargetFilter::Player { player }) => match player {
+            DamageTargetPlayerScope::Any => Some(TargetFilter::Player),
+            DamageTargetPlayerScope::Controller => Some(TargetFilter::Controller),
+            DamageTargetPlayerScope::Opponent
+            | DamageTargetPlayerScope::SourceChosenPlayer
+            | DamageTargetPlayerScope::Specific(_) => None,
+        },
+        Some(DamageTargetFilter::CreatureOnly) => None,
+        Some(DamageTargetFilter::PlayerOrPermanentsControlledBy { .. }) => None,
     }
 }
 
@@ -7457,6 +7469,16 @@ pub(crate) fn parse_oneshot_damage_replacement(
     }
 
     if is_complete_oneshot_prevention_result(result_clause) {
+        // CR 115.10a: this generic branch keeps a NARROWER projection of the
+        // shared recipient table — only "to you" (`Controller`) is carried; every
+        // other entry (including `Player`) and every unsupported scope stays
+        // `Any`, exactly as before. These shapes carry no source-slot `And`, so
+        // the source-scoped carve-out that keeps a `Player` recipient untargeted
+        // does not apply here, and emitting `TargetFilter::Player` would surface
+        // a spurious target-player slot for what is only a recipient scope.
+        let target = damage_target_filter_to_prevent_target(target_filter.as_ref())
+            .filter(|target| *target == TargetFilter::Controller)
+            .unwrap_or(TargetFilter::Any);
         return Some(Effect::PreventDamage {
             amount: PreventionAmount::All,
             amount_dynamic: None,
@@ -7467,7 +7489,7 @@ pub(crate) fn parse_oneshot_damage_replacement(
             // The `recipient_object_filter` object-slot path ("to target
             // creature") is intentionally left as `Any` here (unchanged), since
             // it takes `target_filter == None`.
-            target: damage_target_filter_to_prevent_target(target_filter.as_ref()),
+            target,
             scope: combat_scope
                 .map(|_| crate::types::ability::PreventionScope::CombatDamage)
                 .unwrap_or(crate::types::ability::PreventionScope::AllDamage),
@@ -7499,43 +7521,29 @@ fn is_complete_oneshot_prevention_result(input: &str) -> bool {
 /// CR 510.2 + CR 120.1: Parse the scope/recipient tail of a source-scoped
 /// one-shot prevention's would-deal clause — the text after "would deal" and
 /// before the "this turn" / "this combat" window: "[combat] damage [to
-/// <recipient>]". "combat damage" narrows the shield to combat damage (CR 510.2
-/// deals it simultaneously in the combat damage step); the optional recipient
-/// phrase is a typed recipient domain (CR 120.1). All-consuming: any
-/// unrecognized recipient text ("to target creature") is an `Err`.
+/// <recipient>]". The damage noun reuses the shared
+/// `parse_damage_noun_with_scope` authority: "combat damage" narrows the shield
+/// to combat damage (CR 510.2 deals it simultaneously in the combat damage
+/// step) and bare "damage" covers all damage; "noncombat damage" has no
+/// `PreventionScope` and is an `Err`. The optional recipient phrase is a typed
+/// recipient domain (CR 120.1). All-consuming: any unrecognized recipient text
+/// ("to target creature") is an `Err`.
 fn parse_oneshot_prevent_damage_tail(
     input: &str,
 ) -> OracleResult<'_, (PreventionScope, Option<DamageTargetFilter>)> {
     all_consuming(delimited(
         multispace0,
         pair(
-            alt((
-                value(PreventionScope::CombatDamage, tag("combat damage")),
-                value(PreventionScope::AllDamage, tag("damage")),
-            )),
+            map_opt(parse_damage_noun_with_scope, |scope| match scope {
+                Some(CombatDamageScope::CombatOnly) => Some(PreventionScope::CombatDamage),
+                None => Some(PreventionScope::AllDamage),
+                Some(CombatDamageScope::NoncombatOnly) => None,
+            }),
             opt(preceded(char(' '), parse_damage_target_phrase)),
         ),
         multispace0,
     ))
     .parse(input)
-}
-
-/// CR 615.1a + CR 120.1: None means the recipient scope is unsupported for a source-scoped one-shot prevention (no in-corpus card); the caller lowers it to `Effect::unimplemented` — it never falls through to the generic branch.
-fn oneshot_source_prevent_recipient(
-    recipient: Option<&DamageTargetFilter>,
-) -> Option<TargetFilter> {
-    match recipient {
-        None => Some(TargetFilter::Any),
-        Some(DamageTargetFilter::Player { player }) => match player {
-            DamageTargetPlayerScope::Any => Some(TargetFilter::Player),
-            DamageTargetPlayerScope::Controller => Some(TargetFilter::Controller),
-            DamageTargetPlayerScope::Opponent
-            | DamageTargetPlayerScope::SourceChosenPlayer
-            | DamageTargetPlayerScope::Specific(_) => None,
-        },
-        Some(DamageTargetFilter::CreatureOnly) => None,
-        Some(DamageTargetFilter::PlayerOrPermanentsControlledBy { .. }) => None,
-    }
 }
 
 /// CR 615.1a + CR 614.1a + CR 115.1 + CR 609.7a + CR 609.7b: Parse the
@@ -7589,31 +7597,24 @@ fn parse_oneshot_target_source_prevent(norm_lower: &str, ctx: &ParseContext) -> 
     }
     let body = after_prefix.trim();
 
-    // Subject split: the head noun phrase before "would deal".
-    let (_, (subject, _)) = nom_primitives::split_once_on(body, "would deal").ok()?;
+    // Subject split: the head noun phrase before "would deal"; `post_would` is
+    // the "[combat] damage [to X] this turn, <result>" remainder after it.
+    let (_, (subject, post_would)) = nom_primitives::split_once_on(body, "would deal").ok()?;
     let subject = subject.trim();
 
     // CR 115.1: declared-target subject — "target creature" / "another target
     // creature" / "other target creature" — or the non-trigger anaphor "that
     // creature". The shared `parse_declared_target_prefix` combinator is the
-    // single authority for the target-prefix family.
-    let (target_filter, after_subject) = if let Ok((after_prefix, _)) =
-        crate::parser::oracle_nom::target::parse_declared_target_prefix(subject)
-    {
-        let (filter, rest) = parse_target(after_prefix);
-        if rest.trim().is_empty() {
-            (filter, None)
-        } else {
-            (TargetFilter::Any, Some(rest))
-        }
-    }
-    // CR 608.2c: inside a trigger body "that creature" refers back to the object named by the trigger condition, not a target-source capture — only the declared-target arm ("target creature", CR 115.1) is admitted there (Ria Ivor).
-    else if let Ok((rest, Some(_))) = cond(
-        !ctx.in_trigger,
-        tag::<_, _, OracleError<'_>>("that creature"),
-    )
-    .parse(subject)
-    {
+    // single authority for the target-prefix family. Each arm yields the
+    // subject's filter and its unconsumed tail.
+    let Ok((_, (target_filter, subject_tail))) = alt((
+        preceded(
+            crate::parser::oracle_nom::target::parse_declared_target_prefix,
+            rest::<&str, OracleError<'_>>,
+        )
+        .map(parse_target),
+        // CR 608.2c: inside a trigger body "that creature" refers back to the object named by the trigger condition, not a target-source capture — only the declared-target arm ("target creature", CR 115.1) is admitted there (Ria Ivor). `cond` yields `None` there, which `map_opt` turns into an arm failure.
+        //
         // CR 608.2c: "that creature" in a NON-trigger context is an anaphor
         // to the chosen target creature (Dazzling Reflection). The typed
         // `Typed(creature)` leaf is emitted DIRECTLY rather than routed
@@ -7627,26 +7628,32 @@ fn parse_oneshot_target_source_prevent(norm_lower: &str, ctx: &ParseContext) -> 
         // not in the current corpus; if it ever appears, this branch must
         // extend to parse the qualified noun phrase and the shape predicate
         // must be revisited accordingly.
-        if rest.trim().is_empty() {
-            (TargetFilter::Typed(TypedFilter::creature()), None)
-        } else {
-            (TargetFilter::Any, Some(rest))
-        }
-    } else {
-        (TargetFilter::Any, None)
+        preceded(
+            map_opt(
+                cond(!ctx.in_trigger, tag("that creature")),
+                std::convert::identity,
+            ),
+            rest,
+        )
+        .map(|tail| (TargetFilter::Typed(TypedFilter::creature()), tail)),
+    ))
+    .parse(subject) else {
+        return None;
     };
 
     // Out-of-bounds protection: any unconsumed subject tail (e.g. "target
     // creature card", "target creature or player") or a subject that is not a
     // declared-target/that-creature form falls through to the generic branch.
-    if after_subject.is_some() || target_filter == TargetFilter::Any {
+    if !subject_tail.trim().is_empty() || target_filter == TargetFilter::Any {
         return None;
     }
 
     // CR 615.1a: the prevention body must be a "prevent that damage" /
     // "prevent the damage" result clause (the whole one-shot sentence, from
-    // "would deal" onward).
-    let (would_clause, result_clause) = split_would_deal_clause(body);
+    // "would deal" onward). Splitting `post_would` (not `body`) leaves `tail`
+    // as exactly the "[combat] damage [to X]" slice between "would deal" and
+    // the window.
+    let (tail, result_clause) = split_would_deal_clause(post_would);
     if !is_complete_oneshot_prevention_result(result_clause) {
         return None;
     }
@@ -7672,13 +7679,10 @@ fn parse_oneshot_target_source_prevent(norm_lower: &str, ctx: &ParseContext) -> 
     // not fall through to the generic branch (which would emit an unscoped,
     // source-less shield). Keep it an honest parser gap.
     let fail_closed = || Some(Effect::unimplemented("prevent", norm_lower));
-    let Ok((_, (_, tail))) = nom_primitives::split_once_on(would_clause, "would deal") else {
-        return fail_closed();
-    };
     let Ok((_, (scope, recipient))) = parse_oneshot_prevent_damage_tail(tail) else {
         return fail_closed();
     };
-    let Some(target) = oneshot_source_prevent_recipient(recipient.as_ref()) else {
+    let Some(target) = damage_target_filter_to_prevent_target(recipient.as_ref()) else {
         return fail_closed();
     };
 
@@ -28304,6 +28308,37 @@ mod snapshot_tests {
                 }
             }
             other => panic!("expected PreventDamage, got {other:?}"),
+        }
+    }
+
+    /// CR 115.10a: the GENERIC (non-source-scoped) one-shot prevention keeps
+    /// only the `Controller` projection of the shared recipient table. A
+    /// "to a player" recipient (`Player { Any }`) and an unsupported one ("to an
+    /// opponent") both stay `Any` — emitting `TargetFilter::Player` here would
+    /// surface a spurious target-player slot, since these shapes have no source
+    /// slot. The `ChosenDamageSource` assertion is the reach guard proving the
+    /// generic branch (not the target-source branch) produced the effect.
+    #[test]
+    fn generic_oneshot_prevent_projects_only_controller_recipient() {
+        for text in [
+            "the next time a source of your choice would deal damage to a player this turn, prevent that damage",
+            "the next time a source of your choice would deal damage to an opponent this turn, prevent that damage",
+        ] {
+            match parse_oneshot_damage_replacement(text, &ParseContext::default()) {
+                Some(Effect::PreventDamage {
+                    target,
+                    damage_source_filter,
+                    ..
+                }) => {
+                    assert_eq!(target, TargetFilter::Any, "{text:?}");
+                    assert_eq!(
+                        damage_source_filter,
+                        Some(TargetFilter::ChosenDamageSource { filter: None }),
+                        "{text:?}"
+                    );
+                }
+                other => panic!("{text:?}: expected PreventDamage, got {other:?}"),
+            }
         }
     }
 
