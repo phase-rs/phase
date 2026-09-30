@@ -32,6 +32,7 @@ const FLIGHT_ZONE_CHANGES: { readonly [From in Zone]?: readonly FlightDestinatio
 };
 
 export interface CardFlightSpec {
+  kind: "flight";
   objectId: ObjectId;
   route: CardFlightRoute;
   /** The face the viewer may see before the event, from the engine's
@@ -130,6 +131,7 @@ export function cardFlightSpecFor(
   const endObject = post?.objects[objectId];
   const endFace = visibleAnimationImageSnapshot(endObject);
   return {
+    kind: "flight",
     ...routed,
     startFace: visibleAnimationImageSnapshot(pre?.objects[objectId]),
     endFace,

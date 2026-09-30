@@ -25,7 +25,9 @@ import {
   corsOnlySrc,
   PIXEL_RATIO_CAP,
 } from "../CardVfxLayer.tsx";
+import { SHATTER_CRACK_S, SHATTER_FALL_S } from "../cardShatter.ts";
 import { type CardVfxScene, SCENE_EFFECT_KINDS } from "../cardVfxScene.ts";
+import type { CardShatterSpec, CardVfxSpec } from "../cardVfxSpecs.ts";
 
 interface RecordedChild {
   name: string;
@@ -137,7 +139,7 @@ function spec(
   faces: Pick<CardFlightSpec, "startFace" | "endFace"> = { startFace: null, endFace: null },
   owningStepMs = 500,
 ): CardFlightSpec {
-  return { objectId, route, ...faces, endColors: null, pace: 1, owningStepMs, delayMs: 0 };
+  return { kind: "flight", objectId, route, ...faces, endColors: null, pace: 1, owningStepMs, delayMs: 0 };
 }
 
 const CAST: CardFlightRoute = { from: "Hand", to: "Stack", ownerId: 0 };
@@ -233,8 +235,8 @@ async function renderLayer({ tier = "full", strict = false }: { tier?: "full" | 
   await act(async () => {
     await vi.dynamicImportSettled();
   });
-  const present = (flight: CardFlightSpec, classic: () => void = vi.fn()) => {
-    act(() => ref.current?.present(flight, classic));
+  const present = (effect: CardVfxSpec, classic: () => void = vi.fn()) => {
+    act(() => ref.current?.present(effect, classic));
     return classic;
   };
   return { ref, present, ...utils };
@@ -957,5 +959,98 @@ describe("CardVfxLayer tiers", () => {
     const [first] = flightRenders();
     expect(first).toBeDefined();
     expect(hasVisible(first, "card-shadow")).toBe(shadowed);
+  });
+});
+
+describe("CardVfxLayer shatter", () => {
+  const SHATTER_MS = (SHATTER_CRACK_S + SHATTER_FALL_S) * 1000 + 5 * FRAME_MS + 100;
+  const shatter = (objectId: number, cardFace: AnimationImageSnapshot | null = face(objectId)): CardShatterSpec => ({
+    kind: "shatter",
+    objectId,
+    ownerId: 0,
+    face: cardFace,
+    pace: 1,
+    owningStepMs: 500,
+  });
+  const shatterRenders = () => calls("render").filter((call) => hasVisible(call, "card-shatter"));
+  const commit = () =>
+    act(() => {
+      useGameStore.setState({ engineCommitEpoch: useGameStore.getState().engineCommitEpoch + 1 });
+    });
+
+  async function loadFace() {
+    const loader = faceLoader();
+    expect(loader).not.toBeNull();
+    await act(async () => {
+      if (loader) fireEvent.load(loader);
+    });
+  }
+
+  it("V8-1: a destroyed permanent breaks where it lies, veiled until it has shattered and the commit has landed", async () => {
+    const { present } = await readyLayer();
+    addFace(anchor({ "data-permanent-card": String(X) }, 300, 400));
+
+    const classic = present(shatter(X));
+    // Still on the board while its face loads.
+    expect(veiled(X)).toBe(false);
+    await loadFace();
+
+    expect(classic).not.toHaveBeenCalled();
+    expect(veiled(X)).toBe(true);
+    const surfaceUpload = last(calls("initTexture"));
+    expect((surfaceUpload?.arg as Texture).image).toBeInstanceOf(HTMLCanvasElement);
+    await frames(2);
+    expect(shatterRenders().length).toBeGreaterThan(0);
+    const group = shatterRenders()[0].children?.find((child) => child.name === "card-shatter");
+    expect(group?.position.slice(0, 2)).toEqual([300 + CARD_W / 2, -(400 + CARD_H / 2)]);
+
+    // The shatter ends before the commit: the board card stays hidden.
+    await advance(SHATTER_MS);
+    expect(hasVisible(last(calls("render")) as RendererCall, "card-shatter")).toBe(false);
+    expect(veiled(X)).toBe(true);
+    commit();
+    expect(veiled(X)).toBe(false);
+  });
+
+  it("V8-1: a commit before the shatter ends releases the veil when it ends", async () => {
+    const { present } = await readyLayer();
+    addFace(anchor({ "data-permanent-card": String(X) }, 300, 400));
+    present(shatter(X));
+    await loadFace();
+    commit();
+    await frames(2);
+    expect(veiled(X)).toBe(true);
+
+    await advance(SHATTER_MS);
+    expect(veiled(X)).toBe(false);
+  });
+
+  it("V8-2: no permanent, no face shown, or a face that fails to load presents Classic and veils nothing", async () => {
+    const { present } = await readyLayer();
+
+    expect(present(shatter(X))).toHaveBeenCalledTimes(1);
+    const permanent = anchor({ "data-permanent-card": String(X) }, 300, 400);
+    // A permanent still loading its face has nothing to break.
+    expect(present(shatter(X))).toHaveBeenCalledTimes(1);
+    addFace(permanent);
+    expect(present(shatter(X, null))).toHaveBeenCalledTimes(1);
+
+    const late = present(shatter(X));
+    expect(late).not.toHaveBeenCalled();
+    await advance(CARD_FLIGHT_FACE_READY_MAX_MS);
+    expect(late).toHaveBeenCalledTimes(1);
+    expect(veiled(X)).toBe(false);
+    expect(shatterRenders()).toHaveLength(0);
+  });
+
+  it("V8-3: unmounting mid-shatter releases the veil", async () => {
+    const { present, unmount } = await readyLayer();
+    addFace(anchor({ "data-permanent-card": String(X) }, 300, 400));
+    present(shatter(X));
+    await loadFace();
+    expect(veiled(X)).toBe(true);
+
+    unmount();
+    expect(veiled(X)).toBe(false);
   });
 });

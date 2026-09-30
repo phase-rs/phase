@@ -28,6 +28,7 @@ import {
   createPlaceholderTexture,
   restingState,
 } from "./cardFlight.ts";
+import { type CardShatterParams, cardShatterKind, createCardShatter } from "./cardShatter.ts";
 import { createLandingDust, landingDustKind } from "./landingDust.ts";
 
 /** One running effect. `update` draws a frame and returns whether it is still
@@ -56,7 +57,7 @@ export interface SceneEffectKind {
   warmUp(host: EffectHost): Object3D[];
 }
 
-export const SCENE_EFFECT_KINDS: readonly SceneEffectKind[] = [cardFlightKind, landingDustKind];
+export const SCENE_EFFECT_KINDS: readonly SceneEffectKind[] = [cardFlightKind, landingDustKind, cardShatterKind];
 
 const CAMERA_FOV_DEG = 28;
 
@@ -80,10 +81,13 @@ export interface CardFlightRequest extends Omit<CardFlightParams, "from" | "back
   landingColors: readonly ManaColor[] | null;
 }
 
+/** A shatter to start; the scene supplies the pixel ratio. */
+export type CardShatterRequest = Omit<CardShatterParams, "pixelRatio">;
+
 export interface CardVfxScene {
   setPixelRatio(ratio: number): void;
-  /** Builds a face texture and uploads it now, so no flight frame uploads. */
-  uploadFace(image: HTMLImageElement): Texture;
+  /** Builds a texture and uploads it now, so no effect frame uploads. */
+  uploadFace(image: HTMLImageElement | HTMLCanvasElement): Texture;
   hasBack(): boolean;
   hasFlight(objectId: ObjectId): boolean;
   /** Starts a flight, handing off from the object's unreleased flight if it has
@@ -94,6 +98,7 @@ export interface CardVfxScene {
   /** Silently disposes the object's flight if it has released (is revealing or
    *  fading). A later presentation of the object supersedes its landing. */
   dropReleasedFlight(objectId: ObjectId): void;
+  startShatter(request: CardShatterRequest): void;
   add(effect: SceneEffect): void;
   dispose(): void;
 }
@@ -111,7 +116,7 @@ export interface CardVfxSceneCallbacks {
   onContextRestored(): void;
 }
 
-function uploadableTexture(image: HTMLImageElement): Texture {
+function uploadableTexture(image: HTMLImageElement | HTMLCanvasElement): Texture {
   const texture = new Texture(image);
   texture.colorSpace = SRGBColorSpace;
   texture.anisotropy = 4;
@@ -236,7 +241,7 @@ class CardVfxSceneRuntime implements CardVfxScene, EffectHost {
     this.renderer.setPixelRatio(ratio);
   }
 
-  uploadFace(image: HTMLImageElement): Texture {
+  uploadFace(image: HTMLImageElement | HTMLCanvasElement): Texture {
     const texture = uploadableTexture(image);
     this.renderer.initTexture(texture);
     return texture;
@@ -291,6 +296,10 @@ class CardVfxSceneRuntime implements CardVfxScene, EffectHost {
     this.flights.set(objectId, flight);
     this.add(flight);
     return true;
+  }
+
+  startShatter(request: CardShatterRequest) {
+    this.add(createCardShatter(this, { ...request, pixelRatio: this.pixelRatio }));
   }
 
   add(effect: SceneEffect) {

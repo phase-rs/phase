@@ -74,9 +74,15 @@ export function measureCardPose(el: HTMLElement, origin: DOMRectReadOnly): CardP
  *  node compare in the same untransformed frame. `complete` is not painted: the
  *  first paint of a newly available image may trail it by about one decode. */
 export function faceImagesSettled(el: HTMLElement): boolean {
-  const minArea = FACE_IMAGE_MIN_AREA_FRACTION * el.offsetWidth * el.offsetHeight;
-  const faces = [...el.querySelectorAll("img")].filter((img) => img.offsetWidth * img.offsetHeight >= minArea);
+  const faces = faceImages(el);
   return faces.length > 0 && faces.every((img) => img.complete);
+}
+
+/** The face `<img>`s in `el`: those whose layout box covers at least
+ *  `FACE_IMAGE_MIN_AREA_FRACTION` of `el`'s, in document order. */
+export function faceImages(el: HTMLElement): HTMLImageElement[] {
+  const minArea = FACE_IMAGE_MIN_AREA_FRACTION * el.offsetWidth * el.offsetHeight;
+  return [...el.querySelectorAll("img")].filter((img) => img.offsetWidth * img.offsetHeight >= minArea);
 }
 
 /** The first match in document order that is laid out (non-zero width). A
@@ -130,7 +136,7 @@ const PROVISIONAL_SURFACES: Record<FlightDestination, (ownerId: PlayerId) => HTM
 
 /** Object `id`'s laid-out surface in `zone`: its veil-aware card, or the
  *  owner's pile standing in for it. */
-function zoneSurface(zone: Zone, id: ObjectId, ownerId: PlayerId): HTMLElement | null {
+export function zoneSurface(zone: Zone, id: ObjectId, ownerId: PlayerId): HTMLElement | null {
   return firstRenderedOf(ZONE_SURFACES[zone](id, ownerId));
 }
 

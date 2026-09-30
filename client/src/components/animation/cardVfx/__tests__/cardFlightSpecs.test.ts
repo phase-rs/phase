@@ -5,6 +5,7 @@ import type { AnimationEvent } from "../../../../animation/types.ts";
 import { buildObjectMap, gameObjectFactory } from "../../../../test/factories/gameObjectFactory.ts";
 import { buildGameState } from "../../../../test/factories/gameStateFactory.ts";
 import { cardFlightSpecFor, type CardFlightSpecContext } from "../cardFlightSpecs.ts";
+import { cardVfxSpecFor } from "../cardVfxSpecs.ts";
 
 const X = 7;
 
@@ -186,5 +187,30 @@ describe("cardFlightSpecFor", () => {
     expect(cardFlightSpecFor(spellCast, context(pre, post, 0))).toBeNull();
     expect(cardFlightSpecFor(zoneChanged("Stack", "Battlefield"), context(pre, post, 0))).toBeNull();
     expect(cardFlightSpecFor(spellCast, context(pre, post, 1.5))?.pace).toBe(1.5);
+  });
+});
+
+describe("cardVfxSpecFor", () => {
+  const destroyed: AnimationEvent = { type: "CreatureDestroyed", data: { object_id: X } };
+
+  it("V8-9: a destroyed permanent shatters with the face it showed; flights are unchanged", () => {
+    const pre = stateWith(visible(card.onBattlefield().build()));
+    const post = stateWith(visible(card.params({ zone: "Graveyard" }).build()));
+
+    expect(cardVfxSpecFor(destroyed, context(pre, post))).toEqual({
+      kind: "shatter",
+      objectId: X,
+      ownerId: 0,
+      face: expect.objectContaining({ cardName: "Llanowar Elves" }),
+      pace: 1,
+      owningStepMs: 500,
+    });
+    expect(cardVfxSpecFor(zoneChanged("Stack", "Battlefield"), context(pre, post))?.kind).toBe("flight");
+  });
+
+  it("V8-9: no pre object or pace 0 has no shatter", () => {
+    const pre = stateWith(visible(card.onBattlefield().build()));
+    expect(cardVfxSpecFor(destroyed, context(null, pre))).toBeNull();
+    expect(cardVfxSpecFor(destroyed, context(pre, pre, 0))).toBeNull();
   });
 });

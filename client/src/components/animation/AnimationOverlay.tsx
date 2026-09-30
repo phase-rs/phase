@@ -36,7 +36,7 @@ import {
 } from "./ResolvedAnimationImage.tsx";
 import { applyScreenShake } from "./ScreenShake.tsx";
 import { CardVfxLayer, type CardVfxLayerHandle, cardVfxSupported } from "./cardVfx/CardVfxLayer.tsx";
-import { cardFlightSpecFor } from "./cardVfx/cardFlightSpecs.ts";
+import { cardVfxSpecFor } from "./cardVfx/cardVfxSpecs.ts";
 
 
 interface ActiveFloat {
@@ -824,14 +824,14 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
     ],
   );
 
-  // Under the New style a mounted layer presents a card flight for the event,
-  // or runs the Classic effect instead; never both, never neither.
+  // Under the New style a mounted layer presents the event's card VFX, or runs
+  // the Classic effect instead; never both, never neither.
   const processEffect = useCallback(
     (effect: StepEffect, stepEffects: StepEffect[], owningStepMs: number) => {
       const classic = () => processClassicEffect(effect, stepEffects, owningStepMs);
       const layer = cardVfxRef.current;
       const spec = layer
-        ? cardFlightSpecFor(effect.event, {
+        ? cardVfxSpecFor(effect.event, {
             pre: useGameStore.getState().gameState,
             post: useAnimationStore.getState().animationNewState,
             pace: speedMultiplier,

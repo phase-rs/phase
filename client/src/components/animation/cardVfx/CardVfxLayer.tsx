@@ -1,8 +1,8 @@
 // ─── Card VFX layer ───
 // The React side of the shared WebGL overlay: the canvas, the hidden image
 // loaders, and the `present` handle through which AnimationOverlay offers each
-// flight-eligible event. Every `present` ends in exactly one presentation —
-// a GL flight, or the Classic effect it was handed — and the animation queue
+// event with a card VFX spec. Every `present` ends in exactly one presentation —
+// a GL effect, or the Classic effect it was handed — and the animation queue
 // never waits on either.
 //
 // Only types come from three.js and the scene here; the scene module is
@@ -23,14 +23,17 @@ import { useCardBackImage } from "../../../hooks/useCardImage.ts";
 import type { CardImageSource } from "../../../services/visualPacks/types.ts";
 import { useAnimationStore } from "../../../stores/animationStore.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
+import { usePreferencesStore } from "../../../stores/preferencesStore.ts";
 import { type AnimationImageSnapshot, ResolvedAnimationImage } from "../ResolvedAnimationImage.tsx";
-import { type Aim, type CardPose, measureCardPose, resolveAim, sourceElement } from "./cardAnchors.ts";
+import { type Aim, type CardPose, measureCardPose, resolveAim, sourceElement, zoneSurface } from "./cardAnchors.ts";
 import type { CardVfxTier, FlightFlip } from "./cardFlight.ts";
 import type { CardFlightRoute, CardFlightSpec } from "./cardFlightSpecs.ts";
 import type { CardVfxScene, CardVfxSceneCallbacks } from "./cardVfxScene.ts";
 import type * as CardVfxSceneModule from "./cardVfxScene.ts";
+import type { CardShatterSpec, CardVfxSpec } from "./cardVfxSpecs.ts";
+import { drawSurface, measureSurfaceLayout } from "./surfaceTexture.ts";
 
-/** A flight whose face has not loaded by this deadline presents Classic. */
+/** An effect whose face has not loaded by this deadline presents Classic. */
 export const CARD_FLIGHT_FACE_READY_MAX_MS = 150;
 /** The face deadline never exceeds this fraction of the owning step. */
 const FACE_READY_STEP_FRACTION = 0.3;
@@ -44,9 +47,9 @@ export function cardVfxSupported(): boolean {
 }
 
 export interface CardVfxLayerHandle {
-  /** Presents `spec` as a GL flight, or runs `classic` instead. Exactly one
+  /** Presents `spec` as a GL effect, or runs `classic` instead. Exactly one
    *  of the two happens, once. */
-  present(spec: CardFlightSpec, classic: () => void): void;
+  present(spec: CardVfxSpec, classic: () => void): void;
 }
 
 interface CardVfxLayerProps {
@@ -54,6 +57,18 @@ interface CardVfxLayerProps {
 }
 
 type LayerState = "idle" | "initializing" | "ready" | "lost" | "failed";
+
+/** A face image the layer is loading. Exactly one of `loaded` and `failed`
+ *  runs: `failed` when the image errors, misses its deadline, or the layer
+ *  releases its work. */
+interface FaceRequest {
+  token: number;
+  face: AnimationImageSnapshot;
+  size: "normal" | "art_crop";
+  deadline: ReturnType<typeof setTimeout>;
+  loaded(image: HTMLImageElement): void;
+  failed(): void;
+}
 
 /** A flight waiting for its face image. Later presents for the same object
  *  join it: one flight from the first source to the last destination. */
@@ -63,7 +78,11 @@ interface PendingStart {
   from: CardPose | null;
   face: AnimationImageSnapshot;
   classics: (() => void)[];
-  deadline: ReturnType<typeof setTimeout>;
+}
+
+/** Where a shatter breaks, as fractions of the card: somewhere central. */
+function shatterImpact() {
+  return { u: 0.3 + Math.random() * 0.4, v: 0.25 + Math.random() * 0.45 };
 }
 
 function flipFor({ startFace, endFace }: CardFlightSpec): FlightFlip {
@@ -104,11 +123,13 @@ class CardVfxController {
   private scene: CardVfxScene | null = null;
   private lastStackPose: CardPose | null = null;
   private nextToken = 0;
+  private readonly faceRequests = new Map<number, FaceRequest>();
   private readonly pending = new Map<ObjectId, PendingStart>();
   private readonly veiled = new Set<ObjectId>();
+  private readonly commitWaits = new Set<() => void>();
 
   constructor(
-    private readonly publishPending: (starts: PendingStart[]) => void,
+    private readonly publishRequests: (requests: FaceRequest[]) => void,
     private tier: CardVfxTier,
   ) {}
 
@@ -157,7 +178,7 @@ class CardVfxController {
     this.scheduleInit();
   };
 
-  present(spec: CardFlightSpec, classic: () => void) {
+  present(spec: CardVfxSpec, classic: () => void) {
     switch (this.state) {
       case "idle":
         // The first effect of a mount presents Classic and starts init.
@@ -171,24 +192,53 @@ class CardVfxController {
         classic();
         return;
       case "ready":
-        if (this.scene) this.presentReady(this.scene, spec, classic);
-        else classic();
+        if (!this.scene) classic();
+        else if (spec.kind === "flight") this.presentFlight(this.scene, spec, classic);
+        else this.presentShatter(spec, classic);
         return;
     }
   }
 
-  readonly faceReady = (objectId: ObjectId, token: number, image: HTMLImageElement) => {
-    if (this.pending.get(objectId)?.token !== token) return;
+  readonly faceReady = (token: number, image: HTMLImageElement) => {
+    if (!this.faceRequests.has(token)) return;
     image.decode().then(
-      () => this.finishPending(objectId, token, image),
-      () => this.fallBack(objectId, token),
+      () => this.takeFace(token)?.loaded(image),
+      () => this.faceFailed(token),
     );
   };
 
-  readonly fallBack = (objectId: ObjectId, token: number) => {
+  readonly faceFailed = (token: number) => {
+    this.takeFace(token)?.failed();
+  };
+
+  private requestFace(
+    face: AnimationImageSnapshot,
+    size: FaceRequest["size"],
+    owningStepMs: number,
+    loaded: (image: HTMLImageElement) => void,
+    failed: () => void,
+  ): number {
+    const token = ++this.nextToken;
+    const deadlineMs = Math.min(CARD_FLIGHT_FACE_READY_MAX_MS, FACE_READY_STEP_FRACTION * owningStepMs);
+    const deadline = setTimeout(() => this.faceFailed(token), deadlineMs);
+    this.faceRequests.set(token, { token, face, size, deadline, loaded, failed });
+    this.publish();
+    return token;
+  }
+
+  private takeFace(token: number): FaceRequest | null {
+    const request = this.faceRequests.get(token);
+    if (!request) return null;
+    clearTimeout(request.deadline);
+    this.faceRequests.delete(token);
+    this.publish();
+    return request;
+  }
+
+  private fallBack(objectId: ObjectId, token: number) {
     const pending = this.takePending(objectId, token);
     if (pending) runAll(pending.classics);
-  };
+  }
 
   private scheduleInit() {
     const { canvas, sceneModule, backImage } = this;
@@ -230,7 +280,7 @@ class CardVfxController {
     };
   }
 
-  private presentReady(scene: CardVfxScene, spec: CardFlightSpec, presentClassic: () => void) {
+  private presentFlight(scene: CardVfxScene, spec: CardFlightSpec, presentClassic: () => void) {
     const { objectId } = spec;
     // A Classic presentation supersedes X's earlier landing, so it ends that
     // flight's reveal first. Dropping at the top of `presentReady` instead would
@@ -260,17 +310,54 @@ class CardVfxController {
       this.start(scene, spec, from, null, [classic]);
       return;
     }
-    const token = ++this.nextToken;
-    const deadlineMs = Math.min(CARD_FLIGHT_FACE_READY_MAX_MS, FACE_READY_STEP_FRACTION * spec.owningStepMs);
-    this.pending.set(objectId, {
-      token,
-      spec,
-      from,
+    const token = this.requestFace(
       face,
-      classics: [classic],
-      deadline: setTimeout(() => this.fallBack(objectId, token), deadlineMs),
-    });
-    this.publish();
+      "normal",
+      spec.owningStepMs,
+      (image) => this.finishPending(objectId, token, image),
+      () => this.fallBack(objectId, token),
+    );
+    this.pending.set(objectId, { token, spec, from, face, classics: [classic] });
+  }
+
+  // The permanent's surface is measured now, while it is still on the board;
+  // its face loads in the size the board shows, and the surface is redrawn
+  // from both so the first GL frame matches the card it replaces.
+  private presentShatter(spec: CardShatterSpec, classic: () => void) {
+    const { objectId } = spec;
+    const el = zoneSurface("Battlefield", objectId, spec.ownerId);
+    const layout = el && measureSurfaceLayout(el);
+    if (!el || !layout || !spec.face || !this.canvas) {
+      classic();
+      return;
+    }
+    const pose = measureCardPose(el, this.canvas.getBoundingClientRect());
+    const size = usePreferencesStore.getState().battlefieldCardDisplay === "art_crop" ? "art_crop" : "normal";
+    const commitEpoch = useGameStore.getState().engineCommitEpoch;
+    this.requestFace(
+      spec.face,
+      size,
+      spec.owningStepMs,
+      (image) => {
+        const { scene } = this;
+        if (this.state !== "ready" || !scene) {
+          classic();
+          return;
+        }
+        const surface = scene.uploadFace(drawSurface(layout, image, pixelRatioFor(this.tier)));
+        scene.startShatter({
+          pose,
+          surface,
+          radius: layout.radius,
+          impact: shatterImpact(),
+          tier: this.tier,
+          pace: spec.pace,
+          onDone: () => this.unveilAfterCommit(objectId, commitEpoch),
+        });
+        this.veil(objectId);
+      },
+      classic,
+    );
   }
 
   // A cast and its resolution can share one step, so the resolution may
@@ -300,9 +387,8 @@ class CardVfxController {
   private takePending(objectId: ObjectId, token: number): PendingStart | null {
     const pending = this.pending.get(objectId);
     if (pending?.token !== token) return null;
-    clearTimeout(pending.deadline);
+    this.takeFace(token);
     this.pending.delete(objectId);
-    this.publish();
     return pending;
   }
 
@@ -333,10 +419,30 @@ class CardVfxController {
       runAll(classics);
       return;
     }
-    // A handoff keeps the veil it already holds: no unveil in between.
+    this.veil(objectId);
+  }
+
+  // A handoff keeps the veil it already holds: no unveil in between.
+  private veil(objectId: ObjectId) {
     if (this.veiled.has(objectId)) return;
     this.veiled.add(objectId);
     useAnimationStore.getState().veilFlight(objectId);
+  }
+
+  /** Unveils once the engine commit that follows `commitEpoch` has landed, so
+   *  an effect that ends first does not show the card's old surface again. */
+  private unveilAfterCommit(objectId: ObjectId, commitEpoch: number) {
+    if (useGameStore.getState().engineCommitEpoch !== commitEpoch) {
+      this.unveil(objectId);
+      return;
+    }
+    const stop = useGameStore.subscribe((state) => {
+      if (state.engineCommitEpoch === commitEpoch) return;
+      stop();
+      this.commitWaits.delete(stop);
+      this.unveil(objectId);
+    });
+    this.commitWaits.add(stop);
   }
 
   private measureSource(spec: CardFlightSpec): CardPose | null {
@@ -361,18 +467,20 @@ class CardVfxController {
   // Context loss and unmount: every waiting event presents Classic, and every
   // veil this layer holds is released.
   private releaseAll() {
-    const waiting = [...this.pending.values()];
-    for (const pending of waiting) clearTimeout(pending.deadline);
-    this.pending.clear();
+    const waiting = [...this.faceRequests.values()];
+    for (const request of waiting) clearTimeout(request.deadline);
+    this.faceRequests.clear();
     this.publish();
-    for (const pending of waiting) runAll(pending.classics);
+    for (const request of waiting) request.failed();
+    for (const stop of this.commitWaits) stop();
+    this.commitWaits.clear();
     const { unveilFlight } = useAnimationStore.getState();
     for (const objectId of this.veiled) unveilFlight(objectId);
     this.veiled.clear();
   }
 
   private publish() {
-    this.publishPending([...this.pending.values()]);
+    this.publishRequests([...this.faceRequests.values()]);
   }
 }
 
@@ -427,8 +535,8 @@ function CardBackLoader({ onSettled }: { onSettled: (image: HTMLImageElement | n
 export const CardVfxLayer = forwardRef<CardVfxLayerHandle, CardVfxLayerProps>(
   function CardVfxLayer({ tier }, ref) {
     const canvasRef = useRef<HTMLCanvasElement>(null);
-    const [pendingStarts, setPendingStarts] = useState<PendingStart[]>([]);
-    const [controller] = useState(() => new CardVfxController(setPendingStarts, tier));
+    const [faceRequests, setFaceRequests] = useState<FaceRequest[]>([]);
+    const [controller] = useState(() => new CardVfxController(setFaceRequests, tier));
 
     useImperativeHandle(ref, () => ({
       present: (spec, classic) => controller.present(spec, classic),
@@ -450,16 +558,16 @@ export const CardVfxLayer = forwardRef<CardVfxLayerHandle, CardVfxLayerProps>(
         <canvas ref={canvasRef} data-card-vfx aria-hidden="true" style={CANVAS_STYLE} />
         <div hidden aria-hidden="true">
           <CardBackLoader onSettled={controller.backSettled} />
-          {pendingStarts.map(({ token, spec, face }) => (
+          {faceRequests.map(({ token, face, size }) => (
             <ResolvedAnimationImage
               key={token}
               snapshot={face}
-              size="normal"
+              size={size}
               alt=""
               fallback={null}
               crossOrigin="anonymous"
-              onReady={(image) => controller.faceReady(spec.objectId, token, image)}
-              onExhausted={() => controller.fallBack(spec.objectId, token)}
+              onReady={(image) => controller.faceReady(token, image)}
+              onExhausted={() => controller.faceFailed(token)}
             />
           ))}
         </div>
