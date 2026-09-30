@@ -28154,8 +28154,9 @@ mod snapshot_tests {
     /// declared "target creature" subject lowers inside a trigger body (reach
     /// guard); Impulsive Maneuvers' trigger-body "that creature" declines
     /// (`None`, subject mismatch) and the same text outside a trigger lowers.
-    /// The `None` row discriminates the `Some(_)` pattern on `cond`: matching a
-    /// bare `Ok((rest, _))` would admit every subject inside a trigger.
+    /// The `None` row discriminates the `!ctx.in_trigger` gate on `cond`: without
+    /// it the trigger-body "that creature" anaphor would lower as a target-source
+    /// capture instead of declining.
     #[test]
     fn trigger_context_gates_only_that_creature_anaphor() {
         let source_scoped = Some(TargetFilter::And {
