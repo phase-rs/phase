@@ -102,6 +102,19 @@ describe("zone-scoped anchors", () => {
     expect(sourceElement(CAST, X)).toBe(hand);
   });
 
+  it("V11-6: a card's exile surface is its ghost under its holder, else its fan card, else its owner's pile", () => {
+    const toExile = { from: "Hand", to: "Exile", ownerId: 1 } as const;
+    mount({ "data-exile-pile": "0" });
+    expect(ownNode(toExile, X)).toBeNull();
+    const pile = mount({ "data-exile-pile": "1" });
+    expect(ownNode(toExile, X)).toBe(pile);
+    const fan = mount({ "data-zone-fan-card": "", "data-object-id": String(X) });
+    expect(ownNode(toExile, X)).toBe(fan);
+    const ghost = mount({ "data-exile-ghost": String(X) });
+    expect(ownNode(toExile, X)).toBe(ghost);
+    expect(sourceElement({ from: "Exile", to: "Hand", ownerId: 1 }, X)).toBe(ghost);
+  });
+
   it("V3-5c: of two permanent nodes the first laid out one wins, in document order", () => {
     const collapsed = mount({ "data-permanent-card": String(X) }, { left: 0, top: 0, width: 0, height: 0 });
     const overview = mount({ "data-permanent-card": String(X) });

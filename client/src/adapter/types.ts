@@ -3305,7 +3305,8 @@ export type GameEvent =
   | { type: "XValueChosen"; data: { player: PlayerId; object_id: ObjectId; value: number } }
   | { type: "AbilityActivated"; data: { player_id: PlayerId; source_id: ObjectId } }
   | { type: "ExhaustAbilityActivated"; data: { player_id: PlayerId; source_id: ObjectId; is_mana_ability: boolean } }
-  | { type: "ZoneChanged"; data: { object_id: ObjectId; from: Zone; to: Zone } }
+  // `from` is null for an object that enters from no zone (a created token).
+  | { type: "ZoneChanged"; data: { object_id: ObjectId; from: Zone | null; to: Zone } }
   // `new_total` is the player's life total once this change is applied, supplied
   // by the engine (`LifeTotalReading`, serialized transparently) so a mid-animation
   // display can show intermediate totals. Absent on an event from a peer older than

@@ -15,6 +15,7 @@ import {
   ABANDON_FADE_MS,
   CAST_FLIGHT_MS,
   DRAW_FLIGHT_MS,
+  LAND_REVEAL_WAIT_MAX_MS,
   LAND_STATIONARY_WAIT_MAX_MS,
   RESOLVE_FLIGHT_MS,
   SETTLE_MS,
@@ -143,7 +144,7 @@ function spec(
   faces: Pick<CardFlightSpec, "startFace" | "endFace"> = { startFace: null, endFace: null },
   owningStepMs = 500,
 ): CardFlightSpec {
-  return { kind: "flight", objectId, route, ...faces, endColors: null, pace: 1, owningStepMs, delayMs: 0 };
+  return { kind: "flight", objectId, sourceId: objectId, route, ...faces, endColors: null, pace: 1, owningStepMs, delayMs: 0 };
 }
 
 const CAST: CardFlightRoute = { from: "Hand", to: "Stack", ownerId: 0 };
@@ -724,6 +725,57 @@ describe("CardVfxLayer present contract", () => {
     expect(veiled(Y)).toBe(false);
 
     expect(calls("render").some((call) => hasVisible(call, "landing-dust"))).toBe(false);
+  });
+
+  it("V11-7: a token leaves from its source's surface, and with no source surface presents Classic", async () => {
+    const { present } = await readyLayer();
+    const elf = face(X, "Elf Warrior");
+    const token = { ...spec(X, RESOLVE, { startFace: elf, endFace: elf }), sourceId: Y };
+    expect(present(token)).toHaveBeenCalledTimes(1);
+
+    anchor({ "data-stack-entry": String(Y) }, 700, 200);
+    const classic = present(token);
+    await act(async () => {
+      const loader = faceLoader("Elf Warrior");
+      if (loader) fireEvent.load(loader);
+    });
+    await frames(1);
+
+    expect(classic).not.toHaveBeenCalled();
+    expect(veiled(X)).toBe(true);
+    const card = flightRenders()[0]?.children?.find((child) => child.name === "card-flight");
+    expect(card?.position[0]).toBeCloseTo(700 + CARD_W / 2);
+    expect(card?.position[1]).toBeCloseTo(-(200 + CARD_H / 2));
+  });
+
+  it.each([
+    ["Library", { "data-library-pile": "1" }],
+    ["Exile", { "data-exile-pile": "1" }],
+  ] as const)("V11-9: a card flies into its owner's %s pile and ends there, with no commit needed", async (to, pile) => {
+    const { present } = await readyLayer();
+    handCard(X);
+    anchor(pile, 40, 700);
+
+    present(spec(X, { from: "Hand", to, ownerId: 1 }));
+    await frames(1);
+    expect(veiled(X)).toBe(true);
+
+    // Well inside the await bound, so only a landing (not an abandon) ends it.
+    await advance(RESOLVE_FLIGHT_MS + LAND_STATIONARY_WAIT_MAX_MS + LAND_REVEAL_WAIT_MAX_MS + 10 * FRAME_MS);
+    expect(veiled(X)).toBe(false);
+    expect(unveilSpy).toHaveBeenCalledTimes(1);
+    expect(canvas().style.visibility).toBe("hidden");
+  });
+
+  it("V11-8: an event another event presents shows nothing once ready, and runs Classic before", async () => {
+    const { present } = await renderLayer();
+    expect(present({ kind: "covered" })).toHaveBeenCalledTimes(1);
+    loadBack();
+    await frames(1);
+    await advance(1);
+    expect(gl.constructed).toBe(1);
+
+    expect(present({ kind: "covered" })).not.toHaveBeenCalled();
   });
 
   it("V3-1n (iii): a released card stays drawn until the destination shows its face", async () => {

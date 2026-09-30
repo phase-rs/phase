@@ -129,7 +129,12 @@ const ZONE_SURFACES: Record<Zone, (id: ObjectId, ownerId: PlayerId) => readonly 
     `[data-zone-fan-card][data-object-id="${id}"]`,
     `[data-graveyard-pile="${ownerId}"][data-grouped-ids~="${id}"]`,
   ],
-  Exile: (id) => [`[data-zone-fan-card][data-object-id="${id}"]`],
+  // A face-down exiled card is only in its owner's pile's count.
+  Exile: (id, ownerId) => [
+    `[data-exile-ghost="${id}"]`,
+    `[data-zone-fan-card][data-object-id="${id}"]`,
+    `[data-exile-pile="${ownerId}"]`,
+  ],
   Stack: (id) => [`[data-stack-entry="${id}"]`, `[data-stack-entry][data-grouped-ids~="${id}"]`],
   Battlefield: (id) => [`[data-permanent-card="${id}"]`, `[data-permanent-card][data-grouped-ids~="${id}"]`],
   Command: () => [],
@@ -153,6 +158,9 @@ const PROVISIONAL_SURFACES: Record<FlightDestination, (ownerId: PlayerId) => HTM
   Graveyard: (ownerId) => firstRendered(`[data-graveyard-pile="${ownerId}"]`),
   Battlefield: () => null,
   Hand: () => null,
+  // Their own surfaces fall back to the owner's pile, which stands in for itself.
+  Library: () => null,
+  Exile: () => null,
 };
 
 /** Object `id`'s laid-out surface in `zone`: its veil-aware card, or the
@@ -161,10 +169,12 @@ export function zoneSurface(zone: Zone, id: ObjectId, ownerId: PlayerId): HTMLEl
   return firstRenderedOf(ZONE_SURFACES[zone](id, ownerId));
 }
 
-/** The surface a flight on `route` starts from. `null` (a pending cast already
- *  on the stack, a command-zone cast, the held mobile card) presents Classic. */
-export function sourceElement(route: CardFlightRoute, id: ObjectId): HTMLElement | null {
-  return zoneSurface(route.from, id, route.ownerId);
+/** The surface a flight on `route` starts from: its source object's (the card
+ *  itself, or a token's source) in the route's origin zone. `null` (a pending
+ *  cast already on the stack, a command-zone cast, the held mobile card)
+ *  presents Classic. */
+export function sourceElement(route: CardFlightRoute, sourceId: ObjectId): HTMLElement | null {
+  return zoneSurface(route.from, sourceId, route.ownerId);
 }
 
 /** The object's own surface in the route's destination zone — the only node a

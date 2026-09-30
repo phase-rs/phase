@@ -4,7 +4,7 @@ import type { AnimationEvent } from "../../../animation/types.ts";
 import { useAnimationStore } from "../../../stores/animationStore.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { type AnimationImageSnapshot, visibleAnimationImageSnapshot } from "../ResolvedAnimationImage.tsx";
-import { type CardFlightSpec, type CardFlightSpecContext, cardFlightSpecFor } from "./cardFlightSpecs.ts";
+import { type CardFlightSpec, type CardFlightSpecContext, cardFlightSpecFor, flightPresents } from "./cardFlightSpecs.ts";
 
 /** A permanent broken apart where it lies. */
 export interface CardShatterSpec {
@@ -47,14 +47,41 @@ export interface DamageStrikeSpec {
   owningStepMs: number;
 }
 
+/** An event another event presents: a destruction or sacrifice a replacement
+ *  sent elsewhere, whose zone change shows the move, or a token's entry from
+ *  no zone, which its `TokenCreated` shows. */
+export interface CoveredSpec {
+  kind: "covered";
+}
+
 /** Everything the card VFX layer presents, by `kind`. */
-export type CardVfxSpec = CardFlightSpec | BoardEffectSpec | DamageStrikeSpec;
+export type CardVfxSpec = CardFlightSpec | BoardEffectSpec | DamageStrikeSpec | CoveredSpec;
 
 /** The pre-event state `damageCauseOf` reads, when a card VFX layer presents
  *  damage causes; `null` when every hit presents Classic. Hit timing reads it
  *  too, so a life total ticks when the strike lands. */
 export function damageCauseState(): GameState | null {
   return useAnimationStore.getState().cardVfxReady ? useGameStore.getState().gameState : null;
+}
+
+function coveredSpecFor(event: AnimationEvent, { post, pace }: CardFlightSpecContext): CoveredSpec | null {
+  if (pace <= 0) return null;
+  switch (event.type) {
+    // CR 701.8a / CR 701.21a: a destroyed or sacrificed permanent moves to its
+    // owner's graveyard, unless a replacement (CR 614.1a) sends it elsewhere.
+    // Its move to exile then dissolves, and to a hand or library flies.
+    case "CreatureDestroyed":
+    case "PermanentSacrificed": {
+      const zone = post?.objects[event.data.object_id]?.zone;
+      const presented = zone === "Exile" || (zone !== undefined && flightPresents("Battlefield", zone));
+      return presented ? { kind: "covered" } : null;
+    }
+    // CR 111.1: a token enters the battlefield from no zone.
+    case "ZoneChanged":
+      return event.data.from === null && post?.objects[event.data.object_id]?.is_token ? { kind: "covered" } : null;
+    default:
+      return null;
+  }
 }
 
 // CR 701.8a: a destroyed permanent moves from the battlefield to its owner's
@@ -119,6 +146,7 @@ function damageStrikeSpecFor(
 export function cardVfxSpecFor(event: AnimationEvent, context: CardFlightSpecContext): CardVfxSpec | null {
   return (
     cardFlightSpecFor(event, context) ??
+    coveredSpecFor(event, context) ??
     cardShatterSpecFor(event, context) ??
     exileDissolveSpecFor(event, context) ??
     damageStrikeSpecFor(event, context)

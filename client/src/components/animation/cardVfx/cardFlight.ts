@@ -76,7 +76,7 @@ const LAND_PEAK_AT = 0.36;
 const FLIP_FROM = 0.12;
 const FLIP_TO = 0.72;
 
-/** `panel`: lift and set down on a UI surface (stack, graveyard). `land`:
+/** `panel`: lift and set down on a UI surface (stack, a pile, a hand). `land`:
  *  glide until over the slot, then drop onto the board and settle. */
 export type FlightCurve = "panel" | "land";
 
@@ -91,6 +91,8 @@ export const FLIGHT_PROFILES: Record<FlightDestination, FlightProfile> = {
   Battlefield: { curve: "land", durationMs: RESOLVE_FLIGHT_MS },
   Graveyard: { curve: "panel", durationMs: RESOLVE_FLIGHT_MS },
   Hand: { curve: "panel", durationMs: DRAW_FLIGHT_MS },
+  Library: { curve: "panel", durationMs: RESOLVE_FLIGHT_MS },
+  Exile: { curve: "panel", durationMs: RESOLVE_FLIGHT_MS },
 };
 
 /** A card pose in flight: height above the table, how far the tilt and lean

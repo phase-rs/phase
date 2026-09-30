@@ -7,7 +7,7 @@ import {
 
 /** The zones a card flight can land in. Every per-destination table is keyed
  *  by this, so a new destination is a compile error until each has its entry. */
-export type FlightDestination = Extract<Zone, "Stack" | "Battlefield" | "Graveyard" | "Hand">;
+export type FlightDestination = Extract<Zone, "Stack" | "Battlefield" | "Graveyard" | "Hand" | "Library" | "Exile">;
 
 /** Where a card flight goes: from the card's surface in one zone to its own
  *  surface in another. `ownerId` locates per-player surfaces (hand, library,
@@ -20,20 +20,39 @@ export interface CardFlightRoute {
 
 /** The zone changes a card flight presents, by origin. A move between zones
  *  that already have surfaces needs only its entry here. Casting is not a zone
- *  change event: `castOf` routes it. */
+ *  change event: `castOf` routes it. A permanent leaving the battlefield for a
+ *  graveyard is not either: its destruction breaks it where it lies, its
+ *  sacrifice (`sacrificeOf`) flies, and its exile dissolves. */
 const FLIGHT_ZONE_CHANGES: { readonly [From in Zone]?: readonly FlightDestination[] } = {
-  // CR 608.2n / CR 608.3: a resolving spell goes to the battlefield or its owner's graveyard.
-  Stack: ["Battlefield", "Graveyard"],
-  // CR 121.1: a drawn card moves from the library to the hand.
-  Library: ["Hand"],
+  // CR 608.2n / CR 608.3: a resolving spell goes to the battlefield or its
+  // owner's graveyard; a countered or bounced one to its hand, library or exile.
+  Stack: ["Battlefield", "Graveyard", "Hand", "Library", "Exile"],
+  // CR 121.1: a drawn card moves from the library to the hand; CR 701.17a: a
+  // milled one to the graveyard. Effects also exile or put cards onto the battlefield.
+  Library: ["Hand", "Graveyard", "Exile", "Battlefield"],
   // CR 305.1: a played land (or a card an effect puts onto the battlefield)
-  // moves from the hand to the battlefield.
-  Hand: ["Battlefield"],
+  // moves from the hand to the battlefield; CR 701.9a: a discarded card to the graveyard.
+  Hand: ["Battlefield", "Graveyard", "Library", "Exile"],
+  Graveyard: ["Hand", "Battlefield", "Library", "Exile"],
+  Exile: ["Hand", "Battlefield", "Graveyard", "Library"],
+  Battlefield: ["Hand", "Library"],
 };
+
+/** Whether a card flight presents a move from `from` to `to`. */
+export function flightPresents(from: Zone, to: Zone): boolean {
+  return FLIGHT_ZONE_CHANGES[from]?.some((destination) => destination === to) ?? false;
+}
+
+/** The most flights one batch sends (a mass mill or graveyard exile); the
+ *  rest present Classic. */
+export const FLIGHT_BATCH_MAX = 12;
 
 export interface CardFlightSpec {
   kind: "flight";
   objectId: ObjectId;
+  /** The object whose surface the flight leaves from: the card itself, or the
+   *  source a token comes out of. */
+  sourceId: ObjectId;
   route: CardFlightRoute;
   /** The face the viewer may see before the event, from the engine's
    *  per-viewer visibility; `null` shows the card back. */
@@ -68,6 +87,7 @@ export const FLIGHT_STAGGER_MS = 90;
 
 interface RoutedObject {
   objectId: ObjectId;
+  sourceId: ObjectId;
   route: CardFlightRoute;
 }
 
@@ -78,16 +98,38 @@ function castOf(objectId: ObjectId, pre: GameState | null, post: GameState | nul
   const from = pre?.objects[objectId]?.zone;
   const owner = post?.objects[objectId]?.owner;
   return from !== undefined && owner !== undefined
-    ? { objectId, route: { from, to: "Stack", ownerId: owner } }
+    ? { objectId, sourceId: objectId, route: { from, to: "Stack", ownerId: owner } }
     : null;
 }
 
 function zoneChangeOf(event: AnimationEvent, post: GameState | null): RoutedObject | null {
-  if (event.type !== "ZoneChanged") return null;
+  if (event.type !== "ZoneChanged" || event.data.from === null) return null;
   const { object_id: objectId, from } = event.data;
   const to = FLIGHT_ZONE_CHANGES[from]?.find((destination) => destination === event.data.to);
   const owner = post?.objects[objectId]?.owner;
-  return to && owner !== undefined ? { objectId, route: { from, to, ownerId: owner } } : null;
+  return to && owner !== undefined ? { objectId, sourceId: objectId, route: { from, to, ownerId: owner } } : null;
+}
+
+/** CR 701.21a: a sacrificed permanent moves from the battlefield to its
+ *  owner's graveyard. A replacement (CR 614.1a) that sends it elsewhere leaves
+ *  its zone change to present the move, and a token that ceased to exist in
+ *  the graveyard (CR 111.7) has no card to fly. */
+function sacrificeOf(objectId: ObjectId, post: GameState | null): RoutedObject | null {
+  const object = post?.objects[objectId];
+  return object?.zone === "Graveyard"
+    ? { objectId, sourceId: objectId, route: { from: "Battlefield", to: "Graveyard", ownerId: object.owner } }
+    : null;
+}
+
+/** CR 111.1: an effect puts a token onto the battlefield; it comes out of the
+ *  source that created it, when that source is a spell on the stack or a
+ *  permanent. */
+function tokenOf(objectId: ObjectId, sourceId: ObjectId, pre: GameState | null, post: GameState | null): RoutedObject | null {
+  const from = pre?.objects[sourceId]?.zone;
+  const owner = post?.objects[objectId]?.owner;
+  return (from === "Stack" || from === "Battlefield") && owner !== undefined
+    ? { objectId, sourceId, route: { from, to: "Battlefield", ownerId: owner } }
+    : null;
 }
 
 /** CR 601.2a: whether a spell was announced in an earlier batch whose cast
@@ -102,25 +144,43 @@ function routedObjectFor(event: AnimationEvent, pre: GameState | null, post: Gam
       return castAnnounced(event.data.object_id, pre) ? null : castOf(event.data.object_id, pre, post);
     case "StackPushed":
       return castOf(event.data.object_id, pre, post);
+    case "PermanentSacrificed":
+      return sacrificeOf(event.data.object_id, post);
+    case "TokenCreated":
+      return tokenOf(event.data.object_id, event.data.source_id, pre, post);
     default:
       return zoneChangeOf(event, post);
   }
 }
 
-const sameZoneChange = (a: AnimationEvent, b: AnimationEvent) =>
-  a.type === "ZoneChanged" &&
-  b.type === "ZoneChanged" &&
-  a.data.from === b.data.from &&
-  a.data.to === b.data.to;
+/** The flights of one step that leave one after another: one zone change's
+ *  cards, one step's sacrifices, one step's tokens. */
+function batchKey(event: AnimationEvent): string | null {
+  switch (event.type) {
+    case "ZoneChanged":
+      return `${event.data.from}>${event.data.to}`;
+    case "PermanentSacrificed":
+    case "TokenCreated":
+      return event.type;
+    default:
+      return null;
+  }
+}
 
-/** When a flight leaves after its step starts. Flights of one zone change in a
- *  step (a multi-card draw) leave one after another: the nth leaves n gaps in,
- *  and the gaps shrink so the last still leaves within the step's first half. */
-function delayFor(event: AnimationEvent, stepEvents: readonly AnimationEvent[], pace: number, owningStepMs: number) {
-  const batch = stepEvents.filter((other) => sameZoneChange(event, other));
-  const index = batch.indexOf(event);
-  if (index <= 0) return 0;
-  const gap = Math.min(FLIGHT_STAGGER_MS * pace, owningStepMs / 2 / (batch.length - 1));
+/** Where `event` falls in its step's batch of flights (see `batchKey`). */
+function batchIndex(event: AnimationEvent, stepEvents: readonly AnimationEvent[]): { index: number; size: number } {
+  const key = batchKey(event);
+  const batch = key === null ? [event] : stepEvents.filter((other) => batchKey(other) === key);
+  return { index: Math.max(batch.indexOf(event), 0), size: batch.length };
+}
+
+/** When a flight leaves after its step starts. Flights of one batch in a step
+ *  (a multi-card draw) leave one after another: the nth leaves n gaps in, and
+ *  the gaps shrink so the last still leaves within the step's first half. */
+function delayFor({ index, size }: { index: number; size: number }, pace: number, owningStepMs: number) {
+  if (index === 0) return 0;
+  const flights = Math.min(size, FLIGHT_BATCH_MAX);
+  const gap = Math.min(FLIGHT_STAGGER_MS * pace, owningStepMs / 2 / (flights - 1));
   return index * gap;
 }
 
@@ -134,17 +194,21 @@ export function cardFlightSpecFor(
   if (pace <= 0) return null;
   const routed = routedObjectFor(event, pre, post);
   if (!routed) return null;
+  const batch = batchIndex(event, stepEvents);
+  if (batch.index >= FLIGHT_BATCH_MAX) return null;
   const { objectId } = routed;
   const endObject = post?.objects[objectId];
   const endFace = visibleAnimationImageSnapshot(endObject);
+  // A token has no face before it exists; it comes out of its source already showing it.
+  const startFace = routed.sourceId === objectId ? visibleAnimationImageSnapshot(pre?.objects[objectId]) : endFace;
   return {
     kind: "flight",
     ...routed,
-    startFace: visibleAnimationImageSnapshot(pre?.objects[objectId]),
+    startFace,
     endFace,
     endColors: endFace && endObject ? endObject.color : null,
     pace,
     owningStepMs,
-    delayMs: delayFor(event, stepEvents, pace, owningStepMs),
+    delayMs: delayFor(batch, pace, owningStepMs),
   };
 }

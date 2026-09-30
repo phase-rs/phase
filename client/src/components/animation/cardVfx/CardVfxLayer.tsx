@@ -235,6 +235,8 @@ class CardVfxController {
           case "dissolve":
             this.presentBoardEffect(spec, classic);
             return;
+          case "covered":
+            return;
         }
     }
   }
@@ -567,7 +569,7 @@ class CardVfxController {
   }
 
   private measureSource(spec: CardFlightSpec): CardPose | null {
-    const el = sourceElement(spec.route, spec.objectId);
+    const el = sourceElement(spec.route, spec.sourceId);
     if (!el || !this.canvas) return null;
     const pose = measureCardPose(el, this.canvas.getBoundingClientRect());
     if (spec.route.from === "Stack") this.lastStackPose = pose;
