@@ -18647,7 +18647,7 @@ pub enum Effect {
         /// permission is pruned by the standard layer prune helpers.
         /// Carried by timed grants (Emry-class "you may cast that card this
         /// turn" offers). `None` for all standing cast-from-zone grants
-        /// (Discover, Suspend, Nashi, etc.) and for during-resolution casts
+        /// (Discover, Nashi, Jeleva, etc.) and for during-resolution casts
         /// (Suspend's last-counter cast, Rebound's upkeep recast), which
         /// grant no lingering permission at all.
         #[serde(default, skip_serializing_if = "Option::is_none")]
