@@ -1184,6 +1184,7 @@ mod purged_source_attachment_count_lki;
 mod purged_source_attacked_this_turn_lki;
 mod purged_source_intervening_if_lki;
 mod purged_source_matches_filter_lki;
+mod put_sticker_class;
 mod pyromancy_random_discard_cost;
 mod queen_parser_near_misses;
 mod queen_velocity_skip_turns;

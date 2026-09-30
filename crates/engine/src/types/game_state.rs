@@ -21384,6 +21384,15 @@ declare_game_state! {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chosen_color_this_resolution: Option<crate::types::mana::ManaColor>,
 
+    /// CR 608.2c + CR 123.1: the sticker the current resolution's most recent
+    /// PutSticker instruction placed ("that sticker"). Cleared at every
+    /// top-level resolution and at the start of every PutSticker instruction,
+    /// so a put that places nothing (declined, no candidate, CR 123.3b-refused,
+    /// CR 400.7-stale) leaves no antecedent; preserved across the sticker-choice
+    /// prompt, whose answer resolves at depth 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placed_sticker_this_resolution: Option<crate::types::stickers::AppliedSticker>,
+
     /// CR 609.7a-b: The most recently chosen damage source and its source
     /// filter. Set by `DamageSourceChoice`, consumed by prevention/replacement
     /// continuation effects, and then cleared.
@@ -27325,6 +27334,7 @@ impl GameState {
             last_named_choice: None,
             chosen_counter_kind_this_resolution: None,
             chosen_color_this_resolution: None,
+            placed_sticker_this_resolution: None,
             last_chosen_damage_source: None,
             all_creature_types: Vec::new(),
             all_card_names: Arc::from([]),
@@ -28299,6 +28309,10 @@ impl GameState {
         // loop pre-filter fingerprint.
         self.chosen_counter_kind_this_resolution.hash(&mut h);
         self.chosen_color_this_resolution.hash(&mut h);
+        // CR 608.2c: "that sticker" can change what a following instruction
+        // reads (phase-2 quantity), so distinct live values must not share a
+        // loop pre-filter fingerprint.
+        self.placed_sticker_this_resolution.hash(&mut h);
         self.stack.len().hash(&mut h);
         self.objects.len().hash(&mut h);
         // im::Vector<ObjectId>: Hash, ordered.
@@ -29709,6 +29723,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         last_named_choice: _,
         chosen_counter_kind_this_resolution: _,
         chosen_color_this_resolution: _,
+        placed_sticker_this_resolution: _,
         last_chosen_damage_source: _,
         all_creature_types: _,
         all_card_names: _,
@@ -30083,6 +30098,7 @@ impl PartialEq for GameState {
             && self.chosen_counter_kind_this_resolution
                 == other.chosen_counter_kind_this_resolution
             && self.chosen_color_this_resolution == other.chosen_color_this_resolution
+            && self.placed_sticker_this_resolution == other.placed_sticker_this_resolution
             && self.last_revealed_ids == other.last_revealed_ids
             && self.private_look_ids == other.private_look_ids
             && self.private_look_player == other.private_look_player
@@ -36813,6 +36829,69 @@ mod tests {
             state.loop_fingerprint(),
             "a live counter-kind result can change a following resolution action"
         );
+    }
+
+    fn hot_dog_name_sticker() -> crate::types::stickers::AppliedSticker {
+        crate::types::stickers::AppliedSticker::Name {
+            locator: crate::types::stickers::StickerLocator {
+                sheet: "Ancestral Hot Dog Minotaur".into(),
+                index: 1,
+            },
+            text: "Hot Dog".into(),
+            position: 0,
+            timestamp: 1,
+        }
+    }
+
+    /// CR 608.2c: "that sticker" is resolution-scoped scratch state. A fresh
+    /// state's wire form omits it, a save without the key loads as `None`, and
+    /// a placed sticker round-trips.
+    #[test]
+    fn placed_sticker_this_resolution_wire_form() {
+        let wire = serde_json::to_value(GameState::new_two_player(42))
+            .expect("the bare GameState serializes");
+        assert!(
+            wire.get("placed_sticker_this_resolution").is_none(),
+            "a fresh state omits the key"
+        );
+        assert!(
+            serde_json::from_value::<GameState>(wire.clone()).is_ok(),
+            "the unmodified wire decodes"
+        );
+
+        let mut absent = wire;
+        absent
+            .as_object_mut()
+            .expect("GameState serializes as an object")
+            .remove("placed_sticker_this_resolution");
+        let restored = serde_json::from_value::<GameState>(absent)
+            .expect("an absent placed_sticker_this_resolution defaults");
+        assert_eq!(restored.placed_sticker_this_resolution, None);
+
+        let mut state = GameState::new_two_player(42);
+        state.placed_sticker_this_resolution = Some(hot_dog_name_sticker());
+        let wire = serde_json::to_value(&state).expect("the GameState serializes");
+        let restored =
+            serde_json::from_value::<GameState>(wire).expect("a placed sticker round-trips");
+        assert_eq!(
+            restored.placed_sticker_this_resolution,
+            state.placed_sticker_this_resolution
+        );
+    }
+
+    #[test]
+    fn loop_fingerprint_and_equality_reflect_that_sticker() {
+        let a = GameState::new_two_player(7);
+        let mut b = a.clone();
+        assert_eq!(a.loop_fingerprint(), b.loop_fingerprint());
+        assert!(a == b, "fresh clones are equal");
+        b.placed_sticker_this_resolution = Some(hot_dog_name_sticker());
+        assert_ne!(
+            a.loop_fingerprint(),
+            b.loop_fingerprint(),
+            "a live \"that sticker\" can change a following resolution action"
+        );
+        assert!(a != b, "\"that sticker\" participates in state equality");
     }
 
     #[test]
