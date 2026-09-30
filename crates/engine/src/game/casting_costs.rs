@@ -3883,33 +3883,31 @@ pub(crate) fn handle_sacrifice_for_cost(
     // that determines the total after the declaration locks it in once.
     if let Some(reduction_source) = reduction_source {
         if let Some(&first) = chosen.first() {
-            let record_reduction = pending.deferred_target_selection;
-            match reduction_source {
+            let amount = match reduction_source {
                 SpellCostSource::Offering => {
-                    if let Some(object) = state.objects.get(&first).filter(|_| record_reduction) {
-                        pending
-                            .accepted_cost_reductions
-                            .push(sacrifice_reduction_entry(
-                                object,
-                                object.mana_cost.clone(),
-                                SpellCostSource::Offering,
-                            ));
-                    }
+                    let amount = state
+                        .objects
+                        .get(&first)
+                        .map(|object| object.mana_cost.clone());
                     apply_offering_cost_reduction(state, first, &mut pending.cost);
+                    amount
                 }
                 SpellCostSource::Emerge => {
-                    if let Some(object) = state.objects.get(&first).filter(|_| record_reduction) {
-                        pending
-                            .accepted_cost_reductions
-                            .push(sacrifice_reduction_entry(
-                                object,
-                                ManaCost::generic(object.effective_mana_value()),
-                                SpellCostSource::Emerge,
-                            ));
-                    }
+                    let amount = state
+                        .objects
+                        .get(&first)
+                        .map(|object| ManaCost::generic(object.effective_mana_value()));
                     apply_emerge_cost_reduction(state, first, &mut pending.cost);
+                    amount
                 }
-                SpellCostSource::Other => {}
+                SpellCostSource::Other => None,
+            };
+            if pending.deferred_target_selection {
+                if let Some((object, amount)) = state.objects.get(&first).zip(amount) {
+                    pending
+                        .accepted_cost_reductions
+                        .push(sacrifice_reduction_entry(object, amount, reduction_source));
+                }
             }
         }
     }
@@ -8698,7 +8696,8 @@ fn sacrifice_reduction_entry(
     CostReductionEntry {
         amount,
         multiplier: 1,
-        // CR 118.7a + CR 702.48c: excess coloured reduction reduces generic.
+        // CR 118.7b/c + CR 702.48c: a coloured reduction the cost lacks, or
+        // that exceeds its coloured component, reduces generic.
         reach: CostReductionReach::SpillsToGeneric,
         provenance: ReductionProvenance::SacrificedForCost(source),
         display_name: object.name.clone(),
@@ -8737,14 +8736,17 @@ pub(crate) fn defiler_reduced_cost_alongside(
 
 /// CR 601.2f + CR 601.2h: whether a paused cast still owes committed non-mana
 /// costs that only `finish_pending_cost_or_cast` pays: a required (imposed)
-/// cost on `additional_cost_flow`, or a deferred required cost (a compound
-/// alternative cost's residual). A continuation that rebuilt the cast with
-/// `pay_and_push_with_lock` instead would drop them.
+/// cost on `additional_cost_flow`, a deferred required cost (a compound
+/// alternative cost's residual), or (CR 702.48b + CR 702.119c) an Emerge or
+/// Offering sacrifice chosen before a deferred target declaration, whose kept
+/// reduction the lock then applies once. A continuation that rebuilt the cast
+/// with `pay_and_push_with_lock` instead would drop them.
 pub(crate) fn pending_carries_unpaid_committed_costs(pending: &PendingCast) -> bool {
     matches!(
         pending.additional_cost_flow,
         Some(AdditionalCost::Required(_))
     ) || pending.deferred_required_additional_cost.is_some()
+        || !pending.deferred_sacrificed_permanents.is_empty()
 }
 
 /// CR 601.2b: Handle the player's decision on Defiler life payment.
@@ -8823,9 +8825,7 @@ pub(crate) fn handle_defiler_payment(
                 // resume through the pending so it is still paid.
                 // CR 702.48b + CR 702.119c: so is a sacrifice chosen before a
                 // deferred target declaration.
-                if pending_carries_unpaid_committed_costs(&pending)
-                    || !pending.deferred_sacrificed_permanents.is_empty()
-                {
+                if pending_carries_unpaid_committed_costs(&pending) {
                     return finish_pending_cost_or_cast(state, player, pending, events);
                 }
                 // Proceed with the original cost; no reduction.
@@ -8870,9 +8870,7 @@ pub(crate) fn handle_defiler_payment(
     // pending (a tax on a spell targeting Terror of the Peaks), and CR 702.48b +
     // CR 702.119c for an Emerge or Offering sacrifice chosen before a deferred
     // target declaration, whose kept reduction the lock then applies once.
-    if pending_carries_unpaid_committed_costs(&pending)
-        || !pending.deferred_sacrificed_permanents.is_empty()
-    {
+    if pending_carries_unpaid_committed_costs(&pending) {
         let mut pending = pending;
         if pay {
             pending
@@ -10972,7 +10970,7 @@ impl CostLockInput {
     }
 }
 
-/// CR 601.2f: The single seam where a spell's total cost becomes "locked in".
+/// CR 601.2f: Locks in a spell's total cost and pays it.
 ///
 /// Both the ordinary cast path and the Defiler resume funnel through here, so
 /// an accepted Defiler reduction is ordered against the board's reductions
@@ -10980,7 +10978,10 @@ impl CostLockInput {
 /// orders lock in different costs, the caster is asked which they want
 /// (`WaitingFor::OrderCostReductions`) before any mana is paid — CR 601.2g puts
 /// mana abilities *after* the total cost is determined, so the prompt has to
-/// come first.
+/// come first. The other `lock_in_total_cost` caller is the kept-sacrifice
+/// branch of `finish_pending_cost_or_cast`: a cast whose Emerge or Offering
+/// sacrifice was chosen before a deferred target declaration locks its own
+/// pending there, since rebuilding it here would drop the sacrifice.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn pay_and_push_with_lock(
     state: &mut GameState,

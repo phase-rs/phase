@@ -31,6 +31,8 @@ const CHOICE: &str =
     "As an additional cost to cast this spell, sacrifice a land or discard a card.";
 const OPTIONAL: &str = "As an additional cost to cast this spell, you may sacrifice a land.";
 const OPTIONAL_MANA: &str = "As an additional cost to cast this spell, you may pay {1}.";
+const OPTIONAL_EVIDENCE: &str =
+    "As an additional cost to cast this spell, you may collect evidence 2.";
 const DESTROY_ONE: &str = "Destroy target creature an opponent controls.";
 const DESTROY_X: &str = "Destroy X target creatures.";
 const DESTROY_RANDOM: &str = "Destroy a random target creature.";
@@ -185,6 +187,7 @@ fn drive(runner: &mut GameRunner, source: ObjectId, first: GameAction, answers: 
                 }
                 GameAction::SelectCards { cards }
             }
+            WaitingFor::CollectEvidenceChoice { cards, .. } => GameAction::SelectCards { cards },
             WaitingFor::ManaPayment { .. } => GameAction::PassPriority,
             WaitingFor::SpliceOffer { .. } => GameAction::RespondToSpliceOffer {
                 card: answers.splice,
@@ -971,6 +974,7 @@ struct Kept {
     filler: ObjectId,
     fodders: Vec<ObjectId>,
     victims: Vec<ObjectId>,
+    evidence: Option<ObjectId>,
 }
 
 struct KeptBoard<'a> {
@@ -982,6 +986,8 @@ struct KeptBoard<'a> {
     mana: usize,
     lands: usize,
     victim_color: ManaColor,
+    /// The mana value of a creature card in the graveyard to collect as evidence.
+    evidence: Option<u32>,
 }
 
 impl<'a> KeptBoard<'a> {
@@ -994,6 +1000,7 @@ impl<'a> KeptBoard<'a> {
             mana: 4,
             lands: 3,
             victim_color: ManaColor::Red,
+            evidence: None,
         }
     }
 
@@ -1008,6 +1015,12 @@ impl<'a> KeptBoard<'a> {
         }
         let filler = scenario.add_card_to_hand(P0, "Spare Page");
         let victims = victims(&mut scenario, n, self.victim_text, self.victim_color);
+        let evidence = self.evidence.map(|mv| {
+            scenario
+                .add_creature_to_graveyard(P0, "Case File", 1, 1)
+                .with_mana_cost(ManaCost::generic(mv))
+                .id()
+        });
         let body = match self.route {
             Route::RequiredX => {
                 "As an additional cost to cast this spell, sacrifice X lands.\nDestroy X target creatures."
@@ -1072,6 +1085,7 @@ impl<'a> KeptBoard<'a> {
             filler,
             fodders,
             victims,
+            evidence,
         }
     }
 
@@ -1104,6 +1118,31 @@ fn prompted_emerge_sacrifices_fodder_once() {
     assert_fodder_sacrificed_once(&emerge);
     // {4} reduced by the sacrificed creature's mana value 2.
     assert_eq!(pool(&emerge.runner), 2);
+}
+
+/// CR 702.119c + CR 601.2f: an Emerge sacrifice chosen before a deferred
+/// target declaration survives an optional collect-evidence payment (CR
+/// 701.59a): the fodder is sacrificed once and its reduction applies once.
+#[test]
+fn probe_hex_with_synthetic_emerge_and_optional_evidence_sacrifices_fodder_once() {
+    for n in [1, 2] {
+        let (kept, kept_cast) = KeptBoard {
+            extra: OPTIONAL_EVIDENCE,
+            evidence: Some(2),
+            ..KeptBoard::new(Route::Emerge)
+        }
+        .cast(n, true);
+        assert!(kept_cast.prompted("CollectEvidenceChoice"), "{n} targets");
+        assert_eq!(zone(&kept.runner, kept.spell), Zone::Stack, "{n} targets");
+        assert_eq!(
+            kept.evidence.map(|card| zone(&kept.runner, card)),
+            Some(Zone::Exile),
+            "{n} targets"
+        );
+        assert_fodder_sacrificed_once(&kept);
+        // {4} reduced once by the sacrificed creature's mana value 2.
+        assert_eq!(pool(&kept.runner), 2, "{n} targets");
+    }
 }
 
 #[test]
@@ -1264,7 +1303,9 @@ fn sorcery_offering_applies_target_reduction_once_declined() {
 }
 
 /// CR 601.2f: an optional mana cost the pool pays beside the once-reduced
-/// total is offered once; with only the reduced total in the pool it is not.
+/// total is offered once and charged once. The pool-2 half (not offered when
+/// the pool holds only the reduced total) pins the engine's affordability gate
+/// on optional-cost offers, not a CR 601.2f requirement.
 fn assert_optional_mana_offered_once(route: Route, extra: &str) {
     for n in [1, 2] {
         let affordable = KeptBoard {
