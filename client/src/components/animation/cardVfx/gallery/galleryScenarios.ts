@@ -374,8 +374,36 @@ export const GALLERY_SCENARIOS: Record<string, GalleryScenario> = {
   },
   combat: {
     title: "Combat damage",
-    description: "Serra Angel hits the opponent; Grizzly Bears and Hill Giant trade blows and the Bears die.",
+    description:
+      "Serra Angel and Grizzly Bears attack and Hill Giant blocks the Bears; the Angel hits the opponent, and the Bears die trading blows.",
     batches: [
+      (state) => {
+        state.objects[BEARS] = { ...state.objects[BEARS], tapped: true };
+        state.combat = {
+          attackers: [ANGEL, BEARS].map((object_id) => ({
+            object_id,
+            defending_player: OPPONENT,
+            attack_target: { type: "Player", data: OPPONENT },
+          })),
+          blocker_assignments: {},
+          blocker_to_attacker: {},
+          blockers_declared_by: [],
+          pending_blocker_declaration_events: [],
+          damage_assignments: {},
+          first_strike_done: false,
+          damage_step_index: null,
+          pending_damage: [],
+          regular_damage_done: false,
+        };
+        return [{ type: "AttackersDeclared", data: { attacker_ids: [ANGEL, BEARS], defending_player: OPPONENT } }];
+      },
+      (state) => {
+        const combat = state.combat!;
+        combat.blocker_assignments = { [BEARS]: [HILL_GIANT] };
+        combat.blocker_to_attacker = { [HILL_GIANT]: [BEARS] };
+        combat.blockers_declared_by = [OPPONENT];
+        return [{ type: "BlockersDeclared", data: { assignments: [[HILL_GIANT, BEARS]] } }];
+      },
       (state) => {
         state.objects[HILL_GIANT] = { ...state.objects[HILL_GIANT], damage_marked: 2 };
         return [

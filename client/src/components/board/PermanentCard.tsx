@@ -1,6 +1,6 @@
 import { motion } from "framer-motion";
 import type React from "react";
-import { memo, useCallback, useMemo, useRef } from "react";
+import { memo, useCallback, useId, useMemo, useRef } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { GameObject, Keyword, ObjectId } from "../../adapter/types.ts";
@@ -552,7 +552,7 @@ export const PermanentCard = memo(function PermanentCard({
   let glowClass = "";
   if (isAttacking) {
     glowClass =
-      "ring-2 ring-orange-500 shadow-[0_0_12px_3px_rgba(249,115,22,0.7)]";
+      "ring-2 ring-teal-300 shadow-[0_0_12px_3px_rgba(94,234,212,0.6)]";
   } else if (isBlocking) {
     glowClass =
       "ring-2 ring-orange-500 shadow-[0_0_12px_3px_rgba(249,115,22,0.7)]";
@@ -1298,26 +1298,38 @@ const ExileGhostCard = memo(function ExileGhostCard({ objectId, offset }: ExileG
   );
 });
 
-/** MTGA-style attack marker: a pulsing chevron on the card's leading edge,
- *  pointing toward the defending side. It tilts with the card. */
+/** MTGA-style attack marker: a translucent teal gable behind the card's
+ *  leading edge, its peak rising toward the defending side. It reaches only a
+ *  little way behind the card, since a tapped card is drawn translucent, and
+ *  it tilts with the card. */
 function AttackArrow({ upward }: { upward: boolean }) {
+  const gradientId = `attack-arrow-${useId()}`;
   return (
     <motion.div
       aria-hidden
       data-attack-arrow={upward ? "up" : "down"}
-      className={`pointer-events-none absolute left-1/2 z-[60] -translate-x-1/2 ${upward ? "-top-6" : "-bottom-6"}`}
-      style={{ width: "clamp(18px, calc(var(--card-w) * 0.34), 34px)" }}
-      initial={{ opacity: 0, y: upward ? 6 : -6 }}
-      animate={{ opacity: 1, y: upward ? [0, -3, 0] : [0, 3, 0] }}
-      transition={{ opacity: { duration: 0.15 }, y: { duration: 1, repeat: Infinity, ease: "easeInOut" } }}
+      className={`pointer-events-none absolute -inset-x-[3%] z-0 ${upward ? "-top-[30%] bottom-[88%]" : "-bottom-[30%] top-[88%] rotate-180"}`}
+      initial={{ opacity: 0, scaleY: 0.6 }}
+      animate={{ opacity: 1, scaleY: 1 }}
+      style={{ transformOrigin: upward ? "bottom" : "top" }}
+      transition={{ duration: 0.2, ease: "easeOut" }}
     >
-      <svg viewBox="0 0 32 24" className={`block w-full drop-shadow-[0_0_6px_rgba(249,115,22,0.8)] ${upward ? "" : "rotate-180"}`}>
+      <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="block h-full w-full">
+        <defs>
+          <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stopColor="rgb(94,234,212)" stopOpacity="0.55" />
+            <stop offset="0.71" stopColor="rgb(45,212,191)" stopOpacity="0.25" />
+            <stop offset="1" stopColor="rgb(20,184,166)" stopOpacity="0" />
+          </linearGradient>
+        </defs>
+        <path d="M0 71 L50 0 L100 71 L100 100 L0 100 Z" fill={`url(#${gradientId})`} />
         <path
-          d="M16 2 L30 14 L24 14 L16 7 L8 14 L2 14 Z M16 11 L30 22 L24 22 L16 16 L8 22 L2 22 Z"
-          fill="#f97316"
-          stroke="#431407"
+          d="M0 71 L50 0 L100 71"
+          fill="none"
+          stroke="rgba(153,246,228,0.85)"
           strokeWidth="1.5"
           strokeLinejoin="round"
+          vectorEffect="non-scaling-stroke"
         />
       </svg>
     </motion.div>
