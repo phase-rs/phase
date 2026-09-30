@@ -4243,7 +4243,7 @@ fn parse_target_controller_poison_threshold(input: &str) -> OracleResult<'_, i32
     .parse(input)
 }
 
-/// CR 601.2h + CR 608.2c: `parse_condition_text` for a clause in a known parse
+/// CR 601.2 + CR 608.2c: `parse_condition_text` for a clause in a known parse
 /// context. A cast-time battlefield snapshot (`ControllerControlledMatchingAsCast`)
 /// is stamped only on the cast spell's own ability chain
 /// (`stamp_controller_controlled_as_cast`); a triggered ability's resolved
@@ -4572,7 +4572,7 @@ fn parse_controller_controlled_as_cast_condition(
     parse_controlled_as_cast_body(rest)
 }
 
-/// CR 601.2h + CR 608.2c: The "<type phrase> as you cast this spell" body shared by
+/// CR 601.2 + CR 608.2c: The "<type phrase> as you cast this spell" body shared by
 /// the plain "you controlled …" gate and the "you revealed … or controlled …"
 /// disjunction. A cast-time snapshot of the controller's battlefield, not a
 /// resolution-time read.

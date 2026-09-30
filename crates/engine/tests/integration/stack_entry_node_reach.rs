@@ -13,7 +13,7 @@ use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{GameState, StackEntry, StackEntryKind, WaitingFor};
-use engine::types::identifiers::{CardId, ObjectId};
+use engine::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -2623,7 +2623,7 @@ fn pariah_moves_damage_off_its_controller_so_the_damage_node_acts_on_nothing() {
 }
 
 #[test]
-fn a_counter_whose_target_is_the_source_of_a_later_entry_acts_on_nothing() {
+fn a_counter_acts_on_its_target_spell_beneath_that_spells_own_trigger() {
     for trigger_above in [false, true] {
         let mut state = GameState::new_two_player(42);
         let spell = spell_object(&mut state, PlayerId(0));
@@ -2645,21 +2645,114 @@ fn a_counter_whose_target_is_the_source_of_a_later_entry_acts_on_nothing() {
                 counter_source,
             ),
         );
-        let expected = if trigger_above {
-            Vec::new()
-        } else {
-            vec![TargetRef::Object(spell)]
-        };
         assert_eq!(
             reach(&state, entry)[0].2,
-            expected,
+            vec![TargetRef::Object(spell)],
             "trigger above: {trigger_above}"
         );
         let runner = resolve_raw(state);
+        let stack = &runner.state().stack;
+        assert!(
+            !stack.iter().any(|e| e.id == spell)
+                && (!trigger_above || stack.iter().any(|e| e.id == ObjectId(900))),
+            "engine agreement: the counter removes the spell, not the spell's own trigger"
+        );
+    }
+}
+
+#[test]
+fn a_spell_cast_counter_acts_on_nothing_once_its_spell_is_cast_again() {
+    for pin in [5, 4] {
+        let mut state = GameState::new_two_player(42);
+        let spell = spell_object(&mut state, PlayerId(0));
+        state.objects.get_mut(&spell).unwrap().incarnation = 5;
+        push_spell(
+            &mut state,
+            PlayerId(0),
+            node(Effect::NoOp, Vec::new(), spell),
+        );
+        let source = creature(&mut state, PlayerId(1));
+        let entry = push_trigger(
+            &mut state,
+            900,
+            source,
+            counter(TargetFilter::TriggeringSource),
+            Some(spell_cast(spell)),
+        );
+        state
+            .stack
+            .iter_mut()
+            .find(|e| e.id == entry)
+            .unwrap()
+            .ability_mut()
+            .unwrap()
+            .context
+            .triggering_spell = Some(ObjectIncarnationRef::of(spell, pin));
+        let expected = if pin == 5 {
+            vec![TargetRef::Object(spell)]
+        } else {
+            Vec::new()
+        };
+        assert_eq!(reach(&state, entry)[0].2, expected, "pin: {pin}");
+        let runner = resolve_raw(state);
         assert_eq!(
             runner.state().stack.iter().any(|e| e.id == spell),
-            trigger_above,
-            "engine agreement: with a trigger of the spell above it, that trigger is removed instead"
+            pin != 5,
+            "engine agreement: pin {pin}"
+        );
+    }
+}
+
+#[test]
+fn a_ward_counter_never_reports_the_targeting_abilitys_source_as_acted_on() {
+    for aimed_by_spell in [false, true] {
+        let mut state = GameState::new_two_player(42);
+        let warded = creature(&mut state, PlayerId(1));
+        let (aimer, aimed_entry) = if aimed_by_spell {
+            let spell = spell_object(&mut state, PlayerId(0));
+            push_spell(
+                &mut state,
+                PlayerId(0),
+                node(Effect::NoOp, vec![TargetRef::Object(warded)], spell),
+            );
+            (spell, spell)
+        } else {
+            let pinger = creature(&mut state, PlayerId(0));
+            state.stack.push_back(StackEntry {
+                id: ObjectId(800),
+                source_id: pinger,
+                controller: PlayerId(0),
+                kind: StackEntryKind::ActivatedAbility {
+                    source_id: pinger,
+                    ability: Box::new(node(Effect::NoOp, vec![TargetRef::Object(warded)], pinger)),
+                },
+            });
+            (pinger, ObjectId(800))
+        };
+        let ward = push_trigger(
+            &mut state,
+            900,
+            warded,
+            counter(TargetFilter::TriggeringSource),
+            Some(GameEvent::BecomesTarget {
+                target: TargetRef::Object(warded),
+                source_id: aimer,
+                source_controller: PlayerId(0),
+            }),
+        );
+        let acted_on = reach(&state, ward)[0].2.clone();
+        if aimed_by_spell {
+            assert_eq!(acted_on, vec![TargetRef::Object(aimer)]);
+        } else {
+            assert!(
+                !acted_on.contains(&TargetRef::Object(aimer)),
+                "the source permanent is not what ward counters: {acted_on:?}"
+            );
+        }
+        let runner = resolve_raw(state);
+        assert!(
+            !runner.state().stack.iter().any(|e| e.id == aimed_entry),
+            "engine agreement: ward removes the entry that targeted (spell: {aimed_by_spell})"
         );
     }
 }

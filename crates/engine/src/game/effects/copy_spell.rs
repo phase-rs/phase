@@ -719,20 +719,23 @@ fn copy_source_entry(state: &GameState, ability: &ResolvedAbility) -> CopySource
                 TargetRef::Player(_) => None,
             });
     if let Some(target_id) = target_id {
+        // CR 707.10 + CR 113.7a: the entry whose id is the target is the copied spell or ability; a later entry that only shares it as source, such as that spell's own storm trigger, is a different stack object.
         return state
             .stack
             .iter()
             .rev()
-            .find(|entry| {
-                entry.id == target_id
-                    || entry.source_id == target_id
-                    || matches!(
-                        &entry.kind,
-                        StackEntryKind::ActivatedAbility {
-                            source_id: activated_id,
-                            ..
-                        } if *activated_id == target_id
-                    )
+            .find(|entry| entry.id == target_id)
+            .or_else(|| {
+                state.stack.iter().rev().find(|entry| {
+                    entry.source_id == target_id
+                        || matches!(
+                            &entry.kind,
+                            StackEntryKind::ActivatedAbility {
+                                source_id: activated_id,
+                                ..
+                            } if *activated_id == target_id
+                        )
+                })
             })
             .cloned()
             .map(|entry| Box::new(CopySource::on_stack(entry)))

@@ -250,7 +250,7 @@ fn handle_activated_mode_choice(
             // declaration before activation costs are paid.
             casting::emit_targeting_events(
                 state,
-                &super::ability_utils::flatten_targets_in_chain(&resolved),
+                &super::ability_utils::declared_targets_in_chain(&resolved),
                 source_id,
                 player,
                 events,

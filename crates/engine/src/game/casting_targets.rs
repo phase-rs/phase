@@ -220,7 +220,7 @@ pub(crate) fn handle_select_modes(
             assign_targets_in_chain(state, &mut resolved, &targets)?;
             super::casting::emit_targeting_events(
                 state,
-                &super::ability_utils::flatten_targets_in_chain(&resolved),
+                &super::ability_utils::declared_targets_in_chain(&resolved),
                 pending.object_id,
                 controller,
                 events,
@@ -240,7 +240,7 @@ pub(crate) fn handle_select_modes(
             assign_targets_in_chain(state, &mut resolved, &targets)?;
             super::casting::emit_targeting_events(
                 state,
-                &super::ability_utils::flatten_targets_in_chain(&resolved),
+                &super::ability_utils::declared_targets_in_chain(&resolved),
                 pending.object_id,
                 controller,
                 events,
@@ -388,7 +388,7 @@ pub(crate) fn handle_select_targets(
     let mut ability = pending.ability.clone();
     assign_targets_in_chain(state, &mut ability, &targets)?;
     let mut pending = pending;
-    let announced_targets = super::ability_utils::flatten_targets_in_chain(&ability);
+    let announced_targets = super::ability_utils::declared_targets_in_chain(&ability);
     pending.crime_candidate =
         super::casting::targets_commit_crime(state, &announced_targets, pending.ability.controller);
 
@@ -493,7 +493,7 @@ pub(crate) fn handle_choose_target(
             // inbound per-slot `player` (the opponent) would pay and stack the spell.
             let controller = pending.ability.controller;
             let mut pending = pending;
-            let announced_targets = super::ability_utils::flatten_targets_in_chain(&ability);
+            let announced_targets = super::ability_utils::declared_targets_in_chain(&ability);
             pending.crime_candidate =
                 super::casting::targets_commit_crime(state, &announced_targets, controller);
 

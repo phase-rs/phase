@@ -41,7 +41,10 @@ fn combat_damage_amount(obj: &GameObject) -> u32 {
 ///
 /// 1. Collect triggers from damage events while source creatures are still on the battlefield
 ///    (e.g., DamageReceived for Jackal Pup).
-/// 2. Run SBAs (destroy lethal-damage creatures → ZoneChanged events).
+/// 2. Run SBAs (destroy lethal-damage creatures → ZoneChanged events), passing the
+///    triggers already collected in this batch so CR 704.5v can see them as
+///    "has triggered but not yet left the stack" (a Siege's own victory
+///    trigger, still only in `pending`, must not let it die to CR 704.5v).
 /// 3. Process triggers from SBA-generated events (e.g., dies triggers from graveyard scan).
 /// 4. Repeat SBA/trigger cycle until stable (no new SBAs, no new triggers).
 fn process_combat_damage_triggers(
@@ -67,7 +70,11 @@ fn process_combat_damage_triggers(
     // processing (dies triggers). Repeat until no new SBAs and no new triggers.
     loop {
         let events_before = all_events.len();
-        sba::check_state_based_actions(state, all_events);
+        // CR 704.3 + CR 510.3a + CR 704.5v: SBAs run before this batch is put
+        // on the stack, but its abilities have already triggered — a Siege
+        // whose CR 310.12b victory trigger waits here is not put into its
+        // owner's graveyard.
+        sba::check_state_based_actions_with_waiting_triggers(state, all_events, &pending);
 
         // If SBAs generated new events, process triggers for those events.
         if all_events.len() > events_before {

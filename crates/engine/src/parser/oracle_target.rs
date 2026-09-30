@@ -2492,6 +2492,42 @@ fn parse_named_filter_terminator(input: &str) -> Result<(&str, ()), nom::Err<Ora
                 )),
             ),
         ),
+        // CR 201.2 + CR 603.4: a comma followed by an imperative effect verb
+        // ends the name — it is the boundary between an intervening-if
+        // condition and its effect ("if you don't control another permanent
+        // named The Majestic Duo, create a token …"). Legendary epithets are
+        // noun phrases and never open with one of these verbs; "counter" is
+        // left out because it does open one ("Gimli, Counter of Kills"). The
+        // trailing space keeps a name-final verb ("Untap, Upkeep, Draw") whole.
+        value(
+            (),
+            (
+                tag(", "),
+                alt((
+                    alt((
+                        tag("create "),
+                        tag("draw "),
+                        tag("put "),
+                        tag("return "),
+                        tag("exile "),
+                        tag("destroy "),
+                        tag("sacrifice "),
+                        tag("search "),
+                        tag("gain "),
+                    )),
+                    alt((
+                        tag("lose "),
+                        tag("look "),
+                        tag("reveal "),
+                        tag("mill "),
+                        tag("scry "),
+                        tag("copy "),
+                        tag("shuffle "),
+                        tag("add "),
+                    )),
+                )),
+            ),
+        ),
     ))
     .parse(input)
 }
@@ -10535,6 +10571,21 @@ mod tests {
             "ebondeath, dracolich".len()
         );
         assert_eq!(named_filter_name_end("foo with flying"), "foo".len());
+        // An imperative effect verb after a comma ends the name (the
+        // intervening-if boundary) — but an epithet that merely starts with a
+        // verb-shaped word, or a name-final verb, stays whole.
+        assert_eq!(
+            named_filter_name_end("the majestic duo, create a token that's a copy of it"),
+            "the majestic duo".len()
+        );
+        assert_eq!(
+            named_filter_name_end("gimli, counter of kills you control"),
+            "gimli, counter of kills".len()
+        );
+        assert_eq!(
+            named_filter_name_end("untap, upkeep, draw"),
+            "untap, upkeep, draw".len()
+        );
 
         let (filter, rest) =
             parse_type_phrase_folding("permanent named bonder's ornament draws a card");

@@ -38616,6 +38616,18 @@ fn attached_subject_attacking_alone_rebind_covers_grants_and_unless_gates() {
         }),
         "{unless:?}"
     );
+    // The CantUntap "as long as" route shares the same rebind authority.
+    let cant_untap = parse_static_line(
+        "Enchanted creature doesn't untap during its controller's untap step as long as it has a +1/+1 counter on it.",
+    )
+    .expect("gated CantUntap");
+    assert!(
+        matches!(
+            cant_untap.condition,
+            Some(StaticCondition::RecipientHasCounters { .. })
+        ),
+        "{cant_untap:?}"
+    );
 }
 
 /// CR 101.2 + CR 604.1: a leading "if <cond>," on "this spell can't be countered"

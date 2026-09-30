@@ -1319,6 +1319,11 @@ pub(crate) fn move_to_zone_with_entry_flags(
                         *attack_target
                     }
                     crate::types::game_state::LiminalEntryKind::Token => None,
+                    // Never reached at delivery: `TransformedEntry` projections
+                    // are released before the caller delivers the move (see
+                    // `replacement::release_transformed_entry_projection`).
+                    // This arm exists for exhaustiveness only.
+                    crate::types::game_state::LiminalEntryKind::TransformedEntry => None,
                 })
         })
         .flatten();

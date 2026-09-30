@@ -8318,7 +8318,7 @@ pub(crate) fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedE
     // See `data/parser-swallow-progress.md` for the full architecture and
     // `crates/engine/src/parser/clause_shell.rs` for the slot machinery.
     let (peeled_text, peel_ctx) = super::clause_shell::peel_clause(text);
-    // CR 601.2h + CR 608.2c: the shell peels with a context-free condition parse, so a
+    // CR 601.2 + CR 608.2c: the shell peels with a context-free condition parse, so a
     // cast-time snapshot gate would be accepted here even inside a trigger, where the
     // snapshot is never stamped and the gate could never open. Fail closed rather
     // than publish either the dead gate or the ungated effect.
@@ -34890,6 +34890,9 @@ pub(crate) fn trigger_condition_references_controller_life_gained(
             .iter()
             .any(trigger_condition_references_controller_life_gained),
         TriggerCondition::Not { condition } => {
+            trigger_condition_references_controller_life_gained(condition)
+        }
+        TriggerCondition::EventTime { condition } => {
             trigger_condition_references_controller_life_gained(condition)
         }
         _ => false,

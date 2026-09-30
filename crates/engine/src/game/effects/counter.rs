@@ -1,6 +1,6 @@
 use crate::game::effects::destroy::{self, DestroyOutcome};
 use crate::game::static_abilities::{check_static_ability, StaticCheckContext};
-use crate::game::targeting;
+use crate::game::targeting::{self, TriggeringSpell};
 use crate::game::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 use crate::types::ability::{
     CounterSourceRider, Duration, Effect, EffectError, EffectKind, ResolvedAbility,
@@ -107,9 +107,7 @@ pub fn resolve(
                 continue;
             }
 
-            // Remove from stack — search by both id (spells) and source_id (abilities).
-            // Use rposition to match the most recently pushed entry.
-            let stack_idx = countered_stack_index(state, obj_id);
+            let stack_idx = countered_stack_index(state, ability, obj_id);
             if let Some(idx) = stack_idx {
                 // CR 701.6a: the removal IS the counter, so it goes through the
                 // single CR 405.2 removal authority, which journals it and drops
@@ -306,33 +304,89 @@ pub fn resolve(
     Ok(())
 }
 
-/// The stack entry `resolve` removes for a countered `obj_id`: the most recently
-/// pushed entry whose id (a spell) or source (an ability) is `obj_id`.
-pub(super) fn countered_stack_index(state: &GameState, obj_id: ObjectId) -> Option<usize> {
-    state
-        .stack
-        .iter()
-        .rposition(|e| e.id == obj_id || e.source_id == obj_id)
+/// CR 701.6a + CR 113.7a: the stack entry `resolve` removes for the countered
+/// referent `obj_id`: the entry whose id is `obj_id`. An entry that only has
+/// `obj_id` as its source, such as a spell's own cast trigger, is a different
+/// stack object and is not matched, except when the counter's
+/// `counter_trigger_event` is a `BecomesTarget` event (ward).
+pub(super) fn countered_stack_index(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    obj_id: ObjectId,
+) -> Option<usize> {
+    match counter_trigger_event(state, ability) {
+        // CR 702.21a: see `event_countered_referent`'s `BecomesTarget` arm.
+        Some((GameEvent::BecomesTarget { .. }, _)) => state
+            .stack
+            .iter()
+            .rposition(|e| e.id == obj_id || e.source_id == obj_id),
+        _ => state.stack.iter().rposition(|e| e.id == obj_id),
+    }
+}
+
+/// CR 608.2k: the trigger event a `Counter { TriggeringSource | ParentTarget }`
+/// reads "that spell" / "that ability" from, with the object that event names.
+fn counter_trigger_event<'a>(
+    state: &'a GameState,
+    ability: &ResolvedAbility,
+) -> Option<(&'a GameEvent, ObjectId)> {
+    let Effect::Counter {
+        target: TargetFilter::TriggeringSource | TargetFilter::ParentTarget,
+        ..
+    } = &ability.effect
+    else {
+        return None;
+    };
+    let event = state.current_trigger_event.as_ref()?;
+    Some((event, targeting::extract_source_from_event(event)?))
 }
 
 /// CR 701.6a: the spells or abilities a `Counter` node counters. Shared by
 /// `resolve` and `stack_reach`, so a pending node is read with the resolver's
 /// own binding.
 pub(super) fn countered_targets(state: &GameState, ability: &ResolvedAbility) -> Vec<TargetRef> {
-    match &ability.effect {
-        Effect::Counter { target, .. } if matches!(target, TargetFilter::ParentTarget) => {
-            let event_target = targeting::resolve_event_context_target(
-                state,
-                &TargetFilter::TriggeringSource,
-                ability.source_id,
-            );
-            match event_target {
-                Some(target) => vec![target],
-                None => targeting::resolved_targets(ability, target, state),
-            }
-        }
-        Effect::Counter { target, .. } => targeting::resolved_targets(ability, target, state),
-        _ => ability.targets.clone(),
+    let Effect::Counter { target, .. } = &ability.effect else {
+        return ability.targets.clone();
+    };
+    // CR 608.2k: "that spell" / "that ability" is identified through the
+    // trigger event.
+    if let Some((event, object_id)) = counter_trigger_event(state, ability) {
+        return event_countered_referent(state, event, object_id)
+            .map(TargetRef::Object)
+            .into_iter()
+            .collect();
+    }
+    targeting::resolved_targets(ability, target, state)
+}
+
+/// CR 608.2k + CR 701.6a: the referent a trigger's "that spell" / "that
+/// ability" counters, given `object_id`, the object its trigger `event` names.
+/// `None` counters nothing.
+fn event_countered_referent(
+    state: &GameState,
+    event: &GameEvent,
+    object_id: ObjectId,
+) -> Option<ObjectId> {
+    let on_stack = |id: ObjectId| state.stack.iter().any(|e| e.id == id).then_some(id);
+    match event {
+        // CR 601.2i + CR 400.7: the spell as it was cast; once it left the
+        // stack, or was cast again, it is not "that spell".
+        GameEvent::SpellCast { .. } => match targeting::triggering_spell(state) {
+            Some(TriggeringSpell::OnStack(entry)) => Some(entry.id),
+            Some(TriggeringSpell::Departed(_) | TriggeringSpell::Gone) | None => None,
+        },
+        // CR 702.21a: the event names a targeting spell by its id and a
+        // targeting ability by its source, and not which entry targeted;
+        // `countered_stack_index` matches this referent against both.
+        GameEvent::BecomesTarget { .. } => Some(object_id),
+        // CR 113.7: the event names the object that moved.
+        GameEvent::ZoneChanged { .. } => state
+            .stack
+            .iter()
+            .rev()
+            .find(|e| e.source_id == object_id)
+            .map(|e| e.id),
+        _ => on_stack(object_id),
     }
 }
 
@@ -405,8 +459,7 @@ pub fn resolve_all(
 
         // CR 405.2: Look up the stack entry by its own id only. The
         // `matching` set was populated from `entry.id`, so a `source_id`
-        // fallback (used in the single-target resolver to bridge a target's
-        // ObjectId to its parent permanent) would match the wrong entry
+        // fallback would match the wrong entry
         // when several stack entries share a `source_id` (e.g., two
         // activated abilities of the same permanent).
         let stack_idx = state.stack.iter().position(|e| e.id == obj_id);

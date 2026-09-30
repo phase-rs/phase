@@ -4507,16 +4507,17 @@ fn execute_zone_move_with_applied_terminal(
             // planeswalker enters with 0 loyalty counters and dies immediately
             // to CR 704.5i. Ravenous (front-face cast-time) does not apply to an
             // effect-driven transformed entry, so only face counters are seeded.
+            // CR 714.3a: a back-face Saga's lore counter comes from its own
+            // replacement via the CR 614.12 projection
+            // (`replacement::stage_transformed_entry_projection`), not from
+            // this seeding.
             let intrinsic = match (enter_transformed, obj.back_face.as_ref()) {
-                (true, Some(back)) => {
-                    crate::game::printed_cards::intrinsic_entry_counters_for_face(
-                        back.printed_loyalty,
-                        back.loyalty,
-                        None,
-                        back.defense,
-                        &back.card_types,
-                    )
-                }
+                (true, Some(back)) => crate::game::printed_cards::intrinsic_face_entry_counters(
+                    back.printed_loyalty,
+                    back.loyalty,
+                    None,
+                    back.defense,
+                ),
                 _ => crate::game::printed_cards::intrinsic_etb_counters(obj, None),
             };
             if !intrinsic.is_empty() {

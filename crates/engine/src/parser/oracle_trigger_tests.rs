@@ -23137,8 +23137,10 @@ fn trigger_cast_spell_while_attacking_gates_on_combat() {
     assert_eq!(def.valid_target, Some(TargetFilter::Controller));
     assert_eq!(
         def.condition,
-        Some(TriggerCondition::SourceIsAttacking),
-        "the `while ~ is attacking` gate must become a SourceIsAttacking condition"
+        Some(TriggerCondition::EventTime {
+            condition: Box::new(TriggerCondition::SourceIsAttacking),
+        }),
+        "the `while ~ is attacking` gate must become an event-time SourceIsAttacking condition"
     );
     // The remaining event clause still parses to the copy effect.
     assert!(matches!(
@@ -23161,7 +23163,9 @@ fn trigger_while_attacking_composes_with_existing_condition() {
     match def.condition {
         Some(TriggerCondition::And { conditions }) => {
             assert!(
-                conditions.contains(&TriggerCondition::SourceIsAttacking),
+                conditions.contains(&TriggerCondition::EventTime {
+                    condition: Box::new(TriggerCondition::SourceIsAttacking),
+                }),
                 "expected SourceIsAttacking among AND conditions, got {conditions:?}"
             );
             assert!(
@@ -23252,10 +23256,12 @@ fn trigger_cast_instant_sorcery_while_two_or_more_quest_counters() {
     assert_eq!(def.valid_target, Some(TargetFilter::Controller));
     assert_eq!(
         def.condition,
-        Some(TriggerCondition::HasCounters {
-            counters: CounterMatch::OfType(CounterType::Generic("quest".to_string())),
-            minimum: 2,
-            maximum: None,
+        Some(TriggerCondition::EventTime {
+            condition: Box::new(TriggerCondition::HasCounters {
+                counters: CounterMatch::OfType(CounterType::Generic("quest".to_string())),
+                minimum: 2,
+                maximum: None,
+            }),
         }),
         "the quest-counter gate must become a HasCounters condition"
     );
@@ -27205,6 +27211,57 @@ fn unadmitted_state_change_head_yields_an_honest_unknown_arm() {
     assert_eq!(
         triggers[1].description.as_deref(),
         Some("When ~ is turned face down, draw a card.")
+    );
+}
+
+/// CR 508.1m + CR 109.4: Pugnacious Hammerskull's while-gate must survive. The
+/// negated "you don't control another Dinosaur" used to fail to parse, the gate
+/// was dropped (`condition: None`) and the stun counter landed on EVERY attack.
+#[test]
+fn attacks_while_you_dont_control_another_type_keeps_the_gate() {
+    let triggers = parse_trigger_lines(
+        "Whenever this creature attacks while you don't control another Dinosaur, put a stun counter on it.",
+        "Pugnacious Hammerskull",
+    );
+    assert_eq!(triggers.len(), 1);
+    assert_eq!(triggers[0].mode, TriggerMode::Attacks);
+    // The gate lowers to "count of OTHER Dinosaurs you control == 0" (the same
+    // shape as Kari Zev's "you don't control a legendary Monkey").
+    let cond = format!("{:?}", triggers[0].condition);
+    // CR 508.1m + CR 603.4: an event-time gate, never a resolution recheck.
+    assert!(
+        cond.starts_with("Some(EventTime"),
+        "the while-gate must be wrapped as EventTime, got {cond}"
+    );
+    assert!(
+        cond.contains("Another")
+            && cond.contains("Dinosaur")
+            && (cond.contains("Not {")
+                || (cond.contains("comparator: EQ") && cond.contains("Fixed { value: 0 }"))),
+        "expected the 'no other Dinosaur' gate, got {cond}"
+    );
+}
+
+/// CR 603.4 + CR 201.2: The Majestic Duo — the intervening-if reads "another
+/// permanent named The Majestic Duo" and stops at the comma, so the copy effect
+/// survives. Pins the name boundary the negated-control fix exposed: before it,
+/// the name swallowed ", create a token …" and the copy was dropped.
+#[test]
+fn majestic_duo_named_condition_stops_at_the_effect_comma() {
+    let triggers = parse_trigger_lines(
+        "When The Majestic Duo enters, if you don't control another permanent named The Majestic Duo, create a token that's a copy of it, except it's not legendary, it has \"Whenever this creature deals combat damage to a player, draw a card and earnestly tell them good luck,\" and it loses all other abilities.",
+        "The Majestic Duo",
+    );
+    assert_eq!(triggers.len(), 1);
+    let cond = format!("{:?}", triggers[0].condition);
+    assert!(
+        cond.contains("Another") && cond.to_lowercase().contains("name: \"the majestic duo\""),
+        "condition must name exactly The Majestic Duo, got {cond}"
+    );
+    let exec = format!("{:?}", triggers[0].execute);
+    assert!(
+        exec.contains("CopyTokenOf"),
+        "the copy effect must survive the condition, got {exec}"
     );
 }
 

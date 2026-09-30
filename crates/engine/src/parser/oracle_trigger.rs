@@ -358,6 +358,11 @@ fn collect_trigger_condition_source_zones(condition: &TriggerCondition, out: &mu
                 collect_trigger_condition_source_zones(inner, out);
             }
         }
+        // CR 508.1m: a "while ~ is in your graveyard" event-time gate pins the
+        // source's zone exactly like an intervening "if" does.
+        TriggerCondition::EventTime { condition } => {
+            collect_trigger_condition_source_zones(condition, out);
+        }
         _ => {}
     }
 }
@@ -787,6 +792,7 @@ fn quantity_comparison_operands(cond: &TriggerCondition) -> Option<(&QuantityExp
         TriggerCondition::And { conditions } | TriggerCondition::Or { conditions } => {
             conditions.iter().find_map(quantity_comparison_operands)
         }
+        TriggerCondition::EventTime { condition } => quantity_comparison_operands(condition),
         _ => None,
     }
 }
@@ -2616,6 +2622,7 @@ fn condition_contains_source_counter(condition: &TriggerCondition) -> bool {
             conditions.iter().any(condition_contains_source_counter)
         }
         TriggerCondition::Not { condition } => condition_contains_source_counter(condition),
+        TriggerCondition::EventTime { condition } => condition_contains_source_counter(condition),
         _ => false,
     }
 }
@@ -5503,6 +5510,9 @@ fn remap_self_cast_scope_to_triggering_spell(cond: &mut TriggerCondition) {
                 .for_each(remap_self_cast_scope_to_triggering_spell);
         }
         TriggerCondition::Not { condition } => remap_self_cast_scope_to_triggering_spell(condition),
+        TriggerCondition::EventTime { condition } => {
+            remap_self_cast_scope_to_triggering_spell(condition)
+        }
         // All other variants are leaves that cannot carry a `ManaSpentToCast`
         // quantity ref — nothing to remap.
         _ => {}
@@ -5649,6 +5659,9 @@ fn rebind_attack_anaphor_to_defending_player(cond: &mut TriggerCondition) {
                 .for_each(rebind_attack_anaphor_to_defending_player);
         }
         TriggerCondition::Not { condition } => rebind_attack_anaphor_to_defending_player(condition),
+        TriggerCondition::EventTime { condition } => {
+            rebind_attack_anaphor_to_defending_player(condition)
+        }
         // All other variants are leaves that carry no `PlayerScope`, which
         // `TriggerCondition::designation_player_anchor` enforces exhaustively
         // for the designation family — nothing to rebind.
@@ -11423,8 +11436,16 @@ pub(crate) fn parse_trigger_condition(
                 // Subject-ful state gate ("while ~ is attacking") — AND onto the
                 // parsed trigger's condition so the rest of the event clause
                 // parses exactly as it would unqualified.
+                // CR 508.1m + CR 603.4: the gate is read at the trigger event,
+                // not rechecked on resolution — wrap it as `EventTime` so an
+                // intervening `if` beside it keeps its own recheck.
                 let (mode, mut def) = parse_trigger_condition(&stripped, ctx);
-                def.condition = Some(and_trigger_conditions(def.condition.take(), while_cond));
+                def.condition = Some(and_trigger_conditions(
+                    def.condition.take(),
+                    TriggerCondition::EventTime {
+                        condition: Box::new(while_cond),
+                    },
+                ));
                 return (mode, def);
             }
             WhileStateGate::AttackSubjectState(filter) => {
@@ -12012,7 +12033,9 @@ fn trigger_object_pronoun_ref_for_intervening_if(
             TriggerCondition::And { conditions } | TriggerCondition::Or { conditions } => {
                 conditions.iter().any(pins_source_off_battlefield)
             }
-            TriggerCondition::Not { condition } => pins_source_off_battlefield(condition),
+            TriggerCondition::Not { condition } | TriggerCondition::EventTime { condition } => {
+                pins_source_off_battlefield(condition)
+            }
             _ => false,
         }
     }
