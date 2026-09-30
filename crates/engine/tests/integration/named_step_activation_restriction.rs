@@ -232,7 +232,7 @@ fn werewolf_combat_at_blocker_prompt() -> (GameRunner, ObjectId, ObjectId, usize
 /// CR 509.1 + CR 602.5: Lesser Werewolf's ability is activatable during the
 /// declare blockers step. P1 blocks the bear and activates targeting it (a legal
 /// target under any reading of its target phrase): the activation is accepted,
-/// its {B} is paid, and the ability goes on the stack.
+/// its {B} is paid, and the ability goes on the stack. Resolution is not asserted: a pre-existing defect re-prompts the counter's target at resolution (see PR residuals).
 #[test]
 fn lesser_werewolf_activates_only_during_declare_blockers_step() {
     let (mut runner, bear, werewolf, index) = werewolf_combat_at_blocker_prompt();
