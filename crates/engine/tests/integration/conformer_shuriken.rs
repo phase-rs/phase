@@ -326,3 +326,324 @@ fn less_toughness_variant_runs_end_to_end() {
     );
     assert_eq!(p1p1(&control.runner, control.attacker), 0);
 }
+
+// ---------------------------------------------------------------------------
+// Class boards (review round 1): the same gate on printed-trigger creatures,
+// population bodies, modal chains, and partially illegal chains.
+// ---------------------------------------------------------------------------
+
+const C1_TEXT: &str = "Whenever this creature attacks, tap target creature defending player controls. If that creature has greater power than this creature, return each creature you control to its owner's hand.";
+const C2_BOTH: &str = "Whenever this creature attacks, choose one or both —\n• Tap target creature defending player controls. If that creature has greater power than this creature, put a number of +1/+1 counters on this creature equal to the difference.\n• Tap target creature defending player controls. If that creature has greater power than this creature, put a number of +1/+1 counters on this creature equal to the difference.";
+const C2_REPEAT: &str = "Whenever this creature attacks, choose two. You may choose the same mode more than once.\n• Tap target creature defending player controls. If that creature has greater power than this creature, put a number of +1/+1 counters on this creature equal to the difference.\n• You gain 1 life.";
+
+/// P0 controls `Attacker` (printed `text`) and a 1/1; P1 controls one creature
+/// per entry of `defenders`.
+struct PrintedBoard {
+    runner: GameRunner,
+    attacker: ObjectId,
+    other: ObjectId,
+    defenders: Vec<ObjectId>,
+    unsummon: ObjectId,
+}
+
+fn printed_board(text: &str, attacker_pt: (i32, i32), defenders: &[(i32, i32)]) -> PrintedBoard {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let attacker = scenario
+        .add_creature_from_oracle(P0, "Attacker", attacker_pt.0, attacker_pt.1, text)
+        .id();
+    let other = scenario.add_creature(P0, "Other Mine", 1, 1).id();
+    let defenders = defenders
+        .iter()
+        .enumerate()
+        .map(|(i, &(p, t))| {
+            scenario
+                .add_creature(P1, &format!("Defender {i}"), p, t)
+                .id()
+        })
+        .collect();
+    let unsummon = scenario
+        .add_spell_to_hand_from_oracle(P0, "Unsummon", true, UNSUMMON)
+        .id();
+    PrintedBoard {
+        runner: scenario.build(),
+        attacker,
+        other,
+        defenders,
+        unsummon,
+    }
+}
+
+/// CR 508.1m + CR 700.2 + CR 603.3d: declare the attack, choose `modes`, and
+/// answer each target slot in order with `picks`. Returns the slot count seen.
+/// REACH GUARD: every pick was a legal choice of its slot.
+fn attack_with_modes(b: &mut PrintedBoard, modes: &[usize], picks: &[ObjectId]) -> usize {
+    b.runner.advance_to_combat();
+    b.runner
+        .declare_attackers(&[(b.attacker, AttackTarget::Player(P1))])
+        .expect("the attacker attacks");
+    let mut slots_seen = 0;
+    let mut next_pick = 0;
+    for _ in 0..16 {
+        match b.runner.state().waiting_for.clone() {
+            WaitingFor::AbilityModeChoice { .. } | WaitingFor::ModeChoice { .. } => {
+                b.runner
+                    .act(GameAction::SelectModes {
+                        indices: modes.to_vec(),
+                    })
+                    .expect("select modes");
+            }
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                let order = (0..triggers.len()).collect();
+                b.runner
+                    .act(GameAction::OrderTriggers { order })
+                    .expect("order triggers");
+            }
+            WaitingFor::TriggerTargetSelection {
+                target_slots,
+                selection,
+                ..
+            } => {
+                slots_seen = target_slots.len();
+                let pick = TargetRef::Object(picks[next_pick]);
+                assert!(
+                    target_slots[selection.current_slot]
+                        .legal_targets
+                        .contains(&pick),
+                    "reach guard: pick {next_pick} is legal for its slot: {target_slots:?}"
+                );
+                next_pick += 1;
+                b.runner
+                    .act(GameAction::ChooseTarget { target: Some(pick) })
+                    .expect("choose target");
+            }
+            _ => break,
+        }
+    }
+    assert!(
+        !b.runner.state().stack.is_empty(),
+        "reach guard: the attack trigger is on the stack"
+    );
+    slots_seen
+}
+
+/// CR 608.2c: the gate over a POPULATION body ("return each creature you
+/// control") reads the tapped target; when it holds, every creature P0 controls
+/// returns. Control: a 1/1 target leaves the gate false and both stay.
+#[test]
+fn comparative_gate_over_a_population_body_resolves() {
+    let mut b = printed_board(C1_TEXT, (2, 2), &[(5, 5)]);
+    let target = b.defenders[0];
+    attack_with_modes(&mut b, &[], &[target]);
+    b.runner.advance_until_stack_empty();
+    assert!(
+        b.runner.state().objects[&target].tapped,
+        "reach guard: tap resolved"
+    );
+    assert_eq!(b.runner.state().objects[&b.attacker].zone, Zone::Hand);
+    assert_eq!(b.runner.state().objects[&b.other].zone, Zone::Hand);
+
+    let mut control = printed_board(C1_TEXT, (2, 2), &[(1, 1)]);
+    let target = control.defenders[0];
+    attack_with_modes(&mut control, &[], &[target]);
+    control.runner.advance_until_stack_empty();
+    assert!(
+        control.runner.state().objects[&target].tapped,
+        "reach guard: tap resolved"
+    );
+    assert_eq!(
+        control.runner.state().objects[&control.attacker].zone,
+        Zone::Battlefield
+    );
+    assert_eq!(
+        control.runner.state().objects[&control.other].zone,
+        Zone::Battlefield
+    );
+}
+
+/// CR 700.2 + CR 608.2c: "choose one or both" with two tap-and-compare modes.
+/// Each mode reads ITS OWN tapped creature: +3 from the 5/5 (attacker becomes
+/// 5/5), then +2 from the 7/7 = 5. Two slots, no panic.
+#[test]
+fn modal_one_or_both_each_mode_reads_its_own_tap() {
+    let mut b = printed_board(C2_BOTH, (2, 2), &[(5, 5), (7, 7)]);
+    let (five, seven) = (b.defenders[0], b.defenders[1]);
+    let slots = attack_with_modes(&mut b, &[0, 1], &[five, seven]);
+    assert_eq!(slots, 2, "one slot per mode's tap, none for the riders");
+    b.runner.advance_until_stack_empty();
+    assert!(
+        b.runner.state().objects[&five].tapped,
+        "reach guard: mode 1 tap"
+    );
+    assert!(
+        b.runner.state().objects[&seven].tapped,
+        "reach guard: mode 2 tap"
+    );
+    assert_eq!(p1p1(&b.runner, b.attacker), 5);
+}
+
+/// CR 700.2d: the same mode chosen twice; each occurrence reads its own tap:
+/// +3 (5/5), then +2 (7/7 vs a 5/5 attacker) = 5.
+#[test]
+fn modal_same_mode_twice_reads_each_occurrences_tap() {
+    let mut b = printed_board(C2_REPEAT, (2, 2), &[(5, 5), (7, 7)]);
+    let (five, seven) = (b.defenders[0], b.defenders[1]);
+    let slots = attack_with_modes(&mut b, &[0, 0], &[five, seven]);
+    assert_eq!(slots, 2, "one slot per occurrence's tap");
+    b.runner.advance_until_stack_empty();
+    assert!(
+        b.runner.state().objects[&five].tapped,
+        "reach guard: first tap"
+    );
+    assert!(
+        b.runner.state().objects[&seven].tapped,
+        "reach guard: second tap"
+    );
+    assert_eq!(p1p1(&b.runner, b.attacker), 5);
+}
+
+/// CR 608.2b: the first mode's tap target leaves in response (printed
+/// Unsummon), the second mode's is still legal, so the ability resolves. The
+/// first gate needs information about an illegal target, so it does nothing;
+/// the second reads its own 4/4: 4 − 2 = +2. (Reading the stale 5/5 would give
+/// +3 and then 4 > 5 false = 3.)
+#[test]
+fn modal_first_tap_target_bounced_later_mode_still_resolves() {
+    let mut b = printed_board(C2_BOTH, (2, 2), &[(5, 5), (4, 4)]);
+    let (five, four, unsummon) = (b.defenders[0], b.defenders[1], b.unsummon);
+    attack_with_modes(&mut b, &[0, 1], &[five, four]);
+    b.runner.cast(unsummon).target_object(five).resolve();
+    assert_eq!(
+        b.runner.state().objects[&five].zone,
+        Zone::Hand,
+        "reach guard: Unsummon resolved"
+    );
+    assert!(
+        b.runner.state().stack.is_empty(),
+        "reach guard: stack drained"
+    );
+    assert!(
+        b.runner.state().objects[&four].tapped,
+        "reach guard: the later mode resolved"
+    );
+    assert_eq!(p1p1(&b.runner, b.attacker), 2);
+}
+
+/// CR 608.2b anti-zero: an illegal target's power is not information, so it is
+/// not read as 0. Attacker −1/5; the first tap target (−2/5) is bounced, the
+/// second is a −1/5. Correct: mode 1 does nothing, mode 2's gate is −1 > −1,
+/// false: 0 counters. Reading the missing power as 0 would make mode 1's gate
+/// 0 > −1 true (+1).
+#[test]
+fn bounced_first_target_is_not_read_as_zero_power() {
+    let mut b = printed_board(C2_BOTH, (-1, 5), &[(-2, 5), (-1, 5)]);
+    let (first, second, unsummon) = (b.defenders[0], b.defenders[1], b.unsummon);
+    attack_with_modes(&mut b, &[0, 1], &[first, second]);
+    b.runner.cast(unsummon).target_object(first).resolve();
+    assert_eq!(
+        b.runner.state().objects[&first].zone,
+        Zone::Hand,
+        "reach guard: Unsummon resolved"
+    );
+    assert!(
+        b.runner.state().objects[&second].tapped,
+        "reach guard: the later mode resolved"
+    );
+    assert_eq!(p1p1(&b.runner, b.attacker), 0);
+}
+
+// ---------------------------------------------------------------------------
+// #3864 GainLife rider sibling: the inheriting-rider descent and the validated
+// parent restamp, on Swords to Plowshares' exact instruction inside a modal.
+// ---------------------------------------------------------------------------
+
+const SWORDS_MODAL: &str = "Choose one or both —\n• Exile target creature. Its controller gains life equal to its power.\n• Target player draws a card.";
+
+struct SwordsBoard {
+    runner: GameRunner,
+    spell: ObjectId,
+    four: ObjectId,
+    unsummon: ObjectId,
+}
+
+fn swords_board() -> SwordsBoard {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Swords Modal", true, SWORDS_MODAL)
+        .id();
+    let unsummon = scenario
+        .add_spell_to_hand_from_oracle(P0, "Unsummon", true, UNSUMMON)
+        .id();
+    let four = scenario.add_creature(P1, "P1 Four", 4, 4).id();
+    for i in 0..4 {
+        scenario.add_card_to_library_top(P0, &format!("P0 Library {i}"));
+    }
+    SwordsBoard {
+        runner: scenario.build(),
+        spell,
+        four,
+        unsummon,
+    }
+}
+
+/// CR 601.2c + CR 700.2: the life-gain rider inherits the exile's target, and
+/// the second mode's player slot below it is still announced. Both modes happen.
+#[test]
+fn gain_life_rider_does_not_hide_a_later_mode_slot() {
+    let mut b = swords_board();
+    let (spell, four) = (b.spell, b.four);
+    let life_before = b.runner.state().players[1].life;
+    let outcome = b
+        .runner
+        .cast(spell)
+        .modes(&[0, 1])
+        .target_object(four)
+        .target_player(P0)
+        .resolve();
+    outcome.assert_zone(&[four], Zone::Exile);
+    assert_eq!(
+        outcome.state().players[1].life,
+        life_before + 4,
+        "its controller gains life equal to its power"
+    );
+    outcome.assert_hand_drawn(P0, 1);
+}
+
+/// CR 608.2b: the exile's target is bounced in response while the draw's player
+/// target stays legal, so the spell resolves. The exile does nothing and the
+/// life-gain rider needs information about the illegal target, so P1 gains
+/// nothing; P0 still draws.
+#[test]
+fn modal_swords_first_target_bounced_rider_reads_nothing() {
+    let mut b = swords_board();
+    let (spell, four, unsummon) = (b.spell, b.four, b.unsummon);
+    let life_before = b.runner.state().players[1].life;
+    let p0_library_before = b.runner.state().players[0].library.len();
+    b.runner
+        .cast(spell)
+        .modes(&[0, 1])
+        .target_object(four)
+        .target_player(P0)
+        .commit();
+    b.runner.cast(unsummon).target_object(four).resolve();
+    assert_eq!(
+        b.runner.state().objects[&four].zone,
+        Zone::Hand,
+        "reach guard: Unsummon resolved"
+    );
+    assert!(
+        b.runner.state().stack.is_empty(),
+        "reach guard: stack drained"
+    );
+    assert_eq!(
+        b.runner.state().players[0].library.len(),
+        p0_library_before - 1,
+        "reach guard: the draw mode resolved for P0"
+    );
+    assert_eq!(
+        b.runner.state().players[1].life,
+        life_before,
+        "CR 608.2b: no life from an illegal target's power"
+    );
+}

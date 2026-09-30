@@ -206,6 +206,7 @@ fn make_grant_ability(controller: PlayerId, source: ObjectId) -> ResolvedAbility
         chosen_players: Vec::new(),
         repeat_until: None,
         sub_link: SubAbilityLink::ContinuationStep,
+        target_reads: Default::default(),
         sibling_condition: SiblingCondition::Dependent,
         modal: None,
         mode_abilities: vec![],

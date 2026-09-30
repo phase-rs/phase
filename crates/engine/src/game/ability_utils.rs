@@ -7,7 +7,7 @@ use crate::types::ability::{
     FilterProp, GameRestriction, ModalChoice, ModalSelectionCondition, ModalSelectionConstraint,
     MultiTargetSpec, ObjectScope, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef,
     ResolvedAbility, RestrictionPlayerScope, SpellContext, SubAbilityLink, TargetChoiceTiming,
-    TargetFilter, TargetRef, TriggerDefinition, TypeFilter, TypedFilter,
+    TargetFilter, TargetReadOrigin, TargetRef, TriggerDefinition, TypeFilter, TypedFilter,
 };
 // CR 601.2c: mana recipient / count-source role slot gate.
 use crate::types::ability::mana_multi_role;
@@ -153,6 +153,7 @@ pub fn build_resolved_from_def_with_targets(
         ResolvedAbility::new(*def.effect.clone(), targets, source_id, controller).kind(def.kind);
     resolved.declares_chosen_group = def.declares_chosen_group;
     resolved.reads_chosen_group = def.reads_chosen_group;
+    resolved.target_reads = def.target_reads;
     resolved.declares_return_result = def.declares_return_result;
     resolved.reads_return_result = def.reads_return_result.clone();
     resolved.context.face_down_in_exile = def.face_down_in_exile;
@@ -2222,9 +2223,9 @@ pub(crate) fn illegal_declared_target_slots(
 /// reached the push. That over-exclusion is INERT today, for two reasons that
 /// must be re-checked if either side moves. The only subs it can misclassify are
 /// a GainLife anaphor rider (`effect_player_filter_is_parent_target_anaphor` is
-/// `_ => false` for everything else) and a chosen-group reader of its parent
-/// (`sub_reads_parent_declared_group`; the only printed reader, Conformer
-/// Shuriken, has a `SetTapState` producer, which none of the six arms owns).
+/// `_ => false` for everything else) and a `TargetReadOrigin::ParentAnnouncement`
+/// rider (the only printed one, Conformer Shuriken, has a `SetTapState` producer,
+/// which none of the six arms owns).
 /// For such a rider:
 ///   * on FIVE of the six arms the slot builder surfaces no slot for it, so its
 ///     `targets` is empty and skipping it is a no-op —
@@ -2901,11 +2902,51 @@ pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -
     if let Some(sub_ability) = validated.sub_ability.as_mut() {
         **sub_ability = validate_targets_in_chain(state, sub_ability);
     }
+    // CR 608.2b: an inheriting rider's entry is a snapshot of its immediate
+    // parent's object target, not a target it specified, so the context-ref keep
+    // arm above would otherwise preserve an object the parent's own validation
+    // just dropped. Re-derive it from the VALIDATED parent — empty when the
+    // parent's target is illegal, so "that creature" / "its controller" fail to
+    // determine any information instead of reading a stale object.
+    restamp_inherited_rider_target(&mut validated);
     if let Some(else_ability) = validated.else_ability.as_mut() {
         **else_ability = validate_targets_in_chain(state, else_ability);
     }
     restamp_chosen_group_targets(&mut validated);
     validated
+}
+
+/// CR 608.2b + CR 608.2c: set an inheriting rider's `targets` (and its selected
+/// incarnation pins) to the single object target its immediate parent holds now
+/// — the same snapshot the announce-time assigners push
+/// (`assign_sub_chain_targets` / `assign_sub_chain_selected_slots`). A parent
+/// with no object target leaves the rider with none.
+fn restamp_inherited_rider_target(parent: &mut ResolvedAbility) {
+    let inherits = parent
+        .sub_ability
+        .as_deref()
+        .is_some_and(|sub| sub_ability_inherits_parent_creature_target_only(parent, sub));
+    if !inherits {
+        return;
+    }
+    let object = parent.targets.iter().find_map(|t| match t {
+        TargetRef::Object(id) => Some(*id),
+        _ => None,
+    });
+    let pins: Vec<ObjectIncarnationRef> = object
+        .map(|id| {
+            parent
+                .selected_target_incarnations
+                .iter()
+                .filter(|pin| pin.object_id == id)
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Some(sub) = parent.sub_ability.as_deref_mut() {
+        sub.targets = object.map(TargetRef::Object).into_iter().collect();
+        sub.selected_target_incarnations = pins;
+    }
 }
 
 /// CR 609.7 + CR 601.2c: For a source-scoped `PreventDamage`
@@ -3677,9 +3718,13 @@ fn collect_target_slots_inner(
         if is_per_opponent_target_fanout(ability) {
             collect_per_opponent_target_fanout_slots(state, ability, acc)?;
             if let Some(sub_ability) = ability.sub_ability.as_deref() {
-                if !defers_conditional_target_selection(sub_ability)
-                    && !sub_ability_inherits_parent_creature_target_only(ability, sub_ability)
-                {
+                if defers_conditional_target_selection(sub_ability) {
+                    // Chosen at resolution; no slot now.
+                } else if sub_ability_inherits_parent_creature_target_only(ability, sub_ability) {
+                    // CR 601.2c: an inheriting rider announces no slot of its
+                    // own, but its sub-chain (a later chained mode) still does.
+                    collect_sub_chain_slots(state, sub_ability, acc)?;
+                } else {
                     collect_target_slots(state, sub_ability, acc)?;
                 }
             }
@@ -3858,9 +3903,15 @@ fn collect_sub_chain_slots(
         // `resolve_ability_chain`, not here. They are intentionally left
         // UNLABELLED for the modal targeting banner: no slot is surfaced at
         // mode-selection time, so there is no slot to attach a mode label to.
-        if !defers_conditional_target_selection(sub_ability)
-            && !sub_ability_inherits_parent_creature_target_only(ability, sub_ability)
-        {
+        if defers_conditional_target_selection(sub_ability) {
+            // Pre-collected at resolution (see above).
+        } else if sub_ability_inherits_parent_creature_target_only(ability, sub_ability) {
+            // CR 601.2c + CR 700.2: an inheriting rider (#3864 life-gain anaphor,
+            // Conformer Shuriken's "that creature" gate) announces no slot of its
+            // own, but the chain below it — e.g. a later chosen mode — still
+            // does. Skip only the rider's own slot.
+            collect_sub_chain_slots(state, sub_ability, acc)?;
+        } else {
             collect_target_slots(state, sub_ability, acc)?;
         }
     }
@@ -5573,9 +5624,12 @@ fn effect_primary_target_supplies_player_target(effect: &Effect) -> bool {
 /// creature target slot for the `Power {{ Target }}` quantity ref — the parent's
 /// slot is the only player choice (issue #3864; same class as #3310 Condemn).
 /// Two provenance proofs admit a rider: its player filter is a parent-target
-/// anaphor (the GainLife riders above), or the parser linked it to the parent's
-/// announced target through the chosen-group channel
-/// ([`sub_reads_parent_declared_group`], Conformer Shuriken).
+/// anaphor (the GainLife riders above), or the parser marked its `Target` reads
+/// as the parent's announcement (`TargetReadOrigin::ParentAnnouncement` —
+/// Conformer Shuriken's "If that creature has greater power than this creature,
+/// put … equal to the difference"). The marker is written only for a "that
+/// creature" anaphor whose immediately preceding instruction announced a single
+/// object, and never on an instruction that announces a target of its own.
 fn sub_ability_inherits_parent_creature_target_only(
     parent: &ResolvedAbility,
     sub: &ResolvedAbility,
@@ -5600,19 +5654,7 @@ fn sub_ability_inherits_parent_creature_target_only(
     }
     effect_needs_target_creature_quantity_slot(&sub.effect)
         && (effect_player_filter_is_parent_target_anaphor(&sub.effect)
-            || sub_reads_parent_declared_group(parent, sub))
-}
-
-/// CR 115.1 + CR 608.2c: the parser linked this rider to its parent's announced
-/// target through the typed chosen-group channel ("tap target creature … If
-/// that creature has greater power than this creature, put … equal to the
-/// difference" — Conformer Shuriken). The link is written only for an anaphor
-/// ("that creature"), never for a clause naming a new "target", so the rider's
-/// `Target`-scoped magnitude reads the parent's chosen object and is not a
-/// second instance of the word "target". `restamp_chosen_group_targets` binds
-/// the rider's `targets` to exactly that group.
-fn sub_reads_parent_declared_group(parent: &ResolvedAbility, sub: &ResolvedAbility) -> bool {
-    sub.reads_chosen_group.is_some() && sub.reads_chosen_group == parent.declares_chosen_group
+            || sub.target_reads == TargetReadOrigin::ParentAnnouncement)
 }
 
 /// CR 115.1 + CR 115.10a + CR 608.2c: A one-sided-fight `DealDamage` ("Target
@@ -6436,9 +6478,13 @@ fn collect_sub_chain_slot_specs(
         return;
     }
     if let Some(sub_ability) = ability.sub_ability.as_deref() {
-        if !defers_conditional_target_selection(sub_ability)
-            && !sub_ability_inherits_parent_creature_target_only(ability, sub_ability)
-        {
+        if defers_conditional_target_selection(sub_ability) {
+            // Chosen at resolution; no spec now.
+        } else if sub_ability_inherits_parent_creature_target_only(ability, sub_ability) {
+            // Mirror of `collect_sub_chain_slots`: skip only the inheriting
+            // rider's own spec, keep its sub-chain's.
+            collect_sub_chain_slot_specs(state, sub_ability, specs, next_instance);
+        } else {
             collect_target_slot_specs(state, sub_ability, specs, next_instance);
         }
     }
@@ -9007,14 +9053,16 @@ fn assign_targets_recursive(
     {
         if let Some(spec) = ability.multi_target.as_ref() {
             // CR 601.2c + issue #3864: An inheriting rider (Solitude's life-gain)
-            // surfaces no slot of its own, so it reserves no minimum here. Mirror
-            // the filter in `minimum_targets_in_chain`'s `rest` term.
-            let remaining_minimum = ability
-                .sub_ability
-                .as_deref()
-                .filter(|sub| !sub_ability_inherits_parent_creature_target_only(ability, sub))
-                .map(|sub| minimum_targets_in_chain(state, sub))
-                .unwrap_or(0);
+            // surfaces no slot of its own, so it reserves no minimum here — but
+            // the chain below it still does. Mirrors `minimum_targets_in_chain`'s
+            // `rest` term (`minimum_targets_below` for an inheriting rider).
+            let remaining_minimum = match ability.sub_ability.as_deref() {
+                Some(sub) if sub_ability_inherits_parent_creature_target_only(ability, sub) => {
+                    minimum_targets_below(state, sub)
+                }
+                Some(sub) => minimum_targets_in_chain(state, sub),
+                None => 0,
+            };
             let remaining_after_current = targets.len().saturating_sub(*next_target);
             // Issue #321: cap at this node's own resolved `multi_target` max so a
             // node does not claim a downstream `up to N` effect's optional
@@ -9046,6 +9094,21 @@ fn assign_targets_recursive(
             ));
         }
     }
+    assign_sub_chain_targets(state, ability, targets, next_target)
+}
+
+/// The sub-chain half of [`assign_targets_recursive`]: hand the remaining
+/// announced targets to `ability`'s sub-ability. An inheriting rider (#3864
+/// life-gain anaphor; a `TargetReadOrigin::ParentAnnouncement` rider) takes a
+/// snapshot of `ability`'s object target instead of consuming one, and the
+/// chain below it is then assigned exactly as if the rider were the parent
+/// (CR 601.2c + CR 700.2: a later chained mode still owns its targets).
+fn assign_sub_chain_targets(
+    state: &GameState,
+    ability: &mut ResolvedAbility,
+    targets: &[TargetRef],
+    next_target: &mut usize,
+) -> Result<(), EngineError> {
     if defers_sub_ability_target_selection(&ability.effect) {
         assign_targets_after_deferred_effect(
             state,
@@ -9071,6 +9134,7 @@ fn assign_targets_recursive(
             if let Some(creature) = parent_creature_target {
                 sub_ability.targets.push(creature);
             }
+            assign_sub_chain_targets(state, sub_ability, targets, next_target)?;
         } else {
             assign_targets_recursive(state, sub_ability, targets, next_target)?;
         }
@@ -9522,6 +9586,18 @@ fn assign_selected_slots_recursive(
             *next_slot += 1;
         }
     }
+    assign_sub_chain_selected_slots(state, ability, selected_slots, next_slot)
+}
+
+/// Slot-walk mirror of [`assign_sub_chain_targets`]: an inheriting rider takes a
+/// snapshot of `ability`'s object target, and the chain below it is assigned as
+/// if the rider were the parent.
+fn assign_sub_chain_selected_slots(
+    state: &GameState,
+    ability: &mut ResolvedAbility,
+    selected_slots: &[Option<TargetRef>],
+    next_slot: &mut usize,
+) -> Result<(), EngineError> {
     if defers_sub_ability_target_selection(&ability.effect) {
         assign_selected_slots_after_deferred_effect(
             state,
@@ -9547,6 +9623,7 @@ fn assign_selected_slots_recursive(
             if let Some(creature) = parent_creature_target {
                 sub_ability.targets.push(creature);
             }
+            assign_sub_chain_selected_slots(state, sub_ability, selected_slots, next_slot)?;
         } else {
             assign_selected_slots_recursive(state, sub_ability, selected_slots, next_slot)?;
         }
@@ -10376,9 +10453,15 @@ fn descend_retarget_slots(
         return;
     }
     if let Some(sub) = ability.sub_ability.as_deref() {
-        if !defers_conditional_target_selection(sub)
-            && !sub_ability_inherits_parent_creature_target_only(ability, sub)
-        {
+        if defers_conditional_target_selection(sub) {
+            // Chosen at resolution; not addressable now.
+        } else if sub_ability_inherits_parent_creature_target_only(ability, sub) {
+            // An inheriting rider owns no addressable slot, but the chain below
+            // it (a later chained mode) does.
+            let mut sub_path = path.to_vec();
+            sub_path.push(ChainStep::SubAbility);
+            descend_retarget_slots(sub, &sub_path, bindings, next_run);
+        } else {
             let mut sub_path = path.to_vec();
             sub_path.push(ChainStep::SubAbility);
             emit_node(sub, &sub_path, false, bindings, next_run);
@@ -10873,18 +10956,26 @@ fn minimum_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -> usi
         + parent_target_combat_relation_companion
         + current;
 
-    let rest = if defers_sub_ability_target_selection(&ability.effect) {
-        minimum_targets_after_deferred_effect(state, ability.sub_ability.as_deref())
-    } else {
-        ability
-            .sub_ability
-            .as_deref()
-            .filter(|sub| !sub_ability_inherits_parent_creature_target_only(ability, sub))
-            .map(|sub| minimum_targets_in_chain(state, sub))
-            .unwrap_or(0)
-    };
+    let rest = minimum_targets_below(state, ability);
 
     current + rest
+}
+
+/// CR 601.2c: the minimum number of announced targets the chain BELOW `ability`
+/// requires. An inheriting rider (#3864 life-gain anaphor; a
+/// `TargetReadOrigin::ParentAnnouncement` rider) contributes none of its own,
+/// but the chain below it — a later chained mode — still counts.
+fn minimum_targets_below(state: &GameState, ability: &ResolvedAbility) -> usize {
+    if defers_sub_ability_target_selection(&ability.effect) {
+        return minimum_targets_after_deferred_effect(state, ability.sub_ability.as_deref());
+    }
+    match ability.sub_ability.as_deref() {
+        Some(sub) if sub_ability_inherits_parent_creature_target_only(ability, sub) => {
+            minimum_targets_below(state, sub)
+        }
+        Some(sub) => minimum_targets_in_chain(state, sub),
+        None => 0,
+    }
 }
 
 fn minimum_targets_after_deferred_effect(
@@ -13134,33 +13225,34 @@ mod tests {
         );
     }
 
-    /// CR 115.1 + CR 608.2c: Conformer Shuriken's gated rider ("If that creature
-    /// has greater power than this creature, put … equal to the difference")
-    /// reads its parent's announced tap target through the typed chosen-group
-    /// link, so it inherits that target: no second slot, and its snapshot does
-    /// not keep the ability alive. The same rider WITHOUT the link (what a gate
-    /// naming a new "target creature" would produce) still needs its own slot.
+    /// CR 115.1 + CR 608.2c + CR 700.2: Conformer Shuriken's gated rider ("If that
+    /// creature has greater power than this creature, put … equal to the
+    /// difference") is marked `TargetReadOrigin::ParentAnnouncement`, so it
+    /// inherits its parent's announced tap target — no slot of its own, and its
+    /// snapshot does not keep the ability alive — while a chained node BELOW it
+    /// (a second chosen mode) still announces and receives its own target. The
+    /// same rider with the default origin keeps its count-derived slot.
     #[test]
-    fn chosen_group_reader_inherits_its_producers_target() {
-        use crate::types::ability::ChosenGroupId;
+    fn parent_announcement_rider_inherits_and_keeps_descending() {
+        use crate::types::ability::TapStateChange;
         use crate::types::counter::CounterType;
 
-        let victim = ObjectId(77);
-        let mut tap = ResolvedAbility::new(
-            Effect::SetTapState {
-                target: TargetFilter::Typed(TypedFilter::creature()),
-                scope: EffectScope::Single,
-                state: crate::types::ability::TapStateChange::Tap,
-            },
-            vec![TargetRef::Object(victim)],
-            ObjectId(99),
-            PlayerId(0),
-        );
-        tap.declares_chosen_group = Some(ChosenGroupId(0));
+        let tap = || {
+            ResolvedAbility::new(
+                Effect::SetTapState {
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
+                },
+                vec![],
+                ObjectId(99),
+                PlayerId(0),
+            )
+        };
         let power = |scope| QuantityExpr::Ref {
             qty: QuantityRef::Power { scope },
         };
-        let rider = |reads: Option<ChosenGroupId>| {
+        let rider = |origin: TargetReadOrigin| {
             let mut rider = ResolvedAbility::new(
                 Effect::PutCounter {
                     counter_type: CounterType::Plus1Plus1,
@@ -13170,36 +13262,67 @@ mod tests {
                     },
                     target: TargetFilter::SelfRef,
                 },
-                vec![TargetRef::Object(victim)],
+                vec![],
                 ObjectId(99),
                 PlayerId(0),
             );
-            rider.reads_chosen_group = reads;
+            rider.target_reads = origin;
             rider
         };
 
         // REACH GUARD: the magnitude really is a count-derived creature slot.
         assert!(effect_needs_target_creature_quantity_slot(
-            &rider(None).effect
+            &rider(TargetReadOrigin::OwnAnnouncement).effect
         ));
         assert!(
-            sub_ability_inherits_parent_creature_target_only(&tap, &rider(Some(ChosenGroupId(0)))),
-            "the linked reader must inherit its producer's target"
+            sub_ability_inherits_parent_creature_target_only(
+                &tap(),
+                &rider(TargetReadOrigin::ParentAnnouncement)
+            ),
+            "the parent-announcement rider must inherit its parent's target"
         );
         assert!(
-            !sub_ability_inherits_parent_creature_target_only(&tap, &rider(None)),
-            "an unlinked rider keeps its own count-derived slot"
-        );
-        assert!(
-            !sub_ability_inherits_parent_creature_target_only(&tap, &rider(Some(ChosenGroupId(1)))),
-            "a link to a different group is not this parent's target"
+            !sub_ability_inherits_parent_creature_target_only(
+                &tap(),
+                &rider(TargetReadOrigin::OwnAnnouncement)
+            ),
+            "the default origin keeps its own count-derived slot"
         );
 
-        tap.sub_ability = Some(Box::new(rider(Some(ChosenGroupId(0)))));
+        // tap(t0) -> rider(ParentAnnouncement) -> tap(t1): two announced targets.
+        let state = GameState::new_two_player(42);
+        let (t0, t1) = (ObjectId(77), ObjectId(78));
+        let mut chain = tap();
+        let mut rider_node = rider(TargetReadOrigin::ParentAnnouncement);
+        rider_node.sub_ability = Some(Box::new(tap()));
+        chain.sub_ability = Some(Box::new(rider_node));
         assert_eq!(
-            flatten_specified_targets_in_chain(&tap),
-            vec![TargetRef::Object(victim)],
-            "CR 608.2b: the reader's snapshot must not keep the ability alive"
+            minimum_targets_in_chain(&state, &chain),
+            2,
+            "CR 601.2c: the second tap below the inheriting rider still counts"
+        );
+        assign_targets_in_chain(
+            &state,
+            &mut chain,
+            &[TargetRef::Object(t0), TargetRef::Object(t1)],
+        )
+        .expect("both announced targets are consumed");
+        let rider_node = chain.sub_ability.as_deref().unwrap();
+        assert_eq!(chain.targets, vec![TargetRef::Object(t0)]);
+        assert_eq!(
+            rider_node.targets,
+            vec![TargetRef::Object(t0)],
+            "the rider snapshots its parent's target"
+        );
+        assert_eq!(
+            rider_node.sub_ability.as_deref().unwrap().targets,
+            vec![TargetRef::Object(t1)],
+            "the node below the rider receives its own announced target"
+        );
+        assert_eq!(
+            flatten_specified_targets_in_chain(&chain),
+            vec![TargetRef::Object(t0), TargetRef::Object(t1)],
+            "CR 608.2b: the rider's snapshot is not a specified target"
         );
     }
 

@@ -2960,10 +2960,11 @@ pub(super) enum ComparativePtGate {
 /// "that creature" reads `ObjectScope::Target` — the object target an earlier
 /// clause of the same ability declared (the same slot `TargetHasKeywordInstead`
 /// reads for the sibling "if that creature has <keyword>" gate).
-/// `antecedent_is_target` says whether the immediately preceding clause declares
-/// that target (the gate's producer, which the caller links to the gated clause
-/// through the chosen-group channel); without one the gate is `Unbound` and the
-/// caller fails closed.
+/// `antecedent_is_target` says whether the immediately preceding clause announced
+/// that target as its single object target (the gate's producer); the caller
+/// then marks the gated clause's `Target` reads as that announcement
+/// (`TargetReadOrigin::ParentAnnouncement`). Without one the gate is `Unbound`
+/// and the caller fails closed.
 pub(super) fn strip_target_comparative_pt_conditional(
     text: &str,
     antecedent_is_target: bool,

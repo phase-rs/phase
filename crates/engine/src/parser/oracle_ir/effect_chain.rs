@@ -17,7 +17,8 @@ use crate::types::ability::{
     ActivationManaPaymentRestriction, ActivationRestriction, ChoiceType, ControllerRef,
     CostReduction, DelayedTriggerCondition, Duration, Effect, ManaSpendPermission, MultiTargetSpec,
     OpponentMayScope, PlayerFilter, QuantityExpr, QuantityRef, ReturnResultReadSpec, RoundingMode,
-    SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetSelectionMode, UnlessPayModifier,
+    SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetReadOrigin, TargetSelectionMode,
+    UnlessPayModifier,
 };
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaExpiry;
@@ -878,6 +879,11 @@ pub(crate) struct ClauseIr {
     /// The exact choose instruction named by this selected-group consumer.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) reads_chosen_clause: Option<ClauseId>,
+    /// CR 115.1 + CR 608.2c: where this clause's `ObjectScope::Target` reads take
+    /// their object from. Written only by the comparative "that creature" gate
+    /// after it proves the immediately preceding clause announced the object.
+    #[serde(skip_serializing_if = "TargetReadOrigin::is_own")]
+    pub(crate) target_reads: TargetReadOrigin,
     /// The prior return instruction whose actual results a delayed clause names.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) reads_return_result: Option<(ClauseId, ReturnResultReadSpec)>,
@@ -1235,6 +1241,9 @@ impl ClauseIrBuilder {
         .declared_target_choice_timing(c.declared_target_choice_timing)
         .printed_color_choice(c.printed_color_choice)
         .push();
+        if let Some(absorbed) = self.clauses.last_mut() {
+            absorbed.target_reads = c.target_reads;
+        }
     }
 
     /// Consume the builder, yielding the source-ordered clause list.
@@ -1575,6 +1584,7 @@ impl ClauseDraft<'_> {
             id,
             declares_chosen_clause,
             reads_chosen_clause,
+            target_reads: TargetReadOrigin::OwnAnnouncement,
             reads_return_result,
             source,
             disposition: self.disposition,

@@ -144,6 +144,7 @@ mod tests {
             repeat_until: None,
             replacement_applied: Default::default(),
             sub_link: SubAbilityLink::ContinuationStep,
+            target_reads: Default::default(),
             sibling_condition: SiblingCondition::Dependent,
             modal: None,
             mode_abilities: vec![],

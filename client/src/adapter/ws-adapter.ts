@@ -210,6 +210,12 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 93 — ResolvedAbility.target_reads and AbilityDefinition.target_reads
+ *      (TargetReadOrigin) are serialized: a ParentAnnouncement instruction
+ *      reads the object its immediately preceding instruction announced
+ *      (CR 115.1 + CR 608.2c) and announces no target slot of its own. A v92
+ *      peer would default the field; the exact-match handshake refuses the
+ *      pairing. P2P moves in lockstep (wire 75); lobby messages are unchanged.
  * 92 — ResolvedAbility.parent_target_missing_reason is serialized and
  *      ParentTargetMissingReason gains RevealUntil (CR 701.20a + CR 603.12),
  *      the reveal-until whiff verdict read by the new
@@ -623,7 +629,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 92;
+export const PROTOCOL_VERSION = 93;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

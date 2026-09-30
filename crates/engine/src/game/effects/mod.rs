@@ -4881,6 +4881,9 @@ fn instruction_outlives_declined_gate(
         target_constraints,
         multi_target,
         force_block_attacker,
+        // Reads the object an earlier instruction announced, so it can name a
+        // gated result: only the default origin is unbound.
+        target_reads,
         // Walked by the caller.
         sub_ability: _,
         sub_link: _,
@@ -4954,7 +4957,8 @@ fn instruction_outlives_declined_gate(
         && target_chooser.is_none()
         && target_constraints.is_empty()
         && multi_target.is_none()
-        && force_block_attacker.is_none();
+        && force_block_attacker.is_none()
+        && *target_reads == crate::types::ability::TargetReadOrigin::OwnAnnouncement;
     unbound
         && duration
             .as_ref()

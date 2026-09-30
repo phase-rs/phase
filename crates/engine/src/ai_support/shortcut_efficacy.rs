@@ -663,6 +663,7 @@ fn ability_window_reach(def: &AbilityDefinition) -> WindowReach {
         forward_result: _,
         target_selection_mode: _,
         sub_link: _,
+        target_reads: _, // TargetReadOrigin: which announcement `Target` reads name
         sibling_condition: _,
         // Parser scratch, not runtime state: `parse_oracle_pipeline` settles every
         // deferred guard verdict before it hands a tree out, so this is `None` on

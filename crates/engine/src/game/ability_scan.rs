@@ -288,8 +288,9 @@ fn resolved_ability_axes(a: &ResolvedAbility, mode: ScanMode) -> Axes {
         chosen_players: _,               // concrete chosen player ids
         replacement_applied: _,          // replacement provenance set, no dynamic read
         sub_link: _,                     // SubAbilityLink kind tag
-        sibling_condition: _,            // SiblingCondition replication marker, no dynamic read
-        distribute: _, // announcement unit tag/string, no resolution-time dynamic read
+        target_reads: _, // TargetReadOrigin tag; `Target` reads are classified on condition/effect
+        sibling_condition: _, // SiblingCondition replication marker, no dynamic read
+        distribute: _,   // announcement unit tag/string, no resolution-time dynamic read
         parent_target_missing_reason: _, // seam flag
         activation_cost_reduction: _,
         activation_record: _,
@@ -5096,6 +5097,7 @@ fn ability_definition_axes(def: &AbilityDefinition, mode: ScanMode) -> Axes {
         forward_result: _,
         target_selection_mode: _,
         sub_link: _,
+        target_reads: _, // TargetReadOrigin tag; `Target` reads are classified on condition/effect
         iteration_kind_binding: _,
         sibling_condition: _,
         // Parser scratch, not runtime state: `parse_oracle_pipeline` settles every

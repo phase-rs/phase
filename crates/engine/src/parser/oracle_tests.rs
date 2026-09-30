@@ -25873,6 +25873,20 @@ fn assert_comparative_difference_chain(
         },
         "count must be the Difference of the gate's operands, on the source: {sub:#?}"
     );
+    assert_eq!(
+        sub.target_reads,
+        crate::types::ability::TargetReadOrigin::ParentAnnouncement,
+        "the gated clause's `Target` reads are the tap's announcement: {sub:#?}"
+    );
+    assert_eq!(
+        execute.target_reads,
+        crate::types::ability::TargetReadOrigin::OwnAnnouncement,
+        "the tap announces its own target: {execute:#?}"
+    );
+    assert!(
+        sub.reads_chosen_group.is_none() && execute.declares_chosen_group.is_none(),
+        "the gate must not ride the effect-population chosen-group channel: {execute:#?}"
+    );
 }
 
 /// CR 208.1 + CR 608.2c: Conformer Shuriken — "If that creature has greater
@@ -25949,11 +25963,11 @@ fn comparative_pt_gate_without_a_target_antecedent_fails_closed() {
 
 /// CR 115.1: a gate that names a NEW target ("if target creature has greater
 /// power than this creature") is not the "that creature" anaphor, so it is never
-/// linked to the tap's announced target. It must not come out as a
-/// chosen-group reader; whatever it lowers to, it keeps its own instance of
-/// "target" (or fails closed).
+/// marked as reading the tap's announcement. Whatever it lowers to, the rider
+/// exists and either keeps its own default-origin `Target` read or fails closed.
 #[test]
 fn comparative_gate_naming_a_new_target_is_not_linked_to_the_parent() {
+    use crate::types::ability::TargetReadOrigin;
     let r = parse(
         "Equipped creature has \"Whenever this creature attacks, tap target creature defending player controls. If target creature has greater power than this creature, put a number of +1/+1 counters on this creature equal to the difference.\"\nEquip {2}",
         "Test Shuriken",
@@ -25967,14 +25981,102 @@ fn comparative_gate_naming_a_new_target_is_not_linked_to_the_parent() {
         matches!(&*execute.effect, Effect::SetTapState { .. }),
         "reach guard: the tap clause parsed: {execute:#?}"
     );
-    fn any_group_reader(def: &AbilityDefinition) -> bool {
-        def.reads_chosen_group.is_some()
-            || def.sub_ability.as_deref().is_some_and(any_group_reader)
-            || def.else_ability.as_deref().is_some_and(any_group_reader)
+    // REACH GUARD: the rider after the tap exists.
+    let rider = execute
+        .sub_ability
+        .as_deref()
+        .unwrap_or_else(|| panic!("the rider must be represented: {execute:#?}"));
+    assert!(
+        rider.target_reads == TargetReadOrigin::OwnAnnouncement
+            && matches!(
+                &*rider.effect,
+                Effect::Unimplemented { .. } | Effect::PutCounter { .. }
+            ),
+        "a new-target gate keeps its own announcement or fails closed: {rider:#?}"
+    );
+    fn any_parent_announcement(def: &AbilityDefinition) -> bool {
+        def.target_reads == TargetReadOrigin::ParentAnnouncement
+            || def
+                .sub_ability
+                .as_deref()
+                .is_some_and(any_parent_announcement)
+            || def
+                .else_ability
+                .as_deref()
+                .is_some_and(any_parent_announcement)
     }
     assert!(
-        !any_group_reader(execute) && execute.declares_chosen_group.is_none(),
-        "a new-target gate must not be linked to the tap's target: {execute:#?}"
+        !any_parent_announcement(execute),
+        "a new-target gate must not be marked as reading the tap's target: {execute:#?}"
+    );
+}
+
+/// CR 115.1 + CR 608.2c + CR 115.10a: "that creature" names the ONE object the
+/// immediately preceding instruction announced. A mass producer ("exile all
+/// creatures", "tap all creatures"), an intervening instruction, and a compound
+/// producer have no such single immediate antecedent, so each fails closed.
+/// Control: the printed immediate single-target tap binds.
+#[test]
+fn comparative_gate_after_a_non_announcing_producer_fails_closed() {
+    let shape = |head: &str| {
+        format!(
+            "Equipped creature has \"Whenever this creature attacks, {head} If that creature has greater power than this creature, put a number of +1/+1 counters on this creature equal to the difference.\"\nEquip {{2}}"
+        )
+    };
+    for head in [
+        "exile all creatures.",
+        "tap all creatures defending player controls.",
+        "tap target creature defending player controls. You draw a card.",
+        "tap target creature defending player controls and you draw a card.",
+    ] {
+        let r = parse(
+            &shape(head),
+            "Test Shuriken",
+            &[],
+            &["Artifact"],
+            &["Equipment"],
+        );
+        assert!(
+            has_unimplemented_mentioning(&r, "comparative_pt_anaphor_unbound"),
+            "{head}: no single immediate announced antecedent, must fail closed: {r:#?}"
+        );
+    }
+    let control = parse(
+        &shape("tap target creature defending player controls."),
+        "Test Shuriken",
+        &[],
+        &["Artifact"],
+        &["Equipment"],
+    );
+    assert_comparative_difference_chain(
+        &control,
+        |scope| QuantityRef::Power { scope },
+        Comparator::GT,
+    );
+}
+
+/// CR 115.1 + CR 608.2c: a rider that reads its parent's announcement through
+/// the gate AND announces a target of its own ("…put … counters on target
+/// creature you control equal to the difference") would have one `Target` scope
+/// naming two objects; it fails closed. Control: the printed rider binds.
+#[test]
+fn rider_declaring_its_own_target_fails_closed() {
+    let r = parse(
+        "Equipped creature has \"Whenever this creature attacks, tap target creature defending player controls. If that creature has greater power than this creature, put a number of +1/+1 counters on target creature you control equal to the difference.\"\nEquip {2}",
+        "Test Shuriken",
+        &[],
+        &["Artifact"],
+        &["Equipment"],
+    );
+    let execute = granted_trigger_execute(&r);
+    // REACH GUARD: the root tap parsed.
+    assert!(
+        matches!(&*execute.effect, Effect::SetTapState { .. }),
+        "reach guard: the tap clause parsed: {execute:#?}"
+    );
+    assert!(
+        has_unimplemented_mentioning(&r, "comparative_pt_rider_declares_target"),
+        "a rider with its own target must fail closed: {r:#?}"
     );
 }
 

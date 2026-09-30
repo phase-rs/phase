@@ -86,7 +86,6 @@ expression: "&lowered"
                   "type": "Tap"
                 }
               },
-              "declares_chosen_group": 0,
               "cost": null,
               "sub_ability": {
                 "kind": "Spell",
@@ -118,7 +117,6 @@ expression: "&lowered"
                     "type": "SelfRef"
                   }
                 },
-                "reads_chosen_group": 0,
                 "cost": null,
                 "sub_ability": null,
                 "duration": null,
@@ -149,7 +147,8 @@ expression: "&lowered"
                 "optional_targeting": false,
                 "optional": false,
                 "forward_result": false,
-                "sub_link": "SequentialSibling"
+                "sub_link": "SequentialSibling",
+                "target_reads": "ParentAnnouncement"
               },
               "duration": null,
               "description": null,

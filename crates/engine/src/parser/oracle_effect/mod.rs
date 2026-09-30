@@ -126,10 +126,10 @@ use crate::types::ability::{
     ReplacementDefinition, ResolutionCastWindow, RestrictionExpiry, RestrictionPlayerScope,
     RevealUntilDisposition, RoundingMode, SharedQuality, SharedQualityRelation, SiblingCondition,
     SkipScope, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, StepSkipTarget,
-    SubAbilityLink, TapStateChange, TargetFilter, TargetSelectionMode, ThisWayCause,
-    TrackedAnaphorSource, TriggerCondition, TriggerDefinition, TurnGate, TypeFilter, TypedFilter,
-    UnlessPayModifier, UnloweredGuard, UntilCondition, VoteSubject, WheneverEventExpiry,
-    ZoneChoiceCandidateSource, ZoneChoiceChooser, ZoneOwner,
+    SubAbilityLink, TapStateChange, TargetFilter, TargetReadOrigin, TargetSelectionMode,
+    ThisWayCause, TrackedAnaphorSource, TriggerCondition, TriggerDefinition, TurnGate, TypeFilter,
+    TypedFilter, UnlessPayModifier, UnloweredGuard, UntilCondition, VoteSubject,
+    WheneverEventExpiry, ZoneChoiceCandidateSource, ZoneChoiceChooser, ZoneOwner,
 };
 // `DoubleTarget` has no production use in this module since the counter-doubling
 // discriminator moved to `Effect::is_counter_multiplication()`; the child
@@ -24464,7 +24464,32 @@ fn chain_prior_chosen_target(clauses: &[ClauseIr]) -> Option<&TargetFilter> {
 /// `lower::rekey_counter_slot_in_chain` must re-key to `Some(0)` precisely
 /// because its condition node has its own local target.
 fn chain_declared_object_target(clauses: &[ClauseIr]) -> Option<&TargetFilter> {
-    for prev in clauses.iter().rev() {
+    chain_declared_object_target_clause(clauses).map(|(_, filter)| filter)
+}
+
+/// CR 115.1: does this clause announce a target of its OWN — an instance of the
+/// word "target" in its effect, its compound remainder, or a multi-target spec?
+/// Context references (`SelfRef`, `ParentTarget`, …) announce nothing.
+fn clause_announces_own_target(clause: &ClauseIr) -> bool {
+    clause.multi_target.is_some()
+        || clause.parsed.multi_target.is_some()
+        || triggers::extract_target_filter_from_effect(&clause.parsed.effect).is_some()
+        || std::iter::successors(clause.parsed.sub_ability.as_deref(), |def| {
+            def.sub_ability.as_deref()
+        })
+        .any(|def| {
+            def.multi_target.is_some()
+                || triggers::extract_target_filter_from_effect(&def.effect).is_some()
+        })
+}
+
+/// [`chain_declared_object_target`], also naming WHICH clause declared the
+/// antecedent (its index in `clauses`). Same walk, same exclusions: the only
+/// difference is that the declaring clause's position is returned alongside the
+/// filter, for a caller that must know the antecedent is the IMMEDIATELY
+/// preceding instruction (the comparative "that creature" gate).
+fn chain_declared_object_target_clause(clauses: &[ClauseIr]) -> Option<(usize, &TargetFilter)> {
+    for (index, prev) in clauses.iter().enumerate().rev() {
         // CR 608.2c + CR 118.12 / CR 603.12: an affirmative "if you do" / "when you do" gate decides whether its
         // instruction happens, not what that instruction declared, so its declared
         // target stays the nearest antecedent of a later "that creature" (Magitek
@@ -24486,7 +24511,7 @@ fn chain_declared_object_target(clauses: &[ClauseIr]) -> Option<&TargetFilter> {
             {
                 return None
             }
-            Some(t @ TargetFilter::Typed(_)) if !t.is_player_scope() => return Some(t),
+            Some(t @ TargetFilter::Typed(_)) if !t.is_player_scope() => return Some((index, t)),
             Some(TargetFilter::Typed(_)) => return None,
             // CR 608.2c: an earlier anaphor already bound to the declared target
             // ("That land becomes a 0/0 Elemental creature") names the same object,
@@ -24509,7 +24534,7 @@ fn chain_declared_object_target(clauses: &[ClauseIr]) -> Option<&TargetFilter> {
                     def.sub_ability.as_deref()
                 })
                 .filter_map(|def| match def.effect.target_filter() {
-                    Some(t @ TargetFilter::Typed(_)) if !t.is_player_scope() => Some(t),
+                    Some(t @ TargetFilter::Typed(_)) if !t.is_player_scope() => Some((index, t)),
                     _ => None,
                 })
                 .last();
@@ -39763,14 +39788,22 @@ pub(crate) fn parse_effect_chain_ir(
             && turn_cond.is_none()
         {
             // CR 115.1 + CR 608.2c: "that creature" names the object the
-            // immediately preceding instruction targeted. That clause is recorded
-            // as the gate's producer so the gated clause reads exactly its
-            // announced target (chosen-group link) instead of declaring a new one.
-            let producer = builder
-                .clauses()
-                .len()
-                .checked_sub(1)
-                .filter(|&index| has_typed_target(&builder.clauses()[index].parsed.effect));
+            // immediately preceding instruction announced as its one target. The
+            // antecedent must be exactly that instruction — the same walk and
+            // exclusions as every other "that creature" anaphor (no mass,
+            // resolution-chosen, private-zone or player producer; no intervening
+            // conditional) — with a single announced object and no compound
+            // remainder, so the lowered gated clause's runtime parent IS the
+            // announcing node.
+            let producer = chain_declared_object_target_clause(builder.clauses())
+                .map(|(index, _)| index)
+                .filter(|&index| {
+                    let clause = &builder.clauses()[index];
+                    index + 1 == builder.clauses().len()
+                        && clause.multi_target.is_none()
+                        && clause.parsed.multi_target.is_none()
+                        && clause.parsed.sub_ability.is_none()
+                });
             match strip_target_comparative_pt_conditional(&text, producer.is_some()) {
                 ComparativePtGate::Parsed { condition, body } => {
                     comparative_gate_producer = producer;
@@ -42538,16 +42571,24 @@ pub(crate) fn parse_effect_chain_ir(
             .printed_color_choice(chunk_ctx.pending_printed_color_choice.take())
             .push();
 
-        // CR 115.1 + CR 608.2c: record the comparative gate's antecedent as a
-        // typed chosen-group link — the producer declares its announced target as
-        // a group and the gated clause reads exactly that group. The runtime reads
-        // this link (not a scope coincidence) to reuse the producer's target
-        // rather than surface a second "target creature" slot.
-        if let Some(producer_index) = comparative_gate_producer {
-            let producer = &mut builder.clauses_mut()[producer_index];
-            let group = *producer.declares_chosen_clause.get_or_insert(producer.id);
+        // CR 115.1 + CR 608.2c: the comparative gate's "that creature" reads the
+        // single object the immediately preceding instruction announced
+        // (`TargetReadOrigin::ParentAnnouncement`), so this instruction declares
+        // no target of its own. The origin is per INSTRUCTION — every `Target`
+        // read on it shares it — so an instruction that would ALSO announce its
+        // own object target ("…put counters on target creature you control")
+        // would have one scope naming two objects. That mixed shape is refused
+        // rather than represented.
+        if comparative_gate_producer.is_some() {
             if let Some(reader) = builder.last_mut() {
-                reader.reads_chosen_clause = Some(group);
+                if clause_announces_own_target(reader) {
+                    reader.parsed = parsed_clause(Effect::unimplemented(
+                        "comparative_pt_rider_declares_target",
+                        normalized_text,
+                    ));
+                } else {
+                    reader.target_reads = TargetReadOrigin::ParentAnnouncement;
+                }
             }
         }
 
