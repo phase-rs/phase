@@ -40,6 +40,8 @@ import {
   type HostSessionOwner,
 } from "./wasm-adapter";
 import {
+  acknowledgeFullTerminalDelivery,
+  bootstrapFullTerminalDelivery,
   WebSocketAdapter,
   type NativeAiSeat,
   type NativeSessionAttachment,
@@ -59,9 +61,15 @@ import type {
 } from "../multiplayer/seatTypes";
 import type { BrokerClient } from "../services/brokerClient";
 import type { FullSessionKey } from "../services/multiplayerSession";
+import type { FullTerminalDelivery } from "../services/fullTerminalResult";
 import {
+  clearFullTerminalCleanupStrict,
   clearP2PHostSession,
   clearGame,
+  clearGameStrict,
+  saveFullTerminalCleanupStrict,
+  type FullTerminalCleanupObligation,
+  type FullTerminalCleanupDelivery,
   type NativeAiDriverFault,
   type NativeP2PServerSession,
   type PersistedP2PHostSession,
@@ -218,6 +226,7 @@ type NativeViewerUpdate = {
   snapshot: EngineSnapshot;
   events: GameEvent[];
   logEntries?: GameLogEntry[];
+  revision: number;
 };
 
 /**
@@ -229,6 +238,7 @@ class NativeP2PBridge {
   private readonly clients = new Map<PlayerId, WebSocketAdapter>();
   private readonly playerTokens = new Map<PlayerId, string>();
   private readonly latestViews = new Map<PlayerId, NativeViewerUpdate>();
+  private readonly terminalDeliveries = new Map<PlayerId, FullTerminalDelivery>();
   private readonly pendingViews = new Map<number, Map<PlayerId, NativeViewerUpdate>>();
   private readonly startWaiters: Array<(update: NativeViewerUpdate) => void> = [];
   /** Preserve the server's revision order while asynchronous PeerJS frame
@@ -256,17 +266,33 @@ class NativeP2PBridge {
     if (this.resumeSession) {
       this.gameCode = this.resumeSession.gameCode;
       this.fullKey = this.resumeSession.fullKey;
+      for (const [pidText, token] of Object.entries(this.resumeSession.playerTokens)) {
+        this.playerTokens.set(Number(pidText), token);
+      }
       const hostToken = this.resumeSession.playerTokens[0];
       if (!hostToken) {
         throw new AdapterError("P2P_ERROR", "Native resume is missing the host token", false);
       }
-      const hostAttachment = await this.reconnectClient(0, hostToken);
-      for (const [pidText, token] of Object.entries(this.resumeSession.playerTokens)) {
-        const playerId = Number(pidText);
-        if (playerId === 0) continue;
-        await this.reconnectClient(playerId, token);
+      try {
+        const hostAttachment = await this.reconnectClient(0, hostToken);
+        for (const [pidText, token] of Object.entries(this.resumeSession.playerTokens)) {
+          const playerId = Number(pidText);
+          if (playerId === 0) continue;
+          await this.reconnectClient(playerId, token);
+        }
+        return hostAttachment;
+      } catch (reconnectError) {
+        // A terminal Full session may already have been retired. Only then
+        // bootstrap the existing recipient-bound terminal rows; live resumes
+        // take the ordinary same-seat reconnect path without a second request.
+        if (!(await this.restoreTerminalViews())) throw reconnectError;
+        return {
+          gameCode: this.gameCode,
+          playerId: 0,
+          playerToken: hostToken,
+          fullKey: this.fullKey,
+        };
       }
-      return hostAttachment;
     }
     const host = new WebSocketAdapter(
       "native-engine://phase-server",
@@ -281,6 +307,7 @@ class NativeP2PBridge {
           kind: "host",
           socketFactory: () => new NativeEngineSocket(),
           expectedServerVersion: this.options.expectedServerVersion,
+          callerManagedTerminalDelivery: true,
           playerCount: this.playerCount,
           aiSeats,
           formatConfig: this.formatConfig,
@@ -322,6 +349,7 @@ class NativeP2PBridge {
           kind: "guest",
           socketFactory: () => new NativeEngineSocket(),
           expectedServerVersion: this.options.expectedServerVersion,
+          callerManagedTerminalDelivery: true,
         },
       },
     );
@@ -380,15 +408,21 @@ class NativeP2PBridge {
   }
 
   async getState(): Promise<GameState> {
-    return this.clientFor(0).getState();
+    return this.clients.get(0)?.getState()
+      ?? this.latestViews.get(0)?.snapshot.state
+      ?? Promise.reject(new AdapterError("P2P_ERROR", "Native host state is unavailable", true));
   }
 
   async getLegalActions(): Promise<LegalActionsResult> {
-    return this.clientFor(0).getLegalActions();
+    return this.clients.get(0)?.getLegalActions()
+      ?? this.latestViews.get(0)?.snapshot.legalResult
+      ?? Promise.reject(new AdapterError("P2P_ERROR", "Native host actions are unavailable", true));
   }
 
   async getSnapshot(): Promise<EngineSnapshot> {
-    return this.clientFor(0).getSnapshot();
+    return this.clients.get(0)?.getSnapshot()
+      ?? this.latestViews.get(0)?.snapshot
+      ?? Promise.reject(new AdapterError("P2P_ERROR", "Native host snapshot is unavailable", true));
   }
 
   viewerSnapshot(playerId: PlayerId): EngineSnapshot {
@@ -430,6 +464,18 @@ class NativeP2PBridge {
         this.playerTokens.set(event.attachment.playerId, event.attachment.playerToken);
         return;
       }
+      if (event.type === "terminalDelivery") {
+        const playerId = client.playerId;
+        if (
+          playerId !== null
+          && this.fullKey
+          && event.delivery.key.game_code === this.fullKey.game_code
+          && event.delivery.key.generation === this.fullKey.generation
+        ) {
+          this.terminalDeliveries.set(playerId, event.delivery);
+        }
+        return;
+      }
       if (event.type === "aiDriverFault") {
         if (this.deliveredFaultIds.has(event.id)) return;
         this.pendingFaults.set(event.id, { id: event.id, revision: event.revision, message: event.message });
@@ -444,6 +490,7 @@ class NativeP2PBridge {
         snapshot: event.snapshot,
         events: event.events,
         logEntries: event.logEntries,
+        revision,
       };
       this.latestViews.set(playerId, update);
       const views = this.pendingViews.get(revision) ?? new Map<PlayerId, NativeViewerUpdate>();
@@ -495,6 +542,196 @@ class NativeP2PBridge {
     };
   }
 
+  viewerUpdates(): Map<PlayerId, NativeViewerUpdate> {
+    return new Map(this.latestViews);
+  }
+
+  playerIds(): PlayerId[] {
+    return [...this.playerTokens.keys()];
+  }
+
+  async terminalResume(): Promise<{
+    revision: number;
+    snapshot: EngineSnapshot;
+    display: FullTerminalDelivery["display"];
+  } | null> {
+    const deliveries = await this.readTerminalDeliveries();
+    if (!deliveries) return null;
+    const host = this.latestViews.get(0);
+    const display = deliveries.get(0)?.display;
+    if (!host || !display || host.snapshot.state.waiting_for.type !== "GameOver") return null;
+    return { revision: host.revision, snapshot: host.snapshot, display };
+  }
+
+  async terminalCleanupAuthority(
+    revision: number,
+  ): Promise<{ fullKey: FullSessionKey; terminalRevision: number; deliveries: FullTerminalCleanupDelivery[] }> {
+    const deliveries = await this.readTerminalDeliveries();
+    if (!deliveries || !this.fullKey) {
+      throw new Error("Full terminal cleanup authority is unavailable");
+    }
+    return {
+      fullKey: { ...this.fullKey },
+      terminalRevision: revision,
+      deliveries: [...deliveries].map(([recipient, delivery]) => {
+        if (delivery.terminalRevision !== revision || !delivery.finalView) {
+          throw new Error("Full terminal cleanup authority is incomplete");
+        }
+        return {
+          recipient,
+          deliveryId: delivery.deliveryId,
+          credential: delivery.credential,
+        };
+      }),
+    };
+  }
+
+  async acknowledgeTerminalCleanup(obligation: FullTerminalCleanupObligation): Promise<void> {
+    if (
+      !this.fullKey
+      || obligation.fullKey.game_code !== this.fullKey.game_code
+      || obligation.fullKey.generation !== this.fullKey.generation
+      || obligation.terminalRevision < 0
+    ) {
+      throw new Error("Full terminal cleanup obligation does not match this session");
+    }
+    for (const delivery of obligation.deliveries) {
+      if (!this.playerTokens.has(delivery.recipient)) {
+        throw new Error("Full terminal cleanup recipient is no longer bound to this session");
+      }
+      const cached = this.terminalDeliveries.get(delivery.recipient);
+      if (
+        cached
+        && (
+          cached.key.game_code !== obligation.fullKey.game_code
+          || cached.key.generation !== obligation.fullKey.generation
+          || cached.terminalRevision !== obligation.terminalRevision
+          || cached.deliveryId !== delivery.deliveryId
+          || cached.credential !== delivery.credential
+        )
+      ) {
+        throw new Error("Full terminal cleanup recipient binding changed");
+      }
+      if (!(await acknowledgeFullTerminalDelivery(
+        "native-engine://phase-server",
+        delivery.deliveryId,
+        delivery.credential,
+        () => new NativeEngineSocket(),
+      ))) {
+        throw new Error("Full terminal delivery acknowledgement was rejected");
+      }
+    }
+  }
+
+  async terminalFinalViews(revision: number): Promise<Map<PlayerId, GameState>> {
+    const deliveries = await this.readTerminalDeliveries();
+    if (!deliveries) throw new AdapterError("P2P_ERROR", "Full terminal authority is unavailable", true);
+    const states = new Map<PlayerId, GameState>();
+    for (const [playerId, delivery] of deliveries) {
+      const current = this.latestViews.get(playerId);
+      if (
+        delivery.terminalRevision !== revision
+        || !delivery.finalView
+        || !current
+        || current.revision !== revision
+        || (await p2pFinalStateCommitment(current.snapshot.state)
+          !== await p2pFinalStateCommitment(delivery.finalView))
+      ) {
+        throw new AdapterError("P2P_ERROR", `Full terminal view does not match seat ${playerId}`, false);
+      }
+      states.set(playerId, delivery.finalView);
+    }
+    return states;
+  }
+
+  terminalDisplay(): FullTerminalDelivery["display"] | null {
+    return this.terminalDeliveries.get(0)?.display ?? null;
+  }
+
+  async acknowledgeTerminalDeliveries(revision: number): Promise<void> {
+    const deliveries = await this.readTerminalDeliveries();
+    if (!deliveries) throw new Error("Full terminal delivery is unavailable for acknowledgement");
+    for (const delivery of deliveries.values()) {
+      if (delivery.terminalRevision !== revision) throw new Error("Full terminal revision changed before acknowledgement");
+      if (!(await acknowledgeFullTerminalDelivery(
+        "native-engine://phase-server",
+        delivery.deliveryId,
+        delivery.credential,
+        () => new NativeEngineSocket(),
+      ))) {
+        throw new Error("Full terminal delivery acknowledgement was rejected");
+      }
+    }
+  }
+
+  private async restoreTerminalViews(): Promise<boolean> {
+    const deliveries = await this.readTerminalDeliveries();
+    if (!deliveries) return false;
+    const first = deliveries.values().next().value as FullTerminalDelivery | undefined;
+    if (!first?.finalView) return false;
+    for (const client of this.clients.values()) client.dispose();
+    this.clients.clear();
+    const revision = first.terminalRevision;
+    for (const [playerId, delivery] of deliveries) {
+      if (
+        delivery.terminalRevision !== revision
+        || !delivery.finalView
+        || delivery.finalView.waiting_for.type !== "GameOver"
+      ) {
+        throw new AdapterError("P2P_ERROR", `Full terminal view is invalid for seat ${playerId}`, false);
+      }
+      this.latestViews.set(playerId, {
+        snapshot: {
+          state: delivery.finalView,
+          legalResult: EMPTY_LEGAL_ACTIONS,
+          seq: nextSnapshotSeq(),
+        },
+        events: [],
+        revision,
+      });
+    }
+    return true;
+  }
+
+  private async readTerminalDeliveries(): Promise<Map<PlayerId, FullTerminalDelivery> | null> {
+    if (!this.fullKey || this.playerTokens.size === 0) return null;
+    const received = await Promise.all([...this.playerTokens].map(async ([playerId, token]) => {
+      const cached = this.terminalDeliveries.get(playerId);
+      if (cached) return [playerId, cached] as const;
+      const delivery = await bootstrapFullTerminalDelivery(
+        "native-engine://phase-server",
+        this.fullKey!,
+        token,
+        crypto.randomUUID(),
+        () => new NativeEngineSocket(),
+      );
+      return delivery ? [playerId, delivery] as const : null;
+    }));
+    const found = received.filter((entry): entry is readonly [PlayerId, FullTerminalDelivery] => entry !== null);
+    if (found.length === 0) return null;
+    if (found.length !== this.playerTokens.size) {
+      throw new AdapterError("P2P_ERROR", "Full terminal authority is incomplete across native seats", true);
+    }
+    const deliveries = new Map<PlayerId, FullTerminalDelivery>(found);
+    const first = deliveries.values().next().value as FullTerminalDelivery | undefined;
+    if (!first) return null;
+    for (const [playerId, delivery] of deliveries) {
+      if (
+        delivery.key.game_code !== this.fullKey.game_code
+        || delivery.key.generation !== this.fullKey.generation
+        || delivery.terminalRevision !== first.terminalRevision
+        || !delivery.finalView
+        || delivery.finalView.waiting_for.type !== "GameOver"
+        || delivery.display.winner !== first.display.winner
+        || delivery.display.reason !== first.display.reason
+      ) {
+        throw new AdapterError("P2P_ERROR", `Full terminal authority is invalid for seat ${playerId}`, false);
+      }
+    }
+    for (const [playerId, delivery] of deliveries) this.terminalDeliveries.set(playerId, delivery);
+    return deliveries;
+  }
+
   private async reconnectClient(
     playerId: PlayerId,
     playerToken: string,
@@ -515,6 +752,7 @@ class NativeP2PBridge {
           kind: "reconnect",
           socketFactory: () => new NativeEngineSocket(),
           expectedServerVersion: this.options.expectedServerVersion,
+          callerManagedTerminalDelivery: true,
           gameCode: this.gameCode,
           playerId,
           playerToken,
@@ -522,12 +760,35 @@ class NativeP2PBridge {
         },
       },
     );
+    const previous = this.clients.get(playerId);
     const attachment = await this.attachClient(client);
     if (attachment.playerId !== playerId) {
       client.dispose();
       throw new AdapterError("P2P_ERROR", "Native reconnect returned the wrong player seat", false);
     }
+    if (previous && previous !== client) previous.dispose();
     return attachment;
+  }
+
+  /** Freshly replaces this Full seat's sender before reading Concede reality. */
+  async reconcileConcede(playerId: PlayerId): Promise<NativeViewerUpdate> {
+    const token = this.playerTokens.get(playerId);
+    if (!token) throw new AdapterError("P2P_ERROR", `No native token for seat ${playerId}`, false);
+    try {
+      await this.reconnectClient(playerId, token);
+      await this.revisionQueue;
+    } catch (reconnectError) {
+      if (!(await this.restoreTerminalViews())) throw reconnectError;
+    }
+    let update = this.latestViews.get(playerId);
+    if (update?.snapshot.state.waiting_for.type === "GameOver") {
+      if (!(await this.restoreTerminalViews())) {
+        throw new AdapterError("P2P_ERROR", "Terminal Concede has no retained Full final view", true);
+      }
+      update = this.latestViews.get(playerId);
+    }
+    if (!update) throw new AdapterError("P2P_ERROR", `No authoritative state for seat ${playerId}`, true);
+    return update;
   }
 
   private clientFor(playerId: PlayerId): WebSocketAdapter {
@@ -909,6 +1170,14 @@ export class P2PHostAdapter implements EngineAdapter {
    * make a reload retain a connection that cannot exist any more.
    */
   private pendingReconnectSessions = new Map<PlayerId, PeerSession>();
+  private pendingTerminalReconnectAcks = new Map<PlayerId, {
+    session: PeerSession;
+    revision: number;
+    snapshot: EngineSnapshot;
+    ready: boolean;
+    stateAckReceived: boolean;
+    finishing: boolean;
+  }>();
   /** Native snapshots become reconnectable only after their matching server
    * revision has completed the PeerJS fan-out. */
   private nativeDeliveredViews = new Map<PlayerId, { revision: number; snapshot: EngineSnapshot }>();
@@ -939,6 +1208,9 @@ export class P2PHostAdapter implements EngineAdapter {
   private eliminatedSeats = new Set<PlayerId>();
   // Temporary admission fence, never persisted as gameplay elimination.
   private concedingSeats = new Set<PlayerId>();
+  // A later explicit departure request must recheck Full authority before it
+  // can submit another Concede after an unresolved transport outcome.
+  private uncertainConcedeSeats = new Set<PlayerId>();
   private gameRunState: GameRunState = "running";
   /** Monotonic authority revision for WASM hosts; native hosts replace this
    * with the local phase-server's revision before fan-out. */
@@ -981,10 +1253,18 @@ export class P2PHostAdapter implements EngineAdapter {
    * recorded delivery silently undid it.
    */
   private terminalDelivered = new Set<PlayerId>();
+  private nativeTerminalStateAcked = new Set<PlayerId>();
+  private nativeTerminalAckReady = false;
+  private nativeTerminalPersistenceClearing = false;
+  private nativeTerminalPersistenceCleared = false;
+  private nativeTerminalAcknowledged = false;
+  private nativeTerminalAckPromise: Promise<void> | null = null;
   private redeliveryTimer: ReturnType<typeof setInterval> | null = null;
   /** First committed terminal statement fences every subsequent action and
    * reconnect. Its id is immutable for this adapter incarnation. */
   private terminalResult: P2PTerminalResult | null = null;
+  /** Durable local terminal statement, supplied only as transient native-resume input. */
+  private resumeTerminalResult: P2PTerminalResult | null = null;
   /** Native AI faults are terminal and must also be replayed to a guest that
    * reconnects after the live PeerJS fan-out completed. */
   private nativeAiDriverFault: NativeAiDriverFault | null = null;
@@ -1080,7 +1360,11 @@ export class P2PHostAdapter implements EngineAdapter {
       gameId: string;
       roomCode: string;
       hostDisplayName?: string;
-      resumeData?: { state?: PersistedGameState; session: PersistedP2PHostSession };
+      resumeData?: {
+        state?: PersistedGameState;
+        session: PersistedP2PHostSession;
+        terminalResult?: P2PTerminalResult;
+      };
     },
     native?: NativeP2PHostOptions,
     private readonly boundMatchConcede?: BoundP2PMatchConcede,
@@ -1111,10 +1395,18 @@ export class P2PHostAdapter implements EngineAdapter {
 
     if (persistence?.resumeData) {
       this.resumeGameState = persistence.resumeData.state ?? null;
+      this.resumeTerminalResult = persistence.resumeData.terminalResult ?? null;
       this.rehydrateFromPersistedSession(persistence.resumeData.session);
       this.pregameSeatView = seatStateToView(this.pregameSeatState);
     }
     const nativeResume = persistence?.resumeData?.session.nativeSession;
+    if (this.resumeTerminalResult && !nativeResume) {
+      throw new AdapterError(
+        "P2P_ERROR",
+        "A retained terminal result requires its native Full resume session",
+        false,
+      );
+    }
     if (native && persistence?.resumeData && !nativeResume) {
       throw new AdapterError(
         "P2P_ERROR",
@@ -1238,6 +1530,27 @@ export class P2PHostAdapter implements EngineAdapter {
     this.disconnectedSeats.set(pid, { disconnectedAt: Date.now(), timer: null });
   }
 
+  /** Product elimination is a cache of the engine's public authority state.
+   * Native resume corrects both stale directions while leaving token denial
+   * independent, so a kicked live seat stays denied without being eliminated. */
+  private reconcileEliminatedSeats(snapshot: EngineSnapshot): void {
+    const authoritative = new Set(snapshot.state.eliminated_players ?? []);
+    for (const pid of this.eliminatedSeats) {
+      if (!authoritative.has(pid)) this.eliminatedSeats.delete(pid);
+    }
+    for (const pid of authoritative) this.eliminatedSeats.add(pid);
+    for (const pid of this.playerTokens.keys()) {
+      if (pid === 0) continue;
+      if (authoritative.has(pid)) {
+        const grace = this.disconnectedSeats.get(pid);
+        if (grace?.timer !== null && grace?.timer !== undefined) clearTimeout(grace.timer);
+        this.disconnectedSeats.delete(pid);
+      } else if (!this.disconnectedSeats.has(pid) && !this.guestSessions.has(pid)) {
+        this.armResumeGrace(pid);
+      }
+    }
+  }
+
   /**
    * Build a persisted snapshot from the current in-memory adapter
    * state. Returns null when persistence isn't configured (tests,
@@ -1334,6 +1647,7 @@ export class P2PHostAdapter implements EngineAdapter {
   private saveSession(): void {
     if (!this.ownsAuthority()) return;
     if (!this.gameId) return;
+    if (this.nativeTerminalPersistenceClearing || this.nativeTerminalPersistenceCleared) return;
     const snapshot = this.buildPersistedSession();
     if (!snapshot) return;
     void saveP2PHostSession(this.gameId, snapshot);
@@ -1794,6 +2108,17 @@ export class P2PHostAdapter implements EngineAdapter {
       if (this.nativeBridge) {
         try {
           await this.nativeBridge.initializeHost([]);
+          if (this.isResume && this.gameStarted) {
+            const snapshot = await this.nativeBridge.getSnapshot();
+            this.reconcileEliminatedSeats(snapshot);
+            for (const [playerId, update] of this.nativeBridge.viewerUpdates()) {
+              this.nativeDeliveredViews.set(playerId, { revision: update.revision, snapshot: update.snapshot });
+              this.authoritativeRevision = Math.max(this.authoritativeRevision, update.revision);
+            }
+            this.resumeGameState = null;
+          } else {
+            this.nativeTerminalAckReady = true;
+          }
           this.saveSession();
         } catch (err) {
           if (this.isResume) {
@@ -1819,6 +2144,49 @@ export class P2PHostAdapter implements EngineAdapter {
       // nothing has been claimed yet, so there is nothing to undo.
       if (this.disposed) await this.bailDisposed(false, "initialization");
       this.startRedeliverySweep();
+      if (this.nativeBridge && this.isResume && this.gameStarted) {
+        const snapshot = await this.nativeBridge.getSnapshot();
+        if (snapshot.state.waiting_for.type === "GameOver") {
+          this.gameRunState = "terminal";
+          this.gameStarted = true;
+          this.pregameSeatState.gameStarted = true;
+          const terminalResume = await this.nativeBridge.terminalResume();
+          if (this.resumeTerminalResult) {
+            const retained = this.resumeTerminalResult;
+            const finalView = terminalResume?.snapshot.state;
+            const finalRevision = terminalResume?.revision;
+            const display = terminalResume?.display;
+            if (
+              !terminalResume
+              || !isValidP2PTerminalResult(retained)
+              || retained.key !== this.sessionKey
+              || retained.recipient !== 0
+              || retained.revision !== finalRevision
+              || !display
+              || retained.display.winner !== display.winner
+              || retained.display.reason !== display.reason
+              || !finalView
+              || (await p2pFinalStateCommitment(finalView)) !== retained.finalStateCommitment
+            ) {
+              throw new AdapterError(
+                "P2P_ERROR",
+                "Retained P2P terminal result does not match Full final authority",
+                false,
+              );
+            }
+            this.terminalResult = retained;
+            this.emit({ type: "terminalResult", result: retained });
+          }
+          if (!(await this.commitTerminalIfComplete(
+            terminalResume?.snapshot ?? snapshot,
+            terminalResume?.revision ?? this.authoritativeRevision,
+          ))) {
+            throw new AdapterError("P2P_ERROR", "Failed to retain resumed native terminal result", false);
+          }
+        }
+        this.nativeTerminalAckReady = true;
+        await this.tryAcknowledgeNativeTerminal();
+      }
       // Resume path: load the persisted GameState with a fresh RNG seed
       // and atomic multiplayer-flag claim. `resumeMultiplayerHostState`
       // mirrors server-core's `from_persisted` pattern, and
@@ -1826,7 +2194,7 @@ export class P2PHostAdapter implements EngineAdapter {
       // refuse an engine that is already in use and claim the flag themselves
       // in the same call that installs the state. No client code sets the flag,
       // so an open lobby leaves zero engine footprint.
-      if (this.isResume && this.resumeGameState) {
+      if (this.isResume && this.resumeGameState && !this.nativeBridge) {
         const gameId = this.gameId;
         if (!gameId) {
           throw new AdapterError("P2P_ERROR", "Resumed host is missing its durable game id", false);
@@ -2502,6 +2870,7 @@ export class P2PHostAdapter implements EngineAdapter {
   private async handleNativeRevision(
     revision: number,
     views: Map<PlayerId, NativeViewerUpdate>,
+    terminalReason?: string,
   ): Promise<void> {
     if (!this.ownsAuthority()) return;
     const hostUpdate = views.get(0);
@@ -2552,7 +2921,7 @@ export class P2PHostAdapter implements EngineAdapter {
       events: hostUpdate.events,
       logEntries: hostUpdate.logEntries,
     });
-    await this.commitTerminalIfComplete(hostUpdate.snapshot, revision);
+    await this.commitTerminalIfComplete(hostUpdate.snapshot, revision, terminalReason);
   }
 
   /** The native server publishes the fault after its final state snapshot.
@@ -2616,10 +2985,41 @@ export class P2PHostAdapter implements EngineAdapter {
     reason: string = "Game complete",
   ): Promise<boolean> {
     const { waiting_for: waitingFor } = snapshot.state;
-    if (waitingFor.type !== "GameOver" || this.terminalResult) return true;
+    if (waitingFor.type !== "GameOver") return true;
+    if (this.terminalResult) {
+      await this.tryAcknowledgeNativeTerminal();
+      return true;
+    }
     this.authoritativeRevision = Math.max(this.authoritativeRevision, revision);
-    const winner = waitingFor.data.winner;
-    const display = { winner, reason };
+    let hostTerminalState = snapshot.state;
+    let finalViews: Map<PlayerId, GameState> | null = null;
+    let display: P2PTerminalResult["display"] = {
+      winner: waitingFor.data.winner,
+      reason,
+    };
+    if (this.nativeBridge) {
+      try {
+        finalViews = await this.nativeBridge.terminalFinalViews(revision);
+        const authoritativeHost = finalViews.get(0);
+        const authoritativeDisplay = this.nativeBridge.terminalDisplay();
+        if (
+          !authoritativeHost
+          || !authoritativeDisplay
+          || authoritativeHost.waiting_for.type !== "GameOver"
+          || authoritativeHost.waiting_for.data.winner !== authoritativeDisplay.winner
+        ) {
+          throw new Error("Full terminal host view and display do not agree");
+        }
+        hostTerminalState = authoritativeHost;
+        display = authoritativeDisplay;
+      } catch (err) {
+        this.emit({
+          type: "terminalUnavailable",
+          message: err instanceof Error ? err.message : "Full terminal authority is unavailable",
+        });
+        return false;
+      }
+    }
     const createResult = async (
       recipient: PlayerId,
       terminalState: GameState,
@@ -2632,7 +3032,7 @@ export class P2PHostAdapter implements EngineAdapter {
       finalStateCommitment: await p2pFinalStateCommitment(terminalState),
       display,
     });
-    const result = await createResult(0, snapshot.state);
+    const result = await createResult(0, hostTerminalState);
     if (!(await commitP2PTerminalResult(result))) {
       this.emit({ type: "terminalUnavailable", message: "Failed to retain P2P terminal result" });
       return false;
@@ -2641,10 +3041,11 @@ export class P2PHostAdapter implements EngineAdapter {
     this.gameRunState = "terminal";
     await Promise.all([...this.guestSessions].map(async ([playerId, session]) => {
       try {
-        const viewerSnapshot = this.nativeBridge
-          ? this.nativeBridge.viewerSnapshot(playerId)
-          : await this.wasm.getViewerSnapshot(playerId);
-        const recipientResult = await createResult(playerId, viewerSnapshot.state);
+        const terminalState = this.nativeBridge
+          ? finalViews?.get(playerId)
+          : (await this.wasm.getViewerSnapshot(playerId)).state;
+        if (!terminalState) throw new Error(`Full terminal view is missing for seat ${playerId}`);
+        const recipientResult = await createResult(playerId, terminalState);
         if (await this.send(session, { type: "terminal_result", result: recipientResult })) {
           this.terminalDelivered.add(playerId);
           return;
@@ -2657,7 +3058,82 @@ export class P2PHostAdapter implements EngineAdapter {
       // freshly committed, recipient-bound statement on the next sweep.
     }));
     this.emit({ type: "terminalResult", result });
+    await this.tryAcknowledgeNativeTerminal();
     return true;
+  }
+
+  /** A Full terminal payload is retained until every connected, eligible P2P
+   * guest has accepted the final revision and terminal result. A cleanup-only
+   * owner is durable before gameplay resume records are removed or Full ACKs
+   * clear recipient-private final views. */
+  private async tryAcknowledgeNativeTerminal(): Promise<void> {
+    const terminal = this.terminalResult;
+    const bridge = this.nativeBridge;
+    if (
+      !this.nativeTerminalAckReady
+      || !terminal
+      || !bridge
+      || this.nativeTerminalAcknowledged
+    ) return;
+    if (this.nativeTerminalAckPromise) return this.nativeTerminalAckPromise;
+
+    const pending = (async () => {
+      for (const playerId of bridge.playerIds()) {
+        if (playerId === 0 || this.eliminatedSeats.has(playerId)) continue;
+        const token = this.playerTokens.get(playerId);
+        if (token && this.kickedTokens.has(token)) continue;
+        if (
+          this.disconnectedSeats.has(playerId)
+          || !this.terminalDelivered.has(playerId)
+          || !this.nativeTerminalStateAcked.has(playerId)
+        ) return;
+      }
+      if (this.gameId) {
+        this.nativeTerminalPersistenceClearing = true;
+        try {
+          const authority = await bridge.terminalCleanupAuthority(terminal.revision);
+          const obligation: FullTerminalCleanupObligation = {
+            gameId: this.gameId,
+            p2pSessionKey: terminal.key,
+            p2pTerminalId: terminal.terminalId,
+            p2pResult: terminal,
+            fullKey: authority.fullKey,
+            terminalRevision: authority.terminalRevision,
+            deliveries: authority.deliveries,
+          };
+          await saveFullTerminalCleanupStrict(obligation);
+          await clearGameStrict(this.gameId);
+          this.nativeTerminalPersistenceCleared = true;
+          await bridge.acknowledgeTerminalCleanup(obligation);
+          await clearFullTerminalCleanupStrict(this.gameId);
+        } catch (err) {
+          this.emit({
+            type: "terminalUnavailable",
+            message: err instanceof Error ? err.message : "Native terminal cleanup is still pending",
+          });
+          return;
+        } finally {
+          this.nativeTerminalPersistenceClearing = false;
+        }
+      } else {
+        try {
+          await bridge.acknowledgeTerminalDeliveries(terminal.revision);
+        } catch (err) {
+          this.emit({
+            type: "terminalUnavailable",
+            message: err instanceof Error ? err.message : "Full terminal acknowledgement failed",
+          });
+          return;
+        }
+      }
+      this.nativeTerminalAcknowledged = true;
+    })();
+    this.nativeTerminalAckPromise = pending;
+    try {
+      await pending;
+    } finally {
+      if (this.nativeTerminalAckPromise === pending) this.nativeTerminalAckPromise = null;
+    }
   }
 
   /**
@@ -2823,7 +3299,84 @@ export class P2PHostAdapter implements EngineAdapter {
     const capped = Math.min(revision, this.authoritativeRevision);
     const prior = this.guestAckedRevisions.get(pid);
     if (prior === undefined) return;
-    if (capped > prior) this.guestAckedRevisions.set(pid, capped);
+    const delivered = this.nativeDeliveredViews.get(pid);
+    if (
+      this.nativeBridge
+      && delivered?.revision === capped
+      && delivered.snapshot.state.waiting_for.type === "GameOver"
+    ) {
+      this.nativeTerminalStateAcked.add(pid);
+    }
+    if (capped > prior) {
+      this.guestAckedRevisions.set(pid, capped);
+      void this.tryAcknowledgeNativeTerminal();
+    } else if (this.nativeTerminalStateAcked.has(pid)) {
+      void this.tryAcknowledgeNativeTerminal();
+    }
+  }
+
+  private scheduleTerminalReconnectCompletion(pid: PlayerId, session: PeerSession): void {
+    const pending = this.pendingTerminalReconnectAcks.get(pid);
+    if (
+      !pending
+      || pending.session !== session
+      || !pending.ready
+      || !pending.stateAckReceived
+      || pending.finishing
+    ) return;
+    pending.finishing = true;
+    void this.enqueueDelivery(() => this.completeTerminalReconnectAfterAck(pid, session));
+  }
+
+  private async completeTerminalReconnectAfterAck(pid: PlayerId, session: PeerSession): Promise<void> {
+    const pending = this.pendingTerminalReconnectAcks.get(pid);
+    if (
+      !pending
+      || pending.session !== session
+      || this.pendingReconnectSessions.get(pid) !== session
+      || !this.ownsAuthority()
+    ) return;
+    try {
+      const terminal = this.terminalResult;
+      const delivered = this.nativeDeliveredViews.get(pid);
+      if (
+        !terminal
+        || pending.snapshot.state.waiting_for.type !== "GameOver"
+        || terminal.revision !== pending.revision
+        || (this.nativeBridge && delivered?.revision !== pending.revision)
+      ) {
+        this.failPendingReconnect(pid, session, "Reconnect terminal state is no longer authoritative");
+        return;
+      }
+      this.recordGuestAck(pid, pending.revision);
+      const result = await this.terminalResultForRecipient(pid, pending.snapshot.state, pending.revision);
+      if (
+        this.pendingTerminalReconnectAcks.get(pid) !== pending
+        || this.pendingReconnectSessions.get(pid) !== session
+        || !this.ownsAuthority()
+      ) return;
+      if (!(await this.send(session, { type: "terminal_result", result }))) {
+        this.failPendingReconnect(pid, session, "Reconnect terminal result could not be delivered");
+        return;
+      }
+      this.terminalDelivered.add(pid);
+      const grace = this.disconnectedSeats.get(pid);
+      if (!grace) {
+        this.failPendingReconnect(pid, session, "Reconnect grace expired before terminal delivery");
+        return;
+      }
+      if (grace.timer !== null) clearTimeout(grace.timer);
+      this.pendingTerminalReconnectAcks.delete(pid);
+      this.pendingReconnectSessions.delete(pid);
+      this.disconnectedSeats.delete(pid);
+      await this.tryAcknowledgeNativeTerminal();
+    } catch (error) {
+      this.failPendingReconnect(pid, session, "Reconnect terminal acknowledgement failed");
+      traceAdapter("Host", "reconnect-ack-failed", {
+        pid,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   /**
@@ -2904,6 +3457,7 @@ export class P2PHostAdapter implements EngineAdapter {
         const result = await this.terminalResultForRecipient(pid, handoff.snapshot.state, handoff.revision);
         if (!(await this.send(session, { type: "terminal_result", result }))) return;
         this.terminalDelivered.add(pid);
+        await this.tryAcknowledgeNativeTerminal();
       }
     } catch (err) {
       console.warn(`[P2PHost] state redelivery for seat ${pid} failed; retrying on the next sweep:`, err);
@@ -3053,7 +3607,7 @@ export class P2PHostAdapter implements EngineAdapter {
   async sendConcede(): Promise<void> {
     if (!this.ownsAuthority()) return;
     const outcome = await this.concedePlayer(0, "Host conceded", "conceded");
-    if (outcome !== "committed" && outcome !== "unknown") return;
+    if (outcome !== "committed") return;
     for (const [, s] of this.guestSessions) {
       void this.send(s, { type: "player_conceded", playerId: 0, reason: "Host conceded" });
     }
@@ -3102,6 +3656,7 @@ export class P2PHostAdapter implements EngineAdapter {
       session.close();
     }
     this.pendingReconnectSessions.clear();
+    this.pendingTerminalReconnectAcks.clear();
     for (const session of this.guestSessions.values()) {
       session.close();
     }
@@ -3211,7 +3766,24 @@ export class P2PHostAdapter implements EngineAdapter {
     // open. Resolve the actor from the current session map at receive time;
     // the seat captured when the callback was installed may now be stale.
     const pid = this.guestPlayerIdForSession(sourceSession);
-    if (pid === null) return;
+    if (pid === null) {
+      const pendingTerminal = [...this.pendingTerminalReconnectAcks]
+        .find(([, pending]) => pending.session === sourceSession);
+      if (!pendingTerminal) return;
+      const [pendingPid, pending] = pendingTerminal;
+      if (!this.ownsAuthority()) {
+        this.rejectSuperseded(sourceSession);
+        return;
+      }
+      if (msg.authority && !hasExactP2PAuthority(msg.authority, this.authority)) {
+        this.rejectSuperseded(sourceSession);
+        return;
+      }
+      if (msg.type !== "state_ack" || !Number.isInteger(msg.revision) || msg.revision !== pending.revision) return;
+      pending.stateAckReceived = true;
+      this.scheduleTerminalReconnectCompletion(pendingPid, sourceSession);
+      return;
+    }
     const session = this.guestSessions.get(pid);
     // A reconnecting channel is intentionally not installed in
     // `guestSessions` until its ACK has been delivered. Keep every control
@@ -3422,7 +3994,7 @@ export class P2PHostAdapter implements EngineAdapter {
         // CR 104.3a: Any player may concede at any time. Route through the
         // engine action so the seat is properly eliminated (CR 800.4a).
         const outcome = await this.concedePlayer(pid, "Player conceded", "conceded");
-        if (outcome !== "committed" && outcome !== "unknown") break;
+        if (outcome !== "committed") break;
         // Notify remaining guests with the "conceded" wire variant (not
         // "kicked") so their log entries read correctly.
         for (const [otherPid, s] of this.guestSessions) {
@@ -3610,6 +4182,27 @@ export class P2PHostAdapter implements EngineAdapter {
     try {
       const handoff = await this.reconnectHandoff(pid);
       if (this.pendingReconnectSessions.get(pid) !== session || !this.ownsAuthority()) return;
+      const terminalReconnect = this.terminalResult !== null;
+      if (terminalReconnect) {
+        if (
+          handoff.snapshot.state.waiting_for.type !== "GameOver"
+          || this.terminalResult?.revision !== handoff.revision
+        ) {
+          this.failPendingReconnect(pid, session, "Reconnect terminal state is unavailable");
+          return;
+        }
+        this.pendingTerminalReconnectAcks.set(pid, {
+          session,
+          revision: handoff.revision,
+          snapshot: handoff.snapshot,
+          ready: false,
+          stateAckReceived: false,
+          finishing: false,
+        });
+        // Keep the original pending-session consumer; this additional handler
+        // admits only the matching final-state ACK until terminal completion.
+        session.onMessage((msg) => this.handleGuestMessage(session, msg));
+      }
 
       const acknowledged = await this.send(session, {
         type: "reconnect_ack",
@@ -3624,11 +4217,20 @@ export class P2PHostAdapter implements EngineAdapter {
       // Only a channel that actually accepted its ACK can take the seat; a
       // failed ACK remains disconnected and is eligible for a later retry.
       if (!acknowledged) {
+        this.pendingTerminalReconnectAcks.delete(pid);
         this.failPendingReconnect(pid, session, "Reconnect acknowledgement could not be delivered");
         return;
       }
       if (this.pendingReconnectSessions.get(pid) !== session || !this.ownsAuthority()) return;
       this.seedGuestEntry(pid, handoff.revision);
+
+      if (terminalReconnect) {
+        const pending = this.pendingTerminalReconnectAcks.get(pid);
+        if (!pending || pending.session !== session) return;
+        pending.ready = true;
+        this.scheduleTerminalReconnectCompletion(pid, session);
+        return;
+      }
 
       if (this.deliveredNativeAiDriverFault !== null) {
         const faultDelivered = await this.send(session, {
@@ -3640,20 +4242,6 @@ export class P2PHostAdapter implements EngineAdapter {
           return;
         }
       }
-      if (this.terminalResult !== null) {
-        const result = await this.terminalResultForRecipient(pid, handoff.snapshot.state, handoff.revision);
-        const terminalSent = await this.send(session, { type: "terminal_result", result });
-        if (!terminalSent) {
-          this.failPendingReconnect(pid, session, "Reconnect terminal result could not be delivered");
-          return;
-        }
-        // `terminalResult` is never cleared for this incarnation, so the
-        // terminal clause stays armed for the rest of the session. Without
-        // this the seat would be nominated every tick forever, each one
-        // costing a `reconnectHandoff` viewer-snapshot round trip plus a
-        // duplicate pair of frames.
-        this.terminalDelivered.add(pid);
-      }
       if (this.pendingReconnectSessions.get(pid) !== session || !this.ownsAuthority()) return;
 
       const grace = this.disconnectedSeats.get(pid);
@@ -3664,6 +4252,8 @@ export class P2PHostAdapter implements EngineAdapter {
       this.guestSessions.set(pid, session);
       session.onMessage((msg) => this.handleGuestMessage(session, msg));
       this.publishPlayerLatencies();
+
+      await this.tryAcknowledgeNativeTerminal();
 
       for (const [otherPid, otherSession] of this.guestSessions) {
         if (otherPid !== pid) void this.send(otherSession, { type: "player_reconnected", playerId: pid });
@@ -3702,6 +4292,7 @@ export class P2PHostAdapter implements EngineAdapter {
     for (const [pid, pending] of this.pendingReconnectSessions) {
       if (pending === session) {
         this.pendingReconnectSessions.delete(pid);
+        this.pendingTerminalReconnectAcks.delete(pid);
         return;
       }
     }
@@ -3710,6 +4301,7 @@ export class P2PHostAdapter implements EngineAdapter {
   private failPendingReconnect(pid: PlayerId, session: PeerSession, reason: string): void {
     if (this.pendingReconnectSessions.get(pid) !== session) return;
     this.pendingReconnectSessions.delete(pid);
+    this.pendingTerminalReconnectAcks.delete(pid);
     // An otherwise open guest needs an explicit terminal response; a bare
     // close is treated as a transient transport loss and starts its retry loop.
     // `PeerSession.close` preserves already-queued sends, so this rejection is
@@ -3722,6 +4314,7 @@ export class P2PHostAdapter implements EngineAdapter {
     const session = this.pendingReconnectSessions.get(pid);
     if (!session) return;
     this.pendingReconnectSessions.delete(pid);
+    this.pendingTerminalReconnectAcks.delete(pid);
     session.close(reason);
   }
 
@@ -3751,8 +4344,10 @@ export class P2PHostAdapter implements EngineAdapter {
     origin: "kick" | "conceded",
   ): Promise<"committed" | "definite_non_commit" | "unknown" | "in_progress" | "inactive"> {
     if (this.disposed || !this.ownsAuthority()) return "inactive";
-    if (this.concedingSeats.has(pid)) return "in_progress";
-    this.concedingSeats.add(pid);
+    if (this.eliminatedSeats.has(pid)) return "inactive";
+    const retryingUncertain = this.uncertainConcedeSeats.has(pid);
+    if (this.concedingSeats.has(pid) && !retryingUncertain) return "in_progress";
+    if (!this.concedingSeats.has(pid)) this.concedingSeats.add(pid);
     const retire = () => {
       // Cancel any active grace timer for this seat. `timer` may be null if the
       // host already called `holdForReconnect`.
@@ -3771,11 +4366,109 @@ export class P2PHostAdapter implements EngineAdapter {
         try { session.close("Player conceded"); } catch { /* best-effort */ }
       }
       this.eliminatedSeats.add(pid);
+      this.uncertainConcedeSeats.delete(pid);
       this.saveSession();
+      void this.tryAcknowledgeNativeTerminal();
+    };
+    const readAuthoritativeSeat = async () => {
+      const bridge = this.nativeBridge;
+      if (!bridge) {
+        const snapshot = await this.wasm.getSnapshot();
+        if (this.disposed || !this.ownsAuthority()) throw new Error("Host authority was superseded");
+        const authoritative: NativeViewerUpdate = {
+          snapshot,
+          events: [],
+          revision: this.authoritativeRevision,
+        };
+        return {
+          authoritative,
+          views: new Map<PlayerId, NativeViewerUpdate>([[0, authoritative]]),
+          fanoutAlreadyCompleted: false,
+        };
+      }
+      const authoritative = await bridge.reconcileConcede(pid);
+      if (this.disposed || !this.ownsAuthority()) throw new Error("Host authority was superseded");
+      const views = bridge.viewerUpdates();
+      const fanoutAlreadyCompleted = views.size > 0 && [...views].every(([playerId, update]) =>
+        this.nativeDeliveredViews.get(playerId)?.revision === update.revision,
+      );
+      for (const [playerId, update] of views) {
+        this.nativeDeliveredViews.set(playerId, { revision: update.revision, snapshot: update.snapshot });
+        this.authoritativeRevision = Math.max(this.authoritativeRevision, update.revision);
+      }
+      return { authoritative, views, fanoutAlreadyCompleted };
+    };
+    const settleFromAuthority = async (
+      reconciliation: Awaited<ReturnType<typeof readAuthoritativeSeat>>,
+    ): Promise<"committed" | "definite_non_commit"> => {
+      const { authoritative, views, fanoutAlreadyCompleted } = reconciliation;
+      const eliminated = (authoritative.snapshot.state.eliminated_players ?? []).includes(pid);
+      const terminal = authoritative.snapshot.state.waiting_for.type === "GameOver";
+      if (!eliminated && !terminal) return "definite_non_commit";
+
+      if (eliminated) {
+        committed = true;
+        retire();
+        this.emit(
+          origin === "kick"
+            ? { type: "playerKicked", playerId: pid, reason }
+          : { type: "playerConceded", playerId: pid, reason },
+        );
+      }
+      if (!this.nativeBridge && (eliminated || terminal)) {
+        const transition = this.stampBrowserMutation({ events: [], log_entries: [] }, true);
+        await this.publishHostSnapshot(transition.result);
+        await this.broadcastStateUpdate(transition, reason);
+        await this.runAiLoop();
+      } else if (terminal) {
+        try {
+          const hostUpdate = views.get(0);
+          if (!hostUpdate) throw new Error("Full terminal host view is unavailable");
+          if (fanoutAlreadyCompleted) {
+            await this.commitTerminalIfComplete(hostUpdate.snapshot, authoritative.revision, reason);
+          } else {
+            // A2 restored the complete recipient views outside the ordinary
+            // revision barrier. Run them through the same state fan-out so
+            // each P2P seat receives final state before its terminal statement.
+            await this.handleNativeRevision(authoritative.revision, views, reason);
+          }
+        } catch {
+          this.emit({
+            type: "terminalUnavailable",
+            message: "Concede reached a Full terminal state, but the native final views could not be published.",
+          });
+        }
+      }
+      if (eliminated) void this.persistAuthoritativeState();
+      return eliminated ? "committed" : "definite_non_commit";
     };
     let committed = false;
+    let keepFence = false;
     try {
       this.closePendingReconnect(pid, "Player departure is in progress");
+      if (retryingUncertain) {
+        let reconciliation: Awaited<ReturnType<typeof readAuthoritativeSeat>>;
+        try {
+          reconciliation = await readAuthoritativeSeat();
+        } catch {
+          keepFence = true;
+          this.uncertainConcedeSeats.add(pid);
+          this.emit({
+            type: "error",
+            message: "Could not reconcile the Concede outcome; the seat remains fenced.",
+          });
+          return "unknown";
+        }
+        const outcome = await settleFromAuthority(reconciliation);
+        if (
+          outcome === "committed"
+          || reconciliation.authoritative.snapshot.state.waiting_for.type === "GameOver"
+        ) return outcome;
+        // This invocation is a later explicit host/player departure request.
+        // The fresh Full barrier proved the earlier Action did not commit, so
+        // it is now safe to submit this new Concede once.
+        this.uncertainConcedeSeats.delete(pid);
+      }
       const concedeAction = {
         type: "Concede",
         data: { player_id: pid },
@@ -3803,7 +4496,7 @@ export class P2PHostAdapter implements EngineAdapter {
       void this.persistAuthoritativeState();
     } catch (err) {
       if (this.disposed || !this.ownsAuthority()) return "inactive";
-      console.error("[P2PHost] concedePlayer failed:", err);
+      console.warn("[P2PHost] Concede settlement is uncertain; checking the authoritative seat");
       if (!committed) {
         if (
           err instanceof AdapterError
@@ -3815,15 +4508,28 @@ export class P2PHostAdapter implements EngineAdapter {
           this.resumeIfUnblocked();
           return "definite_non_commit";
         }
-        // Preserve the pre-existing retirement policy for an unknown result;
-        // this slice cannot reconcile whether a sent Action committed.
-        retire();
+        let reconciliation: Awaited<ReturnType<typeof readAuthoritativeSeat>>;
+        try {
+          reconciliation = await readAuthoritativeSeat();
+        } catch {
+          keepFence = true;
+          this.uncertainConcedeSeats.add(pid);
+          this.emit({
+            type: "error",
+            message: "Could not reconcile the Concede outcome; the seat remains fenced.",
+          });
+          return "unknown";
+        }
+        const outcome = await settleFromAuthority(reconciliation);
+        if (outcome === "definite_non_commit") return outcome;
       }
     } finally {
-      this.concedingSeats.delete(pid);
+      if (!keepFence) {
+        this.concedingSeats.delete(pid);
+        this.uncertainConcedeSeats.delete(pid);
+        if (!this.disposed && this.ownsAuthority()) this.resumeIfUnblocked();
+      }
     }
-    // A concession may clear the final outstanding reconnect reservation.
-    this.resumeIfUnblocked();
     return committed ? "committed" : "unknown";
   }
 
@@ -3837,7 +4543,7 @@ export class P2PHostAdapter implements EngineAdapter {
    */
   async kickPlayer(pid: PlayerId, reason: string = "Kicked by host"): Promise<void> {
     if (!this.ownsAuthority()) return;
-    if (this.concedingSeats.has(pid)) return;
+    if (this.concedingSeats.has(pid) && !this.uncertainConcedeSeats.has(pid)) return;
     const token = this.playerTokens.get(pid);
     if (token) this.kickedTokens.add(token);
     this.closePendingReconnect(pid, "Kicked");
@@ -3855,7 +4561,7 @@ export class P2PHostAdapter implements EngineAdapter {
       this.guestSessions.delete(pid);
     }
     const outcome = await this.concedePlayer(pid, reason, "kick");
-    if (outcome !== "committed" && outcome !== "unknown") return;
+    if (outcome !== "committed") return;
     // Broadcast kick to remaining guests (concedePlayer emits playerKicked
     // locally; remaining peers need the wire message).
     for (const [otherPid, s] of this.guestSessions) {
@@ -3872,7 +4578,7 @@ export class P2PHostAdapter implements EngineAdapter {
     if (!this.ownsAuthority()) return;
     const reason = "Host continued without reconnecting player";
     const outcome = await this.concedePlayer(pid, reason, "conceded");
-    if (outcome !== "committed" && outcome !== "unknown") return;
+    if (outcome !== "committed") return;
     for (const [otherPid, s] of this.guestSessions) {
       if (otherPid === pid) continue;
       void this.send(s, { type: "player_conceded", playerId: pid, reason });

@@ -1,12 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const lanGate = vi.hoisted(() => ({ supported: false, probe: vi.fn(), authorize: vi.fn() }));
+const terminalStore = vi.hoisted(() => ({ commit: vi.fn(async () => true) }));
 vi.mock("../../services/nativeEngineSocket", () => ({ NativeEngineSocket: class { constructor() { return new MockWebSocket("native-lan"); } } }));
 vi.mock("../../services/lan", async (importOriginal) => ({
   ...await importOriginal<typeof import("../../services/lan")>(),
   initializeLanCapabilities: lanGate.probe,
   authorizeLanServer: lanGate.authorize,
   canUseLanBridge: () => lanGate.supported,
+}));
+vi.mock("../../services/fullTerminalResult", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../services/fullTerminalResult")>(),
+  commitFullTerminalDelivery: terminalStore.commit,
 }));
 
 import {
@@ -23,6 +28,7 @@ import type {
   PreviewRequestId,
 } from "../generated/interaction";
 import type { PhaseSocketTransport } from "../../services/openPhaseSocket";
+import type { FullTerminalDelivery } from "../../services/fullTerminalResult";
 
 // Minimal mock WebSocket. Latest-constructed instance is exposed via
 // `MockWebSocket.last` so tests can grab it synchronously — the adapter
@@ -169,6 +175,8 @@ describe("WebSocketAdapter", () => {
 
   beforeEach(async () => {
     MockWebSocket.last = null;
+    terminalStore.commit.mockReset();
+    terminalStore.commit.mockResolvedValue(true);
     adapter = new WebSocketAdapter(
       "wss://localhost:9374/ws",
       "host",
@@ -1024,6 +1032,64 @@ describe("WebSocketAdapter", () => {
         },
       },
     );
+
+    it("hands serialized terminal authority to native P2P without local commit or early ACK", async () => {
+      const nativeAdapter = new WebSocketAdapter(
+        "native-engine",
+        "join",
+        { main_deck: [], sideboard: [] },
+        undefined,
+        undefined,
+        undefined,
+        "Guest",
+        {
+          nativePregame: {
+            kind: "reconnect",
+            socketFactory: () => new MockWebSocket("native-engine") as unknown as PhaseSocketTransport,
+            gameCode: "NATIVE",
+            playerId: 1,
+            playerToken: "guest-token",
+            fullKey: { game_code: "NATIVE", generation: 1 },
+            callerManagedTerminalDelivery: true,
+          },
+        },
+      );
+      const events: unknown[] = [];
+      nativeAdapter.onEvent((event) => events.push(event));
+      const delivery: FullTerminalDelivery = {
+        key: { game_code: "NATIVE", generation: 1 },
+        terminalRevision: 9,
+        deliveryId: "recipient-delivery",
+        credential: "recipient-credential",
+        display: { winner: 0, reason: "Finished" },
+        finalView: {
+          players: [],
+          objects: {},
+          waiting_for: { type: "GameOver", data: { winner: 0 } },
+        } as unknown as GameState,
+      };
+
+      const attached = nativeAdapter.initializePregame();
+      const nativeSocket = await completeHandshake(nativeAdapter);
+      nativeSocket.dispatchSynthetic("message", JSON.stringify({
+        type: "SessionAttached",
+        data: {
+          game_code: "NATIVE",
+          player_id: 1,
+          player_token: "guest-token",
+          full_key: { game_code: "NATIVE", generation: 1 },
+        },
+      }));
+      await expect(attached).resolves.toMatchObject({ playerId: 1 });
+      nativeSocket.dispatchSynthetic("message", JSON.stringify({ type: "TerminalResult", data: { delivery } }));
+
+      expect(events).toContainEqual({ type: "terminalDelivery", delivery });
+      expect(events).toContainEqual({ type: "sessionChanged", session: null });
+      expect(events).not.toContainEqual(expect.objectContaining({ type: "terminalUnavailable" }));
+      expect(terminalStore.commit).not.toHaveBeenCalled();
+      expect(MockWebSocket.last).toBe(nativeSocket);
+      nativeAdapter.dispose();
+    });
 
     it("settles an export when native session identity validation fails", async () => {
       const nativeAdapter = new WebSocketAdapter(

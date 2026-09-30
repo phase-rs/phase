@@ -17,7 +17,8 @@ import { PROTOCOL_VERSION, type WsAdapterEvent } from "../ws-adapter";
 import { FakeDataConnection } from "../../network/__tests__/fakeDataConnection";
 import { PEER_CONNECT_OPTIONS } from "../../network/connection";
 import { WIRE_PROTOCOL_VERSION, encodeWireMessage, type P2PMessage } from "../../network/protocol";
-import { p2pFinalStateCommitment } from "../../services/p2pTerminalResult";
+import { p2pFinalStateCommitment, type P2PTerminalResult } from "../../services/p2pTerminalResult";
+import type { FullTerminalDelivery } from "../../services/fullTerminalResult";
 import { ownsP2PHostLease } from "../../services/p2pSession";
 
 /** `multiplayer:reconnectRejected.hostDisconnectedBeforeSetup`, rendered in English. */
@@ -63,7 +64,10 @@ vi.mock("../../services/p2pTerminalResult", async (orig) => {
 
 const persistenceMocks = vi.hoisted(() => ({
   clearGame: vi.fn(async () => undefined),
+  clearGameStrict: vi.fn(async () => undefined),
+  clearFullTerminalCleanupStrict: vi.fn(async () => undefined),
   clearP2PHostSession: vi.fn(async () => undefined),
+  saveFullTerminalCleanupStrict: vi.fn(async () => undefined),
   saveGame: vi.fn(async () => undefined),
   saveP2PHostSession: vi.fn(async () => undefined),
   saveResumableGameStrict: vi.fn<() => Promise<void>>(async () => undefined),
@@ -74,7 +78,10 @@ vi.mock("../../services/gamePersistence", async (orig) => {
   return {
     ...actual,
     clearGame: persistenceMocks.clearGame,
+    clearGameStrict: persistenceMocks.clearGameStrict,
+    clearFullTerminalCleanupStrict: persistenceMocks.clearFullTerminalCleanupStrict,
     clearP2PHostSession: persistenceMocks.clearP2PHostSession,
+    saveFullTerminalCleanupStrict: persistenceMocks.saveFullTerminalCleanupStrict,
     saveGame: persistenceMocks.saveGame,
     saveP2PHostSession: persistenceMocks.saveP2PHostSession,
     saveResumableGameStrict: persistenceMocks.saveResumableGameStrict,
@@ -243,6 +250,11 @@ const nativeWebSocketMocks = vi.hoisted(() => {
   const openSockets = new Set<number>();
   const sentActions: Array<{ playerId: number; action: unknown; actor: number }> = [];
   const preSendRejections: number[] = [];
+  const defaultSnapshot = (): EngineSnapshot => ({
+    state: { players: [], objects: {}, eliminated_players: [], waiting_for: { type: "Priority", data: { player: 0 } } } as unknown as GameState,
+    legalResult: { actions: [], autoPassRecommended: false },
+    seq: 1,
+  });
   return {
     real: false,
     initializePregame: vi.fn(),
@@ -251,6 +263,7 @@ const nativeWebSocketMocks = vi.hoisted(() => {
     onEvent: vi.fn(),
     sendAbandonGame: vi.fn(),
     sendSeatMutation: vi.fn(),
+    getSnapshot: vi.fn(async (): Promise<EngineSnapshot> => defaultSnapshot()),
     submitAction: vi.fn(async (playerId: number | null, action: unknown, actor: number) => {
       // Match WebSocketAdapter's pre-send guard while keeping an attached
       // NativeP2PBridge client addressable after its socket closes.
@@ -268,9 +281,25 @@ const nativeWebSocketMocks = vi.hoisted(() => {
   };
 });
 
+const nativeTerminalMocks = vi.hoisted(() => ({
+  bootstrap: vi.fn(async (
+    _serverUrl?: string,
+    _key?: { game_code: string; generation: number },
+    _playerToken?: string,
+    _requestId?: string,
+  ): Promise<FullTerminalDelivery | null> => null),
+  acknowledge: vi.fn(async (
+    _serverUrl?: string,
+    _deliveryId?: string,
+    _credential?: string,
+  ) => true),
+}));
+
 vi.mock("../ws-adapter", async (original) => {
   const actual = await original<typeof import("../ws-adapter")>();
   return { ...actual,
+  bootstrapFullTerminalDelivery: nativeTerminalMocks.bootstrap,
+  acknowledgeFullTerminalDelivery: nativeTerminalMocks.acknowledge,
   WebSocketAdapter: vi.fn().mockImplementation(function (...args: ConstructorParameters<typeof actual.WebSocketAdapter>) {
     if (nativeWebSocketMocks.real) return new actual.WebSocketAdapter(...args);
     let playerId: number | null = null;
@@ -291,6 +320,7 @@ vi.mock("../ws-adapter", async (original) => {
       onEvent: nativeWebSocketMocks.onEvent,
       sendAbandonGame: nativeWebSocketMocks.sendAbandonGame,
       sendSeatMutation: nativeWebSocketMocks.sendSeatMutation,
+      getSnapshot: nativeWebSocketMocks.getSnapshot,
       dispose: nativeWebSocketMocks.dispose,
     };
   }),
@@ -328,6 +358,7 @@ interface AsyncMockWithResolvedValueOnce {
   mockClear: () => void;
   mockResolvedValueOnce: (value: unknown) => AsyncMockWithResolvedValueOnce;
   mockResolvedValue: (value: unknown) => AsyncMockWithResolvedValueOnce;
+  mockRejectedValueOnce: (value: unknown) => AsyncMockWithResolvedValueOnce;
 }
 const mockGetState = mocks.getState as unknown as AsyncMockWithResolvedValueOnce;
 const mockGetAiActionProposal = mocks.getAiActionProposal as unknown as AsyncMockWithResolvedValueOnce;
@@ -457,7 +488,12 @@ beforeEach(() => {
   }));
   mockSetMultiplayerMode.mockClear();
   mockProjectSeatView.mockClear();
-  mockGetState.mockClear();
+  mocks.getState.mockReset();
+  mocks.getState.mockImplementation(async () => ({
+    players: [],
+    objects: {},
+    waiting_for: { type: "Priority", data: { player: 0 } },
+  }));
   mockGetAiActionProposal.mockClear();
   mockSubmitAiActionProposal.mockClear();
   mocks.exportPersistenceState.mockReset();
@@ -478,10 +514,16 @@ beforeEach(() => {
   });
   persistenceMocks.clearGame.mockReset();
   persistenceMocks.clearGame.mockResolvedValue(undefined);
+  persistenceMocks.clearGameStrict.mockReset();
+  persistenceMocks.clearGameStrict.mockResolvedValue(undefined);
+  persistenceMocks.clearFullTerminalCleanupStrict.mockReset();
+  persistenceMocks.clearFullTerminalCleanupStrict.mockResolvedValue(undefined);
   persistenceMocks.clearP2PHostSession.mockReset();
   persistenceMocks.clearP2PHostSession.mockResolvedValue(undefined);
   persistenceMocks.saveGame.mockReset();
   persistenceMocks.saveGame.mockResolvedValue(undefined);
+  persistenceMocks.saveFullTerminalCleanupStrict.mockReset();
+  persistenceMocks.saveFullTerminalCleanupStrict.mockResolvedValue(undefined);
   persistenceMocks.saveP2PHostSession.mockReset();
   persistenceMocks.saveP2PHostSession.mockResolvedValue(undefined);
   persistenceMocks.saveResumableGameStrict.mockReset();
@@ -509,7 +551,17 @@ beforeEach(() => {
   nativeWebSocketMocks.onEvent.mockClear();
   nativeWebSocketMocks.sendAbandonGame.mockReset();
   nativeWebSocketMocks.sendSeatMutation.mockReset();
+  nativeWebSocketMocks.getSnapshot.mockReset();
+  nativeWebSocketMocks.getSnapshot.mockImplementation(async () => ({
+    state: { players: [], objects: {}, eliminated_players: [], waiting_for: { type: "Priority", data: { player: 0 } } } as unknown as GameState,
+    legalResult: { actions: [], autoPassRecommended: false },
+    seq: 1,
+  }));
   nativeWebSocketMocks.dispose.mockClear();
+  nativeTerminalMocks.bootstrap.mockReset();
+  nativeTerminalMocks.bootstrap.mockResolvedValue(null);
+  nativeTerminalMocks.acknowledge.mockReset();
+  nativeTerminalMocks.acknowledge.mockResolvedValue(true);
 });
 
 afterEach(() => {
@@ -888,6 +940,71 @@ function makeNativeHost(
     true,
     undefined,
     persistence,
+    {},
+  );
+  return { adapter, emitConnection };
+}
+
+function makeNativeResumeHost(options: {
+  eliminatedSeats?: number[];
+  kickedTokens?: string[];
+  state?: GameState;
+  terminalResult?: P2PTerminalResult;
+} = {}) {
+  const { peer, onGuestConnected, emitConnection } = createFakePeer();
+  const hostDeckData = {
+    player: { main_deck: ["Mountain"], sideboard: [] },
+    opponent: { main_deck: ["Forest"], sideboard: [] },
+    ai_decks: [],
+  };
+  const fullKey = { game_code: "native-game", generation: 1 };
+  const session = {
+    gameId: "native-resume",
+    roomCode: "ABCDE",
+    sessionKey: "native-resume-session",
+    useBroker: false,
+    playerTokens: { 0: "native-host-token", 1: "native-guest-token" },
+    guestDecks: {},
+    kickedTokens: options.kickedTokens ?? [],
+    eliminatedSeats: options.eliminatedSeats ?? [],
+    playerCount: 2,
+    hostDeckData,
+    gameStarted: true,
+    nativeSession: {
+      gameCode: "native-game",
+      fullKey,
+      playerTokens: { 0: "native-host-token", 1: "native-guest-token" },
+    },
+  };
+  nativeWebSocketMocks.waitForPlayerSlots.mockResolvedValue([]);
+  nativeWebSocketMocks.initializePregame
+    .mockResolvedValueOnce({ playerId: 0, playerToken: "native-host-token", gameCode: "native-game", fullKey })
+    .mockResolvedValueOnce({ playerId: 1, playerToken: "native-guest-token", gameCode: "native-game", fullKey });
+  nativeWebSocketMocks.getSnapshot.mockResolvedValue({
+    state: options.state ?? remoteState("native resumed state"),
+    legalResult: { actions: [], autoPassRecommended: false },
+    seq: 1,
+  });
+  const adapter = new P2PHostAdapter(
+    hostDeckData,
+    peer as unknown as Peer,
+    onGuestConnected,
+    2,
+    commanderConfig(),
+    undefined,
+    5_000,
+    undefined,
+    true,
+    undefined,
+    {
+      gameId: "native-resume",
+      roomCode: "ABCDE",
+      resumeData: {
+        state: { persisted: true } as unknown as PersistedGameState,
+        session,
+        ...(options.terminalResult ? { terminalResult: options.terminalResult } : {}),
+      },
+    },
     {},
   );
   return { adapter, emitConnection };
@@ -1312,6 +1429,732 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     adapter.dispose();
   });
 
+  it("reconciles an unknown WASM Concede once and publishes a proven elimination once", async () => {
+    const { adapter } = makeHost(2);
+    const events: P2PAdapterEvent[] = [];
+    adapter.onEvent((event) => events.push(event));
+    await adapter.initialize();
+    events.length = 0;
+    const committed = {
+      ...remoteState("WASM Concede committed"),
+      eliminated_players: [1],
+    } as GameState;
+    mockGetState.mockResolvedValue(committed);
+    mockSubmitAction.mockRejectedValueOnce(new Error("response lost after commit"));
+    const concede = (adapter as unknown as {
+      concedePlayer: (pid: number, reason: string, origin: "conceded") => Promise<string>;
+    }).concedePlayer.bind(adapter);
+
+    await expect(concede(1, "Player conceded", "conceded")).resolves.toBe("committed");
+    expect((adapter as unknown as { eliminatedSeats: Set<number> }).eliminatedSeats.has(1)).toBe(true);
+    expect(mockSubmitAction).toHaveBeenCalledOnce();
+    expect(events.filter((event) => event.type === "playerConceded" && event.playerId === 1)).toHaveLength(1);
+    expect(events.filter((event) => event.type === "stateChanged")).toHaveLength(1);
+
+    await expect(concede(1, "Player conceded", "conceded")).resolves.toBe("inactive");
+    expect(mockSubmitAction).toHaveBeenCalledOnce();
+    expect(events.filter((event) => event.type === "playerConceded" && event.playerId === 1)).toHaveLength(1);
+    adapter.dispose();
+  });
+
+  it("does not replay an unknown WASM Concede until a later explicit request", async () => {
+    const { adapter } = makeHost(2);
+    const events: P2PAdapterEvent[] = [];
+    adapter.onEvent((event) => events.push(event));
+    await adapter.initialize();
+    events.length = 0;
+    mockGetState.mockResolvedValue(remoteState("WASM Concede did not commit"));
+    mockSubmitAction.mockRejectedValueOnce(new Error("response lost after send"));
+    const concede = (adapter as unknown as {
+      concedePlayer: (pid: number, reason: string, origin: "conceded") => Promise<string>;
+    }).concedePlayer.bind(adapter);
+
+    await expect(concede(1, "Player conceded", "conceded")).resolves.toBe("definite_non_commit");
+    expect(mockSubmitAction).toHaveBeenCalledOnce();
+    expect((adapter as unknown as { eliminatedSeats: Set<number> }).eliminatedSeats.has(1)).toBe(false);
+    expect(events).not.toContainEqual(expect.objectContaining({ type: "playerConceded", playerId: 1 }));
+
+    mockSubmitAction.mockResolvedValueOnce({ events: [] });
+    await expect(concede(1, "Player conceded", "conceded")).resolves.toBe("committed");
+    expect(mockSubmitAction).toHaveBeenCalledTimes(2);
+    adapter.dispose();
+  });
+
+  it("keeps unknown WASM Concede fenced when snapshot fails, then reconciles before retry", async () => {
+    const { adapter } = makeHost(2);
+    const events: P2PAdapterEvent[] = [];
+    adapter.onEvent((event) => events.push(event));
+    await adapter.initialize();
+    events.length = 0;
+    mockSubmitAction.mockRejectedValueOnce(new Error("response lost after send"));
+    mockGetState.mockRejectedValueOnce(new Error("snapshot unavailable"));
+    const host = adapter as unknown as {
+      concedePlayer: (pid: number, reason: string, origin: "conceded") => Promise<string>;
+      uncertainConcedeSeats: Set<number>;
+      eliminatedSeats: Set<number>;
+    };
+    const concede = host.concedePlayer.bind(adapter);
+
+    await expect(concede(1, "Player conceded", "conceded")).resolves.toBe("unknown");
+    expect(host.uncertainConcedeSeats.has(1)).toBe(true);
+    expect(mockSubmitAction).toHaveBeenCalledOnce();
+    expect(events).not.toContainEqual(expect.objectContaining({ type: "playerConceded", playerId: 1 }));
+
+    mockGetState.mockResolvedValue({
+      ...remoteState("WASM Concede committed before retry"),
+      eliminated_players: [1],
+    } as GameState);
+    await expect(concede(1, "Player conceded", "conceded")).resolves.toBe("committed");
+    expect(mockSubmitAction).toHaveBeenCalledOnce();
+    expect(host.eliminatedSeats.has(1)).toBe(true);
+    expect(host.uncertainConcedeSeats.has(1)).toBe(false);
+    expect(events.filter((event) => event.type === "playerConceded" && event.playerId === 1)).toHaveLength(1);
+    adapter.dispose();
+  });
+
+  it("waits for recipient terminal authority before consuming a reconnect GameOver snapshot", async () => {
+    nativeWebSocketMocks.waitForPlayerSlots.mockResolvedValue([]);
+    nativeWebSocketMocks.initializePregame
+      .mockResolvedValueOnce({ playerId: 0, playerToken: "host-full-token", gameCode: "native-game", fullKey: { game_code: "native-game", generation: 6 } })
+      .mockResolvedValueOnce({ playerId: 1, playerToken: "guest-full-token", gameCode: "native-game", fullKey: { game_code: "native-game", generation: 6 } });
+    const { adapter } = makeNativeHost(2);
+    await adapter.initialize();
+    const finalState = {
+      ...remoteState("Full reconnect terminal state"),
+      waiting_for: { type: "GameOver", data: { winner: 0 } },
+    } as GameState;
+    const fullKey = { game_code: "native-game", generation: 6 };
+    const terminal = (deliveryId: string, credential: string): FullTerminalDelivery => ({
+      key: fullKey,
+      terminalRevision: 19,
+      deliveryId,
+      credential,
+      display: { winner: 0, reason: "Full terminal" },
+      finalView: finalState,
+    });
+    const hostDelivery = deferred<FullTerminalDelivery | null>();
+    const guestDelivery = deferred<FullTerminalDelivery | null>();
+    nativeTerminalMocks.bootstrap.mockImplementation(async (_url, _key, token) =>
+      token === "host-full-token" ? hostDelivery.promise : guestDelivery.promise,
+    );
+    type BridgeHarness = {
+      fullKey: typeof fullKey;
+      playerTokens: Map<number, string>;
+      latestViews: Map<number, { snapshot: EngineSnapshot; events: GameEvent[]; revision: number }>;
+      terminalResume: () => Promise<unknown>;
+    };
+    const bridge = (adapter as unknown as { nativeBridge: BridgeHarness }).nativeBridge;
+    bridge.fullKey = fullKey;
+    bridge.playerTokens.set(0, "host-full-token");
+    bridge.playerTokens.set(1, "guest-full-token");
+    bridge.latestViews.set(0, {
+      snapshot: {
+        state: finalState,
+        legalResult: { actions: [], autoPassRecommended: false },
+        seq: 1,
+      },
+      events: [],
+      revision: 19,
+    });
+
+    let settled = false;
+    const pending = bridge.terminalResume().then((result) => {
+      settled = true;
+      return result;
+    });
+    await flushPromises();
+    expect(nativeTerminalMocks.bootstrap).toHaveBeenCalledTimes(2);
+    expect(settled).toBe(false);
+
+    hostDelivery.resolve(terminal("host-delivery", "host-credential"));
+    guestDelivery.resolve(terminal("guest-delivery", "guest-credential"));
+    await expect(pending).resolves.toMatchObject({ revision: 19, display: { winner: 0 } });
+    expect(settled).toBe(true);
+    adapter.dispose();
+  });
+
+  it("retires exactly once when the fresh Full seat proves an unknown Concede committed", async () => {
+    nativeWebSocketMocks.waitForPlayerSlots.mockResolvedValue([]);
+    nativeWebSocketMocks.initializePregame.mockResolvedValue(NATIVE_HOST_ATTACHMENT);
+    const { adapter } = makeNativeHost(3, { gameId: "unknown-concede-committed", roomCode: "ABCDE" });
+    const events: P2PAdapterEvent[] = [];
+    adapter.onEvent((event) => events.push(event));
+    await adapter.initialize();
+
+    const committedState = { ...remoteState("Concede committed"), eliminated_players: [1] } as GameState;
+    const snapshot: EngineSnapshot = {
+      state: committedState,
+      legalResult: { actions: [], autoPassRecommended: false },
+      seq: 2,
+    };
+    type BridgeHarness = {
+      playerTokens: Map<number, string>;
+      latestViews: Map<number, { snapshot: EngineSnapshot; events: GameEvent[]; revision: number }>;
+      submitAction: (action: GameAction, playerId: number) => Promise<{ events: GameEvent[] }>;
+      reconnectClient: (playerId: number, token: string) => Promise<unknown>;
+      getSnapshot: () => Promise<EngineSnapshot>;
+    };
+    const host = adapter as unknown as {
+      nativeBridge: BridgeHarness;
+      guestSessions: Map<number, { send: (message: P2PMessage) => Promise<boolean>; close: () => void }>;
+      eliminatedSeats: Set<number>;
+      concedingSeats: Set<number>;
+      playerTokens: Map<number, string>;
+    };
+    const bridge = host.nativeBridge;
+    bridge.playerTokens.set(1, "native-seat-1");
+    host.playerTokens.set(1, "p2p-seat-1");
+    bridge.latestViews.set(0, { snapshot, events: [], revision: 8 });
+    bridge.submitAction = vi.fn(async () => { throw new Error("response lost after send"); });
+    bridge.reconnectClient = vi.fn(async (playerId, token) => {
+      expect(playerId).toBe(1);
+      expect(token).toBe("native-seat-1");
+      bridge.latestViews.set(playerId, { snapshot, events: [], revision: 8 });
+      return { playerId, playerToken: token };
+    });
+    bridge.getSnapshot = vi.fn(async () => snapshot);
+    const departureFrames: P2PMessage[] = [];
+    host.guestSessions.set(2, {
+      send: vi.fn(async (message) => { departureFrames.push(message); return true; }),
+      close: vi.fn(),
+    });
+    persistenceMocks.saveP2PHostSession.mockClear();
+
+    await adapter.concedeDisconnected(1);
+    expect(bridge.submitAction).toHaveBeenCalledOnce();
+    expect(bridge.reconnectClient).toHaveBeenCalledOnce();
+    expect(host.eliminatedSeats.has(1)).toBe(true);
+    expect(host.concedingSeats.has(1)).toBe(false);
+    expect(events.filter((event) => event.type === "playerConceded" && event.playerId === 1)).toHaveLength(1);
+    expect(persistenceMocks.saveP2PHostSession).toHaveBeenCalledOnce();
+    expect(departureFrames.filter((message) => message.type === "player_conceded")).toHaveLength(1);
+
+    await adapter.concedeDisconnected(1);
+    expect(bridge.submitAction).toHaveBeenCalledOnce();
+    expect(events.filter((event) => event.type === "playerConceded" && event.playerId === 1)).toHaveLength(1);
+    expect(persistenceMocks.saveP2PHostSession).toHaveBeenCalledOnce();
+    expect(departureFrames.filter((message) => message.type === "player_conceded")).toHaveLength(1);
+    adapter.dispose();
+  });
+
+  it("restores a native seat after reconnect proves an unknown Concede did not commit", async () => {
+    nativeWebSocketMocks.waitForPlayerSlots.mockResolvedValue([]);
+    nativeWebSocketMocks.initializePregame.mockResolvedValue(NATIVE_HOST_ATTACHMENT);
+    const { adapter } = makeNativeHost(3);
+    const events: P2PAdapterEvent[] = [];
+    adapter.onEvent((event) => events.push(event));
+    await adapter.initialize();
+
+    const liveState = remoteState("Concede did not commit");
+    const snapshot: EngineSnapshot = {
+      state: liveState,
+      legalResult: { actions: [], autoPassRecommended: false },
+      seq: 2,
+    };
+    type BridgeHarness = {
+      playerTokens: Map<number, string>;
+      latestViews: Map<number, { snapshot: EngineSnapshot; events: GameEvent[]; revision: number }>;
+      submitAction: (action: GameAction, playerId: number) => Promise<{ events: GameEvent[] }>;
+      reconnectClient: (playerId: number, token: string) => Promise<unknown>;
+      getSnapshot: () => Promise<EngineSnapshot>;
+    };
+    const host = adapter as unknown as {
+      nativeBridge: BridgeHarness;
+      guestSessions: Map<number, { send: (message: P2PMessage) => Promise<boolean>; close: () => void }>;
+      eliminatedSeats: Set<number>;
+      concedingSeats: Set<number>;
+      playerTokens: Map<number, string>;
+    };
+    const bridge = host.nativeBridge;
+    bridge.playerTokens.set(1, "native-seat-1");
+    host.playerTokens.set(1, "p2p-seat-1");
+    bridge.submitAction = vi.fn(async () => { throw new Error("response lost after send"); });
+    bridge.reconnectClient = vi.fn(async (playerId, token) => {
+      expect(playerId).toBe(1);
+      expect(token).toBe("native-seat-1");
+      bridge.latestViews.set(playerId, { snapshot, events: [], revision: 9 });
+      return { playerId, playerToken: token };
+    });
+    bridge.getSnapshot = vi.fn(async () => snapshot);
+    const departureFrames: P2PMessage[] = [];
+    host.guestSessions.set(2, {
+      send: vi.fn(async (message) => { departureFrames.push(message); return true; }),
+      close: vi.fn(),
+    });
+
+    await adapter.concedeDisconnected(1);
+    expect(bridge.submitAction).toHaveBeenCalledOnce();
+    expect(bridge.reconnectClient).toHaveBeenCalledOnce();
+    expect(host.eliminatedSeats.has(1)).toBe(false);
+    expect(host.concedingSeats.has(1)).toBe(false);
+    expect(host.playerTokens.has(1)).toBe(true);
+    expect(events).not.toContainEqual(expect.objectContaining({ type: "playerConceded", playerId: 1 }));
+    expect(departureFrames.filter((message) => message.type === "player_conceded")).toHaveLength(0);
+    adapter.dispose();
+  });
+
+  it("reconciles an unresolved Concede before a later explicit departure retry", async () => {
+    nativeWebSocketMocks.waitForPlayerSlots.mockResolvedValue([]);
+    nativeWebSocketMocks.initializePregame.mockResolvedValue(NATIVE_HOST_ATTACHMENT);
+    const { adapter } = makeNativeHost(3, { gameId: "unknown-concede-retry", roomCode: "ABCDE" });
+    await adapter.initialize();
+
+    const snapshot: EngineSnapshot = {
+      state: remoteState("prior Concede definitely did not commit"),
+      legalResult: { actions: [], autoPassRecommended: false },
+      seq: 4,
+    };
+    type BridgeHarness = {
+      playerTokens: Map<number, string>;
+      latestViews: Map<number, { snapshot: EngineSnapshot; events: GameEvent[]; revision: number }>;
+      submitAction: (action: GameAction, playerId: number) => Promise<{ events: GameEvent[] }>;
+      reconnectClient: (playerId: number, token: string) => Promise<unknown>;
+    };
+    const host = adapter as unknown as {
+      nativeBridge: BridgeHarness;
+      guestSessions: Map<number, { send: (message: P2PMessage) => Promise<boolean>; close: () => void }>;
+      eliminatedSeats: Set<number>;
+      concedingSeats: Set<number>;
+      uncertainConcedeSeats: Set<number>;
+    };
+    const bridge = host.nativeBridge;
+    bridge.playerTokens.set(1, "native-seat-1");
+    const order: string[] = [];
+    let submissions = 0;
+    let reconnects = 0;
+    bridge.submitAction = vi.fn(async () => {
+      submissions += 1;
+      order.push("Concede");
+      if (submissions === 1) throw new Error("response lost after send");
+      return { events: [] };
+    });
+    bridge.reconnectClient = vi.fn(async (playerId, token) => {
+      expect(playerId).toBe(1);
+      expect(token).toBe("native-seat-1");
+      reconnects += 1;
+      order.push("Full reconnect barrier");
+      if (reconnects === 1) throw new Error("temporary authority outage");
+      bridge.latestViews.set(playerId, { snapshot, events: [], revision: 10 });
+      return { playerId, playerToken: token };
+    });
+    const departureFrames: P2PMessage[] = [];
+    host.guestSessions.set(2, {
+      send: vi.fn(async (message) => { departureFrames.push(message); return true; }),
+      close: vi.fn(),
+    });
+
+    await adapter.concedeDisconnected(1);
+    expect(host.concedingSeats.has(1)).toBe(true);
+    expect(host.uncertainConcedeSeats.has(1)).toBe(true);
+    expect(submissions).toBe(1);
+    expect(departureFrames.filter((message) => message.type === "player_conceded")).toHaveLength(0);
+
+    await adapter.concedeDisconnected(1);
+    expect(order).toEqual(["Concede", "Full reconnect barrier", "Full reconnect barrier", "Concede"]);
+    expect(submissions).toBe(2);
+    expect(host.uncertainConcedeSeats.has(1)).toBe(false);
+    expect(host.concedingSeats.has(1)).toBe(false);
+    expect(host.eliminatedSeats.has(1)).toBe(true);
+    expect(departureFrames.filter((message) => message.type === "player_conceded")).toHaveLength(1);
+    adapter.dispose();
+  });
+
+  it("corrects stale native resume elimination in both directions without changing kick denial", async () => {
+    const liveState = { ...remoteState("live native resume"), eliminated_players: [] } as GameState;
+    const staleEliminated = makeNativeResumeHost({ eliminatedSeats: [1], kickedTokens: ["native-guest-token"], state: liveState });
+    await staleEliminated.adapter.initialize();
+    const first = staleEliminated.adapter as unknown as {
+      eliminatedSeats: Set<number>;
+      disconnectedSeats: Map<number, unknown>;
+      kickedTokens: Set<string>;
+    };
+    expect(first.eliminatedSeats.has(1)).toBe(false);
+    expect(first.disconnectedSeats.has(1)).toBe(true);
+    expect(first.kickedTokens.has("native-guest-token")).toBe(true);
+    const deniedReconnect = await joinGuest(staleEliminated.emitConnection, {
+      type: "reconnect",
+      playerToken: "native-guest-token",
+    });
+    expect(await deniedReconnect.getSentMessages()).toContainEqual(expect.objectContaining({
+      type: "reconnect_rejected",
+      reason: "Player kicked",
+    }));
+    staleEliminated.adapter.dispose();
+
+    const engineEliminated = { ...remoteState("eliminated native resume"), eliminated_players: [1] } as GameState;
+    const staleLive = makeNativeResumeHost({ eliminatedSeats: [], state: engineEliminated });
+    await staleLive.adapter.initialize();
+    const second = staleLive.adapter as unknown as {
+      eliminatedSeats: Set<number>;
+      disconnectedSeats: Map<number, unknown>;
+    };
+    expect(second.eliminatedSeats.has(1)).toBe(true);
+    expect(second.disconnectedSeats.has(1)).toBe(false);
+    staleLive.adapter.dispose();
+  });
+
+  it("resumes a durable terminal P2P result only from matching recipient-bound Full final views", async () => {
+    const winnerState = (playerId: number): GameState => ({
+      ...remoteState(`Full final view for ${playerId}`),
+      waiting_for: { type: "GameOver", data: { winner: 0 } },
+      eliminated_players: [],
+      filteredFor: playerId,
+    } as unknown as GameState);
+    const hostFinal = winnerState(0);
+    const guestFinal = winnerState(1);
+    const deliveries = new Map<string, FullTerminalDelivery>([
+      ["native-host-token", {
+        key: { game_code: "native-game", generation: 1 },
+        terminalRevision: 12,
+        deliveryId: "host-delivery",
+        credential: "host-credential",
+        display: { winner: 0, reason: "Full terminal reason" },
+        finalView: hostFinal,
+      }],
+      ["native-guest-token", {
+        key: { game_code: "native-game", generation: 1 },
+        terminalRevision: 12,
+        deliveryId: "guest-delivery",
+        credential: "guest-credential",
+        display: { winner: 0, reason: "Full terminal reason" },
+        finalView: guestFinal,
+      }],
+    ]);
+    nativeWebSocketMocks.initializePregame.mockRejectedValueOnce(new Error("Full session retired"));
+    nativeTerminalMocks.bootstrap.mockImplementation(async (_url, _key, playerToken) =>
+      deliveries.get(playerToken ?? "") ?? null);
+    const retainedTerminal: P2PTerminalResult = {
+      key: "native-resume-session",
+      lease: { sessionKey: "native-resume-session", hostIncarnation: "prior-host-incarnation" },
+      recipient: 0,
+      revision: 12,
+      terminalId: "durable-host-terminal",
+      finalStateCommitment: await p2pFinalStateCommitment(hostFinal),
+      display: { winner: 0, reason: "Full terminal reason" },
+    };
+    const { adapter, emitConnection } = makeNativeResumeHost({
+      eliminatedSeats: [],
+      state: hostFinal,
+      terminalResult: retainedTerminal,
+    });
+    const events: P2PAdapterEvent[] = [];
+    adapter.onEvent((event) => events.push(event));
+
+    await adapter.initialize();
+    const host = adapter as unknown as {
+      nativeBridge: {
+        clients: Map<number, unknown>;
+        terminalFinalViews: (revision: number) => Promise<Map<number, GameState>>;
+      };
+      terminalResult: { display: { winner: number | null; reason: string }; finalStateCommitment: string } | null;
+      disconnectedSeats: Map<number, unknown>;
+    };
+    const finalViews = await host.nativeBridge.terminalFinalViews(12);
+    expect(nativeTerminalMocks.bootstrap).toHaveBeenCalledTimes(2);
+    expect(finalViews.get(0)).toEqual(hostFinal);
+    expect(finalViews.get(1)).toEqual(guestFinal);
+    expect(await adapter.getState()).toEqual(hostFinal);
+    expect(host.terminalResult).toEqual(retainedTerminal);
+    expect(terminalMocks.commitP2PTerminalResult).not.toHaveBeenCalled();
+    expect(events).toContainEqual({ type: "terminalResult", result: retainedTerminal });
+    expect(host.disconnectedSeats.has(1)).toBe(true);
+    expect(nativeTerminalMocks.acknowledge).not.toHaveBeenCalled();
+    expect(persistenceMocks.clearGameStrict).not.toHaveBeenCalled();
+    expect(mocks.resumeMultiplayerHostState).not.toHaveBeenCalled();
+    expect(host.nativeBridge.clients.size).toBe(0);
+
+    // A real P2PGuestAdapter terminates its transport as soon as it accepts
+    // terminal_result, so it cannot ACK a later state_update.
+    const reconnect = new FakeOpenableConnection();
+    reconnect.refuseSendsAfter("terminal_result");
+    emitConnection(reconnect as unknown as DataConnection);
+    reconnect.fireOpen();
+    await reconnect.simulateData({
+      type: "reconnect",
+      playerToken: "native-guest-token",
+      wireProtocolVersion: WIRE_PROTOCOL_VERSION,
+    });
+    await vi.waitFor(async () => {
+      expect(await reconnect.getSentMessages()).toContainEqual(expect.objectContaining({ type: "terminal_result" }));
+    });
+    const reconnectFrames = await reconnect.getSentMessages() as P2PMessage[];
+    const reconnectAckIndex = reconnectFrames.findIndex((message) => message.type === "reconnect_ack");
+    const terminalIndex = reconnectFrames.findIndex((message) => message.type === "terminal_result");
+    const reconnectAck = reconnectFrames[reconnectAckIndex] as Extract<P2PMessage, { type: "reconnect_ack" }>;
+    const terminal = reconnectFrames[terminalIndex] as Extract<P2PMessage, { type: "terminal_result" }>;
+    expect(reconnectAck.state).toEqual(guestFinal);
+    expect(terminal.result.finalStateCommitment).toBe(await p2pFinalStateCommitment(guestFinal));
+    expect(terminal.result.lease).toEqual(reconnectAck.authority);
+    expect(terminal.result.lease.hostIncarnation).not.toBe(retainedTerminal.lease.hostIncarnation);
+    expect(terminal.result.terminalId).not.toBe(retainedTerminal.terminalId);
+    expect(reconnectAckIndex).toBeGreaterThanOrEqual(0);
+    expect(terminalIndex).toBeGreaterThan(reconnectAckIndex);
+    expect(reconnect.acksSent).toContainEqual(expect.objectContaining({
+      type: "state_ack",
+      revision: reconnectAck.revision,
+    }));
+    expect(reconnectFrames.slice(terminalIndex + 1).some((message) => message.type === "state_update")).toBe(false);
+    expect(reconnect.open).toBe(false);
+    expect((adapter as unknown as { guestSessions: Map<number, unknown> }).guestSessions.has(1)).toBe(false);
+    expect(events.some((event) => event.type === "playerReconnected")).toBe(false);
+    expect(events.some((event) => event.type === "gameResumed")).toBe(false);
+    expect(nativeWebSocketMocks.submitAction).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(nativeTerminalMocks.acknowledge).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect((adapter as unknown as { nativeTerminalAcknowledged: boolean }).nativeTerminalAcknowledged).toBe(true));
+    expect(persistenceMocks.clearGameStrict).toHaveBeenCalledWith("native-resume");
+    expect((adapter as unknown as {
+      nativeTerminalStateAcked: Set<number>;
+      terminalDelivered: Set<number>;
+    }).nativeTerminalStateAcked.has(1)).toBe(true);
+    expect((adapter as unknown as { terminalDelivered: Set<number> }).terminalDelivered.has(1)).toBe(true);
+    expect((adapter as unknown as { disconnectedSeats: Map<number, unknown> }).disconnectedSeats.has(1)).toBe(false);
+    adapter.dispose();
+  });
+
+  it("rejects a retained host terminal commitment that differs from recovered Full authority", async () => {
+    const finalView = (playerId: number): GameState => ({
+      ...remoteState(`retained terminal mismatch ${playerId}`),
+      waiting_for: { type: "GameOver", data: { winner: 0 } },
+      eliminated_players: [],
+      filteredFor: playerId,
+    } as unknown as GameState);
+    const hostFinal = finalView(0);
+    const deliveries = new Map<string, FullTerminalDelivery>([
+      ["native-host-token", {
+        key: { game_code: "native-game", generation: 1 },
+        terminalRevision: 12,
+        deliveryId: "host-delivery",
+        credential: "host-credential",
+        display: { winner: 0, reason: "Full terminal reason" },
+        finalView: hostFinal,
+      }],
+      ["native-guest-token", {
+        key: { game_code: "native-game", generation: 1 },
+        terminalRevision: 12,
+        deliveryId: "guest-delivery",
+        credential: "guest-credential",
+        display: { winner: 0, reason: "Full terminal reason" },
+        finalView: finalView(1),
+      }],
+    ]);
+    nativeWebSocketMocks.initializePregame.mockRejectedValueOnce(new Error("Full session retired"));
+    nativeTerminalMocks.bootstrap.mockImplementation(async (_url, _key, playerToken) =>
+      deliveries.get(playerToken ?? "") ?? null);
+    const { adapter } = makeNativeResumeHost({
+      state: hostFinal,
+      terminalResult: {
+        key: "native-resume-session",
+        lease: { sessionKey: "native-resume-session", hostIncarnation: "prior-host-incarnation" },
+        recipient: 0,
+        revision: 12,
+        terminalId: "mismatched-durable-terminal",
+        finalStateCommitment: "sha256:not-the-full-host-view",
+        display: { winner: 0, reason: "Full terminal reason" },
+      },
+    });
+
+    try {
+      await expect(adapter.initialize()).rejects.toThrow("Retained P2P terminal result does not match Full final authority");
+      expect(terminalMocks.commitP2PTerminalResult).not.toHaveBeenCalled();
+    } finally {
+      adapter.dispose();
+    }
+  });
+
+  it("fans out recovered A2 terminal states before P2P terminal results", async () => {
+    nativeWebSocketMocks.waitForPlayerSlots.mockResolvedValue([]);
+    nativeWebSocketMocks.initializePregame.mockResolvedValue(NATIVE_HOST_ATTACHMENT);
+    const { adapter } = makeNativeHost(3, { gameId: "unknown-concede-terminal", roomCode: "ABCDE" });
+    const events: P2PAdapterEvent[] = [];
+    adapter.onEvent((event) => events.push(event));
+    await adapter.initialize();
+
+    const fullKey = { game_code: "native-game", generation: 1 };
+    const finalView = (playerId: number): GameState => ({
+      ...remoteState(`terminal final view ${playerId}`),
+      waiting_for: { type: "GameOver", data: { winner: 2 } },
+      eliminated_players: [1],
+      filteredFor: playerId,
+    } as unknown as GameState);
+    const deliveries = new Map<string, FullTerminalDelivery>([
+      ["native-host-token", {
+        key: fullKey,
+        terminalRevision: 11,
+        deliveryId: "host-delivery",
+        credential: "host-credential",
+        display: { winner: 2, reason: "Full terminal reason" },
+        finalView: finalView(0),
+      }],
+      ["native-seat-1", {
+        key: fullKey,
+        terminalRevision: 11,
+        deliveryId: "seat-1-delivery",
+        credential: "seat-1-credential",
+        display: { winner: 2, reason: "Full terminal reason" },
+        finalView: finalView(1),
+      }],
+      ["native-seat-2", {
+        key: fullKey,
+        terminalRevision: 11,
+        deliveryId: "seat-2-delivery",
+        credential: "seat-2-credential",
+        display: { winner: 2, reason: "Full terminal reason" },
+        finalView: finalView(2),
+      }],
+    ]);
+    nativeTerminalMocks.bootstrap.mockImplementation(async (_url, _key, token) =>
+      deliveries.get(token ?? "") ?? null);
+    const host = adapter as unknown as {
+      nativeBridge: {
+        fullKey: typeof fullKey;
+        playerTokens: Map<number, string>;
+        clients: Map<number, unknown>;
+        submitAction: (action: GameAction, playerId: number) => Promise<{ events: GameEvent[] }>;
+        reconnectClient: (playerId: number, token: string) => Promise<unknown>;
+      };
+      playerTokens: Map<number, string>;
+      guestSessions: Map<number, { send: (message: P2PMessage) => Promise<boolean>; close: () => void }>;
+      concedeDisconnected: (pid: number) => Promise<void>;
+      terminalResult: { revision: number; finalStateCommitment: string } | null;
+    };
+    const bridge = host.nativeBridge;
+    bridge.fullKey = fullKey;
+    bridge.playerTokens.set(1, "native-seat-1");
+    bridge.playerTokens.set(2, "native-seat-2");
+    let submissions = 0;
+    bridge.submitAction = vi.fn(async () => {
+      submissions += 1;
+      throw new Error("response lost after terminal commit");
+    });
+    bridge.reconnectClient = vi.fn(async () => { throw new Error("Full session retired"); });
+    host.playerTokens.set(1, "p2p-seat-1");
+    host.playerTokens.set(2, "p2p-seat-2");
+    const peerFrames: P2PMessage[] = [];
+    host.guestSessions.set(2, {
+      send: vi.fn(async (message) => { peerFrames.push(message); return true; }),
+      close: vi.fn(),
+    });
+
+    await host.concedeDisconnected(1);
+
+    const finalStateIndex = peerFrames.findIndex((message) =>
+      message.type === "state_update" && message.revision === 11,
+    );
+    const terminalIndex = peerFrames.findIndex((message) => message.type === "terminal_result");
+    const finalState = peerFrames[finalStateIndex] as Extract<P2PMessage, { type: "state_update" }>;
+    const terminal = peerFrames[terminalIndex] as Extract<P2PMessage, { type: "terminal_result" }>;
+    expect(submissions).toBe(1);
+    expect(bridge.clients.size).toBe(0);
+    expect(host.terminalResult?.revision).toBe(11);
+    expect(finalState.state).toEqual(finalView(2));
+    expect(terminal.result.finalStateCommitment).toBe(await p2pFinalStateCommitment(finalView(2)));
+    expect(finalStateIndex).toBeGreaterThanOrEqual(0);
+    expect(terminalIndex).toBeGreaterThan(finalStateIndex);
+    expect(peerFrames.filter((message) => message.type === "player_conceded")).toHaveLength(1);
+    expect(events.filter((event) => event.type === "playerConceded" && event.playerId === 1)).toHaveLength(1);
+    expect(nativeTerminalMocks.acknowledge).not.toHaveBeenCalled();
+    expect(persistenceMocks.clearGameStrict).not.toHaveBeenCalled();
+    adapter.dispose();
+  });
+
+  it("ACKs Full terminal rows only after the final P2P state ACK and terminal send", async () => {
+    nativeWebSocketMocks.waitForPlayerSlots.mockResolvedValue([]);
+    nativeWebSocketMocks.initializePregame.mockResolvedValue({
+      playerId: 0,
+      playerToken: "native-host-token",
+      gameCode: "native-game",
+      fullKey: { game_code: "native-game", generation: 1 },
+    });
+    const { adapter } = makeNativeHost(2, { gameId: "native-terminal-ack", roomCode: "ABCDE" });
+    await adapter.initialize();
+
+    const finalState = (playerId: number): GameState => ({
+      ...remoteState(`final ${playerId}`),
+      waiting_for: { type: "GameOver", data: { winner: 0 } },
+      eliminated_players: [],
+      filteredFor: playerId,
+    } as unknown as GameState);
+    const hostState = finalState(0);
+    const guestState = finalState(1);
+    const fullKey = { game_code: "native-game", generation: 1 };
+    const makeDelivery = (playerId: number, state: GameState): FullTerminalDelivery => ({
+      key: fullKey,
+      terminalRevision: 9,
+      deliveryId: `delivery-${playerId}`,
+      credential: `credential-${playerId}`,
+      display: { winner: 0, reason: "Full result" },
+      finalView: state,
+    });
+    const deliveries = new Map<number, FullTerminalDelivery>([
+      [0, makeDelivery(0, hostState)],
+      [1, makeDelivery(1, guestState)],
+    ]);
+    const order: string[] = [];
+    persistenceMocks.clearGameStrict.mockImplementation(async () => { order.push("clear"); });
+    nativeTerminalMocks.acknowledge.mockImplementation(async (_url, deliveryId) => {
+      order.push(`ack:${deliveryId}`);
+      return true;
+    });
+
+    type NativeView = { snapshot: EngineSnapshot; events: GameEvent[]; revision: number };
+    const host = adapter as unknown as {
+      nativeBridge: {
+        playerTokens: Map<number, string>;
+        latestViews: Map<number, NativeView>;
+        terminalDeliveries: Map<number, FullTerminalDelivery>;
+      };
+      playerTokens: Map<number, string>;
+      guestSessions: Map<number, { send: (message: P2PMessage) => Promise<boolean>; close: () => void }>;
+      nativeDeliveredViews: Map<number, { revision: number; snapshot: EngineSnapshot }>;
+      guestAckedRevisions: Map<number, number>;
+      commitTerminalIfComplete: (snapshot: EngineSnapshot, revision: number) => Promise<boolean>;
+      recordGuestAck: (pid: number, revision: number) => void;
+      tryAcknowledgeNativeTerminal: () => Promise<void>;
+      nativeTerminalAcknowledged: boolean;
+    };
+    const bridge = host.nativeBridge;
+    bridge.playerTokens.set(1, "native-guest-token");
+    for (const [playerId, delivery] of deliveries) {
+      const state = delivery.finalView!;
+      bridge.terminalDeliveries.set(playerId, delivery);
+      bridge.latestViews.set(playerId, {
+        snapshot: { state, legalResult: { actions: [], autoPassRecommended: false }, seq: playerId + 1 },
+        events: [],
+        revision: 9,
+      });
+      host.nativeDeliveredViews.set(playerId, {
+        revision: 9,
+        snapshot: { state, legalResult: { actions: [], autoPassRecommended: false }, seq: playerId + 1 },
+      });
+    }
+    host.playerTokens.set(1, "p2p-guest-token");
+    host.guestAckedRevisions.set(1, 8);
+    const sent: P2PMessage[] = [];
+    host.guestSessions.set(1, {
+      send: vi.fn(async (message) => { sent.push(message); return true; }),
+      close: vi.fn(),
+    });
+
+    const snapshot: EngineSnapshot = {
+      state: hostState,
+      legalResult: { actions: [], autoPassRecommended: false },
+      seq: 1,
+    };
+    expect(await host.commitTerminalIfComplete(snapshot, 9)).toBe(true);
+    expect(sent).toContainEqual(expect.objectContaining({ type: "terminal_result", result: expect.objectContaining({ recipient: 1 }) }));
+    expect(nativeTerminalMocks.acknowledge).not.toHaveBeenCalled();
+    expect(persistenceMocks.clearGameStrict).not.toHaveBeenCalled();
+
+    host.recordGuestAck(1, 9);
+    await host.tryAcknowledgeNativeTerminal();
+    expect(order).toEqual(["clear", "ack:delivery-0", "ack:delivery-1"]);
+    expect(host.nativeTerminalAcknowledged).toBe(true);
+
+    await host.commitTerminalIfComplete(snapshot, 9);
+    expect(order).toHaveLength(3);
+    adapter.dispose();
+  });
+
   it("rejects construction with playerCount outside 2-6", () => {
     const { peer, onGuestConnected } = createFakePeer();
     const hostDeck = {
@@ -1650,7 +2493,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
       .toBeLessThan(send.mock.invocationCallOrder[0]!);
     await vi.waitFor(async () => {
       expect((await reconnect.getSentMessages()).map((message) => (message as { type: string }).type))
-        .toEqual(["reconnect_ack", "terminal_result", "player_latencies"]);
+        .toEqual(["reconnect_ack", "terminal_result"]);
     });
     adapter.dispose();
   });
@@ -3069,9 +3912,12 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     },
   );
 
-  it.each([false, true])("releases departure guard after unknown failure (disposed=%s)", async (disposeWhilePending) => {
+  it.each([false, true])("keeps unknown outcome fenced without authority proof (disposed=%s)", async (disposeWhilePending) => {
     const { adapter } = makeHost(2);
     await adapter.initialize();
+    if (!disposeWhilePending) {
+      mockGetState.mockRejectedValueOnce(new Error("WASM snapshot unavailable"));
+    }
     const pending = deferred<void>();
     mocks.submitAction.mockImplementationOnce(async () => {
       await pending.promise;
@@ -3083,8 +3929,8 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     if (disposeWhilePending) adapter.dispose();
     pending.resolve();
     await call;
-    expect(host.concedingSeats.size).toBe(0);
-    expect(host.eliminatedSeats.has(1)).toBe(!disposeWhilePending);
+    expect(host.concedingSeats.has(1)).toBe(!disposeWhilePending);
+    expect(host.eliminatedSeats.has(1)).toBe(false);
     adapter.dispose();
   });
 

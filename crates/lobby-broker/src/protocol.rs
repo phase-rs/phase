@@ -60,6 +60,9 @@ pub struct TournamentRequestId(pub u64);
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
+/// 96 — Full terminal delivery adds recipient-scoped final-view recovery and
+///      cleanup authority. This Full-only capability changes neither Lobby nor
+///      P2P frames.
 /// 95 — `FilterProp::Unblocked` is reshaped to `FilterProp::BlockStatus { status:
 ///      AttackerBlockStatus }` (`Blocked` | `Unblocked`), so "blocked creature"
 ///      filters (CR 509.1h: an attacking creature stays blocked for the rest of
@@ -790,7 +793,7 @@ pub struct TournamentRequestId(pub u64);
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 95;
+pub const PROTOCOL_VERSION: u32 = 96;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -2031,12 +2034,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 95);
+        assert_eq!(PROTOCOL_VERSION, 96);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which refuses an older full-game peer that cannot preserve the exact
         // Full-session identity across draft match attachment and follow-ups.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 94);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 95);
     }
 
     #[test]

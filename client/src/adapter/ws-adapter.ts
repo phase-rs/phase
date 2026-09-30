@@ -174,6 +174,8 @@ export interface NativeSocketAdapterOptions {
   socketFactory: PhaseSocketFactory;
   /** Present on release only; preview parity is verified by the shell. */
   expectedServerVersion?: string;
+  /** Native P2P owns terminal fan-out and ACK ordering across local seat sockets. */
+  callerManagedTerminalDelivery?: boolean;
 }
 
 /** Native server setup for one local P2P seat. The PeerJS connection remains
@@ -210,6 +212,9 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 96 — Full terminal deliveries retain each recipient's filtered final view
+ *      for crash-safe terminal cleanup and recovery. This capability does not
+ *      change GameState or P2P frames.
  * 95 — FilterProp.Unblocked is reshaped to FilterProp.BlockStatus { status:
  *      AttackerBlockStatus } (Blocked | Unblocked), so "blocked creature"
  *      filters (CR 509.1h: an attacking creature stays blocked for the rest of
@@ -640,7 +645,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 95;
+export const PROTOCOL_VERSION = 96;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
@@ -2564,6 +2569,13 @@ export class WebSocketAdapter implements EngineAdapter {
       case "TerminalResult": {
         const delivery = (msg.data as { delivery?: FullTerminalDelivery }).delivery;
         if (!delivery) break;
+        if (this.options.nativePregame?.callerManagedTerminalDelivery) {
+          this.gameEnded = true;
+          this.emit({ type: "actionPendingChanged", pending: false });
+          this.emit({ type: "sessionChanged", session: null });
+          this.emit({ type: "terminalDelivery", delivery });
+          break;
+        }
         void (async () => {
           if (!(await commitFullTerminalDelivery(delivery))) {
             this.emit({
@@ -2578,7 +2590,7 @@ export class WebSocketAdapter implements EngineAdapter {
           this.emit({ type: "terminalDelivery", delivery });
           await acknowledgeFullTerminalDelivery(
             this.serverUrl,
-            delivery.delivery_id,
+            delivery.deliveryId,
             delivery.credential,
           );
         })().catch((error: unknown) => {

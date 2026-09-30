@@ -10,12 +10,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
  */
 const {
   adapters,
+  acknowledgeFullTerminalDelivery,
   bootstrapFullTerminalDelivery,
+  commitFullTerminalDelivery,
   detectServerUrl,
   gameStoreState,
   loadWsSession,
   loadFullTerminalDelivery,
   multiplayerState,
+  readFullTerminalResult,
+  replaceFullTerminalDelivery,
   tryReconnect,
   useGameStore,
   WebSocketAdapter,
@@ -67,14 +71,39 @@ const {
   };
   return {
     adapters,
+    acknowledgeFullTerminalDelivery: vi.fn(async () => true),
     bootstrapFullTerminalDelivery: vi.fn<
-      () => Promise<{ delivery_id: string; credential: string } | null>
+      () => Promise<{ deliveryId: string; credential: string; finalView?: unknown } | null>
     >(async () => null),
+    commitFullTerminalDelivery: vi.fn(async () => true),
     detectServerUrl: vi.fn(async () => "ws://test-server"),
     gameStoreState,
     loadWsSession: vi.fn<() => Record<string, unknown> | null>(() => null),
-    loadFullTerminalDelivery: vi.fn(async () => null),
+    loadFullTerminalDelivery: vi.fn(async () => null as {
+      key: { game_code: string; generation: number };
+      terminalRevision: number;
+      deliveryId: string;
+      credential: string;
+      display: { winner: number | null; reason: string };
+      finalView?: unknown;
+    } | null),
     multiplayerState,
+    readFullTerminalResult: vi.fn(async () => null as {
+      key: { game_code: string; generation: number };
+      terminalRevision: number;
+      deliveryId: string;
+      credential: string;
+      display: { winner: number | null; reason: string };
+      finalView?: unknown;
+    } | null),
+    replaceFullTerminalDelivery: vi.fn(async (_delivery: {
+      key: { game_code: string; generation: number };
+      terminalRevision: number;
+      deliveryId: string;
+      credential: string;
+      display: { winner: number | null; reason: string };
+      finalView?: unknown;
+    }) => true),
     tryReconnect,
     useGameStore,
     WebSocketAdapter,
@@ -87,14 +116,14 @@ vi.mock("../../adapter/ws-adapter", () => ({
   // Without these the reconnect case throws inside the terminal-delivery
   // probe and returns before any socket is opened.
   bootstrapFullTerminalDelivery,
-  readFullTerminalResult: vi.fn(async () => null),
-  acknowledgeFullTerminalDelivery: vi.fn(async () => undefined),
+  readFullTerminalResult,
+  acknowledgeFullTerminalDelivery,
 }));
 
 vi.mock("../../services/fullTerminalResult", () => ({
   loadFullTerminalDelivery,
-  commitFullTerminalDelivery: vi.fn(async () => true),
-  replaceFullTerminalDelivery: vi.fn(async () => true),
+  commitFullTerminalDelivery,
+  replaceFullTerminalDelivery,
 }));
 
 vi.mock("../../adapter/wasm-adapter", () => ({
@@ -242,6 +271,8 @@ describe("GameProvider join origin", () => {
     loadWsSession.mockReturnValue(null);
     loadFullTerminalDelivery.mockResolvedValue(null);
     bootstrapFullTerminalDelivery.mockResolvedValue(null);
+    readFullTerminalResult.mockResolvedValue(null);
+    replaceFullTerminalDelivery.mockResolvedValue(true);
     detectServerUrl.mockResolvedValue("ws://test-server");
     gameStoreState.adapter = null;
     gameStoreState.gameId = null;
@@ -301,8 +332,9 @@ describe("GameProvider join origin", () => {
       timestamp: Date.now(),
     });
     bootstrapFullTerminalDelivery.mockResolvedValue({
-      delivery_id: "d1",
+      deliveryId: "d1",
       credential: "c1",
+      finalView: { turn_number: 7, objects: { "3": { owner_id: 0 } }, derived: {} },
     });
     const onWsEvent = vi.fn();
 
@@ -319,6 +351,125 @@ describe("GameProvider join origin", () => {
         expect.objectContaining({ type: "terminalDelivery" }),
       );
     });
+    expect(commitFullTerminalDelivery).toHaveBeenCalledWith(
+      expect.objectContaining({ finalView: { turn_number: 7, objects: { "3": { owner_id: 0 } }, derived: {} } }),
+    );
+    expect(acknowledgeFullTerminalDelivery).toHaveBeenCalledOnce();
+    expect(commitFullTerminalDelivery.mock.invocationCallOrder[0])
+      .toBeLessThan(acknowledgeFullTerminalDelivery.mock.invocationCallOrder[0]);
+    expect(adapters).toHaveLength(0);
+  });
+
+  it("emits the locally retained final view after an acknowledged terminal refresh", async () => {
+    const localDelivery = {
+      key: { game_code: "ABC123", generation: 1 },
+      terminalRevision: 8,
+      deliveryId: "d1",
+      credential: "c1",
+      display: { winner: 1, reason: "Match conceded" },
+      finalView: { turn_number: 7, objects: { "3": { owner_id: 0 } }, derived: { storm_count: 2 } },
+    };
+    const refreshed = {
+      ...localDelivery,
+      terminalRevision: 9,
+      display: { winner: 1, reason: "Match conceded" },
+    };
+    delete (refreshed as Partial<typeof refreshed>).finalView;
+    let locallyStored: { terminalRevision: number; finalView?: unknown } = localDelivery;
+
+    loadWsSession.mockReturnValue({
+      gameCode: "ABC123",
+      playerToken: "tok",
+      fullKey: localDelivery.key,
+      serverUrl: "wss://session.example/ws",
+      timestamp: Date.now(),
+    });
+    loadFullTerminalDelivery.mockResolvedValue(localDelivery);
+    readFullTerminalResult.mockResolvedValue(refreshed);
+    replaceFullTerminalDelivery.mockImplementation(async (replacement) => {
+      // Model the real persistence helper: a matching terminal authority keeps
+      // its already durable view when an acknowledged server read omits it.
+      locallyStored = replacement.finalView === undefined
+        ? { ...replacement, finalView: localDelivery.finalView }
+        : replacement;
+      return true;
+    });
+    const onWsEvent = vi.fn();
+
+    render(
+      <GameProvider gameId="g1" mode="online" serverUrl="wss://origin.example/ws" onWsEvent={onWsEvent}>
+        <div />
+      </GameProvider>,
+    );
+
+    await waitFor(() => {
+      expect(onWsEvent).toHaveBeenCalledWith(expect.objectContaining({
+        type: "terminalDelivery",
+        delivery: expect.objectContaining({
+          terminalRevision: 9,
+          finalView: localDelivery.finalView,
+        }),
+      }));
+    });
+    expect(locallyStored.finalView).toEqual(localDelivery.finalView);
+    expect(locallyStored.terminalRevision).toBe(9);
+    expect(replaceFullTerminalDelivery).toHaveBeenCalledWith(
+      expect.objectContaining({ deliveryId: "d1", credential: "c1" }),
+    );
+    expect(acknowledgeFullTerminalDelivery).toHaveBeenCalledWith(
+      "wss://session.example/ws",
+      "d1",
+      "c1",
+    );
+    expect(replaceFullTerminalDelivery.mock.invocationCallOrder[0])
+      .toBeLessThan(acknowledgeFullTerminalDelivery.mock.invocationCallOrder[0]);
+    expect(adapters).toHaveLength(0);
+  });
+
+  it.each([
+    ["FullSessionKey", { key: { game_code: "XYZ789", generation: 2 } }],
+    ["deliveryId", { deliveryId: "d2" }],
+    ["credential", { credential: "c2" }],
+  ])("does not merge a local final view when %s changes", async (_field, changedTuple) => {
+    const localDelivery = {
+      key: { game_code: "ABC123", generation: 1 },
+      terminalRevision: 8,
+      deliveryId: "d1",
+      credential: "c1",
+      display: { winner: 1, reason: "Match conceded" },
+      finalView: { turn_number: 7, objects: { "3": { owner_id: 0 } }, derived: {} },
+    };
+    const refreshed = {
+      ...localDelivery,
+      ...changedTuple,
+      terminalRevision: 9,
+      finalView: undefined,
+    };
+    loadWsSession.mockReturnValue({
+      gameCode: "ABC123",
+      playerToken: "tok",
+      fullKey: localDelivery.key,
+      serverUrl: "wss://session.example/ws",
+      timestamp: Date.now(),
+    });
+    loadFullTerminalDelivery.mockResolvedValue(localDelivery);
+    readFullTerminalResult.mockResolvedValue(refreshed);
+    const onWsEvent = vi.fn();
+
+    render(
+      <GameProvider gameId="g1" mode="online" onWsEvent={onWsEvent}>
+        <div />
+      </GameProvider>,
+    );
+
+    await waitFor(() => {
+      expect(onWsEvent).toHaveBeenCalledWith(expect.objectContaining({ type: "terminalDelivery" }));
+    });
+    expect(replaceFullTerminalDelivery).toHaveBeenCalledWith(refreshed);
+    expect(onWsEvent).not.toHaveBeenCalledWith(expect.objectContaining({
+      type: "terminalDelivery",
+      delivery: expect.objectContaining({ finalView: localDelivery.finalView }),
+    }));
     expect(adapters).toHaveLength(0);
   });
 });

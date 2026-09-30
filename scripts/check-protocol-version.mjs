@@ -35,6 +35,9 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // option's `authority`, the slot prompt's `permission`, the latched terms).
 // v91 retypes PendingManaAbility's required chosen-counter count (#9207).
 // v93 adds the SacrificedForCost reduction provenance.
+// v94 adds phase-delayed departure look-back state and mana-cost provenance.
+// v95 reshapes FilterProp::Unblocked to FilterProp::BlockStatus.
+// v96 adds Full-only terminal final-view cleanup/recovery authority.
 // Keep the measured base so a future merge cannot collapse independent wire
 // changes onto one number.
 const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
@@ -59,7 +62,8 @@ const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
 // +23: the v94 phase-delayed departure look-back carrier
 // (SpellContext.creation_lookback_event) and TriggerSourceContext.mana_cost.
 // +24: the v95 FilterProp::BlockStatus reshape (Unblocked → BlockStatus { status }).
-const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 24;
+// +25: Full-only recipient terminal final-view cleanup and recovery authority.
+const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 25;
 // The LOBBY message-set version, not derived from the full-game number above.
 // The classifier below refuses an expression only on the SOURCE constants; this
 // script never reads itself, so its own EXPECTED_* must stay literals.

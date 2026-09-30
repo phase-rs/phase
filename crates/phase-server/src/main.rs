@@ -5655,6 +5655,26 @@ async fn persist_draft_session_async(
 /// Immutable terminal result prepared before any recipient is told that a
 /// started Full session ended. The database transaction retires the runtime,
 /// creates recipient-scoped capabilities, and makes retries idempotent.
+fn recipient_terminal_final_view_json(
+    authoritative_state: &GameState,
+    recipient: PlayerId,
+) -> Result<String, String> {
+    #[derive(serde::Serialize)]
+    struct FinalViewerState<'a> {
+        #[serde(flatten)]
+        state: &'a GameState,
+        derived: engine::game::derived_views::DerivedViews,
+    }
+
+    let filtered = server_core::filter_state_for_player(authoritative_state, recipient);
+    let derived = derive_transport_views(authoritative_state, &filtered, Some(recipient));
+    serde_json::to_string(&FinalViewerState {
+        state: &filtered,
+        derived,
+    })
+    .map_err(|error| error.to_string())
+}
+
 fn terminal_artifact(
     session: &GameSession,
     winner: Option<PlayerId>,
@@ -5665,16 +5685,18 @@ fn terminal_artifact(
         .full_runtime
         .as_ref()
         .ok_or_else(|| "Full session has no runtime identity".to_string())?;
-    let recipients = session
-        .player_tokens
-        .iter()
-        .enumerate()
-        .filter(|(_, token)| !token.is_empty())
-        .map(|(player_id, token)| persistence::TerminalRecipient {
-            player_id: PlayerId(player_id as u8),
+    let mut recipients = Vec::new();
+    for (player_id, token) in session.player_tokens.iter().enumerate() {
+        if token.is_empty() {
+            continue;
+        }
+        let player_id = PlayerId(player_id as u8);
+        recipients.push(persistence::TerminalRecipient {
+            player_id,
             pre_terminal_player_token: token.clone(),
-        })
-        .collect();
+            final_view_json: recipient_terminal_final_view_json(&session.state, player_id)?,
+        });
+    }
     Ok(persistence::FullTerminalArtifact {
         key: runtime.key.clone(),
         terminal_revision: session.state_revision,
@@ -16913,6 +16935,92 @@ mod game_submission_tests {
         result.expect("stale socket replacement scenario timed out");
     }
 
+    #[tokio::test]
+    async fn reconnect_after_an_action_observes_the_post_action_full_snapshot() {
+        let (url, server, _temp_dir, app_state) = spawn_full_mode_server().await;
+        let result = tokio::time::timeout(Duration::from_secs(10), async {
+            let mut socket_a = connect_and_hello(url.clone()).await;
+            let (game_code, player_token, full_key) =
+                create_started_ai_game(&mut socket_a, None).await;
+            let before_revision = app_state
+                .sessions
+                .lock()
+                .await
+                .try_session(&game_code)
+                .expect("started Full session")
+                .state_revision;
+
+            socket_a
+                .send(WsMessage::Text(
+                    serde_json::to_string(&ClientMessage::Action {
+                        action: GameAction::PassPriority,
+                    })
+                    .expect("action json")
+                    .into(),
+                ))
+                .await
+                .expect("send current action");
+
+            let action_revision = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let revision = app_state
+                        .sessions
+                        .lock()
+                        .await
+                        .try_session(&game_code)
+                        .expect("Action-first session stays live")
+                        .state_revision;
+                    if revision > before_revision {
+                        break revision;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("current Action must advance the authoritative snapshot");
+
+            let mut socket_b = connect_and_hello(url).await;
+            socket_b
+                .send(WsMessage::Text(
+                    serde_json::to_string(&ClientMessage::Reconnect {
+                        game_code: game_code.clone(),
+                        player_token,
+                        full_key,
+                    })
+                    .expect("reconnect json")
+                    .into(),
+                ))
+                .await
+                .expect("send same-seat reconnect");
+            let reconnect_revision = loop {
+                match recv_server_message(&mut socket_b).await {
+                    ServerMessage::GameStarted { state_revision, .. } => break state_revision,
+                    ServerMessage::Error { message, .. } => {
+                        panic!("same-seat reconnect failed: {message}")
+                    }
+                    _ => {}
+                }
+            };
+
+            assert!(
+                reconnect_revision >= action_revision,
+                "reconnect must observe the Action-first snapshot or a later one"
+            );
+            let manager = app_state.sessions.lock().await;
+            assert!(
+                manager
+                    .try_session(&game_code)
+                    .expect("reconnected Full session")
+                    .state_revision
+                    >= reconnect_revision,
+                "reconnect snapshot must come from the authoritative session revision"
+            );
+        })
+        .await;
+        server.abort();
+        result.expect("Action-first reconnect scenario timed out");
+    }
+
     #[test]
     fn action_and_request_session_refusals_use_their_distinct_channels() {
         let message = session_action_error_message(SessionActionError::Rejected(
@@ -18710,6 +18818,11 @@ mod issue_4548_deadlock_tests {
         TournamentFormat,
     };
     use engine::game::deck_loading::PlayerDeckPayload;
+    use engine::game::game_object::GameObject;
+    use engine::types::game_state::{GameState, WaitingFor};
+    use engine::types::identifiers::{CardId, ObjectId};
+    use engine::types::phase::Phase;
+    use engine::types::zones::Zone;
     use server_core::draft_session::DraftSessionManager;
     use tempfile::NamedTempFile;
 
@@ -19019,7 +19132,167 @@ mod issue_4548_deadlock_tests {
                 reason: "Opponent disconnected (grace period expired)".to_string(),
                 ranked_result: None,
             },
+            final_view: None,
         }
+    }
+
+    fn terminal_final_view_fixture_state() -> GameState {
+        fn add_object(
+            state: &mut GameState,
+            owner: PlayerId,
+            name: &str,
+            zone: Zone,
+            card_id: u64,
+        ) -> ObjectId {
+            let id = ObjectId(state.next_object_id);
+            state.next_object_id += 1;
+            state.objects.insert(
+                id,
+                GameObject::new(id, CardId(card_id), owner, name.to_string(), zone),
+            );
+            match zone {
+                Zone::Hand => state.players[owner.0 as usize].hand.push_back(id),
+                Zone::Library => state.players[owner.0 as usize].library.push_back(id),
+                Zone::Battlefield => state.battlefield.push_back(id),
+                _ => unreachable!("fixture uses only modeled object zones"),
+            }
+            id
+        }
+
+        let mut state = GameState::new_two_player(7);
+        state.turn_number = 6;
+        state.phase = Phase::PreCombatMain;
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.priority_player = PlayerId(0);
+        state.players[0].life = 37;
+        state.players[1].life = 23;
+
+        add_object(&mut state, PlayerId(0), "P0 private card", Zone::Hand, 101);
+        add_object(&mut state, PlayerId(1), "P1 private card", Zone::Hand, 102);
+        add_object(
+            &mut state,
+            PlayerId(0),
+            "P0 library card",
+            Zone::Library,
+            103,
+        );
+        add_object(
+            &mut state,
+            PlayerId(1),
+            "P1 library card",
+            Zone::Library,
+            104,
+        );
+        let permanent = add_object(
+            &mut state,
+            PlayerId(0),
+            "Wind Drake",
+            Zone::Battlefield,
+            105,
+        );
+        let permanent = state.objects.get_mut(&permanent).expect("permanent exists");
+        permanent.power = Some(2);
+        permanent.toughness = Some(2);
+        permanent.keywords = vec![engine::types::Keyword::Flying];
+        state
+    }
+
+    #[test]
+    fn terminal_final_view_matches_the_production_filtered_state_fixture() {
+        let state = terminal_final_view_fixture_state();
+        let recipient = PlayerId(0);
+        let filtered = server_core::filter_state_for_player(&state, recipient);
+        let expected_derived = derive_transport_views(&state, &filtered, Some(recipient));
+
+        let json = recipient_terminal_final_view_json(&state, recipient).unwrap();
+        assert_eq!(
+            json,
+            include_str!("../../../fixtures/full-terminal-final-view.template.json").trim()
+        );
+        let final_view: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let filtered_value = serde_json::to_value(filtered).unwrap();
+        for (field, value) in filtered_value.as_object().unwrap() {
+            assert_eq!(&final_view[field], value, "filtered field {field}");
+        }
+        assert_eq!(
+            final_view["derived"],
+            serde_json::to_value(expected_derived).unwrap()
+        );
+        assert!(json.rfind("\"derived\"").unwrap() > json.find("\"turn_number\"").unwrap());
+        assert!(json.contains("P0 private card"));
+        assert!(!json.contains("P1 private card"));
+        assert!(final_view["derived"]["unique_authorized_submitter"].is_number());
+        assert_eq!(
+            final_view["derived"]["battlefield_keyword_badges"]["5"],
+            serde_json::json!(["Flying"])
+        );
+        let opponent_view = recipient_terminal_final_view_json(&state, PlayerId(1)).unwrap();
+        assert!(opponent_view.contains("P1 private card"));
+        assert!(!opponent_view.contains("P0 private card"));
+    }
+
+    #[test]
+    fn production_terminal_final_view_survives_database_restart_byte_exactly() {
+        let state = terminal_final_view_fixture_state();
+        let final_view_p0 = recipient_terminal_final_view_json(&state, PlayerId(0)).unwrap();
+        let final_view_p1 = recipient_terminal_final_view_json(&state, PlayerId(1)).unwrap();
+        let committed_fixture =
+            include_str!("../../../fixtures/full-terminal-final-view.template.json").trim();
+        assert_eq!(final_view_p0, committed_fixture);
+        assert_ne!(
+            &final_view_p0, &final_view_p1,
+            "recipient projections differ because their private hands differ"
+        );
+
+        let file = NamedTempFile::new().unwrap();
+        let db = persistence::GameDb::open(file.path(), persistence::SessionRetention::Multiplayer)
+            .unwrap();
+        db.save_session("TERM05", "{}").unwrap();
+        let key = server_core::FullSessionKey {
+            game_code: "TERM05".to_string(),
+            generation: 0,
+        };
+        let artifact = persistence::FullTerminalArtifact {
+            key: key.clone(),
+            terminal_revision: 6,
+            display: server_core::TerminalMatchDisplay {
+                winner: Some(PlayerId(0)),
+                reason: "Match conceded".to_string(),
+                ranked_result: None,
+            },
+            recipients: vec![
+                persistence::TerminalRecipient {
+                    player_id: PlayerId(0),
+                    pre_terminal_player_token: "terminal-seat-0".to_string(),
+                    final_view_json: final_view_p0,
+                },
+                persistence::TerminalRecipient {
+                    player_id: PlayerId(1),
+                    pre_terminal_player_token: "terminal-seat-1".to_string(),
+                    final_view_json: final_view_p1,
+                },
+            ],
+        };
+        assert_eq!(
+            db.prepare_full_terminal(&artifact).unwrap(),
+            persistence::PrepareFullTerminalDisposition::Prepared
+        );
+        let original = db
+            .current_terminal_delivery_for_recipient(&key, PlayerId(0), "terminal-seat-0")
+            .unwrap()
+            .unwrap();
+        let expected_json = original.final_view.unwrap().get().to_string();
+        assert_eq!(expected_json, committed_fixture);
+        let credential = original.credential;
+        drop(db);
+
+        let reopened =
+            persistence::GameDb::open(file.path(), persistence::SessionRetention::Multiplayer)
+                .unwrap();
+        let recovered = reopened.read_terminal_result(&credential).unwrap().unwrap();
+        assert_eq!(recovered.final_view.as_ref().unwrap().get(), expected_json);
     }
 
     /// The deferral that does not clear itself. A contended game is skipped for
