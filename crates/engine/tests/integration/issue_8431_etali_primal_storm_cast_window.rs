@@ -43,6 +43,9 @@ fn etali_attack_trigger_opens_free_cast_window_for_exiled_cards() {
         .id();
     // Known castable spells on top of each library. Both carry a trivial
     // resolvable effect so the free cast leaves the stack on resolution.
+    // The P0 filler sits beneath P0's top so the P0-controlled "Draw a card"
+    // resolution draws a real card instead of decking P0 mid-test.
+    scenario.add_card_to_library_top(P0, "P0 Filler");
     let p0_spell = scenario
         .add_spell_to_library_top(P0, "P0 Bolt", true)
         .with_mana_cost(ManaCost::generic(1))
@@ -80,7 +83,8 @@ fn etali_attack_trigger_opens_free_cast_window_for_exiled_cards() {
     );
 
     // PRIMARY: the free-cast window must open offering both exiled spells,
-    // with no cast cap ("any number" — CR 608.2c: the batch is the bound).
+    // with no cast cap ("any number" is unbounded — CR 608.2g contemplates
+    // casting other spells during resolution with no stated cap).
     match runner.state().waiting_for.clone() {
         WaitingFor::CastOffer {
             player,
@@ -141,10 +145,10 @@ fn etali_attack_trigger_opens_free_cast_window_for_exiled_cards() {
     );
 }
 
-/// CR 608.2c ("any number") + CR 608.2g: after the first free cast the window
-/// re-offers the remaining exiled spell — the report's "no chance to cast one
-/// of those cards" could be a broken re-offer rather than a missing window.
-/// Both spells are cast free and both resolve.
+/// CR 608.2g ("any number" is unbounded): after the first free cast the
+/// window re-offers the remaining exiled spell — the report's "no chance to
+/// cast one of those cards" could be a broken re-offer rather than a missing
+/// window. Both spells are cast free and both resolve.
 #[test]
 fn etali_window_reoffers_so_any_number_of_spells_can_be_cast() {
     let mut scenario = GameScenario::new();
@@ -230,13 +234,15 @@ fn etali_window_reoffers_so_any_number_of_spells_can_be_cast() {
         "both free-cast spells must be on the stack together; waiting_for={:?}",
         runner.state().waiting_for
     );
+    // Exhausted window auto-closes: no candidates remain, so the trigger
+    // finishes and priority returns to the active player — no lingering
+    // empty offer.
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 },
+        "the exhausted window must close back to priority"
+    );
 
-    // Nothing left to offer: decline if the window is still open, then drain.
-    if matches!(runner.state().waiting_for, WaitingFor::CastOffer { .. }) {
-        runner
-            .act(GameAction::FreeCastWindowChoice { selection: None })
-            .expect("closing the exhausted window must succeed");
-    }
     runner.advance_until_stack_empty();
     assert_eq!(
         zone_of(&runner, p0_spell),
@@ -308,11 +314,24 @@ fn etali_window_casts_targeted_spell_with_target_selection() {
         "the targeted free-cast spell must reach the stack"
     );
 
-    if matches!(runner.state().waiting_for, WaitingFor::CastOffer { .. }) {
-        runner
-            .act(GameAction::FreeCastWindowChoice { selection: None })
-            .expect("declining the rest must succeed");
+    // One candidate remains, so the window must re-offer (not auto-close);
+    // decline it unconditionally.
+    match runner.state().waiting_for.clone() {
+        WaitingFor::CastOffer {
+            kind: CastOfferKind::FreeCastWindow { candidates, .. },
+            ..
+        } => {
+            assert_eq!(
+                candidates,
+                vec![other],
+                "only the uncast spell is re-offered; got {candidates:?}"
+            );
+        }
+        other => panic!("expected the window to re-offer the rest, got {other:?}"),
     }
+    runner
+        .act(GameAction::FreeCastWindowChoice { selection: None })
+        .expect("declining the rest must succeed");
     runner.advance_until_stack_empty();
     assert_eq!(
         runner.life(P1),
@@ -333,6 +352,9 @@ fn etali_window_offers_spell_but_excludes_exiled_land() {
     let etali = scenario
         .add_creature_from_oracle(P0, "Etali, Primal Storm", 6, 6, ETALI_ORACLE)
         .id();
+    // The P0 filler sits beneath P0's top so the P0-controlled "Draw a card"
+    // resolution draws a real card instead of decking P0 mid-test.
+    scenario.add_card_to_library_top(P0, "P0 Filler");
     let land = scenario.add_land_to_library_top(P0, "Plains").id();
     let spell = scenario
         .add_spell_to_library_top(P1, "P1 Divination", false)
@@ -380,11 +402,13 @@ fn etali_window_offers_spell_but_excludes_exiled_land() {
             selection: Some(spell),
         })
         .expect("free-casting the spell must succeed");
-    if matches!(runner.state().waiting_for, WaitingFor::CastOffer { .. }) {
-        runner
-            .act(GameAction::FreeCastWindowChoice { selection: None })
-            .expect("closing the window must succeed");
-    }
+    // Exhausted window auto-closes: the land was never a candidate, so no
+    // offer remains — the trigger finishes back to priority.
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 },
+        "the exhausted window must close back to priority"
+    );
     runner.advance_until_stack_empty();
     assert_eq!(
         zone_of(&runner, spell),
@@ -473,9 +497,9 @@ fn etali_exiling_only_lands_opens_no_window_and_combat_continues() {
     );
 }
 
-/// CR 608.2c: three players — Etali exiles the top card of EACH library and
-/// the window offers all three. Pins the `player_scope: All` fan-out batch
-/// binding beyond the two-player case.
+/// Three players — Etali exiles the top card of EACH library and the window
+/// offers all three. Pins the `player_scope: All` fan-out batch binding
+/// beyond the two-player case.
 #[test]
 fn etali_window_offers_exile_from_every_library_in_multiplayer() {
     let p2 = PlayerId(2);
@@ -535,8 +559,8 @@ fn etali_window_offers_exile_from_every_library_in_multiplayer() {
     }
 }
 
-/// CR 701.17b (exile as many as possible): P1's library is empty, so only
-/// P0's top card is exiled — the window still opens offering that one spell
+/// CR 609.3 (do as much as possible): P1's library is empty, so only P0's
+/// top card is exiled — the window still opens offering that one spell
 /// rather than collapsing to nothing.
 #[test]
 fn etali_window_opens_for_lone_exile_when_a_library_is_empty() {
