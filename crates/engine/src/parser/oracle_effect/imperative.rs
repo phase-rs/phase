@@ -26382,7 +26382,7 @@ mod tests {
                 assert_eq!(*control_mode, ReassembleControlMode::GainControl);
                 match target {
                     TargetFilter::Typed(filter) => {
-                        assert_eq!(filter.controller, Some(ControllerRef::TargetPlayer));
+                        assert_eq!(filter.controller, Some(ControllerRef::TriggeringPlayer));
                     }
                     other => panic!("expected typed target, got {other:?}"),
                 }

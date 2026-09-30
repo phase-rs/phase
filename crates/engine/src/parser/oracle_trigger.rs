@@ -1335,8 +1335,16 @@ fn is_damage_done_trigger_pattern(cond_lower: &str) -> bool {
     .map(|(rest, _)| rest)
     .unwrap_or(input);
 
-    // Check for "deals damage to a player" or "deals combat damage to a player"
-    let Ok((rest, _)) = parse_damage_source_subject(input) else {
+    // Check for "deals damage to a player" or "deals combat damage to a player".
+    // Accepts self-references ("~", "this creature", "this permanent") as well as
+    // external damage sources parsed by `parse_damage_source_subject`.
+    let Ok((rest, _)) = alt((
+        value((), tag::<_, _, OracleError<'_>>("~ ")),
+        value((), tag("this creature ")),
+        value((), tag("this permanent ")),
+        value((), parse_damage_source_subject),
+    ))
+    .parse(input) else {
         return false;
     };
     let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("deals ").parse(rest) else {

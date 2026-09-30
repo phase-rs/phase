@@ -365,13 +365,16 @@ printf 'Gate A: scanned %s file(s) under %s (%s).\n' "$scanned_count" "$SCOPE" "
 # commit; a stray `))` in a comment truncates a real block so a cross product
 # SHIPS). Neither shows up as a failure here, so the suite that pins the lexing
 # runs first. It costs ~5ms and only when parser files actually changed.
-if command -v python3 >/dev/null 2>&1 && [ -f "$SCRIPT_DIR/lib/detect_cross_product_alts_tests.py" ]; then
-    if ! python3 "$SCRIPT_DIR/lib/detect_cross_product_alts_tests.py" >/dev/null 2>&1; then
-        echo "ERROR: the cross-product detector's own test suite is RED." >&2
-        echo "       Family (D) cannot be trusted until it passes:" >&2
-        echo "           python3 scripts/lib/detect_cross_product_alts_tests.py" >&2
-        exit 1
-    fi
+if [ ! -f "$SCRIPT_DIR/lib/detect_cross_product_alts_tests.py" ]; then
+    echo "ERROR: the cross-product detector's own test suite is missing:" >&2
+    echo "       $SCRIPT_DIR/lib/detect_cross_product_alts_tests.py" >&2
+    exit 1
+fi
+if ! python3 "$SCRIPT_DIR/lib/detect_cross_product_alts_tests.py" >/dev/null 2>&1; then
+    echo "ERROR: the cross-product detector's own test suite is RED." >&2
+    echo "       Family (D) cannot be trusted until it passes:" >&2
+    echo "           python3 scripts/lib/detect_cross_product_alts_tests.py" >&2
+    exit 1
 fi
 
 while IFS= read -r file; do

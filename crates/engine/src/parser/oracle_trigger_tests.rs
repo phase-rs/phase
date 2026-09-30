@@ -17,7 +17,7 @@ use crate::types::ability::{
     DelayedTriggerCondition, DiscardSelfScope, Duration, Effect, EffectScope, FilterProp,
     ManaContribution, ManaProduction, ManaSpendPermission, ModalChoice, ObjectProperty,
     ObjectScope, PerpetualModification, PlayerFilter, PlayerScope, PropertyAggregate, PtStat,
-    PtValue, PtValueScope, QuantityExpr, QuantityRef, SeatDirection, SharedQuality,
+    PtValue, PtValueScope, QuantityExpr, QuantityRef, RoundingMode, SeatDirection, SharedQuality,
     SiblingCondition, SubAbilityLink, TapStateChange, TargetFilter, TriggerCondition,
     TriggerDefinition, TurnJournalKind, TypeFilter, TypedFilter, ZoneRef,
 };
@@ -8189,12 +8189,10 @@ fn parse_ezio_damage_trigger_verbatim_oracle_text() {
 /// event-bound trigger and resolves to 0 — the reported silent no-op).
 #[test]
 fn parse_unstoppable_slasher_combat_damage_half_life() {
-    use crate::types::ability::{Effect, PlayerScope, QuantityExpr, QuantityRef, RoundingMode};
-
     let def = parse_trigger_line(
-            "Whenever this creature deals combat damage to a player, they lose half their life, rounded up.",
-            "Unstoppable Slasher",
-        );
+        "Whenever this creature deals combat damage to a player, they lose half their life, rounded up.",
+        "Unstoppable Slasher",
+    );
 
     let execute = def.execute.as_ref().expect("execute must be Some");
     match &*execute.effect {
@@ -8213,14 +8211,94 @@ fn parse_unstoppable_slasher_combat_damage_half_life() {
                     assert_eq!(*divisor, 2, "half ⇒ divisor 2");
                     assert_eq!(*rounding, RoundingMode::Up, "rounded up");
                     assert_eq!(
-                            **inner,
-                            QuantityExpr::Ref {
-                                qty: QuantityRef::LifeTotal {
-                                    player: PlayerScope::ScopedPlayer,
-                                },
+                        **inner,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::LifeTotal {
+                                player: PlayerScope::ScopedPlayer,
                             },
-                            "inner amount must read the event player's life (ScopedPlayer), got {inner:?}",
-                        );
+                        },
+                        "inner amount must read the event player's life (ScopedPlayer), got {inner:?}",
+                    );
+                }
+                other => panic!("amount must be DivideRounded, got {other:?}"),
+            }
+        }
+        other => panic!("effect must be LoseLife, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_virtus_the_veiled_combat_damage_half_life() {
+    let def = parse_trigger_line(
+        "Whenever Virtus the Veiled deals combat damage to a player, that player loses half their life, rounded up.",
+        "Virtus the Veiled",
+    );
+
+    let execute = def.execute.as_ref().expect("execute must be Some");
+    match &*execute.effect {
+        Effect::LoseLife { amount, target } => {
+            assert_eq!(
+                target.as_ref(),
+                Some(&TargetFilter::TriggeringPlayer),
+                "LoseLife.target must be TriggeringPlayer (the damaged player)",
+            );
+            match amount {
+                QuantityExpr::DivideRounded {
+                    inner,
+                    divisor,
+                    rounding,
+                } => {
+                    assert_eq!(*divisor, 2, "half ⇒ divisor 2");
+                    assert_eq!(*rounding, RoundingMode::Up, "rounded up");
+                    assert_eq!(
+                        **inner,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::LifeTotal {
+                                player: PlayerScope::ScopedPlayer,
+                            },
+                        },
+                        "inner amount must read ScopedPlayer, got {inner:?}",
+                    );
+                }
+                other => panic!("amount must be DivideRounded, got {other:?}"),
+            }
+        }
+        other => panic!("effect must be LoseLife, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_raving_dead_combat_damage_half_life() {
+    let def = parse_trigger_line(
+        "Whenever Raving Dead deals combat damage to a player, that player loses half their life, rounded down.",
+        "Raving Dead",
+    );
+
+    let execute = def.execute.as_ref().expect("execute must be Some");
+    match &*execute.effect {
+        Effect::LoseLife { amount, target } => {
+            assert_eq!(
+                target.as_ref(),
+                Some(&TargetFilter::TriggeringPlayer),
+                "LoseLife.target must be TriggeringPlayer (the damaged player)",
+            );
+            match amount {
+                QuantityExpr::DivideRounded {
+                    inner,
+                    divisor,
+                    rounding,
+                } => {
+                    assert_eq!(*divisor, 2, "half ⇒ divisor 2");
+                    assert_eq!(*rounding, RoundingMode::Down, "rounded down");
+                    assert_eq!(
+                        **inner,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::LifeTotal {
+                                player: PlayerScope::ScopedPlayer,
+                            },
+                        },
+                        "inner amount must read ScopedPlayer, got {inner:?}",
+                    );
                 }
                 other => panic!("amount must be DivideRounded, got {other:?}"),
             }
@@ -21999,7 +22077,7 @@ fn balefire_dragon_damages_creatures_controlled_by_damaged_player() {
             assert_eq!(
                 *target,
                 TargetFilter::Typed(
-                    TypedFilter::creature().controller(ControllerRef::TargetPlayer)
+                    TypedFilter::creature().controller(ControllerRef::TriggeringPlayer)
                 )
             );
         }
@@ -29600,9 +29678,7 @@ fn walk_to_fight_sub_ability(
 /// test for #1667 — ensures the DefendingPlayer fix doesn't break
 /// damage-to-player triggers.
 #[test]
-fn damage_to_player_trigger_uses_target_player() {
-    use crate::types::ability::Effect;
-
+fn damage_to_player_trigger_uses_triggering_player() {
     let def = parse_trigger_line(
         "Whenever ~ deals combat damage to a player, destroy target creature that player controls.",
         "Test Card",
@@ -29613,8 +29689,8 @@ fn damage_to_player_trigger_uses_target_player() {
         Effect::Destroy { target, .. } => match target {
             TargetFilter::Typed(t) => assert_eq!(
                 t.controller,
-                Some(ControllerRef::TargetPlayer),
-                "Damage-to-player trigger should use TargetPlayer, not DefendingPlayer",
+                Some(ControllerRef::TriggeringPlayer),
+                "Damage-to-player trigger should use TriggeringPlayer",
             ),
             other => panic!("expected Typed target filter, got {other:?}"),
         },
@@ -29622,23 +29698,22 @@ fn damage_to_player_trigger_uses_target_player() {
     }
 }
 
-/// CR 120.3: Damage-to-opponent triggers introduce the damaged player,
-/// which remains TargetPlayer even though attack-to-opponent triggers use
-/// DefendingPlayer.
+/// Damage-to-opponent triggers introduce the damaged opponent, which uses
+/// TriggeringPlayer (the event player), not DefendingPlayer or TargetPlayer.
 #[test]
-fn damage_to_opponent_trigger_uses_target_player() {
+fn damage_to_opponent_trigger_uses_triggering_player() {
     let def = parse_trigger_line(
-            "Whenever ~ deals combat damage to an opponent, destroy target creature that player controls.",
-            "Test Card",
-        );
+        "Whenever ~ deals combat damage to an opponent, destroy target creature that player controls.",
+        "Test Card",
+    );
     assert_eq!(def.mode, TriggerMode::DamageDone);
     let execute = def.execute.as_deref().expect("execute ability");
     match execute.effect.as_ref() {
         Effect::Destroy { target, .. } => match target {
             TargetFilter::Typed(t) => assert_eq!(
                 t.controller,
-                Some(ControllerRef::TargetPlayer),
-                "Damage-to-opponent trigger should use TargetPlayer, not DefendingPlayer",
+                Some(ControllerRef::TriggeringPlayer),
+                "Damage-to-opponent trigger should use TriggeringPlayer",
             ),
             other => panic!("expected Typed target filter, got {other:?}"),
         },
@@ -29652,8 +29727,6 @@ fn damage_to_opponent_trigger_uses_target_player() {
 /// `ControllerRef::You`. Guards against accidental scope leakage.
 #[test]
 fn non_attack_player_trigger_does_not_emit_target_player() {
-    use crate::types::ability::Effect;
-
     let def = parse_trigger_line(
         "Whenever you draw a card, tap target creature that player controls.",
         "Test Card",
@@ -35285,6 +35358,67 @@ fn split_graveyard_origin_owner_axes() {
             }
         );
     }
+}
+/// CR 120.3a + CR 109.4 + CR 603.2: Emissary of Despair and Emissary of Hope
+/// combat-damage triggers establish TriggeringPlayer as the relative player
+/// scope for "that player" / "they" references in their effect bodies.
+#[test]
+fn emissary_of_despair_and_hope_trigger_definitions() {
+    let despair = parse_trigger_line(
+        "Whenever this creature deals combat damage to a player, that player loses 1 life for each artifact they control.",
+        "Emissary of Despair",
+    );
+    assert_eq!(despair.mode, TriggerMode::DamageDone);
+    let despair_exec = despair.execute.as_deref().expect("despair body");
+    let Effect::LoseLife { amount, target } = &*despair_exec.effect else {
+        panic!("expected LoseLife, got {:?}", despair_exec.effect);
+    };
+    assert_eq!(
+        target.as_ref(),
+        Some(&TargetFilter::TriggeringPlayer),
+        "damaged player must be the directed life loss target"
+    );
+    assert_eq!(
+        amount,
+        &QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Artifact],
+                    controller: Some(ControllerRef::TriggeringPlayer),
+                    properties: Vec::new(),
+                })
+            }
+        },
+        "artifact count must be scoped to TriggeringPlayer"
+    );
+
+    let hope = parse_trigger_line(
+        "Whenever this creature deals combat damage to a player, you gain 1 life for each artifact that player controls.",
+        "Emissary of Hope",
+    );
+    assert_eq!(hope.mode, TriggerMode::DamageDone);
+    let hope_exec = hope.execute.as_deref().expect("hope body");
+    let Effect::GainLife { amount, player } = &*hope_exec.effect else {
+        panic!("expected GainLife, got {:?}", hope_exec.effect);
+    };
+    assert_eq!(
+        player,
+        &TargetFilter::Controller,
+        "ability controller gains the life"
+    );
+    assert_eq!(
+        amount,
+        &QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Artifact],
+                    controller: Some(ControllerRef::TriggeringPlayer),
+                    properties: Vec::new(),
+                })
+            }
+        },
+        "artifact count must be scoped to TriggeringPlayer"
+    );
 }
 
 /// CR 608.2c + CR 608.2d: a hand reveal that parks a card choice introduces the

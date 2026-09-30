@@ -60,16 +60,21 @@ pub struct TournamentRequestId(pub u64);
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
-/// 93 — `SpellContext.creation_lookback_event` (`#[serde(default,
+/// 94 — `SpellContext.creation_lookback_event` (`#[serde(default,
 ///      skip_serializing_if = "Option::is_none")]`) carries the battlefield
 ///      departure a phase-delayed triggered ability was created under (CR 603.7
 ///      + CR 603.10a + CR 608.2h: "that many", "its power" and "this creature's
 ///      counters" read the departed object), and `TriggerSourceContext.mana_cost`
 ///      (`#[serde(default)]`) captures the observed object's layered mana cost
-///      (CR 707.2 + CR 708.2a). A v92 peer would drop both and resolve the
+///      (CR 707.2 + CR 708.2a). A v93 peer would drop both and resolve the
 ///      delayed ability differently, so the exact-match handshake refuses the
-///      pairing. Full-game peers and P2P move in lockstep (wire 75); lobby
+///      pairing. Full-game peers and P2P move in lockstep (wire 76); lobby
 ///      messages are unchanged.
+/// 93 — `ReductionProvenance` gains `SacrificedForCost(SpellCostSource)`, the
+///      reduction an Emerge or Offering sacrifice earns before a deferred
+///      target declaration (CR 601.2f + CR 702.119a + CR 702.48c). It reaches
+///      `WaitingFor::OrderCostReductions` and `PendingCast`, and a v92 peer
+///      cannot deserialize it. Full-game and P2P move in lockstep: wire 75.
 /// 92 — `ResolvedAbility.parent_target_missing_reason` is now serialized
 ///      (`#[serde(default, skip_serializing_if = "Option::is_none")]`, it was
 ///      `#[serde(skip)]`) and `ParentTargetMissingReason` gains `RevealUntil`
@@ -777,7 +782,7 @@ pub struct TournamentRequestId(pub u64);
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 93;
+pub const PROTOCOL_VERSION: u32 = 94;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the

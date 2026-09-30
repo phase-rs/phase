@@ -66652,6 +66652,35 @@ fn rewrite_event_player_quantity_refs_rebinds_anaphoric_count() {
     );
 }
 
+#[test]
+fn rewrite_event_anchored_quantities_rebinds_life_total_to_scoped() {
+    let def = parse_trigger_line(
+        "Whenever this creature deals combat damage to a player, they lose half their life, rounded up.",
+        "Unstoppable Slasher",
+    );
+    let execute = def.execute.as_ref().expect("execute must be Some");
+    let Effect::LoseLife { amount, target } = &*execute.effect else {
+        panic!("expected a LoseLife effect, got {:?}", execute.effect);
+    };
+    assert_eq!(
+        target.as_ref(),
+        Some(&TargetFilter::TriggeringPlayer),
+        "target must be TriggeringPlayer",
+    );
+    let QuantityExpr::DivideRounded { inner, .. } = amount else {
+        panic!("expected DivideRounded, got {:?}", amount);
+    };
+    assert_eq!(
+        **inner,
+        QuantityExpr::Ref {
+            qty: QuantityRef::LifeTotal {
+                player: PlayerScope::ScopedPlayer,
+            },
+        },
+        "LifeTotal player scope must be ScopedPlayer",
+    );
+}
+
 /// P-shared-count probe (Dismantle, plan §3.5 / §5.2.2) — MEASURED, not
 /// reasoned.
 ///
@@ -76526,5 +76555,41 @@ fn liliana_pt_disjunction_keeps_both_alternatives_and_binds_x_to_swamps() {
             inner: Box::new(plus_power.clone()),
         },
         "the two alternatives must be exact inverses of one bound quantity"
+    );
+}
+
+/// CR 608.2c + CR 109.4 + CR 608.2b: Vex ("Counter target spell. That spell's controller may draw a card.")
+/// parses to a `Counter` root effect followed by an optional `Draw` sub-ability targeted at
+/// `TargetFilter::ParentTargetController` with `optional_player` set to the countered spell's controller.
+#[test]
+fn vex_counter_target_spell_that_spells_controller_may_draw_card() {
+    let def = parse_effect_chain(
+        "Counter target spell. That spell's controller may draw a card.",
+        AbilityKind::Spell,
+    );
+    assert_eq!(
+        *def.effect,
+        Effect::Counter {
+            target: TargetFilter::StackSpell,
+            source_rider: None,
+            countered_spell_zone: None,
+        }
+    );
+    let sub = def
+        .sub_ability
+        .as_ref()
+        .expect("expected sub_ability for optional draw");
+    assert_eq!(
+        *sub.effect,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::ParentTargetController,
+        }
+    );
+    assert!(sub.optional, "the draw instruction contains 'may'");
+    assert_eq!(
+        sub.optional_player,
+        Some(TargetFilter::ParentTargetController),
+        "the prompt must be presented to that spell's controller"
     );
 }

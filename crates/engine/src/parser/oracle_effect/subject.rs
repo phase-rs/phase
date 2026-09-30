@@ -4087,7 +4087,10 @@ fn resolve_they_pronoun(ctx: &mut ParseContext) -> TargetFilter {
     // (`TriggeringPlayer`) — NOT a chosen target. Without this, "they" fell
     // through to `ParentTarget`, leaving the effect with no player to act on
     // (Unstoppable Slasher's half-life loss silently resolved as "lose 0").
-    if matches!(ctx.relative_player_scope, Some(ControllerRef::TargetPlayer)) {
+    if matches!(
+        ctx.relative_player_scope,
+        Some(ControllerRef::TargetPlayer | ControllerRef::TriggeringPlayer)
+    ) {
         return TargetFilter::TriggeringPlayer;
     }
     // CR 608.2c + CR 109.4: "They" after a `Choose(Player)` clause refers to
