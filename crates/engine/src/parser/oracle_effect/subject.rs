@@ -43,7 +43,6 @@ use super::super::oracle_static::{
     parse_chosen_qualifier_subject, parse_continuous_modifications,
     parse_continuous_subject_filter, parse_static_line, parse_static_line_multi,
     parse_targeting_bypass_tail, peel_compound_all_quantified_conjuncts,
-    TargetingBypassBeneficiary, TargetingBypassQuality,
 };
 use super::super::oracle_target::{
     parse_target, parse_target_with_ctx, parse_target_with_syntax, parse_type_phrase_folding,
@@ -167,7 +166,7 @@ pub(super) fn try_parse_subject_predicate_ast(
     // must intercept before continuous clause parsing, which would extract the
     // quality word as an `AddKeyword` from "didn't have hexproof" and grant the
     // very keyword the clause says to ignore.
-    if let Some(clause) = try_parse_targeting_bypass_clause(text, ctx) {
+    if let Some(clause) = try_parse_targeting_bypass_clause(text) {
         return Some(subject_predicate_ast_from_clause(
             text,
             clause,
@@ -2371,40 +2370,27 @@ fn try_parse_can_attack_with_defender(
     })
 }
 
-/// CR 109.5: True when every member of `filter` is an opponent of the controller
-/// (`Typed` with `ControllerRef::Opponent`, including an `Or` of such filters).
-/// "your opponents" parses to a bare opponent-controlled `Typed` filter.
-fn is_opponent_scoped_filter(filter: &TargetFilter) -> bool {
-    match filter {
-        TargetFilter::Typed(typed) => typed.controller == Some(ControllerRef::Opponent),
-        TargetFilter::Or { filters } => filters.iter().all(is_opponent_scoped_filter),
-        _ => false,
-    }
-}
-
 /// CR 702.11e + CR 702.18a + CR 609.4: "[Duration,] [subject] can be the target[s]
 /// of spells and abilities [you control] as though it/they didn't have
 /// hexproof/shroud".
 ///
-/// The engine models the one-shot hexproof bypass as a player-scoped, target-
-/// invariant grant to the ability's controller: a transient `AddStaticMode {
-/// IgnoreHexproof }` on the controller (`player_ignores_hexproof`; Detection
-/// Tower). That reading is only faithful when the beneficiary is the controller
-/// ("… you control") and the subject is confined to opponents and their
-/// permanents, since hexproof only ever blocks opponents (CR 702.11b). Every other
-/// recognized combination (a shroud bypass, "controlled by target player", an
-/// unrestricted beneficiary, or a non-opponent subject) has no runtime model and
-/// fails closed to `Effect::unimplemented` rather than granting the keyword.
-fn try_parse_targeting_bypass_clause(
-    text: &str,
-    ctx: &mut ParseContext,
-) -> Option<ParsedEffectClause> {
+/// FAILS CLOSED for every beneficiary/quality combination. The only runtime
+/// hook is the player-scoped `StaticMode::IgnoreHexproof` grant
+/// (`player_ignores_hexproof`), which carries no subject filter: it would widen
+/// "creatures your opponents control with hexproof" to every hexproof permanent
+/// an opponent controls, and `player_cannot_be_targeted_by` never consults it, so
+/// it cannot reach "your opponents" (Detection Tower). Until the grant can carry
+/// the subject filter and reach player hexproof, the clause is surfaced as a
+/// named gap so the card does not count as supported while wrong. The STATIC
+/// form ("… can be the target of … as though …") is parsed separately in
+/// `oracle_static` and is unaffected.
+fn try_parse_targeting_bypass_clause(text: &str) -> Option<ParsedEffectClause> {
     let (text, duration) = strip_leading_duration(text);
     let lower = text.to_lowercase();
-    let (tail, subject_lower) = take_until::<_, _, OracleError<'_>>(" can be the target")
+    let (tail, _subject_lower) = take_until::<_, _, OracleError<'_>>(" can be the target")
         .parse(lower.as_str())
         .ok()?;
-    let (rest, (beneficiary, quality)) = terminated(
+    let (rest, _) = terminated(
         parse_targeting_bypass_tail,
         opt(tag::<_, _, OracleError<'_>>(".")),
     )
@@ -2413,31 +2399,9 @@ fn try_parse_targeting_bypass_clause(
     if !rest.is_empty() {
         return None;
     }
-    // ASCII lowercasing preserves byte lengths, so the LOWER prefix's length
-    // indexes the original-case text.
-    let subject = text[..subject_lower.len()].trim();
-    let application = parse_subject_application_for(subject, ctx, AnaphorConsumer::AffectedObject)?;
-    let effect = match (quality, beneficiary) {
-        (TargetingBypassQuality::Hexproof, TargetingBypassBeneficiary::YouControl)
-            if is_opponent_scoped_filter(&application.affected) =>
-        {
-            Effect::GenericEffect {
-                static_abilities: vec![StaticDefinition::new(StaticMode::IgnoreHexproof)
-                    .affected(TargetFilter::Controller)
-                    .modifications(vec![ContinuousModification::AddStaticMode {
-                        mode: StaticMode::IgnoreHexproof,
-                    }])
-                    .description(text.to_string())],
-                duration: duration.clone(),
-                target: None,
-                end_cost: None,
-            }
-        }
-        _ => Effect::unimplemented("targeting_bypass_unmodeled", text),
-    };
     Some(ParsedEffectClause {
         unlowered_guard: None,
-        effect,
+        effect: Effect::unimplemented("targeting_bypass_unmodeled", text),
         duration,
         sub_ability: None,
         distribute: None,

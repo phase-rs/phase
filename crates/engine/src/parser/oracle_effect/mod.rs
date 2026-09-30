@@ -36735,6 +36735,21 @@ fn apply_ability_shell_envelope(def: &mut AbilityDefinition, shell: &AbilityShel
     // CR 602.1a: the activation cost (everything before the colon).
     if let Some(cost) = &shell.cost {
         def.cost = Some(cost.clone());
+        // CR 601.2f + CR 602.2b: an announce-locked X on an ability whose MANA cost
+        // carries {X} cannot run. The activation pipeline publishes the announced
+        // value as `chosen_x`, which skips the `ChooseXValue` step that concretizes
+        // {X} in the cost and closes the X cost lock (`lock_activation_cost_at_x`),
+        // so payment is refused and the ability can never be activated (Voodoo Doll,
+        // Chromatic Armor, Elite Arcanist, Bargaining Table). Report the gap until the
+        // engine settles a preset X, rather than publish an ability that reads as
+        // supported and never works.
+        if def.announced_x.is_some() && crate::game::casting_costs::ability_cost_has_x(cost) {
+            def.announced_x = None;
+            *def.effect = Effect::unimplemented(
+                "where_x_binding",
+                shell.description.clone().unwrap_or_default(),
+            );
+        }
     }
     // CR 601.2f: an explicitly stamped reduction. A site that sets this must not
     // also list `ShellStage::ExtractCostReduction`, which derives the same field.
@@ -39133,9 +39148,28 @@ pub(crate) fn parse_effect_chain_ir(
                 }
                 // CR 608.2c: only a single-clause process can carry the count on
                 // its root (see `RepeatProcessOutcome::CappedRepeat`).
+                // A multi-clause process cannot (the runtime repeats only the root
+                // instruction of a `repeat_for` chain), so surface a named gap
+                // rather than silently dropping the cap (Calamity, Galloping
+                // Inferno).
                 RepeatProcessOutcome::CappedRepeat(qty) => {
                     if let [only] = builder.clauses_mut() {
                         only.repeat_for = Some(qty);
+                    } else {
+                        builder
+                            .clause(
+                                normalized_text,
+                                parsed_clause(Effect::unimplemented(
+                                    "repeat_process_multi_clause",
+                                    normalized_text.to_string(),
+                                )),
+                                chunk.boundary_after,
+                                ClauseDisposition::Emit {
+                                    followup: None,
+                                    intrinsic: None,
+                                },
+                            )
+                            .push();
                     }
                 }
                 RepeatProcessOutcome::ConsumeOnly => {}

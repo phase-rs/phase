@@ -76375,16 +76375,26 @@ fn repeat_process_directive_conditional_or_uncapped_is_not_a_counted_repeat() {
     }
 }
 
-/// A multi-clause process keeps the consume-only handling: the runtime repeats only
+/// A multi-clause process is never stamped on the root: the runtime repeats only
 /// the root instruction of a `repeat_for` chain whose following sentences are
 /// independent siblings, so stamping the count there would repeat the wrong scope.
+/// The dropped cap is surfaced as the named `repeat_process_multi_clause` gap so the
+/// card cannot count as supported while running the process once.
 #[test]
-fn repeat_process_once_after_a_multi_clause_process_is_not_stamped_on_the_root() {
+fn repeat_process_once_after_a_multi_clause_process_fails_closed() {
     let def = parse_effect_chain(
         "Draw a card. Each opponent loses 1 life. Repeat this process once.",
         AbilityKind::Spell,
     );
     assert!(def.repeat_for.is_none(), "{def:?}");
+    let gaps: Vec<_> = collect_chain_effects(&def)
+        .into_iter()
+        .filter_map(|effect| match effect {
+            Effect::Unimplemented { name, .. } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(gaps, vec!["repeat_process_multi_clause"], "{def:?}");
 }
 
 /// CR 608.2c + CR 118.12a: the counted repeat lands on the ROOT ability as
@@ -76422,55 +76432,26 @@ fn ignore_hexproof_grant(text: &str) -> Effect {
     *parse_effect_chain(text, AbilityKind::Activated).effect
 }
 
-/// CR 702.11e + CR 609.4: "[Duration,] <opponent-scoped subject> can be the
-/// target[s] of spells and abilities you control as though it/they didn't have
-/// hexproof" grants the controller a duration-bound hexproof bypass. Both the
-/// singular/plural verb and pronoun forms share one combinator.
+/// CR 702.11e + CR 609.4: every "[Duration,] <subject> can be the target[s] of
+/// spells and abilities … as though it/they didn't have hexproof/shroud" effect
+/// fails closed under the named `targeting_bypass_unmodeled` gap. The only runtime
+/// hook (`StaticMode::IgnoreHexproof` on the controller) carries no subject filter
+/// and is never consulted by player hexproof, so an opponent-scoped grant (Detection
+/// Tower) would widen to every hexproof permanent while never reaching the opponent
+/// player itself. It must also never fall back to granting the keyword it ignores.
 #[test]
-fn ignore_hexproof_effect_grants_controller_a_temporary_bypass() {
+fn ignore_hexproof_effect_fails_closed() {
     for text in [
         "Until end of turn, your opponents and creatures your opponents control with hexproof can be the targets of spells and abilities you control as though they didn't have hexproof.",
         "Until end of turn, creatures your opponents control can be the targets of spells and abilities you control as though they didn't have hexproof.",
-        "Until end of turn, target creature an opponent controls can be the target of spells and abilities you control as though it didn't have hexproof.",
-    ] {
-        let Effect::GenericEffect {
-            static_abilities,
-            duration,
-            ..
-        } = ignore_hexproof_grant(text)
-        else {
-            panic!("{text}: expected a GenericEffect");
-        };
-        assert_eq!(duration, Some(Duration::UntilEndOfTurn), "{text}");
-        assert_eq!(static_abilities.len(), 1, "{text}");
-        let grant = &static_abilities[0];
-        assert_eq!(grant.mode, StaticMode::IgnoreHexproof, "{text}");
-        assert_eq!(grant.affected, Some(TargetFilter::Controller), "{text}");
-        assert_eq!(
-            grant.modifications,
-            vec![ContinuousModification::AddStaticMode {
-                mode: StaticMode::IgnoreHexproof
-            }],
-            "{text}: must never fall back to granting the keyword itself"
-        );
-    }
-}
-
-/// Paired negative reach guard: recognized bypass clauses with no runtime model
-/// (a shroud bypass, a "controlled by target player" beneficiary, a subject that is
-/// not confined to opponents) fail closed instead of granting the keyword they say
-/// to ignore.
-#[test]
-fn ignore_hexproof_effect_without_a_model_fails_closed() {
-    for text in [
         "Until end of turn, ~ can be the target of spells and abilities controlled by target player as though it didn't have shroud.",
-        "Until end of turn, creatures your opponents control can be the targets of spells and abilities controlled by target player as though they didn't have hexproof.",
         "Until end of turn, creatures your opponents control can be the targets of spells and abilities as though they didn't have hexproof.",
         "Until end of turn, creatures you control can be the targets of spells and abilities you control as though they didn't have hexproof.",
     ] {
+        let effect = ignore_hexproof_grant(text);
         assert!(
-            matches!(ignore_hexproof_grant(text), Effect::Unimplemented { .. }),
-            "{text}"
+            matches!(&effect, Effect::Unimplemented { name, .. } if name == "targeting_bypass_unmodeled"),
+            "{text}: {effect:?}"
         );
     }
 }
@@ -76542,7 +76523,7 @@ fn compound_subject_each_over_a_disjunction_fails_closed() {
 fn standalone_x_definition_locks_cost_x_at_announcement() {
     for (text, expected_kind) in [
         (
-            "Draw a card. X is the number of cards in an opponent's hand.",
+            "Draw a card. X is the number of artifacts you control.",
             AbilityKind::Activated,
         ),
         (
@@ -76583,6 +76564,31 @@ fn standalone_x_definition_declines_live_or_anaphoric_counts() {
     ] {
         let def = parse_effect_chain(text, AbilityKind::Activated);
         assert!(def.announced_x.is_none(), "{text}: {def:?}");
+    }
+}
+
+/// CR 601.2b + CR 602.2b: a count naming ONE player chosen at announcement through a
+/// singular possessive ("an opponent's hand", "target player's graveyard") is not
+/// bound. The typed opponent-scoped `ObjectCount` sums every opponent, so binding it
+/// would overcharge in multiplayer (Bargaining Table). Counts with no chosen-player
+/// referent (a plural "your opponents'", the source's own counters, the exiled card)
+/// still bind.
+#[test]
+fn standalone_x_definition_declines_singular_chosen_player_counts() {
+    for text in [
+        "Draw a card. X is the number of cards in an opponent's hand.",
+        "Draw a card. X is the number of cards in target player's hand.",
+        "Draw a card. X is the number of cards in target opponent\u{2019}s graveyard.",
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Activated);
+        assert!(def.announced_x.is_none(), "{text}: {def:?}");
+    }
+    for text in [
+        "Draw a card. X is the number of pin counters on this artifact.",
+        "Draw a card. X is the number of cards in your opponents' hands.",
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Activated);
+        assert!(def.announced_x.is_some(), "{text}: {def:?}");
     }
 }
 

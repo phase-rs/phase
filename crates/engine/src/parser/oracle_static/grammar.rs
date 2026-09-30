@@ -879,6 +879,14 @@ pub(crate) fn parse_enchanted_equipped_predicate(
     } else {
         (pred_tp, None, String::new())
     };
+    // CR 611.3a: an attached-subject gate's "it" names the host creature, not the
+    // Aura/Equipment source (Gutter Shortcut's "as long as it's attacking alone").
+    let suffix_condition = suffix_condition.map(|condition| {
+        super::shared::bind_attacking_alone_pronoun_to_attached_recipient(
+            condition,
+            Some(&affected),
+        )
+    });
     let body_lower = body_tp.lower;
 
     // CR 702.3b + CR 508.1c: "can attack [<class>] as though

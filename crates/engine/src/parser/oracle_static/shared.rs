@@ -3742,6 +3742,45 @@ pub(crate) fn parse_affected_scoped_static_condition(
     }
 }
 
+/// CR 611.3a + CR 506.5: the bare condition grammar reads "it's attacking alone"
+/// as `SourceAttackingAlone` (the static's own source). For an attached-subject
+/// static ("Enchanted creature can't be blocked as long as it's attacking
+/// alone" — Gutter Shortcut) the pronoun names the enchanted/equipped creature,
+/// while the source is the Aura/Equipment, which is never an attacker. Rebind the
+/// leaf to a `RecipientMatchesFilter` gate on the attached creature, the shape
+/// the inverted form (Security Bypass) already produces. A no-op for any other
+/// affected set, so a SelfRef static (Dream Prowler) keeps `SourceAttackingAlone`.
+pub(crate) fn bind_attacking_alone_pronoun_to_attached_recipient(
+    condition: StaticCondition,
+    affected: Option<&TargetFilter>,
+) -> StaticCondition {
+    let is_attached = matches!(
+        affected,
+        Some(TargetFilter::Typed(typed))
+            if typed
+                .properties
+                .iter()
+                .any(|prop| matches!(prop, FilterProp::EnchantedBy | FilterProp::EquippedBy))
+    );
+    if !is_attached {
+        return condition;
+    }
+    match condition {
+        StaticCondition::SourceAttackingAlone => StaticCondition::RecipientMatchesFilter {
+            filter: TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::AttackingAlone]),
+            ),
+        },
+        StaticCondition::And { conditions } => StaticCondition::And {
+            conditions: conditions
+                .into_iter()
+                .map(|c| bind_attacking_alone_pronoun_to_attached_recipient(c, affected))
+                .collect(),
+        },
+        other => other,
+    }
+}
+
 /// Parse the trailing " unless [condition]" clause of a combat-restriction
 /// static. Delegates `Not`-wrapping (with the `UnlessPay` raw-passthrough
 /// exception) to the shared `parse_unless_condition` combinator so the static

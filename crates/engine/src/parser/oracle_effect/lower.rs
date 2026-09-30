@@ -12270,6 +12270,30 @@ fn strip_announce_lock(expression: &str) -> Option<&str> {
     Some(bare[..prefix.len()].trim_end())
 }
 
+/// CR 601.2b + CR 602.2b: True when a lowercase count names ONE player chosen at
+/// announcement through a singular possessive ("an opponent's hand", "target
+/// player's graveyard"). The typed `ObjectCount { Owned: Opponent }` scope for
+/// such a phrase sums over EVERY opponent, so binding it would overcharge in a
+/// multiplayer game (Bargaining Table's ruling: the opponent is chosen on
+/// announcement, before X is determined). The standalone-X path declines it and
+/// the sentence stays an honest gap until a chosen-player count has a typed home.
+fn names_singular_chosen_player(count_lower: &str) -> bool {
+    nom_primitives::scan_preceded(count_lower, |i| {
+        terminated(
+            alt((
+                tag::<_, _, OracleError<'_>>("an opponent"),
+                tag("target opponent"),
+                tag("target player"),
+                tag("that player"),
+                tag("chosen player"),
+            )),
+            alt((tag("'s "), tag("\u{2019}s "))),
+        )
+        .parse(i)
+    })
+    .is_some()
+}
+
 /// CR 107.3c + CR 601.2b + CR 602.2b: Recognize a standalone "X is <count>." sentence
 /// that DEFINES the X of an ability's cost (Bargaining Table: "{X}, {T}: Draw a card.
 /// X is the number of cards in an opponent's hand.") and return the where-X expression
@@ -12298,6 +12322,9 @@ pub(super) fn parse_standalone_x_definition(text: &str, kind: AbilityKind) -> Op
         value((), tag::<_, _, OracleError<'_>>("x is ")).parse(i)
     })?;
     let count = rest.trim().trim_end_matches('.').trim();
+    if names_singular_chosen_player(&count.to_lowercase()) {
+        return None;
+    }
     let quantity = parse_where_x_quantity_expression(count)?;
     // The count is measured at announcement, before any resolution-time referent
     // exists: an anaphoric object ("that card", "that spell") or a prior effect's
