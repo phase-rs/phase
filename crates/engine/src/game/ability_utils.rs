@@ -13303,7 +13303,7 @@ mod tests {
                 .sub_ability
                 .as_deref_mut()
                 .unwrap()
-                .selected_target_incarnations = vec![pin.clone()];
+                .selected_target_incarnations = vec![pin];
             let sub = parent.sub_ability.as_deref().unwrap();
             assert!(sub_ability_inherits_parent_creature_target_only(
                 &parent, sub
@@ -13316,7 +13316,7 @@ mod tests {
             let validated = validate_targets_in_chain(&state, &parent);
             let sub = validated.sub_ability.as_deref().unwrap();
             assert_eq!(sub.targets, selected);
-            assert_eq!(sub.selected_target_incarnations, vec![pin.clone()]);
+            assert_eq!(sub.selected_target_incarnations, vec![pin]);
         }
 
         // Positive control: an ordinary inherited snapshot still loses its
