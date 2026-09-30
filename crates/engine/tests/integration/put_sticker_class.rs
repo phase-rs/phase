@@ -438,7 +438,8 @@ fn assert_one_name_sticker(outcome: &Drive) {
 
 /// CR 603.6 + CR 123.3: the Goblin's enters trigger puts the chosen name
 /// sticker on the Goblin; its trailing mana clause ("Add {R} for each unique
-/// vowel on that sticker") then resolves and the stack empties. CR 608.2c: the sticker it placed is still "that sticker" once
+/// vowel on that sticker") then resolves and the stack empties. CR 608.2c:
+/// the sticker it placed is still "that sticker" once
 /// the trigger has finished resolving (the sticker choice is answered inside
 /// the same resolution).
 #[test]
