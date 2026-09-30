@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useCardBackImage, useCardImage } from "../../../../hooks/useCardImage.ts";
 import { CARD_BACK_URL } from "../../../../services/scryfall.ts";
 import { assetKey, catalogRoot, packId } from "../../../../services/visualPacks/types.ts";
+import { DAMAGE_CAUSE_IMPACT_MS } from "../../../../animation/types.ts";
 import { useAnimationStore } from "../../../../stores/animationStore.ts";
 import { useGameStore } from "../../../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../../../stores/preferencesStore.ts";
@@ -28,7 +29,8 @@ import {
 } from "../CardVfxLayer.tsx";
 import { SHATTER_CRACK_S, SHATTER_FALL_S } from "../cardShatter.ts";
 import { type CardVfxScene, SCENE_EFFECT_KINDS } from "../cardVfxScene.ts";
-import type { CardShatterSpec, CardVfxSpec, ExileDissolveSpec } from "../cardVfxSpecs.ts";
+import type { CardShatterSpec, CardVfxSpec, DamageStrikeSpec, DamageStrikeTarget, ExileDissolveSpec } from "../cardVfxSpecs.ts";
+import { HIT_S } from "../damageStrike.ts";
 import { DISSOLVE_CROSS_S, DISSOLVE_LIFT_S, DISSOLVE_TRAVEL_S } from "../exileDissolve.ts";
 
 interface RecordedChild {
@@ -237,8 +239,8 @@ async function renderLayer({ tier = "full", strict = false }: { tier?: "full" | 
   await act(async () => {
     await vi.dynamicImportSettled();
   });
-  const present = (effect: CardVfxSpec, classic: () => void = vi.fn()) => {
-    act(() => ref.current?.present(effect, classic));
+  const present = (effect: CardVfxSpec, classic: () => void = vi.fn(), onImpact?: () => void) => {
+    act(() => ref.current?.present(effect, classic, onImpact));
     return classic;
   };
   return { ref, present, ...utils };
@@ -1114,5 +1116,103 @@ describe("CardVfxLayer exile dissolve", () => {
     anchor({ "data-permanent-card": String(X) }, 300, 400);
     expect(present(dissolve(X))).toHaveBeenCalledTimes(1);
     expect(veiled(X)).toBe(false);
+  });
+});
+
+describe("CardVfxLayer damage strike", () => {
+  const SPELL = 20;
+  const strike = (target: DamageStrikeTarget): DamageStrikeSpec => ({
+    kind: "damage",
+    cause: "fire",
+    origin: { zone: "Stack", objectId: SPELL, ownerId: 0 },
+    target,
+    amount: 3,
+    pace: 1,
+    owningStepMs: 900,
+  });
+  const atPlayer = strike({ kind: "player", playerId: 1 });
+  const atPermanent = (cardFace: AnimationImageSnapshot | null = face(X)) =>
+    strike({ kind: "permanent", objectId: X, ownerId: 1, face: cardFace });
+  const strikeRenders = () => calls("render").filter((call) => hasVisible(call, "damage-strike"));
+  const hitRenders = () => calls("render").filter((call) => hasVisible(call, "damage-hit"));
+
+  async function loadFace() {
+    const loader = faceLoader();
+    expect(loader).not.toBeNull();
+    await act(async () => {
+      if (loader) fireEvent.load(loader);
+    });
+  }
+
+  it("V10-7: a strike at a player leaves the stack entry now and lands once, at the impact", async () => {
+    const { present } = await readyLayer();
+    anchor({ "data-stack-entry": String(SPELL) }, 600, 300);
+    anchor({ "data-player-hud": "1" }, 400, 20);
+    const onImpact = vi.fn();
+
+    const classic = present(atPlayer, vi.fn(), onImpact);
+    await frames(2);
+    expect(strikeRenders().length).toBeGreaterThan(0);
+    await advance(DAMAGE_CAUSE_IMPACT_MS - 4 * FRAME_MS);
+    expect(onImpact).not.toHaveBeenCalled();
+    await advance(4 * FRAME_MS);
+    expect(onImpact).toHaveBeenCalledTimes(1);
+    expect(classic).not.toHaveBeenCalled();
+  });
+
+  it("V10-8: a struck permanent is veiled from the impact until its copy has rocked back to rest", async () => {
+    const { present } = await readyLayer();
+    anchor({ "data-stack-entry": String(SPELL) }, 600, 300);
+    addFace(anchor({ "data-permanent-card": String(X) }, 300, 100));
+    const onImpact = vi.fn();
+
+    const classic = present(atPermanent(), vi.fn(), onImpact);
+    await loadFace();
+    await advance(DAMAGE_CAUSE_IMPACT_MS - 4 * FRAME_MS);
+    expect(veiled(X)).toBe(false);
+    expect(hitRenders()).toHaveLength(0);
+    // The strike's clock starts on its first frame.
+    await advance(6 * FRAME_MS);
+    expect(onImpact).toHaveBeenCalledTimes(1);
+    expect(veiled(X)).toBe(true);
+    expect(hitRenders().length).toBeGreaterThan(0);
+
+    await advance(HIT_S * 1000 + 2 * FRAME_MS);
+    expect(veiled(X)).toBe(false);
+    expect(classic).not.toHaveBeenCalled();
+  });
+
+  it("V10-9: no source, no target, or a target face that is not shown presents Classic and never lands", async () => {
+    const { present } = await readyLayer();
+    const onImpact = vi.fn();
+    anchor({ "data-player-hud": "1" }, 400, 20);
+    expect(present(atPlayer, vi.fn(), onImpact)).toHaveBeenCalledTimes(1);
+
+    anchor({ "data-stack-entry": String(SPELL) }, 600, 300);
+    expect(present(atPermanent(), vi.fn(), onImpact)).toHaveBeenCalledTimes(1);
+    addFace(anchor({ "data-permanent-card": String(X) }, 300, 100));
+    expect(present(atPermanent(null), vi.fn(), onImpact)).toHaveBeenCalledTimes(1);
+
+    await advance(DAMAGE_CAUSE_IMPACT_MS * 2);
+    expect(onImpact).not.toHaveBeenCalled();
+    expect(strikeRenders()).toHaveLength(0);
+  });
+
+  it("V10-10: a shatter on a struck permanent ends its hit, and the permanent stays veiled for the shatter", async () => {
+    const { present } = await readyLayer();
+    anchor({ "data-stack-entry": String(SPELL) }, 600, 300);
+    addFace(anchor({ "data-permanent-card": String(X) }, 300, 100));
+    present(atPermanent());
+    await loadFace();
+    await advance(DAMAGE_CAUSE_IMPACT_MS + 2 * FRAME_MS);
+    expect(veiled(X)).toBe(true);
+
+    present({ kind: "shatter", objectId: X, ownerId: 1, face: face(X), pace: 1, owningStepMs: 400 });
+    await loadFace();
+    await frames(2);
+    expect(hasVisible(last(calls("render")) as RendererCall, "damage-hit")).toBe(false);
+    expect(hasVisible(last(calls("render")) as RendererCall, "card-shatter")).toBe(true);
+    await advance(HIT_S * 1000);
+    expect(veiled(X)).toBe(true);
   });
 });

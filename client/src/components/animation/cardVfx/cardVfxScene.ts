@@ -29,6 +29,7 @@ import {
   restingState,
 } from "./cardFlight.ts";
 import { type CardShatterParams, cardShatterKind, createCardShatter } from "./cardShatter.ts";
+import { createDamageStrike, type DamageHitParams, type DamageStrikeParams, damageStrikeKind } from "./damageStrike.ts";
 import { createExileDissolve, type ExileDissolveParams, exileDissolveKind } from "./exileDissolve.ts";
 import { createLandingDust, landingDustKind } from "./landingDust.ts";
 
@@ -63,6 +64,7 @@ export const SCENE_EFFECT_KINDS: readonly SceneEffectKind[] = [
   landingDustKind,
   cardShatterKind,
   exileDissolveKind,
+  damageStrikeKind,
 ];
 
 const CAMERA_FOV_DEG = 28;
@@ -87,10 +89,16 @@ export interface CardFlightRequest extends Omit<CardFlightParams, "from" | "back
   landingColors: readonly ManaColor[] | null;
 }
 
+/** The permanent a board effect happens to. */
+interface OnPermanent {
+  objectId: ObjectId;
+}
 /** A shatter to start; the scene supplies the pixel ratio. */
-export type CardShatterRequest = Omit<CardShatterParams, "pixelRatio">;
+export type CardShatterRequest = Omit<CardShatterParams, "pixelRatio"> & OnPermanent;
 /** A dissolve to start; the scene supplies the pixel ratio. */
-export type ExileDissolveRequest = Omit<ExileDissolveParams, "pixelRatio">;
+export type ExileDissolveRequest = Omit<ExileDissolveParams, "pixelRatio"> & OnPermanent;
+/** A damage strike to start; a hit names the permanent it lands on. */
+export type DamageStrikeRequest = Omit<DamageStrikeParams, "hit"> & { hit: (DamageHitParams & OnPermanent) | null };
 
 export interface CardVfxScene {
   setPixelRatio(ratio: number): void;
@@ -106,8 +114,12 @@ export interface CardVfxScene {
   /** Silently disposes the object's flight if it has released (is revealing or
    *  fading). A later presentation of the object supersedes its landing. */
   dropReleasedFlight(objectId: ObjectId): void;
+  /** Board effects — a shatter, a dissolve, a strike's hit — happen to one
+   *  permanent at a time: each silently disposes the permanent's running one,
+   *  whose veil the new effect's completion then releases. */
   startShatter(request: CardShatterRequest): void;
   startDissolve(request: ExileDissolveRequest): void;
+  startDamageStrike(request: DamageStrikeRequest): void;
   add(effect: SceneEffect): void;
   dispose(): void;
 }
@@ -125,6 +137,12 @@ export interface CardVfxSceneCallbacks {
   onContextRestored(): void;
 }
 
+function forget(effects: Map<ObjectId, SceneEffect>, effect: SceneEffect) {
+  for (const [objectId, running] of effects) {
+    if (running === effect) effects.delete(objectId);
+  }
+}
+
 function uploadableTexture(image: HTMLImageElement | HTMLCanvasElement): Texture {
   const texture = new Texture(image);
   texture.colorSpace = SRGBColorSpace;
@@ -140,6 +158,7 @@ class CardVfxSceneRuntime implements CardVfxScene, EffectHost {
   private readonly camera = new PerspectiveCamera(CAMERA_FOV_DEG, 1, 1, 10000);
   private readonly active = new Set<SceneEffect>();
   private readonly flights = new Map<ObjectId, CardFlight>();
+  private readonly boardEffects = new Map<ObjectId, SceneEffect>();
   private readonly resizeObserver: ResizeObserver;
   private warmUpObjects: Object3D[] | null = null;
   private pixelRatio = 1;
@@ -215,9 +234,8 @@ class CardVfxSceneRuntime implements CardVfxScene, EffectHost {
       if (effect.update(nowMs)) continue;
       this.active.delete(effect);
       effect.dispose(false);
-      for (const [objectId, flight] of this.flights) {
-        if (flight === effect) this.flights.delete(objectId);
-      }
+      forget(this.flights, effect);
+      forget(this.boardEffects, effect);
     }
     this.renderer.render(this.scene, this.camera);
     // Render only while something runs: an idle overlay requests no frame.
@@ -239,6 +257,7 @@ class CardVfxSceneRuntime implements CardVfxScene, EffectHost {
     for (const effect of this.active) effect.dispose(true);
     this.active.clear();
     this.flights.clear();
+    this.boardEffects.clear();
   }
 
   canvasOrigin(): DOMRectReadOnly {
@@ -307,12 +326,28 @@ class CardVfxSceneRuntime implements CardVfxScene, EffectHost {
     return true;
   }
 
-  startShatter(request: CardShatterRequest) {
-    this.add(createCardShatter(this, { ...request, pixelRatio: this.pixelRatio }));
+  startShatter({ objectId, ...request }: CardShatterRequest) {
+    this.addBoardEffect(objectId, createCardShatter(this, { ...request, pixelRatio: this.pixelRatio }));
   }
 
-  startDissolve(request: ExileDissolveRequest) {
-    this.add(createExileDissolve(this, { ...request, pixelRatio: this.pixelRatio }));
+  startDissolve({ objectId, ...request }: ExileDissolveRequest) {
+    this.addBoardEffect(objectId, createExileDissolve(this, { ...request, pixelRatio: this.pixelRatio }));
+  }
+
+  startDamageStrike(request: DamageStrikeRequest) {
+    const { strike, hit } = createDamageStrike(this, request);
+    this.add(strike);
+    if (hit && request.hit) this.addBoardEffect(request.hit.objectId, hit);
+  }
+
+  private addBoardEffect(objectId: ObjectId, effect: SceneEffect) {
+    const previous = this.boardEffects.get(objectId);
+    if (previous) {
+      this.active.delete(previous);
+      previous.dispose(true);
+    }
+    this.boardEffects.set(objectId, effect);
+    this.add(effect);
   }
 
   add(effect: SceneEffect) {

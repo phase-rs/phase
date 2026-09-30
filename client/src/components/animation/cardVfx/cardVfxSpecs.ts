@@ -1,5 +1,8 @@
-import type { ObjectId, PlayerId } from "../../../adapter/types.ts";
+import type { GameState, ObjectId, PlayerId } from "../../../adapter/types.ts";
+import { type DamageCause, type DamageCauseOrigin, damageCauseOf } from "../../../animation/damageCause.ts";
 import type { AnimationEvent } from "../../../animation/types.ts";
+import { useAnimationStore } from "../../../stores/animationStore.ts";
+import { useGameStore } from "../../../stores/gameStore.ts";
 import { type AnimationImageSnapshot, visibleAnimationImageSnapshot } from "../ResolvedAnimationImage.tsx";
 import { type CardFlightSpec, type CardFlightSpecContext, cardFlightSpecFor } from "./cardFlightSpecs.ts";
 
@@ -30,8 +33,31 @@ export interface ExileDissolveSpec {
 /** A card VFX that happens to a permanent where it lies on the board. */
 export type BoardEffectSpec = CardShatterSpec | ExileDissolveSpec;
 
+/** Who a damage strike hits: a player at their HUD, or a permanent where it lies. */
+export type DamageStrikeTarget =
+  | { kind: "player"; playerId: PlayerId }
+  | { kind: "permanent"; objectId: ObjectId; ownerId: PlayerId; face: AnimationImageSnapshot | null };
+
+/** A spell or ability's damage travelling from its source to its target. */
+export interface DamageStrikeSpec {
+  kind: "damage";
+  cause: DamageCause;
+  origin: DamageCauseOrigin;
+  target: DamageStrikeTarget;
+  amount: number;
+  pace: number;
+  owningStepMs: number;
+}
+
 /** Everything the card VFX layer presents, by `kind`. */
-export type CardVfxSpec = CardFlightSpec | BoardEffectSpec;
+export type CardVfxSpec = CardFlightSpec | BoardEffectSpec | DamageStrikeSpec;
+
+/** The pre-event state `damageCauseOf` reads, when a card VFX layer presents
+ *  damage causes; `null` when every hit presents Classic. Hit timing reads it
+ *  too, so a life total ticks when the strike lands. */
+export function damageCauseState(): GameState | null {
+  return useAnimationStore.getState().cardFlightsActive ? useGameStore.getState().gameState : null;
+}
 
 // CR 701.8a: a destroyed permanent moves from the battlefield to its owner's
 // graveyard; the shatter shows it breaking where it lay.
@@ -72,12 +98,32 @@ function exileDissolveSpecFor(
   };
 }
 
+function damageStrikeSpecFor(
+  event: AnimationEvent,
+  { pre, pace, owningStepMs }: CardFlightSpecContext,
+): DamageStrikeSpec | null {
+  if (pace <= 0 || event.type !== "DamageDealt") return null;
+  const cause = damageCauseOf(event, pre);
+  if (!cause) return null;
+  const { target: ref, amount } = event.data;
+  let target: DamageStrikeTarget;
+  if ("Player" in ref) {
+    target = { kind: "player", playerId: ref.Player };
+  } else {
+    const object = pre?.objects[ref.Object];
+    if (!object) return null;
+    target = { kind: "permanent", objectId: ref.Object, ownerId: object.owner, face: visibleAnimationImageSnapshot(object) };
+  }
+  return { kind: "damage", ...cause, target, amount, pace, owningStepMs };
+}
+
 /** The card VFX presentation of `event`, or `null` when it has none (it then
  *  presents Classic). */
 export function cardVfxSpecFor(event: AnimationEvent, context: CardFlightSpecContext): CardVfxSpec | null {
   return (
     cardFlightSpecFor(event, context) ??
     cardShatterSpecFor(event, context) ??
-    exileDissolveSpecFor(event, context)
+    exileDissolveSpecFor(event, context) ??
+    damageStrikeSpecFor(event, context)
   );
 }

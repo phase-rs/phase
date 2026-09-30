@@ -1,6 +1,7 @@
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { type RefObject, useCallback, useEffect, useRef, useState } from "react";
 
+import type { TargetRef } from "../../adapter/types.ts";
 import {
   DAMAGE_FLURRY_SOURCE_SAMPLE_LIMIT,
   impactDelayMsForAnimationEvent,
@@ -36,7 +37,7 @@ import {
 } from "./ResolvedAnimationImage.tsx";
 import { applyScreenShake } from "./ScreenShake.tsx";
 import { CardVfxLayer, type CardVfxLayerHandle, cardVfxSupported } from "./cardVfx/CardVfxLayer.tsx";
-import { cardVfxSpecFor } from "./cardVfx/cardVfxSpecs.ts";
+import { cardVfxSpecFor, damageCauseState } from "./cardVfx/cardVfxSpecs.ts";
 
 
 interface ActiveFloat {
@@ -326,6 +327,36 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
     setPendingDeaths(current);
   }, [activeGeneration]);
 
+  /** A damage hit landing: its sound, number and shake, and for a player the
+   *  vignette. The presenter adds its own particles. */
+  const landDamageHit = useCallback(
+    (position: { x: number; y: number }, amount: number, isPlayerTarget: boolean) => {
+      audioManager.playSfx("DamageDealt");
+      const id = ++floatIdCounter;
+      setActiveFloats((prev) => [...prev, { id, value: -amount, position, color: "#ef4444" }]);
+
+      if (vfxQuality === "full" && containerRef.current) {
+        const intensity = amount >= 7 ? "heavy" : amount >= 4 ? "medium" : "light";
+        applyScreenShake(containerRef.current, intensity, speedMultiplier);
+      }
+
+      if (isPlayerTarget) {
+        setActiveVignette({ damageAmount: amount });
+        setTimeout(() => setActiveVignette(null), 500 * speedMultiplier);
+      }
+    },
+    [containerRef, speedMultiplier, vfxQuality],
+  );
+
+  /** Where a damage event's target is on screen. */
+  const damageTargetPosition = useCallback(
+    (target: TargetRef): { x: number; y: number } =>
+      "Player" in target
+        ? getPlayerHudPosition(target.Player)
+        : (getObjectPosition(target.Object) ?? { x: window.innerWidth / 2, y: window.innerHeight / 2 }),
+    [getObjectPosition, getPlayerHudPosition],
+  );
+
   const processClassicEffect = useCallback(
     (effect: StepEffect, stepEffects: StepEffect[], owningStepMs: number) => {
       const { event } = effect;
@@ -369,16 +400,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
 
         case "DamageDealt": {
           const { source_id, target, amount } = event.data;
-          let pos = { x: window.innerWidth / 2, y: window.innerHeight / 2 };
-          let isPlayerTarget = false;
-
-          if ("Object" in target) {
-            const objPos = getObjectPosition(target.Object);
-            if (objPos) pos = objPos;
-          } else if ("Player" in target) {
-            isPlayerTarget = true;
-            pos = getPlayerHudPosition(target.Player);
-          }
+          const pos = damageTargetPosition(target);
 
           // Creature-on-creature: slam the actual card element (Arena-style)
           if ("Object" in target && vfxQuality !== "minimal") {
@@ -399,19 +421,8 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
             const slammed = sourceEl
               ? applyCardSlam(sourceEl, pos.x, pos.y, speedMultiplier, () => {
                   // Impact effects: SFX, shockwave, floating number, screen shake
-                  audioManager.playSfx("DamageDealt");
                   particleRef.current?.slamImpact(pos.x, pos.y, amount);
-
-                  const id = ++floatIdCounter;
-                  setActiveFloats((prev) => [
-                    ...prev,
-                    { id, value: -amount, position: pos, color: "#ef4444" },
-                  ]);
-
-                  if (vfxQuality === "full" && containerRef.current) {
-                    const intensity = amount >= 7 ? "heavy" : amount >= 4 ? "medium" : "light";
-                    applyScreenShake(containerRef.current, intensity, speedMultiplier);
-                  }
+                  landDamageHit(pos, amount, false);
                 })
               : false;
 
@@ -434,24 +445,8 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
             const sourceEl = vfxQuality !== "minimal" ? findCardElement(source_id) : null;
             const slammed = sourceEl
               ? applyCardSlam(sourceEl, pos.x, pos.y, speedMultiplier, () => {
-                  audioManager.playSfx("DamageDealt");
                   particleRef.current?.playerDamage(pos.x, pos.y, amount);
-
-                  const fid = ++floatIdCounter;
-                  setActiveFloats((prev) => [
-                    ...prev,
-                    { id: fid, value: -amount, position: pos, color: "#ef4444" },
-                  ]);
-
-                  if (vfxQuality === "full" && containerRef.current) {
-                    const intensity = amount >= 7 ? "heavy" : amount >= 4 ? "medium" : "light";
-                    applyScreenShake(containerRef.current, intensity, speedMultiplier);
-                  }
-
-                  if (isPlayerTarget) {
-                    setActiveVignette({ damageAmount: amount });
-                    setTimeout(() => setActiveVignette(null), 500 * speedMultiplier);
-                  }
+                  landDamageHit(pos, amount, "Player" in target);
                 })
               : false;
 
@@ -483,7 +478,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
                 new_total,
                 impactEpoch,
               ),
-              lifeChangeImpactDelayMs(effect, stepEffects, player_id) * speedMultiplier,
+              lifeChangeImpactDelayMs(effect, stepEffects, player_id, damageCauseState()) * speedMultiplier,
             );
           }
 
@@ -821,6 +816,8 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
       containerRef,
       scheduleStepTimeout,
       addPendingDeath,
+      damageTargetPosition,
+      landDamageHit,
     ],
   );
 
@@ -839,10 +836,15 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
             stepEvents: stepEffects.map((stepEffect) => stepEffect.event),
           })
         : null;
-      if (layer && spec) layer.present(spec, classic);
+      const { event } = effect;
+      const onImpact =
+        event.type === "DamageDealt"
+          ? () => landDamageHit(damageTargetPosition(event.data.target), event.data.amount, "Player" in event.data.target)
+          : undefined;
+      if (layer && spec) layer.present(spec, classic, onImpact);
       else classic();
     },
-    [processClassicEffect, speedMultiplier],
+    [damageTargetPosition, landDamageHit, processClassicEffect, speedMultiplier],
   );
 
   // Process effects when activeStep changes, then advance after its duration

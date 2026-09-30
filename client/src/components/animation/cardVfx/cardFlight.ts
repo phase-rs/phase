@@ -24,6 +24,7 @@ import type { VfxQuality } from "../../../animation/types.ts";
 import type { Aim, CardPose } from "./cardAnchors.ts";
 import type { CardFlightRoute, FlightDestination } from "./cardFlightSpecs.ts";
 import type { EffectHost, SceneEffect, SceneEffectKind } from "./cardVfxScene.ts";
+import { ROUNDED_BOX_GLSL } from "./glslChunks.ts";
 
 /** The tiers that mount the overlay; `minimal` never does. */
 export type CardVfxTier = Exclude<VfxQuality, "minimal">;
@@ -225,9 +226,6 @@ export function flightPose(
   };
 }
 
-const roundedChunk = /* glsl */ `
-  float roundedBox(vec2 p, vec2 b, float r) { vec2 q = abs(p) - b + r; return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r; }`;
-
 // One card: a unit plane scaled to the card, front and back textures, lit
 // relative to rest so a flat card matches its DOM twin exactly. The plane is
 // flat (scale z = 1), so the model matrix maps its normal exactly.
@@ -241,7 +239,7 @@ const cardVert = /* glsl */ `
 const cardFrag = /* glsl */ `
   uniform sampler2D uFront, uBack; uniform vec2 uSize; uniform float uRadius, uAlpha;
   varying vec2 vUv; varying vec3 vN;
-  ${roundedChunk}
+  ${ROUNDED_BOX_GLSL}
   void main() {
     vec2 p = (vUv - 0.5) * uSize;
     float edge = clamp(0.5 - roundedBox(p, uSize * 0.5, uRadius), 0.0, 1.0);
@@ -258,7 +256,7 @@ const cardFrag = /* glsl */ `
 const shadowFrag = /* glsl */ `
   uniform vec2 uSize; uniform float uRadius, uBlur, uAlpha;
   varying vec2 vUv;
-  ${roundedChunk}
+  ${ROUNDED_BOX_GLSL}
   void main() {
     vec2 p = (vUv - 0.5) * (uSize + 2.0 * uBlur);
     float d = roundedBox(p, uSize * 0.5, uRadius);

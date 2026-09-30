@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { GameObject, GameState, Zone } from "../../../../adapter/types.ts";
+import type { GameObject, GameState, TargetRef, Zone } from "../../../../adapter/types.ts";
 import type { AnimationEvent } from "../../../../animation/types.ts";
 import { buildObjectMap, gameObjectFactory } from "../../../../test/factories/gameObjectFactory.ts";
 import { buildGameState, buildStackEntry } from "../../../../test/factories/gameStateFactory.ts";
@@ -246,5 +246,39 @@ describe("cardVfxSpecFor exile", () => {
     expect(cardVfxSpecFor(zoneChanged("Hand", "Exile"), context(pre, pre))).toBeNull();
     expect(cardVfxSpecFor(zoneChanged("Battlefield", "Exile"), context(null, pre))).toBeNull();
     expect(cardVfxSpecFor(zoneChanged("Battlefield", "Exile"), context(pre, pre, 0))).toBeNull();
+  });
+});
+
+describe("cardVfxSpecFor damage", () => {
+  const SPELL = 20;
+  const shock = gameObjectFactory.withId(SPELL).named("Shock").instant().params({ zone: "Stack", color: ["Red"] });
+  const damage = (target: TargetRef, isCombat = false): AnimationEvent => ({
+    type: "DamageDealt",
+    data: { source_id: SPELL, target, amount: 2, is_combat: isCombat },
+  });
+  const pre = buildGameState({
+    objects: buildObjectMap(shock.build(), visible(card.onBattlefield().ownedBy(1).build())),
+    stack: [buildStackEntry({ id: SPELL, source_id: SPELL })],
+  });
+
+  it("V10-11: a resolving spell's damage strikes a player, or a permanent with the face it shows", () => {
+    expect(cardVfxSpecFor(damage({ Player: 1 }), context(pre, pre))).toEqual({
+      kind: "damage",
+      cause: "fire",
+      origin: { zone: "Stack", objectId: SPELL, ownerId: 0 },
+      target: { kind: "player", playerId: 1 },
+      amount: 2,
+      pace: 1,
+      owningStepMs: 500,
+    });
+    expect(cardVfxSpecFor(damage({ Object: X }), context(pre, pre))).toMatchObject({
+      target: { kind: "permanent", objectId: X, ownerId: 1, face: expect.objectContaining({ cardName: "Llanowar Elves" }) },
+    });
+  });
+
+  it("V10-11: combat damage, a missing target or pace 0 has no strike", () => {
+    expect(cardVfxSpecFor(damage({ Player: 1 }, true), context(pre, pre))).toBeNull();
+    expect(cardVfxSpecFor(damage({ Object: 99 }), context(pre, pre))).toBeNull();
+    expect(cardVfxSpecFor(damage({ Player: 1 }), context(pre, pre, 0))).toBeNull();
   });
 });

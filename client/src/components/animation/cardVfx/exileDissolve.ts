@@ -22,6 +22,7 @@ import {
 import type { CardPose } from "./cardAnchors.ts";
 import type { CardVfxTier } from "./cardFlight.ts";
 import type { EffectHost, SceneEffect, SceneEffectKind } from "./cardVfxScene.ts";
+import { ROUNDED_BOX_GLSL, VALUE_NOISE_GLSL } from "./glslChunks.ts";
 
 /** The lift off the board, in seconds before pace. */
 export const DISSOLVE_LIFT_S = 0.22;
@@ -46,11 +47,7 @@ const smooth = (a: number, b: number, x: number) => {
 // pixels are gone) and the flakes (when each one is released), so they agree.
 const dissolveChunk = /* glsl */ `
   uniform vec2 uFirst; uniform float uAspect;
-  float hash21(vec2 p) { p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x * p.y); }
-  float vnoise(vec2 p) {
-    vec2 i = floor(p), f = fract(p), u = f * f * (3.0 - 2.0 * f);
-    return mix(mix(hash21(i), hash21(i + vec2(1.0, 0.0)), u.x), mix(hash21(i + vec2(0.0, 1.0)), hash21(i + vec2(1.0, 1.0)), u.x), u.y);
-  }
+  ${VALUE_NOISE_GLSL}
   float fbm(vec2 p) { return vnoise(p) * 0.55 + vnoise(p * 2.1 + 7.3) * 0.3 + vnoise(p * 4.3 + 1.7) * 0.15; }
   // 0 = released first, 1 = released last.
   float dissolveKey(vec2 uv) {
@@ -58,9 +55,6 @@ const dissolveChunk = /* glsl */ `
     float along = 0.5 - dot(uv - 0.5, uFirst) / (abs(uFirst.x) + abs(uFirst.y));
     return clamp(along * 0.72 + fbm(uv * a * 6.0) * 0.28, 0.0, 1.0);
   }`;
-
-const roundedChunk = /* glsl */ `
-  float roundedBox(vec2 p, vec2 b, float r) { vec2 q = abs(p) - b + r; return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r; }`;
 
 const plainVert = /* glsl */ `
   varying vec2 vUv;
@@ -70,7 +64,7 @@ const cardFrag = /* glsl */ `
   uniform sampler2D uMap; uniform vec2 uSize; uniform float uRadius, uProg, uPale, uEdge;
   varying vec2 vUv;
   ${dissolveChunk}
-  ${roundedChunk}
+  ${ROUNDED_BOX_GLSL}
   void main() {
     vec2 p = (vUv - 0.5) * uSize;
     float corner = clamp(0.5 - roundedBox(p, uSize * 0.5, uRadius), 0.0, 1.0);
@@ -90,7 +84,7 @@ const cardFrag = /* glsl */ `
 const shadowFrag = /* glsl */ `
   uniform vec2 uSize; uniform float uRadius, uBlur, uAlpha;
   varying vec2 vUv;
-  ${roundedChunk}
+  ${ROUNDED_BOX_GLSL}
   void main() {
     vec2 p = (vUv - 0.5) * (uSize + 2.0 * uBlur);
     gl_FragColor = vec4(0.0, 0.0, 0.0, uAlpha * (1.0 - smoothstep(-uBlur, uBlur, roundedBox(p, uSize * 0.5, uRadius))));

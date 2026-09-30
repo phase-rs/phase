@@ -29,6 +29,7 @@ import {
   type Aim,
   type CardPose,
   exileGhostNode,
+  firstRendered,
   measureCardPose,
   resolveAim,
   sourceElement,
@@ -38,7 +39,7 @@ import type { CardVfxTier, FlightFlip } from "./cardFlight.ts";
 import type { CardFlightRoute, CardFlightSpec } from "./cardFlightSpecs.ts";
 import type { CardVfxScene, CardVfxSceneCallbacks } from "./cardVfxScene.ts";
 import type * as CardVfxSceneModule from "./cardVfxScene.ts";
-import type { BoardEffectSpec, CardVfxSpec, ExileDissolveSpec } from "./cardVfxSpecs.ts";
+import type { BoardEffectSpec, CardVfxSpec, DamageStrikeSpec, ExileDissolveSpec } from "./cardVfxSpecs.ts";
 import type { LinkAim } from "./exileDissolve.ts";
 import { drawSurface, measureSurfaceLayout } from "./surfaceTexture.ts";
 
@@ -57,8 +58,9 @@ export function cardVfxSupported(): boolean {
 
 export interface CardVfxLayerHandle {
   /** Presents `spec` as a GL effect, or runs `classic` instead. Exactly one
-   *  of the two happens, once. */
-  present(spec: CardVfxSpec, classic: () => void): void;
+   *  of the two happens, once. A GL damage strike runs `onImpact` when its hit
+   *  lands; the Classic presentation shows its own impact. */
+  present(spec: CardVfxSpec, classic: () => void, onImpact?: () => void): void;
 }
 
 interface CardVfxLayerProps {
@@ -87,6 +89,13 @@ interface PendingStart {
   from: CardPose | null;
   face: AnimationImageSnapshot;
   classics: (() => void)[];
+}
+
+/** A permanent's surface redrawn as a texture, and where it lies. */
+interface BoardSurface {
+  pose: CardPose;
+  surface: Texture;
+  radius: number;
 }
 
 /** Where a shatter breaks, as fractions of the card: somewhere central. */
@@ -187,7 +196,7 @@ class CardVfxController {
     this.scheduleInit();
   };
 
-  present(spec: CardVfxSpec, classic: () => void) {
+  present(spec: CardVfxSpec, classic: () => void, onImpact: () => void = () => {}) {
     switch (this.state) {
       case "idle":
         // The first effect of a mount presents Classic and starts init.
@@ -201,10 +210,22 @@ class CardVfxController {
         classic();
         return;
       case "ready":
-        if (!this.scene) classic();
-        else if (spec.kind === "flight") this.presentFlight(this.scene, spec, classic);
-        else this.presentBoardEffect(spec, classic);
-        return;
+        if (!this.scene) {
+          classic();
+          return;
+        }
+        switch (spec.kind) {
+          case "flight":
+            this.presentFlight(this.scene, spec, classic);
+            return;
+          case "damage":
+            this.presentDamage(this.scene, spec, classic, onImpact);
+            return;
+          case "shatter":
+          case "dissolve":
+            this.presentBoardEffect(spec, classic);
+            return;
+        }
     }
   }
 
@@ -331,37 +352,54 @@ class CardVfxController {
 
   // The permanent's surface is measured now, while it is still on the board;
   // its face loads in the size the board shows, and the surface is redrawn
-  // from both so the first GL frame matches the card it replaces.
-  private presentBoardEffect(spec: BoardEffectSpec, classic: () => void) {
-    const { objectId } = spec;
-    const el = zoneSurface("Battlefield", objectId, spec.ownerId);
-    const layout = el && measureSurfaceLayout(el);
-    if (!el || !layout || !spec.face || !this.canvas) {
+  // from both so the first GL frame matches the card it replaces. Exactly one
+  // of `ready` and `classic` runs.
+  private withBoardSurface(
+    el: HTMLElement,
+    face: AnimationImageSnapshot | null,
+    owningStepMs: number,
+    ready: (scene: CardVfxScene, board: BoardSurface) => void,
+    classic: () => void,
+  ) {
+    const layout = measureSurfaceLayout(el);
+    if (!layout || !face || !this.canvas) {
       classic();
       return;
     }
     const pose = measureCardPose(el, this.canvas.getBoundingClientRect());
     // The board shows art crops except for tokens, whose art-crop tiles use the full image.
-    const artCrop = usePreferencesStore.getState().battlefieldCardDisplay === "art_crop" && !spec.face.isToken;
-    const size = artCrop ? "art_crop" : "normal";
-    const commitEpoch = useGameStore.getState().engineCommitEpoch;
+    const artCrop = usePreferencesStore.getState().battlefieldCardDisplay === "art_crop" && !face.isToken;
     this.requestFace(
-      spec.face,
-      size,
-      spec.owningStepMs,
+      face,
+      artCrop ? "art_crop" : "normal",
+      owningStepMs,
       (image) => {
         const { scene } = this;
         if (this.state !== "ready" || !scene) {
           classic();
           return;
         }
-        const board = {
-          pose,
-          surface: scene.uploadFace(drawSurface(layout, image, pixelRatioFor(this.tier))),
-          radius: layout.radius,
-          tier: this.tier,
-          pace: spec.pace,
-        };
+        const surface = scene.uploadFace(drawSurface(layout, image, pixelRatioFor(this.tier)));
+        ready(scene, { pose, surface, radius: layout.radius });
+      },
+      classic,
+    );
+  }
+
+  private presentBoardEffect(spec: BoardEffectSpec, classic: () => void) {
+    const { objectId } = spec;
+    const el = zoneSurface("Battlefield", objectId, spec.ownerId);
+    if (!el) {
+      classic();
+      return;
+    }
+    const commitEpoch = useGameStore.getState().engineCommitEpoch;
+    this.withBoardSurface(
+      el,
+      spec.face,
+      spec.owningStepMs,
+      (scene, surface) => {
+        const board = { ...surface, objectId, tier: this.tier, pace: spec.pace };
         const release = () => this.unveilAfterCommit(objectId, commitEpoch);
         switch (spec.kind) {
           case "shatter":
@@ -372,6 +410,52 @@ class CardVfxController {
             break;
         }
         this.veil(objectId);
+      },
+      classic,
+    );
+  }
+
+  // Source and target are measured now: the source's stack entry leaves the
+  // board when the engine commit lands. A struck permanent is veiled from the
+  // impact until its copy has rocked back to rest.
+  private presentDamage(scene: CardVfxScene, spec: DamageStrikeSpec, classic: () => void, onImpact: () => void) {
+    const { origin, target } = spec;
+    const source = zoneSurface(origin.zone, origin.objectId, origin.ownerId);
+    const targetEl =
+      target.kind === "player"
+        ? firstRendered(`[data-player-hud="${target.playerId}"]`)
+        : zoneSurface("Battlefield", target.objectId, target.ownerId);
+    if (!source || !targetEl || !this.canvas) {
+      classic();
+      return;
+    }
+    const canvasRect = this.canvas.getBoundingClientRect();
+    const strike = {
+      cause: spec.cause,
+      from: measureCardPose(source, canvasRect),
+      to: measureCardPose(targetEl, canvasRect),
+      amount: spec.amount,
+      tier: this.tier,
+      pace: spec.pace,
+    };
+    if (target.kind === "player") {
+      scene.startDamageStrike({ ...strike, hit: null, onImpact });
+      return;
+    }
+    const { objectId } = target;
+    this.withBoardSurface(
+      targetEl,
+      target.face,
+      spec.owningStepMs,
+      (liveScene, surface) => {
+        liveScene.startDamageStrike({
+          ...strike,
+          hit: { ...surface, objectId, onDone: () => this.unveil(objectId) },
+          onImpact: () => {
+            this.veil(objectId);
+            onImpact();
+          },
+        });
       },
       classic,
     );
@@ -566,7 +650,7 @@ export const CardVfxLayer = forwardRef<CardVfxLayerHandle, CardVfxLayerProps>(
     const [controller] = useState(() => new CardVfxController(setFaceRequests, tier));
 
     useImperativeHandle(ref, () => ({
-      present: (spec, classic) => controller.present(spec, classic),
+      present: (spec, classic, onImpact) => controller.present(spec, classic, onImpact),
     }), [controller]);
 
     useEffect(() => {
