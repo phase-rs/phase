@@ -1269,20 +1269,12 @@ pub(crate) fn resolve_live_parent_slot_from_root(
     let illegal_at_resolution = resolution_carrier_entry(state, ability)
         .and_then(StackEntry::ability)
         .is_some_and(|root| {
-            use super::ability_utils::flatten_targets_in_chain as flatten;
             let base = parent_slot_base(state, ability);
-            let branch =
-                |node: Option<&ResolvedAbility>| node.map_or(0, |node| flatten(node).len());
             // CR 608.2b: illegal targets won't be affected by parts of the effect for which they're illegal.
-            let ahead: usize =
-                std::iter::successors(Some(root), |node| node.sub_ability.as_deref())
-                    .take_while(|node| !std::ptr::eq(*node, base))
-                    .map(|node| {
-                        flatten(node).len()
-                            - branch(node.sub_ability.as_deref())
-                            - branch(node.else_ability.as_deref())
-                    })
-                    .sum();
+            // The stamp, this offset and the slot reader all count declared
+            // slots (`declared_targets_in_chain` numbering), so an inheriting
+            // rider's carried snapshot never shifts a later slot.
+            let ahead = super::ability_utils::declared_slots_ahead_of(root, base);
             root.illegal_target_slots.contains(&(ahead + index))
         });
     if illegal_at_resolution {

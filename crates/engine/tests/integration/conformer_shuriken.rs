@@ -958,3 +958,131 @@ fn strive_control_without_an_inheriting_rider() {
     assert_eq!(life, 0);
     assert_eq!(drawn, 1);
 }
+
+// ---------------------------------------------------------------------------
+// W3 (review round 4): the illegal-slot stamp, its `ahead` offset and the
+// `ParentTargetSlot` reader all number DECLARED slots. The chain is "Exile
+// target creature (A). Its controller gains life equal to its power (inherited
+// snapshot of A). Tap target creature (B)." with a `ParentTargetSlot { 1 }`
+// counter reader appended — raw holdings [A, A, B], declared slots [A, B].
+// ---------------------------------------------------------------------------
+
+const EXILE_GAIN_TAP: &str =
+    "Exile target creature. Its controller gains life equal to its power. Tap target creature.";
+const SHROUD: &str = "Target creature gains shroud until end of turn.";
+
+/// Returns (A's zone, B tapped, B's +1/+1 counters). `shroud` makes that
+/// creature an illegal target in response. (The A-illegal direction is pinned
+/// at the unit level — `illegal_slots_and_offsets_number_declared_slots` — because
+/// at runtime the exile of an illegal A currently stops on a forced
+/// `EffectZoneChoice`, the separate W4 question.)
+fn exile_gain_tap_with_slot_reader(shroud: Option<char>) -> (Zone, bool, u32) {
+    use engine::types::ability::QuantityExpr;
+    use engine::types::ability::{Effect, ResolvedAbility, TargetFilter};
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let a = scenario.add_creature(P1, "Creature A", 3, 3).id();
+    let b = scenario.add_creature(P1, "Creature B", 2, 2).id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Exile Tap", true, EXILE_GAIN_TAP)
+        .id();
+    let veil = scenario
+        .add_spell_to_hand_from_oracle(P0, "Veil", true, SHROUD)
+        .id();
+    let mut runner = scenario.build();
+    let _ = runner.cast(spell).target_objects(&[a, b]).commit();
+    {
+        let entry = runner
+            .state_mut()
+            .stack
+            .iter_mut()
+            .find(|e| e.source_id == spell)
+            .expect("reach guard: the spell is on the stack");
+        let mut node = entry.ability_mut().expect("spell ability");
+        while node.sub_ability.is_some() {
+            node = node.sub_ability.as_deref_mut().unwrap();
+        }
+        node.sub_ability = Some(Box::new(ResolvedAbility::new(
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::ParentTargetSlot { index: 1 },
+            },
+            vec![],
+            spell,
+            P0,
+        )));
+    }
+    let root = runner
+        .state()
+        .stack
+        .iter()
+        .find(|e| e.source_id == spell)
+        .and_then(|e| e.ability())
+        .expect("spell ability");
+    assert_eq!(
+        engine::game::ability_utils::flatten_targets_in_chain(root),
+        vec![
+            TargetRef::Object(a),
+            TargetRef::Object(a),
+            TargetRef::Object(b)
+        ],
+        "reach guard: the rider carries a snapshot of A"
+    );
+    assert_eq!(
+        engine::game::ability_utils::declared_targets_in_chain(root),
+        vec![TargetRef::Object(a), TargetRef::Object(b)],
+    );
+    if let Some(which) = shroud {
+        let victim = if which == 'A' { a } else { b };
+        let _ = runner.cast(veil).target_object(victim).commit();
+    }
+    for _ in 0..40 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } if !runner.state().stack.is_empty() => {
+                runner.act(GameAction::PassPriority).expect("pass");
+            }
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                runner
+                    .act(GameAction::OrderTriggers {
+                        order: (0..triggers.len()).collect(),
+                    })
+                    .expect("order");
+            }
+            _ => break,
+        }
+    }
+    assert!(
+        runner.state().stack.is_empty(),
+        "reach guard: stack drained"
+    );
+    let state = runner.state();
+    (
+        state.objects[&a].zone,
+        state.objects[&b].tapped,
+        state.objects[&b]
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .copied()
+            .unwrap_or(0),
+    )
+}
+
+/// Control: both legal — A exiled, B tapped, the slot-1 reader counts B.
+#[test]
+fn slot_reader_control_reads_the_second_declared_target() {
+    assert_eq!(
+        exile_gain_tap_with_slot_reader(None),
+        (Zone::Exile, true, 1)
+    );
+}
+
+/// CR 608.2b: B (declared slot 1) becomes illegal; the tap skips it AND the
+/// slot-1 reader gets nothing — the stamp and the reader number the same slot.
+#[test]
+fn illegal_second_target_is_not_read_through_its_slot() {
+    let (a_zone, b_tapped, b_counters) = exile_gain_tap_with_slot_reader(Some('B'));
+    assert_eq!(a_zone, Zone::Exile, "reach guard: the legal exile resolved");
+    assert!(!b_tapped, "the tap skips the illegal B");
+    assert_eq!(b_counters, 0, "CR 608.2b: no counter on the illegal B");
+}

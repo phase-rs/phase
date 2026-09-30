@@ -2066,10 +2066,11 @@ pub fn declared_targets_in_chain(ability: &ResolvedAbility) -> Vec<TargetRef> {
             out.extend(chain_node_targets(ability));
         }
         if let Some(sub_ability) = ability.sub_ability.as_deref() {
-            let inherited = !defers_sub_ability_target_selection(&ability.effect)
-                && !defers_conditional_target_selection(sub_ability)
-                && sub_ability_inherits_parent_creature_target_only(ability, sub_ability);
-            visit(sub_ability, inherited, out);
+            visit(
+                sub_ability,
+                rider_entries_are_inherited(ability, sub_ability),
+                out,
+            );
         }
         if let Some(else_ability) = ability.else_ability.as_deref() {
             visit(else_ability, false, out);
@@ -2079,6 +2080,45 @@ pub fn declared_targets_in_chain(ability: &ResolvedAbility) -> Vec<TargetRef> {
     let mut targets = Vec::new();
     visit(ability, false, &mut targets);
     targets
+}
+
+/// CR 115.10a: whether `sub`'s own `targets` are a carried snapshot of
+/// `parent`'s object target rather than an announcement — the three structural
+/// conjuncts shared by [`declared_targets_in_chain`],
+/// [`flatten_specified_targets_in_chain`], [`illegal_declared_target_slots`] and
+/// [`declared_slots_ahead_of`], so every declared-slot numbering agrees.
+fn rider_entries_are_inherited(parent: &ResolvedAbility, sub: &ResolvedAbility) -> bool {
+    !defers_sub_ability_target_selection(&parent.effect)
+        && !defers_conditional_target_selection(sub)
+        && sub_ability_inherits_parent_creature_target_only(parent, sub)
+}
+
+/// CR 608.2b + CR 608.2c: how many declared slots the chain from `root` down
+/// its `sub_ability` line contributes BEFORE `base`, numbered exactly as
+/// [`declared_targets_in_chain`] numbers them (a paid "instead" delegator's
+/// mirror and an inheriting rider's snapshot contribute none). A branch's
+/// `else_ability` entries follow its whole sub-chain in that order, so they
+/// never precede `base`. `base` must lie on `root`'s `sub_ability` line.
+pub(crate) fn declared_slots_ahead_of(root: &ResolvedAbility, base: &ResolvedAbility) -> usize {
+    let mut ahead = 0;
+    let mut node = Some(root);
+    let mut inherited = false;
+    while let Some(current) = node {
+        if std::ptr::eq(current, base) {
+            break;
+        }
+        if let Some(delegate) = paid_instead_delegate(current) {
+            node = Some(delegate);
+            continue;
+        }
+        if !inherited {
+            ahead += chain_node_targets(current).len();
+        }
+        let next = current.sub_ability.as_deref();
+        inherited = next.is_some_and(|sub| rider_entries_are_inherited(current, sub));
+        node = next;
+    }
+    ahead
 }
 
 /// CR 601.2c: Whether `sub` is the "instead" replacement its parent delegates
@@ -2105,11 +2145,14 @@ fn paid_instead_delegate(ability: &ResolvedAbility) -> Option<&ResolvedAbility> 
 }
 
 /// CR 608.2b: The slots of `declared` — numbered exactly as
-/// [`flatten_targets_in_chain`] numbers them — whose target the resolution-time
-/// re-validation `validated` (the [`validate_targets_in_chain`] result for the
-/// same chain) no longer holds on the corresponding node. Those targets are
-/// illegal, and "illegal targets, if any, won't be affected by parts of a
-/// resolving spell's effect for which they're illegal."
+/// [`declared_targets_in_chain`] numbers them, the numbering every
+/// `ParentTargetSlot` reader and [`declared_slots_ahead_of`] use — whose target
+/// the resolution-time re-validation `validated` (the
+/// [`validate_targets_in_chain`] result for the same chain) no longer holds on
+/// the corresponding node. Those targets are illegal, and "illegal targets, if
+/// any, won't be affected by parts of a resolving spell's effect for which
+/// they're illegal." A paid "instead" delegator's mirror and an inheriting
+/// rider's snapshot are not announced targets and occupy no slot.
 ///
 /// Membership is tested per node, not by position: validation compacts a
 /// node's pruned targets, so positions shift while the survivors keep their
@@ -2127,31 +2170,46 @@ pub(crate) fn illegal_declared_target_slots(
     fn visit(
         declared: &ResolvedAbility,
         validated: Option<&ResolvedAbility>,
+        targets_are_inherited: bool,
         next_slot: &mut usize,
         illegal: &mut Vec<usize>,
     ) {
-        let mut survivors = validated.map_or_else(Vec::new, |node| node.targets.clone());
-        for target in chain_node_targets(declared) {
-            match survivors.iter().position(|survivor| *survivor == target) {
-                Some(found) => {
-                    survivors.swap_remove(found);
+        if let Some(delegate) = paid_instead_delegate(declared) {
+            let validated_delegate = validated.and_then(|node| node.sub_ability.as_deref());
+            visit(
+                delegate,
+                validated_delegate,
+                targets_are_inherited,
+                next_slot,
+                illegal,
+            );
+            return;
+        }
+        if !targets_are_inherited {
+            let mut survivors = validated.map_or_else(Vec::new, |node| node.targets.clone());
+            for target in chain_node_targets(declared) {
+                match survivors.iter().position(|survivor| *survivor == target) {
+                    Some(found) => {
+                        survivors.swap_remove(found);
+                    }
+                    None => illegal.push(*next_slot),
                 }
-                None => illegal.push(*next_slot),
+                *next_slot += 1;
             }
-            *next_slot += 1;
         }
         if let Some(sub_ability) = declared.sub_ability.as_deref() {
             let validated_sub = validated.and_then(|node| node.sub_ability.as_deref());
-            visit(sub_ability, validated_sub, next_slot, illegal);
+            let inherited = rider_entries_are_inherited(declared, sub_ability);
+            visit(sub_ability, validated_sub, inherited, next_slot, illegal);
         }
         if let Some(else_ability) = declared.else_ability.as_deref() {
             let validated_else = validated.and_then(|node| node.else_ability.as_deref());
-            visit(else_ability, validated_else, next_slot, illegal);
+            visit(else_ability, validated_else, false, next_slot, illegal);
         }
     }
 
     let mut illegal = Vec::new();
-    visit(declared, Some(validated), &mut 0, &mut illegal);
+    visit(declared, Some(validated), false, &mut 0, &mut illegal);
     illegal
 }
 
@@ -2314,9 +2372,7 @@ pub(crate) fn flatten_specified_targets_in_chain(ability: &ResolvedAbility) -> V
             // because all three conjuncts are pure and none reads `.targets`.
             // On the deferred path the sub receives REAL selected targets
             // instead of a snapshot.
-            let inherited = !defers_sub_ability_target_selection(&ability.effect)
-                && !defers_conditional_target_selection(sub)
-                && sub_ability_inherits_parent_creature_target_only(ability, sub);
+            let inherited = rider_entries_are_inherited(ability, sub);
             visit(sub, inherited, out);
         }
         // CR 601.2c: neither assign path writes an inherited target into an
@@ -13359,6 +13415,59 @@ mod tests {
             3,
             "reach guard: the carried snapshot is present in the raw flatten"
         );
+    }
+
+    /// CR 608.2b: the illegal-slot stamp, the `ahead` offset and the
+    /// `ParentTargetSlot` reader number the SAME declared slots. Chain:
+    /// exile(A) → inherited life-gain rider (snapshot A) → tap(B). Declared
+    /// slots are [A, B]: A illegal marks slot 0, B illegal marks slot 1, and the
+    /// tap node sits 1 declared slot below the root (not 2).
+    #[test]
+    fn illegal_slots_and_offsets_number_declared_slots() {
+        let (a, b) = (ObjectId(77), ObjectId(78));
+        let tap = |targets: Vec<TargetRef>| {
+            ResolvedAbility::new(
+                Effect::SetTapState {
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
+                },
+                targets,
+                ObjectId(99),
+                PlayerId(0),
+            )
+        };
+        let chain = |a_targets: Vec<TargetRef>, rider_targets, b_targets| {
+            let mut rider = gain_life_anaphor_rider(rider_targets);
+            rider.sub_ability = Some(Box::new(tap(b_targets)));
+            let mut root = change_zone_head(Zone::Exile, a_targets);
+            root.sub_ability = Some(Box::new(rider));
+            root
+        };
+        let declared = chain(
+            vec![TargetRef::Object(a)],
+            vec![TargetRef::Object(a)],
+            vec![TargetRef::Object(b)],
+        );
+        // REACH GUARD: the rider really is an inherited snapshot.
+        assert!(sub_ability_inherits_parent_creature_target_only(
+            &declared,
+            declared.sub_ability.as_deref().unwrap()
+        ));
+        let a_pruned = chain(vec![], vec![], vec![TargetRef::Object(b)]);
+        assert_eq!(illegal_declared_target_slots(&declared, &a_pruned), vec![0]);
+        let b_pruned = chain(
+            vec![TargetRef::Object(a)],
+            vec![TargetRef::Object(a)],
+            vec![],
+        );
+        assert_eq!(illegal_declared_target_slots(&declared, &b_pruned), vec![1]);
+        let tap_node = declared
+            .sub_ability
+            .as_deref()
+            .and_then(|rider| rider.sub_ability.as_deref())
+            .unwrap();
+        assert_eq!(declared_slots_ahead_of(&declared, tap_node), 1);
     }
 
     /// V9 — CR 603.7c: a ROOT node holding a `ParentTarget` snapshot

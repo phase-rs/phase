@@ -11345,6 +11345,8 @@ pub(crate) fn compute_spend_only_on_x_generic_count(
         );
     }
     if let Some(strive_cost) = obj.strive_cost.clone() {
+        // CR 115.10a + CR 601.2f: Count announced targets for the Strive
+        // increase; an inherited rider's snapshot is not another target.
         let target_count = super::ability_utils::declared_targets_in_chain(&pending.ability).len();
         for _ in 1..target_count {
             cost = super::restrictions::add_mana_cost(&cost, &strive_cost);
