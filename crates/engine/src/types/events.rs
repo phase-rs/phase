@@ -655,7 +655,7 @@ impl EventObjectSnapshot {
             // ---- embedded combat role; candidate membership never re-read ----
             FilterProp::Attacking { .. }
             | FilterProp::Blocking
-            | FilterProp::Unblocked
+            | FilterProp::BlockStatus { .. }
             | FilterProp::AttackingAlone
             | FilterProp::BlockingAlone
             | FilterProp::CombatRelation { .. } => Supported,

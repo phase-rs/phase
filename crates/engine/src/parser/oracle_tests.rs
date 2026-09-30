@@ -13568,6 +13568,266 @@ fn put_up_to_two_name_stickers_parses() {
     );
 }
 
+/// Parse a census face with verbatim Oracle text and return its "When this
+/// creature enters, you may put a name sticker on it" trigger's PutSticker and
+/// the clause chained after it. Reach-guard for every row: the whole card
+/// parses with zero `Effect::Unimplemented`.
+fn census_sticker_chain(
+    oracle: &str,
+    name: &str,
+    keywords: &[&str],
+    subtypes: &[&str],
+) -> (AbilityDefinition, AbilityDefinition) {
+    let keywords: Vec<String> = keywords.iter().map(|k| k.to_string()).collect();
+    let subtypes: Vec<String> = subtypes.iter().map(|s| s.to_string()).collect();
+    let parsed = parse_oracle_text(oracle, name, &keywords, &["Creature".into()], &subtypes);
+    assert!(
+        !parsed_has_unimplemented(&parsed),
+        "{name} must parse with zero Unimplemented effects: {parsed:#?}"
+    );
+    let execute = parsed
+        .triggers
+        .iter()
+        .find_map(|trigger| trigger.execute.as_deref())
+        .expect("enters trigger")
+        .clone();
+    assert!(
+        matches!(
+            execute.effect.as_ref(),
+            Effect::PutSticker {
+                target: TargetFilter::ParentTarget,
+                kind: Some(crate::types::stickers::StickerKind::Name),
+                count: QuantityExpr::Fixed { value: 1 },
+                ..
+            }
+        ),
+        "{name}: expected the PutSticker head, got {:?}",
+        execute.effect
+    );
+    let sub = execute
+        .sub_ability
+        .as_deref()
+        .expect("clause after the PutSticker")
+        .clone();
+    (execute, sub)
+}
+
+/// CR 123.6e + CR 608.2c: "for each unique vowel on that sticker".
+fn that_sticker_unique_vowels() -> QuantityExpr {
+    QuantityExpr::Ref {
+        qty: QuantityRef::NameStickerLetterCount {
+            stickers: crate::types::ability::NameStickerSet::ThatSticker,
+            letters: crate::types::ability::LetterQuery::UniqueVowels,
+        },
+    }
+}
+
+/// SHAPE: _____ Goblin — "Add {R} for each unique vowel on that sticker" is a
+/// red mana effect counted by the sticker the PutSticker put (CR 123.6e).
+#[test]
+fn blank_goblin_mana_counts_unique_vowels_on_that_sticker() {
+    let (execute, sub) = census_sticker_chain(
+        "When this creature enters, you may put a name sticker on it. Add {R} for each unique vowel on that sticker. (The vowels are A, E, I, O, U, and Y.)",
+        "_____ Goblin",
+        &[],
+        &["Goblin", "Guest"],
+    );
+    assert!(execute.optional, "CR 603.5: the put is optional");
+    let Effect::Mana {
+        produced:
+            ManaProduction::AnyOneColor {
+                count,
+                color_options,
+                ..
+            },
+        ..
+    } = sub.effect.as_ref()
+    else {
+        panic!("expected red mana, got {:?}", sub.effect);
+    };
+    assert_eq!(count, &that_sticker_unique_vowels());
+    assert_eq!(color_options, &vec![ManaColor::Red]);
+}
+
+/// SHAPE: _____-o-saurus — one +1/+1 counter on itself for each unique vowel
+/// on that sticker (the "for each" is no longer dropped).
+#[test]
+fn o_saurus_counters_count_unique_vowels_on_that_sticker() {
+    let (_, sub) = census_sticker_chain(
+        "Trample\nWhen this creature enters, you may put a name sticker on it. Put a +1/+1 counter on it for each unique vowel on that sticker. (The vowels are A, E, I, O, U, and Y.)",
+        "_____-o-saurus",
+        &["Trample"],
+        &["Alien", "Dinosaur"],
+    );
+    let Effect::PutCounter {
+        counter_type,
+        count,
+        target,
+    } = sub.effect.as_ref()
+    else {
+        panic!("expected PutCounter, got {:?}", sub.effect);
+    };
+    assert_eq!(*counter_type, CounterType::Plus1Plus1);
+    assert_eq!(count, &that_sticker_unique_vowels());
+    assert_eq!(target, &TargetFilter::SelfRef);
+}
+
+/// SHAPE: _____ Bird Gets the Worm — "You gain X life, where X is the number
+/// of unique vowels on that sticker" (CR 107.3i binds X).
+#[test]
+fn bird_gets_the_worm_life_counts_unique_vowels_on_that_sticker() {
+    let (_, sub) = census_sticker_chain(
+        "Flying\nWhen this creature enters, you may put a name sticker on it. You gain X life, where X is the number of unique vowels on that sticker. (The vowels are A, E, I, O, U, and Y.)",
+        "_____ Bird Gets the Worm",
+        &["Flying"],
+        &["Bird", "Guest"],
+    );
+    let Effect::GainLife { amount, player } = sub.effect.as_ref() else {
+        panic!("expected GainLife, got {:?}", sub.effect);
+    };
+    assert_eq!(amount, &that_sticker_unique_vowels());
+    assert_eq!(player, &TargetFilter::Controller);
+}
+
+/// SHAPE: Wizards of the _____ — "look at the top X cards …, where X is the
+/// number of unique vowels on that sticker. Put one of those cards into your
+/// hand and the rest on the bottom" is one Dig counted by that sticker.
+#[test]
+fn wizards_of_the_blank_dig_counts_unique_vowels_on_that_sticker() {
+    let (_, sub) = census_sticker_chain(
+        "When this creature enters, you may put a name sticker on it, then look at the top X cards of your library, where X is the number of unique vowels on that sticker. Put one of those cards into your hand and the rest on the bottom of your library in any order. (The vowels are A, E, I, O, U, and Y.)",
+        "Wizards of the _____",
+        &[],
+        &["Human", "Wizard", "Performer"],
+    );
+    let Effect::Dig {
+        count,
+        keep_count,
+        destination,
+        rest_destination,
+        ..
+    } = sub.effect.as_ref()
+    else {
+        panic!("expected Dig, got {:?}", sub.effect);
+    };
+    assert_eq!(count, &that_sticker_unique_vowels());
+    assert_eq!(*keep_count, Some(1));
+    assert_eq!(*destination, Some(Zone::Hand));
+    assert_eq!(*rest_destination, Some(Zone::Library));
+}
+
+/// SHAPE: Wolf in _____ Clothing — CR 603.12: "When you do, up to X target
+/// creatures each get -1/-1 until end of turn", X the unique vowels on that
+/// sticker.
+#[test]
+fn wolf_in_blank_clothing_reflexive_cap_counts_unique_vowels_on_that_sticker() {
+    let (_, sub) = census_sticker_chain(
+        "When this creature enters, you may put a name sticker on it. When you do, up to X target creatures each get -1/-1 until end of turn, where X is the number of unique vowels on that sticker. (The vowels are A, E, I, O, U, and Y.)",
+        "Wolf in _____ Clothing",
+        &[],
+        &["Wolf", "Guest"],
+    );
+    assert!(
+        matches!(sub.condition, Some(AbilityCondition::WhenYouDo)),
+        "{:?}",
+        sub.condition
+    );
+    assert!(
+        matches!(sub.effect.as_ref(), Effect::Pump { .. }),
+        "{:?}",
+        sub.effect
+    );
+    let spec = sub.multi_target.as_ref().expect("up to X targets");
+    assert_eq!(spec.min, QuantityExpr::Fixed { value: 0 });
+    assert_eq!(spec.max, Some(that_sticker_unique_vowels()));
+}
+
+/// The "Whenever you put a sticker on this enchantment" trigger of an
+/// enchantment census face: its mode stays `Unknown` (the face stays
+/// unsupported) and its execute is returned.
+fn sticker_enchantment_trigger(oracle: &str, name: &str, keywords: &[&str]) -> AbilityDefinition {
+    let keywords: Vec<String> = keywords.iter().map(|k| k.to_string()).collect();
+    let parsed = parse_oracle_text(oracle, name, &keywords, &["Enchantment".into()], &[]);
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|trigger| matches!(trigger.mode, TriggerMode::Unknown(_)))
+        .expect("the put-a-sticker trigger mode is still unrecognized");
+    trigger.execute.as_deref().expect("trigger execute").clone()
+}
+
+/// CR 123.6d: "the number of <letter>'s in name stickers on this enchantment".
+fn letters_in_name_stickers_on_self(letter: char) -> QuantityExpr {
+    QuantityExpr::Ref {
+        qty: QuantityRef::NameStickerLetterCount {
+            stickers: crate::types::ability::NameStickerSet::OnObject {
+                scope: ObjectScope::Source,
+            },
+            letters: crate::types::ability::LetterQuery::Letter { letter },
+        },
+    }
+}
+
+/// SHAPE (honesty): _____ Balls of Fire's damage now reads the o's in its name
+/// stickers, while its "Whenever you put a sticker" trigger mode stays unknown.
+#[test]
+fn balls_of_fire_damage_counts_os_in_name_stickers_on_self() {
+    let execute = sticker_enchantment_trigger(
+        "When this enchantment enters, you may put a name sticker on it.\nWhenever you put a sticker on this enchantment, it deals damage equal to the number of o's in name stickers on this enchantment to any target.",
+        "_____ Balls of Fire",
+        &[],
+    );
+    let Effect::DealDamage { amount, .. } = execute.effect.as_ref() else {
+        panic!("expected DealDamage, got {:?}", execute.effect);
+    };
+    assert_eq!(amount, &letters_in_name_stickers_on_self('o'));
+}
+
+/// SHAPE (honesty): Make a _____ Splash taps up to X creatures, X the u's in
+/// its name stickers, while its trigger mode stays unknown.
+#[test]
+fn make_a_splash_tap_cap_counts_us_in_name_stickers_on_self() {
+    let execute = sticker_enchantment_trigger(
+        "Flash\nWhen this enchantment enters, you may put a name sticker on it.\nWhenever you put a sticker on this enchantment, tap up to X target creatures, where X is the number of u's in name stickers on this enchantment.",
+        "Make a _____ Splash",
+        &["Flash"],
+    );
+    let spec = execute.multi_target.as_ref().expect("up to X targets");
+    assert_eq!(spec.max, Some(letters_in_name_stickers_on_self('u')));
+}
+
+/// SHAPE (negative): Disemvowel counts vowels in the creature's *name* (CR
+/// 201), not on a name sticker (CR 123.6), so it keeps its base parse.
+#[test]
+fn disemvowel_is_not_a_name_sticker_count() {
+    let parsed = parse_oracle_text(
+        "Destroy target creature. That creature's controller loses 1 life for each unique vowel in the creature's name. (The vowels are A, E, I, O, U, and Y.)",
+        "Disemvowel",
+        &[],
+        &["Sorcery".into()],
+        &[],
+    );
+    let spell = parsed.abilities.first().expect("spell ability");
+    // Reach-guard: the Destroy head parsed.
+    assert!(
+        matches!(spell.effect.as_ref(), Effect::Destroy { .. }),
+        "{:?}",
+        spell.effect
+    );
+    let sub = spell.sub_ability.as_deref().expect("life-loss clause");
+    assert!(
+        matches!(
+            sub.effect.as_ref(),
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: Some(TargetFilter::ParentTargetController),
+            }
+        ),
+        "{:?}",
+        sub.effect
+    );
+}
+
 #[test]
 fn repeat_this_process_you_may_sets_controller_choice() {
     use crate::parser::oracle_effect::parse_effect_chain;

@@ -11,10 +11,10 @@ use nom::Parser;
 use crate::types::ability::{
     AggregateFunction, AttachmentKind, CardTypeSetSource, ChoiceType, CombatRelation,
     CombatRelationSubject, Comparator, ControllerRef, CountScope, DamageKindFilter, FilterProp,
-    ObjectProperty, ObjectScope, ParitySource, PlayerFilter, PlayerRelation, PropertyAggregate,
-    PtStat, PtValueScope, QuantityExpr, QuantityRef, SeatDirection, SharedQuality,
-    SharedQualityRelation, TargetFilter, TargetSelectionMode, ThisWayCause, TypeFilter,
-    TypedFilter,
+    NameStickerSet, ObjectProperty, ObjectScope, ParitySource, PlayerFilter, PlayerRelation,
+    PropertyAggregate, PtStat, PtValueScope, QuantityExpr, QuantityRef, SeatDirection,
+    SharedQuality, SharedQualityRelation, TargetFilter, TargetSelectionMode, ThisWayCause,
+    TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{noncreature_subtype_set, SubtypeSet, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -1265,45 +1265,11 @@ pub fn parse_target_with_syntax<'a>(
         ))
         .parse(after_target)
         {
-            if let Ok((object_tail, _)) = alt((
-                tag::<_, _, OracleError<'_>>(", and/or "),
-                tag(", and "),
-                tag(", or "),
-                tag(", "),
-            ))
-            .parse(after_player)
-            {
-                if starts_with_type_word(object_tail) {
-                    let mut combined = player_filter.clone();
-                    let mut leg_text = &text[lower.len() - object_tail.len()..];
-                    let mut merged_any = false;
-                    loop {
-                        let (leg, rest) = parse_type_phrase_folding_with_ctx(leg_text, ctx);
-                        if matches!(leg, TargetFilter::Any) {
-                            if merged_any {
-                                return (combined, leg_text, syntax);
-                            }
-                            break;
-                        }
-                        combined = merge_or_filters(combined, leg);
-                        merged_any = true;
-
-                        let rest_lower = rest.to_lowercase();
-                        let Ok((next_leg, _)) = alt((
-                            tag::<_, _, OracleError<'_>>(", and/or "),
-                            tag(", and "),
-                            tag(", or "),
-                            tag(", "),
-                        ))
-                        .parse(rest_lower.as_str()) else {
-                            return (combined, rest, syntax);
-                        };
-                        if !starts_with_type_word(next_leg) {
-                            return (combined, rest, syntax);
-                        }
-                        leg_text = &rest[rest_lower.len() - next_leg.len()..];
-                    }
-                }
+            let after_player_orig = &text[lower.len() - after_player.len()..];
+            let (combined, rest, _) =
+                parse_coordinated_target_tail(player_filter.clone(), after_player_orig, ctx);
+            if rest.len() != after_player_orig.len() {
+                return (combined, rest, syntax);
             }
             // CR 115.1 + CR 601.2c + CR 603.3d: a `who`-headed relative clause
             // narrows the PLAYER TARGET's legal domain, and every conjunct of it
@@ -1403,6 +1369,17 @@ pub fn parse_target_with_syntax<'a>(
         // — it pushes `IsCommander` and composes uniformly with the existing
         // suffix machinery (ownership, control, counters, "with X", etc.).
         let (filter, rest) = parse_type_phrase_folding_with_ctx(&text[target_offset..], ctx);
+        // CR 115.1: an object-headed coordinated list whose later leg is a
+        // player ("creature token, player, or planeswalker") is still one
+        // target slot. Extend only when a player leg actually appears, so
+        // player-free lists keep their ordinary type-phrase semantics.
+        let mut tentative_ctx = ctx.clone();
+        let (combined, extended_rest, saw_player) =
+            parse_coordinated_target_tail(filter.clone(), rest, &mut tentative_ctx);
+        if saw_player || continues_suffixed_type_list(&filter, rest) {
+            *ctx = tentative_ctx;
+            return (combined, extended_rest, syntax);
+        }
         let consumed_end = lower.len() - rest.len();
         return (
             scope_target_spell_phrase(filter, &lower[target_offset..consumed_end]),
@@ -4489,6 +4466,131 @@ fn starts_with_commander_word(text: &str) -> bool {
         .is_ok_and(|(after, _)| after.is_empty() || after.starts_with([' ', ',', '.', ';']))
 }
 
+/// CR 115.1: a player leg of a coordinated target noun list — "player(s)" or
+/// "opponent(s)" at a word boundary.
+fn parse_coordinated_player_leg(input: &str) -> OracleResult<'_, TargetFilter> {
+    terminated(
+        alt((
+            value(
+                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+                alt((tag("opponents"), tag("opponent"))),
+            ),
+            value(TargetFilter::Player, alt((tag("players"), tag("player")))),
+        )),
+        peek(not(satisfy(|c: char| c.is_alphanumeric() || c == '\''))),
+    )
+    .parse(input)
+}
+
+/// CR 115.1: Fold the remaining legs of a coordinated target noun list into
+/// `head`. Each leg after a `, and/or ` / `, and ` / `, or ` / `, ` separator
+/// is either a player leg or an object type phrase, in any position; all legs
+/// describe one target slot whose legal domain is their union. `rest` starts
+/// at the first separator. Returns the merged filter, the unconsumed text, and
+/// whether any player leg was merged.
+fn parse_coordinated_target_tail<'a>(
+    head: TargetFilter,
+    mut rest: &'a str,
+    ctx: &mut ParseContext,
+) -> (TargetFilter, &'a str, bool) {
+    let mut combined = head;
+    let mut saw_player = false;
+    loop {
+        let rest_lower = rest.to_lowercase();
+        let Ok((leg_lower, _)) = alt((
+            tag::<_, _, OracleError<'_>>(", and/or "),
+            tag(", and "),
+            tag(", or "),
+            tag(", "),
+        ))
+        .parse(rest_lower.as_str()) else {
+            return (combined, rest, saw_player);
+        };
+        let leg_text = &rest[rest_lower.len() - leg_lower.len()..];
+        if let Ok((after_leg, player_leg)) = parse_coordinated_player_leg(leg_lower) {
+            combined = merge_or_filters(combined, player_leg);
+            saw_player = true;
+            rest = &leg_text[leg_lower.len() - after_leg.len()..];
+        } else if starts_with_type_word(leg_lower) {
+            let (leg, after_leg) = parse_type_phrase_folding_with_ctx(leg_text, ctx);
+            if matches!(leg, TargetFilter::Any) {
+                return (combined, rest, saw_player);
+            }
+            combined = merge_or_filters(combined, leg);
+            rest = after_leg;
+        } else {
+            return (combined, rest, saw_player);
+        }
+    }
+}
+
+/// CR 308.2 + CR 205.3m: In "Cleric, Rogue, Warrior, or Wizard creature card" the
+/// trailing core-type noun modifies every subtype in the list. Kindred cards carry
+/// creature types too, so a bare subtype leg would also match a Kindred sorcery.
+/// When the final leg of a union is `<core type> + <subtype>` (the noun bound to a
+/// subtype), every earlier leg that is a bare subtype gains that core type.
+/// Unions whose last leg has no subtype ("Spirit, creature with disturb, or
+/// enchantment") name independent types and are left unchanged.
+fn distribute_trailing_core_type(filter: TargetFilter) -> TargetFilter {
+    let TargetFilter::Or { mut filters } = filter else {
+        return filter;
+    };
+    let shared = match filters.last() {
+        Some(TargetFilter::Typed(tf))
+            if tf
+                .type_filters
+                .iter()
+                .any(|t| matches!(t, TypeFilter::Subtype(_))) =>
+        {
+            let mut core = tf.type_filters.iter().filter(|t| {
+                !matches!(
+                    t,
+                    TypeFilter::Subtype(_)
+                        | TypeFilter::Non(_)
+                        | TypeFilter::AnyOf(_)
+                        | TypeFilter::Any
+                        | TypeFilter::Card
+                )
+            });
+            match (core.next(), core.next()) {
+                (Some(core_type), None) => Some(core_type.clone()),
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+    if let Some(core_type) = shared {
+        for leg in &mut filters {
+            if let TargetFilter::Typed(tf) = leg {
+                if !tf.type_filters.is_empty()
+                    && tf
+                        .type_filters
+                        .iter()
+                        .all(|t| matches!(t, TypeFilter::Subtype(_)))
+                {
+                    tf.type_filters.insert(0, core_type.clone());
+                }
+            }
+        }
+    }
+    TargetFilter::Or { filters }
+}
+
+/// CR 115.1 + CR 205.2a: True when a comma-opened type list ("Spirit, creature
+/// with disturb, or enchantment") stopped after a leg that carried its own
+/// suffix ("with disturb"): the type-list recursion consumes separators before
+/// per-leg suffixes, so the final Oxford-comma leg is left in `rest`. The list
+/// is already an `Or`, and the leftover starts with the final-leg connector
+/// followed by a type word, so it is one more leg of the same target slot. A
+/// bare ", and " is excluded: it can equally begin a new clause.
+fn continues_suffixed_type_list(filter: &TargetFilter, rest: &str) -> bool {
+    let rest_lower = rest.to_lowercase();
+    matches!(filter, TargetFilter::Or { .. })
+        && alt((tag::<_, _, OracleError<'_>>(", or "), tag(", and/or ")))
+            .parse(rest_lower.as_str())
+            .is_ok_and(|(leg, _)| starts_with_type_word(leg))
+}
+
 /// Guard: does text start with something `parse_type_phrase_folding` would recognize?
 /// Used to prevent comma/and/or recursion on non-type text.
 pub(crate) fn starts_with_type_word(text: &str) -> bool {
@@ -4857,6 +4959,7 @@ fn stack_spell_filter(mut typed: TypedFilter) -> TargetFilter {
 fn finalize_or_disjunction(combined: TargetFilter, shared_props: &[FilterProp]) -> TargetFilter {
     let combined = distribute_controller_to_or(combined);
     let combined = distribute_core_type_to_or(combined);
+    let combined = distribute_trailing_core_type(combined);
     let combined = distribute_neg_type_filters_to_or(combined);
     let combined = distribute_shared_properties(combined, shared_props);
     distribute_properties_to_or(combined)
@@ -4979,7 +5082,7 @@ pub(crate) fn is_adjective_prefix_prop(prop: &FilterProp) -> bool {
             // CR 509.1h: combat-status prefixes "attacking/blocking/unblocked".
             | FilterProp::Attacking { defender: None }
             | FilterProp::Blocking
-            | FilterProp::Unblocked
+            | FilterProp::BlockStatus { .. }
             // CR 105.1 + CR 205.2: color / supertype adjectives.
             | FilterProp::HasColor { .. }
             | FilterProp::ColorCount { .. }
@@ -5094,7 +5197,7 @@ fn prop_reads_creature_pt(prop: &FilterProp) -> bool {
         | FilterProp::Blocking
         | FilterProp::BlockingSource
         | FilterProp::CombatRelation { .. }
-        | FilterProp::Unblocked
+        | FilterProp::BlockStatus { .. }
         | FilterProp::AttackingAlone
         | FilterProp::BlockingAlone
         | FilterProp::Tapped
@@ -6143,7 +6246,7 @@ pub(crate) fn parse_combat_status_prefix(text: &str) -> Option<(FilterProp, usiz
     if let Ok((rest, prop)) = nom_filter::parse_property_filter(text) {
         if matches!(
             prop,
-            FilterProp::Unblocked
+            FilterProp::BlockStatus { .. }
                 | FilterProp::Attacking { defender: None }
                 | FilterProp::Blocking
                 | FilterProp::Tapped
@@ -7150,6 +7253,10 @@ fn rebind_compound_slot_referent_in_quantity(expr: &mut QuantityExpr) {
             | QuantityRef::ObjectManaValue { scope }
             | QuantityRef::ObjectColorCount { scope }
             | QuantityRef::ObjectNameWordCount { scope }
+            | QuantityRef::NameStickerLetterCount {
+                stickers: NameStickerSet::OnObject { scope },
+                letters: _,
+            }
             | QuantityRef::ObjectTypelineComponentCount { scope }
             | QuantityRef::ManaSymbolsInManaCost { scope, .. }
             | QuantityRef::CountersOn { scope, .. } => scope,
@@ -7635,6 +7742,25 @@ fn parse_counters_put_this_turn_clause(input: &str) -> Option<(FilterProp, usize
     None
 }
 
+/// A keyword-list separator followed by something other than a keyword, where
+/// that something opens another leg of the enclosing list — a type word ("creature
+/// with disturb, or enchantment") or a determiner-led leg ("each creature without
+/// flying and each planeswalker", "target creature with flying and all Equipment
+/// attached to that creature") — belongs to the enclosing list and stays
+/// unconsumed.
+fn separator_continues_enclosing_list(after_separator: &str) -> bool {
+    parse_leading_keyword_match(after_separator).is_none()
+        && (starts_with_type_word(after_separator)
+            || alt((
+                tag::<_, _, OracleError<'_>>("each "),
+                tag("all "),
+                tag("target "),
+                tag("up to "),
+            ))
+            .parse(after_separator)
+            .is_ok())
+}
+
 struct KeywordSuffix {
     properties: Vec<FilterProp>,
     disjunctive: bool,
@@ -7665,6 +7791,12 @@ fn parse_keyword_suffix(text: &str) -> Option<(KeywordSuffix, usize)> {
         let mut found_sep = false;
         for sep in &[", and ", ", or ", " and ", " or ", ", "] {
             if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(*sep).parse(remaining) {
+                // A separator followed by a type word rather than a keyword
+                // belongs to the enclosing type list ("creature with disturb,
+                // or enchantment") and stays unconsumed for the caller.
+                if separator_continues_enclosing_list(rest) {
+                    break;
+                }
                 if matches!(*sep, ", or " | " or ") {
                     disjunctive = true;
                 }
@@ -7721,6 +7853,9 @@ pub(crate) fn parse_without_keyword_suffix(text: &str) -> Option<(Vec<FilterProp
         let mut found_sep = false;
         for sep in &[", and ", ", or ", " and ", " or ", ", "] {
             if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(*sep).parse(remaining) {
+                if separator_continues_enclosing_list(rest) {
+                    break;
+                }
                 consumed += sep.len();
                 remaining = rest;
                 found_sep = true;
@@ -10542,6 +10677,7 @@ mod tests {
     use super::*;
     use crate::parser::oracle_ir::context::ParseContext;
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
+    use crate::types::ability::AttackerBlockStatus;
     use crate::types::ability::{PtStat, PtValueScope};
     use crate::types::counter::CounterType;
 
@@ -12248,6 +12384,65 @@ mod tests {
                 ],
             },
             "the player and both opponent-controlled object alternatives share one target slot"
+        );
+    }
+
+    #[test]
+    fn coordinated_target_player_leg_in_middle_is_kept() {
+        let (filter, rest) = parse_target("target creature token, player, or planeswalker.");
+
+        assert_eq!(rest, ".");
+        let TargetFilter::Or { filters } = filter else {
+            panic!("expected one Or slot, got {filter:?}");
+        };
+        assert_eq!(filters.len(), 3);
+        assert_eq!(filters[1], TargetFilter::Player);
+        assert!(matches!(&filters[2], TargetFilter::Typed(t)
+            if t.type_filters == vec![TypeFilter::Planeswalker]));
+    }
+
+    #[test]
+    fn coordinated_target_opponent_leg_last_is_kept() {
+        let (filter, rest) = parse_target("target artifact, creature, planeswalker, or opponent.");
+
+        assert_eq!(rest, ".");
+        let TargetFilter::Or { filters } = filter else {
+            panic!("expected one Or slot, got {filter:?}");
+        };
+        assert_eq!(filters.len(), 4);
+        assert_eq!(
+            filters[3],
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
+        );
+    }
+
+    #[test]
+    fn coordinated_target_plural_and_or_player_leg_is_kept() {
+        let (filter, rest) = parse_target("target creatures, planeswalkers, and/or players.");
+
+        assert_eq!(rest, ".");
+        let TargetFilter::Or { filters } = filter else {
+            panic!("expected one Or slot, got {filter:?}");
+        };
+        assert_eq!(filters.len(), 3);
+        assert_eq!(filters[2], TargetFilter::Player);
+    }
+
+    #[test]
+    fn coordinated_target_without_player_leg_keeps_controller_qualifier() {
+        let (filter, rest) = parse_target("target artifact, creature, or land you control.");
+
+        assert_eq!(rest, ".");
+        let TargetFilter::Or { filters } = filter else {
+            panic!("expected one Or slot, got {filter:?}");
+        };
+        assert_eq!(filters.len(), 3);
+        assert!(
+            filters
+                .iter()
+                .all(|leg| matches!(leg, TargetFilter::Typed(t)
+                if t.controller == Some(ControllerRef::You))),
+            "every leg keeps the trailing controller qualifier: {filters:?}"
         );
     }
 
@@ -18166,7 +18361,15 @@ mod tests {
     #[test]
     fn combat_status_prefix_unblocked() {
         let result = parse_combat_status_prefix("unblocked attacking creatures");
-        assert_eq!(result, Some((FilterProp::Unblocked, 10)));
+        assert_eq!(
+            result,
+            Some((
+                FilterProp::BlockStatus {
+                    status: AttackerBlockStatus::Unblocked
+                },
+                10
+            ))
+        );
         // Second call on remainder should get Attacking
         let result2 = parse_combat_status_prefix("attacking creatures");
         assert_eq!(
@@ -18176,12 +18379,52 @@ mod tests {
     }
 
     #[test]
+    fn combat_status_prefix_blocked() {
+        // CR 509.1h: "blocked" as a prefix adjective consumes "blocked ".
+        assert_eq!(
+            parse_combat_status_prefix("blocked creature"),
+            Some((
+                FilterProp::BlockStatus {
+                    status: AttackerBlockStatus::Blocked
+                },
+                8
+            ))
+        );
+        // Postfix forms are handled elsewhere and must not be consumed.
+        assert_eq!(parse_combat_status_prefix("blocked by a creature"), None);
+        assert_eq!(parse_combat_status_prefix("blocked this turn"), None);
+    }
+
+    #[test]
+    fn blocking_or_blocked_creature_parses_as_disjunction() {
+        let (filter, remainder) = parse_type_phrase_folding("blocking or blocked creature");
+        assert!(remainder.trim().is_empty(), "remainder: '{remainder}'");
+        let TargetFilter::Or { filters } = &filter else {
+            panic!("expected Or, got {filter:?}");
+        };
+        assert_eq!(filters.len(), 2);
+        let has = |prop: FilterProp| {
+            filters.iter().any(|f| {
+                matches!(f, TargetFilter::Typed(tf)
+                    if tf.type_filters.contains(&TypeFilter::Creature)
+                        && tf.properties.contains(&prop))
+            })
+        };
+        assert!(has(FilterProp::Blocking));
+        assert!(has(FilterProp::BlockStatus {
+            status: AttackerBlockStatus::Blocked
+        }));
+    }
+
+    #[test]
     fn parse_type_phrase_unblocked_attacking_creatures_you_control() {
         let (filter, remainder) =
             parse_type_phrase_folding("unblocked attacking creatures you control");
         assert!(remainder.trim().is_empty(), "remainder: '{remainder}'");
         if let TargetFilter::Typed(tf) = &filter {
-            assert!(tf.properties.contains(&FilterProp::Unblocked));
+            assert!(tf.properties.contains(&FilterProp::BlockStatus {
+                status: AttackerBlockStatus::Unblocked
+            }));
             assert!(tf
                 .properties
                 .contains(&FilterProp::Attacking { defender: None }));
@@ -21677,6 +21920,112 @@ mod tests {
         };
         assert!(tf.type_filters.contains(&TypeFilter::Artifact));
         assert!(tf.type_filters.contains(&TypeFilter::Creature));
+    }
+
+    /// CR 115.1: a comma-opened type list whose middle leg carries a `with`
+    /// suffix keeps its final Oxford-comma leg in the same target slot.
+    #[test]
+    fn target_list_keeps_final_leg_after_suffixed_middle_leg() {
+        for text in [
+            "target Spirit, creature with disturb, or enchantment",
+            "target artifact, creature with flying, or land",
+        ] {
+            let (f, rest) = parse_target(text);
+            assert!(rest.trim().is_empty(), "{text}: leftover {rest:?}");
+            let TargetFilter::Or { filters } = f else {
+                panic!("{text}: expected Or, got {f:?}");
+            };
+            assert_eq!(filters.len(), 3, "{text}: {filters:?}");
+        }
+    }
+
+    /// CR 308.2: the shared trailing core-type noun of a subtype list binds to
+    /// every subtype leg, for 2-leg and 3+-leg lists; a list whose last leg has no
+    /// subtype keeps independent legs.
+    #[test]
+    fn subtype_list_distributes_shared_core_type_noun() {
+        for (text, legs) in [
+            ("target Warrior or Wizard creature card", 2),
+            ("target Cleric, Rogue, Warrior, or Wizard creature card", 4),
+            (
+                "target Cleric, Rogue, Warrior, or Wizard creature card from your graveyard",
+                4,
+            ),
+        ] {
+            let (f, rest) = parse_target(text);
+            assert!(rest.trim().is_empty(), "{text}: leftover {rest:?}");
+            let TargetFilter::Or { filters } = f else {
+                panic!("{text}: expected Or, got {f:?}");
+            };
+            assert_eq!(filters.len(), legs, "{text}");
+            for leg in &filters {
+                assert!(
+                    matches!(leg, TargetFilter::Typed(t)
+                        if t.type_filters.contains(&TypeFilter::Creature)),
+                    "{text}: leg lacks Creature: {leg:?}"
+                );
+            }
+        }
+        // A leg that names its own card type keeps it and does not gain the noun.
+        let (f, _) = parse_target("target artifact, Cleric, or Wizard creature card");
+        let TargetFilter::Or { filters } = f else {
+            panic!("expected Or, got {f:?}");
+        };
+        assert!(
+            matches!(&filters[0], TargetFilter::Typed(t)
+                if t.type_filters.contains(&TypeFilter::Artifact)
+                    && !t.type_filters.contains(&TypeFilter::Creature)),
+            "artifact leg must not gain Creature: {:?}",
+            filters[0]
+        );
+        let (f, _) = parse_target("target Spirit, creature with disturb, or enchantment");
+        let TargetFilter::Or { filters } = f else {
+            panic!("expected Or, got {f:?}");
+        };
+        assert!(
+            matches!(&filters[0], TargetFilter::Typed(t) if !t.type_filters.contains(&TypeFilter::Creature)),
+            "independent Spirit leg must stay creature-free: {:?}",
+            filters[0]
+        );
+    }
+
+    /// CR 608.2c: a keyword suffix stops before a separator that opens another
+    /// determiner-led leg of the enclosing phrase ("target creature with flying
+    /// and all Equipment attached to that creature"), so the leg is not swallowed.
+    /// The paired positive: a separator followed by another keyword still joins
+    /// the keyword list.
+    #[test]
+    fn keyword_suffix_leaves_determiner_led_leg_unconsumed() {
+        for leg in [
+            " and all Equipment attached to that creature",
+            " and each planeswalker",
+            " and target artifact",
+            " and up to one target land",
+        ] {
+            let text = format!("target creature with flying{leg}");
+            let (filter, rest) = parse_target(&text);
+            assert!(
+                matches!(&filter, TargetFilter::Typed(t)
+                    if t.properties.iter().any(|p| matches!(p, FilterProp::WithKeyword { .. }))),
+                "{text}: flying suffix kept: {filter:?}"
+            );
+            assert_eq!(rest, leg, "{text}: the determiner-led leg stays unconsumed");
+        }
+        let (filter, rest) = parse_target("target creature with flying and vigilance");
+        assert_eq!(rest, "", "a second keyword still joins the list");
+        assert!(
+            matches!(&filter, TargetFilter::Typed(t)
+                if t.properties.iter().filter(|p| matches!(p, FilterProp::WithKeyword { .. })).count() == 2),
+            "{filter:?}"
+        );
+    }
+
+    /// A non-list target followed by an unrelated ", or" clause stays untouched.
+    #[test]
+    fn target_single_type_leaves_trailing_or_clause() {
+        let (f, rest) = parse_target("target creature, or draw a card");
+        assert!(matches!(f, TargetFilter::Typed(_)), "{f:?}");
+        assert_eq!(rest, ", or draw a card");
     }
 
     /// Regression: a single article-led conjunction with no connector still

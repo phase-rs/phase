@@ -3056,6 +3056,18 @@ pub(super) fn apply_post_replacement_effect(
     };
     let mut resolved =
         build_resolved_from_def_with_targets(effect_def, source_id, controller, targets);
+    // CR 121.6b + CR 616.1g: a nested replacement may temporarily become the
+    // resident drain while this chain is suspended on its child draw. Capture
+    // this continuation's own event target on the chain now so a later sibling
+    // (for example, Alms Collector's "that player" draw) cannot read the nested
+    // child's event target when it resumes.
+    if ability_definition_uses_post_replacement_event_target(effect_def) {
+        if let Some(target) = state.post_replacement_event_target() {
+            if !resolved.targets.contains(target) {
+                resolved.targets.push(target.clone());
+            }
+        }
+    }
     // CR 109.5: "that player" / "its controller" — the player the replaced
     // event acted on, bound only when that is somebody other than "you" (see
     // `distinct_scoped_player` above). Applied to the whole chain so a rider
@@ -3066,6 +3078,37 @@ pub(super) fn apply_post_replacement_effect(
     }
     resolved.set_replacement_applied_recursive(replacement_applied);
     resolve_post_replacement_chain(state, &resolved, events)
+}
+
+fn ability_definition_uses_post_replacement_event_target(ability: &AbilityDefinition) -> bool {
+    fn filter_uses_event_target(filter: &TargetFilter) -> bool {
+        match filter {
+            TargetFilter::PostReplacementDamageTarget => true,
+            TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+                filters.iter().any(filter_uses_event_target)
+            }
+            TargetFilter::Not { filter } => filter_uses_event_target(filter),
+            _ => false,
+        }
+    }
+
+    ability
+        .effect
+        .target_filter()
+        .is_some_and(filter_uses_event_target)
+        || ability
+            .sub_ability
+            .as_deref()
+            .is_some_and(ability_definition_uses_post_replacement_event_target)
+        || ability
+            .else_ability
+            .as_deref()
+            .is_some_and(ability_definition_uses_post_replacement_event_target)
+        || matches!(
+            ability.effect.as_ref(),
+            Effect::ChooseOneOf { branches, .. }
+                if branches.iter().any(ability_definition_uses_post_replacement_event_target)
+        )
 }
 
 /// CR 608.2c: execute instructions in the order written.

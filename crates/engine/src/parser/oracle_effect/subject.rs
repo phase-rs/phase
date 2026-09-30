@@ -2713,7 +2713,8 @@ fn parse_subject_application_for(
         .is_ok()
     {
         let (filter, _) = parse_target_with_ctx(&subject["another ".len()..], ctx);
-        let filter = add_another_property(filter);
+        let mut filter = filter;
+        imperative::add_another_to_filter_recursive(&mut filter);
         return subject_filter_application(filter, true);
     }
     if tag::<_, _, OracleError<'_>>("target ")
@@ -3045,11 +3046,10 @@ fn parse_subject_application_for(
         // player's creatures.
         let (filter, rest) = parse_target_with_ctx(&normalized, ctx);
         if rest.trim().is_empty() {
-            let filter = if had_other {
-                add_another_property(filter)
-            } else {
-                filter
-            };
+            let mut filter = filter;
+            if had_other {
+                imperative::add_another_to_filter_recursive(&mut filter);
+            }
             return subject_filter_application(filter, false);
         }
     }
@@ -7160,6 +7160,7 @@ pub(super) fn parse_cant_be_regenerated_predicate(input: &str) -> OracleResult<'
         (
             alt((
                 tag::<_, _, OracleError<'_>>("can't"),
+                tag::<_, _, OracleError<'_>>("can\u{2019}t"),
                 tag::<_, _, OracleError<'_>>("cannot"),
             )),
             tag(" be regenerated"),
@@ -8064,7 +8065,10 @@ fn is_restriction_predicate_verb(token: &str) -> bool {
     // copula-negation here lets `find_predicate_start` split subject from
     // predicate so the continuous-clause path produces a `RemoveType`
     // modification (via `parse_continuous_modifications`).
-    matches!(token, "can't" | "cannot" | "isn't" | "aren't")
+    matches!(
+        token,
+        "can't" | "can\u{2019}t" | "cannot" | "isn't" | "isn\u{2019}t" | "aren't" | "aren\u{2019}t"
+    )
 }
 
 fn token_starts_predicate(token: &str) -> bool {
@@ -8131,31 +8135,10 @@ pub(super) fn find_predicate_start(text: &str) -> Option<usize> {
     None
 }
 
-/// Add `FilterProp::Another` to a lone `Typed` target filter, ensuring the
-/// source is excluded.
-///
-/// Composite (`Or`/`And`) classes use the recursion-aware
-/// `imperative::add_another_to_filter_recursive` instead — this helper is the
-/// single-`Typed` form consumed by the subject-composition paths below.
-fn add_another_property(filter: TargetFilter) -> TargetFilter {
-    match filter {
-        TargetFilter::Typed(mut tf) => {
-            if !tf
-                .properties
-                .iter()
-                .any(|p| matches!(p, FilterProp::Another))
-            {
-                tf.properties.push(FilterProp::Another);
-            }
-            TargetFilter::Typed(tf)
-        }
-        other => other,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ability::AttackerBlockStatus;
     use crate::types::ability::{
         AbilityKind, BasicLandType, ContinuousModification, ControllerRef, Effect, TypeFilter,
     };
@@ -10543,6 +10526,30 @@ mod tests {
         );
     }
 
+    /// "another target A or B you control" excludes the source from
+    /// every leg of the union, not just a single-type filter.
+    #[test]
+    fn parse_subject_another_target_distributes_over_union() {
+        for text in [
+            "another target Wolf or Werewolf you control",
+            "another target Elf, Goblin, or Wizard you control",
+        ] {
+            let mut ctx = ParseContext::default();
+            let app = parse_subject_application(text, &mut ctx).expect(text);
+            let TargetFilter::Or { filters } = app.affected else {
+                panic!("{text}: expected Or, got {:?}", app.affected);
+            };
+            assert!(filters.len() >= 2, "{text}");
+            for leg in &filters {
+                assert!(
+                    matches!(leg, TargetFilter::Typed(t)
+                        if t.properties.iter().any(|p| matches!(p, FilterProp::Another))),
+                    "{text}: leg lacks Another: {leg:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn parse_subject_up_to_one_target_honors_relative_player_scope() {
         let mut ctx = ParseContext {
@@ -11577,7 +11584,7 @@ mod tests {
 
     // CR 509.1h: "Target unblocked attacking creature becomes blocked." parses to
     // `Effect::BecomeBlocked` whose target is a Typed(creature) filter carrying
-    // both FilterProp::Unblocked and FilterProp::Attacking. SHAPE test — runtime
+    // both FilterProp::BlockStatus { Unblocked } and FilterProp::Attacking. SHAPE test — runtime
     // semantics are covered by the cast-pipeline tests in
     // tests/dazzling_beauty_become_blocked.rs.
     #[test]
@@ -11604,10 +11611,13 @@ mod tests {
             "target must be a creature filter, got {type_filters:?}"
         );
         assert!(
-            properties
-                .iter()
-                .any(|p| matches!(p, FilterProp::Unblocked)),
-            "target must carry FilterProp::Unblocked (CR 509.1h), got {properties:?}"
+            properties.iter().any(|p| matches!(
+                p,
+                FilterProp::BlockStatus {
+                    status: AttackerBlockStatus::Unblocked
+                }
+            )),
+            "target must carry an Unblocked BlockStatus (CR 509.1h), got {properties:?}"
         );
         assert!(
             properties

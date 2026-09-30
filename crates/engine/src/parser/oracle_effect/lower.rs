@@ -16,6 +16,7 @@ use super::super::oracle_nom::enters_under::{
 use super::super::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
+use super::super::oracle_nom::target::parse_declared_target_prefix;
 use super::super::oracle_quantity::{
     parse_cda_quantity, parse_cda_quantity_with_context, parse_event_context_quantity,
     parse_for_each_clause, parse_for_each_clause_expr, parse_for_each_clause_expr_with_context,
@@ -36,10 +37,10 @@ use crate::types::ability::{
     CastingPermission, CombatHistoryScope, Comparator, ConjureSource, ContinuousModification,
     ControllerRef, CountBinding, DamageChannel, DamageSource, DelayedTriggerCondition, Duration,
     Effect, EffectScope, ExiledSpellRider, FilterProp, GameRestriction, LibraryPosition,
-    MultiTargetSpec, ObjectScope, PermissionGrantee, PlayerFilter, PreventionAmount,
-    PreventionScope, PtValue, QuantityExpr, QuantityRef, RestrictionPlayerScope, RoundingMode,
-    SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, SubAbilityLink,
-    TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
+    MultiTargetSpec, NameStickerSet, ObjectScope, PermissionGrantee, PlayerFilter,
+    PreventionAmount, PreventionScope, PtValue, QuantityExpr, QuantityRef, RestrictionPlayerScope,
+    RoundingMode, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition,
+    SubAbilityLink, TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::counter::CounterType;
 use crate::types::game_state::{DistributionUnit, TargetSelectionConstraint};
@@ -1692,6 +1693,10 @@ fn quantity_ref_reads_other_revealed_card(qty: &QuantityRef) -> bool {
         | QuantityRef::Toughness { scope }
         | QuantityRef::ObjectColorCount { scope }
         | QuantityRef::ObjectNameWordCount { scope }
+        | QuantityRef::NameStickerLetterCount {
+            stickers: NameStickerSet::OnObject { scope },
+            letters: _,
+        }
         | QuantityRef::ObjectTypelineComponentCount { scope }
         | QuantityRef::CountersOn { scope, .. }
         | QuantityRef::ManaSymbolsInManaCost { scope, .. } => scope,
@@ -5083,10 +5088,7 @@ pub(super) fn parse_for_each_opponent_target_fanout_clause(
 fn is_per_opponent_target_fanout_clause(clause: &ParsedEffectClause) -> bool {
     if matches!(
         clause.effect,
-        Effect::Choose { .. }
-            | Effect::ChooseCard { .. }
-            | Effect::CopyTokenOf { .. }
-            | Effect::TargetOnly { .. }
+        Effect::Choose { .. } | Effect::ChooseCard { .. } | Effect::TargetOnly { .. }
     ) {
         return false;
     }
@@ -6596,6 +6598,47 @@ fn chosen_number_extremum_of(amount: &QuantityExpr) -> Option<AggregateFunction>
                 },
         } => Some(*aggregate),
         _ => None,
+    }
+}
+
+/// CR 120.1 + CR 608.2f: fold trailing "and each <object type>" legs of a
+/// damage recipient list into one union filter — "each creature and each
+/// planeswalker" names ONE set of damaged permanents, not a creature set with an
+/// ignored tail. A leg that is a player scope ("and each player") is left in the
+/// remainder for the caller's `player_filter` lift, and a leg that names no
+/// object type (a player-shaped `Typed` with empty `type_filters` matches every
+/// permanent) ends the fold.
+fn fold_each_object_legs<'a>(
+    filter: TargetFilter,
+    mut remainder: &'a str,
+    ctx: &mut ParseContext,
+) -> (TargetFilter, &'a str) {
+    let mut legs = vec![filter];
+    loop {
+        // allow-noncombinator: punctuation cleanup before the combinator dispatch below
+        let trimmed = remainder.trim_start_matches([',', ' ']);
+        let lower = trimmed.to_lowercase();
+        let Some(((), after_and)) = nom_on_lower(trimmed, &lower, |i| {
+            value((), terminated(tag("and "), peek(tag("each ")))).parse(i)
+        }) else {
+            break;
+        };
+        if parse_damage_each_player_scope(&after_and.to_lowercase()).is_some() {
+            break;
+        }
+        let mut leg_ctx = ctx.clone();
+        let (leg, rest) = parse_target_with_ctx(after_and, &mut leg_ctx);
+        let names_type = matches!(&leg, TargetFilter::Typed(tf) if !tf.type_filters.is_empty());
+        if !names_type {
+            break;
+        }
+        *ctx = leg_ctx;
+        legs.push(leg);
+        remainder = rest;
+    }
+    match legs.len() {
+        1 => (legs.remove(0), remainder),
+        _ => (TargetFilter::Or { filters: legs }, remainder),
     }
 }
 
@@ -9141,6 +9184,20 @@ pub(super) fn try_parse_bidirectional_prevent(
         prevention_duration: prevention_duration.clone(),
     };
 
+    // CR 601.2c + CR 608.2c: a declared "target <X>" recipient is chosen once,
+    // when the ability is put on the stack, and both halves must be scoped to
+    // that one object. The resolver cannot scope the "to" half to it: a declared
+    // recipient ("target creature you control") and a mass recipient ("creatures
+    // you control") lower to the same `Typed` filter, and the hosted shield keeps
+    // that filter as `valid_card`, so it would shield every object the filter
+    // matches. Fail closed until the declared form has its own representation.
+    if parse_declared_target_prefix(anaphor_tp.lower).is_ok() {
+        return Some(parsed_clause(Effect::unimplemented(
+            super::imperative::BIDIRECTIONAL_PREVENT_DECLARED_TARGET_GAP,
+            text,
+        )));
+    }
+
     // CR 615: the source-only ("by") shield — scoped to the chosen creature as
     // the damage SOURCE (target: Any, damage_source_filter: ParentTarget). A
     // SequentialSibling: an independent following instruction in the same
@@ -9401,6 +9458,7 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
                     }
                     let (filter, remainder) = parse_target_with_ctx(target_phrase, ctx);
                     let (filter, remainder) = refine_damage_target_remainder(filter, remainder);
+                    let (filter, remainder) = fold_each_object_legs(filter, remainder, ctx);
                     // CR 119.2 + CR 120.3: "[N] damage to each creature and each
                     // player" — composite scope. The "each creature" parse
                     // captures the object filter; the trailing "and each player"
@@ -9664,6 +9722,7 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
         }
         let (target, rem) = parse_target_with_ctx(after_to_for_classification, ctx);
         let (target, rem) = refine_damage_target_remainder(target, rem);
+        let (target, rem) = fold_each_object_legs(target, rem, ctx);
         // CR 119.2 + CR 120.3: Composite "each <object> and each <player>"
         // (Chandra's Ignition: "to each other creature and each opponent"). The
         // object filter is captured above; if the remainder begins with

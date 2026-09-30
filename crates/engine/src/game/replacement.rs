@@ -3518,7 +3518,44 @@ fn draw_applier(
     // are pre-zeroed in `apply_single_replacement` so the original draw is a
     // no-op (CR 614.6 — the replaced event never happens), and the substitute
     // runs via the `post_replacement_continuation` drain.
-    if let Some(new_count) = draw_replacement_count(state, rid, &event) {
+    if has_draw_count_replacement_life_rider(state, rid, &event) {
+        // CR 121.6b: replace this individual event and run the replacement's
+        // complete Draw-plus-rider ability as a nested continuation. The child
+        // draw frame owns its count and applied set. Only that child's actual
+        // delivery contributes to the interrupted unit in this parent frame;
+        // its rider and the parent's remaining units stay separately owned.
+        if let ProposedEvent::Draw {
+            player_id, count, ..
+        } = &mut event
+        {
+            if let Some(parent) = state.active_draw_sequence_mut() {
+                if parent.player == *player_id {
+                    parent.capture_next_child_delivery = true;
+                }
+            }
+            *count = 0;
+        }
+    } else if draw_count_replacement_requires_child_sequence(state, rid, &event) {
+        if let ProposedEvent::Draw {
+            player_id, count, ..
+        } = &mut event
+        {
+            // CR 121.2 + CR 616.1g: the count replacement turns this individual
+            // event into its own sequence of individual draws. The current unit
+            // is replaced by that child sequence; later replacements then see
+            // each child card separately, and the child result returns only to
+            // this same-player parent instruction. Defer starting the child to
+            // the replacement's resident continuation below so a child prompt
+            // cannot be mistaken for a completed replacement while this applier
+            // is still on the stack.
+            if let Some(parent) = state.active_draw_sequence_mut() {
+                if parent.player == *player_id {
+                    parent.capture_next_child_delivery = true;
+                }
+            }
+            *count = 0;
+        }
+    } else if let Some(new_count) = draw_replacement_count(state, rid, &event) {
         if let ProposedEvent::Draw { count, .. } = &mut event {
             *count = new_count;
         }
@@ -3589,6 +3626,73 @@ fn draw_replacement_count(
         }
         _ => None,
     }
+}
+
+/// Whether an individual count replacement must run its full Draw ability
+/// through the post-replacement continuation so child draws can park safely.
+fn draw_count_replacement_requires_child_sequence(
+    state: &GameState,
+    rid: ReplacementId,
+    event: &ProposedEvent,
+) -> bool {
+    let ProposedEvent::Draw {
+        player_id,
+        count,
+        stage: DrawEventStage::Individual,
+        ..
+    } = event
+    else {
+        return false;
+    };
+    let Some(replacement_count) = draw_replacement_count(state, rid, event) else {
+        return false;
+    };
+    replacement_count > 0
+        && replacement_count != *count
+        && state
+            .active_draw_sequence()
+            .is_some_and(|frame| frame.player == *player_id)
+}
+
+/// Find a mandatory individual-draw count replacement with an independent
+/// LoseLife rider. Its complete Draw ability is dispatched as a nested
+/// continuation, keeping both the rider's completion point and the child
+/// instruction's replacement history separate from the parent draw.
+fn has_draw_count_replacement_life_rider(
+    state: &GameState,
+    rid: ReplacementId,
+    event: &ProposedEvent,
+) -> bool {
+    let ProposedEvent::Draw {
+        count,
+        stage: DrawEventStage::Individual,
+        ..
+    } = event
+    else {
+        return false;
+    };
+    let Some(repl_def) = replacement_definition_for_id(state, rid) else {
+        return false;
+    };
+    if !matches!(&repl_def.mode, ReplacementMode::Mandatory) {
+        return false;
+    }
+    let Some(execute) = repl_def.execute.as_deref() else {
+        return false;
+    };
+    if !matches!(execute.effect.as_ref(), Effect::Draw { .. })
+        || !matches!(
+            execute
+                .sub_ability
+                .as_deref()
+                .map(|rider| rider.effect.as_ref()),
+            Some(Effect::LoseLife { .. })
+        )
+    {
+        return false;
+    }
+    draw_replacement_count(state, rid, event)
+        .is_some_and(|replacement_count| replacement_count != *count)
 }
 
 /// CR 614.6 + CR 614.11: does the branch being applied substitute the proposed
@@ -9713,10 +9817,27 @@ fn apply_single_replacement(
                             Some(PostReplacementContinuation::Resolved(runtime))
                         } else {
                             repl_def.execute.as_deref().and_then(|def| {
-                                // CR 608.2c + CR 614.11: Draw-count replacements with
-                                // chained riders (Blood Scrivener: draw two, then lose
-                                // 1 life) modify the draw via `draw_replacement_count`
-                                // and stash only the rider chain for post-draw drain.
+                                // CR 608.2c + CR 121.6b: the applier replaces the
+                                // current individual event with count zero. Run the
+                                // full Draw-plus-rider ability as a nested child so
+                                // its draw units finish before the rider and the
+                                // parent frame resumes with its own applied set.
+                                if has_draw_count_replacement_life_rider(state, rid, &proposed) {
+                                    return Some(PostReplacementContinuation::Template(Box::new(
+                                        def.clone(),
+                                    )));
+                                }
+                                // CR 121.6b: complete a count-changing replacement's
+                                // full Draw ability as a nested child before its
+                                // follow-up runs. Keeping the whole ability here
+                                // lets a paused child delivery retain its suffix.
+                                if draw_count_replacement_requires_child_sequence(
+                                    state, rid, &proposed,
+                                ) {
+                                    return Some(PostReplacementContinuation::Template(Box::new(
+                                        def.clone(),
+                                    )));
+                                }
                                 if matches!(*def.effect, Effect::Draw { .. })
                                     && def.sub_ability.is_some()
                                     && matches!(proposed, ProposedEvent::Draw { .. })
@@ -9823,6 +9944,14 @@ fn apply_single_replacement(
                         return true;
                     };
                     if def.sub_ability.is_some() {
+                        return true;
+                    }
+                    // CR 121.6b: an individual count replacement delegated to
+                    // the nested draw-sequence path still needs its full Draw
+                    // ability as a continuation. The modified event is zeroed
+                    // by `draw_applier`, so treating this as an already-folded
+                    // Draw would discard the only pause-aware child dispatcher.
+                    if draw_count_replacement_requires_child_sequence(state, rid, &proposed) {
                         return true;
                     }
                     // CR 614.6: a draw for another player was not folded into the

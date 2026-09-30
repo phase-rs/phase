@@ -7,6 +7,7 @@
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until, take_while1};
+use nom::character::complete::satisfy;
 use nom::combinator::{all_consuming, eof, map, map_res, opt, peek, value};
 use nom::multi::separated_list1;
 use nom::sequence::{pair, preceded, terminated};
@@ -28,10 +29,10 @@ use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
     AggregateFunction, CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric, Comparator,
     ControllerRef, CountBinding, CountScope, DamageChannel, DamageKindFilter, DevotionColors,
-    FilterProp, ObjectProperty, ObjectScope, PlayerFilter, PlayerRelation, PlayerScope,
-    PropertyAggregate, PtStat, QuantityExpr, QuantityRef, RoundingMode, SharedQuality,
-    SubtypeExclusion, TargetFilter, ThisWayCause, TrackedAnaphorSource, TurnJournalKind,
-    TypeFilter, TypedFilter, ZoneRef,
+    FilterProp, LetterQuery, NameStickerSet, ObjectProperty, ObjectScope, PlayerFilter,
+    PlayerRelation, PlayerScope, PropertyAggregate, PtStat, QuantityExpr, QuantityRef,
+    RoundingMode, SharedQuality, SubtypeExclusion, TargetFilter, ThisWayCause,
+    TrackedAnaphorSource, TurnJournalKind, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::keywords::Keyword;
@@ -1981,6 +1982,10 @@ fn parse_object_property_aggregate_ref(input: &str) -> OracleResult<'_, Quantity
 /// Parse the inner part after "the number of".
 fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
     alt((
+        // CR 123.6d + CR 123.6e: first, so no earlier arm can stop `alt` with a
+        // stranded remainder; its "unique vowels"/"<letter>'s" + sticker-set
+        // language is disjoint from every other arm's.
+        parse_name_sticker_letter_count,
         // CR 110.4: the permanent-type head lowers to `ObjectCountDistinct`, not
         // `DistinctCardTypes`, so it must precede the card-type head.
         parse_distinct_permanent_types_in_zone,
@@ -5170,6 +5175,10 @@ fn parse_for_each_clause_ref_with_they_controller(
     they_controller: ControllerRef,
 ) -> OracleResult<'_, QuantityRef> {
     alt((
+        // CR 123.6d + CR 123.6e: first, so no earlier arm can stop `alt` with a
+        // stranded remainder; its "unique vowel"/"<letter>'s" + sticker-set
+        // language is disjoint from every other arm's.
+        parse_name_sticker_letter_count,
         parse_event_context_opponent_dealt_damage,
         parse_for_each_card_drawn_this_way,
         parse_for_each_recipient_attack_count,
@@ -5811,6 +5820,46 @@ fn parse_object_name_word_count_for_each(input: &str) -> OracleResult<'_, Quanti
     let (rest, scope) = parse_object_possessive_scope(rest)?;
     let (rest, _) = tag(" name").parse(rest)?;
     Ok((rest, QuantityRef::ObjectNameWordCount { scope }))
+}
+
+/// CR 123.6d + CR 123.6e: "<letter statistic> <name-sticker set>" —
+/// "unique vowel[s] on that sticker", "o's in name stickers on ~".
+fn parse_name_sticker_letter_count(input: &str) -> OracleResult<'_, QuantityRef> {
+    map(
+        (parse_sticker_letter_query, parse_name_sticker_set),
+        |(letters, stickers)| QuantityRef::NameStickerLetterCount { stickers, letters },
+    )
+    .parse(input)
+}
+
+/// CR 123.6e "unique vowel[s]" / CR 123.6d "<letter>'s".
+fn parse_sticker_letter_query(input: &str) -> OracleResult<'_, LetterQuery> {
+    alt((
+        value(
+            LetterQuery::UniqueVowels,
+            (tag("unique vowel"), opt(tag("s"))),
+        ),
+        map(
+            terminated(satisfy(|c: char| c.is_ascii_lowercase()), tag("'s")),
+            |letter| LetterQuery::Letter { letter },
+        ),
+    ))
+    .parse(input)
+}
+
+/// CR 608.2c "on that sticker" / CR 123.6d "in name stickers on <object>".
+fn parse_name_sticker_set(input: &str) -> OracleResult<'_, NameStickerSet> {
+    alt((
+        value(NameStickerSet::ThatSticker, tag(" on that sticker")),
+        map(
+            preceded(
+                tag(" in name stickers on "),
+                parse_object_prepositional_scope,
+            ),
+            |scope| NameStickerSet::OnObject { scope },
+        ),
+    ))
+    .parse(input)
 }
 
 /// CR 107.4 + CR 202.1: Parse
@@ -9861,6 +9910,82 @@ mod tests {
                 counter_type: Some(_),
             }
         ));
+    }
+
+    /// CR 123.6e: "for each unique vowel on that sticker" (_____ Goblin,
+    /// _____-o-saurus) → the sticker this resolution put.
+    #[test]
+    fn test_parse_for_each_unique_vowels_on_that_sticker() {
+        let that_sticker_vowels = QuantityRef::NameStickerLetterCount {
+            stickers: NameStickerSet::ThatSticker,
+            letters: LetterQuery::UniqueVowels,
+        };
+        let (rest, q) = parse_for_each_clause_ref("unique vowel on that sticker").unwrap();
+        assert_eq!(q, that_sticker_vowels);
+        assert_eq!(rest, "");
+        let (rest, q) = parse_for_each_clause_ref_complete("unique vowel on that sticker").unwrap();
+        assert_eq!(q, that_sticker_vowels);
+        assert_eq!(rest, "");
+
+        // Negatives (after the positive above): an object's name (CR 201) and a
+        // card are not name stickers.
+        let is_sticker_count = |result: OracleResult<'_, QuantityRef>| {
+            matches!(result, Ok(("", QuantityRef::NameStickerLetterCount { .. })))
+        };
+        assert!(!is_sticker_count(parse_for_each_clause_ref(
+            "unique vowel in the creature's name"
+        )));
+        assert!(!is_sticker_count(parse_for_each_clause_ref(
+            "unique vowel on that card"
+        )));
+        assert!(!is_sticker_count(parse_quantity_ref(
+            "the number of vowels on that sticker"
+        )));
+    }
+
+    /// CR 123.6e / CR 123.6d: the "the number of" forms — unique vowels on
+    /// that sticker (_____ Bird Gets the Worm, Wizards of the _____, Wolf in
+    /// _____ Clothing) and a letter in the name stickers on an object (_____
+    /// Balls of Fire, Make a _____ Splash).
+    #[test]
+    fn test_parse_number_of_name_sticker_letters() {
+        let cases = [
+            (
+                "the number of unique vowels on that sticker",
+                NameStickerSet::ThatSticker,
+                LetterQuery::UniqueVowels,
+            ),
+            (
+                "the number of o's in name stickers on ~",
+                NameStickerSet::OnObject {
+                    scope: ObjectScope::Source,
+                },
+                LetterQuery::Letter { letter: 'o' },
+            ),
+            (
+                "the number of u's in name stickers on ~",
+                NameStickerSet::OnObject {
+                    scope: ObjectScope::Source,
+                },
+                LetterQuery::Letter { letter: 'u' },
+            ),
+            (
+                "the number of o's in name stickers on it",
+                NameStickerSet::OnObject {
+                    scope: ObjectScope::Recipient,
+                },
+                LetterQuery::Letter { letter: 'o' },
+            ),
+        ];
+        for (text, stickers, letters) in cases {
+            let (rest, q) = parse_quantity_ref(text).unwrap();
+            assert_eq!(
+                q,
+                QuantityRef::NameStickerLetterCount { stickers, letters },
+                "{text}"
+            );
+            assert_eq!(rest, "", "{text}");
+        }
     }
 
     #[test]

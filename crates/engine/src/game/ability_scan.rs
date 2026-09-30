@@ -95,11 +95,11 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AttachCardinality, AttachSelection,
     CardTypeSetSource, ContinuousModification, ControllerRef, CountScope, DelayedTriggerCondition,
     Duration, EachDamageRecipient, Effect, EffectScope, FilterProp, ForEachCategoryAction,
-    GuessSubject, KeeperConstraint, ManaProduction, ModalChoice, MultiTargetSpec, ObjectScope,
-    PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole,
-    RepeatContinuation, ReplacementCondition, ResolvedAbility, StaticCondition, TargetFilter,
-    TrackedAnaphorSource, TriggerCondition, TriggerConstraint, TriggerDefinition, TypedFilter,
-    UnlessPayModifier, ZoneChangeClause, ZoneChoiceCandidateSource,
+    GuessSubject, KeeperConstraint, ManaProduction, ModalChoice, MultiTargetSpec, NameStickerSet,
+    ObjectScope, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef,
+    ReciprocalZoneChoiceRole, RepeatContinuation, ReplacementCondition, ResolvedAbility,
+    StaticCondition, TargetFilter, TrackedAnaphorSource, TriggerCondition, TriggerConstraint,
+    TriggerDefinition, TypedFilter, UnlessPayModifier, ZoneChangeClause, ZoneChoiceCandidateSource,
 };
 use crate::types::game_state::TargetSelectionConstraint;
 use crate::types::keywords::{DisguiseCost, Keyword};
@@ -2315,6 +2315,20 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
             acc = acc.or(scan_object_scope(scope));
             acc
         }
+        // CR 123.6d + CR 123.6e: the scoped object's name stickers; a sibling
+        // `PutSticker` can change the stickers read.
+        QuantityRef::NameStickerLetterCount {
+            stickers: NameStickerSet::OnObject { scope },
+            letters: _,
+        } => {
+            let mut acc = Axes {
+                event: false,
+                sibling: true,
+                projected: false,
+            };
+            acc = acc.or(scan_object_scope(scope));
+            acc
+        }
         QuantityRef::ObjectTypelineComponentCount { scope, .. } => {
             let mut acc = Axes {
                 event: false,
@@ -2410,6 +2424,12 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
             acc
         }
         QuantityRef::ExiledFromHandThisResolution => Axes::NONE,
+        // CR 608.2c: the sticker this resolution's put-a-sticker instruction
+        // placed — a resolution-local record, like the ref above.
+        QuantityRef::NameStickerLetterCount {
+            stickers: NameStickerSet::ThatSticker,
+            letters: _,
+        } => Axes::NONE,
         // CR 608.2c + CR 608.2i: every channel and every aggregate reads
         // resolution-local state — `last_effect_amount` /
         // `last_effect_excess_amount` / `last_effect_counts_by_player` /
@@ -4412,7 +4432,7 @@ fn scan_filter_prop(x: &FilterProp, mode: ScanMode) -> Axes {
         | FilterProp::Blocking
         | FilterProp::BlockingSource
         | FilterProp::CombatRelation { .. }
-        | FilterProp::Unblocked
+        | FilterProp::BlockStatus { .. }
         | FilterProp::AttackingAlone
         | FilterProp::BlockingAlone
         | FilterProp::Tapped

@@ -7,8 +7,8 @@
 use nom::branch::alt;
 use nom::bytes::complete::tag;
 use nom::character::complete::{alphanumeric1, space1};
-use nom::combinator::{map, not, opt, value};
-use nom::sequence::preceded;
+use nom::combinator::{map, not, opt, peek, value};
+use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::error::OracleResult;
@@ -17,8 +17,8 @@ use super::primitives::{
 };
 use super::quantity::{parse_quantity_expr_number, parse_quantity_ref};
 use crate::types::ability::{
-    AggregateFunction, Comparator, ControllerRef, FilterProp, ObjectProperty, PtStat, PtValueScope,
-    QuantityExpr, SourceExclusion,
+    AggregateFunction, AttackerBlockStatus, Comparator, ControllerRef, FilterProp, ObjectProperty,
+    PtStat, PtValueScope, QuantityExpr, SourceExclusion,
 };
 use crate::types::card_type::CoreType;
 #[cfg(test)]
@@ -199,7 +199,23 @@ pub fn parse_property_filter(input: &str) -> OracleResult<'_, FilterProp> {
         value(FilterProp::FaceDown, tag("face down")),
         // CR 701.27g: "transformed permanent"/"transformed creature" selector.
         value(FilterProp::Transformed, tag("transformed")),
-        value(FilterProp::Unblocked, tag("unblocked")),
+        value(
+            FilterProp::BlockStatus {
+                status: AttackerBlockStatus::Unblocked,
+            },
+            tag("unblocked"),
+        ),
+        // CR 509.1h: "blocked" as a prefix adjective; postfix "blocked by"/"blocked this
+        // turn" are handled elsewhere and must not be consumed here.
+        value(
+            FilterProp::BlockStatus {
+                status: AttackerBlockStatus::Blocked,
+            },
+            terminated(
+                tag("blocked"),
+                peek(preceded(tag(" "), not(alt((tag("by"), tag("this turn")))))),
+            ),
+        ),
         value(FilterProp::Suspected, tag("suspected")),
         value(FilterProp::Renowned, tag("renowned")),
         // CR 701.15b/c: standalone "goaded" designation property token.
