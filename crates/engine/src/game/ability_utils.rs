@@ -3003,7 +3003,7 @@ fn restamp_inherited_rider_target(parent: &mut ResolvedAbility) {
     let inherits = parent
         .sub_ability
         .as_deref()
-        .is_some_and(|sub| sub_ability_inherits_parent_creature_target_only(parent, sub));
+        .is_some_and(|sub| rider_entries_are_inherited(parent, sub));
     if !inherits {
         return;
     }
@@ -13261,6 +13261,74 @@ mod tests {
             ObjectId(99),
             PlayerId(0),
         )
+    }
+
+    /// CR 608.2b: validation re-stamps inherited snapshots, not genuine
+    /// selected targets on the deferred-parent or deferred-sub paths.
+    #[test]
+    fn validation_preserves_deferred_rider_targets_and_pins() {
+        let mut state = GameState::new_two_player(42);
+        let victim = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(1),
+            "Selected Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&victim)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Creature];
+        let pin = ObjectIncarnationRef::from_object(&state.objects[&victim]);
+        let selected = vec![TargetRef::Object(victim)];
+        let mut deferred_parent = ResolvedAbility::new(
+            Effect::Surveil {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(99),
+            PlayerId(0),
+        );
+        deferred_parent.sub_ability = Some(Box::new(gain_life_anaphor_rider(selected.clone())));
+        let mut deferred_sub = change_zone_head(Zone::Exile, vec![]);
+        let mut rider = gain_life_anaphor_rider(selected.clone());
+        rider.condition = Some(AbilityCondition::WhenYouDo);
+        deferred_sub.sub_ability = Some(Box::new(rider));
+
+        for mut parent in [deferred_parent, deferred_sub] {
+            parent
+                .sub_ability
+                .as_deref_mut()
+                .unwrap()
+                .selected_target_incarnations = vec![pin.clone()];
+            let sub = parent.sub_ability.as_deref().unwrap();
+            assert!(sub_ability_inherits_parent_creature_target_only(
+                &parent, sub
+            ));
+            assert!(
+                defers_sub_ability_target_selection(&parent.effect)
+                    || defers_conditional_target_selection(sub),
+                "reach guard: a deferral, not the bare inheritance predicate, owns this selection"
+            );
+            let validated = validate_targets_in_chain(&state, &parent);
+            let sub = validated.sub_ability.as_deref().unwrap();
+            assert_eq!(sub.targets, selected);
+            assert_eq!(sub.selected_target_incarnations, vec![pin.clone()]);
+        }
+
+        // Positive control: an ordinary inherited snapshot still loses its
+        // referent when its parent has no legal target.
+        let mut inherited = change_zone_head(Zone::Exile, vec![]);
+        inherited.sub_ability = Some(Box::new(gain_life_anaphor_rider(selected)));
+        assert!(rider_entries_are_inherited(
+            &inherited,
+            inherited.sub_ability.as_deref().unwrap()
+        ));
+        let validated = validate_targets_in_chain(&state, &inherited);
+        assert!(validated.sub_ability.as_deref().unwrap().targets.is_empty());
     }
 
     /// V8 — CR 608.2b + CR 115.10a: the inherited rider's `targets` entry is a
