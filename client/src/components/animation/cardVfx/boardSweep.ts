@@ -75,7 +75,7 @@ const sweepFrag = /* glsl */ `
     // Rolling smoke: a billowing leading edge, thick behind it, thinning out
     // toward its tail.
     float n = fbm(vec2(along * 0.012 - uTime * 0.5, across * 2.2 + uTime * 0.3));
-    float edge = smoothstep(26.0, -50.0, d + (n - 0.5) * 90.0);
+    float edge = 1.0 - smoothstep(-50.0, 26.0, d + (n - 0.5) * 90.0);
     float tail = smoothstep(-uTrail * 1.2, -uTrail * 0.3, d);
     float density = edge * tail * (0.45 + 0.75 * n);
     // Its billows catch a little light, so it reads even over a dark board.

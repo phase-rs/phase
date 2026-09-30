@@ -13,6 +13,7 @@ import {
   type CardFlightSpec,
   type CardFlightSpecContext,
   cardFlightSpecFor,
+  counterLeaveMs,
   flightPresents,
   type RippleLook,
   rippleLookFor,
@@ -93,6 +94,9 @@ export interface CounterRippleSpec {
   targetId: ObjectId;
   look: RippleLook;
   pace: number;
+  /** When the countering spell may leave the stack, after the ripple sets
+   *  out: once the spell it counters has washed out. */
+  leaveMs: number;
 }
 
 /** A player's life total changing other than by damage a strike or blow shows. */
@@ -231,7 +235,8 @@ function counterRippleSpecFor(event: AnimationEvent, { pre, pace }: CardFlightSp
   const resolving = resolvingSourceOf(event.data.countered_by, pre);
   if (!resolving) return null;
   const { source, origin } = resolving;
-  return { kind: "ripple", origin, targetId: event.data.object_id, look: rippleLookFor(source.color), pace };
+  const look = rippleLookFor(source.color);
+  return { kind: "ripple", origin, targetId: event.data.object_id, look, pace, leaveMs: counterLeaveMs(pace) };
 }
 
 // CR 122.1: a counter is a marker placed on an object; it plays where the

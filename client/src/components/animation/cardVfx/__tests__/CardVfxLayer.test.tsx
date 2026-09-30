@@ -1651,6 +1651,7 @@ describe("CardVfxLayer counter ripple", () => {
     targetId: X,
     look: "water",
     pace: 1,
+    leaveMs: 600,
   };
   const rippleRenders = () => calls("render").filter((call) => hasVisible(call, "counter-ripple"));
   const TO_GRAVEYARD: CardFlightRoute = { from: "Stack", to: "Graveyard", ownerId: 0 };
@@ -1697,6 +1698,29 @@ describe("CardVfxLayer counter ripple", () => {
     await advance(5 * FRAME_MS);
     expect(flight()?.position).not.toEqual(resting);
   });
+
+  it("V14-8: the counter leaves only once its ripple's wash is done, though its move comes a step later", async () => {
+    const { present } = await readyLayer();
+    anchor({ "data-stack-entry": String(X) }, 700, 200);
+    anchor({ "data-stack-entry": String(COUNTER) }, 700, 320);
+    addFace(anchor({ "data-graveyard-pile": "0", "data-grouped-ids": String(COUNTER) }, 40, 700));
+    present(ripple);
+    // The countered spell's step ends; the counter's move is the next step's.
+    await advance(400);
+    present(spec(COUNTER, TO_GRAVEYARD, { startFace: face(COUNTER), endFace: face(COUNTER) }));
+    const loader = faceLoader();
+    await act(async () => {
+      if (loader) fireEvent.load(loader);
+    });
+    await frames(2);
+    const flight = () => last(flightRenders())?.children?.find((child) => child.name === "card-flight");
+    const resting = flight()?.position;
+    // Still resting just before 600 ms from the ripple; on its way just after.
+    await advance(600 - 400 - 4 * FRAME_MS);
+    expect(flight()?.position).toEqual(resting);
+    await advance(5 * FRAME_MS);
+    expect(flight()?.position).not.toEqual(resting);
+  });
 });
 
 describe("CardVfxLayer board sweep", () => {
@@ -1721,11 +1745,11 @@ describe("CardVfxLayer board sweep", () => {
     return shards?.material.uniforms.uProg.value as number | undefined;
   };
 
+  /** Loads every requested image of each named card. */
   async function loadFaces(...names: string[]) {
     await act(async () => {
       for (const name of names) {
-        const loader = faceLoader(name);
-        if (loader) fireEvent.load(loader);
+        for (const loader of document.querySelectorAll(`img[src="${name}.png"]`)) fireEvent.load(loader);
       }
     });
   }
@@ -1763,19 +1787,47 @@ describe("CardVfxLayer board sweep", () => {
       const faces = { startFace: face(objectId, cardName), endFace: face(objectId, cardName) };
       present({ ...spec(objectId, TO_HAND, faces), sweep: wave });
     }
+    // Each loads its face, and its art-crop tile to rest as while it waits.
+    const sizes = vi.mocked(useCardImage).mock.calls.map(([name, options]) => [name, options?.size]);
+    expect(sizes).toEqual(expect.arrayContaining([["Hill Giant", "normal"], ["Hill Giant", "art_crop"]]));
     await loadFaces("Llanowar Elves", "Hill Giant");
     await frames(2);
     expect(fronts()).toHaveLength(1);
-    const cards = () =>
-      (lastRender().children ?? [])
-        .filter((child) => child.name === "card-flight")
-        .map((child) => child.position.slice(0, 2));
-    const resting = cards();
-    // From the HUD below, the wave reaches the lower card first.
+    const shown = (name: string) =>
+      (lastRender().children ?? []).filter((child) => child.name === name && child.visible).map((child) => child.position.slice(0, 2));
+    const lower = [300 + CARD_W / 2, -(450 + CARD_H / 2)];
+    const upper = [300 + CARD_W / 2, -(150 + CARD_H / 2)];
+    expect(shown("card-flight-rest")).toEqual([lower, upper]);
+    expect(shown("card-flight")).toHaveLength(0);
+    // From the HUD below, the wave reaches the lower card first: it has left
+    // as a card, and the upper one still rests as its tile.
     await advance(300);
-    const [lower, upper] = cards();
-    expect(lower).not.toEqual(resting[0]);
-    expect(upper).toEqual(resting[1]);
+    expect(shown("card-flight-rest")).toEqual([upper]);
+    expect(shown("card-flight")).toHaveLength(1);
+  });
+
+  it("V16-2: destructions one snapshot reports in two steps sweep a front over each", async () => {
+    const { present } = await readyLayer();
+    anchor({ "data-player-hud": "1" }, 400, 20);
+    const W = 9;
+    const Z = 10;
+    for (const [objectId, top] of [[X, 450], [Y, 150], [W, 300], [Z, 600]]) {
+      addFace(anchor({ "data-permanent-card": String(objectId) }, objectId < W ? 300 : 500, top));
+    }
+    present(swept(X, "Llanowar Elves"));
+    present(swept(Y, "Hill Giant"));
+    await loadFaces("Llanowar Elves", "Hill Giant");
+    await frames(2);
+    expect(fronts()).toHaveLength(1);
+    // Some other event split the wipe; its second step has members of its own.
+    await advance(400);
+    const second = { ...sweep, memberIds: [W, Z] };
+    present({ ...swept(W, "Serra Angel"), sweep: second });
+    present({ ...swept(Z, "Air Elemental"), sweep: second });
+    await loadFaces("Serra Angel", "Air Elemental");
+    await frames(2);
+    expect(fronts()).toHaveLength(2);
+    expect(cracked(300)).toBe(0);
   });
 
   it("V15-5: with fewer than two members on the board there is no front, and the one there breaks at once", async () => {

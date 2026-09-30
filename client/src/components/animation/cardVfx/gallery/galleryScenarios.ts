@@ -382,7 +382,10 @@ export const GALLERY_SCENARIOS: Record<string, GalleryScenario> = {
       cast(COUNTERSPELL, YOU),
       (state) => [
         { type: "SpellCountered", data: { object_id: HILL_GIANT_IN_HAND, countered_by: COUNTERSPELL } },
-        ...moveAll([HILL_GIANT_IN_HAND, COUNTERSPELL], "Stack", "Graveyard")(state),
+        ...moveAll([HILL_GIANT_IN_HAND], "Stack", "Graveyard")(state),
+        // As the engine reports it: the counter resolves, then leaves.
+        { type: "EffectResolved", data: { kind: "Counter", source_id: COUNTERSPELL } },
+        ...moveAll([COUNTERSPELL], "Stack", "Graveyard")(state),
       ],
     ],
   },

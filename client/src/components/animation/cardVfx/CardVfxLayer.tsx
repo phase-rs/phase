@@ -37,7 +37,7 @@ import {
   sourceElement,
   zoneSurface,
 } from "./cardAnchors.ts";
-import type { CardVfxTier, FlightFlip } from "./cardFlight.ts";
+import type { BoardSurface, CardVfxTier, FlightFlip } from "./cardFlight.ts";
 import type { CardFlightRoute, CardFlightSpec, SweepSpec } from "./cardFlightSpecs.ts";
 import type { CardVfxScene, CardVfxSceneCallbacks } from "./cardVfxScene.ts";
 import type * as CardVfxSceneModule from "./cardVfxScene.ts";
@@ -114,13 +114,11 @@ interface PendingStart {
   from: CardPose | null;
   face: AnimationImageSnapshot;
   classics: (() => void)[];
-}
-
-/** A permanent's surface redrawn as a texture, and where it lies. */
-interface BoardSurface {
-  pose: CardPose;
-  surface: Texture;
-  radius: number;
+  /** The board surface the card rests as while it waits to leave the
+   *  battlefield: `undefined` while it loads, `null` to rest as the card. */
+  rest: BoardSurface | null | undefined;
+  /** The loaded face, while the rest still loads. */
+  image: HTMLImageElement | null;
 }
 
 /** Where a shatter breaks, as fractions of the card: somewhere central. */
@@ -178,8 +176,12 @@ class CardVfxController {
   /** Holds released only once their snapshot commits, by holder. */
   private readonly commitWaits = new Map<number, () => void>();
   /** When each running sweep reaches its permanents, on the frame clock, by
-   *  the snapshot it animates and its look. */
+   *  the step it sweeps: its snapshot, look and members. Destructions a
+   *  snapshot reports apart (split by some other event) sweep apart. */
   private readonly sweeps = new Map<string, ReadonlyMap<ObjectId, number>>();
+  /** When each countering spell whose ripple is running may leave the stack,
+   *  on the frame clock. */
+  private readonly counterLeaves = new Map<ObjectId, number>();
 
   constructor(
     private readonly publishRequests: (requests: FaceRequest[]) => void,
@@ -324,7 +326,9 @@ class CardVfxController {
 
   private fallBack(objectId: ObjectId, token: number) {
     const pending = this.takePending(objectId, token);
-    if (pending) runAll(pending.classics);
+    if (!pending) return;
+    pending.rest?.surface.dispose();
+    runAll(pending.classics);
   }
 
   private scheduleInit() {
@@ -385,6 +389,11 @@ class CardVfxController {
     const presentedMs = performance.now();
     const sweptAtMs = this.sweepArrivalMs(scene, spec);
     if (sweptAtMs !== null) spec = { ...spec, delayMs: spec.delayMs + Math.max(0, sweptAtMs - presentedMs) };
+    const leaveAtMs = spec.route.from === "Stack" ? this.counterLeaves.get(objectId) : undefined;
+    if (leaveAtMs !== undefined) {
+      this.counterLeaves.delete(objectId);
+      spec = { ...spec, delayMs: Math.max(spec.delayMs, leaveAtMs - presentedMs) };
+    }
     const face = spec.endFace ?? spec.startFace;
     if ((flipFor(spec) !== "none" || !face) && !scene.hasBack()) {
       classic();
@@ -397,7 +406,7 @@ class CardVfxController {
     }
     if (!face) {
       // Back only: nothing to load, so the flight starts now.
-      this.start(scene, spec, presentedMs, from, null, [classic]);
+      this.start(scene, spec, presentedMs, from, null, null, [classic]);
       return;
     }
     const token = this.requestFace(
@@ -407,7 +416,25 @@ class CardVfxController {
       (image) => this.finishPending(objectId, token, image),
       () => this.fallBack(objectId, token),
     );
-    this.pending.set(objectId, { token, presentedMs, spec, from, face, classics: [classic] });
+    // A card waiting to leave the battlefield rests as its tile until it goes.
+    const tile = spec.route.from === "Battlefield" && spec.delayMs > 0 ? ownPermanentSurface(objectId) : null;
+    const waiting: PendingStart = {
+      ...{ token, presentedMs, spec, from, face },
+      classics: [classic],
+      rest: tile ? undefined : null,
+      image: null,
+    };
+    this.pending.set(objectId, waiting);
+    if (!tile) return;
+    const settle = (rest: BoardSurface | null) => {
+      if (this.pending.get(objectId) !== waiting) {
+        rest?.surface.dispose();
+        return;
+      }
+      waiting.rest = rest;
+      if (waiting.image) this.finishPending(objectId, token, waiting.image);
+    };
+    this.withBoardSurface(tile, spec.startFace, spec.owningStepMs, (_, board) => settle(board), () => settle(null));
   }
 
   // The permanent's surface is measured now, while it is still on the board;
@@ -570,6 +597,8 @@ class CardVfxController {
   }
 
   // Both stack entries are measured now: the commit takes them off the stack.
+  // The counter leaves once the spell it counters has washed out, though the
+  // engine reports its move after the counter's own resolution, a step later.
   private presentRipple(scene: CardVfxScene, spec: CounterRippleSpec, classic: () => void) {
     const { origin } = spec;
     const source = zoneSurface(origin.zone, origin.objectId, origin.ownerId);
@@ -586,6 +615,12 @@ class CardVfxController {
       tier: this.tier,
       pace: spec.pace,
     });
+    if (origin.zone !== "Stack") return;
+    const now = performance.now();
+    for (const [objectId, leaveAtMs] of this.counterLeaves) {
+      if (leaveAtMs < now) this.counterLeaves.delete(objectId);
+    }
+    this.counterLeaves.set(origin.objectId, now + spec.leaveMs);
   }
 
   // A life or counter change plays over its HUD or permanent where it is now.
@@ -631,7 +666,7 @@ class CardVfxController {
     { objectId, sweep, snapshotSeq, pace }: { objectId: ObjectId; sweep: SweepSpec | null; snapshotSeq: number; pace: number },
   ): number | null {
     if (!sweep || !this.canvas) return null;
-    const key = `${snapshotSeq}:${sweep.look}`;
+    const key = `${snapshotSeq}:${sweep.look}:${sweep.memberIds.join(",")}`;
     let arrivals = this.sweeps.get(key);
     if (!arrivals) {
       const origin = this.canvas.getBoundingClientRect();
@@ -669,14 +704,20 @@ class CardVfxController {
   }
 
   private finishPending(objectId: ObjectId, token: number, image: HTMLImageElement) {
+    const waiting = this.pending.get(objectId);
+    if (waiting?.token === token && waiting.rest === undefined) {
+      waiting.image = image;
+      return;
+    }
     const pending = this.takePending(objectId, token);
     if (!pending) return;
     if (this.state !== "ready" || !this.scene) {
+      pending.rest?.surface.dispose();
       runAll(pending.classics);
       return;
     }
-    const { spec, presentedMs, from, classics } = pending;
-    this.start(this.scene, spec, presentedMs, from, this.scene.uploadFace(image), classics);
+    const { spec, presentedMs, from, rest, classics } = pending;
+    this.start(this.scene, spec, presentedMs, from, this.scene.uploadFace(image), rest ?? null, classics);
   }
 
   private takePending(objectId: ObjectId, token: number): PendingStart | null {
@@ -693,6 +734,7 @@ class CardVfxController {
     presentedMs: number,
     from: CardPose | null,
     front: Texture | null,
+    rest: BoardSurface | null,
     classics: readonly (() => void)[],
   ) {
     const { objectId, route, snapshotSeq, wash } = spec;
@@ -706,6 +748,7 @@ class CardVfxController {
       pace: spec.pace,
       delayMs: Math.max(0, presentedMs + spec.delayMs - performance.now()),
       wash: wash && { startMs: presentedMs + wash.atMs, durationMs: wash.durationMs, look: wash.look },
+      rest,
       tier: this.tier,
       landingColors: spec.endColors,
       aim: (origin) => this.aim(route, objectId, origin),
@@ -716,6 +759,7 @@ class CardVfxController {
     });
     if (!started) {
       front?.dispose();
+      rest?.surface.dispose();
       runAll(classics);
       return;
     }
@@ -804,6 +848,8 @@ class CardVfxController {
     for (const objectId of this.veilHolds.keys()) unveilFlight(objectId);
     this.veilHolds.clear();
     this.boardEffects.clear();
+    this.sweeps.clear();
+    this.counterLeaves.clear();
   }
 
   private publish() {

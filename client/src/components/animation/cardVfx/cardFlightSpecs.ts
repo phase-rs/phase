@@ -58,6 +58,10 @@ export const COUNTER_RIPPLE_MS = 380;
  *  before pace; then it leaves the stack. */
 export const COUNTER_WASH_MS = 300;
 
+/** How long after its ripple sets out a counter and the spell it counters
+ *  may leave the stack: once the countered spell has washed out. */
+export const counterLeaveMs = (pace: number) => (COUNTER_RIPPLE_MS + COUNTER_WASH_MS) * pace;
+
 /** A countered spell washing out where it lies before it leaves. */
 export interface WashSpec {
   /** When the wash starts, after the flight is presented, already paced. */
@@ -263,8 +267,9 @@ function delayFor({ index, size }: { index: number; size: number }, pace: number
 
 /** CR 701.6a: a countered spell is removed from the stack and put into its
  *  owner's graveyard. Its counter's ripple reaches it and washes it out before
- *  it leaves, and the countering spell (CR 608.2n) leaves with it. `null` for
- *  a move from the stack that no counter in the step made. */
+ *  it leaves. (The countering spell leaves once it has, CR 608.2n; the engine
+ *  can report that move a step later, so the ripple carries its time.) `null`
+ *  for a move from the stack that no counter in the step made. */
 function counteredLeave(
   objectId: ObjectId,
   route: CardFlightRoute,
@@ -272,13 +277,10 @@ function counteredLeave(
 ): Pick<CardFlightSpec, "delayMs" | "wash"> | null {
   if (route.from !== "Stack") return null;
   for (const event of stepEvents) {
-    if (event.type !== "SpellCountered") continue;
-    const { object_id: countered, countered_by: counter } = event.data;
-    if (objectId !== countered && objectId !== counter) continue;
-    const delayMs = (COUNTER_RIPPLE_MS + COUNTER_WASH_MS) * pace;
-    if (objectId === counter) return { delayMs, wash: null };
-    const look = rippleLookFor(pre?.objects[counter]?.color ?? []);
-    return { delayMs, wash: { atMs: COUNTER_RIPPLE_MS * pace, durationMs: COUNTER_WASH_MS * pace, look } };
+    if (event.type !== "SpellCountered" || event.data.object_id !== objectId) continue;
+    const look = rippleLookFor(pre?.objects[event.data.countered_by]?.color ?? []);
+    const wash = { atMs: COUNTER_RIPPLE_MS * pace, durationMs: COUNTER_WASH_MS * pace, look };
+    return { delayMs: counterLeaveMs(pace), wash };
   }
   return null;
 }

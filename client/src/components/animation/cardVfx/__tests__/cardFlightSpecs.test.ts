@@ -452,14 +452,12 @@ describe("a counter", () => {
     expect(cardFlightSpecFor(toGraveyard(X), counterContext(["White"]))?.wash?.look).toBe("pale");
   });
 
-  it("V14-3: the counter leaves with the spell it countered, unwashed; other moves keep their stagger", () => {
+  it("V14-3: other moves from the stack, the counter's own among them, keep their stagger and are not washed", () => {
     const ctx = counterContext(["Blue"]);
-    expect(cardFlightSpecFor(toGraveyard(COUNTER), ctx)).toMatchObject({
-      delayMs: COUNTER_RIPPLE_MS + COUNTER_WASH_MS,
-      wash: null,
-    });
-    // Second in the step's Stack→Graveyard batch: one stagger gap.
+    // Second and third in the step's Stack→Graveyard batch: the ripple, not
+    // the step, holds the counter until the spell it counters has washed out.
     expect(cardFlightSpecFor(step[2], ctx)).toMatchObject({ objectId: OTHER, delayMs: 90, wash: null });
+    expect(cardFlightSpecFor(step[3], ctx)).toMatchObject({ objectId: COUNTER, delayMs: 180, wash: null });
   });
 
   it("V14-4: a counter's ripple leaves from the resolving counter to the countered entry", () => {
@@ -469,8 +467,12 @@ describe("a counter", () => {
       targetId: X,
       look: "water",
       pace: 1,
+      leaveMs: COUNTER_RIPPLE_MS + COUNTER_WASH_MS,
     });
-    expect(cardVfxSpecFor(countered, counterContext(["Black"]))).toMatchObject({ look: "pale" });
+    expect(cardVfxSpecFor(countered, counterContext(["Black"], 2))).toMatchObject({
+      look: "pale",
+      leaveMs: (COUNTER_RIPPLE_MS + COUNTER_WASH_MS) * 2,
+    });
     expect(cardVfxSpecFor(countered, counterContext(["Blue"], 0))).toBeNull();
     // A counter that is not what resolves (none on the stack) has no ripple.
     expect(cardVfxSpecFor(countered, context(stateWith(), null))).toBeNull();

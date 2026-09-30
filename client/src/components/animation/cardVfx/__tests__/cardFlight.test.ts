@@ -1,10 +1,11 @@
 import { type Mesh, PerspectiveCamera, Scene, type ShaderMaterial, Texture, Vector3 } from "three";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { Aim, CardPose } from "../cardAnchors.ts";
 import {
   ABANDON_FADE_MS,
   ABSENT_FRAMES_AFTER_COMMIT,
+  type BoardSurface,
   CARD_ASPECT,
   CARD_FLIGHT_MAX_AWAIT_MS,
   CAST_FLIGHT_MS,
@@ -69,7 +70,15 @@ function fly(
     pace = 1,
     delayMs = 0,
     wash = null,
-  }: { aim: () => Aim; committed?: () => boolean; pace?: number; delayMs?: number; wash?: FlightWash | null },
+    rest = null,
+  }: {
+    aim: () => Aim;
+    committed?: () => boolean;
+    pace?: number;
+    delayMs?: number;
+    wash?: FlightWash | null;
+    rest?: BoardSurface | null;
+  },
 ): Harness {
   const releases: FlightRelease[] = [];
   const effectHost = host();
@@ -83,6 +92,7 @@ function fly(
     pace,
     delayMs,
     wash,
+    rest,
     tier: "full",
     aim,
     committed,
@@ -119,6 +129,24 @@ describe("a waiting flight", () => {
     frame(1200);
     frame(1200 + RESOLVE_FLIGHT_MS / 2);
     expect(Math.hypot(mesh.position.x - FROM.x, mesh.position.y + FROM.y)).toBeGreaterThan(20);
+  });
+
+  it("V16-1: a card leaving a tile rests as a copy of the tile, and turns into the card as it leaves", () => {
+    // A landscape art-crop tile, nothing like the card's shape.
+    const tile = { pose: { x: 300, y: 400, w: 120, h: 80, angleDeg: 0 }, surface: new Texture(), radius: 6 };
+    const dispose = vi.spyOn(tile.surface, "dispose");
+    const { frame, host: effectHost } = fly(GRAVEYARD, { aim: () => own(TO), delayMs: 200, rest: tile });
+    const rest = () => effectHost.scene.getObjectByName("card-flight-rest") as Mesh<never, ShaderMaterial> | undefined;
+    frame(1000);
+    frame(1150);
+    expect(card(effectHost).visible).toBe(false);
+    expect(rest()?.scale.toArray()).toEqual([120, 80, 1]);
+    expect(rest()?.position.toArray()).toEqual([300, -400, 0]);
+    expect(rest()?.material.uniforms.uRadius.value).toBe(6);
+    frame(1200);
+    expect(rest()).toBeUndefined();
+    expect(dispose).toHaveBeenCalled();
+    expect(card(effectHost).visible).toBe(true);
   });
 
   it("V14-2: a wash runs pale over its span from its start on the frame clock, and stays", () => {

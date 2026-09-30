@@ -353,6 +353,13 @@ const WASH_TINTS: Record<RippleLook, [number, number, number]> = {
   pale: [0.88, 0.88, 0.86],
 };
 
+/** A permanent's surface redrawn as a texture, and where it lies. */
+export interface BoardSurface {
+  pose: CardPose;
+  surface: Texture;
+  radius: number;
+}
+
 /** A wash running through the card where it rests, before it leaves. */
 export interface FlightWash {
   /** When it starts, on the frame clock (`performance.now()`). */
@@ -374,6 +381,9 @@ export interface CardFlightParams {
   delayMs: number;
   /** A countered spell's wash; `null` for any other flight. */
   wash: FlightWash | null;
+  /** The board surface of the permanent it leaves, owned by the flight: the
+   *  card rests as that copy until it leaves. `null` rests as the card. */
+  rest: BoardSurface | null;
   tier: CardVfxTier;
   aim: (origin: DOMRectReadOnly) => Aim;
   /** Whether the engine has committed the state this flight moves to. */
@@ -413,6 +423,7 @@ type FlightPhase =
 class CardFlightEffect implements CardFlight {
   readonly objectId: ObjectId;
   private readonly card: Mesh<PlaneGeometry, ShaderMaterial>;
+  private rest: Mesh<PlaneGeometry, ShaderMaterial> | null = null;
   private readonly shadow: Mesh<PlaneGeometry, ShaderMaterial> | null;
   private readonly profile: FlightProfile;
   private readonly targetFlip: number;
@@ -446,6 +457,33 @@ class CardFlightEffect implements CardFlight {
     } else {
       this.shadow = null;
     }
+    if (params.rest) this.restOn(params.rest, back);
+  }
+
+  // A permanent's tile can be shaped nothing like its card (an art crop), so
+  // while it waits it rests as a copy of the tile, and turns into the card as
+  // it leaves.
+  private restOn({ pose, surface, radius }: BoardSurface, back: Texture) {
+    const rest = createCardMesh(surface, back, 1);
+    rest.name = "card-flight-rest";
+    rest.position.set(pose.x, -pose.y, 0);
+    rest.rotation.z = -MathUtils.degToRad(pose.angleDeg);
+    rest.scale.set(pose.w, pose.h, 1);
+    rest.material.uniforms.uSize.value.set(pose.w, pose.h);
+    rest.material.uniforms.uRadius.value = radius;
+    this.host.scene.add(rest);
+    this.rest = rest;
+    this.card.visible = false;
+  }
+
+  private leaveRest() {
+    const { rest } = this;
+    if (!rest) return;
+    this.host.scene.remove(rest);
+    rest.material.dispose();
+    this.params.rest?.surface.dispose();
+    this.rest = null;
+    this.card.visible = true;
   }
 
   currentState(): FlightState {
@@ -483,9 +521,12 @@ class CardFlightEffect implements CardFlight {
         return true;
       }
       case "flying":
-        if (nowMs >= this.flightStartMs) return this.fly(nowMs, this.flightStartMs);
+        if (nowMs >= this.flightStartMs) {
+          this.leaveRest();
+          return this.fly(nowMs, this.flightStartMs);
+        }
         // A staggered card rests on its veiled source until its turn to leave.
-        this.draw(flightPose(this.profile.curve, 0, this.state, this.state, this.state.flip), 1, 1);
+        if (!this.rest) this.draw(flightPose(this.profile.curve, 0, this.state, this.state, this.state.flip), 1, 1);
         return true;
     }
   }
@@ -634,6 +675,7 @@ class CardFlightEffect implements CardFlight {
   }
 
   dispose() {
+    this.leaveRest();
     this.host.scene.remove(this.card);
     this.card.material.dispose();
     this.params.front?.dispose();
