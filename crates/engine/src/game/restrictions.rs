@@ -1777,9 +1777,9 @@ pub(crate) fn evaluate_condition(
         ParsedCondition::IsOpponentsTurn => {
             super::players::is_opponent(state, player, state.active_player)
         }
-        // CR 503.1: The game is currently in the upkeep step. Player scope, if
-        // any, is composed by the caller via `And([IsOpponentsTurn, ..])`.
-        ParsedCondition::IsDuringUpkeep => state.phase == Phase::Upkeep,
+        // CR 500.1 + CR 602.5: the game is in one of the named steps; player
+        // scope, if any, is composed by the caller via `And`.
+        ParsedCondition::CurrentPhaseIs { phases } => phases.contains(&state.phase),
         // CR 601.3d + CR 608.2c: "if it targets a [filter]" — gates a casting
         // permission on the chosen targets of the in-flight spell. Read from
         // `state.pending_cast.ability.targets` when targets have been committed.
@@ -3709,7 +3709,7 @@ mod tests {
         state.phase = Phase::Upkeep;
         assert!(allowed(&state), "opponent's upkeep must permit activation");
 
-        // Opponent's turn, non-upkeep step -> denied (IsDuringUpkeep false).
+        // Opponent's turn, non-upkeep step -> denied (CurrentPhaseIs false).
         state.phase = Phase::PreCombatMain;
         assert!(
             !allowed(&state),

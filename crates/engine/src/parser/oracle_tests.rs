@@ -1117,7 +1117,8 @@ fn activated_ability_opponent_turn_restriction_uses_team_aware_condition() {
 
 /// CR 602.5b + CR 102.3 + CR 503.1: "Activate only during an opponent's upkeep"
 /// (Trade Caravan) composes the team-aware opponent-turn scope
-/// (`IsOpponentsTurn`) with the upkeep-step predicate (`IsDuringUpkeep`) in a
+/// (`IsOpponentsTurn`) with the upkeep-step predicate
+/// (`CurrentPhaseIs { phases: [Upkeep] }`) in a
 /// single `RequiresCondition`, reusing the same composition idiom as the bare
 /// opponent-turn gate above rather than a dedicated `DuringOpponents*`
 /// restriction sibling. Before the fix the tail dropped to
@@ -1149,7 +1150,9 @@ fn activated_ability_opponents_upkeep_restriction_composes_scope_and_step() {
         condition: Some(ParsedCondition::And {
             conditions: vec![
                 ParsedCondition::IsOpponentsTurn,
-                ParsedCondition::IsDuringUpkeep,
+                ParsedCondition::CurrentPhaseIs {
+                    phases: vec![Phase::Upkeep],
+                },
             ],
         }),
     };
@@ -1173,7 +1176,9 @@ fn activation_during_gate_composes_turn_role_and_window_axes() {
         condition: Some(ParsedCondition::And {
             conditions: vec![
                 ParsedCondition::IsOpponentsTurn,
-                ParsedCondition::IsDuringUpkeep,
+                ParsedCondition::CurrentPhaseIs {
+                    phases: vec![Phase::Upkeep],
+                },
             ],
         }),
     };
@@ -1211,7 +1216,9 @@ fn activated_ability_any_upkeep_restriction_uses_unscoped_upkeep_condition() {
         "{2}, Sacrifice a land: Put a +2/+2 counter on target creature. Activate only during any upkeep step.";
     const TOLARIA: &str = "{T}: Add {U}.\n{T}: Target creature loses banding and all \"bands with other\" abilities until end of turn. Activate only during any upkeep step.";
     let expected = ActivationRestriction::RequiresCondition {
-        condition: Some(ParsedCondition::IsDuringUpkeep),
+        condition: Some(ParsedCondition::CurrentPhaseIs {
+            phases: vec![Phase::Upkeep],
+        }),
     };
     fn has_unimplemented(definition: &AbilityDefinition) -> bool {
         matches!(definition.effect.as_ref(), Effect::Unimplemented { .. })
@@ -1246,6 +1253,344 @@ fn activated_ability_any_upkeep_restriction_uses_unscoped_upkeep_condition() {
         "Tolaria's second ability must retain its any-upkeep restriction: {:#?}",
         tolaria.abilities
     );
+}
+
+/// Every `Effect::Unimplemented` fragment reachable along an ability's
+/// `sub_ability` / `else_ability` chain, for honest-red assertions that must name
+/// the exact clause left unparsed.
+fn def_chain_unimplemented_descriptions(def: &AbilityDefinition) -> Vec<String> {
+    let mut out: Vec<String> = def
+        .effect
+        .unimplemented_description()
+        .map(str::to_string)
+        .into_iter()
+        .collect();
+    if let Some(sub) = def.sub_ability.as_deref() {
+        out.extend(def_chain_unimplemented_descriptions(sub));
+    }
+    if let Some(els) = def.else_ability.as_deref() {
+        out.extend(def_chain_unimplemented_descriptions(els));
+    }
+    out
+}
+
+/// True iff any restriction (including inside an `And`/`Or`/`Not` composition)
+/// carries the step-timing leaf `ParsedCondition::CurrentPhaseIs`.
+fn restrictions_mention_current_phase(restrictions: &[ActivationRestriction]) -> bool {
+    fn condition_mentions(condition: &ParsedCondition) -> bool {
+        match condition {
+            ParsedCondition::CurrentPhaseIs { .. } => true,
+            ParsedCondition::And { conditions } | ParsedCondition::Or { conditions } => {
+                conditions.iter().any(condition_mentions)
+            }
+            ParsedCondition::Not { condition } => condition_mentions(condition),
+            _ => false,
+        }
+    }
+    restrictions.iter().any(|restriction| {
+        matches!(
+            restriction,
+            ActivationRestriction::RequiresCondition { condition: Some(condition) }
+                if condition_mentions(condition)
+        )
+    })
+}
+
+fn named_step_restriction(phases: Vec<Phase>) -> ActivationRestriction {
+    ActivationRestriction::RequiresCondition {
+        condition: Some(ParsedCondition::CurrentPhaseIs { phases }),
+    }
+}
+
+/// CR 602.1b + CR 500.1 + CR 506.1: the `during ...` activation gate composes an
+/// unscoped determiner axis ("the" / "any") with the shared step-name grammar, so
+/// every named step resolves to `RequiresCondition { CurrentPhaseIs }` without a
+/// whole-clause tag per step. Longest-first ordering is load-bearing: "the end of
+/// combat step" must not collapse to the end step. The turn-role siblings keep
+/// their existing variants.
+#[test]
+fn activation_during_gate_composes_named_step_axis() {
+    for (phrase, expected) in [
+        (
+            "during the end of combat step",
+            named_step_restriction(vec![Phase::EndCombat]),
+        ),
+        (
+            "during the declare blockers step",
+            named_step_restriction(vec![Phase::DeclareBlockers]),
+        ),
+        (
+            "during the declare attackers step",
+            named_step_restriction(vec![Phase::DeclareAttackers]),
+        ),
+        (
+            "during the beginning of combat step",
+            named_step_restriction(vec![Phase::BeginCombat]),
+        ),
+        (
+            "during the combat damage step",
+            named_step_restriction(vec![Phase::CombatDamage]),
+        ),
+        (
+            "during the end step",
+            named_step_restriction(vec![Phase::End]),
+        ),
+        (
+            "during the draw step",
+            named_step_restriction(vec![Phase::Draw]),
+        ),
+        (
+            "during any upkeep step",
+            named_step_restriction(vec![Phase::Upkeep]),
+        ),
+        // Siblings on the same gate keep their existing variants.
+        ("during combat", ActivationRestriction::DuringCombat),
+        (
+            "during your upkeep",
+            ActivationRestriction::DuringYourUpkeep,
+        ),
+    ] {
+        let line = format!("{{T}}: Add {{C}}. Activate only {phrase}.");
+        let r = parse(&line, "Axis Probe", &[], &["Creature"], &["Human"]);
+        assert_eq!(r.abilities.len(), 1, "{phrase}: got {:#?}", r.abilities);
+        assert!(
+            !def_chain_has_unimplemented(&r.abilities[0]),
+            "{phrase}: timing tail must not fall back to Unimplemented: {:#?}",
+            r.abilities[0]
+        );
+        assert!(
+            r.abilities[0].activation_restrictions.contains(&expected),
+            "{phrase}: expected {expected:?}, got {:?}",
+            r.abilities[0].activation_restrictions
+        );
+    }
+
+    // Ordering hostile row: "end of combat step" is tried before "end step".
+    let r = parse(
+        "{T}: Add {C}. Activate only during the end of combat step.",
+        "Axis Probe",
+        &[],
+        &["Creature"],
+        &["Human"],
+    );
+    assert!(
+        !r.abilities[0]
+            .activation_restrictions
+            .contains(&named_step_restriction(vec![Phase::End])),
+        "the end of combat step must not parse as the end step: {:?}",
+        r.abilities[0].activation_restrictions
+    );
+}
+
+/// CR 602.1b + CR 511.1 + CR 509.1 + CR 508.1: the three cards whose only gap
+/// was the named-step activation instruction now parse with zero
+/// `Effect::Unimplemented` and a typed step restriction. Kongming's
+/// Contraptions composes the step leg with its existing `BeenAttackedThisStep`
+/// leg. (Lesser Werewolf's target filter is a separate, pre-existing backlog
+/// item; nothing here asserts that reading.)
+#[test]
+fn named_step_activation_cards_parse_without_gaps() {
+    const DESERT: &str = "{T}: Add {C}.\n{T}: This land deals 1 damage to target attacking creature. Activate only during the end of combat step.";
+    const LESSER_WEREWOLF: &str = "{B}: If this creature's power is 1 or more, it gets -1/-0 until end of turn and put a -0/-1 counter on target creature blocking or blocked by this creature. Activate only during the declare blockers step.";
+    const KONGMINGS_CONTRAPTIONS: &str = "{T}: This creature deals 2 damage to target attacking creature. Activate only during the declare attackers step and only if you've been attacked this step.";
+
+    let desert = parse(DESERT, "Desert", &[], &["Land"], &["Desert"]);
+    assert!(
+        !parsed_has_unimplemented(&desert),
+        "Desert must parse without gaps: {:#?}",
+        desert.abilities
+    );
+    assert_eq!(desert.abilities.len(), 2, "got {:#?}", desert.abilities);
+    let damage = &desert.abilities[1];
+    assert!(matches!(damage.effect.as_ref(), Effect::DealDamage { .. }));
+    assert_eq!(
+        damage.activation_restrictions,
+        vec![named_step_restriction(vec![Phase::EndCombat])]
+    );
+
+    let werewolf = parse(
+        LESSER_WEREWOLF,
+        "Lesser Werewolf",
+        &[],
+        &["Creature"],
+        &["Werewolf"],
+    );
+    assert!(
+        !parsed_has_unimplemented(&werewolf),
+        "Lesser Werewolf must parse without gaps: {:#?}",
+        werewolf.abilities
+    );
+    assert_eq!(werewolf.abilities.len(), 1, "got {:#?}", werewolf.abilities);
+    assert!(matches!(
+        werewolf.abilities[0].effect.as_ref(),
+        Effect::Pump { .. }
+    ));
+    assert_eq!(
+        werewolf.abilities[0].activation_restrictions,
+        vec![named_step_restriction(vec![Phase::DeclareBlockers])]
+    );
+
+    let kongming = parse(
+        KONGMINGS_CONTRAPTIONS,
+        "Kongming's Contraptions",
+        &[],
+        &["Creature"],
+        &["Human", "Soldier"],
+    );
+    assert!(
+        !parsed_has_unimplemented(&kongming),
+        "Kongming's Contraptions must parse without gaps: {:#?}",
+        kongming.abilities
+    );
+    assert_eq!(kongming.abilities.len(), 1, "got {:#?}", kongming.abilities);
+    assert!(matches!(
+        kongming.abilities[0].effect.as_ref(),
+        Effect::DealDamage { .. }
+    ));
+    let restrictions = &kongming.abilities[0].activation_restrictions;
+    assert!(
+        restrictions.contains(&ActivationRestriction::RequiresCondition {
+            condition: Some(ParsedCondition::BeenAttackedThisStep),
+        }),
+        "the attacked-this-step leg must survive: {restrictions:?}"
+    );
+    assert!(
+        restrictions.contains(&named_step_restriction(vec![Phase::DeclareAttackers])),
+        "the declare-attackers step leg must be typed: {restrictions:?}"
+    );
+}
+
+/// CR 602.1b: a role×step window ("during their draw step") is out of the named-step
+/// class (it carries a turn owner) and must stay an honest `Effect::Unimplemented`
+/// rather than being read as the unscoped draw step.
+#[test]
+fn role_scoped_step_window_stays_honest_unimplemented() {
+    const WELL_OF_KNOWLEDGE: &str =
+        "{2}: Draw a card. Any player may activate this ability but only during their draw step.";
+    let r = parse(
+        WELL_OF_KNOWLEDGE,
+        "Well of Knowledge",
+        &[],
+        &["Artifact"],
+        &[],
+    );
+    assert_eq!(r.abilities.len(), 1, "got {:#?}", r.abilities);
+    let ability = &r.abilities[0];
+    // Positive reach-guard: the effect itself parsed.
+    assert!(matches!(ability.effect.as_ref(), Effect::Draw { .. }));
+    assert!(
+        def_chain_unimplemented_descriptions(ability)
+            .iter()
+            .any(|d| d.contains("during their draw step")),
+        "the role-scoped window must stay visible as Unimplemented: {ability:#?}"
+    );
+    assert!(
+        !restrictions_mention_current_phase(&ability.activation_restrictions),
+        "'their draw step' must not be read as an unscoped step: {:?}",
+        ability.activation_restrictions
+    );
+}
+
+/// CR 602.1b: Grizzled Wolverine's instruction adds an unrepresentable leg
+/// ("only if at least one creature is blocking this creature"); the named-step
+/// gate must not consume the sentence and silently drop that leg.
+#[test]
+fn named_step_gate_with_unparsed_only_if_leg_stays_red() {
+    const GRIZZLED_WOLVERINE: &str = "{R}: This creature gets +2/+0 until end of turn. Activate only during the declare blockers step, only if at least one creature is blocking this creature, and only once each turn.";
+    let r = parse(
+        GRIZZLED_WOLVERINE,
+        "Grizzled Wolverine",
+        &[],
+        &["Creature"],
+        &["Wolverine"],
+    );
+    assert_eq!(r.abilities.len(), 1, "got {:#?}", r.abilities);
+    let ability = &r.abilities[0];
+    // Positive reach-guard: the pump effect parsed past the constraint loop.
+    assert!(matches!(ability.effect.as_ref(), Effect::Pump { .. }));
+    assert_eq!(
+        ability.activation_restrictions,
+        vec![ActivationRestriction::OnlyOnceEachTurn]
+    );
+    assert!(
+        def_chain_unimplemented_descriptions(ability)
+            .iter()
+            .any(|d| d.contains("only if at least one creature is blocking")),
+        "the unrepresentable leg must stay visible: {ability:#?}"
+    );
+}
+
+/// CR 602.1b: Nemesis Phoenix's " and only if you're attacking two or more
+/// opponents" leg is unrepresentable; the whole instruction stays red and no
+/// step restriction is committed on its own.
+#[test]
+fn named_step_gate_with_unparsed_and_only_if_leg_stays_red() {
+    const NEMESIS_PHOENIX: &str = "Flying\n{2}{R}: Return this card from your graveyard to the battlefield tapped and attacking. Activate only during the declare attackers step and only if you're attacking two or more opponents.";
+    let r = parse(
+        NEMESIS_PHOENIX,
+        "Nemesis Phoenix",
+        &[Keyword::Flying],
+        &["Creature"],
+        &["Phoenix"],
+    );
+    let ability = r
+        .abilities
+        .iter()
+        .find(|ability| ability.kind == AbilityKind::Activated)
+        .expect("Nemesis Phoenix's activated ability must parse");
+    // Positive reach-guard: the return effect parsed.
+    assert!(matches!(ability.effect.as_ref(), Effect::ChangeZone { .. }));
+    assert!(
+        ability.activation_restrictions.is_empty(),
+        "no partial restriction may be committed: {:?}",
+        ability.activation_restrictions
+    );
+    assert!(
+        def_chain_unimplemented_descriptions(ability)
+            .iter()
+            .any(|d| d.contains("you're attacking two or more opponents")),
+        "the unrepresentable leg must stay visible: {ability:#?}"
+    );
+}
+
+/// CR 602.1b + CR 509.1: Balduvian Warlord and General Jarkeld gain the typed
+/// declare-blockers step restriction but stay red for their other, unrelated
+/// clauses (combat-rearrangement effects the engine can't express).
+#[test]
+fn named_step_restriction_on_otherwise_red_cards_keeps_other_gaps() {
+    const BALDUVIAN_WARLORD: &str = "{T}: Remove target blocking creature from combat. Creatures it was blocking that hadn't become blocked by another creature this combat become unblocked, then it blocks an attacking creature of your choice. Activate only during the declare blockers step.";
+    const GENERAL_JARKELD: &str = "{T}: Choose two target blocked attacking creatures. If each of those creatures could be blocked by all creatures that the other is blocked by, each creature that's blocking exactly one of those attacking creatures stops blocking it and is blocking the other attacking creature. Activate only during the declare blockers step.";
+    for (name, text, subtypes, remaining_gap) in [
+        (
+            "Balduvian Warlord",
+            BALDUVIAN_WARLORD,
+            &["Human", "Barbarian"][..],
+            "Creatures it was blocking",
+        ),
+        (
+            "General Jarkeld",
+            GENERAL_JARKELD,
+            &["Human", "Soldier"][..],
+            "each creature that's blocking exactly one",
+        ),
+    ] {
+        let r = parse(text, name, &[], &["Creature"], subtypes);
+        assert_eq!(r.abilities.len(), 1, "{name}: got {:#?}", r.abilities);
+        let ability = &r.abilities[0];
+        assert!(
+            ability
+                .activation_restrictions
+                .contains(&named_step_restriction(vec![Phase::DeclareBlockers])),
+            "{name}: expected the declare-blockers step restriction, got {:?}",
+            ability.activation_restrictions
+        );
+        assert!(
+            def_chain_unimplemented_descriptions(ability)
+                .iter()
+                .any(|d| d.contains(remaining_gap)),
+            "{name}: its unrelated clause must stay Unimplemented: {ability:#?}"
+        );
+    }
 }
 
 /// CR 508.1: a STANDALONE combat-window activation gate — "Activate only before

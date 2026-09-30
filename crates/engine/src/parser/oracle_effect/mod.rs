@@ -153,7 +153,7 @@ use crate::types::zones::Zone;
 use self::conditions::*;
 pub(crate) use self::conditions::{
     condition_text_is_rehomeable, parse_additional_cost_instead_condition_fragment,
-    split_leading_conditional,
+    parse_phase_name_set, split_leading_conditional,
 };
 use self::imperative::{
     lower_imperative_family_ast, lower_shuffle_ast, lower_targeted_action_ast,
