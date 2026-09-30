@@ -285,6 +285,7 @@ mod tests {
         AppState {
             sessions: Arc::new(Mutex::new(SessionManager::new())),
             draft_sessions: Arc::new(Mutex::new(DraftSessionManager::new())),
+            tournament_hosting: Arc::new(Mutex::new(server_core::TournamentHostingManager::new())),
             draft_pools: Arc::new(draft_pools::DraftPools::default()),
             connections: Arc::new(Mutex::new(HashMap::new())),
             db: Arc::new(engine::database::CardDatabase::default()),

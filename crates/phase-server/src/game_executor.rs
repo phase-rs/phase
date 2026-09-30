@@ -1108,6 +1108,10 @@ mod tests {
             let spectators: SharedGameSpectators =
                 Arc::new(tokio::sync::Mutex::new(HashMap::new()));
             let drafts = Arc::new(tokio::sync::Mutex::new(crate::DraftSessionManager::new()));
+            let lobby = Arc::new(tokio::sync::Mutex::new(lobby_broker::Broker::new()));
+            let tournament_hosting = Arc::new(tokio::sync::Mutex::new(
+                server_core::TournamentHostingManager::new(),
+            ));
             let submit = |code: String, token: String, started: oneshot::Sender<()>| {
                 let executor = executor.clone();
                 let state = state.clone();
@@ -1116,6 +1120,8 @@ mod tests {
                 let connections = connections.clone();
                 let spectators = spectators.clone();
                 let drafts = drafts.clone();
+                let lobby = lobby.clone();
+                let tournament_hosting = tournament_hosting.clone();
                 async move {
                     let (tx, mut messages) = crate::socket_mailbox::channel();
                     connections
@@ -1134,6 +1140,8 @@ mod tests {
                         &state,
                         &db,
                         &drafts,
+                        &lobby,
+                        &tournament_hosting,
                         &connections,
                         &tx,
                         &game_db,
@@ -1482,6 +1490,10 @@ mod tests {
             let spectators: SharedGameSpectators =
                 Arc::new(tokio::sync::Mutex::new(HashMap::new()));
             let draft_state = Arc::new(tokio::sync::Mutex::new(crate::DraftSessionManager::new()));
+            let lobby = Arc::new(tokio::sync::Mutex::new(lobby_broker::Broker::new()));
+            let tournament_hosting = Arc::new(tokio::sync::Mutex::new(
+                server_core::TournamentHostingManager::new(),
+            ));
             let mut identity = empty_identity();
             identity.set_session(code_b, PlayerId(0), token_b);
             let (queued, waiting) = oneshot::channel();
@@ -1498,6 +1510,8 @@ mod tests {
                         &state,
                         &db,
                         &draft_state,
+                        &lobby,
+                        &tournament_hosting,
                         &connections,
                         &tx,
                         &game_db,

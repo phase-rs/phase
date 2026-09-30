@@ -1531,6 +1531,7 @@ fn queued_reconnect_before_departure_keeps_contest_presence_causal() {
                 &table.app.game_spectators,
                 &table.app.lobby,
                 &table.app.lobby_subscribers,
+                &table.app.tournament_hosting,
                 &table.key.game_code,
             )
             .await;
@@ -2724,7 +2725,7 @@ fn legitimate_forty_click_bursts_keep_plain_and_gzip_contests_running() {
                 crate::ensure_contest_driver(
                     &table.app.context.game_executor, &table.app.sessions, &table.app.connections,
                     &table.app.draft_sessions, &table.app.game_db, &table.app.game_spectators,
-                    &table.app.lobby, &table.app.lobby_subscribers, &table.key.game_code,
+                    &table.app.lobby, &table.app.lobby_subscribers, &table.app.tournament_hosting, &table.key.game_code,
                 ).await;
                 loop {
                     let lease = crate::lock_session(&table.app.sessions, &table.key.game_code).await.unwrap();
@@ -2846,6 +2847,7 @@ fn policy_compliant_click_refill_preserves_correlated_completion() {
                     &table.app.game_spectators,
                     &table.app.lobby,
                     &table.app.lobby_subscribers,
+                    &table.app.tournament_hosting,
                     &table.key.game_code,
                 )
                 .await;

@@ -154,6 +154,7 @@ type SharedLobbySubscribers = Arc<Mutex<Vec<LobbySubscriber>>>;
 type SharedPlayerCount = Arc<AtomicU32>;
 type SharedGameDb = Arc<persistence::GameDb>;
 type SharedDraftState = Arc<Mutex<DraftSessionManager>>;
+type SharedTournamentHosting = Arc<Mutex<server_core::TournamentHostingManager>>;
 const SPECTATOR_PLAYER_ID: PlayerId = PlayerId(u8::MAX);
 const PERSISTED_SESSION_REAPER_INTERVAL: Duration = Duration::from_secs(10);
 const PERSISTED_SESSION_CLEANUP_INTERVAL: Duration = Duration::from_secs(60 * 60);
@@ -3231,6 +3232,8 @@ async fn serve() {
     let draft_sessions: SharedDraftState = Arc::new(Mutex::new(
         DraftSessionManager::new().with_card_db(db.clone()),
     ));
+    let tournament_hosting: SharedTournamentHosting =
+        Arc::new(Mutex::new(server_core::TournamentHostingManager::new()));
     let draft_pools: SharedDraftPools = match data_bootstrap::load_data_file(
         data_path,
         data_bootstrap::DRAFT_POOLS_FILE,
@@ -3403,6 +3406,7 @@ async fn serve() {
     let app_state = AppState {
         sessions: state,
         draft_sessions,
+        tournament_hosting,
         draft_pools,
         connections,
         db,
@@ -4987,6 +4991,7 @@ async fn start_ngrok_tunnel(port: u16) -> Option<(String, Box<dyn std::any::Any 
 struct AppState {
     sessions: SharedState,
     draft_sessions: SharedDraftState,
+    tournament_hosting: SharedTournamentHosting,
     draft_pools: SharedDraftPools,
     connections: SharedConnections,
     db: SharedDb,
@@ -5073,6 +5078,7 @@ async fn ws_handler(
                 socket,
                 app_state.sessions,
                 app_state.draft_sessions,
+                app_state.tournament_hosting,
                 app_state.draft_pools,
                 app_state.connections,
                 app_state.db,
@@ -5161,6 +5167,7 @@ async fn handle_socket(
     socket: WebSocket,
     state: SharedState,
     draft_state: SharedDraftState,
+    tournament_hosting: SharedTournamentHosting,
     draft_pools: SharedDraftPools,
     connections: SharedConnections,
     db: SharedDb,
@@ -5290,6 +5297,7 @@ async fn handle_socket(
                 &mut socket,
                 &state,
                 &draft_state,
+                &tournament_hosting,
                 &draft_pools,
                 &connections,
                 &db,
@@ -7514,6 +7522,87 @@ fn ranked_result_for_duel(
     )
 }
 
+/// Build the tournament pod outcome for a completed hosted Bo3 match from the
+/// engine's final match tally. A Bo3 reaches `WaitingFor::GameOver` only once a
+/// player has 2 game wins, so a completed hosted match is decisive; the winner
+/// is the seat with more game wins, and `pairing.players[i]` is game
+/// `PlayerId(i)` (the spawn seats them in that order). `winner == None` cannot
+/// arise for a completed Bo3, but is mapped to a draw defensively.
+fn tournament_pod_outcome(
+    players: &[String],
+    match_score: engine::types::match_config::MatchScore,
+    winner: Option<PlayerId>,
+) -> lobby_broker::tournament::PodOutcome {
+    match winner {
+        Some(pid) if players.len() == 2 && (pid.0 as usize) < players.len() => {
+            let mut game_wins = std::collections::HashMap::new();
+            game_wins.insert(players[0].clone(), match_score.p0_wins);
+            game_wins.insert(players[1].clone(), match_score.p1_wins);
+            lobby_broker::tournament::PodOutcome::Decisive {
+                winner: players[pid.0 as usize].clone(),
+                game_wins,
+            }
+        }
+        _ => lobby_broker::tournament::PodOutcome::Draw,
+    }
+}
+
+/// The tournament analog of [`report_draft_game_over`]: if `game_code` is a
+/// server-hosted tournament match, hand the game's server-verified terminal back
+/// to the tournament core via `report_result_system`, then drop the hosting
+/// binding. A no-op for a draft/casual game (the reverse lookup misses).
+///
+/// Lock discipline: each shared handle is taken and released singly (never
+/// nested), because the reverse lookup, the report, and the forget are
+/// independent and the binding is stable once the game is over.
+async fn report_tournament_game_over(
+    tournament_hosting: &SharedTournamentHosting,
+    lobby: &SharedLobby,
+    game_code: &str,
+    match_score: engine::types::match_config::MatchScore,
+    winner: Option<PlayerId>,
+) {
+    let Some((code, pairing_id)) = tournament_hosting
+        .lock()
+        .await
+        .tournament_for_game_code(game_code)
+    else {
+        return;
+    };
+    {
+        let mut broker = lobby.lock().await;
+        let players = broker
+            .tournaments()
+            .get(&code)
+            .and_then(|meta| meta.pairings.iter().find(|p| p.id == pairing_id))
+            .map(|p| p.players.clone());
+        match players {
+            Some(players) if players.len() == 2 => {
+                let outcome = tournament_pod_outcome(&players, match_score, winner);
+                if let Err(error) = broker
+                    .tournaments_mut()
+                    .report_result_system(&code, pairing_id, outcome, &SysEnv)
+                {
+                    warn!(
+                        tournament = %code,
+                        pairing = pairing_id,
+                        %error,
+                        "hosted game-over report rejected by tournament core"
+                    );
+                }
+            }
+            _ => {
+                warn!(
+                    tournament = %code,
+                    pairing = pairing_id,
+                    "hosted pairing missing at game-over handoff; dropping binding"
+                );
+            }
+        }
+    }
+    tournament_hosting.lock().await.forget(&code, pairing_id);
+}
+
 /// If this game_code belongs to a draft tournament, auto-report the match
 /// result to the DraftSessionManager and broadcast updated views. This
 /// implements Pitfall 6 from RESEARCH: clients must NOT send
@@ -7631,6 +7720,41 @@ fn build_draft_match_start_message(
         your_player: player.game_player,
         opponent_name: opponent_name.to_string(),
     })
+}
+
+/// Spawn any hosted tournament games newly made ready (a round paired, or the
+/// last missing deck submitted). Mirrors [`maybe_spawn_draft_matches`], but the
+/// `TournamentManager` lives inside the `Broker`, so this locks lobby +
+/// game_state + tournament_hosting (in that order). Idempotent: the core's
+/// `hostable_pairings` returns only fully-decked pending pairings and the
+/// hosting manager skips codes already spawned, so it is safe to call after
+/// every tournament mutation.
+async fn maybe_spawn_tournament_matches(
+    code: &str,
+    lobby: &SharedLobby,
+    game_state: &SharedState,
+    db: &SharedDb,
+    combos: &SharedComboTable,
+    tournament_hosting: &SharedTournamentHosting,
+) {
+    let spawn_count = {
+        let mut broker = lobby.lock().await;
+        let mut game_mgr = game_state.lock().await;
+        let mut hosting = tournament_hosting.lock().await;
+        hosting
+            .spawn_ready_matches(
+                code,
+                broker.tournaments_mut(),
+                &mut game_mgr,
+                db,
+                combos,
+                &SysEnv,
+            )
+            .len()
+    };
+    if spawn_count > 0 {
+        info!(tournament = %code, count = spawn_count, "spawned hosted tournament match(es)");
+    }
 }
 
 /// Generate pairings and spawn 2-player game sessions for pending draft tables.
@@ -8297,6 +8421,7 @@ async fn ensure_contest_driver(
     game_spectators: &SharedGameSpectators,
     lobby: &SharedLobby,
     lobby_subscribers: &SharedLobbySubscribers,
+    tournament_hosting: &SharedTournamentHosting,
     game_code: &str,
 ) {
     let claimed = match lock_session(state, game_code).await {
@@ -8324,6 +8449,7 @@ async fn ensure_contest_driver(
         game_spectators.clone(),
         lobby.clone(),
         lobby_subscribers.clone(),
+        tournament_hosting.clone(),
         full_key,
         activation_epoch,
     ));
@@ -8344,6 +8470,7 @@ async fn run_contest_driver(
     game_spectators: SharedGameSpectators,
     lobby: SharedLobby,
     lobby_subscribers: SharedLobbySubscribers,
+    tournament_hosting: SharedTournamentHosting,
     expected_key: server_core::FullSessionKey,
     activation_epoch: Option<u64>,
 ) {
@@ -8483,11 +8610,22 @@ async fn run_contest_driver(
                                 }
                             }
                         }
+                        // Capture the final match tally before the session is
+                        // dropped; the hosted tournament handoff needs it.
+                        let match_score = session.state.match_score;
                         drop(session);
                         report_draft_game_over(
                             &draft_state,
                             &connections,
                             &game_code,
+                            game_over_winner.flatten(),
+                        )
+                        .await;
+                        report_tournament_game_over(
+                            &tournament_hosting,
+                            &lobby,
+                            &game_code,
+                            match_score,
                             game_over_winner.flatten(),
                         )
                         .await;
@@ -8962,6 +9100,8 @@ async fn handle_full_concession(
     connections: &SharedConnections,
     game_spectators: &SharedGameSpectators,
     draft_state: &SharedDraftState,
+    lobby: &SharedLobby,
+    tournament_hosting: &SharedTournamentHosting,
     game_db: &SharedGameDb,
     identity: &SocketIdentity,
     tx: &crate::socket_mailbox::Sender,
@@ -9117,6 +9257,8 @@ async fn handle_full_concession(
                 &context.game_executor,
                 state,
                 draft_state,
+                lobby,
+                tournament_hosting,
                 connections,
                 game_db,
                 game_code,
@@ -9148,6 +9290,9 @@ async fn handle_full_concession(
         None => Vec::new(),
     };
     let retire = !deliveries.is_empty() || matches!(scope, ConcessionScope::Match);
+    // Capture the final match tally before `result` is moved into the publish
+    // closure; the hosted-tournament handoff below needs it after retirement.
+    let match_score = result.0.match_score;
     let mut publisher = game_executor::StateUpdatePublisher::capture(
         connections,
         Some(game_spectators),
@@ -9192,6 +9337,8 @@ async fn handle_full_concession(
     drop(lease);
     if retire {
         report_draft_game_over(draft_state, connections, &game_code, winner).await;
+        report_tournament_game_over(tournament_hosting, lobby, &game_code, match_score, winner)
+            .await;
         state.lock().await.remove_game(&game_code);
     }
 }
@@ -9211,6 +9358,8 @@ async fn handle_full_game_submission(
     state: &SharedState,
     db: &SharedDb,
     draft_state: &SharedDraftState,
+    lobby: &SharedLobby,
+    tournament_hosting: &SharedTournamentHosting,
     connections: &SharedConnections,
     tx: &crate::socket_mailbox::Sender,
     game_db: &SharedGameDb,
@@ -9396,6 +9545,8 @@ async fn handle_full_game_submission(
         executor,
         state,
         draft_state,
+        lobby,
+        tournament_hosting,
         connections,
         game_db,
         game_code,
@@ -9420,6 +9571,8 @@ async fn finish_full_ai_continuation(
     executor: &game_executor::GameExecutor,
     state: &SharedState,
     draft_state: &SharedDraftState,
+    lobby: &SharedLobby,
+    tournament_hosting: &SharedTournamentHosting,
     connections: &SharedConnections,
     game_db: &SharedGameDb,
     game_code: String,
@@ -9520,9 +9673,20 @@ async fn finish_full_ai_continuation(
     publisher.deliver_terminal(deliveries);
     publisher.finish(executor).await;
     info!(game = %game_code, kind, lock_ms = lock_start.elapsed().as_millis(), ai_actions, "game submission processed (lock held)");
+    // Capture the final match tally before the session is dropped; the hosted
+    // tournament handoff below needs it to build the Bo3 pod outcome.
+    let match_score = session.state.match_score;
     drop(session);
     if terminal_prepared {
         report_draft_game_over(draft_state, connections, &game_code, winner.flatten()).await;
+        report_tournament_game_over(
+            tournament_hosting,
+            lobby,
+            &game_code,
+            match_score,
+            winner.flatten(),
+        )
+        .await;
         state.lock().await.remove_game(&game_code);
     }
 }
@@ -9537,6 +9701,8 @@ async fn handle_resolve_all(
     max_resolutions: u32,
     state: &SharedState,
     draft_state: &SharedDraftState,
+    lobby: &SharedLobby,
+    tournament_hosting: &SharedTournamentHosting,
     connections: &SharedConnections,
     tx: &crate::socket_mailbox::Sender,
     game_db: &SharedGameDb,
@@ -9806,6 +9972,14 @@ async fn handle_resolve_all(
             draft_state,
             connections,
             &game_code,
+            game_over_winner.flatten(),
+        )
+        .await;
+        report_tournament_game_over(
+            tournament_hosting,
+            lobby,
+            &game_code,
+            raw_state.match_score,
             game_over_winner.flatten(),
         )
         .await;
@@ -10321,6 +10495,7 @@ async fn handle_client_message(
     socket: &mut NegotiatedSocket,
     state: &SharedState,
     draft_state: &SharedDraftState,
+    tournament_hosting: &SharedTournamentHosting,
     draft_pools: &SharedDraftPools,
     connections: &SharedConnections,
     db: &SharedDb,
@@ -10773,6 +10948,8 @@ async fn handle_client_message(
                 state,
                 db,
                 draft_state,
+                lobby,
+                tournament_hosting,
                 connections,
                 tx,
                 game_db,
@@ -10790,6 +10967,7 @@ async fn handle_client_message(
                     game_spectators,
                     lobby,
                     lobby_subscribers,
+                    tournament_hosting,
                     game_code,
                 )
                 .await;
@@ -10804,6 +10982,8 @@ async fn handle_client_message(
                 state,
                 db,
                 draft_state,
+                lobby,
+                tournament_hosting,
                 connections,
                 tx,
                 game_db,
@@ -10821,6 +11001,7 @@ async fn handle_client_message(
                     game_spectators,
                     lobby,
                     lobby_subscribers,
+                    tournament_hosting,
                     game_code,
                 )
                 .await;
@@ -12121,6 +12302,8 @@ async fn handle_client_message(
                 connections,
                 game_spectators,
                 draft_state,
+                lobby,
+                tournament_hosting,
                 game_db,
                 identity,
                 tx,
@@ -12136,6 +12319,8 @@ async fn handle_client_message(
                 connections,
                 game_spectators,
                 draft_state,
+                lobby,
+                tournament_hosting,
                 game_db,
                 identity,
                 tx,
@@ -13507,6 +13692,23 @@ async fn handle_client_message(
                 identity,
             )
             .await;
+            // A newly paired round or a newly-complete deck set can make a
+            // pairing hostable; spawn any ready hosted games (idempotent).
+            match &client_msg {
+                ClientMessage::StartTournamentRound { code, .. }
+                | ClientMessage::SubmitTournamentDeck { code, .. } => {
+                    maybe_spawn_tournament_matches(
+                        code,
+                        lobby,
+                        state,
+                        db,
+                        combos,
+                        tournament_hosting,
+                    )
+                    .await;
+                }
+                _ => {}
+            }
         }
     }
 }
@@ -14005,6 +14207,9 @@ mod state_transport_derived_tests {
 
             let state: SharedState = Arc::new(Mutex::new(manager));
             let draft_state: SharedDraftState = Arc::new(Mutex::new(DraftSessionManager::new()));
+            let lobby: SharedLobby = Arc::new(Mutex::new(Broker::new()));
+            let tournament_hosting: SharedTournamentHosting =
+                Arc::new(Mutex::new(server_core::TournamentHostingManager::new()));
             let connections: SharedConnections = Arc::new(Mutex::new(HashMap::new()));
             let game_spectators: SharedGameSpectators = Arc::new(Mutex::new(HashMap::new()));
             let db_file = tempfile::NamedTempFile::new().expect("temporary game database");
@@ -14047,6 +14252,8 @@ mod state_transport_derived_tests {
                 1,
                 &state,
                 &draft_state,
+                &lobby,
+                &tournament_hosting,
                 &connections,
                 &requester_tx,
                 &game_db,
@@ -14112,6 +14319,9 @@ mod state_transport_derived_tests {
             let (game_code, player_token) = manager.create_game(PlayerDeckPayload::default(), None);
             let state: SharedState = Arc::new(Mutex::new(manager));
             let draft_state: SharedDraftState = Arc::new(Mutex::new(DraftSessionManager::new()));
+            let lobby: SharedLobby = Arc::new(Mutex::new(Broker::new()));
+            let tournament_hosting: SharedTournamentHosting =
+                Arc::new(Mutex::new(server_core::TournamentHostingManager::new()));
             let connections: SharedConnections = Arc::new(Mutex::new(HashMap::new()));
             let game_spectators: SharedGameSpectators = Arc::new(Mutex::new(HashMap::new()));
             let db_file = tempfile::NamedTempFile::new().expect("temporary game database");
@@ -14149,6 +14359,8 @@ mod state_transport_derived_tests {
                 5_001,
                 &state,
                 &draft_state,
+                &lobby,
+                &tournament_hosting,
                 &connections,
                 &requester_tx,
                 &game_db,
@@ -16984,6 +17196,7 @@ mod issue_4548_full_create_tests {
         let app_state = AppState {
             sessions: Arc::new(Mutex::new(SessionManager::new())),
             draft_sessions: Arc::new(Mutex::new(DraftSessionManager::new())),
+            tournament_hosting: Arc::new(Mutex::new(server_core::TournamentHostingManager::new())),
             draft_pools: Arc::new(pools),
             connections: Arc::new(Mutex::new(HashMap::new())),
             db,
@@ -20635,6 +20848,7 @@ mod game_submission_tests {
                 &app.game_spectators,
                 &app.lobby,
                 &app.lobby_subscribers,
+                &app.tournament_hosting,
                 &code,
             )
             .await;
@@ -20730,6 +20944,7 @@ mod game_submission_tests {
                 &app.game_spectators,
                 &app.lobby,
                 &app.lobby_subscribers,
+                &app.tournament_hosting,
                 &code,
             )
             .await;
@@ -20786,6 +21001,7 @@ mod game_submission_tests {
             &app.game_spectators,
             &app.lobby,
             &app.lobby_subscribers,
+            &app.tournament_hosting,
             code,
         )
         .await;
@@ -25476,6 +25692,7 @@ mod admin_auth_tests {
         AppState {
             sessions: Arc::new(Mutex::new(SessionManager::new())),
             draft_sessions: Arc::new(Mutex::new(DraftSessionManager::new())),
+            tournament_hosting: Arc::new(Mutex::new(server_core::TournamentHostingManager::new())),
             draft_pools: Arc::new(draft_pools::DraftPools::default()),
             connections: Arc::new(Mutex::new(std::collections::HashMap::new())),
             db: Arc::new(engine::database::CardDatabase::default()),
@@ -25647,6 +25864,7 @@ mod compression_tests {
         AppState {
             sessions: Arc::new(Mutex::new(SessionManager::new())),
             draft_sessions: Arc::new(Mutex::new(DraftSessionManager::new())),
+            tournament_hosting: Arc::new(Mutex::new(server_core::TournamentHostingManager::new())),
             draft_pools: Arc::new(draft_pools::DraftPools::default()),
             connections: Arc::new(Mutex::new(std::collections::HashMap::new())),
             db: Arc::new(engine::database::CardDatabase::default()),
@@ -26325,6 +26543,7 @@ mod p2p_backup_delete_tests {
         AppState {
             sessions: Arc::new(Mutex::new(SessionManager::new())),
             draft_sessions: Arc::new(Mutex::new(DraftSessionManager::new())),
+            tournament_hosting: Arc::new(Mutex::new(server_core::TournamentHostingManager::new())),
             draft_pools: Arc::new(draft_pools::DraftPools::default()),
             connections: Arc::new(Mutex::new(std::collections::HashMap::new())),
             db: Arc::new(engine::database::CardDatabase::default()),
@@ -26738,6 +26957,7 @@ mod metrics_tests {
         AppState {
             sessions: Arc::new(Mutex::new(SessionManager::new())),
             draft_sessions: Arc::new(Mutex::new(DraftSessionManager::new())),
+            tournament_hosting: Arc::new(Mutex::new(server_core::TournamentHostingManager::new())),
             draft_pools: Arc::new(draft_pools::DraftPools::default()),
             connections: Arc::new(Mutex::new(HashMap::new())),
             db: Arc::new(CardDatabase::default()),
