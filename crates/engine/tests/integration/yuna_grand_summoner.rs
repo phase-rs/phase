@@ -309,3 +309,60 @@ fn yuna_counter_count_saturates_without_overflow() {
         "the counter total must saturate to i32::MAX instead of overflowing"
     );
 }
+
+/// Nikara, Lair Scavenger — verbatim Oracle text. The same "if it had one or
+/// more counters on it" gate, on a leaves-the-battlefield trigger (CR 603.10a).
+const NIKARA_ORACLE: &str = "Partner with Yannik, Scavenging Sentinel (When this creature enters, target player may put Yannik into their hand from their library, then shuffle.)\nMenace\nWhenever another creature you control leaves the battlefield, if it had one or more counters on it, you draw a card and you lose 1 life.";
+
+fn nikara_departure(counters: &[(CounterType, u32)]) -> (i32, usize, i32, usize, Zone) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(P0, three_generic());
+    for name in ["Island", "Plains", "Swamp"] {
+        scenario.add_card_to_library_top(P0, name);
+    }
+    scenario.add_creature_from_oracle(P0, "Nikara, Lair Scavenger", 2, 2, NIKARA_ORACLE);
+    let destroy = scenario
+        .add_spell_to_hand_from_oracle(P0, "Vindicate", false, VINDICATE_ORACLE)
+        .id();
+    let departing = scenario.add_creature(P0, "Leaving Creature", 2, 2).id();
+    for (kind, count) in counters {
+        scenario.with_counter(departing, kind.clone(), *count);
+    }
+    let mut runner = scenario.build();
+    let life_before = runner.life(P0);
+    let hand_before = runner.state().players[0].hand.len();
+    let outcome = runner.cast(destroy).target_object(departing).resolve();
+    let zone = outcome.zone_of(departing);
+    runner.advance_until_stack_empty();
+    (
+        life_before,
+        hand_before,
+        runner.life(P0),
+        runner.state().players[0].hand.len(),
+        zone,
+    )
+}
+
+/// CR 603.4 + CR 603.10a + CR 608.2h: Nikara's trigger fires only when the
+/// departed creature had a counter, and then draws one card and loses 1 life.
+/// The counterless departure is the paired negative; both boards prove the
+/// creature actually left (reach guard), and the hand count excludes the cast
+/// Vindicate.
+#[test]
+fn nikara_draws_and_loses_life_only_for_a_countered_departure() {
+    let (life_before, hand_before, life_after, hand_after, zone) =
+        nikara_departure(&[(CounterType::Generic("oil".to_string()), 1)]);
+    assert_eq!(zone, Zone::Graveyard, "reach-guard: the creature left");
+    assert_eq!(life_after, life_before - 1, "you lose 1 life");
+    assert_eq!(
+        hand_after,
+        hand_before, // -1 Vindicate cast, +1 card drawn
+        "you draw a card (net of the cast Vindicate)"
+    );
+
+    let (life_before, hand_before, life_after, hand_after, zone) = nikara_departure(&[]);
+    assert_eq!(zone, Zone::Graveyard, "reach-guard: the creature left");
+    assert_eq!(life_after, life_before, "no counters: no life loss");
+    assert_eq!(hand_after, hand_before - 1, "no counters: no draw");
+}
