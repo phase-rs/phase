@@ -186,6 +186,9 @@ pub(crate) use shared::{
     is_tiered_enters_with_additional_counters_static,
     parse_tiered_enters_with_additional_counters_pattern,
 };
+pub(crate) use shared::{
+    parse_targeting_bypass_tail, TargetingBypassBeneficiary, TargetingBypassQuality,
+};
 pub(crate) use static_helpers::apply_raw_parenthetical_cant_cast_gate;
 pub(crate) use static_helpers::parse_basic_land_type_plural;
 pub(crate) use static_helpers::parse_leading_turn_scope;

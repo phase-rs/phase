@@ -38512,3 +38512,40 @@ fn attached_subject_production_still_fires_with_a_trailing_rider() {
         "Animate Wall prints no gate and must remain unconditioned"
     );
 }
+
+/// CR 702.11e + CR 702.18a + CR 609.4: the shared targeting-bypass tail reads the
+/// verb number, pronoun, beneficiary qualifier and quality independently. The
+/// static form only models the hexproof bypass; a shroud bypass has no static form.
+#[test]
+fn targeting_bypass_tail_axes_are_independent() {
+    for (tail, beneficiary, quality) in [
+        (
+            " can be the targets of spells and abilities as though they didn't have hexproof",
+            TargetingBypassBeneficiary::Anyone,
+            TargetingBypassQuality::Hexproof,
+        ),
+        (
+            " can be the target of spells and abilities you control as though it didn't have hexproof",
+            TargetingBypassBeneficiary::YouControl,
+            TargetingBypassQuality::Hexproof,
+        ),
+        (
+            " can be the target of spells and abilities controlled by target player as though it didn't have shroud",
+            TargetingBypassBeneficiary::ControlledByTargetPlayer,
+            TargetingBypassQuality::Shroud,
+        ),
+    ] {
+        let (rest, parsed) = parse_targeting_bypass_tail(tail).expect(tail);
+        assert_eq!(rest, "", "{tail}");
+        assert_eq!(parsed, (beneficiary, quality), "{tail}");
+    }
+    assert!(parse_targeting_bypass_tail(" can be the target of spells").is_err());
+
+    // Static path: the shroud bypass stays unparsed there (paired with the hexproof
+    // form, which `Glaring Spotlight` already covers above).
+    let tp = TextPair::new(
+        "Creatures your opponents control can be the targets of spells and abilities as though they didn't have shroud.",
+        "creatures your opponents control can be the targets of spells and abilities as though they didn't have shroud.",
+    );
+    assert!(parse_ignore_hexproof_static(&tp, tp.original).is_none());
+}
