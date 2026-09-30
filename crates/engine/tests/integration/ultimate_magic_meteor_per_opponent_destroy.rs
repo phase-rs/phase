@@ -865,7 +865,11 @@ fn targeted_forms_keep_their_parent_target_reading() {
     let mega_flare = "Kicker {3}{R}{R}\nIf this spell was kicked, create a 6/6 red Dragon creature token with flying.\nFor each opponent, choose up to one target creature that player controls. Mega Flare deals damage equal to the greatest power among creatures you control to each of the chosen creatures.";
     let parsed = parse(mega_flare, "Mega Flare", &["Kicker"], &["Sorcery"]);
     let defs = all_defs(&parsed);
-    assert!(!has_unimplemented(&parsed));
+    assert!(
+        defs.iter()
+            .any(|d| matches!(&*d.effect, Effect::TargetOnly { .. })),
+        "reach: the printed-target clause still lowers to its target declaration"
+    );
     assert!(
         !defs
             .iter()

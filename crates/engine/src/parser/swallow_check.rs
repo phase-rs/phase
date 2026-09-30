@@ -2629,7 +2629,7 @@ fn distinct_card_type_constraint_count(scoped: &ParsedAbilities) -> usize {
     root_aware_count(scoped, def_tree_distinct_card_type_constraint_count)
 }
 
-/// CR 113.2c + CR 603.1b: sum `per_def` over the unit's spell-ability roots, and
+/// CR 113.2c: sum `per_def` over the unit's spell-ability roots, and
 /// take its max over the trigger roots and over the replacement roots — see
 /// [`distinct_card_type_constraint_count`] for why split trigger and replacement
 /// roots of one printed ability count once.
@@ -13130,6 +13130,27 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
         );
         let swallows = swallows_for(&parsed, "DynamicQty");
         assert!(swallows.is_empty(), "{swallows:?}");
+        // Reach: the parse the detector saw is the full per-opponent chain, not
+        // a gap the card-wide `Unimplemented` guard would have excused.
+        assert_eq!(
+            crate::parser::swallow_check::root_aware_count(
+                &parsed,
+                crate::parser::swallow_check::def_tree_per_opponent_choice_count,
+            ),
+            1,
+            "exactly one ChooseFromZone {{ Each(Opponents) }}: {:#?}",
+            parsed.abilities
+        );
+        let mut unimplemented = false;
+        for def in &parsed.abilities {
+            let _ = crate::types::ability_visit::visit_ability_def(def, &mut |effect| {
+                if matches!(effect, Effect::Unimplemented { .. }) {
+                    unimplemented = true;
+                }
+                std::ops::ControlFlow::<()>::Continue(())
+            });
+        }
+        assert!(!unimplemented, "{:#?}", parsed.abilities);
     }
 
     /// Occurrence-counted: one per-opponent choice discharges one raised

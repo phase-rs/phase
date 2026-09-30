@@ -1450,7 +1450,7 @@ pub fn parse_target_with_syntax<'a>(
         );
     }
 
-    // CR 608.2c + CR 603.7: "the chosen <plural noun>" right after a zone-choice
+    // CR 608.2c + CR 608.2d: "the chosen <plural noun>" right after a zone-choice
     // producer (`ChooseFromZone`, signalled by `pending_tracked_set_origin`) names
     // the set that choice published. A per-player choice ("for each opponent,
     // choose …") never writes the continuation's targets — every pick is
