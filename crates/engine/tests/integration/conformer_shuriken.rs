@@ -17,13 +17,16 @@
 //! `GameRunner::cast` at P0's priority while the trigger waits on the stack.
 //! Their mana costs are left unset: the tests are about stack timing, not payment.
 
+use engine::game::derived_views::derive_views;
 use engine::game::game_object::AttachTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
-use engine::types::game_state::WaitingFor;
+use engine::types::events::GameEvent;
+use engine::types::game_state::{GameState, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
+use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -646,4 +649,231 @@ fn modal_swords_first_target_bounced_rider_reads_nothing() {
         life_before,
         "CR 608.2b: no life from an illegal target's power"
     );
+}
+
+// ---------------------------------------------------------------------------
+// W1 (review round 2): an inheriting rider's snapshot is not a second
+// announcement. Printed Aboleth Spawn (Ward {2}) is the tapped target.
+// ---------------------------------------------------------------------------
+
+const ABOLETH_SPAWN: &str = "Flash\nWard {2}\nProbing Telepathy — Whenever a creature entering under an opponent's control causes a triggered ability of that creature to trigger, you may copy that ability. You may choose new targets for the copy.";
+
+fn add_aboleth_spawn(scenario: &mut GameScenario, name: &str) -> ObjectId {
+    scenario
+        .add_creature(P1, name, 2, 3)
+        .from_oracle_text_with_keywords(&["Flash", "Ward", "Probing Telepathy"], ABOLETH_SPAWN)
+        .id()
+}
+
+fn becomes_target_count(events: &[GameEvent], object: ObjectId) -> usize {
+    events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                GameEvent::BecomesTarget {
+                    target: TargetRef::Object(o),
+                    ..
+                } if *o == object
+            )
+        })
+        .count()
+}
+
+fn triggers_from(state: &GameState, source: ObjectId) -> Vec<ObjectId> {
+    state
+        .stack
+        .iter()
+        .filter(|e| {
+            e.source_id == source && matches!(e.kind, StackEntryKind::TriggeredAbility { .. })
+        })
+        .map(|e| e.id)
+        .collect()
+}
+
+fn displayed_target_count(state: &GameState, entry: ObjectId) -> usize {
+    derive_views(state, None)
+        .stack_entry_details
+        .get(&entry)
+        .map_or(0, |d| d.targets.len())
+}
+
+/// CR 115.1 + CR 115.10a + CR 702.21a: the Shuriken trigger targets the Spawn
+/// ONCE — the gated rider only reads that announcement — so the Spawn becomes
+/// the target once, Ward triggers once, one target is displayed, and paying
+/// {2} once lets the trigger resolve (tap; 2 − 1 = +1). `decoy` adds a second
+/// legal target so the target is chosen through the prompt (manual) rather than
+/// auto-selected.
+fn shuriken_against_ward(decoy: bool) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let attacker = scenario.add_creature(P0, "Small Attacker", 1, 1).id();
+    let shuriken = scenario
+        .add_artifact_from_oracle(P0, "Conformer Shuriken", SHURIKEN)
+        .with_subtypes(vec!["Equipment"])
+        .id();
+    let spawn = add_aboleth_spawn(&mut scenario, "Aboleth Spawn");
+    if decoy {
+        scenario.add_creature(P1, "Decoy", 1, 1);
+    }
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.objects.get_mut(&shuriken).unwrap().attached_to =
+            Some(AttachTarget::Object(attacker));
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .attachments
+            .push(shuriken);
+    }
+
+    let mut events: Vec<GameEvent> = Vec::new();
+    runner.advance_to_combat();
+    events.extend(
+        runner
+            .declare_attackers(&[(attacker, AttackTarget::Player(P1))])
+            .expect("attack")
+            .events,
+    );
+    let mut prompted = false;
+    let mut ward_triggers: Vec<ObjectId> = Vec::new();
+    let mut displayed: Option<usize> = None;
+    let mut unless_prompts = 0;
+    for _ in 0..60 {
+        for id in triggers_from(runner.state(), spawn) {
+            if !ward_triggers.contains(&id) {
+                ward_triggers.push(id);
+            }
+        }
+        if displayed.is_none() && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+        {
+            if let Some(&entry) = triggers_from(runner.state(), attacker).first() {
+                displayed = Some(displayed_target_count(runner.state(), entry));
+            }
+        }
+        let action = match runner.state().waiting_for.clone() {
+            WaitingFor::TriggerTargetSelection { .. } => {
+                prompted = true;
+                GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(spawn)),
+                }
+            }
+            WaitingFor::OrderTriggers { triggers, .. } => GameAction::OrderTriggers {
+                order: (0..triggers.len()).collect(),
+            },
+            WaitingFor::UnlessPayment { .. } => {
+                unless_prompts += 1;
+                // Exactly {2}, once, at the first Ward payment.
+                if unless_prompts == 1 {
+                    for _ in 0..2 {
+                        let _ = runner.state_mut().add_mana_to_pool(
+                            P0,
+                            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+                        );
+                    }
+                }
+                GameAction::PayUnlessCost {
+                    pay: unless_prompts == 1,
+                }
+            }
+            WaitingFor::Priority { .. } if !runner.state().stack.is_empty() => {
+                GameAction::PassPriority
+            }
+            _ => break,
+        };
+        events.extend(runner.act(action).expect("action accepted").events);
+    }
+
+    assert_eq!(
+        prompted, decoy,
+        "reach guard: manual vs automatic selection"
+    );
+    assert_eq!(
+        becomes_target_count(&events, spawn),
+        1,
+        "CR 115.10a: the Spawn becomes the target once"
+    );
+    assert_eq!(ward_triggers.len(), 1, "CR 702.21a: Ward triggers once");
+    assert_eq!(displayed, Some(1), "one displayed target on the trigger");
+    assert_eq!(unless_prompts, 1, "one Ward payment prompt");
+    assert!(
+        runner.state().stack.is_empty(),
+        "reach guard: stack drained"
+    );
+    assert!(
+        runner.state().objects[&spawn].tapped,
+        "paying Ward once lets the trigger resolve"
+    );
+    assert_eq!(p1p1(&runner, attacker), 1);
+}
+
+#[test]
+fn shuriken_target_with_ward_is_announced_once_automatic_selection() {
+    shuriken_against_ward(false);
+}
+
+#[test]
+fn shuriken_target_with_ward_is_announced_once_manual_selection() {
+    shuriken_against_ward(true);
+}
+
+/// CR 115.10a + CR 702.21a: the #3864 life-gain rider ("Its controller gains
+/// life equal to its power.") is the same inherited-snapshot shape: casting
+/// Swords to Plowshares' instruction at a Ward creature announces it once.
+#[test]
+fn gain_life_rider_does_not_double_announce_a_ward_target() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let swords = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Swords to Plowshares",
+            true,
+            "Exile target creature. Its controller gains life equal to its power.",
+        )
+        .id();
+    let spawn = add_aboleth_spawn(&mut scenario, "Aboleth Spawn");
+    let mut runner = scenario.build();
+    let commit = runner.cast(swords).target_object(spawn).commit();
+    let state = commit.state();
+    let spell_entry = state
+        .stack
+        .iter()
+        .find(|e| e.source_id == swords)
+        .map(|e| e.id)
+        .expect("reach guard: Swords is on the stack");
+    assert_eq!(triggers_from(state, spawn).len(), 1, "Ward triggers once");
+    assert_eq!(displayed_target_count(state, spell_entry), 1);
+}
+
+/// Control: two genuinely distinct instances of "target" keep their
+/// multiplicity — the Ward creature and a second creature are both announced
+/// (two displayed targets), and Ward triggers for its one announcement.
+#[test]
+fn two_printed_targets_still_announce_twice() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Two Targets",
+            true,
+            "Tap target creature. Target creature gets +1/+0 until end of turn.",
+        )
+        .id();
+    let first = add_aboleth_spawn(&mut scenario, "Spawn A");
+    let second = scenario.add_creature(P1, "Plain Bear", 2, 2).id();
+    let mut runner = scenario.build();
+    let commit = runner.cast(spell).target_objects(&[first, second]).commit();
+    let state = commit.state();
+    let spell_entry = state
+        .stack
+        .iter()
+        .find(|e| e.source_id == spell)
+        .map(|e| e.id)
+        .expect("reach guard: the spell is on the stack");
+    assert_eq!(triggers_from(state, first).len(), 1);
+    assert_eq!(displayed_target_count(state, spell_entry), 2);
 }

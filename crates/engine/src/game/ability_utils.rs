@@ -2045,17 +2045,39 @@ pub fn flatten_targets_in_chain(ability: &ResolvedAbility) -> Vec<TargetRef> {
 /// are the spell's alternative targets (CR 601.2c, CR 702.174m, CR 702.194c) and
 /// the delegating node's own `targets` only mirror them
 /// (`assign_targets_recursive`), so they are not a second declaration.
+///
+/// CR 115.1 + CR 115.10a: likewise an INHERITING rider (the #3864 life-gain
+/// anaphor; a `TargetReadOrigin::ParentAnnouncement` rider) holds only a
+/// snapshot of its parent's object target, pushed by the assigners so its
+/// `Target` reads have something to read. It declares no instance of the word
+/// "target", so its entry is not a second announcement: counting it would make
+/// the object "become the target" twice (two `BecomesTarget` events, two Ward
+/// triggers, two displayed targets). The gate is the same three conjuncts the
+/// fizzle mirror [`flatten_specified_targets_in_chain`] uses, so the two agree
+/// on what an inherited entry is. Genuinely distinct printed target words keep
+/// their multiplicity.
 pub fn declared_targets_in_chain(ability: &ResolvedAbility) -> Vec<TargetRef> {
-    if let Some(sub_ability) = paid_instead_delegate(ability) {
-        return declared_targets_in_chain(sub_ability);
+    fn visit(ability: &ResolvedAbility, targets_are_inherited: bool, out: &mut Vec<TargetRef>) {
+        if let Some(sub_ability) = paid_instead_delegate(ability) {
+            visit(sub_ability, targets_are_inherited, out);
+            return;
+        }
+        if !targets_are_inherited {
+            out.extend(chain_node_targets(ability));
+        }
+        if let Some(sub_ability) = ability.sub_ability.as_deref() {
+            let inherited = !defers_sub_ability_target_selection(&ability.effect)
+                && !defers_conditional_target_selection(sub_ability)
+                && sub_ability_inherits_parent_creature_target_only(ability, sub_ability);
+            visit(sub_ability, inherited, out);
+        }
+        if let Some(else_ability) = ability.else_ability.as_deref() {
+            visit(else_ability, false, out);
+        }
     }
-    let mut targets = chain_node_targets(ability);
-    if let Some(sub_ability) = ability.sub_ability.as_deref() {
-        targets.extend(declared_targets_in_chain(sub_ability));
-    }
-    if let Some(else_ability) = ability.else_ability.as_deref() {
-        targets.extend(declared_targets_in_chain(else_ability));
-    }
+
+    let mut targets = Vec::new();
+    visit(ability, false, &mut targets);
     targets
 }
 
