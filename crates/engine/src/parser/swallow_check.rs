@@ -4314,6 +4314,85 @@ fn enters_with_finality_this_way_is_only_if_marker(
     !has_other_if
 }
 
+/// CR 608.2c + CR 611.2a: a gains-modifications cast-permission rider ("If you
+/// cast a [quality] spell this way, it gains …" — Strago and Relm) is
+/// represented by the typed `Effect::AddPendingEntersModifications` carrier
+/// attached to the `CastFromZone` clause (consumed as permission metadata). The
+/// leading "if" is the CR 608.2c back-reference to the granted cast, not a
+/// swallowed game-state condition — so the represented carrier sentence is
+/// exempted exactly like the counter/alt-cost rider siblings, and only when
+/// the unit's evidence actually contains the typed carrier.
+///
+/// The sentence is located by the recognizer's OWN consumed span
+/// (`cast_this_way_gains_rider_consumed_len`) rather than a pre-split sentence
+/// list: the rider quotes a granted ability that contains an internal period
+/// ("…sacrifice this creature.\""), which a period-only sentence model would
+/// sever. Exactly one match is required — zero (no carrier sentence) or two or
+/// more (the evidence cannot name which sentence produced it) both leave every
+/// " if " visible to the caller's marker scan.
+fn cast_this_way_gains_rider_is_only_if_marker(stripped: &str, evidence: &UnitEvidence) -> bool {
+    if !evidence.any_effect(|e| matches!(e, Effect::AddPendingEntersModifications { .. })) {
+        return false;
+    }
+    let Some(residual) = cast_this_way_gains_rider_residual(stripped) else {
+        return false;
+    };
+    let has_other_if = residual.contains(" if ") // allow-noncombinator: swallow detector marker scan on classified text
+        && !residual.contains(" as if ") // allow-noncombinator: swallow detector marker scan on classified text
+        && !residual.contains(" even if "); // allow-noncombinator: swallow detector marker scan on classified text
+    !has_other_if
+}
+
+/// Locate the represented gains-modifications rider sentence by the parser
+/// recognizer's own consumed span and return the text with that span removed
+/// (`None` when the cardinality guard is not exactly one). Sentence starts are
+/// walked with [`crate::parser::oracle_nom::primitives::parse_period_sentence`],
+/// but a match advances the walk past the recognizer's full span, so the quoted
+/// internal period inside the rider cannot split it (BF-P2-1).
+fn cast_this_way_gains_rider_residual(stripped: &str) -> Option<String> {
+    let mut remaining = stripped;
+    let mut offset = 0usize;
+    let mut matched: Option<(usize, usize)> = None;
+    while !remaining.is_empty() {
+        // `parse_period_sentence` skips leading whitespace; trim it here too so
+        // the recognizer's consumed length (measured from its first recognized
+        // byte) slices at the exact byte boundary.
+        let trimmed = remaining.trim_start();
+        offset += remaining.len() - trimmed.len();
+        remaining = trimmed;
+        if remaining.is_empty() {
+            break;
+        }
+        if let Some(len) =
+            crate::parser::oracle_effect::cast_this_way_gains_rider_consumed_len(remaining)
+        {
+            if matched.is_some() {
+                // A second syntactically matching carrier sentence means the
+                // typed evidence cannot be linked to a single sentence, so no
+                // suppression is sound.
+                return None;
+            }
+            matched = Some((offset, offset + len));
+            offset += len;
+            remaining = &remaining[len..];
+            continue;
+        }
+        match crate::parser::oracle_nom::primitives::parse_period_sentence(remaining) {
+            Ok((rest, _sentence)) => {
+                offset += remaining.len() - rest.len();
+                remaining = rest;
+            }
+            // Unterminated tail: no further sentence start exists.
+            Err(_) => break,
+        }
+    }
+    let (start, end) = matched?;
+    let mut residual = String::with_capacity(stripped.len() - (end - start));
+    residual.push_str(&stripped[..start]);
+    residual.push_str(&stripped[end..]);
+    Some(residual)
+}
+
 /// CR 118.9 + CR 607.1 + CR 608.2c: conservative cardinality guard shared by
 /// every detector that exempts an alternative-cost-rider carrier's OWN
 /// sentence ("[if you cast a spell / it this way,] pay <cost> rather than pay
@@ -4560,6 +4639,13 @@ fn detect_condition_if(
         return;
     }
     if enters_with_finality_this_way_is_only_if_marker(&stripped, evidence) {
+        return;
+    }
+    // CR 608.2c + CR 611.2a: "If you cast a [quality] spell this way, it gains …"
+    // — represented by the typed `AddPendingEntersModifications` carrier
+    // (Strago and Relm). Mirrors the counter-rider sibling exemption's evidence
+    // gate and cardinality guard.
+    if cast_this_way_gains_rider_is_only_if_marker(&stripped, evidence) {
         return;
     }
     if cast_this_way_alt_cost_is_only_if_marker(&stripped, evidence) {
@@ -14801,6 +14887,142 @@ mod detect_condition_if_replacement_exemption_tests {
              still be flagged as a swallowed Condition_If — a cardinality-blind carrier \
              exemption strips BOTH matching sentences and reports nothing; \
              diagnostics: {diagnostics:?}"
+        );
+    }
+
+    /// CR 608.2c + CR 611.2a: the gains-modifications carrier fixture — a
+    /// parsed tree whose representation is the typed
+    /// `AddPendingEntersModifications` effect (the shape Strago and Relm's
+    /// rider produces).
+    fn parsed_with_gains_rider_carrier() -> ParsedAbilities {
+        use crate::types::ability::AbilityKind;
+        let carrier = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::AddPendingEntersModifications {
+                modifications: vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Haste,
+                }],
+            },
+        );
+        ParsedAbilities {
+            abilities: vec![carrier],
+            triggers: Vec::new(),
+            statics: Vec::new(),
+            replacements: Vec::new(),
+            extracted_keywords: Vec::new(),
+            modal: None,
+            additional_cost: None,
+            casting_restrictions: Vec::new(),
+            casting_options: Vec::new(),
+            solve_condition: None,
+            strive_cost: None,
+            parse_warnings: Vec::new(),
+        }
+    }
+
+    /// The exact rider sentence shape Strago and Relm print, with a quoted
+    /// granted ability that carries an INTERNAL period — the sentence a naive
+    /// period-split would sever (BF-P2-1). Prefixed with a neutral grant
+    /// sentence so the rider's " if " is not at byte offset 0 (the detector's
+    /// marker scans require a preceding space).
+    fn gains_rider_unit_text() -> String {
+        "You may cast that card without paying its mana cost. If you cast a creature spell \
+         this way, it gains haste and \"At the beginning of the end step, sacrifice this \
+         creature.\" Activate only as a sorcery."
+            .to_string()
+    }
+
+    /// CR 608.2c + CR 611.2a: the gains-modifications carrier exemption clears
+    /// ONLY the represented carrier sentence. The positive also pins BF-P2-1:
+    /// the rider sentence quotes a granted ability with an internal period, so
+    /// the exemption must locate it by the recognizer's own consumed span, not
+    /// by a period-only sentence split.
+    #[test]
+    fn gains_rider_carrier_suppresses_only_its_own_sentence() {
+        let parsed = parsed_with_gains_rider_carrier();
+        let evidence = UnitEvidence::of(&parsed);
+
+        // Positive — the represented carrier's own sentence is exempted.
+        let text = gains_rider_unit_text();
+        let cleaned = text.to_ascii_lowercase();
+        let mut diagnostics = Vec::new();
+        detect_condition_if(&cleaned, &text, &evidence, &parsed, &mut diagnostics);
+        assert!(
+            !has_condition_if_swallow(&diagnostics),
+            "the represented gains rider must clear its own warning, got {diagnostics:?}"
+        );
+
+        // Negative — an unrelated second conditional in the same unit must
+        // remain visible.
+        let text = format!(
+            "{} If you control a Forest, draw a card.",
+            gains_rider_unit_text()
+        );
+        let cleaned = text.to_ascii_lowercase();
+        let mut diagnostics = Vec::new();
+        detect_condition_if(&cleaned, &text, &evidence, &parsed, &mut diagnostics);
+        assert!(
+            has_condition_if_swallow(&diagnostics),
+            "an unrelated second conditional must remain visible, got {diagnostics:?}"
+        );
+
+        // Negative — two matching carrier sentences with ONE typed carrier
+        // cannot be linked, so nothing is suppressed (cardinality guard).
+        let rider = gains_rider_unit_text();
+        let text = format!("{rider} {rider}");
+        let cleaned = text.to_ascii_lowercase();
+        let mut diagnostics = Vec::new();
+        detect_condition_if(&cleaned, &text, &evidence, &parsed, &mut diagnostics);
+        assert!(
+            has_condition_if_swallow(&diagnostics),
+            "two matching rider sentences with one carrier must not be suppressed, \
+             got {diagnostics:?}"
+        );
+    }
+
+    /// CR 608.2c + CR 611.2a: only a unit whose tree contains the typed
+    /// carrier is eligible; a sentence that merely has the shape is not
+    /// suppressed, and a non-gains cast-this-way sentence is never claimed by
+    /// this exemption even when the carrier is present.
+    #[test]
+    fn gains_rider_carrier_requires_typed_evidence() {
+        let parsed = parsed_with_gains_rider_carrier();
+        let text = gains_rider_unit_text();
+        let cleaned = text.to_ascii_lowercase();
+
+        // Negative — no typed evidence: the sentence shape alone must keep
+        // warning.
+        let no_evidence = UnitEvidence::from_json_for_test("{}");
+        let mut diagnostics = Vec::new();
+        detect_condition_if(&cleaned, &text, &no_evidence, &parsed, &mut diagnostics);
+        assert!(
+            has_condition_if_swallow(&diagnostics),
+            "the sentence shape without typed evidence must keep warning, got {diagnostics:?}"
+        );
+
+        // Positive reach guard — the same text with evidence suppresses, so
+        // the negative above is not vacuous.
+        let evidence = UnitEvidence::of(&parsed);
+        let mut diagnostics = Vec::new();
+        detect_condition_if(&cleaned, &text, &evidence, &parsed, &mut diagnostics);
+        assert!(
+            !has_condition_if_swallow(&diagnostics),
+            "reach guard: the same text with evidence must suppress, got {diagnostics:?}"
+        );
+
+        // Negative — Tomb's non-gains sentence ("if you do, it enters with a
+        // finality counter on it …") does not match this recognizer's prefix
+        // even with a carrier present, so it stays visible to this exemption.
+        let text = "You may cast a creature spell from your graveyard this turn. If you do, it \
+                    enters with a finality counter on it and is a Vampire in addition to its \
+                    other types.";
+        let cleaned = text.to_ascii_lowercase();
+        let mut diagnostics = Vec::new();
+        detect_condition_if(&cleaned, text, &evidence, &parsed, &mut diagnostics);
+        assert!(
+            has_condition_if_swallow(&diagnostics),
+            "Tomb's non-gains sentence must not be suppressed by the gains exemption, \
+             got {diagnostics:?}"
         );
     }
 
