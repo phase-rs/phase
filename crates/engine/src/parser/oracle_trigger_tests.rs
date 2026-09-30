@@ -4913,6 +4913,54 @@ fn trigger_first_combat_phase_followup_condition() {
     );
 }
 
+/// CR 500.8 + CR 506.1 + CR 109.5 + CR 608.2c: Tifa's second-sentence
+/// possessive conditional binds to the FOLLOW-UP ability (the untap stays
+/// unconditional), and "of your turn" composes `IsYourTurn` with
+/// `FirstCombatPhaseOfTurn` — the possessive axis on the phase-occurrence gate.
+#[test]
+fn tifa_first_combat_phase_of_your_turn_followup_condition() {
+    let def = parse_trigger_line(
+        "Whenever one or more creatures you control with power 7 or greater deal combat damage to a player, untap all creatures you control. If it's the first combat phase of your turn, there is an additional combat phase after this phase.",
+        "Tifa, Martial Artist",
+    );
+    assert_eq!(def.mode, TriggerMode::DamageDoneOnceByController);
+    assert_eq!(
+        def.condition, None,
+        "the second-sentence if must not hoist onto the trigger"
+    );
+    let head = def.execute.as_deref().expect("untap head");
+    assert!(
+        matches!(
+            head.effect.as_ref(),
+            Effect::SetTapState {
+                state: TapStateChange::Untap,
+                scope: EffectScope::All,
+                ..
+            }
+        ),
+        "paired reach guard: the head effect is the unconditional untap, got {:?}",
+        head.effect
+    );
+    let followup = head
+        .sub_ability
+        .as_deref()
+        .expect("additional combat follow-up");
+    assert!(matches!(
+        followup.effect.as_ref(),
+        Effect::AdditionalPhase { .. }
+    ));
+    assert_eq!(
+        followup.condition,
+        Some(AbilityCondition::And {
+            conditions: vec![
+                AbilityCondition::IsYourTurn,
+                AbilityCondition::FirstCombatPhaseOfTurn,
+            ],
+        }),
+        "the possessive phrase must bind IsYourTurn + FirstCombatPhaseOfTurn"
+    );
+}
+
 // Word-boundary guard: "enters untapped creatures" (hypothetical) must not
 // accidentally match — the combinator requires a terminator after the
 // state word.
@@ -12706,6 +12754,7 @@ fn subtype_intervening_if_dispatches_by_trigger_kind() {
         None,
         Some((Zone::Battlefield, Zone::Graveyard)),
         false,
+        None,
     );
     let zone_change = extraction.condition;
     let Some(TriggerCondition::Not { condition }) = zone_change else {
@@ -16256,6 +16305,157 @@ fn talion_opponent_spell_cast_chosen_number_or_filter() {
         .as_ref()
         .expect("draw chained after life loss");
     assert!(matches!(draw.effect.as_ref(), Effect::Draw { .. }));
+}
+
+/// CR 208.1 + CR 614.12a: the chosen-number P/T comparison is one shared
+/// building block. Its two legs are exactly the power/toughness comparisons
+/// against the source's as-enters choice, and Talion's existing 3-leg `AnyOf`
+/// (mana value + both P/T legs, in that order) composes from it unchanged.
+#[test]
+fn chosen_number_pt_props_shared_legs() {
+    let expected = vec![
+        FilterProp::PtComparison {
+            stat: PtStat::Power,
+            scope: PtValueScope::Current,
+            comparator: Comparator::EQ,
+            value: QuantityExpr::Ref {
+                qty: QuantityRef::ChosenNumber,
+            },
+        },
+        FilterProp::PtComparison {
+            stat: PtStat::Toughness,
+            scope: PtValueScope::Current,
+            comparator: Comparator::EQ,
+            value: QuantityExpr::Ref {
+                qty: QuantityRef::ChosenNumber,
+            },
+        },
+    ];
+    assert_eq!(chosen_number_pt_props(), expected);
+
+    let tf = parse_spell_chosen_number_quality(
+        "spell with mana value, power, or toughness equal to the chosen number",
+    )
+    .expect("Talion suffix still parses");
+    let any_of = tf
+        .properties
+        .iter()
+        .find_map(|p| match p {
+            FilterProp::AnyOf { props } => Some(props),
+            _ => None,
+        })
+        .expect("Talion reach guard: the 3-leg AnyOf is still present");
+    assert_eq!(any_of.len(), 3);
+    assert!(matches!(any_of[0], FilterProp::Cmc { .. }));
+    assert_eq!(&any_of[1..], expected.as_slice());
+}
+
+/// CR 506.2 + CR 508.1 + CR 508.1b + CR 603.4 + CR 614.12a: the verbatim
+/// Squall attack-batch chosen-number existential lowers onto the existing
+/// `AttackersDeclaredCount{AttackTarget}` subject with the head's
+/// attacked-player relation and the shared P/T filter.
+#[test]
+fn squall_attack_batch_chosen_number_condition() {
+    let def = parse_trigger_line(
+        "Whenever one or more creatures attack one of your opponents, if any of those creatures have power or toughness equal to the chosen number, Squall deals damage equal to its power to defending player.",
+        "Squall, Gunblade Duelist",
+    );
+    assert_eq!(def.mode, TriggerMode::Attacks);
+    assert!(
+        def.batched,
+        "the 'one or more creatures' head stays batched"
+    );
+    assert_eq!(def.attack_target_filter, Some(AttackTargetFilter::Player));
+    assert_eq!(
+        def.valid_target,
+        Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent)
+        )),
+        "the head's attacked-player scope must stay on valid_target"
+    );
+    let expected_filter =
+        TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::AnyOf {
+            props: chosen_number_pt_props(),
+        }]));
+    assert_eq!(
+        def.condition,
+        Some(TriggerCondition::AttackersDeclaredCount {
+            subject: AttackersDeclaredCountSubject::AttackTarget {
+                controller: ControllerRef::Opponent,
+                attacked: AttackTargetFilter::Player,
+                filter: Some(expected_filter),
+            },
+            comparator: Comparator::GE,
+            count: 1,
+        }),
+        "the chosen-number existential must bind with the head's opponent scope"
+    );
+    let execute = def.execute.as_deref().expect("Squall damage effect");
+    assert!(
+        matches!(
+            execute.effect.as_ref(),
+            Effect::DealDamage {
+                target: TargetFilter::DefendingPlayer,
+                ..
+            }
+        ),
+        "paired reach guard: the damage effect must survive the condition hoist"
+    );
+}
+
+/// CR 506.2 + CR 508.1b: the "attacks you" head variant scopes the condition's
+/// attacked player to the trigger controller (`ControllerRef::You`).
+#[test]
+fn squall_attacks_you_scope_variant() {
+    let def = parse_trigger_line(
+        "Whenever one or more creatures attack you, if any of those creatures have power or toughness equal to the chosen number, you draw a card.",
+        "Test Defender",
+    );
+    assert_eq!(
+        def.condition,
+        Some(TriggerCondition::AttackersDeclaredCount {
+            subject: AttackersDeclaredCountSubject::AttackTarget {
+                controller: ControllerRef::You,
+                attacked: AttackTargetFilter::Player,
+                filter: Some(TargetFilter::Typed(TypedFilter::default().properties(
+                    vec![FilterProp::AnyOf {
+                        props: chosen_number_pt_props(),
+                    },]
+                ))),
+            },
+            comparator: Comparator::GE,
+            count: 1,
+        }),
+        "the 'attacks you' head must bind ControllerRef::You"
+    );
+}
+
+/// P1-6 decline row (CR 603.4): an attack head the prover cannot confidently
+/// scope ("attack a player") leaves the condition unbound rather than guessing
+/// a player relation — paired with the Squall positive in the same test so the
+/// decline is not vacuous.
+#[test]
+fn attack_batch_chosen_number_declines_without_attack_scope() {
+    let undecided = parse_trigger_line(
+        "Whenever one or more creatures attack a player, if any of those creatures have power or toughness equal to the chosen number, you draw a card.",
+        "Test Undecided Attacker",
+    );
+    assert_eq!(
+        undecided.condition, None,
+        "an unconfident head must leave the condition honestly unbound"
+    );
+
+    let squall = parse_trigger_line(
+        "Whenever one or more creatures attack one of your opponents, if any of those creatures have power or toughness equal to the chosen number, Squall deals damage equal to its power to defending player.",
+        "Squall, Gunblade Duelist",
+    );
+    assert!(
+        matches!(
+            squall.condition,
+            Some(TriggerCondition::AttackersDeclaredCount { .. })
+        ),
+        "paired positive: the confident Squall head still binds"
+    );
 }
 
 #[test]
@@ -37016,6 +37216,52 @@ fn batched_partitive_graveyard_origin_trigger_line_scoping() {
         "trailing garbage must not be accepted as the graveyard-origin Or"
     );
 }
+
+/// CR 603.2c + CR 603.4 + CR 601.2a: the exile sibling of the batch
+/// graveyard-origin disjunction (Extraordinary Journey). Same zone-parameterized
+/// class, `Zone::Exile` on both legs; the card was green only through the
+/// detector's graveyard-cast exemption while its condition slot stayed null.
+#[test]
+fn exile_origin_condition_extraordinary_journey() {
+    let exile_or = TriggerCondition::Or {
+        conditions: vec![
+            TriggerCondition::ZoneChangeObjectMatchesFilter {
+                origin: Some(Zone::Exile),
+                destination: Zone::Battlefield,
+                filter: TargetFilter::Any,
+            },
+            TriggerCondition::WasCast {
+                zone: Some(Zone::Exile),
+                controller: None,
+                owner: None,
+            },
+        ],
+    };
+
+    let (rest, condition) = parse_graveyard_origin_intervening_if(
+        "if one or more of them entered from exile or was cast from exile",
+    )
+    .expect("exile passive split must bind");
+    assert!(
+        rest.is_empty(),
+        "full clause must be consumed, got {rest:?}"
+    );
+    assert_eq!(condition, exile_or);
+
+    let extra = parse_trigger_line(
+        "Whenever one or more nontoken creatures enter, if one or more of them entered from exile or was cast from exile, you draw a card. This ability triggers only once each turn.",
+        "Extraordinary Journey",
+    );
+    assert_eq!(extra.mode, TriggerMode::ChangesZone);
+    assert!(
+        extra.condition.is_some(),
+        "positive reach guard: the Extraordinary Journey condition must be bound"
+    );
+    assert_eq!(
+        extra.condition,
+        Some(exile_or),
+        "the verbatim Extraordinary Journey intervening-if must bind the exile disjunction"
+
 
 /// CR 120.3a + CR 109.4 + CR 603.2: Emissary of Despair and Emissary of Hope
 /// combat-damage triggers establish TriggeringPlayer as the relative player

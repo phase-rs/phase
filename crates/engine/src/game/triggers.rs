@@ -16600,11 +16600,51 @@ fn attackers_declared_count(
                         },
                         FilterContext::from_trigger_source,
                     );
-                    matches_target_filter(state, *attacker_id, f, &context)
+                    attack_declaration_attacker_matches_filter(state, *attacker_id, f, &context)
                 })
             })
             .count(),
     }
+}
+
+/// CR 603.4 + CR 608.2h + CR 400.7 + CR 508.1: evaluate the resolution
+/// recheck's filter against one creature from the triggering attack
+/// declaration.
+///
+/// While the creature is still on the battlefield, its live characteristics
+/// answer ("the ability will check the power and toughness of those creatures
+/// as it tries to resolve"). Once it has left, CR 608.2h routes the question
+/// to its last known information — Squall's official ruling is explicit:
+/// "If any of those creatures have left the battlefield since the first time
+/// the ability checked their power and toughness, use their power and
+/// toughness as they last existed on the battlefield." `state.lki_cache`
+/// holds exactly that exit-time snapshot (captured by
+/// `zones::apply_zone_exit_cleanup` before the zone-exit revert restores the
+/// printed base values, CR 400.7), so a departed attacker must NOT fall
+/// through to the live graveyard-card reading `filter_inner` would give it.
+/// Fail closed when neither the live battlefield object nor a snapshot exists.
+fn attack_declaration_attacker_matches_filter(
+    state: &GameState,
+    attacker_id: ObjectId,
+    filter: &TargetFilter,
+    context: &FilterContext<'_>,
+) -> bool {
+    if state
+        .objects
+        .get(&attacker_id)
+        .is_some_and(|object| object.zone == Zone::Battlefield)
+    {
+        return matches_target_filter(state, attacker_id, filter, context);
+    }
+    state.lki_cache.get(&attacker_id).is_some_and(|lki| {
+        super::filter::matches_target_filter_on_lki_snapshot(
+            state,
+            attacker_id,
+            lki,
+            filter,
+            context,
+        )
+    })
 }
 
 fn controller_ref_matches_player(
@@ -16708,13 +16748,24 @@ fn condition_is_attack_event_only(
                 trigger_mode_uses_attack_declaration_count(&trigger.mode)
             }
             crate::types::ability::AttackersDeclaredCountSubject::AttackTarget {
-                attacked, ..
-            } => trigger
-                .attack_target_filter
-                .as_ref()
-                .is_some_and(|trigger_filter| {
-                    attack_target_filters_compatible(trigger_filter, attacked)
-                }),
+                attacked,
+                filter,
+                ..
+            } => {
+                // CR 603.4: a condition carrying an object-level filter is a
+                // fact about the creatures as they are, not about the
+                // declaration alone — it must survive onto the stack entry and
+                // be rechecked at resolution (Squall's chosen-number P/T
+                // existential). The filter-less family keeps the event-time-only
+                // contract (the deliberate pre-existing event-fact contract).
+                filter.is_none()
+                    && trigger
+                        .attack_target_filter
+                        .as_ref()
+                        .is_some_and(|trigger_filter| {
+                            attack_target_filters_compatible(trigger_filter, attacked)
+                        })
+            }
         },
         _ => false,
     }
@@ -20149,6 +20200,21 @@ pub mod tests {
         }
     }
 
+    fn attack_target_count_condition_with_pt_filter(
+        attacked: AttackTargetFilter,
+        filter: TargetFilter,
+    ) -> TriggerCondition {
+        TriggerCondition::AttackersDeclaredCount {
+            subject: AttackersDeclaredCountSubject::AttackTarget {
+                controller: ControllerRef::You,
+                attacked,
+                filter: Some(filter),
+            },
+            comparator: Comparator::GE,
+            count: 1,
+        }
+    }
+
     #[test]
     fn stack_condition_strips_min_co_attackers_only_for_attacks() {
         let attacks = make_trigger(TriggerMode::Attacks);
@@ -20340,6 +20406,93 @@ pub mod tests {
         assert_eq!(
             stack_condition_for_trigger(&no_filter, &player_condition),
             Some(player_condition)
+        );
+    }
+
+    /// CR 603.4: a filter-carrying `AttackTarget` attack-count condition is an
+    /// intervening-if about the creatures themselves, so it must survive onto
+    /// the stack entry for the resolution recheck (Squall's chosen-number P/T
+    /// existential). The filter-less sibling keeps the event-time-only family
+    /// contract byte-identically.
+    #[test]
+    fn stack_condition_keeps_filter_carrying_attack_target_counts() {
+        let mut trigger = make_trigger(TriggerMode::Attacks);
+        trigger.attack_target_filter = Some(AttackTargetFilter::Player);
+        let pt_filter = TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            FilterProp::PtComparison {
+                stat: PtStat::Power,
+                scope: PtValueScope::Current,
+                comparator: Comparator::EQ,
+                value: QuantityExpr::Fixed { value: 2 },
+            },
+        ]));
+        let filtered =
+            attack_target_count_condition_with_pt_filter(AttackTargetFilter::Player, pt_filter);
+        assert_eq!(
+            stack_condition_for_trigger(&trigger, &filtered),
+            Some(filtered.clone()),
+            "the filter-carrying condition must survive for the CR 603.4 recheck"
+        );
+
+        let filterless = attack_target_count_condition(AttackTargetFilter::Player);
+        assert_eq!(
+            stack_condition_for_trigger(&trigger, &filterless),
+            None,
+            "the filter-less AttackTarget family stays event-time-only"
+        );
+    }
+
+    /// CR 603.4 + CR 608.2h + CR 400.7 + CR 208.1: the attack-declaration
+    /// recheck's filter reads a live battlefield creature's characteristics,
+    /// and a departed attacker's LAST BATTLEFIELD characteristics from the
+    /// exit-time `lki_cache` snapshot — never the reverted printed base.
+    #[test]
+    fn attack_declaration_filter_reads_last_battlefield_pt_after_exit() {
+        let mut state = setup();
+        let attacker = make_creature(&mut state, PlayerId(0), "Departed Qualifier", 2, 2);
+        let context = FilterContext::neutral();
+        let power_eq = |value: i32| {
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::PtComparison {
+                    stat: PtStat::Power,
+                    scope: PtValueScope::Current,
+                    comparator: Comparator::EQ,
+                    value: QuantityExpr::Fixed { value },
+                },
+            ]))
+        };
+
+        assert!(
+            attack_declaration_attacker_matches_filter(&state, attacker, &power_eq(2), &context),
+            "positive reach guard: the live battlefield read sees the 2/2"
+        );
+
+        // Direct pre-exit mutation: no layer pass runs between the write and
+        // the move, so the LKI snapshot captures 7/2 while the printed base
+        // stays 2/2.
+        state
+            .objects
+            .get_mut(&attacker)
+            .expect("attacker exists")
+            .power = Some(7);
+        move_to_zone(&mut state, attacker, Zone::Graveyard, &mut Vec::new());
+
+        assert!(
+            state.lki_cache.contains_key(&attacker),
+            "the zone exit must have captured a last-battlefield snapshot"
+        );
+        assert_eq!(
+            state.objects[&attacker].power,
+            Some(2),
+            "the live card is reverted to its printed base power"
+        );
+        assert!(
+            attack_declaration_attacker_matches_filter(&state, attacker, &power_eq(7), &context),
+            "the departed attacker is answered by its last-battlefield power"
+        );
+        assert!(
+            !attack_declaration_attacker_matches_filter(&state, attacker, &power_eq(2), &context),
+            "the reverted printed base must not be substituted for last-battlefield information"
         );
     }
 
