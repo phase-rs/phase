@@ -1291,6 +1291,12 @@ pub enum GameEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         subject: Option<Box<EventObjectSnapshot>>,
     },
+    /// CR 701.3a + CR 603.2e: An Aura, Equipment, or Fortification became attached
+    /// to an object or player.
+    Attached {
+        attachment_id: ObjectId,
+        target: TargetRef,
+    },
     /// CR 701.3d: An Aura, Equipment, or Fortification became unattached from
     /// the object or player it was attached to.
     Unattached {

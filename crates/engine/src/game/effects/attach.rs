@@ -471,12 +471,7 @@ pub(crate) fn deliver_attach(
     source_id: ObjectId,
     events: &mut Vec<GameEvent>,
 ) -> Option<WaitingFor> {
-    if let Some(old_target) = attach_to(state, attachment_id, target_id) {
-        events.push(GameEvent::Unattached {
-            attachment_id,
-            old_target,
-        });
-    }
+    attach_to_with_events(state, attachment_id, target_id, events);
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Attach,
@@ -1807,6 +1802,72 @@ pub fn attach_to(
     target_id: ObjectId,
 ) -> Option<TargetRef> {
     attach_to_with_authority(state, attachment_id, target_id, AttachmentAuthority::Stored)
+}
+
+/// CR 701.3a + CR 603.2e: Attach `attachment_id` to `target_id` and record
+/// `GameEvent::Attached` (and `GameEvent::Unattached` if moving from a prior host)
+/// into `events`. Returns `true` if the object became attached to the new target.
+pub fn attach_to_with_events(
+    state: &mut GameState,
+    attachment_id: ObjectId,
+    target_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    let attachment_object = state.objects.get(&attachment_id);
+    let prior_host = attachment_object
+        .and_then(|obj| obj.attached_to)
+        .map(target_ref_from_attach_target);
+    if prior_host == Some(TargetRef::Object(target_id)) {
+        return false;
+    }
+    if !can_attach_to_object(state, attachment_id, target_id) {
+        return false;
+    }
+    let old_target = attach_to(state, attachment_id, target_id);
+    if let Some(old_target) = old_target {
+        events.push(GameEvent::Unattached {
+            attachment_id,
+            old_target,
+        });
+    }
+    events.push(GameEvent::Attached {
+        attachment_id,
+        target: TargetRef::Object(target_id),
+    });
+    true
+}
+
+/// CR 701.3a + CR 603.2e: Attach `attachment_id` to `target_player` and record
+/// `GameEvent::Attached` (and `GameEvent::Unattached` if moving from a prior host)
+/// into `events`. Returns `true` if the object became attached to the player.
+pub fn attach_to_player_with_events(
+    state: &mut GameState,
+    attachment_id: ObjectId,
+    target_player: PlayerId,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    let attachment_object = state.objects.get(&attachment_id);
+    let prior_host = attachment_object
+        .and_then(|obj| obj.attached_to)
+        .map(target_ref_from_attach_target);
+    if prior_host == Some(TargetRef::Player(target_player)) {
+        return false;
+    }
+    if !can_attach_to_player(state, attachment_id, target_player) {
+        return false;
+    }
+    let old_target = attach_to_player(state, attachment_id, target_player);
+    if let Some(old_target) = old_target {
+        events.push(GameEvent::Unattached {
+            attachment_id,
+            old_target,
+        });
+    }
+    events.push(GameEvent::Attached {
+        attachment_id,
+        target: TargetRef::Player(target_player),
+    });
+    true
 }
 
 /// CR 614.12 + CR 701.3a: [`attach_to`] whose CR 701.3b legality gate reads the

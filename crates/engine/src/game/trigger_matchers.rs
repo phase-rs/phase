@@ -1069,6 +1069,7 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::ExtraTurnCreated { .. }
         | GameEvent::ObjectConjured { .. }
         | GameEvent::EffectResolved { .. }
+        | GameEvent::Attached { .. }
         | GameEvent::Unattached { .. }
         // CR 116.2c: carries a group key and a player, no object subject to
         // count for a "one or more <FILTER> …" trigger filter.
@@ -3137,7 +3138,7 @@ pub(super) fn match_exiled(
     }
 }
 
-/// CR 701.3a: Attached triggers compare the object that became attached
+/// CR 701.3a + CR 603.2e: Attached triggers compare the object that became attached
 /// (`valid_card`) with the host it is attached to (`valid_target`).
 pub(super) fn match_attached(
     event: &GameEvent,
@@ -3146,7 +3147,11 @@ pub(super) fn match_attached(
     state: &GameState,
 ) -> bool {
     let source_id = source_event_subject_id(source_context);
-    match event {
+    let (attachment_id, target) = match event {
+        GameEvent::Attached {
+            attachment_id,
+            target,
+        } => (*attachment_id, target.clone()),
         GameEvent::EffectResolved {
             kind: EffectKind::Attach | EffectKind::AttachAll | EffectKind::Equip,
             source_id: eventsource_id,
@@ -3164,43 +3169,32 @@ pub(super) fn match_attached(
                 *eventsource_id
             };
 
-            if attachment_id != source_id
-                && !matches!(trigger.valid_target, Some(TargetFilter::SelfRef))
-            {
+            let Some(host) = state
+                .objects
+                .get(&attachment_id)
+                .and_then(|obj| obj.attached_to)
+            else {
                 return false;
-            }
-
-            valid_card_matches(trigger, state, attachment_id, source_context)
-                && attached_host_matches(trigger, state, attachment_id, source_context)
+            };
+            let target = match host {
+                crate::game::game_object::AttachTarget::Object(id) => TargetRef::Object(id),
+                crate::game::game_object::AttachTarget::Player(pid) => TargetRef::Player(pid),
+            };
+            (attachment_id, target)
         }
-        _ => false,
-    }
-}
+        _ => return false,
+    };
 
-fn attached_host_matches(
-    trigger: &TriggerDefinition,
-    state: &GameState,
-    attachment_id: ObjectId,
-    source_context: &TriggerSourceContext,
-) -> bool {
-    let Some(host) = state
-        .objects
-        .get(&attachment_id)
-        .and_then(|obj| obj.attached_to)
-    else {
+    if attachment_id != source_id && !matches!(trigger.valid_target, Some(TargetFilter::SelfRef)) {
         return false;
-    };
-    let Some(filter) = trigger.valid_target.as_ref() else {
-        return true;
-    };
-    match host {
-        crate::game::game_object::AttachTarget::Object(object_id) => {
-            target_filter_matches_object(state, object_id, filter, source_context)
-        }
-        crate::game::game_object::AttachTarget::Player(player_id) => {
-            player_matches_filter(filter, state, player_id, source_context)
-        }
     }
+
+    valid_card_matches(trigger, state, attachment_id, source_context)
+        && trigger
+            .valid_target
+            .as_ref()
+            .map(|filter| target_ref_matches_filter(&target, filter, state, source_context))
+            .unwrap_or(true)
 }
 
 fn target_ref_matches_filter(

@@ -1083,6 +1083,22 @@ pub(crate) fn parse_enchanted_equipped_predicate(
         );
     }
 
+    // CR 702.18a / CR 702.11a: "can't be the target [of ...]" on attached/scoped host
+    if let Some(scope) = crate::parser::oracle_keyword::classify_cant_be_targeted(body_lower) {
+        let keyword = match scope {
+            crate::parser::oracle_keyword::CantBeTargetedScope::AnyPlayer => Keyword::Shroud,
+            crate::parser::oracle_keyword::CantBeTargetedScope::OpponentsOnly => Keyword::Hexproof,
+        };
+        let mut def = StaticDefinition::continuous()
+            .affected(affected.clone())
+            .modifications(vec![ContinuousModification::AddKeyword { keyword }])
+            .description(description.to_string());
+        if let Some(condition) = &suffix_condition {
+            attach_gated_condition(&mut def, condition.clone(), &gap_text);
+        }
+        return vec![def];
+    }
+
     // --- Conditional grants: split "as long as" before passing to continuous parser ---
     // Handles both "gets +1/+1 as long as ..." and "has flying as long as ..."
     //

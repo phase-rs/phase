@@ -1805,5 +1805,6 @@ mod optional_chain_link_prompt_description;
 mod planeswalker_token;
 mod professor_hojo_activation_cost;
 mod ripple_reveal_choice_interaction;
+mod shielding_plax_bramble_elemental;
 mod siphon_insight_mana_rider;
 mod uba_mask_draw_to_exile_play;

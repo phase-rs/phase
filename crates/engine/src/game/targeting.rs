@@ -2056,7 +2056,11 @@ pub(crate) fn extract_source_from_event(
         GameEvent::TokenCreated { object_id, .. } => Some(*object_id),
         GameEvent::CreatureDestroyed { object_id } => Some(*object_id),
         GameEvent::PermanentSacrificed { object_id, .. } => Some(*object_id),
-        GameEvent::Unattached {
+        GameEvent::Attached {
+            target: TargetRef::Object(object_id),
+            ..
+        }
+        | GameEvent::Unattached {
             old_target: TargetRef::Object(object_id),
             ..
         } => Some(*object_id),
@@ -2217,6 +2221,7 @@ pub(crate) fn extract_target_object_from_event(
         | GameEvent::PermanentSacrificed { .. }
         | GameEvent::ControllerChanged { .. }
         | GameEvent::EffectResolved { .. }
+        | GameEvent::Attached { .. }
         | GameEvent::Unattached { .. }
         | GameEvent::ContinuousEffectEnded { .. }
         | GameEvent::AttackersDeclared { .. }
@@ -2335,7 +2340,11 @@ pub(crate) fn extract_player_from_event(
         // carried on the event.
         GameEvent::AbilityActivated { player_id, .. } => Some(*player_id),
         GameEvent::PermanentSacrificed { player_id, .. } => Some(*player_id),
-        GameEvent::Unattached {
+        GameEvent::Attached {
+            target: TargetRef::Player(player_id),
+            ..
+        }
+        | GameEvent::Unattached {
             old_target: TargetRef::Player(player_id),
             ..
         } => Some(*player_id),

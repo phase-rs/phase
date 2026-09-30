@@ -1052,10 +1052,10 @@ pub(crate) fn apply_create_token_after_replacement_with_created_ids(
         if let Some(host) = spec.attach_to.bound() {
             match host {
                 AttachTarget::Object(id) => {
-                    super::attach::attach_to(state, obj_id, id);
+                    super::attach::attach_to_with_events(state, obj_id, id, events);
                 }
                 AttachTarget::Player(pid) => {
-                    super::attach::attach_to_player(state, obj_id, pid);
+                    super::attach::attach_to_player_with_events(state, obj_id, pid, events);
                 }
             }
         }
@@ -2023,10 +2023,10 @@ pub(crate) fn finalize_committed_liminal_token_entry_from_action(
     if let Some(host) = attach_to {
         match host {
             AttachTarget::Object(id) => {
-                super::attach::attach_to(state, object_id, id);
+                super::attach::attach_to_with_events(state, object_id, id, events);
             }
             AttachTarget::Player(pid) => {
-                super::attach::attach_to_player(state, object_id, pid);
+                super::attach::attach_to_player_with_events(state, object_id, pid, events);
             }
         };
     }

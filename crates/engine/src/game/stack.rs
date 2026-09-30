@@ -2812,7 +2812,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                             state, entry.id, *target_id,
                         ) =>
                     {
-                        effects::attach::attach_to(state, entry.id, *target_id);
+                        effects::attach::attach_to_with_events(state, entry.id, *target_id, events);
                     }
                     Some(crate::types::ability::TargetRef::Object(_)) => {
                         // Target is no longer a legal host — SBA cleanup follows.
@@ -2823,7 +2823,9 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     // `check_unattached_auras` (CR 303.4c) will detach + grave
                     // a Curse whose enchanted player has left the game.
                     Some(crate::types::ability::TargetRef::Player(player_id)) => {
-                        effects::attach::attach_to_player(state, entry.id, *player_id);
+                        effects::attach::attach_to_player_with_events(
+                            state, entry.id, *player_id, events,
+                        );
                     }
                     None => {
                         // CR 303.4g: An Aura entering the battlefield with no
@@ -3240,14 +3242,12 @@ fn resolve_keyword_action(
                         && t.card_types.core_types.contains(&CoreType::Creature)
                 });
             if still_valid {
-                if let Some(old_target) =
-                    effects::attach::attach_to(state, equipment_id, target_creature_id)
-                {
-                    events.push(GameEvent::Unattached {
-                        attachment_id: equipment_id,
-                        old_target,
-                    });
-                }
+                effects::attach::attach_to_with_events(
+                    state,
+                    equipment_id,
+                    target_creature_id,
+                    events,
+                );
             }
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::Equip,

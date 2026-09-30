@@ -3514,11 +3514,21 @@ pub(crate) fn apply_pending_spell_resolution(
                 crate::types::ability::TargetRef::Object(target_id)
                     if state.battlefield.contains(target_id) =>
                 {
-                    effects::attach::attach_to(state, ctx.object_id, *target_id);
+                    effects::attach::attach_to_with_events(
+                        state,
+                        ctx.object_id,
+                        *target_id,
+                        events,
+                    );
                 }
                 crate::types::ability::TargetRef::Object(_) => {}
                 crate::types::ability::TargetRef::Player(player_id) => {
-                    effects::attach::attach_to_player(state, ctx.object_id, *player_id);
+                    effects::attach::attach_to_player_with_events(
+                        state,
+                        ctx.object_id,
+                        *player_id,
+                        events,
+                    );
                 }
             }
         }

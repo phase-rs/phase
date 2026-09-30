@@ -3999,12 +3999,13 @@ pub(crate) fn deliver_replaced_zone_change(
             if let Some(target) = attach_to {
                 match target {
                     crate::game::game_object::AttachTarget::Object(target_id) => {
-                        let _ =
-                            crate::game::effects::attach::attach_to(state, object_id, target_id);
+                        crate::game::effects::attach::attach_to_with_events(
+                            state, object_id, target_id, events,
+                        );
                     }
                     crate::game::game_object::AttachTarget::Player(player_id) => {
-                        let _ = crate::game::effects::attach::attach_to_player(
-                            state, object_id, player_id,
+                        crate::game::effects::attach::attach_to_player_with_events(
+                            state, object_id, player_id, events,
                         );
                     }
                 }

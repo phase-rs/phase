@@ -634,7 +634,9 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         GameEvent::CreatureDestroyed { .. } => push(TriggerEventKey::Destroyed),
         GameEvent::PermanentSacrificed { .. } => push(TriggerEventKey::Sacrificed),
         GameEvent::EffectResolved { kind, .. } => keys_from_effect_kind(*kind, &mut push),
-        GameEvent::Unattached { .. } => push(TriggerEventKey::AttachmentChanged),
+        GameEvent::Attached { .. } | GameEvent::Unattached { .. } => {
+            push(TriggerEventKey::AttachmentChanged)
+        }
         // CR 116.2c + CR 116.1: no printed trigger condition matches "a
         // continuous effect ended". The special action doesn't use the stack, and
         // any consequential board change (a Licid reverting to a creature and
