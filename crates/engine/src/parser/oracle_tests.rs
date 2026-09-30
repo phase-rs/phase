@@ -17217,8 +17217,8 @@ fn strip_counter_conditional_demonstrative_target_non_trigger() {
 /// `DealDamage`. The leading demonstrative is deliberately withheld from
 /// `strip_counter_conditional` (offered only in the trailing form), so
 /// `strip_counter_conditional` returns no condition here and this
-/// replacement-class clause stays on the same inert deferral path as upstream
-/// `main` (CR 608.2c). Discriminating: under the pre-fix over-acceptance the
+/// replacement-class clause stays off the counter-conditional (the "if that
+/// creature has" owner fails it closed instead, CR 608.2c). Discriminating: under the pre-fix over-acceptance the
 /// leading demonstrative matched and the condition became
 /// `QuantityCheck(Target, GE 1)`, with the "instead" replacement wrongly lowered
 /// as an additive 5-damage sibling (target with a counter → 3+5=8 instead of the
@@ -25741,15 +25741,17 @@ fn difference_counter_anaphor_without_comparison_stays_unimplemented() {
     );
 }
 
-/// CR 122.1 + CR 603.4: Conformer Shuriken class — the "equal to the difference"
-/// put-counter sits under a CLAUSE-LEVEL conditional continuation (a
-/// `sub_ability`), not the trigger's hoisted intervening-if, so there is no
-/// `QuantityComparison` on `def.condition` to bind against. The deferred
-/// placeholder is nested one level below the top-level effect, where the
-/// top-level-only `count_expr_mut` guard cannot see it. The recursive resolver
-/// must still downgrade it to an honest Unimplemented so the card does NOT
-/// appear falsely supported (no surviving `PutCounter { Variable{"difference"} }`
-/// anywhere in the tree).
+/// CR 122.1 + CR 603.4: the "equal to the difference" put-counter sits under a
+/// CLAUSE-LEVEL conditional continuation (a `sub_ability`), not the trigger's
+/// hoisted intervening-if. Here the gate uses the stat-first order "has power
+/// greater than ~'s power", which the comparative gate
+/// (`strip_target_comparative_pt_conditional`) deliberately does not accept, so
+/// there is no `QuantityCheck` for "the difference" to bind against. The card
+/// must NOT appear falsely supported: no surviving
+/// `PutCounter { Variable{"difference"} }` anywhere in the tree, and a loud
+/// `Unimplemented` residual instead. (Conformer Shuriken's printed wording,
+/// "has greater power than this creature", IS accepted — see
+/// `conformer_shuriken_binds_difference_to_the_clause_comparison`.)
 #[test]
 fn nested_conditional_difference_anaphor_downgrades_to_unimplemented() {
     use crate::types::ability::QuantityRef;
@@ -25779,7 +25781,7 @@ fn nested_conditional_difference_anaphor_downgrades_to_unimplemented() {
         "Whenever this creature attacks, tap target creature defending player controls. \
          If that creature has power greater than this creature's power, put a number of \
          +1/+1 counters on this creature equal to the difference.",
-        "Conformer Shuriken",
+        "Test Relic",
         &[],
         &["Artifact"],
         &["Equipment"],
@@ -25799,6 +25801,255 @@ fn nested_conditional_difference_anaphor_downgrades_to_unimplemented() {
         has_unimplemented(execute),
         "nested unbindable difference anaphor must become a loud Unimplemented residual: {execute:#?}"
     );
+}
+
+/// The granted trigger's execute chain on an "Equipped creature has \"…\""
+/// Equipment (Conformer Shuriken's shape).
+fn granted_trigger_execute(r: &ParsedAbilities) -> &AbilityDefinition {
+    r.statics
+        .iter()
+        .flat_map(|s| s.modifications.iter())
+        .find_map(|m| match m {
+            crate::types::ability::ContinuousModification::GrantTrigger { trigger } => {
+                trigger.execute.as_deref()
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no granted trigger with a body: {r:#?}"))
+}
+
+/// Asserts the complete Conformer-class chain: tap target creature defending
+/// player controls, then a `QuantityCheck`-gated `PutCounter` of +1/+1 counters
+/// on the source whose count is the `Difference` of the gate's two operands.
+fn assert_comparative_difference_chain(
+    r: &ParsedAbilities,
+    stat: fn(ObjectScope) -> QuantityRef,
+    comparator: Comparator,
+) {
+    use crate::types::counter::CounterType;
+    assert!(
+        !format!("{r:?}").contains("Unimplemented"),
+        "the whole card must parse with no Unimplemented: {r:#?}"
+    );
+    let execute = granted_trigger_execute(r);
+    assert!(
+        matches!(
+            &*execute.effect,
+            Effect::SetTapState {
+                target: TargetFilter::Typed(_),
+                ..
+            }
+        ),
+        "root must tap the target creature: {execute:#?}"
+    );
+    let sub = execute
+        .sub_ability
+        .as_deref()
+        .unwrap_or_else(|| panic!("the gated clause must chain off the tap: {execute:#?}"));
+    let target_stat = QuantityExpr::Ref {
+        qty: stat(ObjectScope::Target),
+    };
+    let source_stat = QuantityExpr::Ref {
+        qty: stat(ObjectScope::Source),
+    };
+    assert_eq!(
+        sub.condition,
+        Some(AbilityCondition::QuantityCheck {
+            lhs: target_stat.clone(),
+            comparator,
+            rhs: source_stat.clone(),
+        }),
+        "gate must compare the tapped target's stat with the source's: {sub:#?}"
+    );
+    assert_eq!(
+        *sub.effect,
+        Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Difference {
+                left: Box::new(target_stat),
+                right: Box::new(source_stat),
+            },
+            target: TargetFilter::SelfRef,
+        },
+        "count must be the Difference of the gate's operands, on the source: {sub:#?}"
+    );
+}
+
+/// CR 208.1 + CR 608.2c: Conformer Shuriken — "If that creature has greater
+/// power than this creature, put a number of +1/+1 counters on this creature
+/// equal to the difference." The clause-level comparison is typed, so the
+/// clause's own difference bind resolves "the difference" to its operands.
+#[test]
+fn conformer_shuriken_binds_difference_to_the_clause_comparison() {
+    let r = parse(
+        "Equipped creature has \"Whenever this creature attacks, tap target creature defending player controls. If that creature has greater power than this creature, put a number of +1/+1 counters on this creature equal to the difference.\"\nEquip {2}",
+        "Conformer Shuriken",
+        &[],
+        &["Artifact"],
+        &["Equipment"],
+    );
+    assert_comparative_difference_chain(&r, |scope| QuantityRef::Power { scope }, Comparator::GT);
+}
+
+/// CR 208.1 + CR 608.2c: every shape the comparative gate accepts,
+/// `{greater, less} × {power, toughness}`, lowers to the full chain through the
+/// production dispatch path (synthetic Equipment texts; only "greater power" is
+/// printed).
+#[test]
+fn comparative_pt_gate_accepted_shapes_bind_the_difference() {
+    let power: fn(ObjectScope) -> QuantityRef = |scope| QuantityRef::Power { scope };
+    let toughness: fn(ObjectScope) -> QuantityRef = |scope| QuantityRef::Toughness { scope };
+    for (phrase, stat, comparator) in [
+        ("greater power", power, Comparator::GT),
+        ("less power", power, Comparator::LT),
+        ("greater toughness", toughness, Comparator::GT),
+        ("less toughness", toughness, Comparator::LT),
+    ] {
+        let text = format!(
+            "Equipped creature has \"Whenever this creature attacks, tap target creature defending player controls. If that creature has {phrase} than this creature, put a number of +1/+1 counters on this creature equal to the difference.\"\nEquip {{2}}"
+        );
+        let r = parse(&text, "Test Shuriken", &[], &["Artifact"], &["Equipment"]);
+        assert_comparative_difference_chain(&r, stat, comparator);
+    }
+}
+
+/// CR 115.1 + CR 608.2c: "that creature" in the comparative gate reads an
+/// object target an earlier clause declared. With no such clause the gate must
+/// fail closed (a named `Unimplemented`), never bind a guess; the adjacent
+/// control with a declared tap target binds.
+#[test]
+fn comparative_pt_gate_without_a_target_antecedent_fails_closed() {
+    let unbound = parse(
+        "When this creature enters, draw a card. If that creature has greater power than this creature, put a +1/+1 counter on this creature.",
+        "Test Creature",
+        &[],
+        &["Creature"],
+        &[],
+    );
+    assert!(
+        has_unimplemented_mentioning(&unbound, "comparative_pt_anaphor_unbound"),
+        "an unbound comparative gate must fail closed: {unbound:#?}"
+    );
+    let bound = parse(
+        "When this creature enters, tap target creature. If that creature has greater power than this creature, put a +1/+1 counter on this creature.",
+        "Test Creature",
+        &[],
+        &["Creature"],
+        &[],
+    );
+    assert!(
+        !format!("{bound:?}").contains("Unimplemented"),
+        "control: a declared tap target binds the gate: {bound:#?}"
+    );
+    assert!(
+        format!("{bound:?}").contains("QuantityCheck"),
+        "control: the bound gate is a typed comparison: {bound:#?}"
+    );
+}
+
+/// CR 115.1: a gate that names a NEW target ("if target creature has greater
+/// power than this creature") is not the "that creature" anaphor, so it is never
+/// linked to the tap's announced target. It must not come out as a
+/// chosen-group reader; whatever it lowers to, it keeps its own instance of
+/// "target" (or fails closed).
+#[test]
+fn comparative_gate_naming_a_new_target_is_not_linked_to_the_parent() {
+    let r = parse(
+        "Equipped creature has \"Whenever this creature attacks, tap target creature defending player controls. If target creature has greater power than this creature, put a number of +1/+1 counters on this creature equal to the difference.\"\nEquip {2}",
+        "Test Shuriken",
+        &[],
+        &["Artifact"],
+        &["Equipment"],
+    );
+    let execute = granted_trigger_execute(&r);
+    // REACH GUARD: the granted trigger and its tap parsed.
+    assert!(
+        matches!(&*execute.effect, Effect::SetTapState { .. }),
+        "reach guard: the tap clause parsed: {execute:#?}"
+    );
+    fn any_group_reader(def: &AbilityDefinition) -> bool {
+        def.reads_chosen_group.is_some()
+            || def.sub_ability.as_deref().is_some_and(any_group_reader)
+            || def.else_ability.as_deref().is_some_and(any_group_reader)
+    }
+    assert!(
+        !any_group_reader(execute) && execute.declares_chosen_group.is_none(),
+        "a new-target gate must not be linked to the tap's target: {execute:#?}"
+    );
+}
+
+/// CR 608.2c: an "if that creature has <predicate>," gate whose predicate is not
+/// a keyword (a counter or power threshold) cannot be evaluated by the
+/// keyword check, so it must fail closed as a named `Unimplemented` rather than
+/// ship as an inert `TargetHasKeywordInstead{Unknown}` that reads as supported.
+/// Real keyword gates (Toxic, Flying) are unchanged.
+#[test]
+fn unknown_keyword_gate_fails_closed() {
+    use crate::types::keywords::Keyword;
+    for (name, text, types) in [
+        (
+            "Bring Low",
+            "Bring Low deals 3 damage to target creature. If that creature has a +1/+1 counter on it, Bring Low deals 5 damage to it instead.",
+            &["Instant"][..],
+        ),
+        (
+            "Strider, Ranger of the North",
+            "Landfall — Whenever a land you control enters, target creature gets +1/+1 until end of turn. Then if that creature has power 4 or greater, it gains first strike until end of turn.",
+            &["Creature"][..],
+        ),
+        (
+            "Urdnan, Dromoka Warrior",
+            "When Urdnan enters, put a +1/+1 counter on target creature.\nWhenever you attack, target attacking creature with a +1/+1 counter on it gains first strike until end of turn. If that creature has two or more +1/+1 counters on it, it gains double strike until end of turn instead.",
+            &["Creature"][..],
+        ),
+    ] {
+        let r = parse(text, name, &[], types, &[]);
+        let rendered = format!("{r:?}");
+        assert!(
+            has_unimplemented_mentioning(&r, "target_has_unknown_keyword_condition"),
+            "{name}: a non-keyword gate must fail closed: {r:#?}"
+        );
+        assert!(
+            !rendered.contains("TargetHasKeywordInstead"),
+            "{name}: no inert keyword gate may survive: {r:#?}"
+        );
+    }
+    for (name, text, types, keyword_matches) in [
+        (
+            "Porcelain Zealot",
+            "At the beginning of combat on your turn, target creature you control gets +1/+1 until end of turn. If that creature has toxic, instead it gets +2/+2 until end of turn.",
+            &["Creature"][..],
+            (|k: &Keyword| matches!(k, Keyword::Toxic(_))) as fn(&Keyword) -> bool,
+        ),
+        (
+            "Cut Propulsion",
+            "Target creature deals damage to itself equal to its power. If that creature has flying, it deals twice that much damage to itself instead.",
+            &["Instant"][..],
+            (|k: &Keyword| matches!(k, Keyword::Flying)) as fn(&Keyword) -> bool,
+        ),
+    ] {
+        let r = parse(text, name, &[], types, &[]);
+        assert!(
+            !format!("{r:?}").contains("Unimplemented"),
+            "{name}: a real keyword gate must still parse: {r:#?}"
+        );
+        fn find_keyword_gate(def: &AbilityDefinition) -> Option<&Keyword> {
+            if let Some(AbilityCondition::TargetHasKeywordInstead { keyword }) = &def.condition {
+                return Some(keyword);
+            }
+            def.sub_ability
+                .as_deref()
+                .and_then(find_keyword_gate)
+                .or_else(|| def.else_ability.as_deref().and_then(find_keyword_gate))
+        }
+        let gate = r
+            .abilities
+            .iter()
+            .chain(r.triggers.iter().filter_map(|t| t.execute.as_deref()))
+            .find_map(find_keyword_gate)
+            .unwrap_or_else(|| panic!("{name}: keyword gate must survive: {r:#?}"));
+        assert!(keyword_matches(gate), "{name}: wrong keyword {gate:?}");
+    }
 }
 
 /// CR 508.6 + CR 608.2c: The Commander 2017 "whenever enchanted player is

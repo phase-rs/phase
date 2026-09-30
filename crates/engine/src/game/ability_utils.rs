@@ -2220,9 +2220,12 @@ pub(crate) fn illegal_declared_target_slots(
 /// `chain_has_target_sink` returns early for four of those same parent shapes.
 /// So this mirror can answer "inherited" on a parent whose producer arm never
 /// reached the push. That over-exclusion is INERT today, for two reasons that
-/// must be re-checked if either side moves. The only sub it can misclassify is
+/// must be re-checked if either side moves. The only subs it can misclassify are
 /// a GainLife anaphor rider (`effect_player_filter_is_parent_target_anaphor` is
-/// `_ => false` for everything else), and for such a rider:
+/// `_ => false` for everything else) and a chosen-group reader of its parent
+/// (`sub_reads_parent_declared_group`; the only printed reader, Conformer
+/// Shuriken, has a `SetTapState` producer, which none of the six arms owns).
+/// For such a rider:
 ///   * on FIVE of the six arms the slot builder surfaces no slot for it, so its
 ///     `targets` is empty and skipping it is a no-op —
 ///     `collect_target_slots_inner`'s `Fight` arm descends into no sub at all,
@@ -5569,6 +5572,10 @@ fn effect_primary_target_supplies_player_target(effect: &Effect) -> bool {
 /// chosen object for the life-gain magnitude. They must not surface a second
 /// creature target slot for the `Power {{ Target }}` quantity ref — the parent's
 /// slot is the only player choice (issue #3864; same class as #3310 Condemn).
+/// Two provenance proofs admit a rider: its player filter is a parent-target
+/// anaphor (the GainLife riders above), or the parser linked it to the parent's
+/// announced target through the chosen-group channel
+/// ([`sub_reads_parent_declared_group`], Conformer Shuriken).
 fn sub_ability_inherits_parent_creature_target_only(
     parent: &ResolvedAbility,
     sub: &ResolvedAbility,
@@ -5592,7 +5599,20 @@ fn sub_ability_inherits_parent_creature_target_only(
         return false;
     }
     effect_needs_target_creature_quantity_slot(&sub.effect)
-        && effect_player_filter_is_parent_target_anaphor(&sub.effect)
+        && (effect_player_filter_is_parent_target_anaphor(&sub.effect)
+            || sub_reads_parent_declared_group(parent, sub))
+}
+
+/// CR 115.1 + CR 608.2c: the parser linked this rider to its parent's announced
+/// target through the typed chosen-group channel ("tap target creature … If
+/// that creature has greater power than this creature, put … equal to the
+/// difference" — Conformer Shuriken). The link is written only for an anaphor
+/// ("that creature"), never for a clause naming a new "target", so the rider's
+/// `Target`-scoped magnitude reads the parent's chosen object and is not a
+/// second instance of the word "target". `restamp_chosen_group_targets` binds
+/// the rider's `targets` to exactly that group.
+fn sub_reads_parent_declared_group(parent: &ResolvedAbility, sub: &ResolvedAbility) -> bool {
+    sub.reads_chosen_group.is_some() && sub.reads_chosen_group == parent.declares_chosen_group
 }
 
 /// CR 115.1 + CR 115.10a + CR 608.2c: A one-sided-fight `DealDamage` ("Target
@@ -13111,6 +13131,75 @@ mod tests {
             "CR 608.2b + CR 115.10a: 'its controller gains life equal to its \
              power' has no instance of the word 'target' of its own, so its \
              propagated snapshot must not keep the spell alive"
+        );
+    }
+
+    /// CR 115.1 + CR 608.2c: Conformer Shuriken's gated rider ("If that creature
+    /// has greater power than this creature, put … equal to the difference")
+    /// reads its parent's announced tap target through the typed chosen-group
+    /// link, so it inherits that target: no second slot, and its snapshot does
+    /// not keep the ability alive. The same rider WITHOUT the link (what a gate
+    /// naming a new "target creature" would produce) still needs its own slot.
+    #[test]
+    fn chosen_group_reader_inherits_its_producers_target() {
+        use crate::types::ability::ChosenGroupId;
+        use crate::types::counter::CounterType;
+
+        let victim = ObjectId(77);
+        let mut tap = ResolvedAbility::new(
+            Effect::SetTapState {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                scope: EffectScope::Single,
+                state: crate::types::ability::TapStateChange::Tap,
+            },
+            vec![TargetRef::Object(victim)],
+            ObjectId(99),
+            PlayerId(0),
+        );
+        tap.declares_chosen_group = Some(ChosenGroupId(0));
+        let power = |scope| QuantityExpr::Ref {
+            qty: QuantityRef::Power { scope },
+        };
+        let rider = |reads: Option<ChosenGroupId>| {
+            let mut rider = ResolvedAbility::new(
+                Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Difference {
+                        left: Box::new(power(ObjectScope::Target)),
+                        right: Box::new(power(ObjectScope::Source)),
+                    },
+                    target: TargetFilter::SelfRef,
+                },
+                vec![TargetRef::Object(victim)],
+                ObjectId(99),
+                PlayerId(0),
+            );
+            rider.reads_chosen_group = reads;
+            rider
+        };
+
+        // REACH GUARD: the magnitude really is a count-derived creature slot.
+        assert!(effect_needs_target_creature_quantity_slot(
+            &rider(None).effect
+        ));
+        assert!(
+            sub_ability_inherits_parent_creature_target_only(&tap, &rider(Some(ChosenGroupId(0)))),
+            "the linked reader must inherit its producer's target"
+        );
+        assert!(
+            !sub_ability_inherits_parent_creature_target_only(&tap, &rider(None)),
+            "an unlinked rider keeps its own count-derived slot"
+        );
+        assert!(
+            !sub_ability_inherits_parent_creature_target_only(&tap, &rider(Some(ChosenGroupId(1)))),
+            "a link to a different group is not this parent's target"
+        );
+
+        tap.sub_ability = Some(Box::new(rider(Some(ChosenGroupId(0)))));
+        assert_eq!(
+            flatten_specified_targets_in_chain(&tap),
+            vec![TargetRef::Object(victim)],
+            "CR 608.2b: the reader's snapshot must not keep the ability alive"
         );
     }
 

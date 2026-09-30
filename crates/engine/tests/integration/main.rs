@@ -1480,6 +1480,7 @@ mod coalition_victory_win_condition;
 mod coastal_wizard_bounce_self_and_another;
 mod coerced_attack_punisher;
 mod conditional_cost_reduction_3223;
+mod conformer_shuriken;
 mod connecting_the_dots_return_exiled_with;
 mod connive_draw_pause_tail_completion;
 mod connive_trigger_msh_wave1;

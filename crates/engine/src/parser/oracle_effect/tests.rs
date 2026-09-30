@@ -66836,10 +66836,13 @@ fn lost_isle_calling_second_sentence_stays_swallowed() {
 /// Blocker 1 / Minor 5 replacement-collision regression: Bring Low —
 /// "Bring Low deals 3 damage to target creature. If that creature has a
 /// +1/+1 counter on it, Bring Low deals 5 damage to it instead." — present
-/// tense `has`, stays on the `TargetHasKeywordInstead` replacement path,
-/// untouched by the new PAST-tense `had` branch.
+/// tense `has` is the target-gated replacement class, untouched by the new
+/// PAST-tense `had` branch. Its counter gate is not a keyword, so the "if that
+/// creature has" owner fails the rider closed (CR 608.2c) instead of emitting
+/// an inert `TargetHasKeywordInstead{Unknown}` that read as supported; it must
+/// still never be captured as an additive `ChainRootTarget`-gated clause.
 #[test]
-fn bring_low_stays_on_replacement_path() {
+fn bring_low_replacement_rider_fails_closed() {
     let parsed = parse_oracle_text(
         "Bring Low deals 3 damage to target creature. If that creature has a +1/+1 \
          counter on it, Bring Low deals 5 damage to it instead.",
@@ -66858,12 +66861,10 @@ fn bring_low_stays_on_replacement_path() {
         .expect("Bring Low's replacement rider must still be represented");
     assert!(
         matches!(
-            sub.condition,
-            Some(AbilityCondition::TargetHasKeywordInstead { .. })
+            &*sub.effect,
+            Effect::Unimplemented { name, .. } if name == "target_has_unknown_keyword_condition"
         ),
-        "present-tense 'has' must stay on the replacement-class condition, \
-         got {:?}",
-        sub.condition
+        "the non-keyword gate must fail closed, got {sub:#?}"
     );
     fn tree_mentions_chain_root_target(def: &AbilityDefinition) -> bool {
         let self_hit = matches!(
