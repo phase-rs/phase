@@ -3338,6 +3338,7 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{Comparator, ContinuousModification, Duration, QuantityExpr};
     use crate::types::card_type::CoreType;
+    use crate::types::format::FormatConfig;
     use crate::types::game_state::{
         CastingVariant, DrainStatus, PostReplacementDrain, ResidentDrainPolicy,
     };
@@ -3713,8 +3714,6 @@ mod tests {
 
     #[test]
     fn parent_target_owner_prefers_zone_change_record_owner() {
-        use crate::types::format::FormatConfig;
-
         // CR 108.3 + CR 603.10a + CR 608.2h: leaves-the-battlefield owner
         // anaphors read the zone-change record/LKI authority. The live object
         // row is absent here on purpose; falling back to live object state (or

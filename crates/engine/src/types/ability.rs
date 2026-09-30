@@ -35037,6 +35037,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::events::GameEvent;
+    use crate::types::game_state::{DelayedTrigger, GameState, ZoneChangeRecord};
     use crate::types::mana::ZoneSpendPolarity;
     use crate::types::zones::Zone;
 
@@ -35315,9 +35317,6 @@ mod tests {
 
     #[test]
     fn spell_context_creation_lookback_round_trips() {
-        use crate::types::events::GameEvent;
-        use crate::types::game_state::{DelayedTrigger, GameState, ZoneChangeRecord};
-
         let event = GameEvent::ZoneChanged {
             object_id: ObjectId(7),
             from: Some(Zone::Battlefield),

@@ -259,6 +259,7 @@ pub(crate) fn eval_source_attached_to_controlled_creature(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::types::counter::CounterType;
     use crate::types::game_state::GameState;
     use crate::types::player::PlayerId;
     use crate::types::CardId;
@@ -279,7 +280,6 @@ mod tests {
     /// would equal (or undershoot) the bound and wrongly answer true.
     #[test]
     fn counter_condition_upper_bound_uses_exact_total() {
-        use crate::types::counter::CounterType;
         let mut state = GameState::new_two_player(42);
         let id = create_object(
             &mut state,
