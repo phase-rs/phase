@@ -255,6 +255,7 @@ mod deck_pool_projection;
 mod declare_attackers_end_combat_pairing;
 mod defending_player_controls_combat_anchor;
 mod deferred_card_type_reflexive_guard;
+mod deferred_target_cost_determination;
 mod delayed_event_subject_anaphor_snapshot;
 mod delayed_parent_target_incarnation;
 mod delayed_trigger_binds_added_combat;
