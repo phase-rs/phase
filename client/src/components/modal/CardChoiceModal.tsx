@@ -3271,7 +3271,7 @@ function ManaSingleColorChoiceModal({
         />
       }
     >
-      <div className="mx-auto flex w-full flex-wrap items-center justify-center gap-3 px-4 py-4 lg:w-fit lg:flex-nowrap sm:gap-5 sm:px-6 sm:py-6">
+      <div className="mx-auto flex w-full flex-wrap items-center justify-center gap-3 px-4 py-4 lg:w-fit sm:gap-5 sm:px-6 sm:py-6">
         {options.map((color, index) => {
           const isSelected = selected === color;
           return (

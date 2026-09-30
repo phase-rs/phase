@@ -275,7 +275,7 @@ expression: "&ir"
               "constraint": null,
               "has_up_to": false,
               "effect_lower": "exile the top card of each player's library. until end of turn, you may play one of those cards. if you cast a spell this way, pay life equal to its mana value rather than paying its mana cost.",
-              "relative_player_scope": "TargetPlayer"
+              "relative_player_scope": "TriggeringPlayer"
             },
             "source_text": "Whenever ~ deals combat damage to a player, exile the top card of each player's library. Until end of turn, you may play one of those cards. If you cast a spell this way, pay life equal to its mana value rather than paying its mana cost.",
             "die_results": []

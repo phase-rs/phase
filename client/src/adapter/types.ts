@@ -2215,7 +2215,10 @@ export type ReductionProvenance =
   // CR 602.2b: the activating ability's own "costs {N} less" rider.
   | { type: "AbilityCostRider" }
   // CR 611.2: a duration-scoped continuous reduction (The Dining Car).
-  | { type: "TransientEffect"; data: { effect: number; ordinal: number } };
+  | { type: "TransientEffect"; data: { effect: number; ordinal: number } }
+  // CR 601.2f + CR 702.119a + CR 702.48c: the reduction an Emerge or Offering
+  // sacrifice earns before a deferred target declaration.
+  | { type: "SacrificedForCost"; data: "Emerge" | "Offering" };
 
 /// CR 601.2f: one cost reduction, snapshotted at the lock seam. `amount` ×
 /// `multiplier` is the effective reduction — every dynamic count is already

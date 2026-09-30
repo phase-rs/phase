@@ -3318,6 +3318,10 @@ mod tests {
         }
     }
 
+    /// `ReductionProvenance` gains `SacrificedForCost`, the reduction an Emerge
+    /// or Offering sacrifice earns before a deferred target declaration; v92
+    /// state cannot decode a v93 provenance, so it must be refused before
+    /// state delivery.
     /// `ResolvedAbility.parent_target_missing_reason` is serialized and gains
     /// `ParentTargetMissingReason::RevealUntil`, and `EffectOutcomeSignal` gains
     /// `RevealUntilMatched`, and the CR 701.20a reveal lease adds
@@ -3347,8 +3351,8 @@ mod tests {
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_92_for_reveal_until_reflexive_verdict() {
-        assert_eq!(PROTOCOL_VERSION, 92);
+    fn protocol_version_is_93_for_sacrifice_cost_reduction_provenance() {
+        assert_eq!(PROTOCOL_VERSION, 93);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3359,7 +3363,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_92_for_reveal_until_reflexive_verdict` stays
+    /// `protocol_version_is_93_for_sacrifice_cost_reduction_provenance` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {
