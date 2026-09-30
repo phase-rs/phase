@@ -25523,11 +25523,7 @@ fn declaration_is_slot_zero(earlier: &[ClauseIr], enclosing_declares_target: boo
 }
 
 fn clause_declares_target(clause: &ParsedEffectClause) -> bool {
-    let declares = |effect: &Effect| {
-        effect
-            .target_filter()
-            .is_some_and(|filter| !filter.is_context_ref())
-    };
+    let declares = |effect: &Effect| triggers::extract_target_filter_from_effect(effect).is_some();
     declares(&clause.effect)
         || std::iter::successors(clause.sub_ability.as_deref(), |def| {
             def.sub_ability.as_deref()

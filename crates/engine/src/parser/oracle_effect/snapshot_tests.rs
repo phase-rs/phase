@@ -2262,6 +2262,46 @@ fn search_declared_player_after_an_object_target_is_not_slot_zero() {
     assert_ne!(shuffle_target(&effects), &slot0(), "{effects:?}");
 }
 
+/// CR 115.1 + CR 601.2c: a non-targeting earlier clause (Sacrifice) declares no slot, so the
+/// declared player is still slot 0.
+#[test]
+fn player_declared_after_a_non_targeting_clause_is_slot_zero() {
+    let parsed = parse_card(
+        "You sacrifice a creature. Target player gains 2 life. That player discards a card, then draws a card.",
+        "Sacrifice First Anaphor",
+        &[],
+        &["Sorcery"],
+    );
+    let effects = card_effects(&parsed);
+    assert!(no_unimplemented(&effects), "{effects:?}");
+    assert_eq!(last_draw(&effects), &slot0(), "{effects:?}");
+    assert_eq!(declared_player_fields(&effects), 1, "{effects:?}");
+}
+
+/// CR 115.1 + CR 601.2c: the same holds when the declaring clause is a search.
+#[test]
+fn search_declared_player_after_a_non_targeting_clause_is_slot_zero() {
+    let parsed = parse_card(
+        "Sacrifice a creature. Target opponent searches their library for a card and exiles it. That player shuffles.",
+        "Sacrifice First Search",
+        &[],
+        &["Sorcery"],
+    );
+    let effects = card_effects(&parsed);
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::SearchLibrary {
+                target_player: Some(_),
+                ..
+            }
+        )),
+        "declaring search reached: {effects:?}"
+    );
+    assert_eq!(shuffle_target(&effects), &slot0(), "{effects:?}");
+    assert_eq!(declared_player_fields(&effects), 1, "{effects:?}");
+}
+
 /// Control: the same anaphor shape with the player declared first still names slot 0.
 #[test]
 fn player_declared_first_is_slot_zero_for_the_anaphor() {
