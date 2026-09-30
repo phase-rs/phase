@@ -943,6 +943,7 @@ mod issue_828_full_throttle;
 mod issue_8302_liberator_mana_spent_power;
 mod issue_836_hero_of_bladehold_battle_cry;
 mod issue_841_selvala_explorer_returned;
+mod issue_8431_etali_primal_storm_cast_window;
 mod issue_8432_morophon_colored_only_reduction;
 mod issue_8455_town_greeter;
 mod issue_847_braids_cabal_minion;

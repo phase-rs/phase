@@ -945,6 +945,37 @@ impl GameScenario {
         self.add_spell_to_zone(player, name, is_instant, Zone::Library)
     }
 
+    /// Add a land to the top of a player's library. Mirrors
+    /// `add_spell_to_library_top`/`add_land_to_hand`; used to stage a
+    /// non-spell library top (a land has no spell face, so exile-then-cast
+    /// windows must exclude it while still offering sibling spells).
+    pub fn add_land_to_library_top(&mut self, player: PlayerId, name: &str) -> CardBuilder<'_> {
+        let card_id = CardId(self.state.next_object_id);
+        let id = create_object(
+            &mut self.state,
+            card_id,
+            player,
+            name.to_string(),
+            Zone::Library,
+        );
+        let obj = self.state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        obj.base_card_types = obj.card_types.clone();
+        let player_state = self
+            .state
+            .players
+            .iter_mut()
+            .find(|p| p.id == player)
+            .expect("player exists");
+        player_state.library.retain(|&oid| oid != id);
+        player_state.library.insert(0, id);
+
+        CardBuilder {
+            state: &mut self.state,
+            id,
+        }
+    }
+
     /// Add an instant or sorcery to a player's graveyard without Oracle text.
     ///
     /// Use `is_instant: true` for instants, `false` for sorceries.
