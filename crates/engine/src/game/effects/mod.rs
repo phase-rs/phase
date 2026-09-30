@@ -16,8 +16,8 @@ use crate::types::ability::{
     CounterKindDomain, DetachedRemainder, Duration, EachDamageRecipient, Effect, EffectError,
     EffectKind, EffectOutcomeSignal, EffectResolutionResult, EffectScope, FilterProp,
     ForEachCategoryAction, ForwardedResultContext, ManaProduction, MassLibraryShuffleMode,
-    ObjectSelectionCardinality, OpponentMayScope, PlayerFilter, PlayerRelation, PlayerScope,
-    PossessionAxis, PtValue, QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole,
+    NameStickerSet, ObjectSelectionCardinality, OpponentMayScope, PlayerFilter, PlayerRelation,
+    PlayerScope, PossessionAxis, PtValue, QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole,
     RepeatContinuation, ResolvedAbility, RevealUntilDisposition, SacrificeCost,
     SacrificeRequirement, SharedQuality, SharedQualityRelation, SiblingCondition, StaticDefinition,
     SubAbilityLink, TapStateChange, TargetChoiceTiming, TargetDamageSourceBinding, TargetFilter,
@@ -5799,6 +5799,7 @@ fn quantity_ref_counts_population_matching(
         | QuantityRef::ObjectManaValue { .. }
         | QuantityRef::ObjectColorCount { .. }
         | QuantityRef::ObjectNameWordCount { .. }
+        | QuantityRef::NameStickerLetterCount { .. }
         | QuantityRef::ObjectTypelineComponentCount { .. }
         | QuantityRef::ManaSymbolsInManaCost { .. }
         | QuantityRef::SelfManaValue
@@ -6863,6 +6864,10 @@ fn quantity_ref_references_demonstrative(qty: &QuantityRef) -> bool {
         | QuantityRef::CountersOn { scope, .. }
         | QuantityRef::ObjectColorCount { scope }
         | QuantityRef::ObjectNameWordCount { scope }
+        | QuantityRef::NameStickerLetterCount {
+            stickers: NameStickerSet::OnObject { scope },
+            letters: _,
+        }
         | QuantityRef::ObjectTypelineComponentCount { scope }
         | QuantityRef::ManaSymbolsInManaCost { scope, .. } => scope,
         _ => return false,

@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::fmt;
 use std::num::NonZeroU32;
 use std::ops::{BitOrAssign, ControlFlow};
@@ -9066,6 +9066,14 @@ pub enum QuantityRef {
     /// "enchanted/equipped creature gets +N/+N for each word in its name" by
     /// binding to the affected object rather than the Aura or Equipment source.
     ObjectNameWordCount { scope: ObjectScope },
+    /// CR 123.6d + CR 123.6e: A letter statistic over the text of name stickers —
+    /// "for each unique vowel on that sticker", "the number of o's in name
+    /// stickers on ~". `stickers` selects which name stickers are read; `letters`
+    /// selects the statistic. Non-name stickers carry no letters and are ignored.
+    NameStickerLetterCount {
+        stickers: NameStickerSet,
+        letters: LetterQuery,
+    },
     /// CR 205.4a + CR 205.2a + CR 205.3: Number of typeline components on an
     /// object (supertypes + core card types + subtypes). Embiggen: "+1/+1 for
     /// each supertype, card type, and subtype it has."
@@ -9776,6 +9784,52 @@ pub enum QuantityRef {
     VoteCount { choice_index: u32 },
 }
 
+/// Which name stickers a [`QuantityRef::NameStickerLetterCount`] reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum NameStickerSet {
+    /// CR 608.2c + CR 123.6e: "that sticker" — the sticker this resolution's
+    /// preceding put-a-sticker instruction placed
+    /// (`GameState::placed_sticker_this_resolution`). No such sticker → 0.
+    ThatSticker,
+    /// CR 123.6d: every name sticker currently on the scoped object
+    /// ("in name stickers on ~").
+    OnObject { scope: ObjectScope },
+}
+
+/// A letter statistic over name-sticker text (CR 123.6d / CR 123.6e).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum LetterQuery {
+    /// CR 123.6e: the number of different vowels (A, E, I, O, U, Y) that
+    /// appear, however often each appears.
+    UniqueVowels,
+    /// CR 123.6d: the number of occurrences of `letter`.
+    Letter { letter: char },
+}
+
+impl LetterQuery {
+    /// CR 123.6d + CR 123.6e: A lowercase letter and its uppercase equivalent
+    /// are the same letter. Over several stickers, occurrences are summed and
+    /// unique vowels are the distinct vowels appearing on any of them.
+    pub fn count_in<'a>(self, texts: impl IntoIterator<Item = &'a str>) -> usize {
+        let letters = texts
+            .into_iter()
+            .flat_map(str::chars)
+            .flat_map(char::to_lowercase);
+        match self {
+            LetterQuery::UniqueVowels => letters
+                .filter(|c| matches!(c, 'a' | 'e' | 'i' | 'o' | 'u' | 'y'))
+                .collect::<BTreeSet<char>>()
+                .len(),
+            LetterQuery::Letter { letter } => {
+                let wanted: Vec<char> = letter.to_lowercase().collect();
+                letters.filter(|c| wanted.contains(c)).count()
+            }
+        }
+    }
+}
+
 impl QuantityRef {
     /// CR 109.4: mutable access to this reference's single player-relativity
     /// axis, when it has one.
@@ -9827,6 +9881,7 @@ impl QuantityRef {
             | QuantityRef::TargetObjectManaValue { .. }
             | QuantityRef::ObjectColorCount { .. }
             | QuantityRef::ObjectNameWordCount { .. }
+            | QuantityRef::NameStickerLetterCount { .. }
             | QuantityRef::ObjectTypelineComponentCount { .. }
             | QuantityRef::ManaSymbolsInManaCost { .. }
             | QuantityRef::SelfManaValue
@@ -34986,6 +35041,67 @@ mod tests {
     use super::*;
     use crate::types::mana::ZoneSpendPolarity;
     use crate::types::zones::Zone;
+
+    /// CR 123.6e: unique vowels are the *different* vowels among A, E, I, O,
+    /// U and Y, case-insensitively, over every text read. Each value exposes
+    /// one wrong implementation: occurrences ("Unique" → 4), case-sensitive
+    /// distinct ("Unique" → 4), Y not a vowel ("Sassy" → 1, "Myr"/"Rhythm" →
+    /// 0), no case fold ("Yogurt" → 2), per-text sum (["Unique", "Cheese"] → 4).
+    #[test]
+    fn letter_query_counts_unique_vowels_per_cr_123_6e() {
+        let vowels = |texts: &[&str]| LetterQuery::UniqueVowels.count_in(texts.iter().copied());
+        assert_eq!(vowels(&["Unique"]), 3);
+        assert_eq!(vowels(&["Sassy"]), 2);
+        assert_eq!(vowels(&["Myr"]), 1);
+        assert_eq!(vowels(&["Rhythm"]), 1);
+        assert_eq!(vowels(&["Yogurt"]), 3);
+        // CR 123.6e: the distinct vowels across both stickers (U, I, E).
+        assert_eq!(vowels(&["Unique", "Cheese"]), 3);
+        assert_eq!(vowels(&[]), 0);
+    }
+
+    /// CR 123.6d: letter occurrences are counted case-insensitively and summed
+    /// over every text read.
+    #[test]
+    fn letter_query_counts_letter_occurrences_per_cr_123_6d() {
+        let letter = |letter: char, texts: &[&str]| {
+            LetterQuery::Letter { letter }.count_in(texts.iter().copied())
+        };
+        assert_eq!(letter('o', &["Hot Dog", "Doom"]), 4);
+        // CR 123.6d: "O" and "o" are the same letter.
+        assert_eq!(letter('o', &["Otter"]), 1);
+        assert_eq!(letter('u', &["Unique"]), 2);
+        // A hand-authored uppercase letter still folds.
+        assert_eq!(letter('O', &["Hot Dog"]), 2);
+    }
+
+    #[test]
+    fn name_sticker_letter_count_serde_shapes() {
+        let that_sticker = QuantityRef::NameStickerLetterCount {
+            stickers: NameStickerSet::ThatSticker,
+            letters: LetterQuery::UniqueVowels,
+        };
+        let on_source = QuantityRef::NameStickerLetterCount {
+            stickers: NameStickerSet::OnObject {
+                scope: ObjectScope::Source,
+            },
+            letters: LetterQuery::Letter { letter: 'o' },
+        };
+        let shapes = [
+            (
+                that_sticker,
+                r#"{"type":"NameStickerLetterCount","stickers":{"type":"ThatSticker"},"letters":{"type":"UniqueVowels"}}"#,
+            ),
+            (
+                on_source,
+                r#"{"type":"NameStickerLetterCount","stickers":{"type":"OnObject","scope":{"type":"Source"}},"letters":{"type":"Letter","letter":"o"}}"#,
+            ),
+        ];
+        for (value, json) in shapes {
+            assert_eq!(serde_json::to_string(&value).unwrap(), json);
+            assert_eq!(serde_json::from_str::<QuantityRef>(json).unwrap(), value);
+        }
+    }
 
     /// CR 607.1 + CR 607.5 + CR 613.1f: every trigger occurrence classifies
     /// exhaustively — printed and copied-value occurrences are characteristic

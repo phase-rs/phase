@@ -36,10 +36,10 @@ use crate::types::ability::{
     CastingPermission, CombatHistoryScope, Comparator, ConjureSource, ContinuousModification,
     ControllerRef, CountBinding, DamageChannel, DamageSource, DelayedTriggerCondition, Duration,
     Effect, EffectScope, ExiledSpellRider, FilterProp, GameRestriction, LibraryPosition,
-    MultiTargetSpec, ObjectScope, PermissionGrantee, PlayerFilter, PreventionAmount,
-    PreventionScope, PtValue, QuantityExpr, QuantityRef, RestrictionPlayerScope, RoundingMode,
-    SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, SubAbilityLink,
-    TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
+    MultiTargetSpec, NameStickerSet, ObjectScope, PermissionGrantee, PlayerFilter,
+    PreventionAmount, PreventionScope, PtValue, QuantityExpr, QuantityRef, RestrictionPlayerScope,
+    RoundingMode, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition,
+    SubAbilityLink, TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::counter::CounterType;
 use crate::types::game_state::{DistributionUnit, TargetSelectionConstraint};
@@ -1692,6 +1692,10 @@ fn quantity_ref_reads_other_revealed_card(qty: &QuantityRef) -> bool {
         | QuantityRef::Toughness { scope }
         | QuantityRef::ObjectColorCount { scope }
         | QuantityRef::ObjectNameWordCount { scope }
+        | QuantityRef::NameStickerLetterCount {
+            stickers: NameStickerSet::OnObject { scope },
+            letters: _,
+        }
         | QuantityRef::ObjectTypelineComponentCount { scope }
         | QuantityRef::CountersOn { scope, .. }
         | QuantityRef::ManaSymbolsInManaCost { scope, .. } => scope,

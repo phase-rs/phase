@@ -24,12 +24,12 @@ use crate::types::ability::{
     Comparator, ContinuousModification, ControllerRef, CountScope, CounterKindChooser,
     CounterKindDomain, CounterSourceRider, DelayedTriggerCondition, DieRollModifier, DoublePTMode,
     Duration, EachDamageRecipient, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
-    ForEachCategoryAction, GameRestriction, LibraryPosition, ManaProduction,
-    MassLibraryShuffleMode, ObjectProperty, ObjectScope, ObjectSelectionCardinality,
-    ObjectSelectionEligibility, ParsedCondition, PerpetualModification, PlayerFilter,
-    PlayerRelation, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
-    ReplacementCondition, ReplacementDefinition, ReplacementMode, SeatDirection, SharedQuality,
-    SharedQualityRelation, SpeedDelta, SpellCastingOption, SpellCastingOptionKind,
+    ForEachCategoryAction, GameRestriction, LetterQuery, LibraryPosition, ManaProduction,
+    MassLibraryShuffleMode, NameStickerSet, ObjectProperty, ObjectScope,
+    ObjectSelectionCardinality, ObjectSelectionEligibility, ParsedCondition, PerpetualModification,
+    PlayerFilter, PlayerRelation, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr,
+    QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode, SeatDirection,
+    SharedQuality, SharedQualityRelation, SpeedDelta, SpellCastingOption, SpellCastingOptionKind,
     SpellStackToGraveyardReplacement, StackAbilityKind, StaticCondition, StaticDefinition,
     TapStateChange, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
 };
@@ -1503,6 +1503,34 @@ fn fmt_player_scope(scope: &PlayerScope) -> String {
     }
 }
 
+/// CR 123.6d + CR 123.6e: "unique vowels on that sticker", "letter 'o' in name
+/// stickers on self".
+fn fmt_name_sticker_letter_count(stickers: &NameStickerSet, letters: &LetterQuery) -> String {
+    let statistic = match letters {
+        LetterQuery::UniqueVowels => "unique vowels".to_string(),
+        LetterQuery::Letter { letter } => format!("letter '{letter}'"),
+    };
+    let set = match stickers {
+        NameStickerSet::ThatSticker => "on that sticker",
+        NameStickerSet::OnObject { scope } => match scope {
+            ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
+                "in name stickers on self"
+            }
+            ObjectScope::Target => "in name stickers on target",
+            ObjectScope::Recipient => "in name stickers on recipient",
+            ObjectScope::EventSource => "in name stickers on event source",
+            ObjectScope::EventTarget => "in name stickers on event target",
+            ObjectScope::CostPaidObject => "in name stickers on cost-paid object",
+            ObjectScope::OtherRevealedCard => "in name stickers on other revealed card",
+            ObjectScope::OwnedLinkedExileCard => "in name stickers on owned linked-exiled card",
+            ObjectScope::AmassedArmy => "in name stickers on amassed Army",
+            ObjectScope::BatchSource => "in name stickers on batch source",
+            ObjectScope::ChainRootTarget => "in name stickers on chain-root target",
+        },
+    };
+    format!("{statistic} {set}")
+}
+
 fn fmt_quantity_ref(qty: &QuantityRef) -> String {
     match qty {
         QuantityRef::HandSize { player } => {
@@ -1702,6 +1730,9 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::BatchSource => "words in batch source's name".into(),
             ObjectScope::ChainRootTarget => "words in chain-root target's name".into(),
         },
+        QuantityRef::NameStickerLetterCount { stickers, letters } => {
+            fmt_name_sticker_letter_count(stickers, letters)
+        }
         QuantityRef::ManaSymbolsInManaCost { scope, color } => {
             let scope_str = match scope {
                 ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => "self",
@@ -9893,6 +9924,42 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             // chain-root target's characteristics yet (CR 601.2c referent is
             // wired for `CountersOn` only).
             ObjectScope::ChainRootTarget => ("ChainRootTargetObjectNameWordCount", Unhandled),
+        },
+        // CR 608.2c: `game/quantity.rs` reads the resolution's placed-sticker record.
+        QuantityRef::NameStickerLetterCount {
+            stickers: NameStickerSet::ThatSticker,
+            letters: _,
+        } => ("ThatStickerNameStickerLetterCount", Handled),
+        // CR 123.6d: `game/quantity.rs` reads the live object `object_for_scope`
+        // returns.
+        QuantityRef::NameStickerLetterCount {
+            stickers: NameStickerSet::OnObject { scope },
+            letters: _,
+        } => match scope {
+            ObjectScope::Source => ("SourceNameStickerLetterCount", Handled),
+            ObjectScope::Target => ("TargetNameStickerLetterCount", Handled),
+            ObjectScope::Recipient => ("RecipientNameStickerLetterCount", Handled),
+            ObjectScope::EventSource => ("EventSourceNameStickerLetterCount", Handled),
+            ObjectScope::EventTarget => ("EventTargetNameStickerLetterCount", Handled),
+            ObjectScope::BatchSource => ("BatchSourceNameStickerLetterCount", Handled),
+            // `object_for_scope` has no referent for this scope → fail-closed 0.
+            ObjectScope::CostPaidObject => ("CostPaidObjectNameStickerLetterCount", Unhandled),
+            // `object_for_scope` has no referent for this scope → fail-closed 0.
+            ObjectScope::Anaphoric => ("AnaphoricNameStickerLetterCount", Unhandled),
+            // `object_for_scope` has no referent for this scope → fail-closed 0.
+            ObjectScope::Demonstrative => ("DemonstrativeNameStickerLetterCount", Unhandled),
+            // `object_for_scope` has no referent for this scope → fail-closed 0.
+            ObjectScope::OtherRevealedCard => {
+                ("OtherRevealedCardNameStickerLetterCount", Unhandled)
+            }
+            // `object_for_scope` has no referent for this scope → fail-closed 0.
+            ObjectScope::OwnedLinkedExileCard => {
+                ("OwnedLinkedExileCardNameStickerLetterCount", Unhandled)
+            }
+            // `object_for_scope` has no referent for this scope → fail-closed 0.
+            ObjectScope::AmassedArmy => ("AmassedArmyNameStickerLetterCount", Unhandled),
+            // `object_for_scope` has no referent for this scope → fail-closed 0.
+            ObjectScope::ChainRootTarget => ("ChainRootTargetNameStickerLetterCount", Unhandled),
         },
         QuantityRef::ObjectTypelineComponentCount { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {

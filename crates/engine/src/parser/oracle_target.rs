@@ -11,10 +11,10 @@ use nom::Parser;
 use crate::types::ability::{
     AggregateFunction, AttachmentKind, CardTypeSetSource, ChoiceType, CombatRelation,
     CombatRelationSubject, Comparator, ControllerRef, CountScope, DamageKindFilter, FilterProp,
-    ObjectProperty, ObjectScope, ParitySource, PlayerFilter, PlayerRelation, PropertyAggregate,
-    PtStat, PtValueScope, QuantityExpr, QuantityRef, SeatDirection, SharedQuality,
-    SharedQualityRelation, TargetFilter, TargetSelectionMode, ThisWayCause, TypeFilter,
-    TypedFilter,
+    NameStickerSet, ObjectProperty, ObjectScope, ParitySource, PlayerFilter, PlayerRelation,
+    PropertyAggregate, PtStat, PtValueScope, QuantityExpr, QuantityRef, SeatDirection,
+    SharedQuality, SharedQualityRelation, TargetFilter, TargetSelectionMode, ThisWayCause,
+    TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{noncreature_subtype_set, SubtypeSet, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -7114,6 +7114,10 @@ fn rebind_compound_slot_referent_in_quantity(expr: &mut QuantityExpr) {
             | QuantityRef::ObjectManaValue { scope }
             | QuantityRef::ObjectColorCount { scope }
             | QuantityRef::ObjectNameWordCount { scope }
+            | QuantityRef::NameStickerLetterCount {
+                stickers: NameStickerSet::OnObject { scope },
+                letters: _,
+            }
             | QuantityRef::ObjectTypelineComponentCount { scope }
             | QuantityRef::ManaSymbolsInManaCost { scope, .. }
             | QuantityRef::CountersOn { scope, .. } => scope,
