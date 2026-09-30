@@ -971,25 +971,53 @@ const EXILE_GAIN_TAP: &str =
     "Exile target creature. Its controller gains life equal to its power. Tap target creature.";
 const SHROUD: &str = "Target creature gains shroud until end of turn.";
 
-/// Returns (A's zone, B tapped, B's +1/+1 counters). `shroud` makes that
-/// creature an illegal target in response. (The A-illegal direction is pinned
-/// at the unit level — `illegal_slots_and_offsets_number_declared_slots` — because
-/// at runtime the exile of an illegal A currently stops on a forced
-/// `EffectZoneChoice`, the separate W4 question.)
-fn exile_gain_tap_with_slot_reader(shroud: Option<char>) -> (Zone, bool, u32) {
+/// How a target is made illegal in response.
+#[derive(Clone, Copy, PartialEq)]
+enum Response {
+    /// Shroud on B: B stays on the battlefield but is an illegal target.
+    ShroudB,
+    /// Printed Unsummon on A: A changes zone. The Leg-2 board uses "target
+    /// creature an opponent controls" for the exile with B under P0's control,
+    /// so the exile of the departed A has no other candidate: an exile whose
+    /// target became illegal currently falls back to a resolution-time pick
+    /// (it exiles B, or prompts when A stays in place under shroud) — a
+    /// pre-existing, separately filed issue that reproduces without any rider.
+    UnsummonA,
+}
+
+const EXILE_OPP_GAIN_TAP: &str = "Exile target creature an opponent controls. Its controller gains life equal to its power. Tap target creature.";
+
+/// Returns (A's zone, B tapped, B's +1/+1 counters, P1's life change, B's zone).
+fn exile_gain_tap_with_slot_reader(response: Option<Response>) -> (Zone, bool, u32, i32, Zone) {
     use engine::types::ability::QuantityExpr;
     use engine::types::ability::{Effect, ResolvedAbility, TargetFilter};
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
+    let leg2 = response == Some(Response::UnsummonA);
     let a = scenario.add_creature(P1, "Creature A", 3, 3).id();
-    let b = scenario.add_creature(P1, "Creature B", 2, 2).id();
+    let b = scenario
+        .add_creature(if leg2 { P0 } else { P1 }, "Creature B", 2, 2)
+        .id();
     let spell = scenario
-        .add_spell_to_hand_from_oracle(P0, "Exile Tap", true, EXILE_GAIN_TAP)
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Exile Tap",
+            true,
+            if leg2 {
+                EXILE_OPP_GAIN_TAP
+            } else {
+                EXILE_GAIN_TAP
+            },
+        )
         .id();
     let veil = scenario
         .add_spell_to_hand_from_oracle(P0, "Veil", true, SHROUD)
         .id();
+    let unsummon = scenario
+        .add_spell_to_hand_from_oracle(P0, "Unsummon", true, UNSUMMON)
+        .id();
     let mut runner = scenario.build();
+    let life_before = runner.state().players[1].life;
     let _ = runner.cast(spell).target_objects(&[a, b]).commit();
     {
         let entry = runner
@@ -1033,9 +1061,14 @@ fn exile_gain_tap_with_slot_reader(shroud: Option<char>) -> (Zone, bool, u32) {
         engine::game::ability_utils::declared_targets_in_chain(root),
         vec![TargetRef::Object(a), TargetRef::Object(b)],
     );
-    if let Some(which) = shroud {
-        let victim = if which == 'A' { a } else { b };
-        let _ = runner.cast(veil).target_object(victim).commit();
+    match response {
+        Some(Response::ShroudB) => {
+            let _ = runner.cast(veil).target_object(b).commit();
+        }
+        Some(Response::UnsummonA) => {
+            let _ = runner.cast(unsummon).target_object(a).commit();
+        }
+        None => {}
     }
     for _ in 0..40 {
         match runner.state().waiting_for.clone() {
@@ -1065,15 +1098,18 @@ fn exile_gain_tap_with_slot_reader(shroud: Option<char>) -> (Zone, bool, u32) {
             .get(&CounterType::Plus1Plus1)
             .copied()
             .unwrap_or(0),
+        state.players[1].life - life_before,
+        state.objects[&b].zone,
     )
 }
 
-/// Control: both legal — A exiled, B tapped, the slot-1 reader counts B.
+/// Control: both legal — A exiled (P1 gains 3), B tapped, the slot-1 reader
+/// counts B.
 #[test]
 fn slot_reader_control_reads_the_second_declared_target() {
     assert_eq!(
         exile_gain_tap_with_slot_reader(None),
-        (Zone::Exile, true, 1)
+        (Zone::Exile, true, 1, 3, Zone::Battlefield)
     );
 }
 
@@ -1081,8 +1117,28 @@ fn slot_reader_control_reads_the_second_declared_target() {
 /// slot-1 reader gets nothing — the stamp and the reader number the same slot.
 #[test]
 fn illegal_second_target_is_not_read_through_its_slot() {
-    let (a_zone, b_tapped, b_counters) = exile_gain_tap_with_slot_reader(Some('B'));
+    let (a_zone, b_tapped, b_counters, _, _) =
+        exile_gain_tap_with_slot_reader(Some(Response::ShroudB));
     assert_eq!(a_zone, Zone::Exile, "reach guard: the legal exile resolved");
     assert!(!b_tapped, "the tap skips the illegal B");
     assert_eq!(b_counters, 0, "CR 608.2b: no counter on the illegal B");
+}
+
+/// CR 608.2b: A (declared slot 0) leaves in response (printed Unsummon) while B
+/// stays legal: A is not exiled and its controller gains nothing, B is tapped,
+/// and the slot-1 reader still finds B — neither the illegal first target nor
+/// the rider's carried copy of it shifts slot 1.
+#[test]
+fn illegal_first_target_leaves_the_second_slot_readable() {
+    let (a_zone, b_tapped, b_counters, life, b_zone) =
+        exile_gain_tap_with_slot_reader(Some(Response::UnsummonA));
+    assert_eq!(
+        a_zone,
+        Zone::Hand,
+        "reach guard: Unsummon resolved; A is not exiled"
+    );
+    assert_eq!(life, 0, "CR 608.2b: no life from the illegal A's power");
+    assert_eq!(b_zone, Zone::Battlefield, "reach guard: B was not exiled");
+    assert!(b_tapped, "reach guard: the legal B was tapped");
+    assert_eq!(b_counters, 1, "slot 1 is still B");
 }
