@@ -913,6 +913,165 @@ fn targeted_forms_keep_their_parent_target_reading() {
 }
 
 // ---------------------------------------------------------------------------
+// T18 / T19: consumers the per-player set cannot express stay unsupported
+// ---------------------------------------------------------------------------
+
+fn is_per_player_parent_target_gap(def: &AbilityDefinition) -> bool {
+    matches!(
+        &*def.effect,
+        Effect::Unimplemented { name, .. } if name == "per_player_choice_parent_target"
+    )
+}
+
+/// "Destroy the chosen artifacts" after "choose an artifact or land" names only
+/// the chosen artifacts. The bare tracked set would destroy a chosen land too
+/// (CR 608.2c + CR 608.2d), so the narrower noun is an honest gap — and at
+/// runtime a chosen land is never destroyed.
+#[test]
+fn narrower_noun_than_the_choice_is_strict_and_spares_a_chosen_land() {
+    for text in [
+        "For each opponent, choose an artifact or land that player controls. Destroy the chosen artifacts.",
+        "For each opponent, choose a creature or land that player controls. Destroy the chosen creatures.",
+    ] {
+        let parsed = parse(text, "Probe", &[], &["Sorcery"]);
+        let defs = all_defs(&parsed);
+        assert!(
+            defs.iter().any(|d| matches!(
+                &*d.effect,
+                Effect::ChooseFromZone {
+                    zone_owner: ZoneOwner::Each(PerPlayerScope::Opponents),
+                    ..
+                }
+            )),
+            "reach: the per-opponent choice parses: {text}"
+        );
+        assert!(
+            defs.iter().any(|d| is_per_player_parent_target_gap(d)),
+            "the narrower-noun consumer is strict: {:#?}",
+            parsed.abilities
+        );
+        assert!(
+            !defs.iter().any(|d| matches!(
+                &*d.effect,
+                Effect::DestroyAll {
+                    target: TargetFilter::TrackedSet { .. },
+                    ..
+                }
+            )),
+            "no unfiltered destroy of the whole chosen set: {text}"
+        );
+    }
+
+    let mut scenario = GameScenario::new_n_player(3, 301);
+    scenario.at_phase(Phase::PreCombatMain);
+    let p1_land = add_land(&mut scenario, P1, "P1 Land");
+    add_artifact(&mut scenario, P1, "P1 Relic");
+    add_artifact(&mut scenario, P2, "P2 Relic");
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Chosen Artifacts Probe",
+            false,
+            "For each opponent, choose an artifact or land that player controls. Destroy the chosen artifacts.",
+        )
+        .id();
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast");
+    let prompts = resolve_with(
+        &mut runner,
+        |r, cards| {
+            if controller(r, cards[0]) == P1 {
+                vec![p1_land]
+            } else {
+                vec![cards[0]]
+            }
+        },
+        |_, _| {},
+    );
+    assert_eq!(
+        prompts.len(),
+        2,
+        "reach: both opponents prompted: {prompts:?}"
+    );
+    assert!(
+        prompts[0].cards.contains(&p1_land) || prompts[1].cards.contains(&p1_land),
+        "reach: the land was offered and picked"
+    );
+    assert!(
+        on_battlefield(&runner, p1_land),
+        "a chosen land is not one of \"the chosen artifacts\""
+    );
+}
+
+/// "The chosen permanents" separated from the per-opponent choice by another
+/// instruction does not bind the choice's tracked set (only the adjacent form
+/// does), and its `ParentTarget` reading has no producer — so it is an honest
+/// gap rather than a supported destroy that never fires.
+#[test]
+fn chosen_permanents_after_an_intervening_instruction_is_strict() {
+    let text = "Meteor Probe deals 7 damage to each creature. If this spell was cast from exile, for each opponent, choose an artifact or land that player controls. You gain 1 life. Destroy the chosen permanents.\nForetell {5}{R} (During your turn, you may pay {2} and exile this card from your hand face down. Cast it on a later turn for its foretell cost.)";
+    let parsed = parse(text, "Meteor Probe", &["Foretell"], &["Sorcery"]);
+    let defs = all_defs(&parsed);
+    assert!(
+        defs.iter().any(|d| matches!(
+            &*d.effect,
+            Effect::ChooseFromZone {
+                zone_owner: ZoneOwner::Each(PerPlayerScope::Opponents),
+                ..
+            }
+        )),
+        "reach: the per-opponent choice parses: {:#?}",
+        parsed.abilities
+    );
+    assert!(
+        defs.iter()
+            .any(|d| matches!(&*d.effect, Effect::GainLife { .. })),
+        "reach: the intervening instruction parses: {:#?}",
+        parsed.abilities
+    );
+    assert!(
+        defs.iter().any(|d| is_per_player_parent_target_gap(d)),
+        "the non-adjacent consumer is strict: {:#?}",
+        parsed.abilities
+    );
+
+    // Control: an intervening instruction that declares its own target is the
+    // nearer antecedent, so a following "it" keeps its `ParentTarget` reading.
+    let control = parse(
+        "For each opponent, choose an artifact that player controls. Tap target creature. Put a +1/+1 counter on it.",
+        "Probe",
+        &[],
+        &["Sorcery"],
+    );
+    assert!(
+        all_defs(&control).iter().any(|d| matches!(
+            &*d.effect,
+            Effect::PutCounter {
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        )),
+        "reach: the control's \"it\" reads ParentTarget: {:#?}",
+        control.abilities
+    );
+    assert!(
+        !all_defs(&control)
+            .iter()
+            .any(|d| is_per_player_parent_target_gap(d)),
+        "a targeted intervening instruction is the antecedent: {:#?}",
+        control.abilities
+    );
+}
+
+// ---------------------------------------------------------------------------
 // T15b: clause boundary / T17: serialized state
 // ---------------------------------------------------------------------------
 

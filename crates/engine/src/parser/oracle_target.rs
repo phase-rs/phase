@@ -1450,15 +1450,21 @@ pub fn parse_target_with_syntax<'a>(
         );
     }
 
-    // CR 608.2c + CR 608.2d: "the chosen <plural noun>" right after a zone-choice
+    // CR 608.2c + CR 608.2d: "the chosen permanents" right after a zone-choice
     // producer (`ChooseFromZone`, signalled by `pending_tracked_set_origin`) names
-    // the set that choice published. A per-player choice ("for each opponent,
-    // choose …") never writes the continuation's targets — every pick is
-    // accumulated into the chain tracked set — so `ParentTarget` would have no
-    // producer there. After a targeted antecedent ("choose … target creatures")
-    // the phrase keeps its `ParentTarget` reading below.
+    // the whole set that choice published. A per-player choice ("for each
+    // opponent, choose …") never writes the continuation's targets — every pick
+    // is accumulated into the chain tracked set — so `ParentTarget` would have no
+    // producer there.
+    //
+    // A narrower noun ("the chosen artifacts" after "choose an artifact or land")
+    // names only the chosen permanents of that type. The bare tracked set cannot
+    // say that, so the noun keeps its `ParentTarget` reading: correct after a
+    // single-pool choice (whose answer writes the continuation's targets), and
+    // strict-failed after a per-player choice by
+    // `strict_fail_parent_target_after_per_player_choice`.
     if ctx.pending_tracked_set_origin.is_some() {
-        if let Ok((rest, _)) = terminated(
+        if let Ok((rest, noun)) = terminated(
             preceded(
                 tag::<_, _, OracleError<'_>>("the chosen "),
                 alt((
@@ -1468,20 +1474,20 @@ pub fn parse_target_with_syntax<'a>(
                     tag("lands"),
                     tag("enchantments"),
                     tag("planeswalkers"),
-                    tag("cards"),
                 )),
             ),
             not(nom::character::complete::alphanumeric1),
         )
         .parse(lower.as_str())
         {
-            return (
+            let filter = if noun == "permanents" {
                 TargetFilter::TrackedSet {
                     id: TrackedSetId(0),
-                },
-                &text[lower.len() - rest.len()..],
-                syntax,
-            );
+                }
+            } else {
+                TargetFilter::ParentTarget
+            };
+            return (filter, &text[lower.len() - rest.len()..], syntax);
         }
     }
 

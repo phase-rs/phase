@@ -3632,21 +3632,40 @@ fn effect_reads_tracked_set_sentinel(effect: &Effect) -> bool {
 
 /// CR 608.2c: A per-player zone choice (`ChooseFromZone { zone_owner: Each(_) }`)
 /// accumulates every pick into the chain's tracked set and never writes the
-/// continuation's targets, so an instruction right after it that reads
-/// `ParentTarget` has no producer and would silently do nothing. Chaos Defiler
-/// ("Destroy one of them chosen at random") and Benthic Anomaly ("a copy of one
-/// of those creatures") have that shape; their consumers are not built, so
-/// strict-fail the consumer instead of letting the card claim support.
+/// continuation's targets, so a later instruction whose `ParentTarget` would
+/// resolve against that choice has no producer and would silently do nothing.
+/// Chaos Defiler ("Destroy one of them chosen at random") and Benthic Anomaly
+/// ("a copy of one of those creatures") have that shape directly after the
+/// choice; "Destroy the chosen artifacts" (a narrower noun than the choice) and
+/// "the chosen permanents" separated from the choice by another instruction
+/// ("… You gain 1 life. Destroy the chosen permanents.") have it too. Their
+/// consumers are not built, so strict-fail the consumer instead of letting the
+/// card claim support.
+///
+/// The walk back from a `ParentTarget` reader stops at the nearest earlier
+/// definition that can supply targets — one that declares its own (non-context)
+/// target, or a single-pool `ChooseFromZone`, whose answer writes the
+/// continuation's targets. Only when the nearest such antecedent is a
+/// per-player choice is the reader strict-failed. Instructions that name no
+/// object ("You gain 1 life") are walked past.
 pub(super) fn strict_fail_parent_target_after_per_player_choice(defs: &mut [AbilityDefinition]) {
     for i in 1..defs.len() {
-        let after_per_player_choice = matches!(
-            &*defs[i - 1].effect,
-            Effect::ChooseFromZone {
-                zone_owner: crate::types::ability::ZoneOwner::Each(_),
-                ..
-            }
-        );
-        if after_per_player_choice && effect_reads_parent_target(&defs[i].effect) {
+        if !effect_reads_parent_target(&defs[i].effect) {
+            continue;
+        }
+        let antecedent_is_per_player_choice =
+            defs[..i].iter().rev().find_map(|def| match &*def.effect {
+                Effect::ChooseFromZone {
+                    zone_owner: crate::types::ability::ZoneOwner::Each(_),
+                    ..
+                } => Some(true),
+                Effect::ChooseFromZone { .. } => Some(false),
+                effect if effect.target_filter().is_some_and(|t| !t.is_context_ref()) => {
+                    Some(false)
+                }
+                _ => None,
+            });
+        if antecedent_is_per_player_choice == Some(true) {
             let fragment = defs[i]
                 .description
                 .clone()
