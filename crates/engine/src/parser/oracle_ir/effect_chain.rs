@@ -989,7 +989,7 @@ pub(crate) struct ClauseIr {
 }
 
 impl ClauseIr {
-    /// CR 608.2c: turn this clause, in place, into an honest parser gap
+    /// Turn this clause, in place, into an honest parser gap
     /// (`Effect::unimplemented(name, <printed fragment>)`) that carries NO
     /// executable metadata — exactly what [`ClauseIrBuilder::clause`] +
     /// `Effect::unimplemented` would have minted for the same text. Identity,
