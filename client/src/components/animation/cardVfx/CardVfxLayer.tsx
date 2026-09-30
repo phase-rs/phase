@@ -29,9 +29,9 @@ import {
   type Aim,
   type CardPose,
   exileGhostNode,
-  firstRendered,
   measureCardPose,
   ownPermanentSurface,
+  playerHudSurface,
   resolveAim,
   sourceElement,
   zoneSurface,
@@ -40,7 +40,7 @@ import type { CardVfxTier, FlightFlip } from "./cardFlight.ts";
 import type { CardFlightRoute, CardFlightSpec } from "./cardFlightSpecs.ts";
 import type { CardVfxScene, CardVfxSceneCallbacks } from "./cardVfxScene.ts";
 import type * as CardVfxSceneModule from "./cardVfxScene.ts";
-import type { BoardEffectSpec, CardVfxSpec, DamageStrikeSpec, ExileDissolveSpec } from "./cardVfxSpecs.ts";
+import type { BoardEffectSpec, CardVfxSpec, DamageBlowSpec, DamageStrikeSpec, ExileDissolveSpec } from "./cardVfxSpecs.ts";
 import type { LinkAim } from "./exileDissolve.ts";
 import { drawSurface, measureSurfaceLayout } from "./surfaceTexture.ts";
 
@@ -230,6 +230,9 @@ class CardVfxController {
             return;
           case "damage":
             this.presentDamage(this.scene, spec, classic, onImpact);
+            return;
+          case "blow":
+            this.presentBlow(this.scene, spec, classic);
             return;
           case "shatter":
           case "dissolve":
@@ -435,7 +438,7 @@ class CardVfxController {
     const source = zoneSurface(origin.zone, origin.objectId, origin.ownerId);
     const targetEl =
       target.kind === "player"
-        ? firstRendered(`[data-player-hud="${target.playerId}"]`)
+        ? playerHudSurface(target.playerId)
         : ownPermanentSurface(target.objectId);
     if (!source || !targetEl || !this.canvas) {
       classic();
@@ -471,6 +474,26 @@ class CardVfxController {
       },
       classic,
     );
+  }
+
+  // Both surfaces are measured now, before the slam moves its creature.
+  private presentBlow(scene: CardVfxScene, spec: DamageBlowSpec, classic: () => void) {
+    const { target, sourceId } = spec;
+    const targetEl = "Player" in target ? playerHudSurface(target.Player) : ownPermanentSurface(target.Object);
+    if (!targetEl || !this.canvas || spec.pace <= 0) {
+      classic();
+      return;
+    }
+    const canvasRect = this.canvas.getBoundingClientRect();
+    const sourceEl = sourceId === null ? null : ownPermanentSurface(sourceId);
+    scene.startDamageBlow({
+      from: sourceEl && measureCardPose(sourceEl, canvasRect),
+      to: measureCardPose(targetEl, canvasRect),
+      amount: spec.amount,
+      tier: this.tier,
+      pace: spec.pace,
+      impactS: spec.impactDelayMs / 1000 / spec.pace,
+    });
   }
 
   // A cast and its resolution can share one step, so the resolution may

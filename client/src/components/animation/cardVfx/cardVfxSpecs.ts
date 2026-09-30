@@ -1,4 +1,4 @@
-import type { GameState, ObjectId, PlayerId } from "../../../adapter/types.ts";
+import type { GameState, ObjectId, PlayerId, TargetRef } from "../../../adapter/types.ts";
 import { type DamageCause, type DamageCauseOrigin, damageCauseOf } from "../../../animation/damageCause.ts";
 import type { AnimationEvent } from "../../../animation/types.ts";
 import { useAnimationStore } from "../../../stores/animationStore.ts";
@@ -47,6 +47,19 @@ export interface DamageStrikeSpec {
   owningStepMs: number;
 }
 
+/** A creature's blow landing where its slam strikes; the slam itself, and
+ *  the struck card's knockback, are the DOM's. */
+export interface DamageBlowSpec {
+  kind: "blow";
+  /** The striking creature; `null` for a flurry of hits from many. */
+  sourceId: ObjectId | null;
+  target: TargetRef;
+  amount: number;
+  pace: number;
+  /** When the slam lands, after the blow is presented, already paced. */
+  impactDelayMs: number;
+}
+
 /** An event another event presents: a destruction or sacrifice a replacement
  *  sent elsewhere, whose zone change shows the move, or a token's entry from
  *  no zone, which its `TokenCreated` shows. */
@@ -55,7 +68,7 @@ export interface CoveredSpec {
 }
 
 /** Everything the card VFX layer presents, by `kind`. */
-export type CardVfxSpec = CardFlightSpec | BoardEffectSpec | DamageStrikeSpec | CoveredSpec;
+export type CardVfxSpec = CardFlightSpec | BoardEffectSpec | DamageStrikeSpec | DamageBlowSpec | CoveredSpec;
 
 /** The pre-event state `damageCauseOf` reads, when a card VFX layer presents
  *  damage causes; `null` when every hit presents Classic. Hit timing reads it

@@ -30,7 +30,14 @@ import {
 } from "../CardVfxLayer.tsx";
 import { SHATTER_CRACK_S, SHATTER_FALL_S } from "../cardShatter.ts";
 import { type CardVfxScene, SCENE_EFFECT_KINDS } from "../cardVfxScene.ts";
-import type { CardShatterSpec, CardVfxSpec, DamageStrikeSpec, DamageStrikeTarget, ExileDissolveSpec } from "../cardVfxSpecs.ts";
+import type {
+  CardShatterSpec,
+  CardVfxSpec,
+  DamageBlowSpec,
+  DamageStrikeSpec,
+  DamageStrikeTarget,
+  ExileDissolveSpec,
+} from "../cardVfxSpecs.ts";
 import { HIT_S } from "../damageStrike.ts";
 import { DISSOLVE_CROSS_S, DISSOLVE_LIFT_S, DISSOLVE_TRAVEL_S } from "../exileDissolve.ts";
 
@@ -1285,6 +1292,39 @@ describe("CardVfxLayer damage strike", () => {
     unmount();
     expect(onImpact).toHaveBeenCalledTimes(1);
     expect(veiled(X)).toBe(false);
+  });
+
+  it("V12-5: a blow lands dust on a player's HUD or a permanent at once, with no face to load and no veil", async () => {
+    const { present } = await readyLayer();
+    anchor({ "data-permanent-card": String(X) }, 40, 600);
+    anchor({ "data-player-hud": "1" }, 400, 40);
+    anchor({ "data-permanent-card": String(Y) }, 300, 400);
+    const blow = (target: DamageBlowSpec["target"]): DamageBlowSpec => ({
+      kind: "blow",
+      sourceId: X,
+      target,
+      amount: 3,
+      pace: 1,
+      impactDelayMs: 300,
+    });
+
+    for (const target of [{ Player: 1 }, { Object: Y }]) {
+      const classic = present(blow(target));
+      expect(classic).not.toHaveBeenCalled();
+    }
+    await frames(1);
+    const blows = last(calls("render"))?.children?.filter((child) => child.name === "damage-blow");
+    expect(blows).toHaveLength(2);
+    expect(veiled(Y)).toBe(false);
+  });
+
+  it("V12-5: a blow with no surface to land on, or at pace 0, presents Classic", async () => {
+    const { present } = await readyLayer();
+    const blow: DamageBlowSpec = { kind: "blow", sourceId: null, target: { Object: Y }, amount: 3, pace: 1, impactDelayMs: 300 };
+    expect(present(blow)).toHaveBeenCalledTimes(1);
+    anchor({ "data-permanent-card": String(Y) }, 300, 400);
+    expect(present({ ...blow, pace: 0 })).toHaveBeenCalledTimes(1);
+    expect(present(blow)).not.toHaveBeenCalled();
   });
 
   it("V10-16: readiness is published: not before init, while ready, not after unmount", async () => {

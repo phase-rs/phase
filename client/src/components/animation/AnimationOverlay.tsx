@@ -3,6 +3,7 @@ import { type RefObject, useCallback, useEffect, useRef, useState } from "react"
 
 import type { TargetRef } from "../../adapter/types.ts";
 import {
+  CARD_SLAM_FLIGHT_MS,
   DAMAGE_FLURRY_SOURCE_SAMPLE_LIMIT,
   impactDelayMsForAnimationEvent,
   isPlayerDamageAnimationEvent,
@@ -18,7 +19,7 @@ import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { audioManager } from "../../audio/AudioManager.ts";
 import { FORGE_YELLOW, hexToRgb } from "./particleEffects.ts";
 import { CardRevealBurst } from "./CardRevealBurst.tsx";
-import { applyCardSlam } from "./CardSlamAnimation.tsx";
+import { applyCardKnockback, applyCardSlam } from "./CardSlamAnimation.tsx";
 import { CastArcAnimation } from "./CastArcAnimation.tsx";
 import { DamageVignette } from "./DamageVignette.tsx";
 import { DeathShatter } from "./DeathShatter.tsx";
@@ -38,7 +39,7 @@ import {
 import { applyScreenShake } from "./ScreenShake.tsx";
 import { CardVfxLayer, type CardVfxLayerHandle, cardVfxSupported } from "./cardVfx/CardVfxLayer.tsx";
 import { castAnnounced } from "./cardVfx/cardFlightSpecs.ts";
-import { cardVfxSpecFor, damageCauseState } from "./cardVfx/cardVfxSpecs.ts";
+import { cardVfxSpecFor, type DamageBlowSpec, damageCauseState } from "./cardVfx/cardVfxSpecs.ts";
 
 
 interface ActiveFloat {
@@ -354,6 +355,21 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
     [getObjectPosition, getPlayerHudPosition],
   );
 
+  /** A slam's impact under the New style: the layer's dust and ring, or
+   *  `particles` when it cannot present them. Presented as the slam starts;
+   *  returns what runs as the slam lands. */
+  const presentBlow = useCallback((spec: DamageBlowSpec, particles: () => void): (() => void) => {
+    const layer = cardVfxRef.current;
+    if (!layer) return particles;
+    let classic = false;
+    layer.present(spec, () => {
+      classic = true;
+    });
+    return () => {
+      if (classic) particles();
+    };
+  }, []);
+
   const processClassicEffect = useCallback(
     (effect: StepEffect, stepEffects: StepEffect[], owningStepMs: number) => {
       const { event } = effect;
@@ -368,9 +384,21 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
             .filter((position): position is { x: number; y: number } => position != null);
           const origins = fromPoints.length > 0 ? fromPoints : [to];
           const impactDelay = impactDelayMsForAnimationEvent(event) * speedMultiplier;
+          let landBlow = () => particleRef.current?.playerDamage(to.x, to.y, total_damage);
 
           if (vfxQuality !== "minimal") {
             particleRef.current?.damageFlurry(origins, to, hit_count, total_damage, impactDelay);
+            landBlow = presentBlow(
+              {
+                kind: "blow",
+                sourceId: null,
+                target: { Player: player_id },
+                amount: total_damage,
+                pace: speedMultiplier,
+                impactDelayMs: impactDelay,
+              },
+              landBlow,
+            );
           }
 
           scheduleStepTimeout(() => {
@@ -382,7 +410,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
             ]);
 
             if (vfxQuality !== "minimal") {
-              particleRef.current?.playerDamage(to.x, to.y, total_damage);
+              landBlow();
               setActiveVignette({ damageAmount: total_damage });
               scheduleStepTimeout(() => setActiveVignette(null), 500 * speedMultiplier);
             }
@@ -415,13 +443,33 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
             // Resolve via the group representative when this attacker is a
             // non-rendered member of a collapsed swarm (findCardElement).
             const sourceEl = isPairedReturn ? null : findCardElement(source_id);
+            const sourceAt = sourceEl && rectCenter(sourceEl.getBoundingClientRect());
+            // Under the New style the struck card rocks back from the blow.
+            const struckEl = cardVfxRef.current ? findCardElement(target.Object) : null;
+            let landBlow = () => particleRef.current?.slamImpact(pos.x, pos.y, amount);
             const slammed = sourceEl
               ? applyCardSlam(sourceEl, pos.x, pos.y, speedMultiplier, () => {
                   // Impact effects: SFX, shockwave, floating number, screen shake
-                  particleRef.current?.slamImpact(pos.x, pos.y, amount);
+                  landBlow();
+                  if (struckEl && sourceAt) {
+                    applyCardKnockback(struckEl, pos.x - sourceAt.x, pos.y - sourceAt.y, amount, speedMultiplier);
+                  }
                   landDamageHit(pos, amount, false);
                 })
               : false;
+            if (slammed) {
+              landBlow = presentBlow(
+                {
+                  kind: "blow",
+                  sourceId: source_id,
+                  target,
+                  amount,
+                  pace: speedMultiplier,
+                  impactDelayMs: CARD_SLAM_FLIGHT_MS * speedMultiplier,
+                },
+                landBlow,
+              );
+            }
 
             if (!slammed) {
               // Paired return, missing source element, or representative already
@@ -440,12 +488,26 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
           {
             // Resolve via the group representative for a collapsed swarm member.
             const sourceEl = vfxQuality !== "minimal" ? findCardElement(source_id) : null;
+            let landBlow = () => particleRef.current?.playerDamage(pos.x, pos.y, amount);
             const slammed = sourceEl
               ? applyCardSlam(sourceEl, pos.x, pos.y, speedMultiplier, () => {
-                  particleRef.current?.playerDamage(pos.x, pos.y, amount);
+                  landBlow();
                   landDamageHit(pos, amount, "Player" in target);
                 })
               : false;
+            if (slammed) {
+              landBlow = presentBlow(
+                {
+                  kind: "blow",
+                  sourceId: source_id,
+                  target,
+                  amount,
+                  pace: speedMultiplier,
+                  impactDelayMs: CARD_SLAM_FLIGHT_MS * speedMultiplier,
+                },
+                landBlow,
+              );
+            }
 
             if (!slammed) {
               audioManager.playSfx("DamageDealt");
@@ -822,6 +884,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
       addPendingDeath,
       damageTargetPosition,
       landDamageHit,
+      presentBlow,
     ],
   );
 

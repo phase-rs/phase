@@ -6,6 +6,8 @@
 // was hit, which rocks back to rest. Light is colour written with alpha 0,
 // which the browser adds over the DOM board, so no bloom pass is needed.
 // `full` adds the light the fire casts on the board and the fireball's shadow.
+// A creature's blow (`createDamageBlow`) lands where its DOM slam strikes,
+// with no light of its own: a puff of dust and a pale shock ring.
 
 import {
   AddEquation,
@@ -110,6 +112,8 @@ interface ParticleLook {
   gain: number;
   cool?: number;
   palette?: number;
+  /** SMOKE's colour. */
+  smoke?: Vec3;
   order: number;
 }
 
@@ -167,7 +171,7 @@ function particleLayer(
   list: readonly Particle[],
   kind: ParticleKind,
   clock: { value: number },
-  { accZ, gain, cool = 1.6, palette = 0, order }: ParticleLook,
+  { accZ, gain, cool = 1.6, palette = 0, smoke = [0.09, 0.075, 0.065], order }: ParticleLook,
 ): Mesh<InstancedBufferGeometry, ShaderMaterial> {
   const n = list.length;
   const base = new PlaneGeometry(1, 1);
@@ -201,7 +205,7 @@ function particleLayer(
         uGain: { value: gain },
         uCool: { value: cool },
         uPalette: { value: palette },
-        uSmoke: { value: new Vector3(0.09, 0.075, 0.065) },
+        uSmoke: { value: new Vector3(...smoke) },
       },
       ...(kind === "SMOKE" ? NORMAL : ADDITIVE),
     }),
@@ -614,10 +618,14 @@ function burst(T: Vec2, ti: number, scale: number, L: Layers, n: BurstCounts) {
 /** What a cause lends the strike: its per-frame update, given time in seconds. */
 type CauseFrame = (t: number) => void;
 
-interface CauseContext {
+/** What a strike's look draws with: the strike's group, shared quad and clock. */
+interface StrikeParts {
   group: Group;
   unit: PlaneGeometry;
   clock: { value: number };
+}
+
+interface CauseContext extends StrikeParts {
   S: Vec2;
   T: Vec2;
   /** The target's size for the impact ring: a card's width, a HUD's height. */
@@ -751,6 +759,76 @@ const CAUSES: Record<DamageCause, (context: CauseContext) => CauseFrame> = {
   lightning: lightningCause,
 };
 
+// ---------- The blow: a creature's slam landing ----------
+
+/** How long a blow's dust hangs after its impact, before pace. */
+const BLOW_TAIL_S = 1.2;
+
+/** A blow's dust and grit: the dry grey-brown of the table. */
+const DUST: Vec3 = [0.46, 0.41, 0.34];
+const GRIT: Vec3 = [0.19, 0.16, 0.13];
+
+interface BlowContext extends StrikeParts {
+  T: Vec2;
+  /** The blow's direction, or `null` (a flurry of hits) to throw dust all round. */
+  dir: Vec2 | null;
+  span: number;
+  scale: number;
+  share: number;
+  impactS: number;
+}
+
+// Dust thrown off the struck surface, most of it on along the blow, grit
+// flicked out with it, and a pale ring where the shock runs out.
+function blowFrame({ group, unit, clock, T, dir, span, scale, share, impactS }: BlowContext): CauseFrame {
+  // Unit headings: any way round, or on along the blow within `spread`.
+  const around = (): Vec2 => {
+    const a = rand(0, Math.PI * 2);
+    return [Math.cos(a), Math.sin(a)];
+  };
+  const along = (spread: number): Vec2 => {
+    if (!dir) return around();
+    const [ox, oy] = around();
+    const x = dir[0] + ox * spread;
+    const y = dir[1] + oy * spread;
+    const length = Math.hypot(x, y) || 1;
+    return [x / length, y / length];
+  };
+  const dust: Particle[] = [];
+  for (let i = 0; i < count(40, share); i++) {
+    // Every other mote rings the impact; the rest follow the blow.
+    const [hx, hy] = i % 2 === 0 ? along(0.7) : around();
+    const speed = rand(50, 210) * scale;
+    dust.push({ pos: [T[0] + rand(-6, 6), T[1] + rand(-6, 6), 4], vel: [hx * speed, hy * speed, rand(10, 60)], spawn: impactS + rand(0, 0.05), life: rand(0.6, 1.1), drag: rand(3, 4.5), s0: rand(8, 14) * scale, s1: rand(38, 70) * scale });
+  }
+  const grit: Particle[] = [];
+  for (let i = 0; i < count(24, share); i++) {
+    const [hx, hy] = along(0.9);
+    const speed = rand(180, 420) * scale;
+    grit.push({ pos: [T[0], T[1], 4], vel: [hx * speed, hy * speed, 0], spawn: impactS + rand(0, 0.03), life: rand(0.25, 0.45), drag: 5, s0: rand(2, 3.5) * scale, s1: rand(1.5, 2.5) * scale });
+  }
+  group.add(
+    particleLayer(dust, "SMOKE", clock, { accZ: 30, gain: 0.55, smoke: DUST, order: 3 }),
+    particleLayer(grit, "SMOKE", clock, { accZ: 0, gain: 0.9, smoke: GRIT, order: 4 }),
+  );
+  const ring = sprite(unit, "RING", [0.92, 0.88, 0.8], 6);
+  group.add(ring);
+
+  return (t) => {
+    const k = t - impactS;
+    const rp = clamp01(k / 0.3);
+    place(ring, T[0], T[1], 2, (0.5 + 2 * (1 - (1 - rp) ** 3)) * span * scale, k >= 0 && rp < 1 ? (1 - rp) ** 2 * 0.4 : 0);
+  };
+}
+
+/** When a strike lands and ends, in seconds before pace, and what runs as it lands. */
+interface StrikeTiming {
+  impactS: number;
+  endS: number;
+  pace: number;
+  onImpact(): void;
+}
+
 class DamageStrike implements SceneEffect {
   private readonly group = new Group();
   private readonly unit = new PlaneGeometry(1, 1);
@@ -761,40 +839,28 @@ class DamageStrike implements SceneEffect {
 
   constructor(
     private readonly host: EffectHost,
-    private readonly params: Omit<DamageStrikeParams, "hit">,
-    S: Vec2,
-    T: Vec2,
-    scale: number,
+    name: string,
+    private readonly timing: StrikeTiming,
+    look: (parts: StrikeParts) => CauseFrame,
   ) {
-    const { cause, to, tier } = params;
-    this.group.name = "damage-strike";
-    this.frame = CAUSES[cause]({
-      group: this.group,
-      unit: this.unit,
-      clock: this.clock,
-      S,
-      T,
-      span: Math.min(to.w, to.h),
-      scale,
-      share: PARTICLE_SHARE[tier],
-      boardLight: tier === "full",
-    });
+    this.group.name = name;
+    this.frame = look({ group: this.group, unit: this.unit, clock: this.clock });
     host.scene.add(this.group);
   }
 
   update(nowMs: number): boolean {
     this.startMs ??= nowMs;
-    const t = (nowMs - this.startMs) / 1000 / this.params.pace;
+    const t = (nowMs - this.startMs) / 1000 / this.timing.pace;
     this.clock.value = t;
     this.frame(t);
-    if (t >= IMPACT_S) this.land();
-    return t < IMPACT_S + TAIL_S[this.params.cause];
+    if (t >= this.timing.impactS) this.land();
+    return t < this.timing.endS;
   }
 
   private land() {
     if (this.impacted) return;
     this.impacted = true;
-    this.params.onImpact();
+    this.timing.onImpact();
   }
 
   // A strike cut short (context loss, unmount) still lands its hit once: the
@@ -824,10 +890,55 @@ export function createDamageStrike(
   const scale = hit ? 0.8 + Math.min(params.amount, 8) * 0.07 : 0.7;
   const dist = Math.hypot(T[0] - S[0], T[1] - S[1]) || 1;
   const dir: Vec2 = [(T[0] - S[0]) / dist, (T[1] - S[1]) / dist];
+  const { cause, to, tier, pace, onImpact } = params;
+  const timing = { impactS: IMPACT_S, endS: IMPACT_S + TAIL_S[cause], pace, onImpact };
+  const look = (parts: StrikeParts) =>
+    CAUSES[cause]({
+      ...parts,
+      S,
+      T,
+      span: Math.min(to.w, to.h),
+      scale,
+      share: PARTICLE_SHARE[tier],
+      boardLight: tier === "full",
+    });
   return {
-    strike: new DamageStrike(host, params, S, T, scale),
+    strike: new DamageStrike(host, "damage-strike", timing, look),
     hit: hit && new DamageHit(host, hit, impact, dir, scale, params.amount, params.pace),
   };
+}
+
+export interface DamageBlowParams {
+  /** The striking creature's surface; `null` (a flurry of hits) has no one direction. */
+  from: CardPose | null;
+  /** The struck surface: the creature, or the player's HUD. */
+  to: CardPose;
+  amount: number;
+  tier: CardVfxTier;
+  pace: number;
+  /** When the slam lands, in seconds after the blow's first frame, before pace. */
+  impactS: number;
+}
+
+/** Creates a creature's blow landing on `to` as its slam strikes. The slam
+ *  lands the hit itself, so the blow reports nothing. */
+export function createDamageBlow(host: EffectHost, { from, to, amount, tier, pace, impactS }: DamageBlowParams): SceneEffect {
+  const T = worldPoint(to, 0.5, 0.5);
+  const S = from && worldPoint(from, 0.5, 0.5);
+  const dist = S ? Math.hypot(T[0] - S[0], T[1] - S[1]) : 0;
+  const dir: Vec2 | null = S && dist > 0 ? [(T[0] - S[0]) / dist, (T[1] - S[1]) / dist] : null;
+  const timing = { impactS, endS: impactS + BLOW_TAIL_S, pace, onImpact: () => {} };
+  const look = (parts: StrikeParts) =>
+    blowFrame({
+      ...parts,
+      T,
+      dir,
+      span: Math.min(to.w, to.h),
+      scale: 0.8 + Math.min(amount, 8) * 0.07,
+      share: PARTICLE_SHARE[tier],
+      impactS,
+    });
+  return new DamageStrike(host, "damage-blow", timing, look);
 }
 
 export const damageStrikeKind: SceneEffectKind = {

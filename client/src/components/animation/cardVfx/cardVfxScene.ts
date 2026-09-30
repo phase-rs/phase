@@ -29,7 +29,14 @@ import {
   restingState,
 } from "./cardFlight.ts";
 import { type CardShatterParams, cardShatterKind, createCardShatter } from "./cardShatter.ts";
-import { createDamageStrike, type DamageHitParams, type DamageStrikeParams, damageStrikeKind } from "./damageStrike.ts";
+import {
+  createDamageBlow,
+  createDamageStrike,
+  type DamageBlowParams,
+  type DamageHitParams,
+  type DamageStrikeParams,
+  damageStrikeKind,
+} from "./damageStrike.ts";
 import { createExileDissolve, type ExileDissolveParams, exileDissolveKind } from "./exileDissolve.ts";
 import { createLandingDust, landingDustKind } from "./landingDust.ts";
 
@@ -120,6 +127,8 @@ export interface CardVfxScene {
   startShatter(request: CardShatterRequest): void;
   startDissolve(request: ExileDissolveRequest): void;
   startDamageStrike(request: DamageStrikeRequest): void;
+  /** A blow happens to no one permanent: the DOM slam moves the struck card. */
+  startDamageBlow(request: DamageBlowParams): void;
   add(effect: SceneEffect): void;
   dispose(): void;
 }
@@ -340,6 +349,10 @@ class CardVfxSceneRuntime implements CardVfxScene, EffectHost {
     // A hit taking over from a running effect inherits its veil, so it shows
     // the permanent at rest until its own impact.
     if (hit && request.hit && this.addBoardEffect(request.hit.objectId, hit)) hit.showAtRest();
+  }
+
+  startDamageBlow(request: DamageBlowParams) {
+    this.add(createDamageBlow(this, request));
   }
 
   /** Returns whether `effect` took over from one already running. */

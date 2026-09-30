@@ -1,10 +1,12 @@
-import { type InstancedBufferGeometry, Mesh, type Object3D, Scene, Texture } from "three";
+import { type InstancedBufferGeometry, Mesh, type Object3D, Scene, type ShaderMaterial, Texture } from "three";
 import { describe, expect, it, vi } from "vitest";
 
 import { DAMAGE_CAUSE_IMPACT_MS } from "../../../../animation/types.ts";
 import type { EffectHost } from "../cardVfxScene.ts";
 import {
+  createDamageBlow,
   createDamageStrike,
+  type DamageBlowParams,
   damageStrikeKind,
   type DamageHitParams,
   type DamageStrikeParams,
@@ -133,5 +135,81 @@ describe("damage strike", () => {
       }),
     );
     expect(programs.size).toBe(9);
+  });
+});
+
+describe("damage blow", () => {
+  const FROM = { x: 100, y: 400, w: 63, h: 88, angleDeg: 0 };
+  const TO = { x: 400, y: 400, w: 63, h: 88, angleDeg: 0 };
+
+  function blow(overrides: Partial<DamageBlowParams> = {}): DamageBlowParams {
+    return { from: FROM, to: TO, amount: 3, tier: "full", pace: 1, impactS: 0.3, ...overrides };
+  }
+
+  function meshes(group: Object3D) {
+    const found: Mesh[] = [];
+    group.traverse((object) => {
+      if (object instanceof Mesh) found.push(object);
+    });
+    return found;
+  }
+
+  /** The mean of every dust and grit velocity's component along +x (world). */
+  function meanPushX(group: Object3D) {
+    let sum = 0;
+    let n = 0;
+    for (const mesh of meshes(group)) {
+      const velocity = (mesh.geometry as InstancedBufferGeometry).getAttribute("aVel");
+      if (!velocity) continue;
+      for (let i = 0; i < velocity.count; i += 1) {
+        sum += Math.sign(velocity.getX(i));
+        n += 1;
+      }
+    }
+    return sum / n;
+  }
+
+  it("V12-1: a blow shows its ring only from the impact, scaled by pace, and ends after its dust settles", () => {
+    const effectHost = host();
+    const effect = createDamageBlow(effectHost, blow({ pace: 2 }));
+    const group = named(effectHost.scene, "damage-blow") as Object3D;
+    const ring = meshes(group).find((mesh) => "RING" in ((mesh.material as ShaderMaterial).defines ?? {}));
+
+    expect(effect.update(1000)).toBe(true);
+    effect.update(1000 + 0.3 * 2 * 1000 - 10);
+    expect(ring?.visible).toBe(false);
+    effect.update(1000 + 0.3 * 2 * 1000 + 40);
+    expect(ring?.visible).toBe(true);
+    expect(effect.update(1000 + 4000)).toBe(false);
+
+    effect.dispose(false);
+    expect(effectHost.scene.children).toHaveLength(0);
+  });
+
+  it("V12-1: a blow gives off no light: dust and grit only, and one pale ring", () => {
+    const effectHost = host();
+    createDamageBlow(effectHost, blow());
+    const programs = meshes(named(effectHost.scene, "damage-blow") as Object3D).map(
+      (mesh) => Object.keys((mesh.material as ShaderMaterial).defines ?? {}),
+    );
+    expect(programs.sort()).toEqual([["RING"], ["SMOKE"], ["SMOKE"]]);
+  });
+
+  it("V12-2: dust is thrown on along the blow, and all round with no one direction", () => {
+    const along = host();
+    createDamageBlow(along, blow());
+    expect(meanPushX(named(along.scene, "damage-blow") as Object3D)).toBeGreaterThan(0.3);
+
+    const around = host();
+    createDamageBlow(around, blow({ from: null }));
+    expect(Math.abs(meanPushX(named(around.scene, "damage-blow") as Object3D))).toBeLessThan(0.3);
+  });
+
+  it("V12-2: a reduced blow throws fewer motes", () => {
+    const [full, reduced] = [host(), host()];
+    createDamageBlow(full, blow());
+    createDamageBlow(reduced, blow({ tier: "reduced" }));
+    const [fullLoad, reducedLoad] = [full, reduced].map((h) => strikeLoad(named(h.scene, "damage-blow") as Object3D));
+    expect(reducedLoad.particles).toBeLessThan(fullLoad.particles * 0.6);
   });
 });

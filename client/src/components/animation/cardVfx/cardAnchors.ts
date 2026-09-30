@@ -147,6 +147,11 @@ export function ownPermanentSurface(id: ObjectId): HTMLElement | null {
   return firstRendered(`[data-permanent-card="${id}"]`);
 }
 
+/** Player `id`'s HUD, where damage to them lands. */
+export function playerHudSurface(id: PlayerId): HTMLElement | null {
+  return firstRendered(`[data-player-hud="${id}"]`);
+}
+
 /** Object `id`'s ghost under the permanent holding it in exile, veil-aware. */
 export function exileGhostNode(id: ObjectId): HTMLElement | null {
   return firstRendered(`[data-exile-ghost="${id}"]`);

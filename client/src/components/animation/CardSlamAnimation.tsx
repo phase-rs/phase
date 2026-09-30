@@ -92,3 +92,52 @@ export function applyCardSlam(
   requestAnimationFrame(frame);
   return true;
 }
+
+/** How long a struck card takes to rock back to rest, before pace. */
+export const CARD_KNOCKBACK_MS = 800;
+
+/**
+ * The struck card's knockback: pushed along the blow (`dirX`, `dirY`) and
+ * pressed into the table, rocking as it settles back to rest; a bigger hit
+ * rocks it further. Uses the independent `translate`/`rotate`/`scale`
+ * properties and shares the slam's busy set, so the two never fight over one
+ * element. Returns `false` if the element is already busy.
+ */
+export function applyCardKnockback(
+  element: HTMLElement,
+  dirX: number,
+  dirY: number,
+  amount: number,
+  speedMultiplier: number,
+): boolean {
+  if (activeSlams.has(element)) return false;
+  activeSlams.add(element);
+
+  const length = Math.hypot(dirX, dirY) || 1;
+  const ux = dirX / length;
+  const uy = dirY / length;
+  // A blow from the left rocks the card clockwise first.
+  const tiltDeg = (ux >= 0 ? 1 : -1) * Math.min(4 + 1.2 * amount, 11);
+  const durationMs = CARD_KNOCKBACK_MS * speedMultiplier;
+  const start = performance.now();
+
+  const frame = (now: number) => {
+    const elapsed = now - start;
+    if (elapsed >= durationMs) {
+      element.style.translate = "";
+      element.style.rotate = "";
+      element.style.scale = "";
+      activeSlams.delete(element);
+      return;
+    }
+    const k = elapsed / 1000 / speedMultiplier;
+    const push = 9 * (1 - Math.exp(-k * 40)) * Math.exp(-k * 6);
+    element.style.translate = `${ux * push}px ${uy * push}px`;
+    element.style.rotate = `${tiltDeg * Math.exp(-k * 8) * Math.sin(k * 22)}deg`;
+    element.style.scale = `${1 - 0.05 * (1 - Math.exp(-k * 50)) * Math.exp(-k * 9)}`;
+    requestAnimationFrame(frame);
+  };
+
+  requestAnimationFrame(frame);
+  return true;
+}

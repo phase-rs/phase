@@ -3,7 +3,12 @@ import type { RefObject } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { GameObject, GameState } from "../../../adapter/types.ts";
-import type { AnimationStep } from "../../../animation/types.ts";
+import {
+  type AnimationEvent,
+  type AnimationStep,
+  CARD_SLAM_FLIGHT_MS,
+  impactDelayMsForAnimationEvent,
+} from "../../../animation/types.ts";
 import { currentSnapshot } from "../../../hooks/useGameDispatch.ts";
 import { useAnimationStore } from "../../../stores/animationStore.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
@@ -12,14 +17,15 @@ import { buildObjectMap, gameObjectFactory } from "../../../test/factories/gameO
 import { buildGameState, buildStackEntry } from "../../../test/factories/gameStateFactory.ts";
 import { AnimationOverlay } from "../AnimationOverlay.tsx";
 import { CardRevealBurst } from "../CardRevealBurst.tsx";
+import { CARD_KNOCKBACK_MS } from "../CardSlamAnimation.tsx";
 import { CastArcAnimation } from "../CastArcAnimation.tsx";
-import type { CardFlightSpec } from "../cardVfx/cardFlightSpecs.ts";
+import type { CardVfxSpec } from "../cardVfx/cardVfxSpecs.ts";
 import type { CardVfxLayerHandle } from "../cardVfx/CardVfxLayer.tsx";
 import type { ParticleCanvasHandle } from "../ParticleCanvas.tsx";
 
 const layer = vi.hoisted(() => ({
   supported: undefined as boolean | undefined,
-  present: vi.fn<(spec: CardFlightSpec, classic: () => void) => void>(),
+  present: vi.fn<(spec: CardVfxSpec, classic: () => void) => void>(),
 }));
 
 vi.mock("../cardVfx/CardVfxLayer.tsx", async (importOriginal) => {
@@ -275,5 +281,119 @@ describe("AnimationOverlay announced casts", () => {
     renderOverlay();
 
     expectClassicCast();
+  });
+});
+
+describe("AnimationOverlay combat blows", () => {
+  const Y = 8;
+  const hit = {
+    type: "DamageDealt",
+    data: { source_id: X, target: { Object: Y }, amount: 3, is_combat: true },
+  } as const;
+
+  function card(objectId: number, left: number) {
+    const el = document.createElement("div");
+    el.setAttribute("data-object-id", String(objectId));
+    el.getBoundingClientRect = () => new DOMRect(left, 300, 63, 88);
+    document.body.appendChild(el);
+    return el;
+  }
+
+  function seedHit() {
+    const bears = gameObjectFactory.withId(Y).named("Grizzly Bears").creature(2, 2).onBattlefield().build();
+    act(() => {
+      useGameStore.setState({ gameState: buildGameState({ objects: buildObjectMap(elves.onBattlefield().build(), bears) }) });
+      useAnimationStore.getState().enqueueSteps([{ effects: [{ event: hit, duration: 500 }], duration: 500 }]);
+    });
+  }
+
+  const advance = (ms: number) =>
+    act(() => {
+      vi.advanceTimersByTime(ms);
+    });
+
+  beforeEach(() => {
+    vi.useFakeTimers({
+      toFake: ["setTimeout", "clearTimeout", "requestAnimationFrame", "cancelAnimationFrame", "performance"],
+    });
+  });
+
+  afterEach(() => {
+    document.body.replaceChildren();
+  });
+
+  it("V12-4: under the New style a slam's impact is the layer's blow, and the struck card rocks back", () => {
+    layer.supported = true;
+    card(X, 40);
+    const struck = card(Y, 400);
+    seedHit();
+
+    renderOverlay();
+
+    expect(layer.present).toHaveBeenCalledTimes(1);
+    expect(layer.present.mock.calls[0][0]).toEqual({
+      kind: "blow",
+      sourceId: X,
+      target: { Object: Y },
+      amount: 3,
+      pace: 1,
+      impactDelayMs: CARD_SLAM_FLIGHT_MS,
+    });
+    advance(CARD_SLAM_FLIGHT_MS + 60);
+    expect(particles.slamImpact).not.toHaveBeenCalled();
+    expect(struck.style.rotate).not.toBe("");
+    advance(CARD_KNOCKBACK_MS + 100);
+    expect(struck.style.rotate).toBe("");
+  });
+
+  it("V12-4: a blow the layer cannot present runs the Classic particles as the slam lands", () => {
+    layer.supported = true;
+    layer.present.mockImplementation((_spec, classic) => classic());
+    card(X, 40);
+    card(Y, 400);
+    seedHit();
+
+    renderOverlay();
+
+    advance(CARD_SLAM_FLIGHT_MS - 40);
+    expect(particles.slamImpact).not.toHaveBeenCalled();
+    advance(80);
+    expect(particles.slamImpact).toHaveBeenCalledTimes(1);
+  });
+
+  it("V12-4: a flurry of hits on a player lands one blow with no one direction, else its Classic burst", () => {
+    layer.supported = true;
+    layer.present.mockImplementation((_spec, classic) => classic());
+    const flurry: AnimationEvent = {
+      type: "GroupedDamageFlurry",
+      data: { player_id: 1, source_ids: [X], total_damage: 9, hit_count: 3 },
+    };
+    act(() => {
+      useGameStore.setState({ gameState: buildGameState({ objects: buildObjectMap(elves.onBattlefield().build()) }) });
+      useAnimationStore.getState().enqueueSteps([{ effects: [{ event: flurry, duration: 500 }], duration: 500 }]);
+    });
+
+    renderOverlay();
+
+    const impactDelayMs = impactDelayMsForAnimationEvent(flurry);
+    expect(layer.present.mock.calls.map(([spec]) => spec)).toEqual([
+      { kind: "blow", sourceId: null, target: { Player: 1 }, amount: 9, pace: 1, impactDelayMs },
+    ]);
+    advance(impactDelayMs + 10);
+    expect(particles.playerDamage).toHaveBeenCalledTimes(1);
+  });
+
+  it("V12-4: the Classic style keeps today's slam: particles at the impact, no blow and no knockback", () => {
+    usePreferencesStore.setState({ cardAnimationStyle: "classic" });
+    card(X, 40);
+    const struck = card(Y, 400);
+    seedHit();
+
+    renderOverlay();
+
+    advance(CARD_SLAM_FLIGHT_MS + 60);
+    expect(layer.present).not.toHaveBeenCalled();
+    expect(particles.slamImpact).toHaveBeenCalledTimes(1);
+    expect(struck.style.rotate).toBeFalsy();
   });
 });
