@@ -80486,16 +80486,22 @@ mod carried_player_reference_tests {
     #[test]
     fn extract_player_anchor_converts_only_a_declaring_search() {
         for declared in [TargetFilter::Player, opponent_filter()] {
-            assert_eq!(extract_player_anchor(&search(declared)), Some(slot0()));
+            assert_eq!(
+                extract_player_anchor(&search(declared), true),
+                Some(slot0())
+            );
         }
         assert_eq!(
-            extract_player_anchor(&search(TargetFilter::ParentTargetController)),
+            extract_player_anchor(&search(TargetFilter::ParentTargetController), true),
             Some(TargetFilter::ParentTargetController)
         );
         assert_eq!(
-            extract_player_anchor(&Effect::Shuffle {
-                target: TargetFilter::Player
-            }),
+            extract_player_anchor(
+                &Effect::Shuffle {
+                    target: TargetFilter::Player
+                },
+                true
+            ),
             Some(TargetFilter::Player)
         );
         let mut sweep: Effect = serde_json::from_value(serde_json::json!({
@@ -80506,7 +80512,7 @@ mod carried_player_reference_tests {
         if let Effect::ChangeZoneAll { target, .. } = &mut sweep {
             *target = opponent_filter();
         }
-        assert_eq!(extract_player_anchor(&sweep), Some(opponent_filter()));
+        assert_eq!(extract_player_anchor(&sweep, true), Some(opponent_filter()));
     }
 
     /// One row per carry form: the reference, the phrase it re-supplies, its lifetime.

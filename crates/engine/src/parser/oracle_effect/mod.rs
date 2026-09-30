@@ -25513,20 +25513,46 @@ fn chain_source_becomes_attachment(clauses: &[ClauseIr]) -> bool {
     })
 }
 
+/// CR 601.2c: targets are slotted in text order, so a declaration is slot 0
+/// only when no earlier clause here, nor the enclosing chain, declares a target.
+fn declaration_is_slot_zero(earlier: &[ClauseIr], enclosing_declares_target: bool) -> bool {
+    !enclosing_declares_target
+        && !earlier
+            .iter()
+            .any(|clause| clause_declares_target(&clause.parsed))
+}
+
+fn clause_declares_target(clause: &ParsedEffectClause) -> bool {
+    let declares = |effect: &Effect| {
+        effect
+            .target_filter()
+            .is_some_and(|filter| !filter.is_context_ref())
+    };
+    declares(&clause.effect)
+        || std::iter::successors(clause.sub_ability.as_deref(), |def| {
+            def.sub_ability.as_deref()
+        })
+        .any(|def| declares(&def.effect))
+}
+
 /// CR 115.1 + CR 608.2c: the player slot an effect chain already declared, as
-/// the `ParentTargetSlot` reference a later "that player" names. `clauses` are
-/// this chain's earlier clauses; `enclosing` is the declaration a chain nested
-/// in another one inherits (`ParseContext::enclosing_declared_player`). The
-/// declaration is the chain's first target, hence slot 0.
+/// the `ParentTargetSlot` reference a later "that player" names, or `None` when
+/// an earlier target declaration leaves its index unproven. `clauses` are this
+/// chain's earlier clauses; `enclosing` is the declaration a chain nested in
+/// another one inherits (`ParseContext::enclosing_declared_player`).
 fn chain_declared_player_slot(
     clauses: &[ClauseIr],
     enclosing: &Option<TargetFilter>,
+    enclosing_declares_target: bool,
 ) -> Option<TargetFilter> {
-    clauses
+    match clauses
         .iter()
-        .any(|clause| has_explicit_player_target(&clause.parsed.effect))
-        .then_some(TargetFilter::ParentTargetSlot { index: 0 })
-        .or_else(|| enclosing.clone())
+        .position(|clause| has_explicit_player_target(&clause.parsed.effect))
+    {
+        Some(i) => declaration_is_slot_zero(&clauses[..i], enclosing_declares_target)
+            .then_some(TargetFilter::ParentTargetSlot { index: 0 }),
+        None => enclosing.clone(),
+    }
 }
 
 fn chain_has_prior_player_target_referent(clauses: &[ClauseIr]) -> bool {
@@ -26422,7 +26448,7 @@ fn is_player_applicable_keyword(keyword: &crate::types::keywords::Keyword) -> bo
 ///
 /// Returns None for caster-defaulted or object-scoped effects — these do not
 /// establish an acting-player anchor.
-fn extract_player_anchor(effect: &Effect) -> Option<TargetFilter> {
+fn extract_player_anchor(effect: &Effect, declares_slot_zero: bool) -> Option<TargetFilter> {
     let (candidate, searched) = match effect {
         Effect::SearchLibrary {
             target_player: Some(filter),
@@ -26458,7 +26484,7 @@ fn extract_player_anchor(effect: &Effect) -> Option<TargetFilter> {
     if matches!(candidate, TargetFilter::Controller | TargetFilter::Any) {
         return None;
     }
-    if searched && is_declared_player_filter(candidate) {
+    if searched && declares_slot_zero && is_declared_player_filter(candidate) {
         return Some(TargetFilter::ParentTargetSlot { index: 0 });
     }
     Some(candidate.clone())
@@ -26485,8 +26511,11 @@ fn is_declared_player_filter(filter: &TargetFilter) -> bool {
 /// level down — `extract_player_anchor` alone (top-effect only) would miss it.
 /// Used so a following "then faces a villainous choice — …" continuation can
 /// inherit the named owner as its chooser (This Is How It Ends).
-fn extract_player_anchor_in_chain(clause: &ParsedEffectClause) -> Option<TargetFilter> {
-    if let Some(anchor) = extract_player_anchor(&clause.effect) {
+fn extract_player_anchor_in_chain(
+    clause: &ParsedEffectClause,
+    declares_slot_zero: bool,
+) -> Option<TargetFilter> {
+    if let Some(anchor) = extract_player_anchor(&clause.effect, declares_slot_zero) {
         return Some(anchor);
     }
     // CR 115.1a + CR 608.2c: a player-only `TargetOnly` wrapper establishes
@@ -26513,7 +26542,7 @@ fn extract_player_anchor_in_chain(clause: &ParsedEffectClause) -> Option<TargetF
         {
             return Some(TargetFilter::ParentTarget);
         }
-        if let Some(anchor) = extract_player_anchor(&def.effect) {
+        if let Some(anchor) = extract_player_anchor(&def.effect, declares_slot_zero) {
             return Some(anchor);
         }
         sub = def.sub_ability.as_deref();
@@ -39166,6 +39195,7 @@ fn parse_effect_chain_ir_body(
     // CR 608.2c: the enclosing chain's player declaration, taken on entry so only
     // the one nested call that set it can read it.
     let enclosing_declared_player = ctx.enclosing_declared_player.take();
+    let enclosing_declares_target = std::mem::take(&mut ctx.enclosing_declares_target);
     if let Some(ir) = parse_reciprocal_graveyard_choice_ir(text, kind) {
         return ir;
     }
@@ -41069,8 +41099,16 @@ fn parse_effect_chain_ir_body(
         if let Some(ref outer_condition) = condition {
             let body_chunks = split_clause_sequence(&text);
             if body_chunks.len() > 1 {
-                ctx.enclosing_declared_player =
-                    chain_declared_player_slot(builder.clauses(), &enclosing_declared_player);
+                ctx.enclosing_declared_player = chain_declared_player_slot(
+                    builder.clauses(),
+                    &enclosing_declared_player,
+                    enclosing_declares_target,
+                );
+                ctx.enclosing_declares_target = enclosing_declares_target
+                    || builder
+                        .clauses()
+                        .iter()
+                        .any(|clause| clause_declares_target(&clause.parsed));
                 let mut body_ir = parse_effect_chain_ir(&text, kind, ctx);
                 if let Some(last) = body_ir.clauses.last_mut() {
                     if last.boundary.is_none() {
@@ -42650,7 +42688,10 @@ fn parse_effect_chain_ir_body(
         // chain so an owner-shuffle carried as a sub-ability (CR 108.3 — "target
         // creature's owner shuffles it into their library") still registers its
         // ParentTargetOwner anchor for a following villainous-choice clause.
-        if let Some(extracted) = extract_player_anchor_in_chain(&clause) {
+        if let Some(extracted) = extract_player_anchor_in_chain(
+            &clause,
+            declaration_is_slot_zero(builder.clauses(), enclosing_declares_target),
+        ) {
             let text_lower_for_anchor = text.to_lowercase();
             apply_anchor_subject_to_clause(&mut clause, &extracted, &text_lower_for_anchor);
             carried_player = Some(CarriedPlayerSubject::antecedent(extracted));
@@ -42848,9 +42889,12 @@ fn parse_effect_chain_ir_body(
                 .is_some_and(CarriedPlayerSubject::persists_across_sentences)
         {
             if let Some(application) = leading_subject_application.as_ref() {
-                let declared_player =
-                    chain_declared_player_slot(builder.clauses(), &enclosing_declared_player)
-                        .filter(|_| has_player_anaphoric_reference(&text_lower));
+                let declared_player = chain_declared_player_slot(
+                    builder.clauses(),
+                    &enclosing_declared_player,
+                    enclosing_declares_target,
+                )
+                .filter(|_| has_player_anaphoric_reference(&text_lower));
                 carried_player =
                     CarriedPlayerSubject::from_anaphoric_subject(application, declared_player)
                         .or(carried_player.take());

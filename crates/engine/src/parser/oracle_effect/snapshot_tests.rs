@@ -2209,3 +2209,70 @@ fn player_reference_controls_keep_their_lowering() {
         }
     )));
 }
+
+/// CR 601.2c: slot 0 names the chain's first declared target, so a player declared after an
+/// object target must not be referenced as `ParentTargetSlot { 0 }` (that slot is the creature).
+#[test]
+fn player_declared_after_an_object_target_is_not_slot_zero() {
+    let parsed = parse_card(
+        "Destroy target creature. This spell deals 2 damage to target player. That player discards a card, then draws a card.",
+        "Object First Anaphor",
+        &[],
+        &["Sorcery"],
+    );
+    let effects = card_effects(&parsed);
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::DealDamage {
+                target: TargetFilter::Player,
+                ..
+            }
+        )),
+        "player declaration reached: {effects:?}"
+    );
+    assert!(no_unimplemented(&effects), "{effects:?}");
+    assert!(
+        !matches!(last_draw(&effects), TargetFilter::ParentTargetSlot { .. }),
+        "{effects:?}"
+    );
+    assert_eq!(declared_player_fields(&effects), 0, "{effects:?}");
+}
+
+/// CR 601.2c: a search-declared player after an object target is likewise not slot 0.
+#[test]
+fn search_declared_player_after_an_object_target_is_not_slot_zero() {
+    let parsed = parse_card(
+        "Destroy target creature. Search target opponent's library for a card and exile it. That player shuffles.",
+        "Object First Search",
+        &[],
+        &["Sorcery"],
+    );
+    let effects = card_effects(&parsed);
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::SearchLibrary {
+                target_player: Some(_),
+                ..
+            }
+        )),
+        "declaring search reached: {effects:?}"
+    );
+    assert_ne!(shuffle_target(&effects), &slot0(), "{effects:?}");
+}
+
+/// Control: the same anaphor shape with the player declared first still names slot 0.
+#[test]
+fn player_declared_first_is_slot_zero_for_the_anaphor() {
+    let parsed = parse_card(
+        "Target player gains 2 life. That player discards a card, then draws a card.",
+        "Player First Anaphor",
+        &[],
+        &["Sorcery"],
+    );
+    let effects = card_effects(&parsed);
+    assert!(no_unimplemented(&effects), "{effects:?}");
+    assert_eq!(last_draw(&effects), &slot0(), "{effects:?}");
+    assert_eq!(declared_player_fields(&effects), 1, "{effects:?}");
+}

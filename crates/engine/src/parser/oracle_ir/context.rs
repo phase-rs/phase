@@ -558,6 +558,9 @@ pub(crate) struct ParseContext {
     /// immediately before that one call; the callee `take`s it on entry, so it is
     /// `None` everywhere else. Never serialized.
     pub enclosing_declared_player: Option<TargetFilter>,
+    /// CR 601.2c: whether the enclosing chain had already declared any target
+    /// when it set `enclosing_declared_player`; same set/`take` lifetime.
+    pub enclosing_declares_target: bool,
     /// CR 608.2c + CR 400.7: Source zone of the tracked set that a downstream
     /// "put those cards / put them onto the battlefield" anaphor (a
     /// `TargetFilter::TrackedSet`) must scan. Set by a producer clause that
