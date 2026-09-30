@@ -27157,7 +27157,7 @@ fn activate_with_cost_carrier(
     let record = take_activation_record(&mut resolved, player)?;
     let entry_id = ObjectId(state.next_object_id);
     state.next_object_id += 1;
-    let announced_targets = flatten_targets_in_chain(&resolved);
+    let announced_targets = declared_targets_in_chain(&resolved);
     let crime_candidate = targets_commit_crime(state, &announced_targets, player);
 
     stack::push_to_stack(

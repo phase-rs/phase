@@ -48,8 +48,7 @@ use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 use super::ability_utils::{
     assign_targets_in_chain, auto_select_targets_for_ability, begin_target_selection_for_ability,
     build_target_slots, build_target_slots_labelled, declared_targets_in_chain,
-    flatten_targets_in_chain, modal_choice_for_player, random_select_targets_for_ability,
-    target_constraints_from_modal,
+    modal_choice_for_player, random_select_targets_for_ability, target_constraints_from_modal,
 };
 use super::life_costs::PayLifeCostResult;
 
@@ -1841,7 +1840,7 @@ pub(crate) fn begin_deferred_target_selection(
         pending.ability = ability;
         pending.crime_candidate = super::casting::targets_commit_crime(
             state,
-            &flatten_targets_in_chain(&pending.ability),
+            &declared_targets_in_chain(&pending.ability),
             pending.ability.controller,
         );
         if pending.activation_ability_index.is_some() {
@@ -1873,7 +1872,7 @@ pub(crate) fn begin_deferred_target_selection(
         pending.ability = ability;
         pending.crime_candidate = super::casting::targets_commit_crime(
             state,
-            &flatten_targets_in_chain(&pending.ability),
+            &declared_targets_in_chain(&pending.ability),
             pending.ability.controller,
         );
         if pending.activation_ability_index.is_some() {
@@ -6439,7 +6438,7 @@ pub(super) fn push_activated_ability_to_stack(
                 let mut pending = pending(resolved);
                 pending.crime_candidate = super::casting::targets_commit_crime(
                     state,
-                    &flatten_targets_in_chain(&pending.ability),
+                    &declared_targets_in_chain(&pending.ability),
                     player,
                 );
                 pending.begin_activation_trigger_collection();
@@ -6462,7 +6461,7 @@ pub(super) fn push_activated_ability_to_stack(
                 let mut pending = pending(resolved);
                 pending.crime_candidate = super::casting::targets_commit_crime(
                     state,
-                    &flatten_targets_in_chain(&pending.ability),
+                    &declared_targets_in_chain(&pending.ability),
                     player,
                 );
                 pending.begin_activation_trigger_collection();
@@ -6858,7 +6857,7 @@ pub(super) fn finish_pending_cast_cost_or_pay(
     if !pending.crime_candidate {
         pending.crime_candidate = super::casting::targets_commit_crime(
             state,
-            &flatten_targets_in_chain(&ability),
+            &declared_targets_in_chain(&ability),
             player,
         );
     }
@@ -11462,7 +11461,7 @@ fn finalize_cast_with_phyrexian_choices_inner(
         }
     }
 
-    let announced_targets = flatten_targets_in_chain(&ability);
+    let announced_targets = declared_targets_in_chain(&ability);
 
     // Determine whether this spell has a meaningful on-resolve ability.
     // Permanent spells with no Spell-kind AbilityDefinition get a placeholder

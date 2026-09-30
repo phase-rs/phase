@@ -6,13 +6,15 @@
 //! (abilities that trigger when they become a target trigger at this point).
 //! When the cost is paid the replacement clause's target is the spell's only
 //! target, so it becomes a target once and emits one `BecomesTarget` event.
-//! CR 702.33d (kicked) and CR 702.174m (gift promised) are the printed gates.
+//! CR 702.33d (kicked), CR 702.174m (gift promised) and CR 702.194c (cast using
+//! teamwork) are the printed gates.
 
+use engine::game::derived_views::derive_views;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
-use engine::types::game_state::{CastPaymentMode, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, PayCostKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -28,6 +30,12 @@ const INTO_THE_FLOOD_MAW: &str =
 If you do, they create a tapped 1/1 blue Fish creature token before its other effects.)\n\
 Return target creature an opponent controls to its owner's hand. If the gift was promised, \
 instead return target nonland permanent an opponent controls to its owner's hand.";
+
+const CRUEL_ALLIANCE: &str =
+    "Teamwork 2 (As an additional cost to cast this spell, you may tap any number \
+of creatures you control with total power 2 or more.)\n\
+Exile target creature with mana value 3 or less. If this spell was cast using teamwork, instead \
+exile target creature and you gain 3 life.";
 
 const GIGGLING_SKITTERSPIKE: &str = "Indestructible\n\
 Whenever this creature attacks, blocks, or becomes the target of a spell, it deals damage \
@@ -49,9 +57,16 @@ fn mana_pool(types: &[ManaType]) -> Vec<ManaUnit> {
         .collect()
 }
 
-/// Casts `spell`, answers its optional additional cost with `pay`, and selects
-/// `chosen` at the target prompt; stops once the spell is on the stack.
-fn declare(runner: &mut GameRunner, spell: ObjectId, pay: bool, chosen: ObjectId) -> Declaration {
+/// Casts `spell`, answers its optional additional cost with `pay` (tapping `tap`
+/// when that cost taps creatures), and selects `chosen` at the target prompt;
+/// stops once the spell is on the stack.
+fn declare(
+    runner: &mut GameRunner,
+    spell: ObjectId,
+    pay: bool,
+    tap: &[ObjectId],
+    chosen: ObjectId,
+) -> Declaration {
     let card_id = runner.state().objects[&spell].card_id;
     let mut events = runner
         .act(GameAction::CastSpell {
@@ -75,6 +90,12 @@ fn declare(runner: &mut GameRunner, spell: ObjectId, pay: bool, chosen: ObjectId
                     targets: vec![TargetRef::Object(chosen)],
                 }
             }
+            WaitingFor::PayCost {
+                kind: PayCostKind::TapCreatures { .. },
+                ..
+            } => GameAction::SelectCards {
+                cards: tap.to_vec(),
+            },
             WaitingFor::ManaPayment { .. } => GameAction::PassPriority,
             WaitingFor::Priority { .. } => break,
             other => panic!("unexpected prompt while casting: {other:?}"),
@@ -113,20 +134,10 @@ enum Big {
     GigglingSkitterspike,
 }
 
-/// P0 holds Bloodchief's Thirst with mana for the kicker; P1 controls two
-/// creatures of mana value 2 or less (so each declaration is a real prompt)
-/// and `big`, a mana value 4 creature only the kicked target allows.
-fn thirst_against(big: Big) -> Thirst {
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    let spell = scenario
-        .add_spell_to_hand(P0, "Bloodchief's Thirst", false)
-        .from_oracle_text_with_keywords(&["Kicker"], BLOODCHIEFS_THIRST)
-        .with_mana_cost(ManaCost::Cost {
-            shards: vec![ManaCostShard::Black],
-            generic: 0,
-        })
-        .id();
+/// P1 controls two creatures of mana value 2 or less (so each declaration is a
+/// real prompt) and `big`, a mana value 4 creature only a paid "instead"
+/// target allows. Returns the mana value 1 creature and `big`.
+fn add_opponent_creatures(scenario: &mut GameScenario, big: Big) -> (ObjectId, ObjectId) {
     let small = scenario
         .add_creature(P1, "Elvish Mystic", 1, 1)
         .with_mana_cost(ManaCost::Cost {
@@ -157,6 +168,23 @@ fn thirst_against(big: Big) -> Thirst {
             .with_mana_cost(ManaCost::generic(4))
             .id(),
     };
+    (small, big)
+}
+
+/// P0 holds Bloodchief's Thirst with mana for the kicker, against
+/// [`add_opponent_creatures`].
+fn thirst_against(big: Big) -> Thirst {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand(P0, "Bloodchief's Thirst", false)
+        .from_oracle_text_with_keywords(&["Kicker"], BLOODCHIEFS_THIRST)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 0,
+        })
+        .id();
+    let (small, big) = add_opponent_creatures(&mut scenario, big);
     scenario.with_mana_pool(
         P0,
         mana_pool(&[
@@ -186,7 +214,7 @@ fn kicked_bloodchiefs_thirst_declares_its_replacement_target_once() {
         big,
     } = thirst_against(Big::HillGiant);
 
-    let declared = declare(&mut runner, spell, true, big);
+    let declared = declare(&mut runner, spell, true, &[], big);
 
     assert_eq!(declared.prompts.len(), 1, "one target slot when kicked");
     assert!(declared.prompts[0].contains(&TargetRef::Object(big)));
@@ -202,6 +230,27 @@ fn kicked_bloodchiefs_thirst_declares_its_replacement_target_once() {
     assert_eq!(runner.state().objects[&small].zone, Zone::Battlefield);
 }
 
+/// CR 601.2c: the kicked Thirst's stack entry shows its one target once.
+#[test]
+fn kicked_bloodchiefs_thirst_displays_its_target_once() {
+    let Thirst {
+        mut runner,
+        spell,
+        big,
+        ..
+    } = thirst_against(Big::HillGiant);
+
+    declare(&mut runner, spell, true, &[], big);
+
+    let targets: Vec<TargetRef> = derive_views(runner.state(), Some(P0)).stack_entry_details
+        [&spell]
+        .targets
+        .iter()
+        .map(|display| display.target.clone())
+        .collect();
+    assert_eq!(targets, vec![TargetRef::Object(big)]);
+}
+
 /// CR 601.2c: an ability that triggers when its source becomes the target of
 /// a spell triggers once for the kicked Thirst's single target, so Giggling
 /// Skitterspike deals its 1 damage to P0 once.
@@ -214,7 +263,7 @@ fn kicked_bloodchiefs_thirst_triggers_a_becomes_target_ability_once() {
         ..
     } = thirst_against(Big::GigglingSkitterspike);
 
-    let declared = declare(&mut runner, spell, true, big);
+    let declared = declare(&mut runner, spell, true, &[], big);
     assert_eq!(declared.becomes_target, vec![TargetRef::Object(big)]);
 
     runner.advance_until_stack_empty();
@@ -237,7 +286,7 @@ fn unkicked_bloodchiefs_thirst_declares_only_the_small_target() {
         big,
     } = thirst_against(Big::GigglingSkitterspike);
 
-    let declared = declare(&mut runner, spell, false, small);
+    let declared = declare(&mut runner, spell, false, &[], small);
 
     assert_eq!(declared.prompts.len(), 1, "one target slot when unkicked");
     assert!(declared.prompts[0].contains(&TargetRef::Object(small)));
@@ -272,7 +321,7 @@ fn promised_into_the_flood_maw_declares_its_replacement_target_once() {
     scenario.with_mana_pool(P0, mana_pool(&[ManaType::Blue]));
     let mut runner = scenario.build();
 
-    let declared = declare(&mut runner, spell, true, artifact);
+    let declared = declare(&mut runner, spell, true, &[], artifact);
 
     assert_eq!(declared.prompts.len(), 1, "one target slot when promised");
     assert!(declared.prompts[0].contains(&TargetRef::Object(artifact)));
@@ -285,4 +334,44 @@ fn promised_into_the_flood_maw_declares_its_replacement_target_once() {
 
     runner.advance_until_stack_empty();
     assert_eq!(runner.state().objects[&artifact].zone, Zone::Hand);
+}
+
+/// CR 601.2c + CR 702.194c: cast using teamwork, Cruel Alliance prompts once for
+/// its replacement target, which admits the mana value 4 Hill Giant, and that
+/// creature becomes a target once.
+#[test]
+fn cruel_alliance_cast_using_teamwork_declares_its_replacement_target_once() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand(P0, "Cruel Alliance", false)
+        .from_oracle_text_with_keywords(&["Teamwork"], CRUEL_ALLIANCE)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 2,
+        })
+        .id();
+    let tapper = scenario.add_creature(P0, "Teammate", 2, 2).id();
+    let (small, big) = add_opponent_creatures(&mut scenario, Big::HillGiant);
+    scenario.with_mana_pool(
+        P0,
+        mana_pool(&[ManaType::Black, ManaType::Colorless, ManaType::Colorless]),
+    );
+    let mut runner = scenario.build();
+
+    let declared = declare(&mut runner, spell, true, &[tapper], big);
+
+    assert!(runner.state().objects[&tapper].tapped, "teamwork was paid");
+    assert_eq!(declared.prompts.len(), 1, "one target slot with teamwork");
+    assert!(declared.prompts[0].contains(&TargetRef::Object(big)));
+    assert!(declared.prompts[0].contains(&TargetRef::Object(small)));
+    assert_eq!(
+        declared.becomes_target,
+        vec![TargetRef::Object(big)],
+        "the teamwork target becomes a target of the spell exactly once"
+    );
+
+    runner.advance_until_stack_empty();
+    assert_eq!(runner.state().objects[&big].zone, Zone::Exile);
+    assert_eq!(runner.life(P0), 23);
 }

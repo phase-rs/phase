@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::analysis::resource::ResourceAxis;
-use crate::game::ability_utils::flatten_targets_in_chain;
+use crate::game::ability_utils::declared_targets_in_chain;
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::{AttachTarget, DisplaySource};
 use crate::game::stack::{
@@ -2938,7 +2938,7 @@ fn stack_entry_targets(state: &GameState, entry: &StackEntry) -> Vec<StackTarget
         StackEntryKind::KeywordAction { action } => keyword_action_targets(action),
         _ => effective_stack_ability(state, entry)
             .ability
-            .map(flatten_targets_in_chain)
+            .map(declared_targets_in_chain)
             .unwrap_or_default(),
     };
     targets

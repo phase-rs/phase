@@ -8571,7 +8571,7 @@ fn push_pending_trigger_to_stack_with_firing_and_duration_events(
     );
     let crime_candidate = super::casting::targets_commit_crime(
         state,
-        &super::ability_utils::flatten_targets_in_chain(&ability),
+        &super::ability_utils::declared_targets_in_chain(&ability),
         controller,
     );
     let reveal_caused_card = reveal_causing_card(&ability);
