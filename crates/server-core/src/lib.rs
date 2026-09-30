@@ -31,6 +31,7 @@ pub mod session;
 pub mod spectator_wire_guard;
 pub mod starter_decks;
 pub mod takeback;
+pub mod tournament_hosting;
 
 pub use ai_seats_wire_guard::guard_create_ai_seats;
 pub use client_hello_guard::guard_client_hello;
@@ -82,3 +83,4 @@ pub use spectator_wire_guard::{
 pub use takeback::{
     RewindOption, RewindTarget, TakebackOutcome, MAX_TAKEBACK_HISTORY, MAX_TURN_REWIND_HISTORY,
 };
+pub use tournament_hosting::{TournamentHostingManager, TournamentMatchSeat, TournamentMatchSpawn};

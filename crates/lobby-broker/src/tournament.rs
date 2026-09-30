@@ -786,6 +786,31 @@ pub struct HostedMatch {
     pub generation: u32,
 }
 
+/// A pairing the server layer may spawn a game for right now: hosted-eligible,
+/// every seat's deck submitted, and no outcome yet. The core owns this
+/// readiness judgement ([`TournamentManager::hostable_pairings`]) and hands the
+/// server exactly the seats and decks it needs, so `game_code` and `GameState`
+/// never cross into this core. The decks are cloned out (owned) so the server
+/// can resolve and seat them without holding a borrow across a later
+/// [`TournamentManager::begin_hosting`] `&mut` call.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HostablePairing {
+    pub pairing_id: PairingId,
+    /// One entry per seat, in `TournamentPairing::players` order — so seat `i`
+    /// is `pairing.players[i]`, the same ordering the game-over handoff maps a
+    /// game `PlayerId` back through.
+    pub seats: Vec<HostableSeat>,
+}
+
+/// One seat of a [`HostablePairing`]: the entrant's key, their display name, and
+/// the deck they submitted for hosted play.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HostableSeat {
+    pub player_key: String,
+    pub display_name: String,
+    pub deck: DeckData,
+}
+
 /// Which bracket shape the same [`TournamentManager`] runs for a tournament.
 /// `SingleElimination` covers MTR Appendix E's 4-8 player case — the whole
 /// contiguous range, byes included, not only the power-of-two counts (see
@@ -2868,6 +2893,58 @@ impl TournamentManager {
         Ok(())
     }
 
+    /// The pairings the server layer may spawn a game for right now: for a
+    /// running (non-terminal) tournament, every pending pairing that is both
+    /// [`TournamentMeta::is_hosted_eligible`] and
+    /// [`TournamentMeta::pairing_decks_submitted`], with each seat's submitted
+    /// deck cloned out. Empty for an unknown or terminal tournament.
+    ///
+    /// This is the single authority for hosting readiness — the server never
+    /// re-derives "is this pairing ready" from raw pairing/player state; it asks
+    /// here and acts. Idempotency (a pairing already spawned) is the server's own
+    /// concern (its `active_matches` map), orthogonal to this readiness gate.
+    pub fn hostable_pairings(&self, code: &str) -> Vec<HostablePairing> {
+        let Some(meta) = self.tournaments.get(code) else {
+            return Vec::new();
+        };
+        if meta.status.is_terminal() {
+            return Vec::new();
+        }
+        meta.pairings
+            .iter()
+            .filter(|pairing| {
+                pairing.outcome.is_none()
+                    && meta.is_hosted_eligible(pairing)
+                    && meta.pairing_decks_submitted(pairing)
+            })
+            .map(|pairing| HostablePairing {
+                pairing_id: pairing.id,
+                seats: pairing
+                    .players
+                    .iter()
+                    .map(|key| {
+                        // `pairing_decks_submitted` above guarantees every seat's
+                        // player is registered with `deck.is_some()`, so this
+                        // lookup cannot miss.
+                        let player = meta
+                            .players
+                            .iter()
+                            .find(|p| &p.player_key == key)
+                            .expect("pairing_decks_submitted guarantees a registered player");
+                        HostableSeat {
+                            player_key: key.clone(),
+                            display_name: player.display_name.clone(),
+                            deck: player
+                                .deck
+                                .clone()
+                                .expect("pairing_decks_submitted guarantees a submitted deck"),
+                        }
+                    })
+                    .collect(),
+            })
+            .collect()
+    }
+
     /// Marks `pairing_id` as server-hosted and returns its new host generation,
     /// bumping the generation on a re-host. Refuses a pairing that is not
     /// [`TournamentMeta::is_hosted_eligible`] (wrong bracket/arity/match-type, or
@@ -4565,6 +4642,53 @@ mod tests {
             .find(|p| p.player_key == key(0))
             .expect("player");
         assert_eq!(player.deck, Some(deck_of("Island")));
+    }
+
+    /// `hostable_pairings` yields a pairing only once every seat's deck is in,
+    /// hands back each seat's deck in `players` order, and drops the pairing once
+    /// it has an outcome (nothing to spawn).
+    #[test]
+    fn hostable_pairings_gate_on_readiness_and_outcome() {
+        let env = FakeEnv::new();
+        let mut mgr = swiss(2, 2, &env);
+        mgr.generate_pairings("T", &env).expect("round 1");
+        let pairing = mgr.get("T").expect("t").pairings[0].clone();
+
+        // No decks yet -> nothing hostable.
+        assert!(mgr.hostable_pairings("T").is_empty());
+
+        mgr.submit_deck("T", &pairing.players[0], deck_of("Island"), &env)
+            .expect("submit seat 0");
+        // Only one seat ready -> still nothing hostable.
+        assert!(mgr.hostable_pairings("T").is_empty());
+
+        mgr.submit_deck("T", &pairing.players[1], deck_of("Forest"), &env)
+            .expect("submit seat 1");
+        let hostable = mgr.hostable_pairings("T");
+        assert_eq!(hostable.len(), 1);
+        assert_eq!(hostable[0].pairing_id, pairing.id);
+        // Seats come back in `players` order with each seat's own deck.
+        assert_eq!(hostable[0].seats[0].player_key, pairing.players[0]);
+        assert_eq!(hostable[0].seats[0].deck, deck_of("Island"));
+        assert_eq!(hostable[0].seats[1].player_key, pairing.players[1]);
+        assert_eq!(hostable[0].seats[1].deck, deck_of("Forest"));
+
+        // Once the pairing has an outcome, it is no longer hostable.
+        mgr.begin_hosting("T", pairing.id, &env).expect("host");
+        mgr.report_result_system(
+            "T",
+            pairing.id,
+            PodOutcome::Decisive {
+                winner: pairing.players[0].clone(),
+                game_wins: HashMap::from([
+                    (pairing.players[0].clone(), 2),
+                    (pairing.players[1].clone(), 1),
+                ]),
+            },
+            &env,
+        )
+        .expect("system report");
+        assert!(mgr.hostable_pairings("T").is_empty());
     }
 
     /// `submit_deck` refuses an unregistered player and a terminal tournament.
