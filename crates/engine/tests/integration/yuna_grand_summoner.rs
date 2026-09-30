@@ -10,6 +10,7 @@
 //! permanent, not just +1/+1 counters."
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::game_state::WaitingFor;
@@ -180,4 +181,131 @@ fn yuna_does_not_trigger_when_the_departed_permanent_had_no_counters() {
             "no creature may receive counters from a counterless departure"
         );
     }
+}
+
+const DELAYED_COUNTER_ORACLE: &str = "Whenever another permanent you control is put into a graveyard from the battlefield, if it had one or more counters on it, at the beginning of your next end step, put that many +1/+1 counters on target creature.";
+
+/// Positive: CR 603.7 + CR 603.10a + CR 608.2h require the delayed trigger to
+/// carry the departed permanent's LKI counter count to the next end step.
+#[test]
+fn delayed_that_many_uses_departure_counter_count_at_end_step() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PostCombatMain);
+    scenario.with_mana_pool(P0, three_generic());
+    scenario.add_enchantment_from_oracle(P0, "Delayed Counter Engine", DELAYED_COUNTER_ORACLE);
+    let departing = scenario
+        .add_creature(P0, "Countered Artifact", 2, 2)
+        .as_artifact()
+        .id();
+    let recipient = scenario.add_creature(P0, "Recipient", 2, 2).id();
+    scenario.add_card_to_library_top(P1, "Island");
+    scenario.add_card_to_library_top(P1, "Plains");
+    scenario.with_counter(departing, CounterType::Plus1Plus1, 2);
+    scenario.with_counter(departing, CounterType::Generic("charge".to_string()), 1);
+    let destroy = scenario
+        .add_spell_to_hand_from_oracle(P0, "Vindicate", false, VINDICATE_ORACLE)
+        .id();
+
+    let mut runner = scenario.build();
+    let destroy_outcome = runner.cast(destroy).target_object(departing).resolve();
+    assert_eq!(
+        destroy_outcome.zone_of(departing),
+        Zone::Graveyard,
+        "reach-guard: Vindicate must destroy the counter-bearing permanent"
+    );
+    assert_eq!(
+        destroy_outcome.counters(recipient, CounterType::Plus1Plus1),
+        0,
+        "reach-guard: counters must not be placed before the delayed trigger fires"
+    );
+
+    runner.advance_to_end_step();
+    for _ in 0..16 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::TriggerTargetSelection { .. } => {
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(recipient)),
+                    })
+                    .expect("delayed trigger target choice must succeed");
+                break;
+            }
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                runner
+                    .act(GameAction::OrderTriggers {
+                        order: (0..triggers.len()).collect(),
+                    })
+                    .expect("ordering the delayed trigger must succeed");
+            }
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("passing priority must reach the delayed trigger target prompt");
+            }
+            other => panic!("unexpected prompt before delayed trigger target choice: {other:?}"),
+        }
+    }
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::TriggerTargetSelection { .. }
+        ),
+        "delayed trigger target prompt must have been answered"
+    );
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        runner
+            .state()
+            .objects
+            .get(&recipient)
+            .and_then(|obj| obj.counters.get(&CounterType::Plus1Plus1).copied())
+            .unwrap_or(0),
+        3,
+        "the delayed trigger must use the departed permanent's three counters"
+    );
+}
+
+/// Positive: CR 122.1 counters of multiple kinds are all counted for Yuna, and
+/// the engine must saturate rather than overflow when the sum exceeds i32::MAX.
+#[test]
+fn yuna_counter_count_saturates_without_overflow() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(P0, three_generic());
+    scenario
+        .add_creature_from_oracle(P0, "Yuna, Grand Summoner", 1, 5, YUNA_ORACLE)
+        .as_legendary();
+    let destroy = scenario
+        .add_spell_to_hand_from_oracle(P0, "Vindicate", false, VINDICATE_ORACLE)
+        .id();
+    let departing = scenario
+        .add_artifact_from_oracle(P0, "Counter Relic", "{T}: You gain 1 life.")
+        .id();
+    let recipient = scenario.add_creature(P0, "Recipient", 2, 2).id();
+    scenario.with_counter(
+        departing,
+        CounterType::Generic("charge".to_string()),
+        u32::MAX,
+    );
+    scenario.with_counter(departing, CounterType::Generic("oil".to_string()), 1);
+
+    let mut runner = scenario.build();
+    let outcome = runner
+        .cast(destroy)
+        .target_object(departing)
+        .target_object(recipient)
+        .accept_optional()
+        .resolve();
+
+    assert_eq!(
+        outcome.zone_of(departing),
+        Zone::Graveyard,
+        "reach-guard: Vindicate must destroy the counter-bearing artifact"
+    );
+    assert_eq!(
+        outcome.counters(recipient, CounterType::Plus1Plus1),
+        i32::MAX as u32,
+        "the counter total must saturate to i32::MAX instead of overflowing"
+    );
 }

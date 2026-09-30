@@ -12,9 +12,9 @@ use crate::types::counter::parse_counter_type;
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    CounterAddedRecord, CounterMoveChoice, CounterRemoveChoice, DelayedTrigger, GameState,
-    PendingCounterAddition, PendingCounterAdditionQueue, PendingCounterMove,
-    PendingCounterMoveQueue, PendingCounterPostAction, PendingCounterRemoval,
+    BattlefieldDepartureSourceContext, CounterAddedRecord, CounterMoveChoice, CounterRemoveChoice,
+    DelayedTrigger, GameState, PendingCounterAddition, PendingCounterAdditionQueue,
+    PendingCounterMove, PendingCounterMoveQueue, PendingCounterPostAction, PendingCounterRemoval,
     PendingCounterRemovalQueue, PendingEffectResolutionEvent, PendingEffectResolved, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
@@ -2948,13 +2948,26 @@ fn counter_transfer_source_counters(
     mode: CounterTransferMode,
     counter_type_filter: Option<&CounterType>,
 ) -> Vec<(CounterType, u32)> {
-    let mut counters = state
-        .objects
-        .get(&source_id)
-        .map(|obj| obj.counters.clone())
-        .unwrap_or_default();
+    let departure_counters = (mode == CounterTransferMode::Put)
+        .then(|| departure_counters_for_counter_reproduction(state, source_id))
+        .flatten();
+    let mut counters = if mode == CounterTransferMode::Put {
+        departure_counters.clone().unwrap_or_else(|| {
+            state
+                .objects
+                .get(&source_id)
+                .map(|obj| obj.counters.clone())
+                .unwrap_or_default()
+        })
+    } else {
+        state
+            .objects
+            .get(&source_id)
+            .map(|obj| obj.counters.clone())
+            .unwrap_or_default()
+    };
 
-    if counters.is_empty() && mode == CounterTransferMode::Put {
+    if counters.is_empty() && mode == CounterTransferMode::Put && departure_counters.is_none() {
         counters = state
             .lki_cache
             .get(&source_id)
@@ -2966,6 +2979,40 @@ fn counter_transfer_source_counters(
         .into_iter()
         .filter(|(ct, count)| *count > 0 && counter_type_filter.is_none_or(|filter| filter == ct))
         .collect()
+}
+
+fn departure_counters_for_counter_reproduction(
+    state: &GameState,
+    source_id: ObjectId,
+) -> Option<std::collections::HashMap<CounterType, u32>> {
+    let Some(
+        event @ GameEvent::ZoneChanged {
+            object_id,
+            from: Some(Zone::Battlefield),
+            ..
+        },
+    ) = state.current_trigger_event.as_ref()
+    else {
+        return None;
+    };
+    if *object_id != source_id {
+        return None;
+    }
+
+    // CR 122.8 + CR 400.7 + CR 608.2h: a dies trigger that puts the departed
+    // object's counters on another object reproduces the old incarnation's LKI
+    // counters, not counters on a same-id object that later returned.
+    Some(
+        match crate::types::game_state::battlefield_departure_trigger_source_context(event) {
+            BattlefieldDepartureSourceContext::Present(context) => context.lki.counters.clone(),
+            BattlefieldDepartureSourceContext::Absent => state
+                .lki_cache
+                .get(object_id)
+                .map(|lki| lki.counters.clone())
+                .unwrap_or_default(),
+            BattlefieldDepartureSourceContext::Malformed => Default::default(),
+        },
+    )
 }
 
 /// CR 122.5 + CR 608.2d: an optional fixed stack-target counter move is

@@ -5,7 +5,7 @@ use crate::types::ability::{
 #[cfg(test)]
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{DelayedTrigger, GameState};
+use crate::types::game_state::{BattlefieldDepartureSourceContext, DelayedTrigger, GameState};
 use crate::types::identifiers::TrackedSetId;
 use crate::types::zones::Zone;
 
@@ -1420,6 +1420,47 @@ fn snapshot_quantity_ref(
     ability: &ResolvedAbility,
 ) -> Option<i32> {
     use crate::types::ability::ObjectScope;
+    // CR 603.7 + CR 603.10a + CR 608.2h: delayed "that many" quantities
+    // created by a battlefield-departure trigger must carry the departed
+    // object's event-time LKI counters, not the later phase event that fires
+    // the delayed trigger.
+    if let QuantityRef::CountersOn {
+        scope: ObjectScope::EventSource,
+        counter_type,
+    } = qty
+    {
+        if let Some(
+            event @ GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Battlefield),
+                ..
+            },
+        ) = state.current_trigger_event.as_ref()
+        {
+            return Some(
+                match crate::types::game_state::battlefield_departure_trigger_source_context(event)
+                {
+                    BattlefieldDepartureSourceContext::Present(context) => {
+                        crate::game::quantity::counter_count_from_map(
+                            &context.lki.counters,
+                            counter_type.as_ref(),
+                        )
+                    }
+                    BattlefieldDepartureSourceContext::Absent => state
+                        .lki_cache
+                        .get(object_id)
+                        .map(|lki| {
+                            crate::game::quantity::counter_count_from_map(
+                                &lki.counters,
+                                counter_type.as_ref(),
+                            )
+                        })
+                        .unwrap_or(0),
+                    BattlefieldDepartureSourceContext::Malformed => 0,
+                },
+            );
+        }
+    }
     // CR 603.7c + CR 400.7: CountersOn { Source } uses ability.source_id,
     // not targets — handle it before the target_object_id extraction which
     // early-returns None when targets is empty (common for dies triggers).

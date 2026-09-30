@@ -5066,7 +5066,7 @@ fn resolve_ref(
                         None
                     }
                 })
-                .sum()
+                .fold(0_i32, i32::saturating_add)
         }
         QuantityRef::Devotion { colors } => match colors {
             crate::types::ability::DevotionColors::Fixed(colors) => u32_to_i32_saturating(
@@ -7228,8 +7228,12 @@ pub(crate) fn counter_count_from_map(
 ) -> i32 {
     match counter_type {
         Some(ct) => u32_to_i32_saturating(counters.get(ct).copied().unwrap_or(0)),
-        None => u32_to_i32_saturating(counters.values().copied().sum::<u32>()),
+        None => counter_total_from_map(counters),
     }
+}
+
+fn counter_total_from_map(counters: &HashMap<CounterType, u32>) -> i32 {
+    u32_to_i32_saturating(counters.values().copied().fold(0_u32, u32::saturating_add))
 }
 
 /// Resolve an ordinary object scope through its live object or its LKI snapshot.

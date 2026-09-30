@@ -389,26 +389,34 @@ fn parent_object_target_owner_player(
     state: &GameState,
     ability: &ResolvedAbility,
 ) -> Option<PlayerId> {
-    crate::game::ability_utils::parent_target_owner(ability, state)
-        .or_else(|| {
-            crate::game::targeting::resolve_event_context_target(
-                state,
-                &TargetFilter::ParentTargetOwner,
-                ability.source_id,
-            )
-            .and_then(|target| match target {
-                TargetRef::Player(player) => Some(player),
-                TargetRef::Object(object_id) => state.objects.get(&object_id).map(|obj| obj.owner),
-            })
+    parent_object_target_owner_anchor(state, ability).and_then(|player| live_player(state, player))
+}
+
+fn parent_object_target_owner_anchor(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Option<PlayerId> {
+    crate::game::ability_utils::parent_target_owner(ability, state).or_else(|| {
+        crate::game::targeting::resolve_event_context_target(
+            state,
+            &TargetFilter::ParentTargetOwner,
+            ability.source_id,
+        )
+        .and_then(|target| match target {
+            TargetRef::Player(player) => Some(player),
+            TargetRef::Object(object_id) => state.objects.get(&object_id).map(|obj| obj.owner),
         })
-        .and_then(|player| live_player(state, player))
+    })
 }
 
 fn players_except_required_owner_anchor(
     state: &GameState,
     ability: &ResolvedAbility,
 ) -> Vec<PlayerId> {
-    let Some(owner) = parent_object_target_owner_player(state, ability) else {
+    // CR 108.3 + CR 800.4a: "each other player" excludes the object's owner
+    // even if that owner has left the game before this still-controlled trigger
+    // resolves; only recipients are filtered to live players below.
+    let Some(owner) = parent_object_target_owner_anchor(state, ability) else {
         return Vec::new();
     };
     state
