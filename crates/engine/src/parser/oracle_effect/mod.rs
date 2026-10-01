@@ -8448,6 +8448,7 @@ pub(crate) fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedE
     // `Permanent` from a body parser yields to the explicit peeled duration.
     if duration_is_unset_sentinel(&clause.duration) {
         if let Some(duration) = peel_ctx.duration().cloned() {
+            spread_duration_over_exile_conjuncts(&mut clause, &duration);
             clause = with_clause_duration(clause, duration);
         }
     }
@@ -8473,6 +8474,44 @@ pub(crate) fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedE
         *partner_filter = live_partner;
     }
     attach_unless_slots(clause, None, unless_pay_deferred)
+}
+
+/// CR 610.3 + CR 608.2c: "exile A and all B … until <event>" is ONE exile
+/// instruction, so every object it exiles returns when the event occurs. The
+/// targeted-compound split lowers the verb-carried conjunct to its own
+/// `sub_ability` (Deputy of Detention's same-name mass exile), which the trailing
+/// duration stamped on the root would otherwise miss. Walks only the contiguous
+/// exile links directly under an exile root, and never overwrites a link's own
+/// duration. `with_clause_chain_duration` is not used because its
+/// `duration_governs` table deliberately leaves zone changes ungoverned.
+fn spread_duration_over_exile_conjuncts(clause: &mut ParsedEffectClause, duration: &Duration) {
+    if !matches!(
+        clause.effect,
+        Effect::ChangeZone {
+            destination: Zone::Exile,
+            ..
+        }
+    ) {
+        return;
+    }
+    let mut link = clause.sub_ability.as_deref_mut();
+    while let Some(def) = link {
+        let is_exile = matches!(
+            &*def.effect,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                ..
+            } | Effect::ChangeZoneAll {
+                destination: Zone::Exile,
+                ..
+            }
+        );
+        if !is_exile || def.duration.is_some() {
+            break;
+        }
+        def.duration = Some(duration.clone());
+        link = def.sub_ability.as_deref_mut();
+    }
 }
 
 fn try_parse_for_each_copy_token_source(
@@ -18383,14 +18422,18 @@ fn for_each_quantity_context(original: &str, ctx: &ParseContext) -> ParseContext
 }
 
 fn is_player_filter(filter: &TargetFilter) -> bool {
+    // CR 111.1: a token is a permanent, so "all tokens that player controls"
+    // names objects even though it carries no type filter.
     matches!(filter, TargetFilter::Player)
         || matches!(
             filter,
             TargetFilter::Typed(TypedFilter {
                 type_filters,
                 controller: Some(_),
+                properties,
                 ..
             }) if type_filters.is_empty()
+                && !properties.iter().any(|prop| matches!(prop, FilterProp::Token))
         )
 }
 
@@ -19373,6 +19416,7 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
     // `OptionalEffectChoice` whose decline destroyed the grant.
     if clause.duration.is_none() {
         if let Some(duration) = duration {
+            spread_duration_over_exile_conjuncts(&mut clause, &duration);
             clause = with_clause_duration(clause, duration);
         }
     }
@@ -20464,6 +20508,19 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
     // Keep the primary phrase's announcer on `ctx`; only a chooser printed in
     // the continuation itself may be attached to the chained sub-ability.
     continuation_ctx.target_chooser = None;
+
+    // CR 608.2c: when the primary instruction announced an OBJECT target, a
+    // "that player" in the continuation names that object's controller
+    // ("exile target nonland permanent an opponent controls and all tokens that
+    // player controls with the same name as that permanent"). Unseeded, the
+    // "that player controls" suffix falls back to `You`. CR 608.2h: the runtime
+    // reads the controller via LKI once the parent target has left.
+    if continuation_ctx.relative_player_scope.is_none()
+        && triggers::extract_target_filter_from_effect(&primary_effect)
+            .is_some_and(|filter| !is_player_scoped_filter(filter))
+    {
+        continuation_ctx.relative_player_scope = Some(ControllerRef::ParentTargetController);
+    }
 
     // Parse the sub-effect
     let mut sub_clause = parse_imperative_effect(sub_text, &mut continuation_ctx);
