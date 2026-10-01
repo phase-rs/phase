@@ -48,6 +48,7 @@ use engine::types::statics::StaticMode;
 use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
 
+const EXILE_TARGET_CREATURE: &str = "Exile target creature.";
 const RIA_NAME: &str = "Ria Ivor, Bane of Bladehold";
 const RIA_ORACLE: &str = "Battle cry (Whenever this creature attacks, each other attacking creature gets +1/+0 until end of turn.)\nAt the beginning of combat on your turn, the next time target creature would deal combat damage to one or more players this combat, prevent that damage. If damage is prevented this way, create that many 1/1 colorless Phyrexian Mite artifact creature tokens with toxic 1 and \"This token can't block.\"";
 
@@ -507,11 +508,21 @@ fn ria_shield_survives_ria_leaving_the_battlefield() {
     scenario.at_phase(Phase::PreCombatMain);
     let ria = add_ria(&mut scenario);
     let bear = scenario.add_creature(P0, "Bear", 3, 3).id();
+    let exile_spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Exile Ria", true, EXILE_TARGET_CREATURE)
+        .id();
     let mut runner = scenario.build();
     let p1_life = runner.life(P1);
 
     target_and_resolve(&mut runner, ria, bear);
-    engine::game::zones::move_to_zone(runner.state_mut(), ria, Zone::Exile, &mut Vec::new());
+    // Remove Ria through a resolved exile spell so the move runs the production
+    // replacement-aware zone-change pipeline, not the raw zone primitive.
+    runner.cast(exile_spell).target_object(ria).resolve();
+    assert_eq!(
+        runner.state().objects[&ria].zone,
+        Zone::Exile,
+        "reach guard: Ria is exiled before damage"
+    );
     assert!(
         !runner.state().battlefield.contains(&ria),
         "reach guard: Ria is gone before damage"
