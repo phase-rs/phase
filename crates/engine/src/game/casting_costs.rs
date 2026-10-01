@@ -959,6 +959,46 @@ pub(crate) fn payable_spell_alternative_cost_details(
         return self_option;
     }
 
+    // CR 118.9 + CR 113.6e + CR 601.2f: a SELF-granted alternative cost -- a
+    // `CastWithAlternativeCost` static the spell object carries on its OWN
+    // baseline (a perpetual "You may pay {N} rather than pay this spell's mana
+    // cost" grant, installed with the 6-zone `self_spell_cost_mod_active_zones`
+    // reach so it functions from any zone the spell could be cast from, plus
+    // the stack). Consulted alongside the printed self-option scan above,
+    // before battlefield grants: a spell's own alternative wins over outer
+    // grants, consistent with printed-self behavior. The gate mirrors
+    // `casting::self_spell_cost_modifier_applies_before_targets`' shape
+    // (current zone in `active_zones`, `affected == SelfRef`) with NO origin
+    // restriction -- `SelfRef` identity-match, not other-grant
+    // affected-filtering.
+    let granted_self = obj
+        .static_definitions
+        .iter_all()
+        .filter(|def| {
+            !def.active_zones.is_empty()
+                && def.active_zones.contains(&obj.zone)
+                && matches!(def.affected, Some(TargetFilter::SelfRef))
+        })
+        .find_map(|def| match &def.mode {
+            StaticMode::CastWithAlternativeCost {
+                cost,
+                timing_permission,
+                ..
+            } => Some((cost.clone(), *timing_permission)),
+            _ => None,
+        });
+    if let Some((cost, timing_permission)) = granted_self {
+        if spell_alternative_cost_is_payable(state, player, object_id, &cost) {
+            return Some(PayableSpellAlternativeCost {
+                cost,
+                timing_permission,
+                // CR 118.9: a self grant carries no per-turn grant slot to
+                // consume.
+                once_per_turn_source: None,
+            });
+        }
+    }
+
     // CR 118.9 + CR 601.2f: A permanent-granted alternative MANA cost (Rooftop
     // Storm, Fist of Suns, Jodah) applies when no self-referential option does.
     // CR 118.9 + CR 601.2a (#7575): zone reach is decided INSIDE

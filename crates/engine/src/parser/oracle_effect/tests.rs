@@ -43524,17 +43524,514 @@ fn perpetual_parser_maps_grant_ability_multiple_quoted_bodies() {
     }
 }
 
-/// Honest-red: a granted quoted body that classifies to a modification kind
-/// the perpetual runtime cannot install onto a persistent baseline
-/// (`GrantTrigger` — a full triggered ability body has no persistent-baseline
-/// installer) must fail the WHOLE clause closed rather than silently
-/// dropping it or installing a partial/incorrect grant.
+/// SHAPE: a quoted triggered ability with fully-parsed content (Jessie Zane's
+/// "When this creature enters, draw a card.") installs as a `GrantTrigger` —
+/// quoted triggers are a supported perpetual grant kind, not a rejection.
 #[test]
-fn perpetual_grant_ability_rejects_unsupported_triggered_body() {
+fn perpetual_grant_ability_accepts_supported_triggered_body() {
+    use crate::types::ability::{PerpetualGrantModification, PerpetualModification};
+
     let e = parse_effect("~ perpetually gains \"When ~ dies, draw a card.\"");
+    match &e {
+        Effect::ApplyPerpetual {
+            target: TargetFilter::Any,
+            modification: PerpetualModification::GrantAbility { modifications },
+        } => {
+            assert!(
+                matches!(
+                    modifications.as_slice(),
+                    [PerpetualGrantModification::GrantTrigger { .. }]
+                ),
+                "expected a single GrantTrigger install, got {modifications:?}"
+            );
+        }
+        other => panic!("expected ApplyPerpetual GrantAbility, got {other:?}"),
+    }
+}
+
+/// Honest-red (V2N): a quoted trigger whose INNER content never parsed fails
+/// the WHOLE clause closed. Fixture is a single-clause body with a real but
+/// unimplemented mechanic ("draft a card" — Conspiracy): single-clause so the
+/// unparseable body surfaces as `Effect::Unimplemented` in `execute` (a
+/// failing non-head "and"-conjunct is dropped by the generic chain assembler
+/// without a marker — a pre-existing parser-wide limitation shared with the
+/// `GrantAbility` gate, so a multi-conjunct fixture cannot exercise this
+/// gate). Reach-guard: the quote classifies to `GrantTrigger`, proving the
+/// content gate — not a misparse — refused it.
+#[test]
+fn perpetual_grant_trigger_rejects_unimplemented_inner_content() {
+    let body = "When ~ enters, draft a card.";
+    let classified = crate::parser::oracle_static::classify_quoted_inner(body);
+    assert!(
+        classified
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::GrantTrigger { .. })),
+        "reach-guard: the draft quote must classify to GrantTrigger, got {classified:?}"
+    );
+    let e = parse_effect(&format!("~ perpetually gains \"{body}\""));
     assert!(
         matches!(e, Effect::Unimplemented { .. }),
-        "an unsupported (triggered-ability) quoted grant must fail closed, got {e:?}"
+        "a quoted trigger with unparsed inner content must fail the whole clause closed, got {e:?}"
+    );
+}
+
+/// Honest-red: a multi-quote grant where one sibling classifies to a kind with
+/// no persistent-baseline installer (`GrantReplacement`) fails the WHOLE
+/// clause closed rather than install the installable sibling alone.
+#[test]
+fn perpetual_grant_ability_multi_quote_partial_failure_stays_closed() {
+    let e = parse_effect(
+        "~ perpetually gains \"flying\" and \"If ~ would leave the battlefield, \
+        exile it instead of putting it anywhere else.\"",
+    );
+    assert!(
+        matches!(e, Effect::Unimplemented { .. }),
+        "a multi-quote grant with an uninstallable sibling must fail the whole clause closed, got {e:?}"
+    );
+}
+
+/// SHAPE (V1): Indris's "They perpetually gain storm" rider binds the
+/// chain-conjured Bolts (`LastCreated`) and installs Storm on each.
+#[test]
+fn perpetual_they_subject_binds_last_created_after_conjure() {
+    use crate::types::ability::PerpetualModification;
+    use crate::types::keywords::Keyword;
+
+    let def = parse_effect_chain(
+        "conjure four cards named Lightning Bolt into your library. They perpetually gain storm.",
+        AbilityKind::Spell,
+    );
+    assert_attachment_chain_has_no_unimplemented(&def);
+    assert!(
+        matches!(def.effect.as_ref(), Effect::Conjure { .. }),
+        "reach-guard: the conjure head must parse, got {:?}",
+        def.effect
+    );
+    let rider = def
+        .sub_ability
+        .as_deref()
+        .expect("rider clause follows conjure");
+    match rider.effect.as_ref() {
+        Effect::ApplyPerpetual {
+            target,
+            modification,
+        } => {
+            assert_eq!(
+                *target,
+                TargetFilter::LastCreated,
+                "they-after-conjure must bind the created set"
+            );
+            assert!(
+                matches!(
+                    modification,
+                    PerpetualModification::GrantKeywords { keywords }
+                        if keywords.as_slice() == [Keyword::Storm]
+                ),
+                "they-after-conjure must install Storm, got {modification:?}"
+            );
+        }
+        other => panic!("expected ApplyPerpetual rider, got {other:?}"),
+    }
+    assert!(
+        rider.sub_ability.is_none(),
+        "rider must be the chain tail: {def:#?}"
+    );
+}
+
+/// SHAPE (V1/A2 mechanism pin): a choose-then-grant SUBJECT shape binds
+/// `ParentTarget` (the tracked chosen set) via `pending_tracked_set_origin`.
+/// The singular head + plural anaphor is deliberately non-card-text: it pins
+/// the A2 gate mechanism (Racketeer Boss's own "choose up to two ... and/or
+/// ..." head does not parse to `ChooseFromZone`, so its production rider
+/// stays red at the subject — pinned by
+/// `perpetual_racketeer_full_rider_stays_unimplemented`).
+#[test]
+fn perpetual_they_subject_binds_parent_target_after_choice() {
+    use crate::types::ability::PerpetualModification;
+    use crate::types::keywords::Keyword;
+
+    let def = parse_effect_chain(
+        "choose a creature card in your hand. They perpetually gain flying.",
+        AbilityKind::Spell,
+    );
+    assert_attachment_chain_has_no_unimplemented(&def);
+    assert!(
+        matches!(def.effect.as_ref(), Effect::ChooseFromZone { .. }),
+        "reach-guard: the choose head must parse to ChooseFromZone, got {:?}",
+        def.effect
+    );
+    let rider = def
+        .sub_ability
+        .as_deref()
+        .expect("rider clause follows choose");
+    match rider.effect.as_ref() {
+        Effect::ApplyPerpetual {
+            target,
+            modification,
+        } => {
+            assert_eq!(
+                *target,
+                TargetFilter::ParentTarget,
+                "they-after-choose must bind the chosen set"
+            );
+            assert!(
+                matches!(
+                    modification,
+                    PerpetualModification::GrantKeywords { keywords }
+                        if keywords.as_slice() == [Keyword::Flying]
+                ),
+                "they-after-choose must install Flying, got {modification:?}"
+            );
+        }
+        other => panic!("expected ApplyPerpetual rider, got {other:?}"),
+    }
+}
+
+/// SHAPE (V1 negative): bare "they gain storm" (no "perpetually") must NOT
+/// take the perpetual arm. Reach-guard: the conjure head still parses, proving
+/// the input reached the rider.
+#[test]
+fn perpetual_they_without_perpetually_does_not_bind() {
+    let def = parse_effect_chain(
+        "conjure four cards named Lightning Bolt into your library. They gain storm.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(def.effect.as_ref(), Effect::Conjure { .. }),
+        "reach-guard: the conjure head must parse, got {:?}",
+        def.effect
+    );
+    let rider = def
+        .sub_ability
+        .as_deref()
+        .expect("rider clause follows conjure");
+    assert!(
+        !matches!(rider.effect.as_ref(), Effect::ApplyPerpetual { .. }),
+        "bare 'they gain' must not produce ApplyPerpetual, got {:?}",
+        rider.effect
+    );
+}
+
+/// SHAPE (V2b composition): they-subject × trigger-body in one rider — the U1
+/// subject gate and the U2 installable kind compose (Jewel Mine Overseer's
+/// rider shape; its "on top of" conjure head is a separately unsupported
+/// destination form, so the fragment uses the supported into-library head).
+#[test]
+fn perpetual_they_subject_with_trigger_body_composes() {
+    use crate::types::ability::{PerpetualGrantModification, PerpetualModification};
+
+    let def = parse_effect_chain(
+        "conjure seven cards named Seven Dwarves into your library. They perpetually \
+        gain \"When ~ enters, draw a card.\"",
+        AbilityKind::Spell,
+    );
+    assert_attachment_chain_has_no_unimplemented(&def);
+    let rider = def
+        .sub_ability
+        .as_deref()
+        .expect("rider clause follows conjure");
+    match rider.effect.as_ref() {
+        Effect::ApplyPerpetual {
+            target,
+            modification,
+        } => {
+            assert_eq!(
+                *target,
+                TargetFilter::LastCreated,
+                "they-after-conjure must bind the created set"
+            );
+            assert!(
+                matches!(
+                    modification,
+                    PerpetualModification::GrantAbility { modifications }
+                        if matches!(
+                            modifications.as_slice(),
+                            [PerpetualGrantModification::GrantTrigger { .. }]
+                        )
+                ),
+                "they+trigger rider must install GrantTrigger, got {modification:?}"
+            );
+        }
+        other => panic!("expected ApplyPerpetual rider, got {other:?}"),
+    }
+}
+
+/// SHAPE (V2): Jessie Zane's quoted trigger rider binds the conjured Viper
+/// (`LastCreated`) and installs a `GrantTrigger`. "~" here, not "this
+/// creature": card-level parsing normalizes self-references before any clause
+/// reaches classification, so `~` is the form this fragment-level helper must
+/// be fed to match production input.
+#[test]
+fn perpetual_quoted_trigger_rider_binds_last_created() {
+    use crate::types::ability::{PerpetualGrantModification, PerpetualModification};
+
+    let def = parse_effect_chain(
+        "conjure a card named Ambush Viper into the top six cards of your library \
+        at random. It perpetually gains \"When ~ enters, draw a card.\"",
+        AbilityKind::Spell,
+    );
+    assert_attachment_chain_has_no_unimplemented(&def);
+    let rider = def
+        .sub_ability
+        .as_deref()
+        .expect("rider clause follows conjure");
+    match rider.effect.as_ref() {
+        Effect::ApplyPerpetual {
+            target,
+            modification,
+        } => {
+            assert_eq!(
+                *target,
+                TargetFilter::LastCreated,
+                "it-after-conjure must bind the created card"
+            );
+            assert!(
+                matches!(
+                    modification,
+                    PerpetualModification::GrantAbility { modifications }
+                        if matches!(
+                            modifications.as_slice(),
+                            [PerpetualGrantModification::GrantTrigger { .. }]
+                        )
+                ),
+                "quoted trigger rider must install GrantTrigger, got {modification:?}"
+            );
+        }
+        other => panic!("expected ApplyPerpetual rider, got {other:?}"),
+    }
+}
+
+/// SHAPE (V3): Sanguine Soothsayer's two-quote rider (bare self-cost quote +
+/// trigger quote) installs both the self alternative-cost static and the
+/// granted trigger on the conjured Bond.
+#[test]
+fn perpetual_self_alt_cost_two_quote_rider_installs_both() {
+    use crate::types::ability::{PerpetualGrantModification, PerpetualModification};
+    use crate::types::mana::ManaCost;
+    use crate::types::statics::StaticMode;
+
+    let def = parse_effect_chain(
+        "conjure a card named Sanguine Bond into the top fifteen cards of your library \
+        at random. It perpetually gains \"You may pay {0} rather than pay this spell's \
+        mana cost\" and \"When ~ enters, draw a card.\"",
+        AbilityKind::Spell,
+    );
+    assert_attachment_chain_has_no_unimplemented(&def);
+    let rider = def
+        .sub_ability
+        .as_deref()
+        .expect("rider clause follows conjure");
+    match rider.effect.as_ref() {
+        Effect::ApplyPerpetual {
+            target,
+            modification,
+        } => {
+            assert_eq!(
+                *target,
+                TargetFilter::LastCreated,
+                "it-after-conjure must bind the created card"
+            );
+            match modification {
+                PerpetualModification::GrantAbility { modifications } => {
+                    assert_eq!(
+                        modifications.len(),
+                        2,
+                        "both quotes must install, got {modifications:?}"
+                    );
+                    assert!(
+                        matches!(
+                            &modifications[0],
+                            PerpetualGrantModification::AddStaticMode {
+                                mode: StaticMode::CastWithAlternativeCost { cost, .. }
+                            } if matches!(
+                                cost,
+                                AbilityCost::Mana { cost } if *cost == ManaCost::zero()
+                            )
+                        ),
+                        "first quote must install the {{0}} self alternative cost, got {:?}",
+                        modifications[0]
+                    );
+                    assert!(
+                        matches!(
+                            modifications[1],
+                            PerpetualGrantModification::GrantTrigger { .. }
+                        ),
+                        "second quote must install the granted trigger, got {:?}",
+                        modifications[1]
+                    );
+                }
+                other => panic!("expected GrantAbility install, got {other:?}"),
+            }
+        }
+        other => panic!("expected ApplyPerpetual rider, got {other:?}"),
+    }
+}
+
+/// SHAPE (V3): Mine Security's single self-cost quote (period INSIDE the
+/// quote) installs the {0} self alternative cost.
+#[test]
+fn perpetual_self_alt_cost_period_inside_quote_installs() {
+    use crate::types::ability::{PerpetualGrantModification, PerpetualModification};
+    use crate::types::mana::ManaCost;
+    use crate::types::statics::StaticMode;
+
+    let def = parse_effect_chain(
+        "conjure a card named Flametongue Kavu into the top eight cards of your library \
+        at random. It perpetually gains \"You may pay {0} rather than pay this spell's \
+        mana cost.\"",
+        AbilityKind::Spell,
+    );
+    assert_attachment_chain_has_no_unimplemented(&def);
+    let rider = def
+        .sub_ability
+        .as_deref()
+        .expect("rider clause follows conjure");
+    match rider.effect.as_ref() {
+        Effect::ApplyPerpetual {
+            target,
+            modification,
+        } => {
+            assert_eq!(
+                *target,
+                TargetFilter::LastCreated,
+                "it-after-conjure must bind the created card"
+            );
+            assert!(
+                matches!(
+                    modification,
+                    PerpetualModification::GrantAbility { modifications }
+                        if matches!(
+                            modifications.as_slice(),
+                            [PerpetualGrantModification::AddStaticMode {
+                                mode: StaticMode::CastWithAlternativeCost { cost, .. }
+                            }] if matches!(
+                                cost,
+                                AbilityCost::Mana { cost } if *cost == ManaCost::zero()
+                            )
+                        )
+                ),
+                "period-inside-quote self cost must install, got {modification:?}"
+            );
+        }
+        other => panic!("expected ApplyPerpetual rider, got {other:?}"),
+    }
+}
+
+/// Honest-red: Divine Purge's affected-set "They" (the just-exiled mass-filter
+/// set — a binding concept this run does not design) must NOT install. The
+/// rider stays `Unimplemented` (gap `unbound_subject`); the exile head parses
+/// to `ChangeZoneAll` (reach-guard).
+#[test]
+fn perpetual_they_affected_set_subject_stays_unimplemented() {
+    let def = parse_effect_chain(
+        "Exile all artifacts and creatures with mana value 3 or less. They perpetually \
+        gain \"This spell costs {2} more to cast\" and \"This permanent enters the \
+        battlefield tapped.\"",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(def.effect.as_ref(), Effect::ChangeZoneAll { .. }),
+        "reach-guard: the exile head must parse to ChangeZoneAll, got {:?}",
+        def.effect
+    );
+    let rider = def
+        .sub_ability
+        .as_deref()
+        .expect("rider clause follows the exile head");
+    assert!(
+        matches!(
+            rider.effect.as_ref(),
+            Effect::Unimplemented { name, .. } if name == "unbound_subject"
+        ),
+        "Divine Purge's affected-set rider must stay unimplemented, got {:?}",
+        rider.effect
+    );
+}
+
+/// Honest-red: Racketeer Boss's full production rider stays `Unimplemented`.
+/// Its "choose up to two ... and/or ..." head does not parse to
+/// `ChooseFromZone`, so no tracked-set origin exists and the "They" subject
+/// cannot bind — the whole clause fails closed at the subject, before the
+/// quoted content gate is even reached.
+#[test]
+fn perpetual_racketeer_full_rider_stays_unimplemented() {
+    let def = parse_effect_chain(
+        "choose up to two creature and/or planeswalker cards in your hand. They perpetually \
+        gain \"When you cast this spell, create a Treasure token and this spell perpetually \
+        loses this ability.\"",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(def.effect.as_ref(), Effect::Unimplemented { .. }),
+        "reach-guard: the Racketeer choose head must stay unimplemented, got {:?}",
+        def.effect
+    );
+    let rider = def
+        .sub_ability
+        .as_deref()
+        .expect("rider clause follows the choose head");
+    assert!(
+        matches!(
+            rider.effect.as_ref(),
+            Effect::Unimplemented { name, .. } if name == "unbound_subject"
+        ),
+        "Racketeer Boss's full rider must stay unimplemented, got {:?}",
+        rider.effect
+    );
+}
+
+/// Honest-red: Flames of Moradin's definite-plural "The duplicates" subject
+/// matches no designed arm and stays `Unimplemented`.
+#[test]
+fn perpetual_the_duplicates_subject_stays_unimplemented() {
+    let e = parse_effect(
+        "the duplicates perpetually gain \"You may pay {R} rather than pay this \
+        spell's mana cost.\"",
+    );
+    assert!(
+        matches!(e, Effect::Unimplemented { .. }),
+        "the deferred 'the duplicates' subject must stay unimplemented, got {e:?}"
+    );
+}
+
+/// SHAPE (V2b head pin): "conjure seven cards named Seven Dwarves on top of
+/// your library" (Jewel Mine Overseer) binds `destination: Library` with
+/// `library_position: Some(Top)`, and the tail passes through to the
+/// following "They perpetually gain …" rider clause.
+#[test]
+fn conjure_on_top_of_your_library_binds_top_position() {
+    let def = parse_effect_chain(
+        "conjure seven cards named Seven Dwarves on top of your library. They perpetually gain \"When this creature enters, draw a card.\"",
+        AbilityKind::Spell,
+    );
+    assert_attachment_chain_has_no_unimplemented(&def);
+    match def.effect.as_ref() {
+        Effect::Conjure {
+            destination,
+            library_position,
+            ..
+        } => {
+            assert_eq!(
+                *destination,
+                Zone::Library,
+                "the on-top head must target the library"
+            );
+            assert_eq!(
+                *library_position,
+                Some(LibraryPosition::Top),
+                "the on-top head must bind LibraryPosition::Top"
+            );
+        }
+        other => panic!("expected Conjure head, got: {other:?}"),
+    }
+    let rider = def
+        .sub_ability
+        .as_deref()
+        .expect("the rider clause must follow the on-top head");
+    assert!(
+        matches!(rider.effect.as_ref(), Effect::ApplyPerpetual { .. }),
+        "the tail must pass through to the perpetual rider, got {:?}",
+        rider.effect
     );
 }
 

@@ -89,6 +89,20 @@ fn perpetual_target_object_ids(
         return Vec::new();
     }
 
+    // Digital-only Alchemy (no CR entry for "perpetually"): fan a `LastCreated`
+    // rider ("they"/"it" after a plural conjure) out to the WHOLE just-created
+    // set. The shared `resolved_targets` path is singular by design (first-only
+    // via `resolve_event_context_target`), which is correct for every other
+    // consumer — only the perpetual rider needs the plural set, so the arm
+    // lives here at the perpetual seam, not in `targeting.rs`. The live ledger
+    // read is safe because `Conjure` ASSIGNS `last_created_token_ids`
+    // immediately before in the same chain (conjure.rs); an empty ledger means
+    // the antecedent never existed, so the rider applies to nothing (CR 609.3 —
+    // same no-referent outcome as the anaphor arm below).
+    if matches!(target, TargetFilter::LastCreated) {
+        return state.last_created_token_ids.clone();
+    }
+
     let mut ids = super::resolved_effect_object_ids(state, ability, target);
 
     if matches!(target, TargetFilter::ParentTarget) && ids == [ability.source_id] {

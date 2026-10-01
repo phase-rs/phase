@@ -16025,7 +16025,7 @@ impl FaceDownProfile {
 /// can install onto a persistent baseline.
 ///
 /// `ContinuousModification` is the engine-wide 57-variant layer vocabulary; only
-/// three of its kinds have a persistent-baseline installer. Carrying that subset
+/// four of its kinds have a persistent-baseline installer. Carrying that subset
 /// as its OWN type (rather than a `Vec<ContinuousModification>` guarded by a
 /// separate predicate) makes the acceptance gate and the installer the same
 /// authority: [`PerpetualModification::GrantAbility`] cannot be constructed
@@ -16060,6 +16060,11 @@ pub enum PerpetualGrantModification {
     /// closed rather than install a board-wide mana concession under a "this
     /// spell only" card.
     GrantAbility { definition: Box<AbilityDefinition> },
+    /// A quoted triggered ability (Jessie Zane's "When this creature enters,
+    /// draw a card.") — installed onto `trigger_definitions` +
+    /// `base_trigger_definitions` as a Printed slot via the
+    /// `push_printed_trigger` single authority.
+    GrantTrigger { trigger: Box<TriggerDefinition> },
 }
 
 impl TryFrom<ContinuousModification> for PerpetualGrantModification {
@@ -16174,6 +16179,37 @@ impl TryFrom<ContinuousModification> for PerpetualGrantModification {
             ContinuousModification::GrantAbility { definition } => {
                 Ok(Self::GrantAbility { definition })
             }
+            // Fail-closed: a `GrantTrigger` whose `execute` is missing or whose
+            // nested tree still carries `Effect::Unimplemented` did not actually
+            // parse (Racketeer Boss's "... and this spell perpetually loses this
+            // ability." — the loses class has no model, so the inner effect is
+            // the parser's honest "couldn't classify this" stub). Accepting it
+            // would install a trigger that does nothing (or half of a
+            // multi-quote grant) while the top-level effect stays
+            // `Effect::ApplyPerpetual`, so coverage would keep reporting the
+            // card as fully supported. Reuse
+            // `game::coverage::ability_tree_any` — the single walker authority
+            // — over the `AbilityDefinition`-shaped `execute`. Rejecting here
+            // propagates through the `Result` collect in
+            // `try_parse_perpetual_grant_ability`, which fails the whole clause
+            // closed rather than installing a partial grant.
+            //
+            // The `GrantAbility` resolution-time `GenericEffect` gate above is
+            // explicitly NOT mirrored: a trigger's `execute` runs through
+            // normal trigger resolution (CR 603.1), so a resolution-time grant
+            // nested inside it resolves like any other trigger body — that
+            // gate's rationale (the installer cannot route nested statics at
+            // grant time) does not apply.
+            ContinuousModification::GrantTrigger { trigger }
+                if trigger.execute.as_deref().is_none_or(|execute| {
+                    crate::game::coverage::ability_tree_any(execute, &|d| {
+                        matches!(&*d.effect, Effect::Unimplemented { .. })
+                    })
+                }) =>
+            {
+                Err(ContinuousModification::GrantTrigger { trigger })
+            }
+            ContinuousModification::GrantTrigger { trigger } => Ok(Self::GrantTrigger { trigger }),
             other => Err(other),
         }
     }
@@ -38216,6 +38252,77 @@ mod tests {
             result,
             Err(modification),
             "a granted ability with an unparsed COST must fail the whole perpetual grant closed, not install an ability that silently ignores its own printed cost"
+        );
+    }
+
+    /// SHAPE: a quoted trigger whose `execute` fully parsed (Jessie Zane's
+    /// "When this creature enters, draw a card.") is installable — the
+    /// `GrantTrigger` accept arm. Paired positive for the two rejection pins
+    /// below: removing the gate must not change this arm's verdict.
+    #[test]
+    fn perpetual_grant_trigger_try_from_accepts_clean_trigger() {
+        let granted =
+            TriggerDefinition::new(TriggerMode::ChangesZone).execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: default_quantity_one(),
+                    target: default_target_filter_controller(),
+                },
+            ));
+        let modification = ContinuousModification::GrantTrigger {
+            trigger: Box::new(granted),
+        };
+        assert!(
+            matches!(
+                PerpetualGrantModification::try_from(modification),
+                Ok(PerpetualGrantModification::GrantTrigger { .. })
+            ),
+            "a fully-parsed quoted trigger must be accepted as installable"
+        );
+    }
+
+    /// SHAPE (V2N gate pin): a quoted trigger with NO `execute` body never
+    /// parsed its effect half, so the whole grant fails closed rather than
+    /// install a trigger that does nothing.
+    #[test]
+    fn perpetual_grant_trigger_try_from_rejects_missing_execute() {
+        let granted = TriggerDefinition::new(TriggerMode::ChangesZone);
+        let modification = ContinuousModification::GrantTrigger {
+            trigger: Box::new(granted.clone()),
+        };
+        assert_eq!(
+            PerpetualGrantModification::try_from(modification),
+            Err(ContinuousModification::GrantTrigger {
+                trigger: Box::new(granted),
+            }),
+            "a quoted trigger with no execute body must fail the whole perpetual grant closed"
+        );
+    }
+
+    /// SHAPE (V2N gate pin): a quoted trigger whose nested `execute` tree still
+    /// carries `Effect::Unimplemented` (Racketeer Boss's "... and this spell
+    /// perpetually loses this ability." — the loses class has no model) fails
+    /// the WHOLE grant closed rather than install half a multi-quote grant
+    /// while reporting the card supported.
+    #[test]
+    fn perpetual_grant_trigger_try_from_rejects_unimplemented_content() {
+        let granted =
+            TriggerDefinition::new(TriggerMode::ChangesZone).execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Unimplemented {
+                    name: "loses".to_string(),
+                    description: Some("this spell perpetually loses this ability".to_string()),
+                },
+            ));
+        let modification = ContinuousModification::GrantTrigger {
+            trigger: Box::new(granted.clone()),
+        };
+        assert_eq!(
+            PerpetualGrantModification::try_from(modification),
+            Err(ContinuousModification::GrantTrigger {
+                trigger: Box::new(granted),
+            }),
+            "a quoted trigger with unparsed inner content must fail the whole perpetual grant closed"
         );
     }
 

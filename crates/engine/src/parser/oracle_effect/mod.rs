@@ -11261,6 +11261,18 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         return parsed_clause(effect);
     }
 
+    // Digital-only Alchemy + CR 118.9: "[~/it] perpetually gains \"You may pay
+    // {N} rather than pay this spell's mana cost\"[ and \"<ability>\"]*" --
+    // persistent self alternative-cost grant (Sanguine Soothsayer, Mine
+    // Security). Tried before the keyword grant: disjoint (this requires a
+    // quoted self-cost body, the keyword grant a bare keyword list), and
+    // before the general quoted-ability arm (which fails these quotes closed
+    // today, so the order is non-load-bearing, but the specific arm first
+    // reads correctly).
+    if let Some(effect) = try_parse_perpetual_grant_self_alt_cost(tp, ctx) {
+        return parsed_clause(effect);
+    }
+
     // Digital-only Alchemy: "[~/that X] perpetually gains [keyword(s)]" — persistent
     // keyword grant (Monoist Gravliner station trigger). Mutable Pupa's
     // keyword-MIRROR antecedent ("… perpetually gains <K0> if that creature has
@@ -11971,6 +11983,13 @@ fn try_parse_perpetual_modify_pt_single(tp: TextPair) -> Option<Effect> {
 ///   with no created referent back-references a prior chosen/tracked object,
 ///   e.g. the self-spell cost grant's "Choose a nonland card ... It
 ///   perpetually gains \"...\"");
+/// - the plural-anaphoric `"they perpetually gain(s) ..."` form mirrors the
+///   "it" form's first two antecedents only: the chain's most-recently CREATED
+///   objects ([`TargetFilter::LastCreated`], fanning out to every conjured
+///   card) or a prior same-chain chosen/tracked set
+///   ([`TargetFilter::ParentTarget`]). The trigger-subject mirror is NOT
+///   implemented — no card needs it — so a "they" with neither antecedent
+///   fails the clause closed;
 /// - the self forms (`~`, `this creature/artifact/…`) target the source itself
 ///   ([`TargetFilter::Any`], resolved to the source by the perpetual resolver).
 ///
@@ -12055,6 +12074,43 @@ fn parse_perpetual_self_subject<'a>(
         return Some((rest, target));
     }
 
+    // Plural-anaphoric back-reference: "they perpetually gain(s) ...".
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("they perpetually ").parse(lower) {
+        let (rest, _) = alt((
+            tag::<_, _, OracleError<'_>>("gains "),
+            tag::<_, _, OracleError<'_>>("gain "),
+        ))
+        .parse(rest)
+        .ok()?;
+        // CR 608.2c: a bare "they" must have a legitimate antecedent -- it must
+        // NEVER silently default to the ability's own source. Mirrors the "it"
+        // arm's first two antecedents, nearest first:
+        //
+        //  1. The chain's most-recently CREATED objects (Indris's conjured
+        //     Lightning Bolts) -- `ctx.token_created_in_chain`, the same
+        //     predicate the "it" arm reaches through
+        //     `counter::counter_anaphor_created_token_binding` (whose
+        //     recipient-pronoun set has no subject-plural member, so the
+        //     equivalent flag read is inline here). `LastCreated` fans out to
+        //     every object the conjure published.
+        //  2. An earlier SAME-CHAIN typed/chosen referent (Racketeer Boss's
+        //     "choose up to two ... cards in your hand") --
+        //     `ctx.parent_target_available` /
+        //     `ctx.pending_tracked_set_origin`.
+        //
+        // The "it" arm's third antecedent (the trigger's own non-self subject)
+        // has NO plural mirror -- no card needs it -- so a "they" with neither
+        // of the two above fails the clause closed.
+        let target = if ctx.token_created_in_chain {
+            TargetFilter::LastCreated
+        } else if ctx.parent_target_available || ctx.pending_tracked_set_origin.is_some() {
+            TargetFilter::ParentTarget
+        } else {
+            return None;
+        };
+        return Some((rest, target));
+    }
+
     let after_subject = [
         "~ ",
         "this creature ",
@@ -12112,13 +12168,33 @@ fn parse_bound_it_perpetual_gain_cost_subject<'a>(
 
 /// Digital-only Alchemy: parse "perpetually gains [keyword(s)]" —
 /// [`PerpetualModification::GrantKeywords`] (Monoist Gravliner).
+/// Digital-only Alchemy + CR 702.40: single-keyword supplement for perpetual
+/// grant bodies naming a keyword outside the shared evergreen vocabulary —
+/// today exactly "storm" (Indris, the Hydrostatic Surge's "They perpetually
+/// gain storm").
+///
+/// `sequence::parse_keyword_grant_list` (via `parse_keyword_name`'s KEYWORDS
+/// table) covers the evergreen vocabulary only, so it cannot see "storm"; the
+/// general fix — admitting cast-trigger keywords (cascade's table entry is the
+/// precedent) to that shared table — is a corpus-wide vocabulary change owned
+/// outside this run. This supplement keeps the perpetual arm honest in the
+/// meantime: it accepts ONLY the bare single keyword "storm" (any tail beyond
+/// the clause terminator, including "storm and <evergreen>" multis, fails
+/// closed via the caller's `tail_done`), so unobserved shapes stay red rather
+/// than silently dropping a sibling keyword.
+fn parse_perpetual_non_evergreen_keyword(input: &str) -> Option<(Vec<Keyword>, &str)> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("storm").parse(input).ok()?;
+    Some((vec![Keyword::Storm], rest))
+}
+
 fn try_parse_perpetual_grant_keywords(tp: TextPair, ctx: &ParseContext) -> Option<Effect> {
     fn tail_done(tail: &str) -> bool {
         tail.is_empty() || tail == "."
     }
 
     let (rest, target) = parse_perpetual_self_subject(tp.lower, ctx)?;
-    let (keywords, rest) = sequence::parse_keyword_grant_list(rest)?;
+    let (keywords, rest) = sequence::parse_keyword_grant_list(rest)
+        .or_else(|| parse_perpetual_non_evergreen_keyword(rest))?;
     tail_done(rest).then_some(Effect::ApplyPerpetual {
         target,
         modification: crate::types::ability::PerpetualModification::GrantKeywords { keywords },
@@ -12189,7 +12265,7 @@ fn try_parse_perpetual_grant_ability(tp: TextPair, ctx: &ParseContext) -> Option
     // Not a CR citation -- an architectural honest-red gate. An empty list (a
     // degenerate quote with no recognized body) would record a grant that
     // installs nothing, and a body classifying to a kind with no
-    // persistent-baseline installer (`GrantTrigger`, `GrantReplacement`, a
+    // persistent-baseline installer (`GrantReplacement`, a
     // `GrantAbility` whose nested tree still carries `Effect::Unimplemented`,
     // …) must fail the WHOLE clause rather than silently drop part of a
     // multi-ability grant — so the `Result` collect short-circuits on the
@@ -12284,6 +12360,107 @@ fn try_parse_perpetual_modify_cost(tp: TextPair, ctx: &ParseContext) -> Option<E
         target,
         // CR 601.2f: perpetual self-spell cost modifier (digital-only "perpetually" grant).
         modification: crate::types::ability::PerpetualModification::ModifyCost { mode, amount },
+    })
+}
+
+/// Digital-only Alchemy (no CR entry for "perpetually") + CR 118.9: the inner
+/// text of a quoted self alternative-cost grant -- "you may pay {N} rather
+/// than pay this spell's mana cost[.,]" (Sanguine Soothsayer, Mine Security)
+/// -- into the offered `AbilityCost`.
+///
+/// Single authority for the quoted clause, used by the perpetual self-cost arm
+/// ([`try_parse_perpetual_grant_self_alt_cost`]). Runs on lowercased text via
+/// `nom_on_lower`, mirroring the sibling [`parse_quoted_self_spell_cost_body`];
+/// "this spell's" survives card-wide self-ref normalization verbatim (it is
+/// not in `SELF_REF_TYPE_PHRASES`), so the literal matches the printed quote.
+/// An optional terminal `.`/`,` is consumed before the closing quote (Mine
+/// Security prints the period INSIDE the quote; Sanguine Soothsayer's is
+/// bare). Only mana costs are accepted -- a non-mana offer fails closed.
+fn parse_quoted_self_alt_cost_body(inner: &str) -> OracleResult<'_, AbilityCost> {
+    let (inner, _) = tag("you may pay ").parse(inner)?;
+    let (inner, cost) = nom_primitives::parse_mana_cost(inner)?;
+    let (inner, _) = tag(" rather than pay this spell's mana cost").parse(inner)?;
+    // CR 118.9: terminal punctuation may be printed inside the quote.
+    let (inner, _) = opt(alt((tag("."), tag(",")))).parse(inner)?;
+    Ok((inner, AbilityCost::Mana { cost }))
+}
+
+/// Digital-only Alchemy (no CR entry for "perpetually") + CR 118.9: parse
+/// "[subject] perpetually gains \"You may pay {N} rather than pay this spell's
+/// mana cost\"[ and \"<ability text>\"]*" into a
+/// [`PerpetualModification::GrantAbility`] carrying the self alternative-cost
+/// static.
+///
+/// Each quote is classified independently: a quote matching the self-cost form
+/// becomes a self-affected `CastWithAlternativeCost` (the installer forces
+/// `affected` to `SelfRef`); every other quote flows through the SAME single
+/// authority every other quoted-ability grant uses
+/// (`oracle_static::classify_quoted_inner`), so Sanguine Soothsayer's second
+/// quote ("When this permanent enters, draw a card.") lands as a granted
+/// trigger. At least one quote must match the self-cost form, or the arm
+/// declines and the rider falls through to
+/// [`try_parse_perpetual_grant_ability`] unchanged.
+///
+/// Honest-red: a granted body that classifies to a kind the runtime cannot
+/// install (see `try_parse_perpetual_grant_ability`'s gate note) fails the
+/// WHOLE clause closed, as does any unconsumed tail after the last quote.
+fn try_parse_perpetual_grant_self_alt_cost(tp: TextPair, ctx: &ParseContext) -> Option<Effect> {
+    fn tail_done(tail: &str) -> bool {
+        tail.is_empty() || tail == "."
+    }
+
+    let (lower_rest, target) = parse_perpetual_self_subject(tp.lower, ctx)?;
+    // Lowercase-only remainder, as in `try_parse_perpetual_grant_ability`:
+    // re-derive the ORIGINAL-case remainder so the self-cost slice below
+    // preserves mana-symbol casing.
+    let consumed = tp.lower.len() - lower_rest.len();
+    let orig_rest = &tp.original[consumed..];
+
+    let (mut rest, first_body) = parse_perpetual_quoted_ability_body(orig_rest)?;
+    let mut bodies = vec![first_body];
+    while let Ok((after_and, _)) = tag::<_, _, OracleError<'_>>(" and ").parse(rest) {
+        let (after_body, body) = parse_perpetual_quoted_ability_body(after_and)?;
+        bodies.push(body);
+        rest = after_body;
+    }
+    if !tail_done(rest) {
+        return None;
+    }
+
+    let mut saw_self_cost = false;
+    let mut classified = Vec::new();
+    for body in bodies {
+        let lower_body = body.to_lowercase();
+        let self_cost = nom_on_lower(body, &lower_body, parse_quoted_self_alt_cost_body)
+            .filter(|(_, rest)| rest.is_empty())
+            .map(|(cost, _)| cost);
+        if let Some(cost) = self_cost {
+            saw_self_cost = true;
+            classified.push(
+                crate::types::ability::ContinuousModification::AddStaticMode {
+                    mode: crate::types::statics::StaticMode::CastWithAlternativeCost {
+                        cost,
+                        timing_permission: None,
+                        frequency: crate::types::statics::CastFrequency::Unlimited,
+                    },
+                },
+            );
+        } else {
+            classified.extend(super::oracle_static::classify_quoted_inner(body));
+        }
+    }
+    if !saw_self_cost {
+        return None;
+    }
+    let modifications: Vec<crate::types::ability::PerpetualGrantModification> = classified
+        .into_iter()
+        .map(crate::types::ability::PerpetualGrantModification::try_from)
+        .collect::<Result<_, _>>()
+        .ok()?;
+
+    Some(Effect::ApplyPerpetual {
+        target,
+        modification: crate::types::ability::PerpetualModification::GrantAbility { modifications },
     })
 }
 
@@ -12594,7 +12771,7 @@ fn try_parse_conjure(tp: TextPair) -> Option<Effect> {
         .ok()?;
     let after_named_orig = &rest_orig[rest_orig.len() - after_named.len()..];
 
-    // Extract card name: take until " onto ", " into ", or " and a card" separator.
+    // Extract card name: take until " onto ", " into ", " on top of ", or " and a card" separator.
     let (card_name_lower, zone_rest) = parse_conjure_card_name(after_named)?;
     let card_name = &after_named_orig[..card_name_lower.len()];
 
@@ -12743,17 +12920,22 @@ fn parse_conjure_quantity<'a>(
 }
 
 /// Extract the card name from conjure text. The name extends until we hit
-/// a zone destination (" onto " or " into ") or an " and a card" separator.
-/// Uses nom `take_until` combinators for structured extraction.
+/// a zone destination (" onto ", " into ", or " on top of ") or an
+/// " and a card" separator. Uses nom `take_until` combinators for structured
+/// extraction.
 ///
 /// " and a card" is checked first because multi-card patterns like
 /// "X and a card named Y into your hand" contain both " and a card" and " into ",
-/// and we want the shortest (first occurring) separator.
+/// and we want the shortest (first occurring) separator. " on top of " is
+/// checked last: `alt` returns the first success, so every pre-existing head
+/// still terminates at its original separator and only heads with no other
+/// separator reach the on-top boundary.
 fn parse_conjure_card_name(lower: &str) -> Option<(&str, &str)> {
     alt((
         take_until::<_, _, OracleError<'_>>(" and a card"),
         take_until(" onto "),
         take_until(" into "),
+        take_until(" on top of "),
     ))
     .parse(lower)
     .ok()
@@ -12762,7 +12944,8 @@ fn parse_conjure_card_name(lower: &str) -> Option<(&str, &str)> {
 
 /// Parse the destination zone from conjure text using nom combinators. Returns
 /// the zone, an optional in-library slot (`Some` only for the Alchemy "into the
-/// top N cards … at random" positional destination), the player scope whose
+/// top N cards … at random" and "on top of your library" positional
+/// destinations), the player scope whose
 /// libraries receive the cards (`Some(PlayerFilter::All)` only for the "each
 /// player's library" fan-out; `None` = the controller's library), and the
 /// unconsumed tail.
@@ -12800,6 +12983,16 @@ fn parse_conjure_zone(
             library_players,
             rest,
         ));
+    }
+
+    // Digital-only Alchemy (no CR entry): "conjure … on top of your library"
+    // (Jewel Mine Overseer) slots the conjured cards onto the library top.
+    // Preceding arm because it must produce `Some(Top)` — it cannot join the
+    // Zone-only `value()` alt below. Head-disjoint from the ` into`/` onto`
+    // arms (` on top of` shares neither prefix), so placement here is
+    // non-load-bearing.
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(" on top of your library").parse(lower) {
+        return Some((Zone::Library, Some(LibraryPosition::Top), None, rest));
     }
 
     alt((
