@@ -1391,8 +1391,6 @@
     },
     "config": {
       "startingLife": "開始時のライフ",
-      "experimentalDungeons": "実験的ダンジョン",
-      "experimentalDungeonsHelp": "ダンジョン探索とイニシアティブ取得で Baldur's Gate Wilderness を選択可能にします。実験的かつ非公式。",
       "players": "プレイヤー",
       "whoGoesFirst": "先攻プレイヤー",
       "firstPlayer": {

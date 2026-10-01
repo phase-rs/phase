@@ -1340,10 +1340,9 @@ fn companion_candidates_returns_empty_for_custom_format_without_panicking() {
 // representations of the same state with nothing cross-checking them. Phase
 // 1c builds that resolver (FormatConfig::for_custom_rules), so the boundary
 // now accepts a Custom payload exactly when it equals what the resolver
-// derives from the payload's own custom_rules (allow_debug_actions and
-// allow_experimental_dungeons excepted,
-// being a session capability rather than a format rule), and rejects
-// anything else. Each value below is constructed directly in Rust (bypassing
+// derives from the payload's own custom_rules (allow_debug_actions
+// excepted, being a session capability rather than a format rule), and
+// rejects anything else. Each value below is constructed directly in Rust (bypassing
 // Deserialize, which has no reason to reject it going the other way) and
 // round-tripped through `serde_json` — the only way to exercise
 // FormatConfig's real Deserialize impl without hand-guessing its full field
@@ -1528,27 +1527,24 @@ fn format_config_deserialization_ignores_allow_debug_actions_in_the_custom_equal
 }
 
 #[test]
-fn format_config_deserialization_ignores_allow_experimental_dungeons_in_the_custom_equality_check()
-{
-    // allow_experimental_dungeons is a per-session capability (the
-    // experimental dungeon pool), orthogonal to format and not derivable
-    // from custom_rules — the resolver always emits false, so a strict
-    // whole-struct equality check would reject every experimental Custom
-    // game. Both values must round-trip; the paired assertions are what
-    // prove the field is genuinely excluded rather than coincidentally
-    // matching.
-    for allow_experimental_dungeons in [true, false] {
-        let mut config = sample_custom_config(5);
-        config.allow_experimental_dungeons = allow_experimental_dungeons;
-        let json = serde_json::to_value(&config).unwrap();
-        let back = serde_json::from_value::<FormatConfig>(json).unwrap_or_else(|error| {
-            panic!("allow_experimental_dungeons={allow_experimental_dungeons}: {error}")
-        });
-        assert_eq!(back, config);
-        assert_eq!(
-            back.allow_experimental_dungeons,
-            allow_experimental_dungeons
+fn format_config_deserialization_ignores_the_removed_experimental_dungeons_key() {
+    // Back-compat: saves, replays, and persisted setups written before the
+    // per-session experimental-dungeons flag was removed still carry the
+    // `allow_experimental_dungeons` key. The derived `Deserialize` impl sets
+    // no `deny_unknown_fields`, so the stale key must be ignored — not
+    // rejected — and the pool must come from the format alone. Both stale
+    // values must load; a `true` on a non-freeform config must NOT smuggle
+    // the Wilderness into its pool.
+    for stale_value in [true, false] {
+        let mut json = serde_json::to_value(FormatConfig::standard()).unwrap();
+        json.as_object_mut().unwrap().insert(
+            "allow_experimental_dungeons".to_string(),
+            serde_json::Value::Bool(stale_value),
         );
+        let back = serde_json::from_value::<FormatConfig>(json)
+            .unwrap_or_else(|error| panic!("stale flag={stale_value}: {error}"));
+        assert_eq!(back, FormatConfig::standard());
+        assert!(!back.format.offers_baldurs_gate_wilderness());
     }
 }
 
@@ -1726,7 +1722,6 @@ fn format_config_deserialization_legacy_payload_omitting_defaulted_fields_still_
         "archenemy_player",
         "range_of_influence",
         "allow_debug_actions",
-        "allow_experimental_dungeons",
         "custom_rules",
         "default_deck_copy_limit",
     ] {
@@ -1736,7 +1731,6 @@ fn format_config_deserialization_legacy_payload_omitting_defaulted_fields_still_
         .expect("a legacy payload omitting every defaulted field must still deserialize");
     assert_eq!(restored.sideboard_policy, SideboardPolicy::Forbidden);
     assert!(!restored.supplies_fixed_deck);
-    assert!(!restored.allow_experimental_dungeons);
     assert_eq!(restored.archenemy_player, None);
     assert_eq!(restored.default_deck_copy_limit, DeckCopyLimit::UpTo(1));
 
@@ -2549,7 +2543,6 @@ fn lobby_save_round_trips_every_structural_field_back_through_the_resolver() {
     assert!(!resolved.supplies_fixed_deck);
     assert_eq!(resolved.archenemy_player, None);
     assert!(!resolved.allow_debug_actions);
-    assert!(!resolved.allow_experimental_dungeons);
 }
 
 #[test]
@@ -2660,8 +2653,7 @@ fn a_lobby_save_resolves_to_a_config_the_deserialize_boundary_accepts() {
         // Deliberately NOT compared against `source` (per for_custom_rules's
         // own doc comment): `format`/`custom_rules` are fixed to the Custom
         // sentinel, and `archenemy_player`/`supplies_fixed_deck`/
-        // `allow_debug_actions`/`allow_experimental_dungeons` are always
-        // reset, never captured.
+        // `allow_debug_actions` are always reset, never captured.
 
         let json = serde_json::to_value(&resolved).unwrap();
         let back = serde_json::from_value::<FormatConfig>(json)

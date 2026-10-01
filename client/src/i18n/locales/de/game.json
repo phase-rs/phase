@@ -1348,8 +1348,6 @@
     },
     "config": {
       "startingLife": "Startleben",
-      "experimentalDungeons": "Experimentelle Dungeons",
-      "experimentalDungeonsHelp": "Baldur's Gate Wilderness bei Dungeon-Optionen und Initiative anbieten. Experimentell und inoffiziell.",
       "players": "Spieler",
       "whoGoesFirst": "Wer beginnt",
       "firstPlayer": {

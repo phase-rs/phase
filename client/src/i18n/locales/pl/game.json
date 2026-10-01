@@ -1348,8 +1348,6 @@
     },
     "config": {
       "startingLife": "Życie początkowe",
-      "experimentalDungeons": "Eksperymentalne lochy",
-      "experimentalDungeonsHelp": "Oferuj Baldur's Gate Wilderness w opcjach lochów i przy przejmowaniu inicjatywy. Eksperymentalne i nieoficjalne.",
       "players": "Gracze",
       "whoGoesFirst": "Kto zaczyna",
       "firstPlayer": {

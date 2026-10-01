@@ -210,6 +210,12 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 99 — FormatConfig loses `allow_experimental_dungeons`: the per-session
+ *      flag is gone and the Baldur's Gate Wilderness pool is format-derived
+ *      (Freeform and Freeform Commander only). A v98 peer would parse the
+ *      frame but fail the pool closed; the exact-match handshake refuses the
+ *      pairing. P2P moves in lockstep (wire 81); lobby carriers move too
+ *      (LOBBY_PROTOCOL_VERSION 15).
  * 98 — PerPlayerScope gains Opponents (CR 102.2 + CR 102.3), written inside
  *      ZoneOwner as {"Each":"Opponents"}; ZoneOpponentChooserPurpose gains
  *      PerPlayerChoiceOrder (CR 101.4c) and SubstituteChooser (CR 800.4g);
@@ -656,7 +662,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 98;
+export const PROTOCOL_VERSION = 99;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
@@ -687,6 +693,12 @@ export const LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION - 1;
  * PROTOCOL_VERSION moved twice for GameState-only changes and the derived lobby
  * window went disjoint from the deployed broker's.
  *
+ * 15 — FormatConfig loses `allow_experimental_dungeons` on its three lobby
+ *      carriers (CreateGameWithSettings, JoinTargetInfo, PeerInfo): the
+ *      per-session toggle is gone and the Wilderness pool is format-derived.
+ *      A CAPABILITY bump like 13, not a parse bump — a v14 frame carrying
+ *      the stale key and a v15 frame omitting it both parse — so
+ *      MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL stays at 2.
  * 14 — PairingView.report_gate gains a `Hosted` arm (the Rust ReportGate enum's
  *      new variant), the "a field's type changed" trigger. No broker emits it
  *      until server-authoritative hosting is wired behind
@@ -818,7 +830,7 @@ export const LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION - 1;
  * 1 — Initial lobby-owned version, covering the lobby variant set unchanged
  *     since #1880.
  */
-export const LOBBY_PROTOCOL_VERSION = 14;
+export const LOBBY_PROTOCOL_VERSION = 15;
 
 /**
  * Lowest broker LOBBY_PROTOCOL_VERSION this client accepts.

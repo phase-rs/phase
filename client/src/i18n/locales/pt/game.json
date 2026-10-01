@@ -1348,8 +1348,6 @@
     },
     "config": {
       "startingLife": "Vida Inicial",
-      "experimentalDungeons": "Masmorras experimentais",
-      "experimentalDungeonsHelp": "Oferecer Baldur's Gate Wilderness nas opções de masmorra e ao tomar a iniciativa. Experimental e não oficial.",
       "players": "Jogadores",
       "whoGoesFirst": "Quem Começa",
       "firstPlayer": {

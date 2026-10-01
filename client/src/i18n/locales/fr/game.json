@@ -1348,8 +1348,6 @@
     },
     "config": {
       "startingLife": "Points de vie de départ",
-      "experimentalDungeons": "Donjons expérimentaux",
-      "experimentalDungeonsHelp": "Proposer Baldur's Gate Wilderness dans les donjons et à la prise d'initiative. Expérimental et non officiel.",
       "players": "Joueurs",
       "whoGoesFirst": "Qui commence",
       "firstPlayer": {

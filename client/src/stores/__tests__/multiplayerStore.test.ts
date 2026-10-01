@@ -879,7 +879,6 @@ describe("multiplayerStore", () => {
       sideboard_policy: { type: "Limited", data: 15 },
       default_deck_copy_limit: { type: "UpTo", data: 4 },
       allow_debug_actions: false,
-      allow_experimental_dungeons: false,
       custom_rules: {
         id: 0,
         structural: {
@@ -964,21 +963,24 @@ describe("multiplayerStore", () => {
     ]);
   });
 
-  it("rehydrates a legacy custom config missing the experimental-dungeons flag", () => {
+  it("keeps a remembered custom config carrying the removed experimental-dungeons key", () => {
     seedSavedCustomFormat("saved-1");
-    // Persisted before the axis existed: every field but the new flag.
-    const { allow_experimental_dungeons: _dropped, ...legacyConfig } =
-      customFormatConfigFixture();
+    // Persisted before the flag was removed: every field plus the stale key.
+    const legacyConfig = {
+      ...customFormatConfigFixture(),
+      allow_experimental_dungeons: true,
+    };
 
     const normalized = normalizeRememberedHostConfig(
       persistedCustomHostConfig({ formatConfig: legacyConfig }),
     );
 
-    // The setup survives with the engine's default filled in — not discarded.
+    // The setup survives with the stale key ignored — not discarded.
     expect(normalized).not.toBeNull();
     expect(normalized?.format).toBe("Custom:0");
-    expect(normalized?.formatConfig).toEqual(customFormatConfigFixture());
-    expect(normalized?.formatConfig.allow_experimental_dungeons).toBe(false);
+    expect(normalized?.formatConfig).toEqual(
+      expect.objectContaining(customFormatConfigFixture()),
+    );
     // ...and the format-independent tail ran, so nothing else was lost either.
     expect(normalized?.playerCount).toBe(3);
     expect(normalized?.isPublic).toBe(false);
