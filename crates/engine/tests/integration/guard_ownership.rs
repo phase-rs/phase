@@ -680,10 +680,9 @@ fn v9_o2_is_an_ancestor_test_so_the_second_rider_survives() {
 // prevention sentence did NOT parse — it was an honest `Unimplemented` gap and the rider a
 // `SequentialSibling`. So the ancestor test found no shield, and a V10-shaped rule would
 // have gapped the `Token` body that base emitted correctly — deleting a correct
-// instruction to punish an UNRELATED parse gap. Ria's shield now parses and its rider
-// folds as a `ContinuationStep` (`oracle_replacement`'s
-// `ria_ivor_trigger_body_lowers_recipient_scoped_target_source_prevention`), but the
-// withdrawal argument stands independently of that witness: a CR 615.5 gap rule would
+// instruction to punish an UNRELATED parse gap. Ria's shield is still an honest gap
+// (`oracle_replacement`'s `ria_ivor_trigger_body_target_source_prevention_stays_a_gap`),
+// and the withdrawal argument stands independently of that witness: a CR 615.5 gap rule would
 // first have to distinguish "no shield printed" from "the printed shield did not parse";
 // no such rule exists here, so the row goes rather than the behaviour.
 //

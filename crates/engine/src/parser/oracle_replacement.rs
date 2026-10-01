@@ -7553,9 +7553,10 @@ fn parse_oneshot_prevent_damage_tail(
 ///    damage."  (Awe Strike)
 ///
 /// The subject of the "would deal" clause is a DECLARED TARGET ("target
-/// creature", "another target creature", "other target creature") — admitted
-/// in any ability body, including a trigger body (Ria Ivor) — or the
-/// non-trigger anaphor "that creature". The prevention is source-scoped: the
+/// creature", "another target creature", "other target creature") or the
+/// non-trigger anaphor "that creature". Inside a trigger body (Ria Ivor) a
+/// proven declared-target prevention fails closed to `Effect::unimplemented`
+/// (see decline outcome 3). The prevention is source-scoped: the
 /// chosen creature is captured as the damage source (CR 609.7a `ParentTargetSlot`
 /// sentinel, concretized to `SpecificObject` at resolution) with a typed
 /// CR 609.7b recheck leaf (`Typed(creature)`; CR 115.1: the target slot is
@@ -7579,6 +7580,10 @@ fn parse_oneshot_prevent_damage_tail(
 ///    but the scope/recipient tail does not parse or names an unsupported
 ///    recipient: returns `Some(Effect::unimplemented(..))`, an honest gap that
 ///    never falls through to the generic branch's unscoped, source-less shield.
+/// 3. Trigger body, subject and result proven — returns
+///    `Some(Effect::unimplemented(..))`: the combat-damage pipeline cannot yet
+///    keep a one-shot shield bound to a whole redirected/split combat damage
+///    instance or pause for its replacement-ordering choice.
 fn parse_oneshot_target_source_prevent(norm_lower: &str, ctx: &ParseContext) -> Option<Effect> {
     // CR 614.1a: "the next time " prefix + the subject slice before "would deal".
     let (after_prefix, _) = preceded(
@@ -7656,6 +7661,16 @@ fn parse_oneshot_target_source_prevent(norm_lower: &str, ctx: &ParseContext) -> 
     let (tail, result_clause) = split_would_deal_clause(post_would);
     if !is_complete_oneshot_prevention_result(result_clause) {
         return None;
+    }
+
+    // Trigger-body declared-target source prevention (Ria Ivor, Bane of
+    // Bladehold) stays an honest gap: the combat-damage pipeline does not yet
+    // preserve a replacement-ordering choice or treat a redirected/split combat
+    // damage instance as one instance for a one-shot shield, so a lowered shield
+    // could prevent only part of the instance or none of it. Fail closed rather
+    // than fall through to the generic branch's unscoped, source-less shield.
+    if ctx.in_trigger {
+        return Some(Effect::unimplemented("prevent", norm_lower));
     }
 
     // CR 511.2: "this turn" → UntilEndOfTurn (expires at cleanup, CR 514.2);
@@ -28056,29 +28071,15 @@ mod snapshot_tests {
     /// TRIGGER body ("At the beginning of combat on your turn, the next time
     /// target creature would deal combat damage to one or more players this
     /// combat, prevent that damage. If damage is prevented this way, create ...").
-    /// The declared "target creature" subject is admitted inside a trigger body
-    /// (only the "that creature" anaphor is trigger-gated, CR 608.2c), so the
-    /// sentence lowers to the source-scoped one-shot `PreventDamage` with the
-    /// player recipient SCOPE (CR 120.1), and the CR 615.5 rider folds as a
-    /// `ContinuationStep` reading the prevented amount. Reverting the branch
-    /// change leaves the prevention an `Unimplemented` gap and the rider a
-    /// `SequentialSibling`.
+    /// The sentence stays an honest `Unimplemented` gap: the combat-damage
+    /// pipeline cannot yet keep a one-shot shield bound to a whole
+    /// redirected/split combat damage instance or pause for its
+    /// replacement-ordering choice, so lowering the shield would be wrong for
+    /// part of the class. It must never fall through to the generic branch's
+    /// source-less `PreventDamage`.
     #[test]
-    fn ria_ivor_trigger_body_lowers_recipient_scoped_target_source_prevention() {
-        use crate::types::ability::{AbilityDefinition, SubAbilityLink};
+    fn ria_ivor_trigger_body_target_source_prevention_stays_a_gap() {
         use crate::types::triggers::TriggerMode;
-
-        fn chain_has_unimplemented(def: &AbilityDefinition) -> bool {
-            matches!(&*def.effect, Effect::Unimplemented { .. })
-                || def
-                    .sub_ability
-                    .as_deref()
-                    .is_some_and(chain_has_unimplemented)
-                || def
-                    .else_ability
-                    .as_deref()
-                    .is_some_and(chain_has_unimplemented)
-        }
 
         let parsed = parse_oracle_text(
             "At the beginning of combat on your turn, the next time target creature would deal combat damage to one or more players this combat, prevent that damage. If damage is prevented this way, create that many 1/1 colorless Phyrexian Mite artifact creature tokens with toxic 1 and \"This token can't block.\"",
@@ -28091,74 +28092,25 @@ mod snapshot_tests {
             .triggers
             .iter()
             .find(|t| t.mode == TriggerMode::Phase)
-            .expect("beginning-of-combat trigger must exist");
+            .expect("reach guard: the beginning-of-combat trigger must exist");
         let body = trigger.execute.as_deref().expect("trigger body");
-        match &*body.effect {
-            Effect::PreventDamage {
-                target,
-                scope,
-                damage_source_filter,
-                prevention_duration,
-                ..
-            } => {
-                assert_eq!(
-                    damage_source_filter,
-                    &Some(TargetFilter::And {
-                        filters: vec![
-                            TargetFilter::ParentTargetSlot { index: 0 },
-                            TargetFilter::Typed(TypedFilter::creature()),
-                        ],
-                    }),
-                    "CR 609.7a: the declared target creature is the captured damage source"
-                );
-                assert_eq!(
-                    target,
-                    &TargetFilter::Player,
-                    "CR 120.1: 'to one or more players' is the player recipient scope"
-                );
-                assert_eq!(scope, &crate::types::ability::PreventionScope::CombatDamage);
-                assert_eq!(
-                    prevention_duration,
-                    &Some(Duration::UntilEndOfCombat),
-                    "CR 511.2: 'this combat' expires at end of combat"
-                );
-            }
-            other => panic!("expected PreventDamage, got {other:?}"),
-        }
-        let rider = body
-            .sub_ability
-            .as_deref()
-            .expect("the rider must be chained");
-        assert_eq!(
-            rider.sub_link,
-            SubAbilityLink::ContinuationStep,
-            "CR 615.5: the 'prevented this way' rider folds onto the shield"
-        );
-        match &*rider.effect {
-            Effect::Token { count, .. } => assert_eq!(
-                count,
-                &QuantityExpr::Ref {
-                    qty: QuantityRef::EventContextAmount
-                },
-                "'that many' reads the prevented amount"
-            ),
-            other => panic!("expected Token rider, got {other:?}"),
-        }
         assert!(
-            !chain_has_unimplemented(body),
-            "no Unimplemented node may remain in the trigger chain: {body:?}"
+            matches!(&*body.effect, Effect::Unimplemented { .. }),
+            "the trigger-body prevention must stay an honest Unimplemented gap, got {:?}",
+            body.effect
         );
     }
 
-    /// CR 608.2c: `ctx.in_trigger` gates ONLY the "that creature" anaphor. The
-    /// declared "target creature" subject lowers inside a trigger body (reach
-    /// guard); Impulsive Maneuvers' trigger-body "that creature" declines
-    /// (`None`, subject mismatch) and the same text outside a trigger lowers.
-    /// The `None` row discriminates the `!ctx.in_trigger` gate on `cond`: without
-    /// it the trigger-body "that creature" anaphor would lower as a target-source
-    /// capture instead of declining.
+    /// CR 608.2c: inside a trigger body the "that creature" anaphor DECLINES
+    /// (`None`, subject mismatch — Impulsive Maneuvers falls through to the
+    /// generic branch), while a proven declared "target creature" subject FAILS
+    /// CLOSED to `Unimplemented` (Ria Ivor's shield is not yet supported). The
+    /// same "that creature" text outside a trigger lowers as the anaphor (reach
+    /// guard). The `None` row discriminates the `!ctx.in_trigger` gate on
+    /// `cond`: without it the trigger-body anaphor would lower as a
+    /// target-source capture instead of declining.
     #[test]
-    fn trigger_context_gates_only_that_creature_anaphor() {
+    fn trigger_context_declines_anaphor_and_fails_closed_on_declared_target() {
         let source_scoped = Some(TargetFilter::And {
             filters: vec![
                 TargetFilter::ParentTargetSlot { index: 0 },
@@ -28175,12 +28127,8 @@ mod snapshot_tests {
             &trigger_ctx,
         );
         assert!(
-            matches!(
-                &declared,
-                Some(Effect::PreventDamage { damage_source_filter, .. })
-                    if *damage_source_filter == source_scoped
-            ),
-            "reach guard: a declared target subject must lower inside a trigger body, got {declared:?}"
+            matches!(&declared, Some(Effect::Unimplemented { .. })),
+            "a declared target subject inside a trigger body must fail closed, got {declared:?}"
         );
 
         const IMPULSIVE: &str =
