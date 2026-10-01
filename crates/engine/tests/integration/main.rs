@@ -279,6 +279,7 @@ mod devour_co_entry_regression;
 mod devour_completion_rest_recovery;
 mod devour_intellect_treasure_rider;
 mod die_result_zero_after_modifier;
+mod dig_announced_target_preservation;
 mod dig_impossible_keep_count;
 mod dig_rest_pile_stranding_on_etb_pause;
 mod dihada_graveyard_treasure_count_8159;
