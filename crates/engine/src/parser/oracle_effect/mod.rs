@@ -20510,12 +20510,20 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
     continuation_ctx.target_chooser = None;
 
     // CR 608.2c: when the primary instruction announced an OBJECT target, a
-    // "that player" in the continuation names that object's controller
+    // "that player" in a MASS continuation names that object's controller
     // ("exile target nonland permanent an opponent controls and all tokens that
     // player controls with the same name as that permanent"). Unseeded, the
-    // "that player controls" suffix falls back to `You`. CR 608.2h: the runtime
-    // reads the controller via LKI once the parent target has left.
+    // "that player controls" suffix falls back to `You`. A continuation that
+    // announces its own target ("and target creature of an opponent's choice
+    // they control") has its own antecedent and is left unseeded. CR 608.2h:
+    // the runtime reads the controller via LKI once the parent target has left.
     if continuation_ctx.relative_player_scope.is_none()
+        && alt((
+            tag::<_, _, OracleError<'_>>("all "),
+            tag::<_, _, OracleError<'_>>("each "),
+        ))
+        .parse(sub_lower.as_str())
+        .is_ok()
         && triggers::extract_target_filter_from_effect(&primary_effect)
             .is_some_and(|filter| !is_player_scoped_filter(filter))
     {
