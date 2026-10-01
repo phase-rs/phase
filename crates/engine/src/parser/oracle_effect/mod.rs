@@ -47009,10 +47009,199 @@ mod scan_at_random_authority_tests {
 /// kind names, which fail closed as an engine limitation.
 #[cfg(test)]
 mod additional_phase_recipient_subject_tests {
+    use crate::game::ability_utils::{build_resolved_from_def, build_target_slots};
+    use crate::game::scenario::{GameScenario, P0, P1};
     use crate::parser::oracle::parse_oracle_text;
     use crate::types::ability::{
-        AbilityDefinition, ControllerRef, Effect, ExtraPhaseRecipient, TargetFilter, TypedFilter,
+        AbilityCondition, AbilityDefinition, ControllerRef, Effect, ExtraPhaseRecipient,
+        QuantityExpr, QuantityRef, TargetFilter, TargetRef, TypedFilter,
     };
+    use crate::types::identifiers::ObjectId;
+    use crate::types::phase::{Phase, PhaseGroup, TurnSegment};
+
+    #[test]
+    fn synthetic_unsplit_compound_grants_are_explicit_production_gaps() {
+        for text in [
+            "You get an additional upkeep step after this phase and the active player gets an additional combat phase after this phase.",
+            "You get an additional land this turn and the active player gets an additional combat phase after this phase.",
+            "There is an additional upkeep step after this step and the active player gets an additional combat phase after this phase.",
+            "There is an additional land this turn and the active player gets an additional combat phase after this phase.",
+            "You get two additional upkeep steps after this step and the active player gets three additional combat phases after this phase.",
+            "You get three additional combat phases after this phase and the active player gets two additional upkeep steps after this step.",
+            "After this phase, you get an additional combat phase after this main phase.",
+            "After this phase, the active player gets an additional combat phase.",
+            "If you control a creature, the active player gets an additional combat phase after this phase.",
+        ] {
+            // A nonempty, category-specific gap proves the affected chain
+            // reached this family and contains no granted phase or step.
+            assert_eq!(recipients("Synthetic Probe", "Sorcery", None, text), vec![None], "{text:?}");
+        }
+    }
+
+    #[test]
+    fn synthetic_isolated_production_grants_preserve_bound_fields_and_targets() {
+        let state = GameScenario::new().build();
+        let phase_anchor = crate::types::ability::ExtraPhaseAnchor::ThisPhase { named: None };
+        let step_anchor = crate::types::ability::ExtraPhaseAnchor::ThisStep;
+        for (text, recipient, count, segment, after, legal_targets) in [
+            (
+                "You get an additional upkeep step after this phase.",
+                ExtraPhaseRecipient::Controller,
+                QuantityExpr::Fixed { value: 1 },
+                TurnSegment::CreatedPhase(Phase::Upkeep),
+                phase_anchor.clone(),
+                vec![],
+            ),
+            (
+                "You get an additional combat phase after this phase.",
+                ExtraPhaseRecipient::Controller,
+                QuantityExpr::Fixed { value: 1 },
+                TurnSegment::Phase(PhaseGroup::Combat),
+                phase_anchor.clone(),
+                vec![],
+            ),
+            (
+                "There is an additional upkeep step after this step.",
+                ExtraPhaseRecipient::NoPlayer,
+                QuantityExpr::Fixed { value: 1 },
+                TurnSegment::Step(Phase::Upkeep),
+                step_anchor.clone(),
+                vec![],
+            ),
+            (
+                "After this phase, there are three additional combat phases.",
+                ExtraPhaseRecipient::NoPlayer,
+                QuantityExpr::Fixed { value: 3 },
+                TurnSegment::Phase(PhaseGroup::Combat),
+                phase_anchor.clone(),
+                vec![],
+            ),
+            (
+                "After this step, you get two additional upkeep steps.",
+                ExtraPhaseRecipient::Controller,
+                QuantityExpr::Fixed { value: 2 },
+                TurnSegment::Step(Phase::Upkeep),
+                step_anchor,
+                vec![],
+            ),
+            (
+                "You get that many additional upkeep steps after this phase.",
+                ExtraPhaseRecipient::Controller,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+                TurnSegment::CreatedPhase(Phase::Upkeep),
+                phase_anchor.clone(),
+                vec![],
+            ),
+            (
+                "Target player gets an additional combat phase after this phase.",
+                ExtraPhaseRecipient::TargetedPlayer(TargetFilter::Player),
+                QuantityExpr::Fixed { value: 1 },
+                TurnSegment::Phase(PhaseGroup::Combat),
+                phase_anchor.clone(),
+                vec![TargetRef::Player(P0), TargetRef::Player(P1)],
+            ),
+            (
+                "Target opponent gets an additional combat phase after this phase.",
+                ExtraPhaseRecipient::TargetedPlayer(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent),
+                )),
+                QuantityExpr::Fixed { value: 1 },
+                TurnSegment::Phase(PhaseGroup::Combat),
+                phase_anchor,
+                vec![TargetRef::Player(P1)],
+            ),
+        ] {
+            let parsed = parse_oracle_text(text, "Synthetic Probe", &[], &["Sorcery".into()], &[]);
+            assert_eq!(parsed.abilities.len(), 1, "{text:?}");
+            let def = &parsed.abilities[0];
+            assert_eq!(
+                *def.effect,
+                Effect::AdditionalPhase {
+                    recipient,
+                    count,
+                    segment,
+                    after,
+                    followed_by: vec![],
+                    attacker_restriction: None,
+                },
+                "{text:?}"
+            );
+            assert!(
+                def.sub_ability.is_none() && def.else_ability.is_none(),
+                "{text:?}"
+            );
+            let resolved = build_resolved_from_def(def, ObjectId(0), P0);
+            let slots = build_target_slots(state.state(), &resolved).expect("target slots build");
+            if legal_targets.is_empty() {
+                assert!(slots.is_empty(), "{text:?}");
+            } else {
+                assert_eq!(slots.len(), 1, "{text:?}");
+                assert!(!slots[0].optional, "{text:?}");
+                assert_eq!(slots[0].legal_targets, legal_targets, "{text:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn synthetic_conditional_production_grant_retains_its_condition() {
+        let text = "If it's your turn, you get an additional combat phase after this phase.";
+        let parsed = parse_oracle_text(text, "Synthetic Probe", &[], &["Sorcery".into()], &[]);
+        assert_eq!(parsed.abilities.len(), 1);
+        let def = &parsed.abilities[0];
+        assert_eq!(def.condition, Some(AbilityCondition::IsYourTurn));
+        assert_eq!(
+            recipients("Synthetic Probe", "Sorcery", None, text),
+            vec![Some(ExtraPhaseRecipient::Controller)]
+        );
+        assert!(matches!(*def.effect, Effect::AdditionalPhase { .. }));
+        assert!(def.sub_ability.is_none() && def.else_ability.is_none());
+    }
+
+    #[test]
+    fn synthetic_production_combat_followups_preserve_exact_grammar() {
+        for comma in ["", ","] {
+            for head in [
+                "You get an additional combat phase after this phase",
+                "After this phase, there is an additional combat phase",
+            ] {
+                let text = format!("{head}{comma} followed by an additional main phase.");
+                let parsed =
+                    parse_oracle_text(&text, "Synthetic Probe", &[], &["Sorcery".into()], &[]);
+                assert_eq!(parsed.abilities.len(), 1, "{text:?}");
+                assert!(
+                    matches!(&*parsed.abilities[0].effect,
+                        Effect::AdditionalPhase { followed_by, .. }
+                            if followed_by == &vec![TurnSegment::Phase(PhaseGroup::PostcombatMain)]
+                    ),
+                    "{text:?}"
+                );
+                assert!(parsed.abilities[0].sub_ability.is_none(), "{text:?}");
+                for tail in [
+                    "an additional beginning phase",
+                    "an additional main phase and an additional end step",
+                    "an additional main phase followed by an additional end step",
+                    "an additional main phase, followed by an additional end step",
+                ] {
+                    let text = format!("{head}{comma} followed by {tail}.");
+                    assert_eq!(
+                        recipients("Synthetic Probe", "Sorcery", None, &text),
+                        vec![None],
+                        "{text:?}"
+                    );
+                }
+            }
+        }
+        for text in [
+            "After this one, you get an additional upkeep step.",
+            "After this one, there is an additional beginning phase.",
+            "You get an additional upkeep step after this step, followed by an additional main phase.",
+            "After this phase, there is an additional beginning phase followed by an additional main phase.",
+        ] {
+            assert_eq!(recipients("Synthetic Probe", "Sorcery", None, text), vec![None], "{text:?}");
+        }
+    }
 
     /// Every `AdditionalPhase` recipient in the parsed card, and every
     /// `additional_phase` strict failure (as `None`), in chain order.
