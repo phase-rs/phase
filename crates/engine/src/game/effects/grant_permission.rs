@@ -69,7 +69,9 @@ pub fn resolve(
     // chained grants don't inherit parent targets via
     // `effects::mod.rs::resolve_ability_chain`.
     let (target_ids, tracked_set_group): (Vec<_>, Option<TrackedSetId>) = match target_filter {
-        TargetFilter::SelfRef => (vec![ability.source_id], None),
+        // CR 400.7: Plot's cost exiles the card before the incarnation is
+        // captured, so the exiled card is still the current source here.
+        TargetFilter::SelfRef => (ability.self_ref_binding(state).into_iter().collect(), None),
         // CR 608.2c: The `TrackedSetId(0)` sentinel binds to the highest tracked
         // set id — the set the immediately preceding effect in this chain
         // published. Empty sets are *not* skipped: an empty current set means
@@ -116,7 +118,7 @@ pub fn resolve(
             // that carry explicit object targets (plotted / PlayFromExile) are
             // unaffected.
             if ids.is_empty() {
-                (vec![ability.source_id], None)
+                (ability.self_ref_binding(state).into_iter().collect(), None)
             } else {
                 (ids, None)
             }
@@ -132,7 +134,9 @@ pub fn resolve(
                 .collect(),
             None,
         ),
-        TargetFilter::Any | TargetFilter::None => (vec![ability.source_id], None),
+        TargetFilter::Any | TargetFilter::None => {
+            (ability.self_ref_binding(state).into_iter().collect(), None)
+        }
         other => {
             let ctx = crate::game::filter::FilterContext::from_ability(ability);
             (

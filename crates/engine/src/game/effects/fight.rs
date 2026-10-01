@@ -120,6 +120,12 @@ pub(crate) fn resolve_fight_fighters(
             // not reinterpret a lone survivor as "~ fights target creature".
             return Ok(None);
         }
+        // CR 701.14b + CR 400.7: "~ fights …" whose source left and returned
+        // before resolution — the fighter is no longer on the battlefield (the
+        // returned permanent is a new object), so neither creature fights.
+        if !refers_to_attached(subject) && ability.self_ref_binding(state).is_none() {
+            return Ok(None);
+        }
     }
     let source_id = resolve_fight_subject(state, ability)?;
     let target_id = object_targets

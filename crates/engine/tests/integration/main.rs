@@ -1788,6 +1788,7 @@ mod zenos_yae_galvus_chosen_object;
 mod zero_life_mid_cast_payment;
 mod zhulodok_double_cascade;
 
+mod activated_self_reference_new_object;
 mod arm_the_cathars_conjunct_anaphor_p6;
 mod context_ref_slot_hygiene;
 mod controls_commander_statics;

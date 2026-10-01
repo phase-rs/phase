@@ -6,7 +6,7 @@ use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, Ta
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{ConniveSubject, GameState, WaitingFor};
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::proposed_event::{AppliedReplacementKey, CounterPlacement, ProposedEvent};
 use crate::types::zones::Zone;
 
@@ -42,14 +42,32 @@ pub fn resolve(
             }
         })
         .unwrap_or(ability.source_id);
+    // CR 701.50b + CR 400.7: "~ connives" whose source left the battlefield
+    // before resolution (and may have returned as a new object). The connive
+    // uses the DEPARTED permanent's last known information — the subject is
+    // rebuilt from that incarnation's departure record, so its last controller
+    // (not the ability's controller, not the returned object's) draws and
+    // discards, connive replacements read the departed characteristics, and
+    // `add_connive_counters` finds no current object for the captured identity
+    // and puts no counter.
+    let departed_source = (conniver_id == ability.source_id
+        && ability.self_ref_binding(state).is_none())
+    .then_some(ability.source_incarnation)
+    .flatten()
+    .map(|incarnation| ObjectIncarnationRef::of(ability.source_id, incarnation));
 
     // CR 701.50a + CR 614.1a: Consult connive replacements (Leader,
     // Super-Genius — "If a creature you control would connive, instead you draw
     // a card, then that creature connives") before the draw/discard/counter
     // pipeline runs. The top-level resolve seeds an empty `applied` set.
-    let conniver = state
-        .capture_connive_subject(conniver_id)
-        .ok_or(EffectError::ObjectNotFound(conniver_id))?;
+    let conniver = match departed_source {
+        Some(identity) => state
+            .capture_departed_connive_subject(identity)
+            .ok_or(EffectError::ObjectNotFound(conniver_id))?,
+        None => state
+            .capture_connive_subject(conniver_id)
+            .ok_or(EffectError::ObjectNotFound(conniver_id))?,
+    };
     propose_connive(state, conniver, count, HashSet::new(), events)
 }
 

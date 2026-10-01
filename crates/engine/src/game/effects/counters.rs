@@ -2342,8 +2342,10 @@ pub(super) fn resolve_defined_or_targets(
     // short-circuit in `targeting::resolved_targets`. Without this, a chained
     // `PutCounter { target: SelfRef }` sub-ability would inherit the parent's
     // targets via chain propagation in `effects::mod.rs::resolve_ability_chain`.
+    // CR 400.7: `self_ref_binding` is empty when the source left and returned
+    // before resolution.
     if let Some(TargetFilter::SelfRef) = target_spec {
-        return vec![ability.source_id];
+        return ability.self_ref_binding(state).into_iter().collect();
     }
 
     // CR 608.2c (tier 2 of `resolved_targets`): `None` falls back to the source
@@ -2352,7 +2354,7 @@ pub(super) fn resolve_defined_or_targets(
     // populates the slot for legitimately targeted sub-abilities, which never
     // reach this arm.
     if matches!(target_spec, Some(TargetFilter::None)) && ability.targets.is_empty() {
-        return vec![ability.source_id];
+        return ability.self_ref_binding(state).into_iter().collect();
     }
 
     // CR 608.2c: A `ParentTarget` with no object target slot resolves to the
@@ -2374,7 +2376,7 @@ pub(super) fn resolve_defined_or_targets(
         && !has_object_target
         && has_choice_bookkeeping_player
     {
-        return vec![ability.source_id];
+        return ability.self_ref_binding(state).into_iter().collect();
     }
 
     // CR 508.1 + CR 603.2c + CR 608.2c (issue #5949): A batched attack trigger's
@@ -2888,7 +2890,7 @@ fn resolve_counter_transfer_sources(
     source_filter: &TargetFilter,
 ) -> Vec<ObjectId> {
     if matches!(source_filter, TargetFilter::SelfRef | TargetFilter::None) {
-        return vec![ability.source_id];
+        return ability.self_ref_binding(state).into_iter().collect();
     }
 
     if let Some(TargetRef::Object(id)) = crate::game::targeting::resolve_event_context_target(
@@ -2917,7 +2919,7 @@ fn resolve_counter_transfer_destinations(
     target_filter: &TargetFilter,
 ) -> Vec<ObjectId> {
     if matches!(target_filter, TargetFilter::SelfRef | TargetFilter::None) {
-        return vec![ability.source_id];
+        return ability.self_ref_binding(state).into_iter().collect();
     }
 
     if matches!(target_filter, TargetFilter::LastCreated) {

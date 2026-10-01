@@ -222,7 +222,11 @@ pub(super) fn destroyed_targets(state: &GameState, ability: &ResolvedAbility) ->
         _ => None,
     };
     if matches!(target_filter, Some(TargetFilter::SelfRef)) && ability.targets.is_empty() {
-        return vec![TargetRef::Object(ability.source_id)];
+        return ability
+            .self_ref_binding(state)
+            .map(TargetRef::Object)
+            .into_iter()
+            .collect();
     }
     // CR 400.7 + CR 603.7c: a delayed destroy's pinned referent that became a
     // new object is dropped. The SelfRef fallback above still reads the RAW

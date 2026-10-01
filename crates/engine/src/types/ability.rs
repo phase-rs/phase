@@ -34377,6 +34377,36 @@ impl ResolvedAbility {
         )
     }
 
+    /// CR 400.7 + CR 608.2c: The object an untargeted self-reference ("~", "this
+    /// creature", or an implicit source subject) binds to at resolution, or
+    /// `None` when there is none. The single authority for effect resolvers
+    /// that bind `SelfRef` (or an implicit-source filter) without going through
+    /// `targeting::resolved_object_ids_for_filter`.
+    ///
+    /// A non-triggered ability follows `self_ref_is_current`: a source that
+    /// left and returned before resolution is a new object, so the instruction
+    /// has no referent (Carrion Feeder sacrificed to its own ability and
+    /// returned by Supernatural Stamina; a creature blinked in response to its
+    /// own activation). A self-move made by the ability's own resolution stays
+    /// bound through `resolution_source_relatch`. A cost that moves the source
+    /// (Suspend, Plot) is paid before the incarnation is captured, which is CR
+    /// 400.7j: the ability's effects can find an object its own cost moved to a
+    /// public zone — and only that object, not what it becomes after moving
+    /// again (Carrion Feeder's graveyard card, once Supernatural Stamina
+    /// returns it to the battlefield).
+    ///
+    /// A triggered source keeps the raw source binding here. Its provenance
+    /// rules live in `self_ref_is_current`, and they do not yet follow every
+    /// self-move a trigger makes during its own resolution: Bogardan Phoenix's
+    /// dies trigger returns the card from the graveyard and then puts the death
+    /// counter "on it", which these resolvers must keep reaching.
+    pub fn self_ref_binding(
+        &self,
+        state: &crate::types::game_state::GameState,
+    ) -> Option<crate::types::identifiers::ObjectId> {
+        (self.trigger_source.is_some() || self.self_ref_is_current(state)).then_some(self.source_id)
+    }
+
     /// Returns whether a self-reference can resolve to the source's current
     /// object. A normal triggered source must still be its exact captured
     /// incarnation. The one exception is the immediate successor of the
@@ -34404,8 +34434,13 @@ impl ResolvedAbility {
             }
             return true;
         }
+        // CR 400.7: without trigger provenance the captured `source_incarnation`
+        // is the whole identity, and `source_is_current` already said it is
+        // stale (the relatch for a self-move during this resolution is read
+        // there). The source left and returned — or never came back — so "~"
+        // names an object that no longer exists.
         let Some(_source) = self.trigger_source.as_ref() else {
-            return true;
+            return false;
         };
         self.self_ref_own_departure_successor(state)
             || self.self_ref_post_sba_graveyard_return(state)

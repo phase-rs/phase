@@ -816,11 +816,21 @@ pub(crate) fn record_resolution_source_relatch(
     // A faithful READ of the resolving ability's captured source identity. The
     // clone is disconnected from the local resolving borrow, so it cannot be the
     // carrier — the record on `state` is (consumed inside `source_is_current`).
+    // A triggered ability's stamp is its trigger provenance; any other stack
+    // ability's is the `source_incarnation` captured when it was put on the
+    // stack. CR 400.7j: an activated ability that moves its own source (Unearth,
+    // "return this card from your graveyard to the battlefield. It gains haste")
+    // can still find the moved object for the rest of its effect.
     let Some((source_id, Some(captured))) = state
         .resolving_stack_entry
         .as_ref()
         .and_then(StackEntry::ability)
-        .map(|a| (a.source_id, a.trigger_source_incarnation()))
+        .map(|a| {
+            (
+                a.source_id,
+                a.trigger_source_incarnation().or(a.source_incarnation),
+            )
+        })
     else {
         return;
     };

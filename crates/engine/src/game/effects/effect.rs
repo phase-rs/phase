@@ -475,18 +475,21 @@ fn register_transient_effect(
         generic_effect_application_filter(target_filter, static_def.affected.as_ref()),
         Some(TargetFilter::SelfRef)
     ) {
-        install_transient(
-            state,
-            end_permission,
-            ability.source_id,
-            ability.controller,
-            duration.clone(),
-            TargetFilter::SpecificObject {
-                id: ability.source_id,
-            },
-            modifications,
-            static_def.condition.clone(),
-        );
+        // CR 400.7: a source that left and returned before resolution is a new
+        // object — "this land becomes …" / "this creature gains …" has no
+        // referent and installs nothing.
+        if let Some(recipient) = ability.self_ref_binding(state) {
+            install_transient(
+                state,
+                end_permission,
+                ability.source_id,
+                ability.controller,
+                duration.clone(),
+                TargetFilter::SpecificObject { id: recipient },
+                modifications,
+                static_def.condition.clone(),
+            );
+        }
         return;
     }
     // CR 603.7 + CR 611.2c: Token followup grants ("It has trample, haste, and …")

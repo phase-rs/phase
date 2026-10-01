@@ -1594,7 +1594,9 @@ fn resolve_object_filter<'a>(
     target_slots: &mut impl Iterator<Item = &'a TargetRef>,
 ) -> Option<ObjectId> {
     match filter {
-        TargetFilter::SelfRef => Some(ability.source_id),
+        // CR 400.7: an Equipment that left and returned before its equip
+        // ability resolved is a new object and attaches nowhere.
+        TargetFilter::SelfRef => ability.self_ref_binding(state),
         TargetFilter::LastCreated => target_slots
             .find_map(|target| match target {
                 TargetRef::Object(id) => Some(*id),

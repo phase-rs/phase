@@ -25766,18 +25766,6 @@ impl GameState {
                 })
             })
             .collect();
-        let zone_changes_this_turn = self
-            .zone_changes_this_turn
-            .iter()
-            .filter(|record| {
-                record
-                    .trigger_source_context
-                    .as_ref()
-                    .is_some_and(|context| context.identity.reference == identity)
-            })
-            .map(|record| (record.from_zone, record.to_zone))
-            .collect();
-
         Some(ConniveSubject {
             snapshot: EventObjectSnapshot {
                 identity,
@@ -25821,24 +25809,10 @@ impl GameState {
                     defending_player: attacker.map(|attacker| attacker.defending_player),
                     related_objects,
                 },
-                history: EventObjectHistorySnapshot {
-                    was_dealt_damage_this_turn: self.damage_dealt_this_turn.iter().any(|damage| {
-                        matches!(damage.target, TargetRef::Object(target) if target == object_id)
-                            && damage.target_incarnation == Some(identity.incarnation)
-                    }),
-                    entered_this_turn: object.entered_battlefield_turn == Some(self.turn_number),
-                    attacked_defenders_this_turn: self
-                        .creature_attacked_defenders_this_turn
-                        .get(&object_id)
-                        .map(|players| players.iter().copied().collect())
-                        .unwrap_or_default(),
-                    blocked_this_turn: self.creatures_blocked_this_turn.contains(&object_id),
-                    zone_changes_this_turn,
-                    // Counter records predating exact-incarnation support carry
-                    // only an ObjectId. Do not turn that ambiguous history into
-                    // evidence about this subject.
-                    counters_put_on_this_turn: Vec::new(),
-                },
+                history: self.connive_subject_history(
+                    identity,
+                    object.entered_battlefield_turn == Some(self.turn_number),
+                ),
                 relations: EventObjectRelationSnapshot {
                     saddled_sources: object
                         .saddled_by
@@ -25861,6 +25835,146 @@ impl GameState {
                 },
             },
         })
+    }
+
+    /// CR 701.50b + CR 400.7: The conniver as it LAST EXISTED on the
+    /// battlefield, for a connive whose performer left before the action ran
+    /// (and may have returned as a new object at the same storage id).
+    ///
+    /// The evidence is the departure record of that exact incarnation: its
+    /// `lki_by_incarnation` entry (controller, owner, characteristics, counters,
+    /// tap status, attachments as of zone exit) and the turn's zone-change
+    /// record for that departure (token/face-down/transformed/renowned/saddled
+    /// status). It never reads the object currently stored under the id, and
+    /// never the broad `lki_cache`, which may already describe a later
+    /// incarnation. Facts the departure evidence does not carry are recorded
+    /// as absent rather than copied from the returned object: the departed
+    /// permanent is in no combat, has no protector and no live saddle/convoke
+    /// relations. `None` when no departure was recorded for the incarnation,
+    /// so the caller fails closed instead of guessing a controller.
+    pub fn capture_departed_connive_subject(
+        &self,
+        identity: ObjectIncarnationRef,
+    ) -> Option<ConniveSubject> {
+        let object_id = identity.object_id;
+        let lki = self
+            .lki_by_incarnation
+            .get(&object_id)
+            .and_then(|history| history.get(&identity.incarnation))?;
+        let departure = self.zone_changes_this_turn.iter().find(|record| {
+            record.object_id == object_id
+                && record
+                    .trigger_source_context
+                    .as_ref()
+                    .is_some_and(|context| context.identity.reference == identity)
+        });
+        let context = departure.and_then(|record| record.trigger_source_context.as_ref());
+        let entered_this_turn = self.zone_changes_this_turn.iter().any(|record| {
+            record.object_id == object_id
+                && record.to_zone == Zone::Battlefield
+                && record.entered_incarnation == Some(identity.incarnation)
+        });
+        Some(ConniveSubject {
+            snapshot: EventObjectSnapshot {
+                identity,
+                controller: lki.controller,
+                owner: lki.owner,
+                zone: departure
+                    .and_then(|record| record.from_zone)
+                    .unwrap_or(Zone::Battlefield),
+                name: lki.name.clone(),
+                core_types: lki.card_types.clone(),
+                subtypes: lki.subtypes.clone(),
+                supertypes: lki.supertypes.clone(),
+                colors: lki.colors.clone(),
+                keywords: lki.keywords.clone(),
+                power: lki.power,
+                toughness: lki.toughness,
+                base_power: lki.base_power,
+                base_toughness: lki.base_toughness,
+                mana_value: lki.mana_value,
+                counters: lki.counters.clone(),
+                is_token: context.is_some_and(|context| context.is_token),
+                // CR 903.3: commander status is a property of the card, but the
+                // departure evidence does not record it; absent, not inferred.
+                is_commander: false,
+                tapped: lki.tapped,
+                face_down: context.is_some_and(|context| context.face_down),
+                transformed: context.is_some_and(|context| context.transformed),
+                is_suspected: lki.is_suspected,
+                is_renowned: context.is_some_and(|context| context.is_renowned),
+                is_saddled: context.is_some_and(|context| context.is_saddled),
+                // The departed permanent is the source of the connive ability it
+                // performed, so it had at least that ability.
+                has_no_abilities: false,
+                attachments: lki
+                    .attachments
+                    .iter()
+                    .filter_map(|attachment| {
+                        Some(EventAttachmentSnapshot {
+                            identity: attachment.identity?,
+                            controller: attachment.controller,
+                            kind: attachment.kind.clone(),
+                        })
+                    })
+                    .collect(),
+                protector: None,
+                combat: EventCombatSnapshot {
+                    attacking: false,
+                    blocking: false,
+                    blocked: false,
+                    attacking_alone: false,
+                    blocking_alone: false,
+                    defending_player: None,
+                    related_objects: Vec::new(),
+                },
+                history: self.connive_subject_history(identity, entered_this_turn),
+                relations: EventObjectRelationSnapshot {
+                    saddled_sources: Vec::new(),
+                    convoked_sources: Vec::new(),
+                    tracked_sets: Vec::new(),
+                },
+            },
+        })
+    }
+
+    /// CR 400.7: the turn history a connive subject carries, read for one exact
+    /// incarnation. Shared by the live capture and the departed-LKI capture so
+    /// the two subjects answer history predicates the same way.
+    fn connive_subject_history(
+        &self,
+        identity: ObjectIncarnationRef,
+        entered_this_turn: bool,
+    ) -> EventObjectHistorySnapshot {
+        let object_id = identity.object_id;
+        EventObjectHistorySnapshot {
+            was_dealt_damage_this_turn: self.damage_dealt_this_turn.iter().any(|damage| {
+                matches!(damage.target, TargetRef::Object(target) if target == object_id)
+                    && damage.target_incarnation == Some(identity.incarnation)
+            }),
+            entered_this_turn,
+            attacked_defenders_this_turn: self
+                .creature_attacked_defenders_this_turn
+                .get(&object_id)
+                .map(|players| players.iter().copied().collect())
+                .unwrap_or_default(),
+            blocked_this_turn: self.creatures_blocked_this_turn.contains(&object_id),
+            zone_changes_this_turn: self
+                .zone_changes_this_turn
+                .iter()
+                .filter(|record| {
+                    record
+                        .trigger_source_context
+                        .as_ref()
+                        .is_some_and(|context| context.identity.reference == identity)
+                })
+                .map(|record| (record.from_zone, record.to_zone))
+                .collect(),
+            // Counter records predating exact-incarnation support carry
+            // only an ObjectId. Do not turn that ambiguous history into
+            // evidence about this subject.
+            counters_put_on_this_turn: Vec::new(),
+        }
     }
 
     /// CR 400.7: Capture the exact incarnation-bound snapshot of an object, for

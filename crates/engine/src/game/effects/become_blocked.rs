@@ -34,7 +34,7 @@ fn resolve_object_targets(state: &GameState, ability: &ResolvedAbility) -> Vec<O
     };
     // CR 608.2c: the printed-name anaphor always resolves to the source.
     if matches!(target, TargetFilter::SelfRef) {
-        return vec![ability.source_id];
+        return ability.self_ref_binding(state).into_iter().collect();
     }
     // CR 608.2c: a context ref (`ParentTarget`/`TriggeringSource`) resolves from
     // the trigger event; empty for a plain targeted effect, which falls through

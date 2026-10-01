@@ -78,7 +78,7 @@ fn resolve_object_targets(state: &GameState, ability: &ResolvedAbility) -> Vec<O
     if matches!(filter, TargetFilter::SelfRef)
         || (ability.targets.is_empty() && matches!(filter, TargetFilter::ParentTarget))
     {
-        return vec![ability.source_id];
+        return ability.self_ref_binding(state).into_iter().collect();
     }
     ability
         .targets
