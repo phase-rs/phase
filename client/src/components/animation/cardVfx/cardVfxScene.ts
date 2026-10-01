@@ -15,6 +15,7 @@ import {
   Mesh,
   type Object3D,
   PerspectiveCamera,
+  Points,
   Scene,
   SRGBColorSpace,
   Texture,
@@ -207,6 +208,7 @@ class CardVfxSceneRuntime implements CardVfxScene, EffectHost {
   private raf = 0;
   private sizeDirty = true;
   private contextLost = false;
+  private disposed = false;
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
@@ -245,6 +247,7 @@ class CardVfxSceneRuntime implements CardVfxScene, EffectHost {
     }
     if (this.backTexture) this.renderer.initTexture(this.backTexture);
     await this.renderer.compileAsync(this.scene, this.camera);
+    if (this.disposed) return false;
     this.renderer.render(this.scene, this.camera);
     for (const object of this.warmUpObjects) object.visible = false;
     return !this.contextLost;
@@ -431,6 +434,7 @@ class CardVfxSceneRuntime implements CardVfxScene, EffectHost {
   }
 
   dispose() {
+    this.disposed = true;
     // Detach first: forceContextLoss dispatches `webglcontextlost` on the
     // canvas, which must not run the loss path after unmount.
     this.canvas.removeEventListener("webglcontextlost", this.handleContextLost);
@@ -443,7 +447,7 @@ class CardVfxSceneRuntime implements CardVfxScene, EffectHost {
     const materials = new Set<Material>();
     for (const object of this.warmUpObjects ?? []) {
       object.traverse((child) => {
-        if (!(child instanceof Mesh)) return;
+        if (!(child instanceof Mesh) && !(child instanceof Points)) return;
         geometries.add(child.geometry);
         for (const material of Array.isArray(child.material) ? child.material : [child.material]) materials.add(material);
       });

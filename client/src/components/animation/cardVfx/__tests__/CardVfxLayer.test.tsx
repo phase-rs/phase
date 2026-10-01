@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render } from "@testing-library/react";
 import { createRef, StrictMode } from "react";
-import type { Mesh, Object3D, Scene, ShaderMaterial, Texture } from "three";
+import type { Mesh, Object3D, Points, Scene, ShaderMaterial, Texture } from "three";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useCardBackImage, useCardImage } from "../../../../hooks/useCardImage.ts";
@@ -629,10 +629,10 @@ describe("CardVfxLayer present contract", () => {
 
   it("unmount releases retained warm-up resources exactly once", async () => {
     const { unmount } = await readyLayer();
-    const objects: Mesh[] = [];
+    const objects: Array<Mesh | Points> = [];
     for (const root of calls("compileAsync")[0].children!) {
       root.object.traverse((object) => {
-        if ((object as Mesh).isMesh) objects.push(object as Mesh);
+        if ((object as Mesh).isMesh || (object as Points).isPoints) objects.push(object as Mesh | Points);
       });
     }
     const geometries = new Set(objects.map((object) => object.geometry));
@@ -643,6 +643,22 @@ describe("CardVfxLayer present contract", () => {
     for (const dispose of disposals) expect(dispose).not.toHaveBeenCalled();
     unmount();
     for (const dispose of disposals) expect(dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it("unmount during context restoration stops the pending warm-up", async () => {
+    const { unmount } = await readyLayer();
+    act(() => canvas().dispatchEvent(new Event("webglcontextlost")));
+    gl.holdCompile = true;
+    act(() => canvas().dispatchEvent(new Event("webglcontextrestored")));
+    expect(gl.releaseCompile).toHaveLength(1);
+    unmount();
+    const renders = calls("render").length;
+    await act(async () => {
+      for (const release of gl.releaseCompile) release();
+    });
+    expect(calls("render")).toHaveLength(renders);
+    expect(calls("dispose")).toHaveLength(1);
+    expect(useAnimationStore.getState().cardVfxReady).toBe(false);
   });
 
   it("V3-1m: unmount runs each waiting Classic once, releases each veil once, and nothing after", async () => {
