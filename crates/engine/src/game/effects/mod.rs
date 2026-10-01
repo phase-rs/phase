@@ -9204,17 +9204,47 @@ fn affected_objects_from_events(
 /// clash, dig, behold — `effect_manages_own_outcome_flag`) keeps its own
 /// record, an effect kind without an event witness stays "mandatory means
 /// yes" (`mandatory_parent_effect_performed`'s default arm), and any recorded
-/// performance (`optional_effect_performed`) always wins.
+/// performance (`optional_effect_performed`) otherwise wins.
+///
+/// A mass zone move is the exception: CR 603.12 keys the reflexive on the
+/// move EVENT, which CR 118.12's "started to pay" reading of "if you do" does
+/// not need. An empty or CR 610.3b-refused `ChangeZoneAll` moved nothing, so
+/// no reflexive — authoritative even over an accepted or inherited performed
+/// mark (`mandatory_parent_event_occurred`).
 fn when_you_do_mandatory_parent_did_nothing(
     condition: &AbilityCondition,
     parent: &ResolvedAbility,
     parent_events: &[GameEvent],
 ) -> bool {
-    condition.has_when_you_do_marker()
-        && !parent.optional
+    if !condition.has_when_you_do_marker() || effect_manages_own_outcome_flag(&parent.effect) {
+        return false;
+    }
+    if effect_reflexive_needs_move_event(&parent.effect) {
+        return !mandatory_parent_event_occurred(&parent.effect, parent_events);
+    }
+    !parent.optional
         && !parent.context.optional_effect_performed
-        && !effect_manages_own_outcome_flag(&parent.effect)
         && !mandatory_parent_effect_performed(&parent.effect, parent_events)
+}
+
+/// CR 603.12: Effect kinds whose reflexive "when you do" needs an actual move
+/// event even though their "if you do" (CR 118.12) treats a started-but-empty
+/// move as performed.
+fn effect_reflexive_needs_move_event(effect: &Effect) -> bool {
+    matches!(effect, Effect::ChangeZoneAll { .. })
+}
+
+/// CR 603.12: Whether the parent's own event slice witnesses the event a
+/// reflexive "when you do" keys on. A mass zone move occurred only if some
+/// object actually changed zones; every other kind defers to the shared
+/// performed reader.
+fn mandatory_parent_event_occurred(effect: &Effect, parent_events: &[GameEvent]) -> bool {
+    if effect_reflexive_needs_move_event(effect) {
+        return parent_events
+            .iter()
+            .any(|event| matches!(event, GameEvent::ZoneChanged { .. }));
+    }
+    mandatory_parent_effect_performed(effect, parent_events)
 }
 
 /// CR 603.12 + CR 701.20a: the inline half of the reveal-until-hit guard. The
@@ -16151,6 +16181,12 @@ fn resolve_chain_body(
     // CR 603.7: Snapshot event count so we can detect objects moved by this effect.
     let events_before = events.len();
     let mut immediate_effect_result = None;
+    // CR 610.3b + CR 118.12: per-call verdicts for this node's bounded zone
+    // move. Each `resolve_effect` call (one per repeat iteration) is judged on
+    // its OWN event window by the resolver's own predicate; the node counts as
+    // refused only when every bounded call was refused.
+    let mut bounded_move_calls = 0usize;
+    let mut bounded_move_refusals = 0usize;
 
     // Skip no-op unimplemented/runtime-handled effects, and a random
     // `Effect::Choose` already resolved above by `resolve_random_in_chain`.
@@ -16420,6 +16456,16 @@ fn resolve_chain_body(
                     // one-time case as well. Only an actual `repeat_for` body
                     // gets a fresh occurrence; an ordinary return publishes
                     // into its enclosing chain for the following reader.
+                    if iter_effective.bounded_zone_change_event().is_some() {
+                        bounded_move_calls += 1;
+                        if change_zone::until_event_already_occurred(
+                            state,
+                            iter_effective,
+                            &events[..],
+                        ) {
+                            bounded_move_refusals += 1;
+                        }
+                    }
                     let resolved = if ability.repeat_for.is_some() {
                         with_iteration_return_result_occurrence(state, iter_effective, |state| {
                             resolve_effect(state, iter_effective, events)
@@ -16873,6 +16919,25 @@ fn resolve_chain_body(
         });
     let amassed_army_object = amassed_army_context_from_events(state, &events[events_before..]);
 
+    // CR 610.3b + CR 118.12: a bounded zone move refused because its "until"
+    // event had already happened was not performed. That verdict is
+    // authoritative for THIS node's dependent "if you do" rider even when the
+    // node arrives already marked performed — an accepted "you may" or a
+    // performed flag inherited from an earlier instruction — so clear the mark
+    // on this node's own hand-off. Scoped to the node: nothing global is
+    // written, so no later resolution can observe it.
+    let bounded_move_refused =
+        bounded_move_calls > 0 && bounded_move_refusals == bounded_move_calls;
+    let bounded_refusal_owned;
+    let ability = if bounded_move_refused && ability.context.optional_effect_performed {
+        let mut owned = ability.clone();
+        owned.context.optional_effect_performed = false;
+        bounded_refusal_owned = owned;
+        &bounded_refusal_owned
+    } else {
+        ability
+    };
+
     // CR 608.2c: "[Mandatory action]. If you do, [rider]." — seed the
     // performed-flag for a mandatory parent whose action just occurred.
     //
@@ -16902,6 +16967,7 @@ fn resolve_chain_body(
     let ability = if !ability.optional
         && !ability.context.optional_effect_performed
         && !state.cost_payment_failed_flag
+        && !bounded_move_refused
         && mandatory_parent_effect_performed(&ability.effect, &events[events_before..])
         && !effect_manages_own_outcome_flag(&ability.effect)
         && ability.sub_ability.as_ref().is_some_and(|sub| {

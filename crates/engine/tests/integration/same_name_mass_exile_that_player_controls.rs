@@ -10,11 +10,14 @@
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::triggers::drain_order_triggers_with_identity;
-use engine::types::ability::{DurationEvent, Effect, TargetRef};
+use engine::types::ability::{
+    AbilityCondition, AbilityDefinition, DurationEvent, Effect, EffectOutcomeSignal, TargetRef,
+};
 use engine::types::actions::GameAction;
+use engine::types::counter::CounterType;
 use engine::types::game_state::{GameState, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::ManaCost;
+use engine::types::mana::{ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -37,6 +40,26 @@ of those tokens instead.";
 /// "if you do" rider.
 const MASS_UNTIL_HOST: &str = "When this creature enters, exile all creatures your opponents \
 control until this creature leaves the battlefield. If you do, draw a card.";
+
+// Typed fixtures for the CR 118.12 / CR 603.12 reader matrix. Each varies one
+// axis of `MASS_UNTIL_HOST`: the rider connector, a "you may" on the move, an
+// accepted optional instruction before it, or a population that includes the
+// host itself.
+const MASS_WHEN_YOU_DO: &str = "When this creature enters, exile all creatures your opponents \
+control until this creature leaves the battlefield. When you do, draw a card.";
+const OPTIONAL_MASS_IF_YOU_DO: &str = "When this creature enters, you may exile all creatures \
+your opponents control until this creature leaves the battlefield. If you do, draw a card.";
+const OPTIONAL_MASS_WHEN_YOU_DO: &str = "When this creature enters, you may exile all creatures \
+your opponents control until this creature leaves the battlefield. When you do, draw a card.";
+const INHERITED_MASS_IF_YOU_DO: &str = "When this creature enters, you may draw a card. If you \
+do, exile all creatures your opponents control until this creature leaves the battlefield. If \
+you do, draw a card.";
+const SELF_EXILING_MASS_IF_YOU_DO: &str = "{0}: Exile all creatures until this creature leaves \
+the battlefield. If you do, draw a card.";
+
+const DARK_DEPTHS: &str = "Dark Depths enters with ten ice counters on it.\n{3}: Remove an ice \
+counter from Dark Depths.\nWhen Dark Depths has no ice counters on it, sacrifice it. If you do, \
+create Marit Lage, a legendary 20/20 black Avatar creature token with flying and indestructible.";
 
 const LEGIONS_TO_ASHES: &str = "Exile target nonland permanent an opponent controls and all \
 tokens that player controls with the same name as that permanent.";
@@ -735,4 +758,378 @@ fn legions_to_ashes_binds_the_targets_controller_not_its_owner() {
         on_battlefield(runner.state(), my_token),
         "not the caster's token"
     );
+}
+
+// --- Round 3: CR 118.12 ("if you do") vs CR 603.12 ("when you do") ---------
+
+/// Like `settle`, but answers every "you may" prompt with accept. Returns how
+/// many prompts were answered.
+fn settle_accepting(runner: &mut GameRunner) -> usize {
+    let mut accepted = 0;
+    for _ in 0..64 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OrderTriggers { .. } => {
+                drain_order_triggers_with_identity(runner.state_mut());
+            }
+            WaitingFor::OptionalEffectChoice { .. } => {
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .expect("accept the optional");
+                accepted += 1;
+            }
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => return accepted,
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass");
+            }
+            other => panic!("resolution halted at {other:?}"),
+        }
+    }
+    panic!("resolution bound exceeded");
+}
+
+fn etb_execute(runner: &GameRunner, host: ObjectId) -> &AbilityDefinition {
+    runner.state().objects[&host]
+        .base_trigger_definitions
+        .iter()
+        .find_map(|trigger| trigger.execute.as_deref())
+        .expect("ETB execute")
+}
+
+/// SHAPE guard: a bounded root `ChangeZoneAll` exile with the given optionality,
+/// followed by a Draw rider gated by `rider`.
+fn assert_bounded_mass_root(
+    runner: &GameRunner,
+    host: ObjectId,
+    optional: bool,
+    rider: AbilityCondition,
+) {
+    let execute = etb_execute(runner, host);
+    assert!(
+        matches!(
+            &*execute.effect,
+            Effect::ChangeZoneAll {
+                destination: Zone::Exile,
+                ..
+            }
+        ),
+        "fixture root must be the mass exile, got {:?}",
+        execute.effect
+    );
+    assert!(execute.duration.is_some(), "fixture root must be bounded");
+    assert_eq!(execute.optional, optional, "fixture root optionality");
+    let draw = execute.sub_ability.as_deref().expect("rider");
+    assert!(
+        matches!(&*draw.effect, Effect::Draw { .. }),
+        "rider is a draw"
+    );
+    assert_eq!(draw.condition, Some(rider), "rider gate");
+}
+
+fn if_you_do() -> AbilityCondition {
+    AbilityCondition::EffectOutcome {
+        signal: EffectOutcomeSignal::OptionalEffectPerformed,
+    }
+}
+
+/// Mass-host board: P0's host in hand, `victims` opposing creatures, a stocked
+/// library, and P1's Murder.
+fn mass_host_board(
+    oracle: &str,
+    victims: usize,
+) -> (GameRunner, ObjectId, Vec<ObjectId>, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let victims: Vec<ObjectId> = (0..victims)
+        .map(|_| scenario.add_creature(P1, "Grizzly Bears", 2, 2).id())
+        .collect();
+    scenario.add_card_to_library_top(P0, "Island");
+    scenario.add_card_to_library_top(P0, "Island");
+    let host = scenario
+        .add_creature_to_hand_from_oracle(P0, "Detention Warden", 2, 2, oracle)
+        .with_mana_cost(free())
+        .id();
+    let murder = scenario
+        .add_spell_to_hand_from_oracle(P1, "Murder", true, "Destroy target creature.")
+        .with_mana_cost(free())
+        .id();
+    (scenario.build(), host, victims, murder)
+}
+
+/// CR 610.3b + CR 118.12, Z2: a refused bounded mass exile is scoped to its
+/// own node. A later, independent resolution — Dark Depths' "sacrifice it. If
+/// you do, create Marit Lage" — must still see its own sacrifice as performed.
+#[test]
+fn refused_deputy_does_not_stop_a_later_dark_depths_marit_lage() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let target = scenario.add_creature(P1, "Soldier", 1, 1).id();
+    let twin = scenario.add_creature(P1, "Soldier", 1, 1).id();
+    let deputy = scenario
+        .add_creature_to_hand_from_oracle(P0, "Deputy of Detention", 1, 3, DEPUTY_OF_DETENTION)
+        .with_mana_cost(free())
+        .id();
+    let murder = scenario
+        .add_spell_to_hand_from_oracle(P1, "Murder", true, "Destroy target creature.")
+        .with_mana_cost(free())
+        .id();
+    let depths = scenario
+        .add_land_from_oracle(P0, "Dark Depths", DARK_DEPTHS)
+        .as_legendary()
+        .id();
+    scenario.with_counter(depths, CounterType::Generic("ice".to_string()), 1);
+    scenario.with_mana_pool(
+        P0,
+        (0..3)
+            .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+
+    stage_etb(&mut runner, deputy, Some(target));
+    remove_host_in_response(&mut runner, P1, murder, deputy);
+    assert_eq!(
+        pending_etb_latches(runner.state(), deputy),
+        vec![true, true]
+    );
+    settle(&mut runner);
+    assert!(on_battlefield(runner.state(), target) && on_battlefield(runner.state(), twin));
+
+    give_priority(&mut runner, P0);
+    let activation = runner.state().objects[&depths]
+        .abilities
+        .iter()
+        .position(|a| matches!(&*a.effect, Effect::RemoveCounter { .. }))
+        .expect("Dark Depths' remove-counter ability");
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: depths,
+            ability_index: activation,
+        })
+        .expect("activate Dark Depths");
+    settle(&mut runner);
+
+    // Reach guard: the state trigger resolved and sacrificed Dark Depths.
+    assert_eq!(runner.state().objects[&depths].zone, Zone::Graveyard);
+    let marit_lage = runner
+        .state()
+        .battlefield
+        .iter()
+        .filter(|id| runner.state().objects[*id].name == "Marit Lage")
+        .count();
+    assert_eq!(
+        marit_lage, 1,
+        "the sacrifice was performed, so Marit Lage is created"
+    );
+}
+
+/// CR 603.12 + CR 610.3b: a refused mass exile moved nothing, so its "when you
+/// do" reflexive never triggers.
+#[test]
+fn mass_when_you_do_refused_does_not_reflex() {
+    let (mut runner, host, victims, murder) = mass_host_board(MASS_WHEN_YOU_DO, 1);
+    assert_bounded_mass_root(&runner, host, false, AbilityCondition::WhenYouDo);
+    stage_etb(&mut runner, host, None);
+    remove_host_in_response(&mut runner, P1, murder, host);
+    assert!(
+        pending_etb_latches(runner.state(), host)[0],
+        "mass root latched"
+    );
+    let hand_before = hand_size(runner.state(), P0);
+    settle(&mut runner);
+    assert!(on_battlefield(runner.state(), victims[0]), "nothing moves");
+    assert_eq!(
+        hand_size(runner.state(), P0),
+        hand_before,
+        "no reflexive draw"
+    );
+}
+
+/// CR 603.12: with nothing to exile, no exile event occurred, so no reflexive —
+/// unlike "if you do" (CR 118.12), which an empty but started move satisfies.
+#[test]
+fn mass_when_you_do_with_nothing_to_exile_does_not_reflex() {
+    let (mut runner, host, _, _) = mass_host_board(MASS_WHEN_YOU_DO, 0);
+    assert_bounded_mass_root(&runner, host, false, AbilityCondition::WhenYouDo);
+    stage_etb(&mut runner, host, None);
+    let hand_before = hand_size(runner.state(), P0);
+    settle(&mut runner);
+    assert!(on_battlefield(runner.state(), host), "host stays");
+    assert_eq!(
+        hand_size(runner.state(), P0),
+        hand_before,
+        "no reflexive draw"
+    );
+}
+
+/// Control (CR 603.12): one creature exiled, so the reflexive draws once.
+#[test]
+fn mass_when_you_do_with_a_victim_reflexes_once() {
+    let (mut runner, host, victims, _) = mass_host_board(MASS_WHEN_YOU_DO, 1);
+    assert_bounded_mass_root(&runner, host, false, AbilityCondition::WhenYouDo);
+    stage_etb(&mut runner, host, None);
+    let hand_before = hand_size(runner.state(), P0);
+    settle(&mut runner);
+    assert_eq!(
+        runner.state().objects[&victims[0]].zone,
+        Zone::Exile,
+        "moved"
+    );
+    assert_eq!(
+        hand_size(runner.state(), P0),
+        hand_before + 1,
+        "one reflexive draw"
+    );
+}
+
+/// CR 610.3b + CR 118.12: an ACCEPTED "you may" mass exile whose host already
+/// left is refused; the accept mark must not count as performance.
+#[test]
+fn accepted_optional_mass_exile_refused_does_not_satisfy_if_you_do() {
+    let (mut runner, host, victims, murder) = mass_host_board(OPTIONAL_MASS_IF_YOU_DO, 1);
+    assert_bounded_mass_root(&runner, host, true, if_you_do());
+    stage_etb(&mut runner, host, None);
+    remove_host_in_response(&mut runner, P1, murder, host);
+    assert!(
+        pending_etb_latches(runner.state(), host)[0],
+        "mass root latched"
+    );
+    let hand_before = hand_size(runner.state(), P0);
+    settle_accepting(&mut runner);
+    assert!(on_battlefield(runner.state(), victims[0]), "nothing moves");
+    assert_eq!(links_from(runner.state(), host), 0, "no return links");
+    assert_eq!(
+        hand_size(runner.state(), P0),
+        hand_before,
+        "no \"if you do\" draw"
+    );
+}
+
+/// CR 118.12: an accepted, possible, but empty "you may" mass exile was
+/// performed, so "if you do" draws exactly once.
+#[test]
+fn accepted_optional_mass_exile_with_nothing_to_exile_satisfies_if_you_do() {
+    let (mut runner, host, _, _) = mass_host_board(OPTIONAL_MASS_IF_YOU_DO, 0);
+    assert_bounded_mass_root(&runner, host, true, if_you_do());
+    stage_etb(&mut runner, host, None);
+    let hand_before = hand_size(runner.state(), P0);
+    let accepted = settle_accepting(&mut runner);
+    assert!(
+        accepted >= 1,
+        "reach: the \"you may\" was offered and accepted"
+    );
+    assert_eq!(hand_size(runner.state(), P0), hand_before + 1, "one draw");
+}
+
+/// CR 603.12: the same accepted, empty move witnessed no exile event, so its
+/// "when you do" reflexive does not trigger despite the accept mark.
+#[test]
+fn accepted_optional_mass_exile_with_nothing_to_exile_does_not_reflex() {
+    let (mut runner, host, _, _) = mass_host_board(OPTIONAL_MASS_WHEN_YOU_DO, 0);
+    assert_bounded_mass_root(&runner, host, true, AbilityCondition::WhenYouDo);
+    stage_etb(&mut runner, host, None);
+    let hand_before = hand_size(runner.state(), P0);
+    let accepted = settle_accepting(&mut runner);
+    assert!(
+        accepted >= 1,
+        "reach: the \"you may\" was offered and accepted"
+    );
+    assert_eq!(
+        hand_size(runner.state(), P0),
+        hand_before,
+        "no reflexive draw"
+    );
+}
+
+/// CR 610.3b + CR 118.12: the bounded mass exile is the "if you do" child of an
+/// accepted optional draw, so it arrives already marked performed. Its own
+/// refusal still keeps its own "if you do" draw from happening.
+#[test]
+fn refused_mass_exile_with_inherited_performed_mark_does_not_satisfy_if_you_do() {
+    let (mut runner, host, victims, murder) = mass_host_board(INHERITED_MASS_IF_YOU_DO, 1);
+    let execute = etb_execute(&runner, host);
+    assert!(matches!(&*execute.effect, Effect::Draw { .. }) && execute.optional);
+    let mass = execute.sub_ability.as_deref().expect("mass node");
+    assert!(matches!(
+        &*mass.effect,
+        Effect::ChangeZoneAll {
+            destination: Zone::Exile,
+            ..
+        }
+    ));
+    assert!(mass.duration.is_some() && mass.condition == Some(if_you_do()));
+    let rider = mass.sub_ability.as_deref().expect("final draw");
+    assert_eq!(rider.condition, Some(if_you_do()));
+
+    stage_etb(&mut runner, host, None);
+    remove_host_in_response(&mut runner, P1, murder, host);
+    assert!(
+        pending_etb_latches(runner.state(), host)[1],
+        "mass node latched"
+    );
+    let hand_before = hand_size(runner.state(), P0);
+    let accepted = settle_accepting(&mut runner);
+    assert!(accepted >= 1, "reach: the optional draw was accepted");
+    assert!(on_battlefield(runner.state(), victims[0]), "nothing moves");
+    assert_eq!(
+        hand_size(runner.state(), P0),
+        hand_before + 1,
+        "only the accepted first draw; the refused exile's \"if you do\" draw must not happen"
+    );
+}
+
+/// CR 610.3b timing: the mass exile includes its own source, so the "until"
+/// event happens DURING this move, not before it. The move is performed and
+/// "if you do" draws once; only events before the node's own window refuse it.
+/// Activated (not an ETB) so the returning source does not trigger again.
+#[test]
+fn mass_exile_that_exiles_its_own_source_still_satisfies_if_you_do() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let victim = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    scenario.add_card_to_library_top(P0, "Island");
+    scenario.add_card_to_library_top(P0, "Island");
+    let host = scenario
+        .add_creature_from_oracle(P0, "Detention Warden", 2, 2, SELF_EXILING_MASS_IF_YOU_DO)
+        .id();
+    let mut runner = scenario.build();
+    let ability = &runner.state().objects[&host].base_abilities[0];
+    assert!(
+        matches!(
+            &*ability.effect,
+            Effect::ChangeZoneAll {
+                destination: Zone::Exile,
+                ..
+            }
+        ),
+        "fixture: mass exile, got {:?}",
+        ability.effect
+    );
+    assert!(ability.duration.is_some(), "fixture: bounded");
+    let rider = ability.sub_ability.as_deref().expect("rider");
+    assert!(matches!(&*rider.effect, Effect::Draw { .. }));
+    assert_eq!(rider.condition, Some(if_you_do()));
+
+    let victim_incarnation = runner.state().objects[&victim].incarnation;
+    let host_incarnation = runner.state().objects[&host].incarnation;
+    let hand_before = hand_size(runner.state(), P0);
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: host,
+            ability_index: 0,
+        })
+        .expect("activate");
+    settle(&mut runner);
+    // Reach guard (CR 400.7): the source and the victim changed zones (new
+    // incarnations), whether or not the source's departure already returned them.
+    assert_ne!(
+        runner.state().objects[&host].incarnation,
+        host_incarnation,
+        "source moved"
+    );
+    assert_ne!(
+        runner.state().objects[&victim].incarnation,
+        victim_incarnation,
+        "victim moved"
+    );
+    assert_eq!(hand_size(runner.state(), P0), hand_before + 1, "one draw");
 }

@@ -618,7 +618,7 @@ fn capture_devour_snapshot_before_single_entry(
 /// same resolution. The initial one-shot move then does not happen. Shared by
 /// the single-object and mass resolvers so each bounded node refuses on its own
 /// latch.
-fn until_event_already_occurred(
+pub(crate) fn until_event_already_occurred(
     state: &GameState,
     ability: &ResolvedAbility,
     events: &[GameEvent],
@@ -1929,14 +1929,12 @@ pub fn resolve_all(
 ) -> Result<(), EffectError> {
     // CR 610.3b: an "until" event that already occurred before this mass
     // move's initial zone change means nothing moves and no return link is
-    // installed. That is a refusal, not an empty move (CR 118.12: a started
-    // mass move that matches nothing is still performed), so it is signalled
-    // through the resolution's "did not happen" flag — the same authority a
-    // mandatory zone move with nothing eligible uses — which the "if you do"
-    // rider seed reads.
+    // installed. That refusal is non-performance for this node's own "if you
+    // do" rider (CR 118.12); `resolve_ability_chain` derives it from this same
+    // predicate over the call's own event window, so no resolution-wide flag
+    // is written here.
     if until_event_already_occurred(state, ability, events) {
         state.last_effect_count = Some(0);
-        state.cost_payment_failed_flag = true;
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
