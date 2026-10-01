@@ -46,12 +46,13 @@ const smooth = (a: number, b: number, x: number) => {
 // The dissolve order lives in one GLSL function, used by both the card (which
 // pixels are gone) and the flakes (when each one is released), so they agree.
 const dissolveChunk = /* glsl */ `
-  uniform vec2 uFirst; uniform float uAspect;
+  uniform vec2 uFirst; uniform float uAspect, uSacrifice;
   ${VALUE_NOISE_GLSL}
   float fbm(vec2 p) { return vnoise(p) * 0.55 + vnoise(p * 2.1 + 7.3) * 0.3 + vnoise(p * 4.3 + 1.7) * 0.15; }
   // 0 = released first, 1 = released last.
   float dissolveKey(vec2 uv) {
     vec2 a = vec2(uAspect, 1.0);
+    if (uSacrifice > 0.5) return clamp(1.0 - length((uv - 0.5) * a) / length(a * 0.5) + (fbm(uv * a * 9.0) - 0.5) * 0.22, 0.0, 1.0);
     float along = 0.5 - dot(uv - 0.5, uFirst) / (abs(uFirst.x) + abs(uFirst.y));
     return clamp(along * 0.72 + fbm(uv * a * 6.0) * 0.28, 0.0, 1.0);
   }`;
@@ -71,6 +72,14 @@ const cardFrag = /* glsl */ `
     float gap = dissolveKey(vUv) - uProg;
     if (corner <= 0.0 || gap < 0.0) discard;
     vec3 col = texture2D(uMap, vUv).rgb;
+    if (uSacrifice > 0.5) {
+      col *= 1.0 - uPale * 1.8;
+      float edge = (1.0 - smoothstep(0.0, 0.045, gap)) * step(0.0001, uProg);
+      col = mix(col, vec3(0.7, 0.12, 0.32), edge);
+      gl_FragColor = vec4(col, corner);
+      #include <colorspace_fragment>
+      return;
+    }
     vec3 pale = vec3(0.78, 0.8, 0.84);
     float grey = dot(col, vec3(0.2126, 0.7152, 0.0722));
     col = mix(col, mix(vec3(grey), pale, 0.5), uPale);
@@ -89,6 +98,34 @@ const shadowFrag = /* glsl */ `
     vec2 p = (vUv - 0.5) * (uSize + 2.0 * uBlur);
     gl_FragColor = vec4(0.0, 0.0, 0.0, uAlpha * (1.0 - smoothstep(-uBlur, uBlur, roundedBox(p, uSize * 0.5, uRadius))));
   }`;
+
+const vortexFrag = /* glsl */ `
+  uniform float uTime, uAlpha;
+  varying vec2 vUv;
+  ${VALUE_NOISE_GLSL}
+  void main() {
+    vec2 p = (vUv - 0.5) * 2.0;
+    float r = length(p);
+    if (r > 1.0) discard;
+    float a = atan(p.y, p.x);
+    float spiral = pow(0.5 + 0.5 * sin(a * 3.0 + r * 22.0 + uTime * 10.0), 5.0);
+    float rim = exp(-pow((r - 0.72) * 18.0, 2.0));
+    float curl = spiral * smoothstep(0.2, 0.6, r) * (1.0 - smoothstep(0.72, 1.0, r));
+    vec3 col = vec3(0.035, 0.006, 0.02) + vec3(0.5, 0.045, 0.13) * (rim + curl * 0.7);
+    gl_FragColor = vec4(col, (1.0 - smoothstep(0.8, 1.0, r)) * uAlpha);
+    #include <colorspace_fragment>
+  }`;
+
+function createVortexMaterial() {
+  return new ShaderMaterial({
+    vertexShader: plainVert,
+    fragmentShader: vortexFrag,
+    transparent: true,
+    depthWrite: false,
+    depthTest: false,
+    uniforms: { uTime: { value: 0 }, uAlpha: { value: 0 } },
+  });
+}
 
 // Flakes: one point per sample of the card. Each is released when the front
 // passes it, takes the card's colour at its spot, then drifts away or flies to
@@ -122,6 +159,12 @@ const flakeVert = /* glsl */ `
       float inside = 1.0 - smoothstep(-3.0, 1.0, max(d.x, d.y));
       alpha *= 1.0 - inside * smoothstep(0.55, 0.9, k);
       alpha *= 1.0 - smoothstep(0.9, 1.0, k) * 0.9;
+    } else if (uSacrifice > 0.5) {
+      // The card's released fragments spiral inward and disappear into the table.
+      float angle = k * 4.0;
+      vec2 curled = turn(turn(offset, uAngle), angle) * pow(1.0 - k, 1.8);
+      pos = uCardPos + vec3(curled, uLift * (1.0 - k) - k * 24.0);
+      alpha = 1.0 - smoothstep(0.5, 1.0, k);
     } else {
       // Drift up the screen and toward the viewer, with a slow sideways sway.
       float a = age;
@@ -132,6 +175,7 @@ const flakeVert = /* glsl */ `
     }
     vec3 col = texture2D(uMap, aUv).rgb;
     vCol = mix(col, vec3(0.86, 0.88, 0.92), uHeld > 0.5 ? 0.15 : smoothstep(0.2, 0.9, k) * 0.5);
+    if (uSacrifice > 0.5) vCol = mix(col * 0.4, vec3(0.9, 0.18, 0.36), smoothstep(0.0, 0.7, k));
     vA = age > 0.0 && k < 1.0 ? alpha : 0.0;
     gl_PointSize = vA > 0.0 ? (1.1 + aRand.y * 1.2) * uDpr * (uHeld > 0.5 ? 1.0 : 1.0 - 0.5 * k) : 0.0;
     gl_Position = projectionMatrix * viewMatrix * vec4(pos, 1.0);
@@ -154,6 +198,7 @@ export interface LinkAim {
 }
 
 export interface ExileDissolveParams {
+  look: "exile" | "sacrifice";
   /** The permanent's pose on the board: its layout size and rotation. */
   pose: CardPose;
   /** The permanent's surface, drawn at its layout size. */
@@ -192,7 +237,7 @@ function flakeGeometry(count: number, aspect: number): BufferGeometry {
 }
 
 function dissolveUniforms(w: number, h: number, first: Vector2) {
-  return { uFirst: { value: first }, uAspect: { value: w / h }, uSize: { value: new Vector2(w, h) } };
+  return { uSacrifice: { value: 0 }, uFirst: { value: first }, uAspect: { value: w / h }, uSize: { value: new Vector2(w, h) } };
 }
 
 function createCardMaterial(surface: Texture, w: number, h: number, radius: number, first: Vector2) {
@@ -263,7 +308,9 @@ export const exileDissolveKind: SceneEffectKind = {
     shadow.name = "exile-dissolve-shadow-warmup";
     const flakes = new Points(flakeGeometry(1, 1), createFlakeMaterial(host.placeholderTexture, 4, 4, first, 1));
     flakes.name = "exile-dissolve-flakes-warmup";
-    return [card, shadow, flakes];
+    const vortex = new Mesh(card.geometry, createVortexMaterial());
+    vortex.name = "sacrifice-vortex-warmup";
+    return [card, shadow, flakes, vortex];
   },
 };
 
@@ -272,6 +319,7 @@ class ExileDissolve implements SceneEffect {
   private readonly card: Mesh<PlaneGeometry, ShaderMaterial>;
   private readonly shadow: Mesh<PlaneGeometry, ShaderMaterial> | null = null;
   private readonly flakes: Points<BufferGeometry, ShaderMaterial>;
+  private readonly vortex: Mesh<PlaneGeometry, ShaderMaterial> | null = null;
   private startMs: number | null = null;
   private arrived = false;
 
@@ -296,7 +344,16 @@ class ExileDissolve implements SceneEffect {
     this.card.rotation.z = -MathUtils.degToRad(pose.angleDeg);
     this.card.frustumCulled = false;
     this.card.renderOrder = 2;
+    this.card.material.uniforms.uSacrifice.value = params.look === "sacrifice" ? 1 : 0;
     host.scene.add(this.card);
+    if (params.look === "sacrifice") {
+      this.vortex = new Mesh(this.plane, createVortexMaterial());
+      this.vortex.name = "sacrifice-vortex";
+      this.vortex.position.set(pose.x, -pose.y, 0);
+      this.vortex.renderOrder = 1;
+      this.vortex.frustumCulled = false;
+      host.scene.add(this.vortex);
+    }
     if (tier === "full") {
       this.shadow = new Mesh(this.plane, createShadowMaterial(w, h, radius));
       this.shadow.name = "exile-dissolve-shadow";
@@ -313,6 +370,7 @@ class ExileDissolve implements SceneEffect {
     uniforms.uAngle.value = this.card.rotation.z;
     uniforms.uGhostAngle.value = this.card.rotation.z;
     uniforms.uHeld.value = link ? 1 : 0;
+    uniforms.uSacrifice.value = params.look === "sacrifice" ? 1 : 0;
     this.flakes.frustumCulled = false;
     this.flakes.renderOrder = 3;
     host.scene.add(this.flakes);
@@ -323,7 +381,8 @@ class ExileDissolve implements SceneEffect {
     const { pose, pace, link } = this.params;
     const t = (nowMs - this.startMs) / 1000 / pace;
     const lifted = smooth(0, 1, t / DISSOLVE_LIFT_S);
-    const z = LIFT_PX * lifted;
+    const sacrifice = this.params.look === "sacrifice";
+    const z = LIFT_PX * lifted * (sacrifice ? -0.5 : 1);
     const td = t - DISSOLVE_LIFT_S;
     this.card.position.z = z;
     const card = this.card.material.uniforms;
@@ -332,6 +391,12 @@ class ExileDissolve implements SceneEffect {
     const flakes = this.flakes.material.uniforms;
     flakes.uT.value = td;
     flakes.uLift.value = z;
+    if (this.vortex) {
+      const envelope = smooth(0, 0.16, t) * (1 - smooth(0.85, 1.55, t));
+      this.vortex.scale.set(pose.w * 1.4 * envelope, pose.h * 0.9 * envelope, 1);
+      this.vortex.material.uniforms.uTime.value = t;
+      this.vortex.material.uniforms.uAlpha.value = envelope;
+    }
     if (link) this.aimLink(link(this.host.canvasOrigin()));
     if (this.shadow) {
       const blur = 2 + z * 0.35;
@@ -370,6 +435,10 @@ class ExileDissolve implements SceneEffect {
 
   dispose(silent: boolean) {
     this.host.scene.remove(this.card, this.flakes);
+    if (this.vortex) {
+      this.host.scene.remove(this.vortex);
+      this.vortex.material.dispose();
+    }
     if (this.shadow) {
       this.host.scene.remove(this.shadow);
       this.shadow.material.dispose();

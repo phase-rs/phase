@@ -238,14 +238,14 @@ describe("cardFlightSpecFor zone moves", () => {
     });
   });
 
-  it("V11-2: a sacrificed permanent flies to its owner's graveyard; one sent elsewhere or a token that ceased to exist does not", () => {
+  it("V11-2: sacrifice collapses in place, while its graveyard entry remains engine-owned", () => {
     const sacrificed: AnimationEvent = { type: "PermanentSacrificed", data: { object_id: X, player_id: 0 } };
     const pre = stateWith(visible(card.onBattlefield().build()));
     const inGraveyard = stateWith(visible(card.params({ zone: "Graveyard", owner: 1 }).build()));
 
-    expect(cardFlightSpecFor(sacrificed, context(pre, inGraveyard))).toMatchObject({
-      route: { from: "Battlefield", to: "Graveyard", ownerId: 1 },
-      startFace: { cardName: "Llanowar Elves" },
+    expect(cardVfxSpecFor(sacrificed, context(pre, inGraveyard))).toMatchObject({
+      kind: "dissolve", look: "sacrifice",
+      face: { cardName: "Llanowar Elves" },
     });
     expect(cardFlightSpecFor(sacrificed, context(pre, stateWith(visible(card.params({ zone: "Exile" }).build()))))).toBeNull();
     expect(cardFlightSpecFor(sacrificed, context(pre, stateWith()))).toBeNull();
@@ -359,6 +359,7 @@ describe("cardVfxSpecFor", () => {
     expect(cardVfxSpecFor(destroyed, context(token, gone, 1, [moved("Graveyard"), destroyed]))?.kind).toBe("shatter");
     expect(cardVfxSpecFor(sacrificed, context(token, gone, 1, [moved("Graveyard"), sacrificed]))).toEqual({
       kind: "dissolve",
+      look: "sacrifice",
       objectId: X,
       face: expect.objectContaining({ objectId: X }),
       holderId: null,
@@ -366,9 +367,9 @@ describe("cardVfxSpecFor", () => {
       owningStepMs: 500,
       snapshotSeq: 1,
     });
-    // A sacrificed card is still there, in the graveyard, and flies.
+    // A sacrificed card shares the collapse, while its graveyard entry remains.
     const inGraveyard = stateWith(visible(card.inGraveyard().build()));
-    expect(cardVfxSpecFor(sacrificed, context(token, inGraveyard, 1, [moved("Graveyard"), sacrificed]))?.kind).toBe("flight");
+    expect(cardVfxSpecFor(sacrificed, context(token, inGraveyard, 1, [moved("Graveyard"), sacrificed]))).toMatchObject({ kind: "dissolve", look: "sacrifice" });
   });
 
   it("V11-5: a token's entry from no zone has no card VFX; its creation flies it", () => {
@@ -409,6 +410,7 @@ describe("cardVfxSpecFor exile", () => {
 
     expect(cardVfxSpecFor(zoneChanged("Battlefield", "Exile"), context(pre, post))).toEqual({
       kind: "dissolve",
+      look: "exile",
       objectId: X,
       face: expect.objectContaining({ cardName: "Llanowar Elves" }),
       holderId: null,

@@ -121,7 +121,7 @@ describe("damage strike", () => {
     expect(reducedLoad.meshes).toBeLessThan(fullLoad.meshes);
   });
 
-  it("V13-1: water draws in ordinary alpha, thins at reduced, and soaks the struck copy", () => {
+  it("V13-1: frost draws solid ice and fewer shards at reduced, and marks the struck copy", () => {
     const full = host();
     const reduced = host();
     const { hit: struck } = createDamageStrike(full, params({ cause: "water", tier: "full", hit: hit() }));
@@ -131,21 +131,21 @@ describe("damage strike", () => {
     strike.traverse((object) => {
       if (object instanceof Mesh) materials.push(object.material as ShaderMaterial);
     });
-    // Water is not light: nothing in its strike is added over the board.
-    expect(materials.every((material) => material.blending === NormalBlending)).toBe(true);
+    // The ice body and shards are opaque material, with a separate light ring.
+    expect(materials.filter((material) => material.defines.ICE !== undefined || material.uniforms.uHead).every((material) => material.blending === NormalBlending)).toBe(true);
     const [fullLoad, reducedLoad] = [full, reduced].map((h) => strikeLoad(named(h.scene, "damage-strike") as Object3D));
     expect(reducedLoad.particles).toBeLessThan(fullLoad.particles * 0.6);
 
     struck?.dispose(true);
     const soaked = createDamageStrike(host(), params({ cause: "water", hit: hit() })).hit as unknown as { materials: { card: ShaderMaterial } };
     const scorched = createDamageStrike(host(), params({ cause: "fire", hit: hit() })).hit as unknown as { materials: { card: ShaderMaterial } };
-    expect(soaked.materials.card.defines).toEqual({ WET: "" });
+    expect(soaked.materials.card.defines).toEqual({ FROST: "" });
     expect(scorched.materials.card.defines).toEqual({});
   });
 
   it("V10-4: the warm-up builds every particle, light, bolt, jet and hit program", () => {
     const warm = damageStrikeKind.warmUp(host());
-    expect(warm).toHaveLength(14);
+    expect(warm).toHaveLength(15);
     expect(warm.every((object) => object instanceof Mesh)).toBe(true);
     const programs = new Set(
       warm.map((object) => {
@@ -157,7 +157,7 @@ describe("damage strike", () => {
         return JSON.stringify([vertexShader, fragmentShader, defines]);
       }),
     );
-    expect(programs.size).toBe(14);
+    expect(programs.size).toBe(15);
   });
 });
 

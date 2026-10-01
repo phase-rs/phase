@@ -25,6 +25,7 @@ const POSE = { x: 300, y: 400, w: 63, h: 88, angleDeg: 0 };
 
 function params(overrides: Partial<ExileDissolveParams> = {}): ExileDissolveParams {
   return {
+    look: "exile",
     pose: POSE,
     surface: new Texture(),
     radius: 4,
@@ -41,6 +42,26 @@ const flakeUniforms = (scene: Scene) =>
   (scene.getObjectByName("exile-dissolve-flakes") as Points<never, ShaderMaterial>).material.uniforms;
 
 describe("exile dissolve", () => {
+  it("sacrifice sinks and consumes the card inward, then releases its veil and resources", () => {
+    const effectHost = host();
+    const onArrive = vi.fn();
+    const surface = new Texture();
+    const dispose = vi.spyOn(surface, "dispose");
+    const collapse = createExileDissolve(effectHost, params({ look: "sacrifice", surface, onArrive }));
+    collapse.update(0);
+    collapse.update(300);
+    const card = effectHost.scene.getObjectByName("exile-dissolve")!;
+    expect(card.position.z).toBeLessThan(0);
+    expect(flakeUniforms(effectHost.scene).uSacrifice.value).toBe(1);
+    expect(effectHost.scene.getObjectByName("sacrifice-vortex")).toBeDefined();
+    expect(onArrive).not.toHaveBeenCalled();
+    expect(collapse.update(2000)).toBe(false);
+    collapse.dispose(false);
+    expect(onArrive).toHaveBeenCalledOnce();
+    expect(dispose).toHaveBeenCalledOnce();
+    expect(effectHost.scene.children).toHaveLength(0);
+  });
+
   it("V9-1: out of the game, the card lifts, dissolves and drifts away, arriving only as it ends", () => {
     const effectHost = host();
     const onArrive = vi.fn();
@@ -116,6 +137,7 @@ describe("exile dissolve", () => {
       "exile-dissolve-warmup",
       "exile-dissolve-shadow-warmup",
       "exile-dissolve-flakes-warmup",
+      "sacrifice-vortex-warmup",
     ]);
   });
 });

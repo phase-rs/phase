@@ -1284,6 +1284,7 @@ describe("CardVfxLayer shatter", () => {
 describe("CardVfxLayer exile dissolve", () => {
   const dissolve = (objectId: number, holderId: number | null = null): ExileDissolveSpec => ({
     kind: "dissolve",
+    look: "exile",
     objectId,
     face: face(objectId),
     holderId,

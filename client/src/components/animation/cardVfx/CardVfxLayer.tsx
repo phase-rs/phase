@@ -519,7 +519,7 @@ class CardVfxController {
             break;
           }
           case "dissolve":
-            scene.startDissolve({ ...board, link: this.linkAimFor(spec), onArrive: release });
+            scene.startDissolve({ ...board, look: spec.look, link: this.linkAimFor(spec), onArrive: release });
             break;
         }
         this.hold(objectId, "board", holder);

@@ -38,10 +38,10 @@ export interface CardShatterSpec {
   sweep: SweepSpec | null;
 }
 
-/** A permanent exiled from the battlefield, or a sacrificed token ceasing to
- *  exist, dissolving where it lies. */
+/** A permanent exiled or sacrificed from the battlefield, dissolving where it lies. */
 export interface ExileDissolveSpec {
   kind: "dissolve";
+  look: "exile" | "sacrifice";
   objectId: ObjectId;
   /** The face the viewer saw before the event; `null` shows the card back. */
   face: AnimationImageSnapshot | null;
@@ -190,18 +190,19 @@ function coveredSpecFor(event: AnimationEvent, { pace, stepEvents }: CardFlightS
   return presented ? { kind: "covered", objectId } : null;
 }
 
-// CR 701.21a + CR 111.7: a sacrificed token goes to its owner's graveyard and
-// ceases to exist there, so it has no card to fly; it dissolves where it lay.
-function sacrificedTokenSpecFor(
+// CR 701.21a + CR 111.7: sacrifice moves a permanent to its owner's graveyard;
+// tokens cease to exist there. Both collapse where they lay on the battlefield.
+function sacrificeSpecFor(
   event: AnimationEvent,
-  { pre, post, pace, owningStepMs, snapshotSeq }: CardFlightSpecContext,
+  { pre, pace, owningStepMs, snapshotSeq }: CardFlightSpecContext,
 ): ExileDissolveSpec | null {
   if (pace <= 0 || event.type !== "PermanentSacrificed") return null;
   const objectId = event.data.object_id;
   const object = pre?.objects[objectId];
-  if (!object?.is_token || post?.objects[objectId] !== undefined) return null;
+  if (!object) return null;
   return {
     kind: "dissolve",
+    look: "sacrifice",
     objectId,
     face: visibleAnimationImageSnapshot(object),
     holderId: null,
@@ -263,6 +264,7 @@ function exileDissolveSpecFor(
   const holder = links.find(([, exiled]) => exiled.includes(objectId))?.[0];
   return {
     kind: "dissolve",
+    look: "exile",
     objectId,
     face: visibleAnimationImageSnapshot(object),
     holderId: holder === undefined ? null : Number(holder),
@@ -324,7 +326,7 @@ export function cardVfxSpecFor(event: AnimationEvent, context: CardFlightSpecCon
   return (
     cardFlightSpecFor(event, context) ??
     coveredSpecFor(event, context) ??
-    sacrificedTokenSpecFor(event, context) ??
+    sacrificeSpecFor(event, context) ??
     cardShatterSpecFor(event, context) ??
     exileDissolveSpecFor(event, context) ??
     damageStrikeSpecFor(event, context) ??

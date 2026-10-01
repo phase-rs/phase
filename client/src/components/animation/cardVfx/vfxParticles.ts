@@ -82,7 +82,7 @@ export const RAMP_GLSL = /* glsl */ `
 
 /** FLAME and SPARK are light; SMOKE is a soft cloud and DROP a bead of
  *  water, both ordinary alpha in their `tint`. */
-export type ParticleKind = "FLAME" | "EMBER" | "SPARK" | "SMOKE" | "DROP";
+export type ParticleKind = "FLAME" | "EMBER" | "SPARK" | "SMOKE" | "DROP" | "ICE";
 
 export interface Particle {
   pos: Vec3;
@@ -137,7 +137,7 @@ const particleVert = /* glsl */ `
     float drag = aTime.z;
     vec3 p = aPos + aVel * (1.0 - exp(-drag * age)) / drag;
     p.z += 0.5 * uAccZ * age * age;
-    #if defined(SPARK) || defined(DROP)
+    #if defined(SPARK) || defined(DROP) || defined(ICE)
     // Sparks and drops fall to the table and stay on it.
     p.z = max(p.z, 0.0);
     #endif
@@ -175,6 +175,13 @@ const particleFrag = /* glsl */ `
     float r = length(q) + (vnoise(q * 2.2 + vSeed * 37.0) - 0.5) * 0.5;
     float fade = smoothstep(0.0, 0.2, vA) * (1.0 - smoothstep(0.4, 1.0, vA));
     gl_FragColor = vec4(uTint, (1.0 - smoothstep(0.3, 1.0, r)) * fade * uGain);
+    #elif defined(ICE)
+    float edge = abs(q.x) * 1.7 + abs(q.y);
+    if (edge > 1.0) discard;
+    float facet = step(0.0, q.x + q.y * 0.25);
+    vec3 col = mix(uTint * 0.65, vec3(0.92, 0.99, 1.0), facet);
+    col = mix(col, vec3(1.0), smoothstep(0.82, 0.98, edge));
+    gl_FragColor = vec4(col, (1.0 - smoothstep(0.4, 1.0, vA)) * uGain);
     #elif defined(DROP)
     // A bead of water: a clear body, a rim darkened where it bends the light,
     // and the highlight of the light above. It thins out as it spreads.
@@ -238,7 +245,7 @@ export function particleLayer(
         uTint: { value: new Vector3(...tint) },
         ...key,
       },
-      ...(kind === "SMOKE" || kind === "DROP" ? NORMAL : ADDITIVE),
+      ...(kind === "SMOKE" || kind === "DROP" || kind === "ICE" ? NORMAL : ADDITIVE),
     }),
   );
   mesh.frustumCulled = false;

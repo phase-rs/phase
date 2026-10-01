@@ -22,8 +22,8 @@ export interface CardFlightRoute {
 /** The zone changes a card flight presents, by origin. A move between zones
  *  that already have surfaces needs only its entry here. Casting is not a zone
  *  change event: `castOf` routes it. A permanent leaving the battlefield for a
- *  graveyard is not either: its destruction breaks it where it lies, its
- *  sacrifice (`sacrificeOf`) flies, and its exile dissolves. */
+ *  graveyard is not either: its destruction breaks it where it lies, while
+ *  sacrifice and exile dissolve. */
 const FLIGHT_ZONE_CHANGES: { readonly [From in Zone]?: readonly FlightDestination[] } = {
   // CR 608.2n / CR 608.3: a resolving spell goes to the battlefield or its
   // owner's graveyard; a countered or bounced one to its hand, library or exile.
@@ -191,17 +191,6 @@ function zoneChangeOf(event: AnimationEvent, post: GameState | null): RoutedObje
   return to && owner !== undefined ? { objectId, sourceId: objectId, route: { from, to, ownerId: owner } } : null;
 }
 
-/** CR 701.21a: a sacrificed permanent moves from the battlefield to its
- *  owner's graveyard. A replacement (CR 614.1a) that sends it elsewhere leaves
- *  its zone change to present the move, and a token that ceased to exist in
- *  the graveyard (CR 111.7) has no card to fly. */
-function sacrificeOf(objectId: ObjectId, post: GameState | null): RoutedObject | null {
-  const object = post?.objects[objectId];
-  return object?.zone === "Graveyard"
-    ? { objectId, sourceId: objectId, route: { from: "Battlefield", to: "Graveyard", ownerId: object.owner } }
-    : null;
-}
-
 /** CR 111.1: an effect puts a token onto the battlefield; it comes out of the
  *  source that created it, when that source is a spell on the stack or a
  *  permanent. */
@@ -225,8 +214,6 @@ function routedObjectFor(event: AnimationEvent, pre: GameState | null, post: Gam
       return castAnnounced(event.data.object_id, pre) ? null : castOf(event.data.object_id, pre, post);
     case "StackPushed":
       return castOf(event.data.object_id, pre, post);
-    case "PermanentSacrificed":
-      return sacrificeOf(event.data.object_id, post);
     case "TokenCreated":
       return tokenOf(event.data.object_id, event.data.source_id, pre, post);
     default:
@@ -235,12 +222,11 @@ function routedObjectFor(event: AnimationEvent, pre: GameState | null, post: Gam
 }
 
 /** The flights of one step that leave one after another: one zone change's
- *  cards, one step's sacrifices, one step's tokens. */
+ *  cards, one step's tokens. */
 function batchKey(event: AnimationEvent): string | null {
   switch (event.type) {
     case "ZoneChanged":
       return `${event.data.from}>${event.data.to}`;
-    case "PermanentSacrificed":
     case "TokenCreated":
       return event.type;
     default:
