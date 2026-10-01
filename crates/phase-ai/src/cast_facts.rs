@@ -572,7 +572,7 @@ fn effect_requires_targets(effect: &Effect) -> bool {
             recipient_scope: EffectScope::Single,
             target,
             ..
-        } => !matches!(target, TargetFilter::None),
+        } => !target.is_context_ref(),
         // CR 701.60a: only single-permanent suspect/unsuspect declares a target.
         // The mass (`All`) scope (e.g. Absolving Lammasu, "all suspected
         // creatures are no longer suspected") is a non-targeting population
@@ -637,7 +637,7 @@ mod tests {
     };
     use engine::types::actions::GameAction;
     use engine::types::game_state::GameState;
-    use engine::types::identifiers::{CardId, ObjectId};
+    use engine::types::identifiers::{CardId, ObjectId, TrackedSetId};
 
     fn make_object() -> GameObject {
         let mut object = GameObject::new(
@@ -928,27 +928,59 @@ mod tests {
     }
 
     // CR 115.10a: a mass prevention recipient ("prevent all damage that would be
-    // dealt to creatures this turn", Blinding Fog) declares no target; only the
-    // `Single` (declared) recipient does.
+    // dealt to creatures this turn", Blinding Fog) declares no target. `Single`
+    // requires a target only when its recipient is not a context reference.
     #[test]
-    fn mass_prevent_damage_is_not_target_requiring() {
-        let prevent = |recipient_scope| Effect::PreventDamage {
-            amount: PreventionAmount::All,
-            amount_dynamic: None,
-            target: TargetFilter::Typed(TypedFilter::creature()),
-            recipient_scope,
-            scope: PreventionScope::AllDamage,
-            damage_source_filter: None,
-            prevention_duration: None,
-        };
-        assert!(
-            effect_requires_targets(&prevent(EffectScope::Single)),
-            "declared-recipient PreventDamage must be target-requiring"
-        );
-        assert!(
-            !effect_requires_targets(&prevent(EffectScope::All)),
-            "mass PreventDamage{{All}} must not be target-requiring"
-        );
+    fn prevention_target_facts_exclude_context_references_and_mass_recipients() {
+        for (target, declares_target) in [
+            (TargetFilter::Typed(TypedFilter::creature()), true),
+            (TargetFilter::None, false),
+            (TargetFilter::SelfRef, false),
+            (TargetFilter::Controller, false),
+            (TargetFilter::ParentTarget, false),
+            (
+                TargetFilter::TrackedSet {
+                    id: TrackedSetId(0),
+                },
+                false,
+            ),
+        ] {
+            for recipient_scope in [EffectScope::Single, EffectScope::All] {
+                let ability = AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::PreventDamage {
+                        amount: PreventionAmount::All,
+                        amount_dynamic: None,
+                        target: target.clone(),
+                        recipient_scope,
+                        scope: PreventionScope::AllDamage,
+                        damage_source_filter: None,
+                        prevention_duration: None,
+                    },
+                );
+                let mut object = make_object();
+                Arc::make_mut(&mut object.abilities).push(ability.clone());
+                object.trigger_definitions.push(
+                    TriggerDefinition::new(TriggerMode::ChangesZone)
+                        .valid_card(TargetFilter::SelfRef)
+                        .destination(Zone::Battlefield)
+                        .execute(ability),
+                );
+
+                let facts = cast_facts_for_object(&object);
+                assert_eq!(facts.primary_effects.len(), 1);
+                assert_eq!(facts.immediate_etb_triggers.len(), 1);
+                let requires_targets = recipient_scope == EffectScope::Single && declares_target;
+                assert_eq!(
+                    facts.requires_targets_in_spell_text, requires_targets,
+                    "spell prevention: {recipient_scope:?}, {target:?}"
+                );
+                assert_eq!(
+                    facts.requires_targets_in_immediate_etb, requires_targets,
+                    "ETB prevention: {recipient_scope:?}, {target:?}"
+                );
+            }
+        }
     }
 
     #[test]
