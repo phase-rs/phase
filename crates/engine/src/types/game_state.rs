@@ -4557,20 +4557,22 @@ pub struct PendingChooseOneOf {
 }
 
 /// CR 101.4 + CR 608.2c: Per-player `ChooseFromZone { zone_owner: EachPlayer }`
-/// iteration state. A single chooser (the spell's controller) picks one card
-/// from EACH player's zone in APNAP order; this stashes the players not yet
-/// prompted while the current player's `WaitingFor::ChooseFromZoneChoice` is
-/// outstanding. Created when the first player's choice is parked, drained after
-/// each pick accumulates into the resolution chain's tracked set, and disposed
-/// once every player has been prompted — at which point the parked
+/// iteration state. A single chooser picks one card from EACH player's zone;
+/// this stashes the players not yet chosen for while either the controller's
+/// order prompt (CR 101.4c, `current == None`) or one player's
+/// `WaitingFor::ChooseFromZoneChoice` (`current == Some(player)`) is
+/// outstanding. Created when the first prompt is parked, drained after each
+/// pick accumulates into the resolution chain's tracked set, and disposed
+/// once every player has been chosen for — at which point the parked
 /// `pending_continuation` (e.g. "put those cards onto the battlefield") runs.
-/// Building block for Breach the Multiverse.
+/// Building block for Breach the Multiverse and Ultimate Magic: Meteor.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PendingPerPlayerZoneChoice {
     /// The `Effect::ChooseFromZone` ability whose per-player body repeats. Its
     /// `zone`/`filter`/`count`/`chooser` describe each player's prompt.
     pub ability: Box<ResolvedAbility>,
-    /// Players not yet prompted, in APNAP order.
+    /// Players not yet chosen for, in APNAP order. When the controller makes
+    /// every choice, this is the set they order (CR 101.4c), not an order.
     pub remaining_players: Vec<PlayerId>,
     /// CR 603.7 + CR 608.2c: Whether a pick from THIS per-player iteration has
     /// already started its fresh chosen-card tracked set. The first non-empty
@@ -4581,6 +4583,15 @@ pub struct PendingPerPlayerZoneChoice {
     /// published, then `true` for the remainder of the iteration.
     #[serde(default)]
     pub accumulated: bool,
+    /// The iterated player whose pool prompt is outstanding, or `None` while
+    /// the controller's order prompt (CR 101.4c) is outstanding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<PlayerId>,
+    /// CR 608.2 + CR 800.4a: The `StackEntry` id of the resolution carrier
+    /// whose own occurrence parked this iteration. Departure teardown acts on
+    /// the frame only while this matches the live carrier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub carrier: Option<ObjectId>,
 }
 
 /// CR 401.4 + CR 608.2c: Per-owner library-order prompts for one
@@ -13387,6 +13398,8 @@ pub enum PersistedRestoreError {
     DeferredTriggerSettlement,
     #[error("persisted priority settlement failed: {0}")]
     PrioritySettlementFailed(String),
+    #[error("persisted resolution occurrence is incoherent: {0}")]
+    InvalidResolutionOccurrence(String),
 }
 
 impl PreparedPersistedGameState {
@@ -13573,6 +13586,9 @@ impl PersistedGameState {
             .validate_payment_transaction()
             .map_err(PersistedRestoreError::InvalidPaymentTransaction)?;
         state
+            .reconcile_resolution_occurrence_on_restore()
+            .map_err(PersistedRestoreError::InvalidResolutionOccurrence)?;
+        state
             .format_config
             .reject_unimplemented_range_of_influence()
             .map_err(PersistedRestoreError::UnsupportedFormat)?;
@@ -13625,12 +13641,15 @@ pub struct ResolutionOptionalPaymentOption {
     pub cost: AbilityCost,
 }
 
-/// Why a controller is selecting an opponent for a zone choice.
+/// Why a controller is selecting a player for a zone choice.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ZoneOpponentChooserPurpose {
     #[default]
     Ordinary,
     BindReciprocalConsume,
+    /// CR 101.4c: the single chooser of a per-player iteration picks whose
+    /// selection to make next. Candidates may include the chooser themself.
+    PerPlayerChoiceOrder,
 }
 
 impl ZoneOpponentChooserPurpose {
@@ -22042,6 +22061,15 @@ declare_game_state! {
     #[serde(skip)]
     pub(crate) active_accepted_triggered_mana_node: Option<RulesExecutionNodeRef>,
 
+    /// CR 605.3b + CR 605.4a: Depth of inline mana-ability subresolutions
+    /// currently executing (a mana ability's `sub_ability` chain or a stackless
+    /// triggered mana ability). Mana abilities resolve immediately, so this is
+    /// zero at every action boundary. A per-player zone choice refuses to park
+    /// while it is nonzero: such a choice would belong to the mana ability, not
+    /// to the resolution carrier above it.
+    #[serde(skip)]
+    pub(crate) mana_subresolution_depth: u32,
+
     /// Debug-only witness that the trigger-construction finisher ran at most
     /// once per reducer action. The finisher is applied at the outermost handler
     /// return of each of its enumerated action seams; a second call in the same
@@ -24902,6 +24930,25 @@ impl GameState {
         self.resolution_stack.push_per_player_zone_choice(pending);
     }
 
+    /// CR 608.2 + CR 800.4a: Restore-time coherence between the resolution
+    /// carrier, the resolution stack's occurrence floor, and per-player frame
+    /// carrier stamps. A carrier persisted before floors existed owned the
+    /// whole stack (floor zero); a floor without a carrier, a floor above the
+    /// stack, or a stamp naming another carrier is rejected.
+    pub fn reconcile_resolution_occurrence_on_restore(&mut self) -> Result<(), String> {
+        let carrier = self.resolving_stack_entry.as_ref().map(|entry| entry.id);
+        match (carrier, self.resolution_stack.occurrence_floor()) {
+            (None, Some(_)) => {
+                return Err("occurrence floor recorded without a resolution carrier".to_string())
+            }
+            (Some(_), None) => self.resolution_stack.adopt_legacy_occurrence_floor(),
+            (Some(_), Some(_)) | (None, None) => {}
+        }
+        self.resolution_stack.validate_occurrence_floor()?;
+        self.resolution_stack
+            .reconcile_per_player_carrier_stamps(carrier)
+    }
+
     /// Returns the per-category zone-choice owner only when it owns the stack top.
     pub fn active_per_category_zone_choice(&self) -> Option<&PendingPerCategoryZoneChoice> {
         self.resolution_stack.active_per_category_zone_choice()
@@ -27498,6 +27545,7 @@ impl GameState {
             pending_triggered_mana_resume: None,
             pending_trigger_construction_priority_recipient: None,
             active_accepted_triggered_mana_node: None,
+            mana_subresolution_depth: 0,
             trigger_construction_finisher_ran_this_action: false,
             pending_discard_for_cost: None,
             pending_cast: None,
@@ -29887,6 +29935,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         pending_triggered_mana_resume: _,
         pending_trigger_construction_priority_recipient: _,
         active_accepted_triggered_mana_node: _,
+        mana_subresolution_depth: _,
         trigger_construction_finisher_ran_this_action: _,
         pending_discard_for_cost: _,
         pending_cast: _,

@@ -75,4 +75,31 @@ describe("ZoneOpponentChooserModalContent", () => {
       .map((button) => button.textContent);
     expect(labels).toEqual(["Bob", "Alice"]);
   });
+
+  it("asks for the next player, labelling the chooser as You, when ordering per-player choices", () => {
+    useMultiplayerStore.setState({
+      playerNames: new Map([[1, "Alice"]]),
+    });
+    const dispatch = renderModal({
+      type: "ChooseFromZoneOpponentChooser",
+      data: {
+        player: 0,
+        candidates: [0, 1],
+        ability: {},
+        purpose: "PerPlayerChoiceOrder",
+      },
+    });
+
+    expect(
+      screen.getByRole("heading", { name: "Choose Next Player" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getAllByRole("button").map((button) => button.textContent),
+    ).toEqual(["You", "Alice"]);
+    fireEvent.click(screen.getByRole("button", { name: "Alice" }));
+    expect(dispatch).toHaveBeenCalledWith({
+      type: "ChooseZoneOpponentChooser",
+      data: { opponent: 1 },
+    });
+  });
 });

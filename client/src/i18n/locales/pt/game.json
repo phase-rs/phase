@@ -2008,7 +2008,9 @@
   },
   "zoneOpponentChooser": {
     "title": "Escolher oponente",
-    "subtitle": "Escolha qual oponente faz a escolha."
+    "subtitle": "Escolha qual oponente faz a escolha.",
+    "orderTitle": "Escolher próximo jogador",
+    "orderSubtitle": "Escolha para quem fazer a próxima seleção."
   },
   "pileOpponent": {
     "title": "Choose Opponent",

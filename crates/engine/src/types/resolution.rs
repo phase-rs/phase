@@ -12,6 +12,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
 
 pub use frame_vec::ChildStackDepth;
+pub use frame_vec::OccurrenceFloor;
 use frame_vec::{FrameSlot, FrameVec};
 
 use crate::types::ability::{
@@ -811,6 +812,23 @@ pub struct ResolutionStack {
     /// unstamped frame is `None`, and no handle can carry `None`.
     #[serde(default)]
     last_post_replacement_frame_id: u64,
+    /// CR 608.2 + CR 800.4a: The depth recorded when the current resolution
+    /// carrier began (`stack::begin_resolving_stack_entry`), cleared when it
+    /// finishes. Frames above it are that occurrence's own work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    occurrence_floor: Option<OccurrenceFloor>,
+}
+
+/// Why a departed occurrence's frames could not be retired. Every variant is a
+/// refusal: nothing was popped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum OccurrenceRetireRefusal {
+    #[error("no occurrence floor is recorded")]
+    NoFloor,
+    #[error("a frame crossed the occurrence floor after it was recorded")]
+    BrokenFloor,
+    #[error("the occurrence floor {depth} lies above the stack length {len}")]
+    FloorAboveStack { depth: usize, len: usize },
 }
 
 /// A dispatch handle bound to the identity of the frame that issued it.
@@ -859,6 +877,100 @@ impl ResolutionStack {
     /// to [`frame_vec`] and this module is its parent, not its descendant.
     pub fn capture_child_boundary(&self) -> ChildStackDepth {
         self.frames.capture_depth()
+    }
+
+    /// CR 608.2: Record the current depth as the new resolution carrier's
+    /// occurrence floor. Called only when a stack entry becomes the carrier.
+    pub fn begin_occurrence_floor(&mut self) {
+        self.occurrence_floor = Some(self.frames.capture_occurrence_floor());
+    }
+
+    /// Clear the occurrence floor when its carrier finishes.
+    pub fn clear_occurrence_floor(&mut self) {
+        self.occurrence_floor = None;
+    }
+
+    /// The live occurrence floor, if a carrier recorded one.
+    pub fn occurrence_floor(&self) -> Option<OccurrenceFloor> {
+        self.occurrence_floor
+    }
+
+    /// Legacy restore: a carrier persisted before floors existed owned the
+    /// whole stack, which is exactly a floor of zero.
+    pub fn adopt_legacy_occurrence_floor(&mut self) {
+        if self.occurrence_floor.is_none() {
+            self.occurrence_floor = Some(OccurrenceFloor::LEGACY_WHOLE_STACK);
+        }
+    }
+
+    /// CR 800.4a: Retire exactly the frames above the occurrence floor — the
+    /// departed carrier's own work — popping from the top and never touching a
+    /// frame at or below the floor. Refuses (popping nothing) when there is no
+    /// floor, when a frame has crossed it, or when it lies above the stack.
+    pub fn retire_frames_above_occurrence_floor(
+        &mut self,
+    ) -> Result<Vec<ResolutionFrame>, OccurrenceRetireRefusal> {
+        let floor = self
+            .occurrence_floor
+            .ok_or(OccurrenceRetireRefusal::NoFloor)?;
+        if floor.is_broken() {
+            return Err(OccurrenceRetireRefusal::BrokenFloor);
+        }
+        let len = self.frames.len();
+        if floor.depth() > len {
+            return Err(OccurrenceRetireRefusal::FloorAboveStack {
+                depth: floor.depth(),
+                len,
+            });
+        }
+        let mut retired = Vec::with_capacity(len - floor.depth());
+        while self.frames.len() > floor.depth() {
+            retired.push(
+                self.frames
+                    .pop(&mut self.occurrence_floor)
+                    .expect("a frame above the floor must exist"),
+            );
+        }
+        Ok(retired)
+    }
+
+    /// Restore-time coherence of the persisted floor against this stack.
+    pub fn validate_occurrence_floor(&self) -> Result<(), String> {
+        match self.occurrence_floor {
+            Some(floor) if !floor.is_broken() && floor.depth() > self.frames.len() => Err(format!(
+                "occurrence floor {} lies above the resolution stack length {}",
+                floor.depth(),
+                self.frames.len()
+            )),
+            Some(_) | None => Ok(()),
+        }
+    }
+
+    /// Restore-time coherence of every per-player zone-choice frame's carrier
+    /// stamp against the installed carrier. A stamped frame must name the live
+    /// carrier; a legacy unstamped frame adopts it when one is installed.
+    pub fn reconcile_per_player_carrier_stamps(
+        &mut self,
+        carrier: Option<ObjectId>,
+    ) -> Result<(), String> {
+        let mut slot = self.frames.top();
+        while let Some(current) = slot {
+            if let Some(ResolutionFrame::PerPlayerZoneChoice(frame)) = self.frames.get_mut(current)
+            {
+                match (frame.carrier, carrier) {
+                    (Some(stamp), Some(live)) if stamp == live => {}
+                    (Some(stamp), live) => {
+                        return Err(format!(
+                            "per-player zone-choice frame stamped {stamp:?} does not match the installed carrier {live:?}"
+                        ))
+                    }
+                    (None, Some(live)) => frame.carrier = Some(live),
+                    (None, None) => {}
+                }
+            }
+            slot = self.frames.below(current);
+        }
+        Ok(())
     }
 
     /// Whether the frame at the captured `child_stack_start` is a `CopyToken` owner.
@@ -1207,7 +1319,7 @@ impl ResolutionStack {
                 ) {
                     return Ok(None);
                 }
-                self.frames.swap(parent, child);
+                self.frames.swap(parent, child, &mut self.occurrence_floor);
                 let ResolutionFrame::AbilityContinuation(frame) =
                     self.pop_expected(FrameKind::AbilityContinuation)?
                 else {
@@ -2823,7 +2935,7 @@ impl ResolutionStack {
         if self.frames.above(parent) != Some(child) {
             return None;
         }
-        self.frames.pop()
+        self.frames.pop(&mut self.occurrence_floor)
     }
 
     /// Finds the active post-replacement authority or its one direct child.
@@ -3262,6 +3374,7 @@ impl ResolutionStack {
         self.frames.insert_below(
             post_replacement,
             ResolutionFrame::AbilityContinuation(frame),
+            &mut self.occurrence_floor,
         );
         Ok(())
     }
@@ -3289,7 +3402,8 @@ impl ResolutionStack {
                 Some(DrainStatus::Paused)
             ) =>
             {
-                self.frames.swap(continuation, post_replacement);
+                self.frames
+                    .swap(continuation, post_replacement, &mut self.occurrence_floor);
                 Ok(true)
             }
             (Some(_), Some(ResolutionFrame::PostReplacement(_))) => Ok(false),
@@ -3325,7 +3439,8 @@ impl ResolutionStack {
             .frames
             .top()
             .ok_or(ResolutionStackError::NoActiveChild)?;
-        self.frames.insert_below(active, frame);
+        self.frames
+            .insert_below(active, frame, &mut self.occurrence_floor);
         Ok(())
     }
 
@@ -3395,7 +3510,9 @@ impl ResolutionStack {
         let (placement, slot) = self.park_target();
         match slot {
             None => self.push_inner(frame),
-            Some(slot) => self.frames.insert_below(slot, frame),
+            Some(slot) => self
+                .frames
+                .insert_below(slot, frame, &mut self.occurrence_floor),
         }
         placement
     }
@@ -3416,10 +3533,11 @@ impl ResolutionStack {
         if stack_len == 0 {
             return Err(ResolutionStackError::NoActiveChild);
         }
-        if !self
-            .frames
-            .insert_at_child_boundary(child_stack_start, frame)
-        {
+        if !self.frames.insert_at_child_boundary(
+            child_stack_start,
+            frame,
+            &mut self.occurrence_floor,
+        ) {
             return Err(ResolutionStackError::InvalidChildBoundary {
                 child_stack_start,
                 stack_len,
@@ -3443,7 +3561,7 @@ impl ResolutionStack {
         }
         Ok(self
             .frames
-            .pop()
+            .pop(&mut self.occurrence_floor)
             .expect("checked resolution stack top must still be present"))
     }
 
@@ -3502,7 +3620,7 @@ impl ResolutionStack {
         validate_shipped_post_replacement_draw_pair(parent_frame, child_frame)?;
         Ok(self
             .frames
-            .pop()
+            .pop(&mut self.occurrence_floor)
             .expect("checked resolution child must be present"))
     }
 
@@ -7736,6 +7854,8 @@ mod tests {
                 ability: Box::new(choose_from_zone),
                 remaining_players: Vec::new(),
                 accumulated: false,
+                current: None,
+                carrier: None,
             },
         );
         crate::game::effects::choose_from_zone::drain_active_per_player_zone_choice(

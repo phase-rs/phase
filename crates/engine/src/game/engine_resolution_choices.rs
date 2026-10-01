@@ -3936,12 +3936,30 @@ pub(super) fn handle_resolution_choice(
             },
             GameAction::ChooseZoneOpponentChooser { opponent },
         ) => {
-            // CR 608.2d: The picked opponent must be one of the offered
-            // candidates (a live opponent of the choose's controller).
+            // CR 608.2d: The picked player must be one of the offered
+            // candidates.
             if !candidates.contains(&opponent) {
                 return Err(EngineError::InvalidAction(format!(
-                    "Chosen zone-choice opponent {opponent:?} is not a legal opponent"
+                    "Chosen zone-choice player {opponent:?} is not a legal candidate"
                 )));
+            }
+            if matches!(purpose, ZoneOpponentChooserPurpose::PerPlayerChoiceOrder) {
+                // CR 101.4c: the chooser picked whose selection to make next.
+                // Candidates may include the chooser themself (each player).
+                effects::choose_from_zone::answer_per_player_order(
+                    state, &ability, opponent, events,
+                )
+                .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+                // A pool that emptied since the prompt re-advanced instead; if
+                // that disposed the whole iteration, its continuation resumes.
+                if state.active_per_player_zone_choice().is_none() {
+                    set_priority(state, player);
+                    super::engine::resume_pending_continuation_if_priority(state, events)
+                        .expect("a settled per-player iteration must resume its continuation");
+                }
+                return Ok(ResolutionChoiceOutcome::WaitingFor(
+                    state.waiting_for.clone(),
+                ));
             }
             if matches!(purpose, ZoneOpponentChooserPurpose::BindReciprocalConsume) {
                 effects::bind_reciprocal_consumer_from_picker(state, opponent)

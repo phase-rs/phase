@@ -3583,15 +3583,26 @@ pub(super) fn relink_gated_token_referent_consumers(defs: &mut [AbilityDefinitio
 /// dealt damage to (a set published because the gated choice below it reads the
 /// tracked set) — and destroys them.
 ///
-/// Mirrors [`relink_gated_token_referent_consumers`], narrowed to the shape the
-/// hazard was established for: the IMMEDIATELY preceding definition is a
-/// conditional `ChooseFromZone`, the candidate reads the tracked-set sentinel
-/// directly, and [`gated_instruction_reaches`] holds.
+/// Mirrors [`relink_gated_token_referent_consumers`], narrowed to exactly the
+/// shape the hazard was established for and the only one the per-opponent
+/// reader rule admits: the IMMEDIATELY preceding definition is a conditional
+/// `ChooseFromZone { zone_owner: Each(Opponents), zone: Battlefield }`, the
+/// candidate is `DestroyAll` over the bare `TrackedSet(0)` sentinel, and
+/// [`gated_instruction_reaches`] holds. Every other gated choice keeps its
+/// existing linkage.
 pub(super) fn relink_gated_tracked_set_consumers(defs: &mut [AbilityDefinition]) {
     for i in 1..defs.len() {
         let publisher = &defs[i - 1];
-        if !matches!(&*publisher.effect, Effect::ChooseFromZone { .. })
-            || publisher.condition.is_none()
+        if !matches!(
+            &*publisher.effect,
+            Effect::ChooseFromZone {
+                zone_owner: crate::types::ability::ZoneOwner::Each(
+                    crate::types::ability::PerPlayerScope::Opponents
+                ),
+                zone: Zone::Battlefield,
+                ..
+            }
+        ) || publisher.condition.is_none()
         {
             continue;
         }
@@ -3599,39 +3610,18 @@ pub(super) fn relink_gated_tracked_set_consumers(defs: &mut [AbilityDefinition])
             continue;
         }
         if defs[i].sub_link == SubAbilityLink::SequentialSibling
-            && effect_reads_tracked_set_sentinel(&defs[i].effect)
+            && matches!(
+                &*defs[i].effect,
+                Effect::DestroyAll {
+                    target: TargetFilter::TrackedSet {
+                        id: crate::types::identifiers::TrackedSetId(0)
+                    },
+                    ..
+                }
+            )
         {
             defs[i].sub_link = SubAbilityLink::ContinuationStep;
         }
-    }
-}
-
-/// CR 608.2c: Does this effect act directly on the chain's tracked set (the
-/// `TrackedSet(0)` sentinel, bare or filtered)? Covers the single-slot family
-/// through `Effect::target_filter` and the population family that carries its
-/// own `target`.
-fn effect_reads_tracked_set_sentinel(effect: &Effect) -> bool {
-    fn is_sentinel(filter: &TargetFilter) -> bool {
-        matches!(
-            filter,
-            TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }
-        )
-    }
-    if effect.target_filter().is_some_and(is_sentinel) {
-        return true;
-    }
-    match effect {
-        Effect::PumpAll { target, .. }
-        | Effect::PutCounterAll { target, .. }
-        | Effect::ChangeZoneAll { target, .. }
-        | Effect::DestroyAll { target, .. }
-        | Effect::BounceAll { target, .. }
-        | Effect::CounterAll { target, .. }
-        | Effect::GainControlAll { target, .. }
-        | Effect::GoadAll { target, .. }
-        | Effect::DamageAll { target, .. }
-        | Effect::DoublePTAll { target, .. } => is_sentinel(target),
-        _ => false,
     }
 }
 
@@ -13103,6 +13093,109 @@ mod tests {
             SubAbilityLink::ContinuationStep,
             "a modal LastCreated reader must keep its wrapper on the gated continuation path"
         );
+    }
+
+    /// CR 608.2c + CR 609.3 (M2): the gated tracked-set relink admits exactly
+    /// the per-opponent battlefield choice followed by `DestroyAll` over the
+    /// bare `TrackedSet(0)` sentinel. A gated SINGLE-POOL choice, a filtered
+    /// tracked-set reader, or another consumer keeps its sibling link.
+    ///
+    /// REVERT PROBE: widen the publisher back to any conditional
+    /// `ChooseFromZone` and the single-pool row is relinked.
+    #[test]
+    fn gated_tracked_set_relink_admits_only_the_per_opponent_destroy() {
+        use super::relink_gated_tracked_set_consumers;
+        use crate::types::ability::{
+            CardSelectionMode, Chooser, PerPlayerScope, ZoneChoiceCandidateSource, ZoneOwner,
+        };
+        use crate::types::identifiers::TrackedSetId;
+
+        fn gated_choice(zone_owner: ZoneOwner) -> AbilityDefinition {
+            let mut choice = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChooseFromZone {
+                    count: 1,
+                    zone: Zone::Battlefield,
+                    additional_zones: Vec::new(),
+                    zone_owner,
+                    filter: None,
+                    chooser: Chooser::Controller.into(),
+                    candidate_source: ZoneChoiceCandidateSource::Legacy,
+                    reciprocal_role: None,
+                    up_to: false,
+                    constraint: None,
+                    selection: CardSelectionMode::Chosen,
+                },
+            );
+            choice.condition = Some(AbilityCondition::WhenYouDo);
+            choice
+        }
+        fn consumer(effect: Effect) -> AbilityDefinition {
+            let mut def = AbilityDefinition::new(AbilityKind::Spell, effect);
+            def.sub_link = SubAbilityLink::SequentialSibling;
+            def
+        }
+        let destroy_set = || {
+            consumer(Effect::DestroyAll {
+                target: TargetFilter::TrackedSet {
+                    id: TrackedSetId(0),
+                },
+                cant_regenerate: false,
+            })
+        };
+
+        let mut admitted = vec![
+            gated_choice(ZoneOwner::Each(PerPlayerScope::Opponents)),
+            destroy_set(),
+        ];
+        relink_gated_tracked_set_consumers(&mut admitted);
+        assert_eq!(
+            admitted[1].sub_link,
+            SubAbilityLink::ContinuationStep,
+            "reach: the per-opponent destroy is relinked"
+        );
+
+        let rejected: Vec<Vec<AbilityDefinition>> = vec![
+            // A gated single-pool choice.
+            vec![gated_choice(ZoneOwner::Controller), destroy_set()],
+            // Another per-player population.
+            vec![
+                gated_choice(ZoneOwner::Each(PerPlayerScope::AllPlayers)),
+                destroy_set(),
+            ],
+            // A filtered tracked-set reader.
+            vec![
+                gated_choice(ZoneOwner::Each(PerPlayerScope::Opponents)),
+                consumer(Effect::DestroyAll {
+                    target: TargetFilter::TrackedSetFiltered {
+                        id: TrackedSetId(0),
+                        filter: Box::new(TargetFilter::Any),
+                        caused_by: None,
+                    },
+                    cant_regenerate: false,
+                }),
+            ],
+            // Another consumer of the bare sentinel.
+            vec![
+                gated_choice(ZoneOwner::Each(PerPlayerScope::Opponents)),
+                consumer(Effect::BounceAll {
+                    target: TargetFilter::TrackedSet {
+                        id: TrackedSetId(0),
+                    },
+                    destination: None,
+                    count: None,
+                }),
+            ],
+        ];
+        for mut defs in rejected {
+            relink_gated_tracked_set_consumers(&mut defs);
+            assert_eq!(
+                defs[1].sub_link,
+                SubAbilityLink::SequentialSibling,
+                "only the per-opponent destroy is relinked: {:?}",
+                defs[0].effect
+            );
+        }
     }
 
     /// CR 608.2c: a `ChooseFromZone` head with a `RemoveCounter`/`PutCounter`

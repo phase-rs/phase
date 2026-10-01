@@ -1013,6 +1013,7 @@ impl ClauseIr {
             id: _,
             declares_chosen_clause,
             reads_chosen_clause,
+            target_reads,
             reads_return_result,
             source: _,
             disposition,
@@ -1039,6 +1040,7 @@ impl ClauseIr {
         } = self;
         *declares_chosen_clause = None;
         *reads_chosen_clause = None;
+        *target_reads = TargetReadOrigin::OwnAnnouncement;
         *reads_return_result = None;
         *disposition = ClauseDisposition::Emit {
             followup: None,

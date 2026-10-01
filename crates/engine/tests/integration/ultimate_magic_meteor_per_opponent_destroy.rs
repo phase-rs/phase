@@ -6,11 +6,12 @@
 //!
 //! The spell's controller makes every choice (CR 608.2c + CR 608.2d), one per
 //! opponent (CR 102.2 + CR 102.3), and none of them is a target (CR 115.10a).
-//! Each choice draws only from permanents THAT opponent controls, so the pools
-//! are disjoint and no earlier pick changes a later pool; the chosen permanents
-//! are then destroyed together (CR 701.8a). The walk order over opponents is an
-//! implementation detail (CR 101.4c: one player orders their own choices), so
-//! the tests identify each prompt by the controller of its candidates.
+//! Each choice draws only from permanents THAT opponent controls, and the
+//! chosen permanents are then destroyed together (CR 701.8a). The caster makes
+//! every choice, so the caster chooses their order (CR 101.4c): with two or
+//! more opponents to choose for, an order prompt asks whose selection to make
+//! next. Tests that do not exercise ordering identify each pool prompt by the
+//! controller of its candidates, never by position.
 //!
 //! When the spell was not cast from exile nothing is chosen and nothing is
 //! destroyed — including the creatures its own damage step published as a
@@ -25,7 +26,9 @@ use engine::types::ability::{
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::format::FormatConfig;
-use engine::types::game_state::{CastPaymentMode, GameState, WaitingFor};
+use engine::types::game_state::{
+    CastPaymentMode, GameState, WaitingFor, ZoneOpponentChooserPurpose,
+};
 use engine::types::identifiers::{ObjectId, TrackedSetId};
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -188,16 +191,39 @@ struct Prompt {
     cards: Vec<ObjectId>,
 }
 
-/// Resolve the stack, answering each per-opponent prompt with `pick`, and
-/// return every prompt seen. `between` runs after each answered prompt.
+/// Resolve the stack, answering each per-opponent pool prompt with `pick`, and
+/// return every pool prompt seen. `between` runs after each answered pool
+/// prompt. The caster's order prompts (CR 101.4c) are answered with the first
+/// offered candidate; use [`resolve_with_order`] to choose the order.
 fn resolve_with(
     runner: &mut GameRunner,
+    pick: impl FnMut(&GameRunner, &[ObjectId]) -> Vec<ObjectId>,
+    between: impl FnMut(&mut GameRunner, usize),
+) -> Vec<Prompt> {
+    resolve_with_order(runner, |_, candidates| candidates[0], pick, between)
+}
+
+/// [`resolve_with`], answering each order prompt (CR 101.4c: the caster
+/// chooses whose selection to make next) with `order`.
+fn resolve_with_order(
+    runner: &mut GameRunner,
+    mut order: impl FnMut(&GameRunner, &[PlayerId]) -> PlayerId,
     mut pick: impl FnMut(&GameRunner, &[ObjectId]) -> Vec<ObjectId>,
     mut between: impl FnMut(&mut GameRunner, usize),
 ) -> Vec<Prompt> {
     let mut prompts = Vec::new();
     for _ in 0..300 {
         match runner.state().waiting_for.clone() {
+            WaitingFor::ChooseFromZoneOpponentChooser {
+                candidates,
+                purpose: ZoneOpponentChooserPurpose::PerPlayerChoiceOrder,
+                ..
+            } => {
+                let next = order(runner, &candidates);
+                runner
+                    .act(GameAction::ChooseZoneOpponentChooser { opponent: next })
+                    .expect("a legal order pick is accepted");
+            }
             WaitingFor::ChooseFromZoneChoice { player, cards, .. } => {
                 prompts.push(Prompt {
                     chooser: player,
@@ -216,6 +242,37 @@ fn resolve_with(
         }
     }
     prompts
+}
+
+/// Advance until the first per-player prompt (order or pool) is outstanding.
+fn advance_to_per_player_prompt(runner: &mut GameRunner) {
+    for _ in 0..50 {
+        match runner.state().waiting_for {
+            WaitingFor::ChooseFromZoneOpponentChooser { .. }
+            | WaitingFor::ChooseFromZoneChoice { .. } => return,
+            WaitingFor::Priority { .. } if !runner.state().stack.is_empty() => {
+                runner.act(GameAction::PassPriority).expect("pass priority");
+            }
+            ref other => panic!("no per-player prompt was reached: {other:?}"),
+        }
+    }
+    panic!("no per-player prompt was reached");
+}
+
+/// The candidates of the outstanding order prompt.
+fn order_candidates(runner: &GameRunner) -> Vec<PlayerId> {
+    match &runner.state().waiting_for {
+        WaitingFor::ChooseFromZoneOpponentChooser {
+            candidates,
+            purpose: ZoneOpponentChooserPurpose::PerPlayerChoiceOrder,
+            player,
+            ..
+        } => {
+            assert_eq!(*player, P0, "the caster orders their own choices");
+            candidates.clone()
+        }
+        other => panic!("expected the caster's order prompt, got {other:?}"),
+    }
 }
 
 fn controller(runner: &GameRunner, id: ObjectId) -> PlayerId {
@@ -592,8 +649,13 @@ fn chosen_permanent_whose_controller_concedes_is_still_destroyed() {
 
     cast_from_exile(&mut runner, meteor);
     let mut conceded = false;
-    let prompts = resolve_with(
+    // b3: the caster orders P1 first (CR 101.4c), explicitly.
+    let prompts = resolve_with_order(
         &mut runner,
+        |_, candidates| {
+            assert!(candidates.contains(&P1), "reach: P1 is orderable");
+            P1
+        },
         |r, cards| {
             let owner = controller(r, cards[0]);
             vec![if owner == P1 { stolen } else { p2_land }]
@@ -1410,9 +1472,34 @@ fn per_opponent_choice_with_a_trailing_instruction_is_not_claimed() {
 }
 
 /// A game paused on Meteor's per-opponent choice serializes the new
-/// population and loads back.
+/// population, the order prompt's purpose, the frame's `current` / `carrier`
+/// fields and the resolution stack's occurrence floor, and loads back — both
+/// parked on the caster's order prompt and parked on one opponent's pool.
 #[test]
 fn game_state_paused_on_the_per_opponent_choice_round_trips() {
+    fn round_trip(runner: &GameRunner, must_contain: &[&str]) {
+        let json = serde_json::to_string(runner.state()).expect("serialize");
+        for needle in must_contain {
+            assert!(json.contains(needle), "{needle} is written");
+        }
+        let back: GameState = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(
+            serde_json::to_string(&back).expect("re-serialize"),
+            json,
+            "round trip is lossless"
+        );
+        let persisted = serde_json::to_string(
+            &engine::types::game_state::PersistedGameState::capture(runner.state().clone()),
+        )
+        .expect("persisted state serializes");
+        serde_json::from_str::<engine::types::game_state::PersistedGameState>(&persisted)
+            .expect("persisted state decodes")
+            .prepare_for_restore(
+                engine::types::game_state::PersistedRestoreFinalization::DeferUntilRehydrated,
+            )
+            .expect("the parked carrier, floor and stamp are coherent on restore");
+    }
+
     let mut scenario = GameScenario::new_n_player(3, 112);
     scenario.at_phase(Phase::PreCombatMain);
     add_artifact(&mut scenario, P1, "P1 Relic");
@@ -1420,29 +1507,712 @@ fn game_state_paused_on_the_per_opponent_choice_round_trips() {
     let meteor = add_meteor(&mut scenario);
     let mut runner = scenario.build();
     cast_from_exile(&mut runner, meteor);
-    for _ in 0..20 {
-        if matches!(
-            runner.state().waiting_for,
-            WaitingFor::ChooseFromZoneChoice { .. }
-        ) {
-            break;
+    advance_to_per_player_prompt(&mut runner);
+
+    assert_eq!(
+        order_candidates(&runner),
+        vec![P1, P2],
+        "reach: order prompt"
+    );
+    round_trip(
+        &runner,
+        &[
+            "\"Opponents\"",
+            "\"PerPlayerChoiceOrder\"",
+            "\"carrier\"",
+            "\"occurrence_floor\"",
+        ],
+    );
+
+    runner
+        .act(GameAction::ChooseZoneOpponentChooser { opponent: P2 })
+        .expect("order pick");
+    let frame = runner
+        .state()
+        .active_per_player_zone_choice()
+        .expect("reach: the pool prompt's frame is parked");
+    assert_eq!(frame.current, Some(P2), "reach: P2's pool is current");
+    round_trip(&runner, &["\"current\"", "\"carrier\""]);
+}
+
+/// A per-player frame persisted before `current` and `carrier` existed loads
+/// with both absent.
+#[test]
+fn legacy_per_player_frame_without_current_or_carrier_loads() {
+    let mut scenario = GameScenario::new_n_player(3, 113);
+    scenario.at_phase(Phase::PreCombatMain);
+    add_artifact(&mut scenario, P1, "P1 Relic");
+    add_artifact(&mut scenario, P2, "P2 Relic");
+    let meteor = add_meteor(&mut scenario);
+    let mut runner = scenario.build();
+    cast_from_exile(&mut runner, meteor);
+    advance_to_per_player_prompt(&mut runner);
+    let frame = runner
+        .state()
+        .active_per_player_zone_choice()
+        .expect("reach: a parked frame")
+        .clone();
+    let mut value = serde_json::to_value(&frame).expect("serialize frame");
+    let object = value.as_object_mut().expect("frame object");
+    assert!(
+        object.remove("carrier").is_some(),
+        "reach: carrier is written"
+    );
+    object.remove("current");
+    let legacy: engine::types::game_state::PendingPerPlayerZoneChoice =
+        serde_json::from_value(value).expect("a legacy frame loads");
+    assert_eq!(legacy.current, None);
+    assert_eq!(legacy.carrier, None);
+}
+
+// ---------------------------------------------------------------------------
+// CR 101.4c: the caster orders their own per-opponent choices
+// ---------------------------------------------------------------------------
+
+/// Give `taker` control of `id` through a transient control-changing effect
+/// that `taker` controls (so it ends when `taker` leaves, CR 800.4a).
+fn steal(runner: &mut GameRunner, id: ObjectId, taker: PlayerId) {
+    let state = runner.state_mut();
+    state.add_transient_continuous_effect(
+        id,
+        taker,
+        Duration::Permanent,
+        TargetFilter::SpecificObject { id },
+        vec![ContinuousModification::ChangeController],
+        None,
+    );
+    engine::game::layers::mark_layers_full(state);
+    engine::game::layers::evaluate_layers(state);
+    assert_eq!(
+        controller(runner, id),
+        taker,
+        "reach: {taker:?} controls {id:?}"
+    );
+}
+
+fn order(runner: &mut GameRunner, next: PlayerId) {
+    assert!(
+        order_candidates(runner).contains(&next),
+        "{next:?} is orderable"
+    );
+    runner
+        .act(GameAction::ChooseZoneOpponentChooser { opponent: next })
+        .expect("a legal order pick is accepted");
+}
+
+/// The outstanding pool prompt's candidates.
+fn pool(runner: &GameRunner) -> Vec<ObjectId> {
+    match &runner.state().waiting_for {
+        WaitingFor::ChooseFromZoneChoice { player, cards, .. } => {
+            assert_eq!(*player, P0, "the caster makes every choice");
+            sorted(cards.clone())
         }
-        runner.act(GameAction::PassPriority).expect("pass");
+        other => panic!("expected a pool prompt, got {other:?}"),
     }
+}
+
+fn pick(runner: &mut GameRunner, id: ObjectId) {
+    runner
+        .act(GameAction::SelectCards { cards: vec![id] })
+        .expect("a legal pick is accepted");
+}
+
+fn no_per_player_prompt(runner: &GameRunner) -> bool {
+    !matches!(
+        runner.state().waiting_for,
+        WaitingFor::ChooseFromZoneOpponentChooser { .. } | WaitingFor::ChooseFromZoneChoice { .. }
+    )
+}
+
+/// (a) CR 101.4c: the caster chooses a non-APNAP order — P2's pool first —
+/// and the prompts follow the chosen order.
+///
+/// REVERT PROBE: ignore the order answer (always take the first candidate)
+/// and P1's pool is presented first.
+#[test]
+fn caster_chooses_a_non_apnap_order() {
+    let mut scenario = GameScenario::new_n_player(3, 201);
+    scenario.at_phase(Phase::PreCombatMain);
+    let p1_art = add_artifact(&mut scenario, P1, "P1 Relic");
+    let p2_art = add_artifact(&mut scenario, P2, "P2 Relic");
+    let meteor = add_meteor(&mut scenario);
+    let mut runner = scenario.build();
+
+    cast_from_exile(&mut runner, meteor);
+    advance_to_per_player_prompt(&mut runner);
+    assert_eq!(
+        order_candidates(&runner),
+        vec![P1, P2],
+        "both opponents offered"
+    );
+    order(&mut runner, P2);
+    assert_eq!(
+        pool(&runner),
+        vec![p2_art],
+        "P2's pool comes first, as ordered"
+    );
+    pick(&mut runner, p2_art);
+    assert_eq!(
+        pool(&runner),
+        vec![p1_art],
+        "with one opponent left there is nothing to order"
+    );
+    pick(&mut runner, p1_art);
+    runner.advance_until_stack_empty();
+
+    assert_eq!(zone_of(&runner, p1_art), Some(Zone::Graveyard));
+    assert_eq!(zone_of(&runner, p2_art), Some(Zone::Graveyard));
+}
+
+/// (b1) Under the chosen order (P2 first), P1 concedes while P1's pool —
+/// which offers the artifact P1 stole from P2 — is outstanding. P1's control
+/// effect ends and the artifact returns to P2 (CR 800.4a), whose choice was
+/// already made: it is not selected, and survives. P1's stale prompt is
+/// discarded and the iteration finishes.
+///
+/// REVERT PROBE: drop the departure reconciliation and P1's stale pool prompt
+/// (still offering the returned artifact) stays outstanding.
+#[test]
+fn concession_after_the_ordered_pick_leaves_the_returned_artifact_unselected() {
+    let mut scenario = GameScenario::new_n_player(3, 202);
+    scenario.at_phase(Phase::PreCombatMain);
+    let stolen = add_artifact(&mut scenario, P2, "P2 Relic");
+    let p2_land = add_land(&mut scenario, P2, "P2 Land");
+    let meteor = add_meteor(&mut scenario);
+    let mut runner = scenario.build();
+    steal(&mut runner, stolen, P1);
+
+    cast_from_exile(&mut runner, meteor);
+    advance_to_per_player_prompt(&mut runner);
+    order(&mut runner, P2);
+    assert_eq!(
+        pool(&runner),
+        vec![p2_land],
+        "P2's pool excludes what P1 controls"
+    );
+    pick(&mut runner, p2_land);
+    assert_eq!(
+        pool(&runner),
+        vec![stolen],
+        "reach: P1's pool offers the stolen artifact"
+    );
+
+    runner
+        .act(GameAction::Concede { player_id: P1 })
+        .expect("a player may concede at any time");
+    assert!(
+        no_per_player_prompt(&runner),
+        "P1's stale pool prompt is discarded: {:?}",
+        runner.state().waiting_for
+    );
+    runner.advance_until_stack_empty();
+
+    assert_eq!(zone_of(&runner, p2_land), Some(Zone::Graveyard));
+    assert!(
+        on_battlefield(&runner, stolen),
+        "the returned artifact was not selected"
+    );
+    assert_eq!(controller(&runner, stolen), P2);
+}
+
+/// (b2) P1 concedes at the order prompt. The artifact P1 stole returns to P2
+/// (CR 800.4a), and P2's pool — now the only one — is presented directly and
+/// offers it.
+#[test]
+fn concession_at_the_order_prompt_returns_the_artifact_to_the_remaining_pool() {
+    let mut scenario = GameScenario::new_n_player(3, 203);
+    scenario.at_phase(Phase::PreCombatMain);
+    let stolen = add_artifact(&mut scenario, P2, "P2 Relic");
+    let p2_land = add_land(&mut scenario, P2, "P2 Land");
+    let meteor = add_meteor(&mut scenario);
+    let mut runner = scenario.build();
+    steal(&mut runner, stolen, P1);
+
+    cast_from_exile(&mut runner, meteor);
+    advance_to_per_player_prompt(&mut runner);
+    assert_eq!(
+        order_candidates(&runner),
+        vec![P1, P2],
+        "reach: order prompt"
+    );
+    runner
+        .act(GameAction::Concede { player_id: P1 })
+        .expect("a player may concede at any time");
+
+    assert_eq!(
+        pool(&runner),
+        sorted(vec![stolen, p2_land]),
+        "P2's pool is presented directly and includes the returned artifact"
+    );
+    pick(&mut runner, stolen);
+    runner.advance_until_stack_empty();
+    assert_eq!(zone_of(&runner, stolen), Some(Zone::Graveyard));
+    assert!(on_battlefield(&runner, p2_land));
+}
+
+/// (c) With nothing changing between the choices, every order destroys the
+/// same permanents.
+#[test]
+fn fixed_pools_give_the_same_result_in_every_order() {
+    let mut destroyed = Vec::new();
+    for first in [P1, P2] {
+        let mut scenario = GameScenario::new_n_player(3, 204);
+        scenario.at_phase(Phase::PreCombatMain);
+        let p1_art = add_artifact(&mut scenario, P1, "P1 Relic");
+        let p1_land = add_land(&mut scenario, P1, "P1 Land");
+        let p2_art = add_artifact(&mut scenario, P2, "P2 Relic");
+        let p2_land = add_land(&mut scenario, P2, "P2 Land");
+        let meteor = add_meteor(&mut scenario);
+        let mut runner = scenario.build();
+
+        cast_from_exile(&mut runner, meteor);
+        let prompts = resolve_with_order(
+            &mut runner,
+            |_, _| first,
+            |r, cards| {
+                vec![if controller(r, cards[0]) == P1 {
+                    p1_art
+                } else {
+                    p2_land
+                }]
+            },
+            |_, _| {},
+        );
+        assert_eq!(
+            pool_owner(&runner, &prompts[0]),
+            first,
+            "reach: ordered {first:?} first"
+        );
+        let gone: Vec<ObjectId> = [p1_art, p1_land, p2_art, p2_land]
+            .into_iter()
+            .filter(|id| zone_of(&runner, *id) == Some(Zone::Graveyard))
+            .collect();
+        destroyed.push(gone.len());
+        assert_eq!(gone, vec![p1_art, p2_land]);
+    }
+    assert_eq!(destroyed, vec![2, 2]);
+}
+
+/// With a single eligible opponent there is nothing to order: the pool is
+/// presented directly.
+#[test]
+fn a_single_eligible_opponent_gets_no_order_prompt() {
+    let mut scenario = GameScenario::new_n_player(3, 205);
+    scenario.at_phase(Phase::PreCombatMain);
+    let p1_art = add_artifact(&mut scenario, P1, "P1 Relic");
+    let meteor = add_meteor(&mut scenario);
+    let mut runner = scenario.build();
+
+    cast_from_exile(&mut runner, meteor);
+    advance_to_per_player_prompt(&mut runner);
+    assert_eq!(pool(&runner), vec![p1_art], "presented directly");
+}
+
+/// The AI's legal actions at the order prompt are exactly one order pick per
+/// eligible opponent.
+#[test]
+fn ai_legal_actions_at_the_order_prompt_are_the_eligible_opponents() {
+    let mut scenario = GameScenario::new_n_player(3, 206);
+    scenario.at_phase(Phase::PreCombatMain);
+    add_artifact(&mut scenario, P1, "P1 Relic");
+    add_artifact(&mut scenario, P2, "P2 Relic");
+    let meteor = add_meteor(&mut scenario);
+    let mut runner = scenario.build();
+
+    cast_from_exile(&mut runner, meteor);
+    advance_to_per_player_prompt(&mut runner);
+    let mut offered: Vec<PlayerId> = engine::ai_support::legal_actions(runner.state())
+        .into_iter()
+        .filter_map(|action| match action {
+            GameAction::ChooseZoneOpponentChooser { opponent } => Some(opponent),
+            _ => None,
+        })
+        .collect();
+    offered.sort();
+    assert_eq!(offered, vec![P1, P2]);
+}
+
+// ---------------------------------------------------------------------------
+// CR 800.4a: departures while the per-opponent choice is outstanding
+// ---------------------------------------------------------------------------
+
+/// E1 (owner leaves, controller stays): P1 controls an artifact P2 owns. P0
+/// is choosing from P1's pool when P2 concedes: P2's artifact leaves the game,
+/// so P1's refreshed pool holds only P1's own artifact, and the departed one
+/// cannot be submitted.
+///
+/// REVERT PROBE: reconcile only when `current` or a candidate leaves, and the
+/// departed artifact stays offered in P1's pool.
+#[test]
+fn an_offered_permanents_owner_leaving_refreshes_the_current_pool() {
+    let mut scenario = GameScenario::new_n_player(4, 211);
+    scenario.at_phase(Phase::PreCombatMain);
+    let p1_own = add_artifact(&mut scenario, P1, "P1 Relic");
+    let p2_owned = add_artifact(&mut scenario, P2, "P2 Relic Held By P1");
+    let p2_own = add_artifact(&mut scenario, P2, "P2 Relic");
+    let p3_art = add_artifact(&mut scenario, P3, "P3 Relic");
+    let meteor = add_meteor(&mut scenario);
+    let mut runner = scenario.build();
+    steal(&mut runner, p2_owned, P1);
+
+    cast_from_exile(&mut runner, meteor);
+    advance_to_per_player_prompt(&mut runner);
+    assert_eq!(order_candidates(&runner), vec![P1, P2, P3]);
+    order(&mut runner, P1);
+    assert_eq!(
+        pool(&runner),
+        sorted(vec![p1_own, p2_owned]),
+        "reach: P1's pool offers P2's artifact"
+    );
+
+    runner
+        .act(GameAction::Concede { player_id: P2 })
+        .expect("a player may concede at any time");
+    assert_eq!(
+        pool(&runner),
+        vec![p1_own],
+        "the departed owner's artifact is gone"
+    );
+    assert!(
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![p2_owned]
+            })
+            .is_err(),
+        "the departed artifact cannot be submitted"
+    );
+    pick(&mut runner, p1_own);
+    assert_eq!(
+        pool(&runner),
+        vec![p3_art],
+        "only P3 remains, so P3's pool is presented directly"
+    );
+    pick(&mut runner, p3_art);
+    runner.advance_until_stack_empty();
+
+    assert_eq!(zone_of(&runner, p1_own), Some(Zone::Graveyard));
+    assert_eq!(zone_of(&runner, p3_art), Some(Zone::Graveyard));
+    assert!(
+        !on_battlefield(&runner, p2_own),
+        "P2's objects left the game"
+    );
+}
+
+/// E1 mirror: a non-current player's control effect ends when they leave, so
+/// the current pool GROWS: P1's artifact that P2 held returns to P1 and is
+/// offered.
+#[test]
+fn a_control_effect_ending_adds_to_the_current_pool() {
+    let mut scenario = GameScenario::new_n_player(3, 212);
+    scenario.at_phase(Phase::PreCombatMain);
+    let p1_first = add_artifact(&mut scenario, P1, "P1 Relic");
+    let p1_second = add_artifact(&mut scenario, P1, "P1 Relic Held By P2");
+    let meteor = add_meteor(&mut scenario);
+    let mut runner = scenario.build();
+    steal(&mut runner, p1_second, P2);
+
+    cast_from_exile(&mut runner, meteor);
+    advance_to_per_player_prompt(&mut runner);
+    order(&mut runner, P1);
+    assert_eq!(
+        pool(&runner),
+        vec![p1_first],
+        "reach: P2 holds P1's second artifact"
+    );
+
+    runner
+        .act(GameAction::Concede { player_id: P2 })
+        .expect("a player may concede at any time");
+    assert_eq!(
+        pool(&runner),
+        sorted(vec![p1_first, p1_second]),
+        "the returned artifact joins P1's pool"
+    );
+    pick(&mut runner, p1_second);
+    runner.advance_until_stack_empty();
+    assert_eq!(zone_of(&runner, p1_second), Some(Zone::Graveyard));
+    assert!(on_battlefield(&runner, p1_first));
+}
+
+/// E1: a departure that empties a candidate's pool collapses the order prompt
+/// — with one eligible opponent left, that pool is presented directly.
+#[test]
+fn a_departure_that_empties_a_candidate_collapses_the_order_prompt() {
+    let mut scenario = GameScenario::new_n_player(4, 213);
+    scenario.at_phase(Phase::PreCombatMain);
+    let p1_art = add_artifact(&mut scenario, P1, "P1 Relic");
+    let p2_owned = add_artifact(&mut scenario, P2, "P2 Relic Held By P3");
+    let meteor = add_meteor(&mut scenario);
+    let mut runner = scenario.build();
+    steal(&mut runner, p2_owned, P3);
+
+    cast_from_exile(&mut runner, meteor);
+    advance_to_per_player_prompt(&mut runner);
+    assert_eq!(
+        order_candidates(&runner),
+        vec![P1, P3],
+        "reach: P2 controls nothing"
+    );
+    runner
+        .act(GameAction::Concede { player_id: P2 })
+        .expect("a player may concede at any time");
+    assert_eq!(
+        pool(&runner),
+        vec![p1_art],
+        "P3's pool emptied; P1's is presented"
+    );
+}
+
+/// A departure that changes no pool leaves the outstanding prompt unchanged.
+#[test]
+fn an_unrelated_departure_leaves_the_prompt_unchanged() {
+    let mut scenario = GameScenario::new_n_player(4, 214);
+    scenario.at_phase(Phase::PreCombatMain);
+    add_artifact(&mut scenario, P1, "P1 Relic");
+    add_artifact(&mut scenario, P2, "P2 Relic");
+    let meteor = add_meteor(&mut scenario);
+    let mut runner = scenario.build();
+
+    cast_from_exile(&mut runner, meteor);
+    advance_to_per_player_prompt(&mut runner);
+    assert_eq!(
+        order_candidates(&runner),
+        vec![P1, P2],
+        "reach: P3 has nothing"
+    );
+    let prompt = runner.state().waiting_for.clone();
+    let frame = runner.state().active_per_player_zone_choice().cloned();
+    runner
+        .act(GameAction::Concede { player_id: P3 })
+        .expect("a player may concede at any time");
+    assert_eq!(runner.state().waiting_for, prompt);
+    let mut expected = frame.expect("reach: a parked frame");
+    expected.remaining_players.retain(|&player| player != P3);
+    assert_eq!(
+        runner.state().active_per_player_zone_choice().cloned(),
+        Some(expected),
+        "the frame is unchanged except that the departed player is no longer iterated"
+    );
+}
+
+/// E2: the caster concedes at the order prompt. The resolution is abandoned
+/// as one occurrence: no further choice, no destroy, priority passes on, and
+/// nothing revives it later.
+///
+/// REVERT PROBE: drop the departure abandonment and only the generic repoint
+/// runs — the frame stays parked under a `Priority` prompt.
+#[test]
+fn caster_conceding_at_the_order_prompt_abandons_the_resolution() {
+    let mut scenario = GameScenario::new_n_player(3, 221);
+    scenario.at_phase(Phase::PreCombatMain);
+    let p1_art = add_artifact(&mut scenario, P1, "P1 Relic");
+    let p2_art = add_artifact(&mut scenario, P2, "P2 Relic");
+    let meteor = add_meteor(&mut scenario);
+    let mut runner = scenario.build();
+
+    cast_from_exile(&mut runner, meteor);
+    advance_to_per_player_prompt(&mut runner);
+    assert_eq!(
+        order_candidates(&runner),
+        vec![P1, P2],
+        "reach: order prompt"
+    );
+    runner
+        .act(GameAction::Concede { player_id: P0 })
+        .expect("a player may concede at any time");
+
+    assert!(runner.state().active_per_player_zone_choice().is_none());
+    assert!(runner.state().active_ability_continuation().is_none());
+    assert!(runner.state().resolving_stack_entry.is_none());
+    match runner.state().waiting_for {
+        WaitingFor::Priority { player } => assert_ne!(player, P0),
+        ref other => panic!("priority passes on, got {other:?}"),
+    }
+    runner.advance_until_stack_empty();
+    assert!(on_battlefield(&runner, p1_art), "no destroy");
+    assert!(on_battlefield(&runner, p2_art), "no destroy");
+    assert!(no_per_player_prompt(&runner));
+}
+
+/// E2: the caster concedes at a pool prompt — the same abandonment.
+#[test]
+fn caster_conceding_at_a_pool_prompt_abandons_the_resolution() {
+    let mut scenario = GameScenario::new_n_player(3, 222);
+    scenario.at_phase(Phase::PreCombatMain);
+    let p1_art = add_artifact(&mut scenario, P1, "P1 Relic");
+    let p2_art = add_artifact(&mut scenario, P2, "P2 Relic");
+    let meteor = add_meteor(&mut scenario);
+    let mut runner = scenario.build();
+
+    cast_from_exile(&mut runner, meteor);
+    advance_to_per_player_prompt(&mut runner);
+    order(&mut runner, P1);
+    pick(&mut runner, p1_art);
+    assert_eq!(pool(&runner), vec![p2_art], "reach: P2's pool outstanding");
+    runner
+        .act(GameAction::Concede { player_id: P0 })
+        .expect("a player may concede at any time");
+
+    assert!(runner.state().active_per_player_zone_choice().is_none());
+    assert!(runner.state().resolving_stack_entry.is_none());
+    runner.advance_until_stack_empty();
+    assert!(
+        on_battlefield(&runner, p1_art),
+        "the earlier pick is never destroyed"
+    );
+    assert!(on_battlefield(&runner, p2_art));
+    assert!(no_per_player_prompt(&runner));
+}
+
+/// E2 terminal: the last opponent concedes at their pool prompt — the game is
+/// over, and no prompt replaces `GameOver`.
+///
+/// REVERT PROBE: run the reconciliation before the game-over decision and a
+/// per-player prompt replaces `GameOver`.
+#[test]
+fn last_opponent_conceding_ends_the_game_with_no_prompt() {
+    let mut scenario = GameScenario::new_n_player(2, 223);
+    scenario.at_phase(Phase::PreCombatMain);
+    add_artifact(&mut scenario, P1, "P1 Relic");
+    let meteor = add_meteor(&mut scenario);
+    let mut runner = scenario.build();
+
+    cast_from_exile(&mut runner, meteor);
+    advance_to_per_player_prompt(&mut runner);
     assert!(matches!(
         runner.state().waiting_for,
         WaitingFor::ChooseFromZoneChoice { .. }
     ));
-
-    let json = serde_json::to_string(runner.state()).expect("serialize");
-    assert!(
-        json.contains("\"Opponents\""),
-        "the new population is written"
-    );
-    let back: GameState = serde_json::from_str(&json).expect("deserialize");
+    runner
+        .act(GameAction::Concede { player_id: P1 })
+        .expect("a player may concede at any time");
     assert_eq!(
-        serde_json::to_string(&back).expect("re-serialize"),
-        json,
-        "round trip is lossless"
+        runner.state().waiting_for,
+        WaitingFor::GameOver { winner: Some(P0) }
     );
+}
+
+/// E2 terminal, batched: both opponents leave in one simultaneous elimination
+/// at the order prompt. The game is over and no prompt replaces `GameOver`.
+#[test]
+fn simultaneous_departure_of_every_opponent_ends_the_game_with_no_prompt() {
+    let mut scenario = GameScenario::new_n_player(3, 224);
+    scenario.at_phase(Phase::PreCombatMain);
+    add_artifact(&mut scenario, P1, "P1 Relic");
+    add_artifact(&mut scenario, P2, "P2 Relic");
+    let meteor = add_meteor(&mut scenario);
+    let mut runner = scenario.build();
+
+    cast_from_exile(&mut runner, meteor);
+    advance_to_per_player_prompt(&mut runner);
+    assert_eq!(
+        order_candidates(&runner),
+        vec![P1, P2],
+        "reach: order prompt"
+    );
+    engine::game::elimination::eliminate_players_simultaneously(
+        runner.state_mut(),
+        &[P1, P2],
+        &mut Vec::new(),
+    );
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::GameOver { winner: Some(P0) }
+    );
+}
+
+/// E2 control: a departure while no per-player choice is outstanding leaves
+/// the prompt to the generic elimination path.
+#[test]
+fn a_departure_without_a_per_player_choice_is_untouched() {
+    let mut scenario = GameScenario::new_n_player(3, 225);
+    scenario.at_phase(Phase::PreCombatMain);
+    let meteor = add_meteor(&mut scenario);
+    let mut runner = scenario.build();
+    cast_from_hand(&mut runner, meteor);
+    let before = runner.state().waiting_for.clone();
+    assert!(matches!(before, WaitingFor::Priority { player } if player == P0));
+    runner
+        .act(GameAction::Concede { player_id: P2 })
+        .expect("a player may concede at any time");
+    assert_eq!(runner.state().waiting_for, before);
+}
+
+/// T1 (CR 800.4a), production path: "For each land you control, for each
+/// opponent, choose an artifact that player controls." parses to `repeat_for`
+/// (P0's two lands) over the per-opponent choice, so the first iteration parks
+/// its per-player frame above a `RepeatFor` driver. When the caster concedes
+/// at the first prompt, the whole occurrence — choice frame and repeat driver
+/// — is retired: no panic, no second iteration, nothing revived.
+#[test]
+fn caster_conceding_under_a_repeated_choice_retires_the_repeat_driver() {
+    const TEXT: &str =
+        "For each land you control, for each opponent, choose an artifact that player controls.";
+    let parsed = parse(TEXT, "Repeated Probe", &[], &["Sorcery"]);
+    assert!(
+        all_defs(&parsed).iter().any(|def| def.repeat_for.is_some()
+            && matches!(
+                &*def.effect,
+                Effect::ChooseFromZone {
+                    zone_owner: ZoneOwner::Each(PerPlayerScope::Opponents),
+                    ..
+                }
+            )),
+        "reach: the phrase parses to a repeated per-opponent choice"
+    );
+
+    let mut scenario = GameScenario::new_n_player(4, 231);
+    scenario.at_phase(Phase::PreCombatMain);
+    add_land(&mut scenario, P0, "P0 Land A");
+    add_land(&mut scenario, P0, "P0 Land B");
+    let p1_art = add_artifact(&mut scenario, P1, "P1 Relic");
+    let p2_art = add_artifact(&mut scenario, P2, "P2 Relic");
+    let p3_art = add_artifact(&mut scenario, P3, "P3 Relic");
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Repeated Probe", false, TEXT)
+        .id();
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast");
+    advance_to_per_player_prompt(&mut runner);
+
+    let kinds: Vec<_> = runner
+        .state()
+        .resolution_stack
+        .iter()
+        .map(engine::types::resolution::ResolutionFrame::kind)
+        .collect();
+    assert_eq!(
+        kinds.last(),
+        Some(&engine::types::resolution::FrameKind::PerPlayerZoneChoice),
+        "reach: the per-player frame is active: {kinds:?}"
+    );
+    assert!(
+        kinds.contains(&engine::types::resolution::FrameKind::RepeatFor),
+        "reach: a repeat driver is parked beneath it: {kinds:?}"
+    );
+
+    runner
+        .act(GameAction::Concede { player_id: P0 })
+        .expect("a player may concede at any time");
+    assert!(
+        runner.state().resolution_stack.is_empty(),
+        "the whole occurrence is retired"
+    );
+    assert!(runner.state().resolving_stack_entry.is_none());
+    runner.advance_until_stack_empty();
+    assert!(
+        no_per_player_prompt(&runner),
+        "no second iteration is revived"
+    );
+    for id in [p1_art, p2_art, p3_art] {
+        assert!(on_battlefield(&runner, id));
+    }
 }

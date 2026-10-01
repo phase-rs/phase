@@ -35,20 +35,35 @@ use super::effects;
 use super::targeting;
 use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 
+/// A second carrier cannot begin while one is installed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ResolutionCarrierError {
+    #[error("a resolution carrier is already installed")]
+    AlreadyResolving,
+}
+
 /// Transfers an already-popped stack entry into the active resolution carrier.
+///
+/// CR 608.2: Exactly one stack object resolves at a time. Refuses, leaving the
+/// installed carrier and its firing untouched, when one is already resolving.
+/// Records the resolution stack's occurrence floor: every frame pushed above it
+/// until the carrier finishes is this occurrence's own work.
 pub(super) fn begin_resolving_stack_entry(
     state: &mut GameState,
     entry: StackEntry,
     firing: Option<TriggerFiring>,
-) {
-    debug_assert!(state.resolving_stack_entry.is_none());
-    debug_assert!(state.resolving_trigger_firing.is_none());
+) -> Result<(), ResolutionCarrierError> {
+    if state.resolving_stack_entry.is_some() || state.resolving_trigger_firing.is_some() {
+        return Err(ResolutionCarrierError::AlreadyResolving);
+    }
     debug_assert_eq!(
         matches!(&entry.kind, StackEntryKind::TriggeredAbility { .. }),
         firing.is_some()
     );
     state.resolving_stack_entry = Some(entry);
     state.resolving_trigger_firing = firing;
+    state.resolution_stack.begin_occurrence_floor();
+    Ok(())
 }
 
 /// Settles the active resolution carrier after its owning resolution completes.
@@ -58,6 +73,7 @@ pub(super) fn finish_resolving_stack_entry(
 ) {
     let entry = state.resolving_stack_entry.take();
     let firing = state.resolving_trigger_firing.take();
+    state.resolution_stack.clear_occurrence_floor();
     // CR 608.2c: the resolving stack entry owns every nested instruction-result
     // occurrence, including ones parked across replacement choices.
     state.return_result_frames.clear();
@@ -95,6 +111,51 @@ fn record_illegal_target_slots(state: &mut GameState, validated: Option<&Resolve
             illegal_declared_target_slots(root, validated)
         });
     }
+}
+
+/// CR 800.4a: The resolution carrier whose controller left the game is
+/// abandoned as one occurrence. Only the frames above its occurrence floor —
+/// the work this carrier created — are retired; frames at or below the floor
+/// survive untouched. `stamp` is the carrier id the abandoning frame recorded
+/// when it parked; any disagreement with the live carrier is a refusal, as is a
+/// missing or broken floor. A refusal retires and finishes nothing.
+pub(super) fn abandon_departed_resolution_occurrence(
+    state: &mut GameState,
+    stamp: ObjectId,
+    disposition: super::lifecycle::DelayedTerminalDisposition,
+) -> Result<(), DepartedOccurrenceRefusal> {
+    match state.resolving_stack_entry.as_ref() {
+        None => return Err(DepartedOccurrenceRefusal::NoCarrier),
+        Some(entry) if entry.id != stamp => {
+            return Err(DepartedOccurrenceRefusal::StampMismatch {
+                stamp,
+                carrier: entry.id,
+            })
+        }
+        Some(_) => {}
+    }
+    state
+        .resolution_stack
+        .retire_frames_above_occurrence_floor()
+        .map_err(DepartedOccurrenceRefusal::Floor)?;
+    super::priority::clear_priority_passes(state);
+    finish_resolving_stack_entry(state, disposition);
+    state.resolution_source_relatch = None;
+    state.deferred_entry_events.clear();
+    state.pending_token_battlefield_entry = None;
+    Ok(())
+}
+
+/// Why a departed occurrence was not abandoned. Every variant leaves the
+/// carrier and the resolution stack exactly as they were.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum DepartedOccurrenceRefusal {
+    #[error("no resolution carrier is installed")]
+    NoCarrier,
+    #[error("frame carrier stamp {stamp:?} does not match the live carrier {carrier:?}")]
+    StampMismatch { stamp: ObjectId, carrier: ObjectId },
+    #[error("occurrence floor refused retirement: {0}")]
+    Floor(crate::types::resolution::OccurrenceRetireRefusal),
 }
 
 /// Abandon the currently resolving family as one lifecycle unit. Prompt owners
@@ -1466,11 +1527,17 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // begin resolving. A parked continuation remains live and therefore still
     // fails the invariant below rather than being silently cleared.
     super::engine::settle_resolving_stack_entry_after_continuation_resume(state);
-    // CR 707.10: A prior resolution must have settled before another stack
-    // object can begin resolving. A parked continuation owns its carrier until
-    // its own completion or abort path; silently clearing it here would lose a
-    // receipt-eligible delayed firing.
-    debug_assert!(state.resolving_stack_entry.is_none());
+    // CR 707.10 + CR 608.2: A prior resolution must have settled before another
+    // stack object can begin resolving. A parked continuation owns its carrier
+    // until its own completion or abort path; silently clearing it here would
+    // lose a receipt-eligible delayed firing. This holds in release builds too:
+    // with a live carrier the top entry stays on the stack and nothing begins.
+    if state.resolving_stack_entry.is_some() {
+        tracing::error!(
+            "resolve_top refused: a resolution carrier is still installed; the stack top was not popped"
+        );
+        return;
+    }
     debug_assert!(state.resolving_trigger_firing.is_none());
     // CR 400.7j: the self-move re-latch is resolution-scoped; clear it alongside
     // `resolving_stack_entry` so it never leaks into the next resolution.
@@ -1493,7 +1560,8 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     };
     // CR 603.4 + CR 608.2b: transfer the exact firing before any branch can
     // abort, resolve, or park this popped triggered ability.
-    begin_resolving_stack_entry(state, entry.clone(), trigger_firing);
+    begin_resolving_stack_entry(state, entry.clone(), trigger_firing)
+        .expect("the carrier slot was checked empty before popping");
 
     // CR 113.3b: Activated keyword abilities (Equip / Crew / Saddle / Station)
     // resolve via their typed payload — they have no ResolvedAbility/targets

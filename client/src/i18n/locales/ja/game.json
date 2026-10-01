@@ -2051,7 +2051,9 @@
   },
   "zoneOpponentChooser": {
     "title": "対戦相手を選択",
-    "subtitle": "選択を行う対戦相手を選択"
+    "subtitle": "選択を行う対戦相手を選択",
+    "orderTitle": "次のプレイヤーを選択",
+    "orderSubtitle": "次に選択を行う対象のプレイヤーを選択"
   },
   "pileOpponent": {
     "title": "対戦相手を選択",

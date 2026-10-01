@@ -37,7 +37,7 @@
 use engine::game::scenario::{GameRunner, GameScenario};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
-use engine::types::game_state::{CastPaymentMode, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, WaitingFor, ZoneOpponentChooserPurpose};
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -263,11 +263,28 @@ fn breach_reanimates_only_chosen_cards_under_caster_as_phyrexian() {
     assert_eq!(zone_of(&runner, p0_milled_creature), Zone::Graveyard);
     assert_eq!(zone_of(&runner, p1_milled_creature), Zone::Graveyard);
 
-    // Answer each player's pick (caster chooses). APNAP order from P0 means P0's
-    // graveyard is prompted first, then P1's.
-    answer_pick(&mut runner, P0, p0_chosen);
-    advance_to_choice_or_empty(&mut runner);
+    // CR 101.4c: the caster makes every pick, so the caster chooses their
+    // order. Both graveyards hold a candidate, so the first prompt is the
+    // caster's order prompt — and the caster's own graveyard is a candidate
+    // ("for each player"). Choose P1's graveyard first (not APNAP).
+    match &runner.state().waiting_for {
+        WaitingFor::ChooseFromZoneOpponentChooser {
+            player,
+            candidates,
+            purpose: ZoneOpponentChooserPurpose::PerPlayerChoiceOrder,
+            ..
+        } => {
+            assert_eq!(*player, P0, "the caster orders their own choices");
+            assert_eq!(candidates, &vec![P0, P1], "both graveyards are offered");
+        }
+        other => panic!("expected the caster's order prompt, got {other:?}"),
+    }
+    runner
+        .act(GameAction::ChooseZoneOpponentChooser { opponent: P1 })
+        .expect("ordering P1 first is legal");
     answer_pick(&mut runner, P0, p1_chosen);
+    advance_to_choice_or_empty(&mut runner);
+    answer_pick(&mut runner, P0, p0_chosen);
 
     runner.advance_until_stack_empty();
 
@@ -330,4 +347,245 @@ fn breach_reanimates_only_chosen_cards_under_caster_as_phyrexian() {
         ),
         "no per-player choice should remain pending"
     );
+}
+
+/// CR 101.4c + CR 707.10: a COPY of Breach the Multiverse resolves its own
+/// per-player iteration under its own resolution carrier (the copy's stack
+/// entry), then the original resolves under its own. Each iteration is
+/// admitted, stamped with the carrier resolving it, and ordered by the caster
+/// — whose own graveyard is a candidate. A validation control for the carrier
+/// admission rule, not evidence of a known mismatch.
+#[test]
+fn copied_breach_resolves_each_iteration_under_its_own_carrier() {
+    const TWINCAST: &str =
+        "Copy target instant or sorcery spell. You may choose new targets for the copy.";
+    let mut scenario = GameScenario::new_n_player(2, 3303);
+    scenario.at_phase(Phase::PreCombatMain);
+    for &pid in &[P0, P1] {
+        let names: Vec<String> = (0..20).map(|i| format!("Filler {i}")).collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        scenario.with_library_top(pid, &names);
+    }
+    let p0_creatures: Vec<ObjectId> = (0..2)
+        .map(|i| {
+            scenario
+                .add_creature_to_graveyard(P0, &format!("P0 Creature {i}"), 2, 2)
+                .id()
+        })
+        .collect();
+    let p1_creatures: Vec<ObjectId> = (0..2)
+        .map(|i| {
+            scenario
+                .add_creature_to_graveyard(P1, &format!("P1 Creature {i}"), 2, 2)
+                .id()
+        })
+        .collect();
+    let breach = scenario
+        .add_spell_to_hand_from_oracle(P0, "Breach the Multiverse", false, BREACH_ORACLE)
+        .id();
+    let twincast = scenario
+        .add_spell_to_hand_from_oracle(P0, "Twincast", true, TWINCAST)
+        .id();
+    let mut runner = scenario.build();
+
+    let breach_card = runner.state().objects[&breach].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: breach,
+            card_id: breach_card,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("casting Breach must be accepted");
+    let twincast_card = runner.state().objects[&twincast].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: twincast,
+            card_id: twincast_card,
+            targets: vec![breach],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("casting Twincast on Breach must be accepted");
+
+    let mut carriers = Vec::new();
+    for _ in 0..400 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::ChooseFromZoneOpponentChooser {
+                player,
+                candidates,
+                purpose: ZoneOpponentChooserPurpose::PerPlayerChoiceOrder,
+                ..
+            } => {
+                assert_eq!(player, P0);
+                assert_eq!(
+                    candidates,
+                    vec![P0, P1],
+                    "the caster's own graveyard is offered"
+                );
+                let entry = runner
+                    .state()
+                    .resolving_stack_entry
+                    .clone()
+                    .expect("an installed carrier resolves the iteration");
+                let stamp = runner
+                    .state()
+                    .active_per_player_zone_choice()
+                    .and_then(|frame| frame.carrier);
+                assert_eq!(stamp, Some(entry.id), "stamped with the resolving carrier");
+                carriers.push(entry.id);
+                runner
+                    .act(GameAction::ChooseZoneOpponentChooser { opponent: P1 })
+                    .expect("order pick");
+            }
+            WaitingFor::ChooseFromZoneChoice { cards, .. } => {
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: vec![cards[0]],
+                    })
+                    .expect("pick");
+            }
+            WaitingFor::OptionalEffectChoice { .. } => {
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: false })
+                    .expect("keep the copy's targets");
+            }
+            WaitingFor::Priority { .. } if !runner.state().stack.is_empty() => {
+                runner.act(GameAction::PassPriority).expect("pass");
+            }
+            _ => break,
+        }
+    }
+
+    assert_eq!(
+        carriers.len(),
+        2,
+        "the copy and the original each iterate: {carriers:?}"
+    );
+    assert_ne!(carriers[0], carriers[1], "each under its own carrier");
+    assert_eq!(
+        carriers[1], breach,
+        "the original resolves under its own stack entry"
+    );
+    let reanimated = p0_creatures
+        .iter()
+        .chain(p1_creatures.iter())
+        .filter(|id| runner.state().battlefield.contains(id))
+        .count();
+    assert_eq!(reanimated, 4, "one creature per graveyard per resolution");
+}
+
+/// CR 101.4c: "for each player" includes the caster, so the AI's order picks
+/// include the caster's own graveyard.
+#[test]
+fn ai_order_picks_include_the_casters_own_graveyard() {
+    let mut scenario = GameScenario::new_n_player(2, 3304);
+    scenario.at_phase(Phase::PreCombatMain);
+    for &pid in &[P0, P1] {
+        let names: Vec<String> = (0..10).map(|i| format!("Filler {i}")).collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        scenario.with_library_top(pid, &names);
+    }
+    let _ = scenario
+        .add_creature_to_graveyard(P0, "P0 Creature", 2, 2)
+        .id();
+    let _ = scenario
+        .add_creature_to_graveyard(P1, "P1 Creature", 2, 2)
+        .id();
+    let breach = scenario
+        .add_spell_to_hand_from_oracle(P0, "Breach the Multiverse", false, BREACH_ORACLE)
+        .id();
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&breach].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: breach,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("casting Breach must be accepted");
+    advance_to_choice_or_empty(&mut runner);
+
+    let mut offered: Vec<PlayerId> = engine::ai_support::legal_actions(runner.state())
+        .into_iter()
+        .filter_map(|action| match action {
+            GameAction::ChooseZoneOpponentChooser { opponent } => Some(opponent),
+            _ => None,
+        })
+        .collect();
+    offered.sort();
+    assert_eq!(offered, vec![P0, P1]);
+}
+
+/// CR 101.4c: Ghouls' Night Out ("For each player, choose a creature card in
+/// that player's graveyard. Put those cards onto the battlefield under your
+/// control. ...") is the same controller-chosen per-player iteration. In a
+/// three-player game the caster orders all three graveyards, in a non-APNAP
+/// order, and every chosen creature enters under the caster's control.
+#[test]
+fn ghouls_night_out_caster_orders_every_graveyard() {
+    const GHOULS_NIGHT_OUT: &str = "For each player, choose a creature card in that player's \
+         graveyard. Put those cards onto the battlefield under your control. They're black \
+         Zombies in addition to their other colors and types and they gain decayed. (A creature \
+         with decayed can't block. When it attacks, sacrifice it at end of combat.)";
+    const P2: PlayerId = PlayerId(2);
+    let mut scenario = GameScenario::new_n_player(3, 3305);
+    scenario.at_phase(Phase::PreCombatMain);
+    let p0_dead = scenario
+        .add_creature_to_graveyard(P0, "P0 Creature", 2, 2)
+        .id();
+    let p1_dead = scenario
+        .add_creature_to_graveyard(P1, "P1 Creature", 2, 2)
+        .id();
+    let p2_dead = scenario
+        .add_creature_to_graveyard(P2, "P2 Creature", 2, 2)
+        .id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Ghouls' Night Out", false, GHOULS_NIGHT_OUT)
+        .id();
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("casting Ghouls' Night Out must be accepted");
+    advance_to_choice_or_empty(&mut runner);
+
+    let order_prompt = |runner: &GameRunner| match &runner.state().waiting_for {
+        WaitingFor::ChooseFromZoneOpponentChooser {
+            player,
+            candidates,
+            purpose: ZoneOpponentChooserPurpose::PerPlayerChoiceOrder,
+            ..
+        } => {
+            assert_eq!(*player, P0, "the caster orders their own choices");
+            candidates.clone()
+        }
+        other => panic!("expected the caster's order prompt, got {other:?}"),
+    };
+    assert_eq!(order_prompt(&runner), vec![P0, P1, P2]);
+    runner
+        .act(GameAction::ChooseZoneOpponentChooser { opponent: P2 })
+        .expect("ordering P2 first is legal");
+    answer_pick(&mut runner, P0, p2_dead);
+    assert_eq!(
+        order_prompt(&runner),
+        vec![P0, P1],
+        "two graveyards remain to order"
+    );
+    runner
+        .act(GameAction::ChooseZoneOpponentChooser { opponent: P0 })
+        .expect("ordering the caster's own graveyard next is legal");
+    answer_pick(&mut runner, P0, p0_dead);
+    answer_pick(&mut runner, P0, p1_dead);
+    runner.advance_until_stack_empty();
+
+    for creature in [p0_dead, p1_dead, p2_dead] {
+        assert_eq!(zone_of(&runner, creature), Zone::Battlefield);
+        assert_eq!(controller_of(&runner, creature), P0);
+    }
 }

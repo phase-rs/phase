@@ -2046,7 +2046,9 @@
   },
   "zoneOpponentChooser": {
     "title": "Choose Opponent",
-    "subtitle": "Choose which opponent makes the choice."
+    "subtitle": "Choose which opponent makes the choice.",
+    "orderTitle": "Choose Next Player",
+    "orderSubtitle": "Choose whose selection to make next."
   },
   "pileOpponent": {
     "title": "Choose Opponent",
