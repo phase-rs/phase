@@ -1005,6 +1005,13 @@ pub fn resolve(
                 hit_card: target_ids[0],
                 mana_spend_permission,
                 graveyard_replacement: cast_from_zone_graveyard_destination(ability),
+                // CR 608.2c + CR 611.2a: the gains-modifications rider rides
+                // the offer → accept request → elected `ExileWithAltCost`
+                // permission; `selected_exile_alt_cost_permission_enters_with_
+                // modifications` is the single reader and the finalize
+                // application (`casting_costs.rs`) is its only application
+                // point.
+                enters_with_modifications: cast_from_zone_enters_with_modifications(ability),
                 cast_transformed,
                 // CR 601.2b: "by paying {R}{R} in addition to its other costs"
                 // rides the offer and is charged on accept (Ogre Battlecaster).
@@ -1042,6 +1049,11 @@ pub fn resolve(
     // re-offer pipeline casts selected spells one at a time without priority.
     let is_per_opponent_fanout = crate::game::ability_utils::is_per_opponent_target_fanout(ability);
     let graveyard_destination = cast_from_zone_graveyard_destination(ability);
+    // CR 608.2c + CR 611.2a: snapshot the gains-modifications rider from the
+    // ORIGINAL ability — the clone's `sub_ability` is cleared below when the
+    // destination rider is translated, so a snapshot taken after the clear
+    // would drop the rider (Strago and Relm class).
+    let enters_with_modifications = cast_from_zone_enters_with_modifications(ability);
     if driver.is_during_resolution()
         && without_paying
         && alt_ability_cost.is_none()
@@ -1087,6 +1099,7 @@ pub fn resolve(
                 max_total_mv: None,
                 zones,
                 graveyard_replacement: graveyard_destination,
+                enters_with_modifications,
                 face_policy,
             },
             events,
@@ -1360,6 +1373,11 @@ fn open_resolution_cast_window(
     let count = bounds.max_casts;
 
     let graveyard_replacement = cast_from_zone_graveyard_destination(ability);
+    // CR 608.2c + CR 611.2a: snapshot the gains-modifications rider from the
+    // ability before the clone's effect is replaced; every cast of the batch
+    // window receives it through the per-cast request and the re-offer
+    // carrier.
+    let enters_with_modifications = cast_from_zone_enters_with_modifications(ability);
     let mut window = ability.clone();
     window.effect = Effect::FreeCastFromZones {
         count,
@@ -1387,6 +1405,7 @@ fn open_resolution_cast_window(
             max_total_mv: bounds.max_total_mv,
             zones,
             graveyard_replacement,
+            enters_with_modifications,
             face_policy,
         },
         events,
@@ -5498,5 +5517,416 @@ mod tests {
             1,
             "the shared pile is the controller's library whoever owns a card"
         );
+    }
+
+    /// The gains-modifications rider sub-ability the parser attaches to a
+    /// `CastFromZone` ("If you cast a [quality] spell this way, it gains …",
+    /// Strago and Relm).
+    fn gains_rider_sub_ability(source: ObjectId) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::AddPendingEntersModifications {
+                modifications: vec![crate::types::ability::ContinuousModification::AddKeyword {
+                    keyword: crate::types::keywords::Keyword::Haste,
+                }],
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+    }
+
+    /// A paid during-resolution `CastFromZone` grant for `target`.
+    fn paid_during_resolution_grant(source: ObjectId, target: ObjectId) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::CastFromZone {
+                target: TargetFilter::Any,
+                without_paying_mana_cost: false,
+                mode: CardPlayMode::Cast,
+                cast_transformed: false,
+                alt_ability_cost: None,
+                constraint: None,
+                duration: None,
+                driver: CastFromZoneDriver::DuringResolution,
+                mana_spend_permission: None,
+                additional_cost: None,
+                cast_cost_modifier: None,
+            },
+            vec![TargetRef::Object(target)],
+            source,
+            PlayerId(0),
+        )
+    }
+
+    /// CR 608.2c + CR 611.2a (row 6.1): the paid during-resolution mint
+    /// snapshots the ability's gains-modifications rider beside the destination
+    /// rider, so the accept can thread it into the elected permission.
+    /// Reverting the mint leaves the offer's rider empty.
+    #[test]
+    fn paid_offer_snapshots_the_gains_rider() {
+        let mut state = make_test_state();
+        let source = create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(0),
+            "Rider Source".to_string(),
+            Zone::Battlefield,
+        );
+        let target = add_card_to_graveyard(&mut state, PlayerId(0), CardId(901));
+
+        // Positive — rider at depth 1 under the destination rider (the Tomb
+        // nesting shape) so BOTH snapshots are exercised on one offer.
+        let mut grant = paid_during_resolution_grant(source, target);
+        let mut destination_rider = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Exile,
+                target: TargetFilter::ParentTarget,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        destination_rider.sub_ability = Some(Box::new(gains_rider_sub_ability(source)));
+        grant.sub_ability = Some(Box::new(destination_rider));
+        let mut events = vec![];
+        resolve(&mut state, &grant, &mut events).unwrap();
+        match &state.waiting_for {
+            WaitingFor::CastOffer {
+                kind:
+                    crate::types::game_state::CastOfferKind::GraveyardPaidCast {
+                        hit_card,
+                        graveyard_replacement,
+                        enters_with_modifications,
+                        ..
+                    },
+                ..
+            } => {
+                assert_eq!(*hit_card, target, "reach guard: the paid offer was minted");
+                assert_eq!(
+                    graveyard_replacement.as_ref(),
+                    Some(&SpellStackToGraveyardReplacement::Exile),
+                    "the destination rider still snapshots"
+                );
+                assert_eq!(
+                    enters_with_modifications,
+                    &vec![crate::types::ability::ContinuousModification::AddKeyword {
+                        keyword: crate::types::keywords::Keyword::Haste,
+                    }],
+                    "the mint must snapshot the gains rider from the sub chain"
+                );
+            }
+            other => panic!("expected GraveyardPaidCast, got {other:?}"),
+        }
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::AddPendingEntersModifications,
+                    ..
+                }
+            )),
+            "the rider is metadata and must never resolve standalone at mint"
+        );
+
+        // Negative (paired) — a rider-less sibling mints an empty rider.
+        let mut state = make_test_state();
+        let source = create_object(
+            &mut state,
+            CardId(902),
+            PlayerId(0),
+            "Plain Source".to_string(),
+            Zone::Battlefield,
+        );
+        let target = add_card_to_graveyard(&mut state, PlayerId(0), CardId(903));
+        let grant = paid_during_resolution_grant(source, target);
+        let mut events = vec![];
+        resolve(&mut state, &grant, &mut events).unwrap();
+        match &state.waiting_for {
+            WaitingFor::CastOffer {
+                kind:
+                    crate::types::game_state::CastOfferKind::GraveyardPaidCast {
+                        enters_with_modifications,
+                        ..
+                    },
+                ..
+            } => assert!(
+                enters_with_modifications.is_empty(),
+                "a rider-less grant must mint an empty rider"
+            ),
+            other => panic!("expected GraveyardPaidCast, got {other:?}"),
+        }
+    }
+
+    /// CR 608.2c + CR 611.2a (row 6.4): the per-opponent fanout conversion
+    /// snapshots the ability's gains rider into the window request, so the
+    /// opened window carries it to every cast. Reverting the conversion leaves
+    /// it empty.
+    #[test]
+    fn per_opponent_fanout_window_carries_the_gains_rider() {
+        use crate::types::ability::{MultiTargetSpec, PlayerFilter, QuantityRef};
+        use crate::types::FormatConfig;
+
+        fn fanout_grant(source: ObjectId, targets: Vec<ObjectId>) -> ResolvedAbility {
+            let mut ability = ResolvedAbility::new(
+                Effect::CastFromZone {
+                    target: TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Instant)
+                            .controller(ControllerRef::TargetPlayer),
+                    ),
+                    without_paying_mana_cost: true,
+                    mode: CardPlayMode::Cast,
+                    cast_transformed: false,
+                    alt_ability_cost: None,
+                    constraint: None,
+                    duration: None,
+                    driver: CastFromZoneDriver::DuringResolution,
+                    mana_spend_permission: None,
+                    additional_cost: None,
+                    cast_cost_modifier: None,
+                },
+                targets.into_iter().map(TargetRef::Object).collect(),
+                source,
+                PlayerId(0),
+            );
+            ability.multi_target = Some(MultiTargetSpec::up_to(QuantityExpr::Ref {
+                qty: QuantityRef::PlayerCount {
+                    filter: PlayerFilter::Opponent,
+                },
+            }));
+            ability
+        }
+
+        let mut state = GameState::new(FormatConfig::standard(), 3, 1);
+        let source = create_object(
+            &mut state,
+            CardId(910),
+            PlayerId(0),
+            "Fanout Source".to_string(),
+            Zone::Battlefield,
+        );
+        let p1_card = add_card_to_graveyard(&mut state, PlayerId(1), CardId(911));
+        let p2_card = add_card_to_graveyard(&mut state, PlayerId(2), CardId(912));
+        for id in [p1_card, p2_card] {
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Instant);
+        }
+
+        // Positive — the opened window carries the rider.
+        let mut grant = fanout_grant(source, vec![p1_card, p2_card]);
+        grant.sub_ability = Some(Box::new(gains_rider_sub_ability(source)));
+        let mut events = vec![];
+        resolve(&mut state, &grant, &mut events).unwrap();
+        match &state.waiting_for {
+            WaitingFor::CastOffer {
+                kind:
+                    crate::types::game_state::CastOfferKind::FreeCastWindow {
+                        candidates,
+                        member_pool,
+                        enters_with_modifications,
+                        ..
+                    },
+                ..
+            } => {
+                assert_eq!(
+                    member_pool,
+                    &vec![p1_card, p2_card],
+                    "reach guard: the fanout pool opened"
+                );
+                assert_eq!(
+                    candidates,
+                    &vec![p1_card, p2_card],
+                    "reach guard: both fanout candidates are eligible"
+                );
+                assert_eq!(
+                    enters_with_modifications,
+                    &vec![crate::types::ability::ContinuousModification::AddKeyword {
+                        keyword: crate::types::keywords::Keyword::Haste,
+                    }],
+                    "the fanout conversion must snapshot the gains rider"
+                );
+            }
+            other => panic!("expected FreeCastWindow, got {other:?}"),
+        }
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::AddPendingEntersModifications,
+                    ..
+                }
+            )),
+            "the rider is metadata and must never resolve standalone"
+        );
+
+        // Negative (paired) — a rider-less sibling opens with an empty rider.
+        let mut state = GameState::new(FormatConfig::standard(), 3, 1);
+        let source = create_object(
+            &mut state,
+            CardId(913),
+            PlayerId(0),
+            "Plain Fanout Source".to_string(),
+            Zone::Battlefield,
+        );
+        let p1_card = add_card_to_graveyard(&mut state, PlayerId(1), CardId(914));
+        let p2_card = add_card_to_graveyard(&mut state, PlayerId(2), CardId(915));
+        for id in [p1_card, p2_card] {
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Instant);
+        }
+        let grant = fanout_grant(source, vec![p1_card, p2_card]);
+        let mut events = vec![];
+        resolve(&mut state, &grant, &mut events).unwrap();
+        match &state.waiting_for {
+            WaitingFor::CastOffer {
+                kind:
+                    crate::types::game_state::CastOfferKind::FreeCastWindow {
+                        enters_with_modifications,
+                        ..
+                    },
+                ..
+            } => assert!(
+                enters_with_modifications.is_empty(),
+                "a rider-less fanout must open an empty rider"
+            ),
+            other => panic!("expected FreeCastWindow, got {other:?}"),
+        }
+    }
+
+    /// CR 608.2c + CR 611.2a (row 6.5): the batch (`ResolutionWindow`)
+    /// conversion snapshots the ability's gains rider into the window request.
+    /// Reverting the conversion leaves it empty. Mirrors
+    /// `resolution_window_replaces_forwarded_targets_with_active_linked_batch`.
+    #[test]
+    fn resolution_window_carries_the_gains_rider() {
+        fn batch_grant(source: ObjectId, targets: Vec<ObjectId>) -> ResolvedAbility {
+            ResolvedAbility::new(
+                Effect::CastFromZone {
+                    target: TargetFilter::ExiledBySource,
+                    without_paying_mana_cost: true,
+                    mode: CardPlayMode::Cast,
+                    cast_transformed: false,
+                    alt_ability_cost: None,
+                    constraint: None,
+                    duration: None,
+                    driver: CastFromZoneDriver::ResolutionWindow {
+                        bounds: ResolutionCastWindow::default(),
+                    },
+                    mana_spend_permission: None,
+                    additional_cost: None,
+                    cast_cost_modifier: None,
+                },
+                targets.into_iter().map(TargetRef::Object).collect(),
+                source,
+                PlayerId(0),
+            )
+        }
+
+        fn state_with_batch() -> (GameState, ObjectId, ObjectId) {
+            let mut state = make_test_state();
+            let source = create_object(
+                &mut state,
+                CardId(920),
+                PlayerId(0),
+                "Batch Source".to_string(),
+                Zone::Battlefield,
+            );
+            let stale = add_card_to_exile(&mut state, PlayerId(1), CardId(921));
+            let current = add_card_to_exile(&mut state, PlayerId(1), CardId(922));
+            for exiled_id in [stale, current] {
+                state.exile_links.push(ExileLink {
+                    exiled_id,
+                    source_id: source,
+                    kind: ExileLinkKind::TrackedBySource,
+                });
+            }
+            let active_set = TrackedSetId(1);
+            state.tracked_object_sets.insert(active_set, vec![current]);
+            state.chain_tracked_set_id = Some(active_set);
+            (state, source, current)
+        }
+
+        // Positive — the opened window carries the rider.
+        let (mut state, source, current) = state_with_batch();
+        let mut grant = batch_grant(source, vec![ObjectId(0), current]);
+        grant.sub_ability = Some(Box::new(gains_rider_sub_ability(source)));
+        let mut events = vec![];
+        resolve(&mut state, &grant, &mut events).unwrap();
+        match &state.waiting_for {
+            WaitingFor::CastOffer {
+                kind:
+                    crate::types::game_state::CastOfferKind::FreeCastWindow {
+                        candidates,
+                        member_pool,
+                        enters_with_modifications,
+                        ..
+                    },
+                ..
+            } => {
+                assert_eq!(
+                    candidates,
+                    &vec![current],
+                    "reach guard: the batch window opened over the active set"
+                );
+                assert_eq!(member_pool, &vec![current]);
+                assert_eq!(
+                    enters_with_modifications,
+                    &vec![crate::types::ability::ContinuousModification::AddKeyword {
+                        keyword: crate::types::keywords::Keyword::Haste,
+                    }],
+                    "the batch conversion must snapshot the gains rider"
+                );
+            }
+            other => panic!("expected FreeCastWindow, got {other:?}"),
+        }
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::AddPendingEntersModifications,
+                    ..
+                }
+            )),
+            "the rider is metadata and must never resolve standalone"
+        );
+
+        // Negative (paired) — a rider-less sibling opens with an empty rider.
+        let (mut state, source, current) = state_with_batch();
+        let grant = batch_grant(source, vec![ObjectId(0), current]);
+        let mut events = vec![];
+        resolve(&mut state, &grant, &mut events).unwrap();
+        match &state.waiting_for {
+            WaitingFor::CastOffer {
+                kind:
+                    crate::types::game_state::CastOfferKind::FreeCastWindow {
+                        enters_with_modifications,
+                        ..
+                    },
+                ..
+            } => assert!(
+                enters_with_modifications.is_empty(),
+                "a rider-less batch must open an empty rider"
+            ),
+            other => panic!("expected FreeCastWindow, got {other:?}"),
+        }
     }
 }

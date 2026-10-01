@@ -5643,6 +5643,7 @@ mod tests {
                 hit_card,
                 mana_spend_permission: None,
                 graveyard_replacement: None,
+                enters_with_modifications: Vec::new(),
                 cast_transformed: false,
                 additional_cost: None,
                 cleanup: ResolutionCastCleanup {

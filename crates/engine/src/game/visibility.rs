@@ -2708,7 +2708,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // cards are eligible instant/sorcery spells within the MV budget. Redact the
     // candidate list to opaque placeholders for viewers who cannot see the
     // controller's private zones — `remaining_casts`, `remaining_mv_budget`, and
-    // the rider stay public (CR 601.2 + CR 408 — the resolving spell is public).
+    // the rider stay public (CR 601.2 + CR 400.2 — the stack is a public zone).
     if let WaitingFor::CastOffer {
         player,
         kind:
@@ -2719,6 +2719,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
                 ref face_policy,
                 ref zones,
                 ref graveyard_replacement,
+                ref enters_with_modifications,
                 ref member_pool,
             },
     } = state.waiting_for
@@ -2733,6 +2734,10 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
                     face_policy: face_policy.clone(),
                     zones: zones.clone(),
                     graveyard_replacement: graveyard_replacement.clone(),
+                    // CR 608.2c: the gains-modifications rider is public (the
+                    // resolving grant is public, CR 601.2 + CR 400.2) — pass it
+                    // through unredacted, exactly like the destination rider.
+                    enters_with_modifications: enters_with_modifications.clone(),
                     // CR 400.2: the member pool can reference the same private
                     // candidates (a hand/graveyard window would leak eligible
                     // ids through it); redact it to placeholders exactly like
@@ -11238,6 +11243,11 @@ mod tests {
                 graveyard_replacement: Some(
                     crate::types::ability::SpellStackToGraveyardReplacement::Exile,
                 ),
+                enters_with_modifications: vec![
+                    crate::types::ability::ContinuousModification::AddKeyword {
+                        keyword: crate::types::keywords::Keyword::Haste,
+                    },
+                ],
                 member_pool: vec![hand_candidate],
             },
         };
@@ -11273,6 +11283,7 @@ mod tests {
                         remaining_casts,
                         remaining_mv_budget,
                         graveyard_replacement,
+                        enters_with_modifications,
                         member_pool,
                         ..
                     },
@@ -11295,6 +11306,15 @@ mod tests {
                 assert_eq!(
                     graveyard_replacement.as_ref(),
                     Some(&crate::types::ability::SpellStackToGraveyardReplacement::Exile)
+                );
+                // CR 608.2c: the gains-modifications rider is public — the
+                // opponent-facing redaction must pass it through unredacted.
+                assert_eq!(
+                    enters_with_modifications,
+                    vec![crate::types::ability::ContinuousModification::AddKeyword {
+                        keyword: crate::types::keywords::Keyword::Haste,
+                    }],
+                    "the public gains rider must survive opponent redaction"
                 );
             }
             other => panic!("expected FreeCastWindow for opponent, got {other:?}"),

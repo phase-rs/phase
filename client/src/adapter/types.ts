@@ -2488,6 +2488,9 @@ export type CastOfferKind =
       additional_cost?: ManaCost;
       // CR 614.1a + CR 608.2n: optional cast-this-way redirect.
       graveyard_replacement?: SpellStackToGraveyardReplacement;
+      // CR 608.2c + CR 611.2a: optional cast-this-way gains-modifications
+      // rider (Strago and Relm); omitted when empty.
+      enters_with_modifications?: ContinuousModification[];
       // Frozen resolution authority, including receipts to withdraw if the
       // accepted offer never becomes a cast.
       cleanup: ResolutionCastCleanup;
@@ -2503,7 +2506,13 @@ export type CastOfferKind =
       /** Required bridge carrier; old filter-only windows fail closed. */
       face_policy: ResolutionCastFacePolicy;
       zones: Zone[];
-      exile_instead_of_graveyard?: boolean;
+      // CR 614.1a: optional cast-this-way redirect. The engine's serialized
+      // field is `graveyard_replacement` (the legacy
+      // `exile_instead_of_graveyard` key survives only as a serde alias).
+      graveyard_replacement?: SpellStackToGraveyardReplacement;
+      // CR 608.2c + CR 611.2a: optional cast-this-way gains-modifications
+      // rider; omitted when empty.
+      enters_with_modifications?: ContinuousModification[];
       // CR 607.2a: THIS resolution's "exiled this way" batch (Plargg and
       // Nassari); omitted when empty (no batch restriction). Display-only
       // pass-through — the modal renders `candidates`.

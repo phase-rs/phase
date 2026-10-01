@@ -2524,6 +2524,7 @@ pub(super) fn handle_resolution_choice(
                         hit_card,
                         mana_spend_permission,
                         graveyard_replacement,
+                        enters_with_modifications,
                         cast_transformed,
                         additional_cost,
                         cleanup,
@@ -2546,7 +2547,10 @@ pub(super) fn handle_resolution_choice(
                         cast_transformed,
                         cleanup,
                         graveyard_replacement,
-                        enters_with_modifications: Vec::new(),
+                        // CR 608.2c + CR 611.2c: the offer's gains-modifications
+                        // rider threads into the elected permission, whose
+                        // finalize application is its only application point.
+                        enters_with_modifications,
                         cost: crate::types::ability::ResolutionCastCost::FullCost {
                             mana_spend_permission,
                             additional_cost,
@@ -3072,6 +3076,7 @@ pub(super) fn handle_resolution_choice(
                         face_policy,
                         zones,
                         graveyard_replacement,
+                        enters_with_modifications,
                         member_pool,
                     },
             },
@@ -3121,6 +3126,7 @@ pub(super) fn handle_resolution_choice(
                 face_policy,
                 zones,
                 graveyard_replacement,
+                enters_with_modifications,
                 member_pool,
             );
             let result = match casting::initiate_cast_during_resolution(
@@ -9221,6 +9227,7 @@ pub(crate) fn abort_resolution_cast(
             face_policy,
             zones,
             graveyard_replacement,
+            enters_with_modifications,
             member_pool,
         } => {
             // No spell was committed, so neither the cast count nor the mana
@@ -9234,6 +9241,7 @@ pub(crate) fn abort_resolution_cast(
                 (*face_policy).clone(),
                 zones.clone(),
                 graveyard_replacement.clone(),
+                enters_with_modifications.clone(),
                 member_pool.clone(),
             );
             let candidates = crate::game::effects::free_cast_from_zones::eligible_candidates(
@@ -9255,6 +9263,7 @@ pub(crate) fn abort_resolution_cast(
                     face_policy: *face_policy,
                     zones,
                     graveyard_replacement,
+                    enters_with_modifications,
                     member_pool,
                 },
             };
@@ -11346,6 +11355,7 @@ mod tests {
                 face_policy: policy.clone(),
                 zones: vec![Zone::Exile],
                 graveyard_replacement: None,
+                enters_with_modifications: Vec::new(),
                 member_pool: Vec::new(),
             },
         };
@@ -11395,6 +11405,313 @@ mod tests {
         assert!(
             !candidates.contains(&over_constraint),
             "the re-offer must retain the original fixed constraint"
+        );
+    }
+
+    /// A free-window candidate: an exiled creature with a zero cost and a body.
+    fn window_rider_creature(
+        state: &mut GameState,
+        owner: PlayerId,
+        name: &str,
+        card_id: u64,
+    ) -> ObjectId {
+        let id = create_object(state, CardId(card_id), owner, name.to_string(), Zone::Exile);
+        let object = state.objects.get_mut(&id).expect("created card exists");
+        object.card_types.core_types.push(CoreType::Creature);
+        object.base_card_types = object.card_types.clone();
+        object.mana_cost = crate::types::mana::ManaCost::zero();
+        object.power = Some(2);
+        object.toughness = Some(2);
+        object.base_power = object.power;
+        object.base_toughness = object.toughness;
+        id
+    }
+
+    fn window_with_rider(
+        source: ObjectId,
+        candidates: Vec<ObjectId>,
+        rider: Vec<crate::types::ability::ContinuousModification>,
+    ) -> WaitingFor {
+        WaitingFor::CastOffer {
+            player: PlayerId(0),
+            kind: CastOfferKind::FreeCastWindow {
+                candidates: candidates.clone(),
+                remaining_casts: Some(2),
+                remaining_mv_budget: None,
+                face_policy: ResolutionCastFacePolicy::new(
+                    TargetFilter::Any,
+                    source,
+                    PlayerId(0),
+                    None,
+                ),
+                zones: vec![Zone::Exile],
+                graveyard_replacement: None,
+                enters_with_modifications: rider,
+                member_pool: candidates,
+            },
+        }
+    }
+
+    /// CR 608.2c + CR 611.2a (row 6.6): EVERY cast of a multi-cast free-cast
+    /// window receives the gains-modifications rider — the per-cast request
+    /// carries it into the elected permission, and the success action carries
+    /// it into the re-offer. Reverting the request leg loses cast #1's rider;
+    /// reverting the re-offer carrier loses cast #2's.
+    #[test]
+    fn each_window_cast_carries_the_gains_rider() {
+        use crate::types::ability::ContinuousModification;
+        use crate::types::keywords::{Keyword, KeywordKind};
+
+        let rider = vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Haste,
+        }];
+        let mut state = GameState::new_two_player(44);
+        let source = create_object(
+            &mut state,
+            CardId(90_200),
+            PlayerId(0),
+            "Rider window source".to_string(),
+            Zone::Battlefield,
+        );
+        let first = window_rider_creature(&mut state, PlayerId(0), "First", 90_201);
+        let second = window_rider_creature(&mut state, PlayerId(0), "Second", 90_202);
+        let mut events = Vec::new();
+
+        let outcome = handle_resolution_choice(
+            &mut state,
+            window_with_rider(source, vec![first, second], rider.clone()),
+            GameAction::FreeCastWindowChoice {
+                selection: Some(first),
+            },
+            &mut events,
+        )
+        .expect("the first window cast must be accepted");
+        let ResolutionChoiceOutcome::WaitingFor(reoffered) = outcome else {
+            panic!("the first window cast must return the re-offer");
+        };
+        assert_eq!(
+            state.objects[&first].zone,
+            Zone::Stack,
+            "reach guard: the first cast reached the stack"
+        );
+        let applied: Vec<_> = state
+            .transient_continuous_effects
+            .iter()
+            .filter(|effect| {
+                effect.affected == TargetFilter::SpecificObject { id: first }
+                    && effect.modifications == rider
+            })
+            .collect();
+        assert_eq!(
+            applied.len(),
+            1,
+            "cast #1 must receive the rider exactly once through its request"
+        );
+        let WaitingFor::CastOffer {
+            kind:
+                CastOfferKind::FreeCastWindow {
+                    candidates,
+                    enters_with_modifications,
+                    ..
+                },
+            ..
+        } = &reoffered
+        else {
+            panic!("expected the re-offered FreeCastWindow, got {reoffered:?}");
+        };
+        assert_eq!(
+            candidates,
+            &vec![second],
+            "reach guard: the window re-offered the remaining cast"
+        );
+        assert_eq!(
+            enters_with_modifications, &rider,
+            "the success re-offer must carry the gains rider to the remaining cast"
+        );
+
+        // Cast #2 goes through the re-offered window: its request leg reads the
+        // re-offered carrier, so both threading sites are exercised.
+        let outcome = handle_resolution_choice(
+            &mut state,
+            reoffered.clone(),
+            GameAction::FreeCastWindowChoice {
+                selection: Some(second),
+            },
+            &mut events,
+        )
+        .expect("the second window cast must be accepted");
+        let ResolutionChoiceOutcome::WaitingFor(final_waiting) = outcome else {
+            panic!("the second window cast must settle the window");
+        };
+        assert_eq!(
+            state.objects[&second].zone,
+            Zone::Stack,
+            "reach guard: the second cast reached the stack"
+        );
+        assert!(
+            !matches!(
+                final_waiting,
+                WaitingFor::CastOffer {
+                    kind: CastOfferKind::FreeCastWindow { .. },
+                    ..
+                }
+            ),
+            "the second cast exhausts the window; got {final_waiting:?}"
+        );
+        let applied: Vec<_> = state
+            .transient_continuous_effects
+            .iter()
+            .filter(|effect| {
+                effect.affected == TargetFilter::SpecificObject { id: second }
+                    && effect.modifications == rider
+            })
+            .collect();
+        assert_eq!(
+            applied.len(),
+            1,
+            "cast #2 must receive the re-offered rider exactly once"
+        );
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::AddPendingEntersModifications,
+                    ..
+                }
+            )),
+            "the rider must never resolve standalone; events: {events:?}"
+        );
+
+        // Reach guard for the layer-level claim: both cast creatures have
+        // effective haste after the layers flush.
+        crate::game::layers::evaluate_layers(&mut state);
+        for id in [first, second] {
+            assert!(
+                crate::game::keywords::object_has_effective_keyword_kind(
+                    &state,
+                    id,
+                    KeywordKind::Haste,
+                ),
+                "cast creature {id:?} must have effective haste"
+            );
+        }
+
+        // Paired negative — an empty-rider window applies nothing.
+        let mut state = GameState::new_two_player(44);
+        let source = create_object(
+            &mut state,
+            CardId(90_203),
+            PlayerId(0),
+            "Plain window source".to_string(),
+            Zone::Battlefield,
+        );
+        let solo = window_rider_creature(&mut state, PlayerId(0), "Solo", 90_204);
+        let mut events = Vec::new();
+        handle_resolution_choice(
+            &mut state,
+            window_with_rider(source, vec![solo], Vec::new()),
+            GameAction::FreeCastWindowChoice {
+                selection: Some(solo),
+            },
+            &mut events,
+        )
+        .expect("the empty-rider window cast must be accepted");
+        assert_eq!(
+            state.objects[&solo].zone,
+            Zone::Stack,
+            "reach guard: the empty-rider cast happened"
+        );
+        assert!(
+            state.transient_continuous_effects.iter().all(|effect| {
+                !(effect.affected == TargetFilter::SpecificObject { id: solo }
+                    && effect.modifications == rider)
+            }),
+            "an empty-rider window must apply no rider"
+        );
+    }
+
+    /// CR 608.2c + CR 611.2a (row 6.6 rejected arm): a window election rejected
+    /// at finalization re-offers through `abort_resolution_cast`, whose rebuilt
+    /// window must still carry the gains rider. Reverting the abort arm's
+    /// carrier loses it.
+    #[test]
+    fn rejected_window_cast_reoffers_with_the_rider() {
+        use crate::types::ability::ContinuousModification;
+        use crate::types::keywords::Keyword;
+
+        let rider = vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Haste,
+        }];
+        let mut state = GameState::new_two_player(44);
+        let source = create_object(
+            &mut state,
+            CardId(90_210),
+            PlayerId(0),
+            "Reject window source".to_string(),
+            Zone::Battlefield,
+        );
+        let chosen = window_rider_creature(&mut state, PlayerId(0), "Chosen", 90_211);
+        let retained = window_rider_creature(&mut state, PlayerId(0), "Retained", 90_212);
+        // Make the chosen card inadmissible at finalization so the election is
+        // rejected and the abort path re-offers.
+        state
+            .objects
+            .get_mut(&chosen)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+
+        let mut events = Vec::new();
+        let outcome = handle_resolution_choice(
+            &mut state,
+            window_with_rider(source, vec![chosen, retained], rider.clone()),
+            GameAction::FreeCastWindowChoice {
+                selection: Some(chosen),
+            },
+            &mut events,
+        )
+        .expect("the rejected election must settle through the abort path");
+        let ResolutionChoiceOutcome::WaitingFor(reoffered) = outcome else {
+            panic!("the rejected election must re-offer");
+        };
+        let WaitingFor::CastOffer {
+            kind:
+                CastOfferKind::FreeCastWindow {
+                    candidates,
+                    enters_with_modifications,
+                    ..
+                },
+            ..
+        } = &reoffered
+        else {
+            panic!("expected the re-offered FreeCastWindow, got {reoffered:?}");
+        };
+        assert_eq!(
+            candidates,
+            &vec![retained],
+            "reach guard: the rejected card is dropped and the window re-offers"
+        );
+        assert_eq!(
+            enters_with_modifications, &rider,
+            "the rejected-cast re-offer must still carry the gains rider"
+        );
+        assert!(
+            state.transient_continuous_effects.iter().all(|effect| {
+                !(effect.affected == TargetFilter::SpecificObject { id: chosen }
+                    && effect.modifications == rider)
+            }),
+            "a rejected election must apply no rider"
+        );
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::AddPendingEntersModifications,
+                    ..
+                }
+            )),
+            "the rider must never resolve standalone; events: {events:?}"
         );
     }
 
