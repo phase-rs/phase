@@ -15,7 +15,7 @@ use crate::types::ability::{
     QuantityRef, ResolvedAbility, SacrificeCost, SearchSelectionConstraint, StaticDefinition,
     TargetFilter, TargetRef, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
 };
-use crate::types::card::{PrintedLoyalty, TokenArtDescriptor};
+use crate::types::card::PrintedLoyalty;
 use crate::types::card_type::{CardType, CoreType, Supertype};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
@@ -4293,6 +4293,20 @@ fn predefined_role_token_spec(name: &str) -> Option<RoleSpec> {
     }
 }
 
+/// Recompute `token_art` from the object's current base characteristics.
+/// Called by every token ability injector (which all creation, copy, and
+/// replay flows run once the base is final), so live and replayed tokens
+/// agree without any flow-specific hook.
+fn refresh_token_art_descriptor(
+    state: &mut GameState,
+    obj_id: crate::types::identifiers::ObjectId,
+) {
+    let Some(obj) = state.objects.get_mut(&obj_id) else {
+        return;
+    };
+    obj.restore_token_art_baseline();
+}
+
 /// Inject predefined token abilities based on the token's subtypes and name.
 ///
 /// Two dispatch paths:
@@ -4312,61 +4326,6 @@ fn predefined_role_token_spec(name: &str) -> Option<RoleSpec> {
 /// CR 111.3 + CR 111.10: Apply predefined token abilities first; fall back to
 /// catalog `rules_text` only when the predefined path contributed nothing
 /// (artifacts, Roles, Incubator, …).
-/// Derive the intrinsic art body for a token from its printed (`base_*`)
-/// characteristics. Grants never contribute: pumps, color setters, and
-/// anthem keyword grants live on the mutable axes, while every store read
-/// here is a printed baseline (grant leakage into `base_abilities` is
-/// refused by test below).
-///
-/// `token_rules_text` is deliberately NOT consulted: it can mirror catalog
-/// text for abilities that were suppressed from functional injection (the
-/// Pilot-crew display-mirror case), which would misreport a functionally
-/// vanilla token as ability-bearing.
-pub(crate) fn token_art_descriptor_for(obj: &GameObject) -> TokenArtDescriptor {
-    let mut keywords = Vec::new();
-    for keyword in obj.base_keywords.iter() {
-        let name = match keyword {
-            Keyword::Unknown(payload) => payload.clone(),
-            // Declared `&'static str` mapping, not `Debug`: the descriptor
-            // is a wire contract, so family names must not depend on the
-            // debug representation.
-            other => {
-                let family: &'static str = other.kind().into();
-                family.to_owned()
-            }
-        };
-        if !name.is_empty() && !keywords.contains(&name) {
-            keywords.push(name);
-        }
-    }
-    TokenArtDescriptor {
-        power: obj.base_power,
-        toughness: obj.base_toughness,
-        colors: obj.base_color.clone(),
-        subtypes: obj.base_card_types.subtypes.clone(),
-        keywords,
-        has_abilities: !obj.base_keywords.is_empty()
-            || !obj.base_abilities.is_empty()
-            || !obj.base_trigger_definitions.is_empty()
-            || !obj.base_replacement_definitions.is_empty()
-            || !obj.base_static_definitions.is_empty(),
-    }
-}
-
-/// Recompute `token_art` from the object's current base characteristics.
-/// Called by every token ability injector (which all creation, copy, and
-/// replay flows run once the base is final), so live and replayed tokens
-/// agree without any flow-specific hook.
-fn refresh_token_art_descriptor(
-    state: &mut GameState,
-    obj_id: crate::types::identifiers::ObjectId,
-) {
-    let Some(obj) = state.objects.get_mut(&obj_id) else {
-        return;
-    };
-    obj.token_art = Some(token_art_descriptor_for(obj));
-}
-
 pub(super) fn inject_resolved_token_abilities(
     state: &mut GameState,
     obj_id: crate::types::identifiers::ObjectId,
@@ -9860,7 +9819,7 @@ mod attach_host_authority_tests {
 
     #[test]
     fn art_descriptor_reports_the_printed_body() {
-        let descriptor = token_art_descriptor_for(&art_fixture());
+        let descriptor = art_fixture().intrinsic_token_art();
         assert_eq!(descriptor.power, Some(1));
         assert_eq!(descriptor.toughness, Some(1));
         assert_eq!(descriptor.colors, vec![crate::types::mana::ManaColor::Red]);
@@ -9879,7 +9838,7 @@ mod attach_host_authority_tests {
         obj.color = vec![crate::types::mana::ManaColor::Blue];
         obj.keywords = vec![Keyword::Flying];
         obj.abilities = Arc::new(vec![treasure_ability()]);
-        let descriptor = token_art_descriptor_for(&obj);
+        let descriptor = obj.intrinsic_token_art();
         assert_eq!(descriptor.power, Some(1));
         assert_eq!(descriptor.toughness, Some(1));
         assert_eq!(descriptor.colors, vec![crate::types::mana::ManaColor::Red]);
@@ -9898,15 +9857,19 @@ mod attach_host_authority_tests {
             Keyword::FirstStrike,
             Keyword::Ward(WardCost::Mana(crate::types::mana::ManaCost::generic(2))),
             Keyword::Flying,
+            // `kind()` collapses Toxic to the catch-all `Unknown`; the art
+            // mapping must still name its own family.
+            Keyword::Toxic(1),
             Keyword::Unknown("some-future-keyword".to_string()),
         ];
-        let descriptor = token_art_descriptor_for(&obj);
+        let descriptor = obj.intrinsic_token_art();
         assert_eq!(
             descriptor.keywords,
             vec![
                 "Flying".to_string(),
                 "FirstStrike".to_string(),
                 "Ward".to_string(),
+                "Toxic".to_string(),
                 "some-future-keyword".to_string(),
             ]
         );
@@ -9916,30 +9879,30 @@ mod attach_host_authority_tests {
     #[test]
     fn art_descriptor_has_abilities_covers_every_base_ability_store() {
         // Each arm independently flips the summary; vanilla stays false.
-        assert!(!token_art_descriptor_for(&art_fixture()).has_abilities);
+        assert!(!art_fixture().intrinsic_token_art().has_abilities);
 
         let mut keyworded = art_fixture();
         keyworded.base_keywords = vec![Keyword::Trample];
-        assert!(token_art_descriptor_for(&keyworded).has_abilities);
+        assert!(keyworded.intrinsic_token_art().has_abilities);
 
         let mut activated = art_fixture();
         activated.base_abilities = Arc::new(vec![treasure_ability()]);
-        assert!(token_art_descriptor_for(&activated).has_abilities);
+        assert!(activated.intrinsic_token_art().has_abilities);
 
         let mut triggered = art_fixture();
         triggered.base_trigger_definitions =
             Arc::new(vec![TriggerDefinition::new(TriggerMode::ChangesZone)]);
-        assert!(token_art_descriptor_for(&triggered).has_abilities);
+        assert!(triggered.intrinsic_token_art().has_abilities);
 
         let mut staticed = art_fixture();
         staticed.base_static_definitions =
             Arc::new(vec![StaticDefinition::new(StaticMode::Continuous)]);
-        assert!(token_art_descriptor_for(&staticed).has_abilities);
+        assert!(staticed.intrinsic_token_art().has_abilities);
 
         let mut replaced = art_fixture();
         replaced.base_replacement_definitions =
             Arc::new(vec![ReplacementDefinition::new(ReplacementEvent::Untap)]);
-        assert!(token_art_descriptor_for(&replaced).has_abilities);
+        assert!(replaced.intrinsic_token_art().has_abilities);
     }
 
     #[test]
@@ -9949,6 +9912,6 @@ mod attach_host_authority_tests {
         // on a functionally vanilla token.
         let mut obj = art_fixture();
         obj.token_rules_text = Some("Flying".to_string());
-        assert!(!token_art_descriptor_for(&obj).has_abilities);
+        assert!(!obj.intrinsic_token_art().has_abilities);
     }
 }

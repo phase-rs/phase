@@ -14731,6 +14731,8 @@ pub(crate) fn apply_bestow_aura_form(obj: &mut crate::game::game_object::GameObj
         obj.base_keywords.push(enchant_creature);
     }
     obj.bestow_form = Some(crate::game::game_object::BestowFormState);
+    // Bestow form rewrites the printed base: restore the derived art baseline.
+    obj.restore_token_art_baseline();
 }
 
 /// CR 702.103e + CR 702.103f: Inverse of `apply_bestow_aura_form`. Restores the
@@ -14760,6 +14762,7 @@ pub(crate) fn revert_bestow_aura_form(obj: &mut crate::game::game_object::GameOb
     obj.base_keywords
         .retain(|k| !matches!(k, Keyword::Enchant(_)));
     obj.bestow_form = None;
+    obj.restore_token_art_baseline();
 }
 
 /// CR 702.140a + CR 108.3 (B1): The mutate spell's target — "a non-Human creature

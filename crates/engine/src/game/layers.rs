@@ -2797,6 +2797,10 @@ fn derive_suspected_abilities(obj: &mut crate::game::game_object::GameObject) {
 /// (they are not part of the face-down CR 708.2a re-seed, which is why this is
 /// separable at all).
 fn seed_live_characteristics_from_base(obj: &mut crate::game::game_object::GameObject) {
+    // Capture BEFORE the reset below clears it: a set marker means the copy
+    // layer overwrote live `token_art` last pass, so the art baseline must
+    // be re-derived rather than reused.
+    let art_overwritten_by_copy = obj.layer1_copy_effect.is_some();
     obj.name = obj.base_name.clone();
     // CR 707.2 + CR 613.1a: the copied Room half data is layer-derived — it
     // survives only as long as a Layer-1a copy effect keeps re-applying it.
@@ -2868,20 +2872,20 @@ fn seed_live_characteristics_from_base(obj: &mut crate::game::game_object::GameO
     if !obj.is_token {
         obj.token_image_ref = None;
     }
-    // Intrinsic art body baseline. A nontoken never carries its own
-    // descriptor, so it resets to `None`; a copy-of-token effect
-    // re-applies the source's descriptor below while active. A true token
-    // re-derives its OWN descriptor from its printed base every pass: copy
-    // effects only ever write the live axes, so the base-derived body is
-    // always the token's own — and it self-restores here when a temporary
-    // copy expires (the copy layer overwrites it below while active).
-    // Deriving (rather than storing a `base_token_art`) also heals tokens
-    // from pre-descriptor snapshots on their first layer pass.
+    // Intrinsic art body baseline. A nontoken carries no descriptor of its
+    // own: reset to `None` (a plain drop, never an allocation); a
+    // copy-of-token effect re-applies the source's descriptor below while
+    // active. A true token REUSES its live descriptor on ordinary passes —
+    // every authority that mutates the printed base restores eagerly, so
+    // live state is already coherent and no fresh keyword/subtype
+    // materialization happens here. Re-derive only when live cannot still
+    // be valid: absent (a pre-descriptor snapshot healing on its first
+    // pass), or overwritten by a copy last pass (the copy layer overwrites
+    // again below while still active).
     if !obj.is_token {
         obj.token_art = None;
-    } else {
-        let own = crate::game::effects::token::token_art_descriptor_for(obj);
-        obj.token_art = Some(own);
+    } else if obj.token_art.is_none() || art_overwritten_by_copy {
+        obj.restore_token_art_baseline();
     }
 }
 

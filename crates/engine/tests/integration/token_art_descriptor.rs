@@ -6,6 +6,8 @@
 //! populated at creation with the printed body and survives the JSON
 //! snapshot/transport round-trip under its `token_art` wire key.
 
+use engine::game::game_object::{reset_token_art_derivation_count, token_art_derivation_count};
+use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
@@ -268,6 +270,115 @@ fn true_token_restores_its_own_descriptor_after_a_temporary_copy_expires() {
     assert_eq!(
         restored, own,
         "the Servo's own intrinsic body returns after expiry"
+    );
+}
+
+#[test]
+fn ordinary_layer_passes_reuse_the_live_descriptor_without_rederiving() {
+    // Allocation/reuse boundary: the layer baseline reseed must not
+    // materialize fresh keyword/subtype state for an unchanged token. The
+    // derivation counter observes materializations while the values prove
+    // the reused descriptor stays correct — including across a temporary
+    // copy, where derivation legitimately resumes at the boundary.
+    const COPY: &str =
+        "Target creature you control becomes a copy of target creature until end of turn.";
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let servo_maker = scenario
+        .add_creature_to_hand_from_oracle(
+            P0,
+            "Servo Schematic",
+            2,
+            1,
+            "When this creature enters, create a 1/1 colorless Servo artifact creature token.",
+        )
+        .id();
+    let goblin_maker = scenario
+        .add_creature_to_hand_from_oracle(
+            P0,
+            "Backstreet Recruiter",
+            1,
+            1,
+            "When this creature enters, create a 1/1 red Goblin creature token.",
+        )
+        .id();
+    let copy_spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Temporary Copy", true, COPY)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(servo_maker).resolve();
+    runner.advance_until_stack_empty();
+    runner.cast(goblin_maker).resolve();
+    runner.advance_until_stack_empty();
+    let servo = token_named(&runner, "Servo");
+    let goblin = token_named(&runner, "Goblin");
+
+    // Quiesce, then start counting.
+    evaluate_layers(runner.state_mut());
+    reset_token_art_derivation_count();
+
+    // Idle full evaluations re-derive nothing for either token.
+    evaluate_layers(runner.state_mut());
+    evaluate_layers(runner.state_mut());
+    assert_eq!(
+        token_art_derivation_count(),
+        0,
+        "ordinary passes reuse live descriptors"
+    );
+    assert_eq!(
+        runner.state().objects[&servo]
+            .token_art
+            .as_ref()
+            .expect("servo keeps its descriptor")
+            .subtypes,
+        vec!["Servo".to_string()]
+    );
+
+    // A temporary copy crosses the boundary: the Servo rides the Goblin
+    // body (derivation resumes to restore-then-overwrite each pass).
+    runner
+        .cast(copy_spell)
+        .target_objects(&[servo, goblin])
+        .resolve();
+    runner.advance_until_stack_empty();
+    evaluate_layers(runner.state_mut());
+    let copying_derivations = token_art_derivation_count();
+    assert!(
+        copying_derivations > 0,
+        "copy activity re-derives at the boundary"
+    );
+    assert_eq!(
+        runner.state().objects[&servo]
+            .token_art
+            .as_ref()
+            .expect("copying servo rides a descriptor")
+            .subtypes,
+        vec!["Goblin".to_string()]
+    );
+
+    // Expiry restores the Servo body, then reuse resumes.
+    runner.advance_to_phase(Phase::End);
+    runner.advance_to_phase(Phase::Upkeep);
+    assert!(
+        token_art_derivation_count() > copying_derivations,
+        "expiry restores via re-derivation"
+    );
+    assert_eq!(
+        runner.state().objects[&servo]
+            .token_art
+            .as_ref()
+            .expect("expired copy restores a descriptor")
+            .subtypes,
+        vec!["Servo".to_string()]
+    );
+    reset_token_art_derivation_count();
+    evaluate_layers(runner.state_mut());
+    evaluate_layers(runner.state_mut());
+    assert_eq!(
+        token_art_derivation_count(),
+        0,
+        "reuse resumes after expiry"
     );
 }
 
