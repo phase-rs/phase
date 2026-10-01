@@ -23860,6 +23860,62 @@ pub(crate) fn find_eligible_unattach_for_cost_targets(
         .collect()
 }
 
+/// CR 701.3d + CR 301.5d: Find an eligible Equipment to unattach for an `AbilityCost::Unattach` cost.
+///
+/// When `target` is `None`: the ability is an intrinsic ability on the Equipment itself (`source`),
+/// so `source` must be a battlefield Equipment controlled by `player` and attached to something.
+///
+/// When `target` is `Some(filter)`: the ability is either on the Equipment itself matching `filter`,
+/// or it was granted to the equipped creature (`source`) by an attached Equipment. Per CR 301.5d,
+/// the equipped creature's controller activates the ability and unattaches the granting Equipment,
+/// even if another player controls that Equipment.
+pub(crate) fn find_eligible_unattach_target(
+    state: &GameState,
+    player: PlayerId,
+    source: ObjectId,
+    target: Option<&TargetFilter>,
+) -> Option<ObjectId> {
+    match target {
+        None => {
+            let obj = state.objects.get(&source)?;
+            if obj.zone == Zone::Battlefield
+                && obj.controller == player
+                && obj.card_types.subtypes.iter().any(|s| s == "Equipment")
+                && obj.attached_to.is_some()
+            {
+                Some(source)
+            } else {
+                None
+            }
+        }
+        Some(filter) => {
+            let ctx = super::filter::FilterContext::from_source(state, source);
+            if let Some(obj) = state.objects.get(&source) {
+                if obj.zone == Zone::Battlefield
+                    && obj.controller == player
+                    && obj.card_types.subtypes.iter().any(|s| s == "Equipment")
+                    && obj.attached_to.is_some()
+                    && super::filter::matches_target_filter(state, source, filter, &ctx)
+                {
+                    return Some(source);
+                }
+            }
+            // CR 301.5d + CR 701.3d: An Equipment's controller is separate from the equipped
+            // creature's controller. When an ability granted to the creature requires unattaching
+            // the Equipment, the creature's controller can pay the cost by unattaching the attached
+            // Equipment regardless of who controls the Equipment.
+            state.battlefield.iter().copied().find(|&id| {
+                let Some(obj) = state.objects.get(&id) else {
+                    return false;
+                };
+                obj.card_types.subtypes.iter().any(|s| s == "Equipment")
+                    && obj.attached_to.and_then(|t| t.as_object()) == Some(source)
+                    && super::filter::matches_target_filter(state, id, filter, &ctx)
+            })
+        }
+    }
+}
+
 pub(super) fn find_one_of_cost(cost: &AbilityCost) -> Option<&Vec<AbilityCost>> {
     match cost {
         AbilityCost::OneOf { costs } => Some(costs),

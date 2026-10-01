@@ -9376,7 +9376,7 @@ fn demote_lifetimes_in_cost(cost: &mut AbilityCost) {
         | AbilityCost::PayEnergy { .. }
         | AbilityCost::PaySpeed { .. }
         | AbilityCost::ReturnToHand { .. }
-        | AbilityCost::Unattach
+        | AbilityCost::Unattach { .. }
         | AbilityCost::UnattachFrom { .. }
         | AbilityCost::Mill { .. }
         | AbilityCost::Exert

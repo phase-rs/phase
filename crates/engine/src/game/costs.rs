@@ -1579,15 +1579,28 @@ fn pay_ability_cost_inner(
             }
             set_speed(state, player, Some(current_speed - amount), events);
         }
-        // CR 701.3d: Explicit unattach cost. Legality is pre-gated by
+        // CR 701.3d + CR 301.5d: Explicit unattach cost. Legality is pre-gated by
         // `AbilityCost::is_payable`; payment clears both sides of the
         // attachment graph and keeps the Equipment on the battlefield.
-        AbilityCost::Unattach => {
-            let obj = state.objects.get(&source_id).ok_or_else(|| {
-                EngineError::InvalidAction("Source object not found for unattach cost".to_string())
+        // The unattached Equipment need not be controlled by the payer when granted
+        // to an equipped creature (CR 301.5d).
+        AbilityCost::Unattach { target } => {
+            let Some(attach_id) = super::casting::find_eligible_unattach_target(
+                state,
+                player,
+                source_id,
+                target.as_ref(),
+            ) else {
+                return Ok(payment_failed(
+                    "Cannot unattach: no matching attached Equipment found",
+                ));
+            };
+            let obj = state.objects.get(&attach_id).ok_or_else(|| {
+                EngineError::InvalidAction(
+                    "Attachment object not found for unattach cost".to_string(),
+                )
             })?;
             if obj.zone != Zone::Battlefield
-                || obj.controller != player
                 || !obj
                     .card_types
                     .subtypes
@@ -1595,15 +1608,15 @@ fn pay_ability_cost_inner(
                     .any(|subtype| subtype == "Equipment")
             {
                 return Ok(payment_failed(
-                    "Cannot unattach: source is not a controlled battlefield Equipment",
+                    "Cannot unattach: target is not a battlefield Equipment",
                 ));
             }
             if obj.attached_to.is_none() {
-                return Ok(payment_failed("Cannot unattach: source is not attached"));
+                return Ok(payment_failed("Cannot unattach: target is not attached"));
             }
-            if let Some(old_target) = super::effects::attach::unattach(state, source_id) {
+            if let Some(old_target) = super::effects::attach::unattach(state, attach_id) {
                 events.push(GameEvent::Unattached {
-                    attachment_id: source_id,
+                    attachment_id: attach_id,
                     old_target,
                 });
             }
@@ -2037,7 +2050,7 @@ pub(crate) fn is_direct_resolution_optional_payment_branch(cost: &AbilityCost) -
         | AbilityCost::PayEnergy { .. }
         | AbilityCost::PaySpeed { .. }
         | AbilityCost::ReturnToHand { .. }
-        | AbilityCost::Unattach
+        | AbilityCost::Unattach { .. }
         | AbilityCost::UnattachFrom { .. }
         | AbilityCost::Mill { .. }
         | AbilityCost::Exert
@@ -2135,7 +2148,7 @@ pub(crate) fn supported_at_resolution(cost: &AbilityCost) -> bool {
         | AbilityCost::RemoveCounter { .. }
         | AbilityCost::ReturnToHand { .. }
         | AbilityCost::Mill { .. }
-        | AbilityCost::Unattach
+        | AbilityCost::Unattach { .. }
         // CR 701.3d: an unattach-from cost is paid at activation via the
         // interactive `PayCost { UnattachFrom }` detour, never at resolution.
         | AbilityCost::UnattachFrom { .. }
@@ -2318,7 +2331,7 @@ pub(crate) fn resolution_cost_includes_impossible_event(
         | AbilityCost::PayEnergy { .. }
         | AbilityCost::PaySpeed { .. }
         | AbilityCost::ReturnToHand { .. }
-        | AbilityCost::Unattach
+        | AbilityCost::Unattach { .. }
         | AbilityCost::UnattachFrom { .. }
         | AbilityCost::Mill { .. }
         | AbilityCost::Exert
@@ -2532,7 +2545,7 @@ fn can_pay_resolution(
         AbilityCost::Discard { .. }
         | AbilityCost::Tap
         | AbilityCost::Untap
-        | AbilityCost::Unattach
+        | AbilityCost::Unattach { .. }
         // CR 701.3d: an unattach-from cost is an activation cost, not a
         // resolution-time cost; refuse here like the unit `Unattach`.
         | AbilityCost::UnattachFrom { .. }
@@ -2752,7 +2765,7 @@ mod tests {
                 filter: None,
                 from_zone: None,
             },
-            AbilityCost::Unattach => AbilityCost::Unattach,
+            AbilityCost::Unattach { .. } => AbilityCost::Unattach { target: None },
             AbilityCost::UnattachFrom { .. } => AbilityCost::UnattachFrom {
                 filter: TargetFilter::Any,
                 count: 1,
@@ -2875,7 +2888,7 @@ mod tests {
                 filter: None,
                 from_zone: None,
             },
-            AbilityCost::Unattach,
+            AbilityCost::Unattach { target: None },
             AbilityCost::UnattachFrom {
                 filter: TargetFilter::Any,
                 count: 1,

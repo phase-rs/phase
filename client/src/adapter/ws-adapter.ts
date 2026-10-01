@@ -210,6 +210,9 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 97 — AbilityCost.Unattach gains an optional granting-Equipment target.
+ *      A v96 peer cannot preserve this cost subject in full-game state.
+ *      Full-game peers and P2P move in lockstep (wire 79); lobby is unchanged.
  * 96 — QuantityRef.NameStickerLetterCount adds a tagged name-sticker statistic
  *      to GameState ability definitions. A v95 peer cannot decode the new tag;
  *      full-game peers and P2P move in lockstep (wire 78). Lobby messages are
@@ -644,7 +647,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 96;
+export const PROTOCOL_VERSION = 97;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

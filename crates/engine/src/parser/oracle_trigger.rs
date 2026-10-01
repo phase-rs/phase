@@ -4370,7 +4370,7 @@ fn reflexive_optional_cost_payable_by_resolution_prompt(cost: &AbilityCost) -> b
         | AbilityCost::PayEnergy { .. }
         | AbilityCost::PaySpeed { .. }
         | AbilityCost::ReturnToHand { .. }
-        | AbilityCost::Unattach
+        | AbilityCost::Unattach { .. }
         | AbilityCost::UnattachFrom { .. }
         | AbilityCost::Mill { .. }
         | AbilityCost::Exert

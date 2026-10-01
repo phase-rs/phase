@@ -2329,13 +2329,14 @@ const GRANTER_SELF_REF_VERB_PREFIXES: &[&str] = &[
     "exile ",      // Exile cost
     "return ",     // ReturnToHand cost / Bounce effect
     "counter on ", // PutCounter target ("put a <kind> counter on <name>")
+    "unattach ",   // Unattach cost (Leonin Bola: "Unattach Leonin Bola")
 ];
 // Deliberately excluded: `destroy ` / `control of ` — no measured class card
 // references its own name cleanly in those positions (Shuriken's "gains control
 // of Shuriken unless it was unattached from a Ninja" carries an unless-rider that
 // parses to `Unimplemented`, so masking it would leak the placeholder rather than
 // producing GrantingObject). Add such a verb only with a card that provably
-// consumes the placeholder there. Nullary self-costs (`unattach`/`tap <name>`)
+// consumes the placeholder there. Nullary self-costs (`tap <name>`)
 // are also excluded — they carry no TargetFilter and expect `~`.
 
 /// CR 201.5a: Within each double-quoted region of `text`, replace occurrences of

@@ -1312,14 +1312,22 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         }
     }
 
-    // CR 701.3d: "Unattach this Equipment" / "Unattach ~" — explicit
-    // activation costs on Equipment such as Sunforger.
-    if nom_on_lower(text, &lower, |i| {
-        value((), alt((tag("unattach this equipment"), tag("unattach ~")))).parse(i)
-    })
-    .is_some()
-    {
-        return AbilityCost::Unattach;
+    // CR 701.3d: "Unattach this Equipment" / "Unattach ~" / "Unattach <granting_self>" — explicit
+    // activation costs on Equipment (Sunforger) or granted by Equipment (Leonin Bola).
+    if let Some((target, _rest)) = nom_on_lower(text, &lower, |i| {
+        let (i, _) = tag("unattach ").parse(i)?;
+        let (i, target) = alt((
+            value(None, alt((tag("this equipment"), tag("~")))),
+            map(parse_cost_self_reference, |filter| match filter {
+                TargetFilter::SelfRef => None,
+                other => Some(other),
+            }),
+        ))
+        .parse(i)?;
+        let (i, _) = eof.parse(i)?;
+        Ok((i, target))
+    }) {
+        return AbilityCost::Unattach { target };
     }
 
     // CR 701.3d + CR 608.2k: "Unattach a[n] <type> from ~" — unattach a matching
@@ -3564,9 +3572,12 @@ mod tests {
     fn cost_unattach_this_equipment() {
         assert_eq!(
             parse_oracle_cost("Unattach this Equipment"),
-            AbilityCost::Unattach
+            AbilityCost::Unattach { target: None }
         );
-        assert_eq!(parse_oracle_cost("Unattach ~"), AbilityCost::Unattach);
+        assert_eq!(
+            parse_oracle_cost("Unattach ~"),
+            AbilityCost::Unattach { target: None }
+        );
     }
 
     #[test]
@@ -3591,7 +3602,7 @@ mod tests {
         // be captured by the new "unattach a[n] <type> from ~" branch.
         assert_eq!(
             parse_oracle_cost("Unattach this Equipment"),
-            AbilityCost::Unattach
+            AbilityCost::Unattach { target: None }
         );
         assert!(!matches!(
             parse_oracle_cost("Unattach this Equipment"),

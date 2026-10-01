@@ -38849,7 +38849,7 @@ mod unattach_cost {
     fn pays_by_detaching_source_equipment() {
         let mut state = setup_game_at_main_phase();
         let (equipment, creature) = attached_equipment(&mut state);
-        let cost = AbilityCost::Unattach;
+        let cost = AbilityCost::Unattach { target: None };
 
         assert!(cost.is_payable(&state, PlayerId(0), equipment));
         pay_ability_cost_for_activation(
@@ -38874,7 +38874,7 @@ mod unattach_cost {
         crate::game::effects::attach::unattach(&mut state, equipment);
 
         assert!(
-            !AbilityCost::Unattach.is_payable(&state, PlayerId(0), equipment),
+            !AbilityCost::Unattach { target: None }.is_payable(&state, PlayerId(0), equipment),
             "unattach cost requires an attached source permanent"
         );
     }
@@ -38894,7 +38894,7 @@ mod unattach_cost {
         assert!(state.objects[&equipment].attached_to.is_some());
         assert!(state.objects[&creature].attachments.contains(&equipment));
         assert!(
-            !AbilityCost::Unattach.is_payable(&state, PlayerId(0), equipment),
+            !AbilityCost::Unattach { target: None }.is_payable(&state, PlayerId(0), equipment),
             "unattach cost is Equipment-only"
         );
     }

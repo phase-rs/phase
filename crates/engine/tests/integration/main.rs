@@ -1023,6 +1023,7 @@ mod lathiel_end_step_counters_repro;
 mod leading_duration_distribution_7923;
 mod leeching_sliver;
 mod legend_rule_scope;
+mod leonin_bola_granted_ability;
 mod leyline_taps_for_mana_repro;
 mod lictor_opponent_entered_this_turn;
 mod life_and_limb_sylvan_advocate;

@@ -18569,7 +18569,7 @@ fn unless_cost_is_unpayable(cost: &AbilityCost) -> bool {
         | AbilityCost::PayEnergy { .. }
         | AbilityCost::PaySpeed { .. }
         | AbilityCost::ReturnToHand { .. }
-        | AbilityCost::Unattach
+        | AbilityCost::Unattach { .. }
         | AbilityCost::UnattachFrom { .. }
         | AbilityCost::Mill { .. }
         | AbilityCost::Exert

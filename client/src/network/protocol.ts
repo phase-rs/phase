@@ -106,6 +106,9 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
+ *  79 — AbilityCost.Unattach carries the granting-Equipment target in
+ *        full-game state; v78 peers lack that cost-subject authority.
+ *        Bumped in lockstep with full-game protocol 97.
  *  77 — game_setup and state_update carry GameState, whose ability definitions
  *       now carry FilterProp.BlockStatus { status } in place of the unit
  *       FilterProp.Unblocked (CR 509.1h). A v76 peer cannot parse the new
@@ -495,7 +498,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 78 as const;
+export const WIRE_PROTOCOL_VERSION = 79 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

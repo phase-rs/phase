@@ -7014,6 +7014,9 @@ fn concretize_granting_object_in_cost(cost: &mut AbilityCost, granter: ObjectId)
         }
         | AbilityCost::RemoveCounter {
             target: Some(f), ..
+        }
+        | AbilityCost::Unattach {
+            target: Some(f), ..
         } => concretize_granting_object_in_filter(f, granter),
         AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
             for c in costs.iter_mut() {

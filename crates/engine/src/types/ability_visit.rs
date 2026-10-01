@@ -549,7 +549,7 @@ where
         | AbilityCost::PayEnergy { .. }
         | AbilityCost::PaySpeed { .. }
         | AbilityCost::ReturnToHand { .. }
-        | AbilityCost::Unattach
+        | AbilityCost::Unattach { .. }
         | AbilityCost::UnattachFrom { .. }
         | AbilityCost::Mill { .. }
         | AbilityCost::Exert
