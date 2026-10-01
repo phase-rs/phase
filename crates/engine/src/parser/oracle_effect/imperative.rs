@@ -7725,7 +7725,7 @@ pub(super) fn parse_prevent_recipient_count(text: &str) -> Option<MultiTargetSpe
     let lower = text.to_lowercase();
     let (_, recipient) = prevent_recipient_phrase(&lower)?;
     let (after_quantifier, spec) = strip_leading_quantifier(recipient);
-    peek(tag::<_, _, OracleError<'_>>("target "))
+    peek(nom_target::parse_declared_target_prefix)
         .parse(after_quantifier)
         .ok()?;
     spec
@@ -7848,15 +7848,19 @@ fn parse_prevent_effect(text: &str, parent_target_available: bool) -> Effect {
     let declared_recipient = recipient.and_then(|recipient| {
         let (_, original_recipient) =
             TextPair::new(text, &lower).split_at(lower.len() - recipient.len());
-        let (filter, remainder, syntax) =
-            parse_target_with_syntax(original_recipient.original, &mut ParseContext::default());
-        // The fixed "any target" phrase retains its existing Any shape.
-        let any_target = tag::<_, _, OracleError<'_>>("any target")
-            .parse(recipient)
-            .is_ok();
+        let (after_quantifier, _) = strip_leading_quantifier(recipient);
+        // Share the declaration authority with other target readers, including
+        // "another target" / "other target"; retain the fixed "any target" shape.
+        peek(alt((
+            nom_target::parse_declared_target_prefix,
+            value((), tag("any target")),
+        )))
+        .parse(after_quantifier)
+        .ok()?;
+        let (filter, remainder) = parse_target(original_recipient.original);
         let (_, remainder) =
             original_recipient.split_at(original_recipient.original.len() - remainder.len());
-        (syntax == TargetSyntax::TargetKeyword || any_target).then_some((filter, remainder.lower))
+        Some((filter, remainder.lower))
     });
     if nom_primitives::scan_contains(rest, "target ")
         && (declared_recipient.is_none()
@@ -7867,7 +7871,7 @@ fn parse_prevent_effect(text: &str, parent_target_available: bool) -> Effect {
                     || nom_primitives::scan_contains(remainder, "target ")
             }))
     {
-        return Effect::unimplemented("prevent", text);
+        return Effect::unimplemented(PREVENT_RECIPIENT_TARGET_ROLE_GAP, text);
     }
 
     // CR 115.1a + CR 115.10a: only a declared recipient is Single here;
@@ -7936,6 +7940,9 @@ fn parse_prevent_effect(text: &str, parent_target_available: bool) -> Effect {
 /// the source-scoped shape. The spell prevent route emits it as-is so a weaker
 /// priority cannot re-read the line as a blanket prevention replacement.
 pub(crate) const PREVENT_DEALT_BY_TARGET_GAP: &str = "prevent_damage_dealt_by_target";
+/// Gap for prevention target roles this recipient route cannot bind. Preserve
+/// it on the spell route rather than retrying a weaker replacement reading.
+pub(crate) const PREVENT_RECIPIENT_TARGET_ROLE_GAP: &str = "prevent_damage_recipient_target_role";
 
 /// Gap for a bidirectional prevent whose "to" half names a declared "target
 /// <X>" recipient; no representation scopes both halves to the one chosen

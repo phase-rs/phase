@@ -3,6 +3,7 @@ use super::lower::{
     rewrite_parent_target_to_last_created, target_filter_is_explicit_target_player_graveyard_card,
 };
 use super::*;
+use crate::game::coverage::card_face_has_unimplemented_parts;
 use crate::game::triggers::extract_target_filter_from_effect;
 use crate::parser::oracle_ir::ast::EntersUnderSpec;
 use crate::parser::oracle_ir::diagnostic::{ClauseGap, ClauseGapKind};
@@ -19,6 +20,7 @@ use crate::types::ability::{
     MassLibraryShuffleMode, ModalChoice, PerpetualModification, PileSource, SeatDirection,
     TurnJournalKind, VoteTally, VoteVisibility, VoterScope,
 };
+use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
 use crate::types::mana::{ManaCost, ManaCostShard};
 use crate::types::statics::CostModifyMode;
@@ -78768,4 +78770,80 @@ fn specialized_prevention_sources_and_any_target_recipient_are_preserved() {
             ..
         }
     ));
+}
+
+/// SHAPE + coverage honesty: unsupported target roles survive the complete
+/// top-level router instead of becoming broad prevention replacements.
+#[test]
+fn prevention_target_role_gaps_survive_top_level_fallback() {
+    let fixtures: &[(&str, &str, &[&str], &[&str])] = &[
+        ("Resistance Fighter", "Sacrifice this creature: Prevent all combat damage target creature would deal this turn.", &["Creature"], &["Human", "Soldier"]),
+        ("Falling Timber", "Kicker—Sacrifice a land. (You may sacrifice a land in addition to any other costs as you cast this spell.)\nPrevent all combat damage target creature would deal this turn. If this spell was kicked, prevent all combat damage another target creature would deal this turn.", &["Instant"], &[]),
+        ("Chain of Silence", "Prevent all damage target creature would deal this turn. That creature's controller may sacrifice a land of their choice. If the player does, they may copy this spell and may choose a new target for that copy.", &["Instant"], &[]),
+        ("Serene Sunset", "Prevent all combat damage X target creatures would deal this turn.", &["Instant"], &[]),
+        ("Soul Parry", "Prevent all damage one or two target creatures would deal this turn.", &["Instant"], &[]),
+        ("Guard Dogs", "{2}{W}, {T}: Choose a permanent you control. Prevent all combat damage target creature would deal this turn if it shares a color with that permanent.", &["Creature"], &["Dog"]),
+        ("Azorius Ploy", "Prevent all combat damage target creature would deal this turn.\nPrevent all combat damage that would be dealt to target creature this turn.", &["Instant"], &[]),
+        ("Gideon of the Trials", "[+1]: Until your next turn, prevent all damage target permanent would deal.\n[0]: Until end of turn, Gideon becomes a 4/4 Human Soldier creature with indestructible that's still a planeswalker. Prevent all damage that would be dealt to him this turn.\n[0]: You get an emblem with \"As long as you control a Gideon planeswalker, you can't lose the game and your opponents can't win the game.\"", &["Planeswalker"], &["Gideon"]),
+        ("Shieldmage Elder", "Tap two untapped Clerics you control: Prevent all damage target creature would deal this turn.\nTap two untapped Wizards you control: Prevent all damage target spell would deal this turn.", &["Creature"], &["Human", "Cleric", "Wizard"]),
+        ("Stonewise Fortifier", "{4}{W}: Prevent all damage that would be dealt to this creature by target creature this turn.", &["Creature"], &["Human", "Wizard"]),
+        ("Terrifying Presence", "Prevent all combat damage that would be dealt by creatures other than target creature this turn.", &["Instant"], &[]),
+        ("Wojek Apothecary", "Radiance — {T}: Prevent the next 1 damage that would be dealt to target creature and each other creature that shares a color with it this turn.", &["Creature"], &["Human", "Cleric"]),
+        ("Encircling Fissure", "Prevent all combat damage that would be dealt this turn by creatures target opponent controls.\nAwaken 2—{4}{W} (If you cast this spell for {4}{W}, also put two +1/+1 counters on target land you control and it becomes a 0/0 Elemental creature with haste. It's still a land.)", &["Instant"], &[]),
+        ("Inquisitor's Snare", "Prevent all damage target attacking or blocking creature would deal this turn. If that creature is black or red, destroy it.", &["Instant"], &[]),
+        ("Old Fat Spider Can't See Me", "(As this Saga enters and after your draw step, add a lore counter. Sacrifice after IV.)\nI — Target creature you control gains hexproof for as long as this Saga remains on the battlefield.\nII — Prevent all damage that would be dealt by up to one target creature for as long as this Saga remains on the battlefield.\nIII, IV — Draw a card.", &["Enchantment"], &["Saga"]),
+    ];
+    for &(name, oracle, types, subtypes) in fixtures {
+        let types = types.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let subtypes = subtypes.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let parsed = parse_oracle_text(oracle, name, &[], &types, &subtypes);
+        assert!(
+            !parsed.abilities.is_empty() || !parsed.triggers.is_empty(),
+            "{name}: reach guard: the complete card produced executable definitions"
+        );
+        assert!(
+            parsed.replacements.is_empty(),
+            "{name}: a rejected target role must not become a broad replacement: {:?}",
+            parsed.replacements
+        );
+        let face = CardFace {
+            name: name.to_string(),
+            oracle_text: Some(oracle.to_string()),
+            abilities: parsed.abilities,
+            triggers: parsed.triggers,
+            static_abilities: parsed.statics,
+            replacements: parsed.replacements,
+            additional_cost: parsed.additional_cost,
+            ..Default::default()
+        };
+        assert!(
+            card_face_has_unimplemented_parts(&face),
+            "{name}: strict unsupported coverage must survive the top-level router"
+        );
+    }
+}
+
+#[test]
+fn prevention_declared_prefixes_keep_full_filters_and_counts() {
+    for (text, expected_count) in [
+        ("Prevent all damage that would be dealt to another target creature this turn.", None),
+        ("Prevent all damage that would be dealt to other target creature this turn.", None),
+        ("Prevent all damage that would be dealt this turn to up to two another target creatures.", Some(MultiTargetSpec::fixed(0, 2))),
+        ("Prevent all damage that would be dealt this turn to up to two other target creatures.", Some(MultiTargetSpec::fixed(0, 2))),
+    ] {
+        let ability = parse_effect_chain(text, AbilityKind::Spell);
+        assert!(matches!(
+            *ability.effect,
+            Effect::PreventDamage {
+                target: TargetFilter::Typed(_),
+                recipient_scope: EffectScope::Single,
+                ..
+            }
+        ), "{text}: {:?}", ability.effect);
+        assert_eq!(
+            ability.multi_target,
+            expected_count,
+            "{text}: announced count"
+        );
+    }
 }

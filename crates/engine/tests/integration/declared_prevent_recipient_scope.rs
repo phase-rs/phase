@@ -698,3 +698,42 @@ fn djerus_resolve_shields_only_the_untapped_creature() {
     assert_eq!(hit.damage_marked(a), 0);
     assert_eq!(hit.zone_of(b), Zone::Graveyard);
 }
+
+/// CR 115.1a + CR 615.1: "another target" still binds one eligible recipient.
+#[test]
+fn kurbis_shields_only_the_chosen_countered_creature() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let kurbis = scenario.add_creature_from_oracle(
+        P0, "Kurbis, Harvest Celebrant", 0, 0,
+        "Kurbis enters with a number of +1/+1 counters on it equal to the amount of mana spent to cast it.\nRemove a +1/+1 counter from Kurbis: Prevent all damage that would be dealt this turn to another target creature with a +1/+1 counter on it.",
+    ).id();
+    let chosen = scenario.add_creature(P0, "Chosen", 4, 4).id();
+    let unchosen = scenario.add_creature(P0, "Unchosen", 4, 4).id();
+    scenario.with_counter(kurbis, CounterType::Plus1Plus1, 3);
+    scenario.with_counter(chosen, CounterType::Plus1Plus1, 1);
+    scenario.with_counter(unchosen, CounterType::Plus1Plus1, 1);
+    let pyroclasm = scenario
+        .add_spell_to_hand_from_oracle(P0, "Pyroclasm", false, PYROCLASM)
+        .id();
+    let mut runner = scenario.build();
+    let activation = runner.activate(kurbis, 0).target_object(chosen).resolve();
+    assert!(
+        activation
+            .events()
+            .iter()
+            .any(|event| matches!(event, GameEvent::AbilityActivated { .. })),
+        "reach guard: Kurbis activated through its counter cost"
+    );
+    let damage = runner.cast(pyroclasm).resolve();
+    assert_eq!(
+        damage.damage_marked(chosen),
+        0,
+        "the chosen countered creature is shielded"
+    );
+    assert_eq!(
+        damage.damage_marked(unchosen),
+        2,
+        "reach guard: an eligible unchosen creature takes damage"
+    );
+}
