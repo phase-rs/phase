@@ -39,7 +39,7 @@ use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{CastPaymentMode, WaitingFor, ZoneOpponentChooserPurpose};
 use engine::types::identifiers::ObjectId;
-use engine::types::phase::Phase;
+use engine::types::phase::{Phase, TurnDirection};
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
@@ -618,13 +618,13 @@ fn make_frame_legacy(runner: &mut GameRunner) {
     runner.state_mut().push_per_player_zone_choice(frame);
 }
 
-/// Cast Breach in a 3-player game (optionally after reversing the turn order
-/// with a real "Reverse the game's turn order." spell), order `first` then
+/// Cast Breach in a 3-player game under `direction` (`Reversed` casts a real
+/// "Reverse the game's turn order." spell first), order `first` then
 /// pick from its graveyard, then order `second`, leaving `second`'s pool
 /// pending. Returns the runner and every graveyard creature.
 fn breach_parked_on_second_pool(
     seed: u64,
-    reverse: bool,
+    direction: TurnDirection,
     first: PlayerId,
     second: PlayerId,
 ) -> (GameRunner, Vec<ObjectId>) {
@@ -662,9 +662,12 @@ fn breach_parked_on_second_pool(
             })
             .expect("cast");
     };
-    if reverse {
-        cast(&mut runner, reverser);
-        runner.advance_until_stack_empty();
+    match direction {
+        TurnDirection::Normal => {}
+        TurnDirection::Reversed => {
+            cast(&mut runner, reverser);
+            runner.advance_until_stack_empty();
+        }
     }
     cast(&mut runner, breach);
     advance_to_choice_or_empty(&mut runner);
@@ -704,7 +707,8 @@ fn finish_breach(runner: &mut GameRunner, picks: &[ObjectId]) {
 #[test]
 fn legacy_breach_save_under_reversed_turn_order_restores() {
     const P2: PlayerId = PlayerId(2);
-    let (mut runner, creatures) = breach_parked_on_second_pool(3306, true, P0, P2);
+    let (mut runner, creatures) =
+        breach_parked_on_second_pool(3306, TurnDirection::Reversed, P0, P2);
     assert_eq!(
         engine::game::players::apnap_order(runner.state()),
         vec![P0, P2, P1],
@@ -740,7 +744,7 @@ fn legacy_breach_save_under_reversed_turn_order_restores() {
 #[test]
 fn current_schema_breach_save_under_reversed_turn_order_restores() {
     const P2: PlayerId = PlayerId(2);
-    let (runner, creatures) = breach_parked_on_second_pool(3307, true, P0, P2);
+    let (runner, creatures) = breach_parked_on_second_pool(3307, TurnDirection::Reversed, P0, P2);
     let restored = restore(&runner).expect("a current-schema save restores");
     let mut runner = GameRunner::from_state(restored);
     finish_breach(&mut runner, &[creatures[2], creatures[1]]);
@@ -752,7 +756,7 @@ fn current_schema_breach_save_under_reversed_turn_order_restores() {
 #[test]
 fn legacy_breach_save_under_normal_turn_order_restores() {
     const P2: PlayerId = PlayerId(2);
-    let (mut runner, creatures) = breach_parked_on_second_pool(3308, false, P0, P1);
+    let (mut runner, creatures) = breach_parked_on_second_pool(3308, TurnDirection::Normal, P0, P1);
     assert_eq!(
         engine::game::players::apnap_order(runner.state()),
         vec![P0, P1, P2]

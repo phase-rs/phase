@@ -1389,7 +1389,7 @@ fn static_per_player_population(
     ability: &ResolvedAbility,
     scope: PerPlayerScope,
 ) -> Vec<PlayerId> {
-    // CR 101.4 + CR 103.1: the same direction- and topology-aware APNAP walk
+    // CR 101.4 + CR 103.1 + CR 805.6: the same direction- and team-aware APNAP walk
     // the producer used, admitting players who have since left the game.
     let apnap = topology::apnap_order_admitting(
         state,

@@ -209,7 +209,8 @@ pub(crate) fn apnap_order_from(state: &GameState, start_player: PlayerId) -> Vec
 }
 
 /// APNAP order from `start_player` over the given seat admission, following
-/// the current turn-order direction and team topology (CR 101.4 + CR 103.1).
+/// the current turn-order direction (CR 101.4 + CR 103.1) and, under the
+/// shared team turns option, team order (CR 805.6).
 pub(crate) fn apnap_order_admitting(
     state: &GameState,
     start_player: PlayerId,
