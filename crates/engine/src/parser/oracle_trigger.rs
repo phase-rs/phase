@@ -6696,7 +6696,7 @@ fn zone_origin_or_condition(
     }
 }
 
-/// CR 603.4 + CR 603.10a: Recognize the "entered/was-cast from <zone>"
+/// CR 603.4 + CR 601.2 + CR 603.2c: Recognize the "entered/was-cast from <zone>"
 /// disjunctive intervening-if as a single nom combinator covering the whole
 /// class — the compact "a graveyard" form (Twilight Diviner), the owner-scoped
 /// "your graveyard" form with an explicit "you cast it" arm (Prized Amalgam),
