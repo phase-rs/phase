@@ -9492,16 +9492,16 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, AggregateFunction, AttachmentKind, ChosenAttribute,
-        CombatHistoryScope, Comparator, ControllerRef, DamageKindFilter, Effect, FilterProp,
-        ManaContribution, ManaProduction, PlayerScope, QuantityExpr, QuantityRef,
-        ReplacementDefinition, ResolvedAbility, StaticDefinition, TargetFilter, TargetRef,
-        TriggerDefinition, TypeFilter, TypedFilter,
+        CombatHistoryScope, Comparator, ControllerRef, CostPaidObjectSnapshot, DamageKindFilter,
+        Effect, FilterProp, ManaContribution, ManaProduction, PlayerScope, QuantityExpr,
+        QuantityRef, ReplacementDefinition, ResolvedAbility, StaticDefinition, TargetFilter,
+        TargetRef, TriggerDefinition, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::events::GameEvent;
     use crate::types::format::FormatConfig;
     use crate::types::game_state::{
-        AttachmentSnapshot, StackEntry, StackEntryKind, ZoneChangeRecord,
+        AttachmentSnapshot, LKISnapshot, StackEntry, StackEntryKind, ZoneChangeRecord,
     };
     use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
     use crate::types::keywords::Keyword;
@@ -17743,10 +17743,6 @@ mod tests {
     /// used (graveyard-origin queries).
     #[test]
     fn same_name_as_parent_target_reads_only_a_current_matching_move_snapshot() {
-        use crate::types::ability::CostPaidObjectSnapshot;
-        use crate::types::game_state::LKISnapshot;
-        use std::collections::HashMap;
-
         let copied_lki = LKISnapshot {
             name: "Grizzly Bears".to_string(),
             token_image_ref: None,
