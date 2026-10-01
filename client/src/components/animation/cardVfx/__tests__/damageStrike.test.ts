@@ -188,7 +188,7 @@ describe("damage strike", () => {
 
   it("V10-4: the warm-up builds every particle, light, bolt, jet and hit program", () => {
     const warm = damageStrikeKind.warmUp(host());
-    expect(warm).toHaveLength(15);
+    expect(warm).toHaveLength(16);
     expect(warm.every((object) => object instanceof Mesh)).toBe(true);
     const programs = new Set(
       warm.map((object) => {
@@ -200,7 +200,17 @@ describe("damage strike", () => {
         return JSON.stringify([vertexShader, fragmentShader, defines]);
       }),
     );
-    expect(programs.size).toBe(15);
+    expect(programs.size).toBe(16);
+    for (const cause of ["fire", "lightning", "water"] as const) {
+      const effectHost = host();
+      const { strike } = createDamageStrike(effectHost, params({ cause }));
+      effectHost.scene.traverse((object) => {
+        if (!(object instanceof Mesh)) return;
+        const { vertexShader, fragmentShader, defines } = object.material as ShaderMaterial;
+        expect(programs.has(JSON.stringify([vertexShader, fragmentShader, defines]))).toBe(true);
+      });
+      strike.dispose(true);
+    }
   });
 });
 

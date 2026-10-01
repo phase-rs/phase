@@ -537,6 +537,15 @@ const fireTrailFrag = /* glsl */ `
     gl_FragColor = vec4(ramp(heat) * body * smoothstep(0.0, 0.15, along), 0.0);
   }`;
 
+function fireTrailMaterial(clock: { value: number }) {
+  return new ShaderMaterial({
+    vertexShader: boltVert,
+    fragmentShader: fireTrailFrag,
+    ...ADDITIVE,
+    uniforms: { uHead: { value: 0 }, uTail: { value: 0 }, uTime: clock },
+  });
+}
+
 function fireCause({ group, unit, clock, S, T, span, scale, share, boardLight }: CauseContext): EffectFrame {
   const dx = T[0] - S[0];
   const dy = T[1] - S[1];
@@ -561,12 +570,7 @@ function fireCause({ group, unit, clock, S, T, span, scale, share, boardLight }:
   const positions = trailGeometry.getAttribute("position");
   const along = trailGeometry.getAttribute("aAlong");
   for (let i = 0; i < positions.count; i++) positions.setZ(i, heightAt(along.getX(i)));
-  const trail = new Mesh(trailGeometry, new ShaderMaterial({
-    vertexShader: boltVert,
-    fragmentShader: fireTrailFrag,
-    ...ADDITIVE,
-    uniforms: { uHead: { value: 0 }, uTail: { value: 0 }, uTime: clock },
-  }));
+  const trail = new Mesh(trailGeometry, fireTrailMaterial(clock));
   trail.renderOrder = 7;
   trail.frustumCulled = false;
   group.add(trail);
@@ -976,6 +980,7 @@ export const damageStrikeKind: SceneEffectKind = {
       sprite(unit, "SHADOW", [0, 0, 0], 0),
       sprite(unit, "RIPPLE", [0, 0, 0], 4),
       new Mesh(boltGeometry([0, 0], [1, 0]), boltMaterial()),
+      new Mesh(jetGeometry({ S: [0, 0], C: [1, 0], T: [2, 0] }, 1), fireTrailMaterial(clock)),
       new Mesh(jetGeometry({ S: [0, 0], C: [1, 0], T: [2, 0] }, 1), frostBoltMaterial(2)),
     ];
     for (const cause of ["fire", "water"] as const) {
