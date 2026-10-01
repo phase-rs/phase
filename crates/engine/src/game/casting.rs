@@ -53,7 +53,7 @@ use super::ability_utils::{
     assign_targets_in_chain, auto_select_targets, auto_select_targets_for_ability,
     begin_target_selection, begin_target_selection_for_ability, build_resolved_from_def,
     build_target_slots, build_target_slots_for_announcement, compute_unavailable_modes,
-    declared_targets_in_chain, filter_references_target_player, flatten_targets_in_chain,
+    declared_targets_in_chain, filter_references_target_player,
     has_legal_target_assignment_for_ability, modal_choice_for_player,
     simple_legal_target_assignment_exists_for_ability, target_constraints_from_modal,
     unresolved_x_target_construction_error, TargetSlotBuildOutcome,
@@ -11229,13 +11229,15 @@ fn apply_target_dependent_cost_modifiers_using(
 ) {
     // CR 601.2f: Strive per-target cost increase. Targets are chosen in
     // CR 601.2c; costs are determined in CR 601.2f. Add
-    // strive_cost * (num_targets - 1) to the total casting cost.
+    // strive_cost * (num_targets - 1) to the total casting cost. "Target"
+    // counts announced targets only (CR 115.10a): an inheriting rider's carried
+    // copy of its parent's target is not another one.
     if let Some(strive_cost) = state
         .objects
         .get(&object_id)
         .and_then(|obj| obj.strive_cost.clone())
     {
-        let target_count = super::ability_utils::flatten_targets_in_chain(ability).len();
+        let target_count = super::ability_utils::declared_targets_in_chain(ability).len();
         for _ in 1..target_count {
             *mana_cost = super::restrictions::add_mana_cost(mana_cost, &strive_cost);
         }
@@ -11346,7 +11348,9 @@ pub(crate) fn compute_spend_only_on_x_generic_count(
         );
     }
     if let Some(strive_cost) = obj.strive_cost.clone() {
-        let target_count = super::ability_utils::flatten_targets_in_chain(&pending.ability).len();
+        // CR 115.10a + CR 601.2f: Count announced targets for the Strive
+        // increase; an inherited rider's snapshot is not another target.
+        let target_count = super::ability_utils::declared_targets_in_chain(&pending.ability).len();
         for _ in 1..target_count {
             cost = super::restrictions::add_mana_cost(&cost, &strive_cost);
         }
@@ -12216,7 +12220,7 @@ fn selected_targets_match_filter(
     filter: &TargetFilter,
     require_all: bool,
 ) -> bool {
-    let targets = flatten_targets_in_chain(ability);
+    let targets = declared_targets_in_chain(ability);
     if targets.is_empty() {
         return false;
     }
@@ -27307,7 +27311,7 @@ pub(crate) fn capture_activation_record(
         player,
         source_id,
         activation_ability_definition(state, source_id, ability_index).as_ref(),
-        &flatten_targets_in_chain(ability),
+        &declared_targets_in_chain(ability),
     )
 }
 
@@ -28735,7 +28739,7 @@ fn parsed_condition_satisfied_with_committed_targets(
             comparator,
             rhs,
         } if parsed_condition_reads_targets(condition, TargetRead::Any) => {
-            let targets = flatten_targets_in_chain(ability);
+            let targets = declared_targets_in_chain(ability);
             let resolve = |qty: &QuantityRef, scope: PlayerId| {
                 super::quantity::resolve_quantity_scoped_with_targets(
                     state,
@@ -28764,7 +28768,7 @@ fn parsed_condition_satisfied_with_committed_targets(
 /// and every other binding are kept.
 fn ability_with_chain_targets(ability: &ResolvedAbility) -> ResolvedAbility {
     let mut chain = ability.clone();
-    chain.targets = flatten_targets_in_chain(ability);
+    chain.targets = declared_targets_in_chain(ability);
     chain
 }
 

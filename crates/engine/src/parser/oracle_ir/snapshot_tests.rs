@@ -2185,9 +2185,10 @@ fn evils_thrall() {
     insta::assert_json_snapshot!("evils_thrall_lowered", &lowered);
 }
 
-// CR 608.2c: KeywordOverride — a "TargetHasKeywordInstead"-conditioned clause
-// builds its def from the parsed effect + condition and attaches as the prior
-// def's `sub_ability` (Conformer Shuriken's granted attack trigger).
+// CR 208.1 + CR 608.2c: a typed "if that creature has greater power than ~"
+// gate (QuantityCheck) on the tap's chained clause, linked to the tap's target
+// through `TargetReadOrigin::ParentAnnouncement`, with "the difference" bound
+// to the gate's operands (Conformer Shuriken's granted attack trigger).
 #[test]
 fn conformer_shuriken() {
     let (ir, lowered) = parse_two_layer(

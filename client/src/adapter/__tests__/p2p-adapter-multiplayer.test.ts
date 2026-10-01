@@ -5389,19 +5389,19 @@ describe("P2P wire-protocol version gate", () => {
   // Both halves stamp LITERALS. A frame built from WIRE_PROTOCOL_VERSION
   // cannot tell a bumped client from an unbumped one, which is why every
   // other handshake fixture in the suite is useless as an instrument for a
-  // bump. Reverting WIRE_PROTOCOL_VERSION itself (79 → 78) breaks both
-  // halves' premise: the v78 frame now equals the reverted constant and is
+  // bump. Reverting WIRE_PROTOCOL_VERSION itself (80 → 79) breaks both
+  // halves' premise: the v79 frame now equals the reverted constant and is
   // admitted instead of refused — this test would fail at that first
-  // assertion ("promise resolved … instead of rejecting") — and the v79
+  // assertion ("promise resolved … instead of rejecting") — and the v80
   // frame no longer equals it and would be refused instead of admitted,
   // though this single synchronous test body never reaches that second
   // assertion once the first has thrown. The admitting half is still the
-  // reach-guard — without it "refuses v78" is also satisfied by a client
+  // reach-guard — without it "refuses v79" is also satisfied by a client
   // that refuses everything.
-  it("refuses the previous wire protocol (v78) and admits its own (v79)", async () => {
+  it("refuses the previous wire protocol (v79) and admits its own (v80)", async () => {
     const refusing = makeGuest();
     await refusing.adapter.initialize();
-    await refusing.conn.simulateData(setupFrameAt(78));
+    await refusing.conn.simulateData(setupFrameAt(79));
 
     await expect(refusing.adapter.initializeGame()).rejects.toMatchObject({
       code: "P2P_REJECTED",
@@ -5413,7 +5413,7 @@ describe("P2P wire-protocol version gate", () => {
 
     const admitting = makeGuest();
     await admitting.adapter.initialize();
-    await admitting.conn.simulateData(setupFrameAt(79));
+    await admitting.conn.simulateData(setupFrameAt(80));
 
     await expect(admitting.adapter.initializeGame()).resolves.toBeDefined();
     expect(admitting.emitted).not.toHaveBeenCalledWith(

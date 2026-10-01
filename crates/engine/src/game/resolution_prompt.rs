@@ -627,6 +627,7 @@ pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
         chosen_players: _, // concrete chosen player ids (already selected)
         replacement_applied: _, // replacement provenance set, no prompt
         sub_link: _, // SubAbilityLink kind tag
+        target_reads: _, // TargetReadOrigin tag (announce-time), no prompt
         sibling_condition: _, // SiblingCondition replication marker, no resolution-time choice
         parent_target_missing_reason: _, // seam flag
         activation_cost_reduction: _,

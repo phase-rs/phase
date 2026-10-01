@@ -24677,7 +24677,7 @@ fn pay_and_push_emits_targeting_events_for_chained_spell_targets() {
     // declaration continuation, so reproduce its event before paying costs.
     emit_targeting_events(
         &state,
-        &flatten_targets_in_chain(&ability),
+        &crate::game::ability_utils::flatten_targets_in_chain(&ability),
         object_id,
         PlayerId(0),
         &mut events,

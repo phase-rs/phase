@@ -3048,6 +3048,42 @@ pub(crate) fn parse_its_pt_vs_source_comparison(
     parse_pt_vs_source_comparison_tail(rest, lhs)
 }
 
+/// CR 208.1 + CR 608.2c: Comparative-adjective form "has greater|less <stat>
+/// than ~" — the subject object's stat against the ability source's same stat
+/// (Conformer Shuriken's granted trigger: "If that creature has greater power
+/// than this creature, …"). The caller has already consumed the subject noun
+/// phrase ("that creature ") and supplies the scope it binds to, for the same
+/// reason as [`parse_its_pt_vs_source_comparison`]: "that creature" is an
+/// anaphor (the tap target in Conformer Shuriken, the entering creature in an
+/// Evolve-shaped trigger), so only the caller knows its referent.
+///
+/// Deliberately NOT registered in [`parse_inner_condition`]. Accepts exactly
+/// `{greater → GT, less → LT} × {power, toughness}` with the same stat on both
+/// sides; "greater power or toughness than" (Evolve) is refused at `" than"`.
+pub(crate) fn parse_has_comparative_pt_vs_source(
+    input: &str,
+    subject: ObjectScope,
+) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("has ").parse(input)?;
+    let (rest, comparator) = alt((
+        value(Comparator::GT, tag("greater ")),
+        value(Comparator::LT, tag("less ")),
+    ))
+    .parse(rest)?;
+    let (rest, stat) = alt((tag("power"), tag("toughness"))).parse(rest)?;
+    let (rest, _) = tag(" than ~").parse(rest)?;
+    let (_, lhs) = parse_pt_ref_scoped(stat, subject)?;
+    let (_, rhs) = parse_pt_ref_scoped(stat, ObjectScope::Source)?;
+    Ok((
+        rest,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref { qty: lhs },
+            comparator,
+            rhs: QuantityExpr::Ref { qty: rhs },
+        },
+    ))
+}
+
 /// CR 208.1: The shared "<comparator> ~'s <stat>" tail of an object-vs-source
 /// P/T comparison, applied to an already-parsed left-hand stat.
 fn parse_pt_vs_source_comparison_tail(
@@ -21560,6 +21596,64 @@ mod tests {
                     }
                 ),
                 "{text}: rhs must be the source's stat, got {rhs:?}"
+            );
+        }
+    }
+
+    /// CR 208.1: "has greater|less <stat> than ~" binds the caller-supplied
+    /// subject scope on the left and the source's SAME stat on the right, for
+    /// all four accepted shapes; Evolve's "power or toughness" and the
+    /// stat-first "power greater than ~'s power" order are refused.
+    #[test]
+    fn test_parse_has_comparative_pt_vs_source_accepted_shapes() {
+        let power = |scope| QuantityRef::Power { scope };
+        let toughness = |scope| QuantityRef::Toughness { scope };
+        for (text, comparator, lhs, rhs) in [
+            (
+                "has greater power than ~",
+                Comparator::GT,
+                power(ObjectScope::Target),
+                power(ObjectScope::Source),
+            ),
+            (
+                "has less power than ~",
+                Comparator::LT,
+                power(ObjectScope::Target),
+                power(ObjectScope::Source),
+            ),
+            (
+                "has greater toughness than ~",
+                Comparator::GT,
+                toughness(ObjectScope::Target),
+                toughness(ObjectScope::Source),
+            ),
+            (
+                "has less toughness than ~",
+                Comparator::LT,
+                toughness(ObjectScope::Target),
+                toughness(ObjectScope::Source),
+            ),
+        ] {
+            let (rest, c) = parse_has_comparative_pt_vs_source(text, ObjectScope::Target)
+                .unwrap_or_else(|e| panic!("{text}: {e:?}"));
+            assert_eq!(rest, "", "{text}");
+            assert_eq!(
+                c,
+                StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref { qty: lhs },
+                    comparator,
+                    rhs: QuantityExpr::Ref { qty: rhs },
+                },
+                "{text}"
+            );
+        }
+        for refused in [
+            "has greater power or toughness than ~",
+            "has power greater than ~'s power",
+        ] {
+            assert!(
+                parse_has_comparative_pt_vs_source(refused, ObjectScope::Target).is_err(),
+                "{refused}: must not be claimed by the comparative-adjective grammar"
             );
         }
     }

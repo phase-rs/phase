@@ -210,11 +210,19 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
- * 97 — PerPlayerScope gains Opponents (CR 102.2 + CR 102.3), written inside
- *      ZoneOwner as {"Each":"Opponents"} on abilities with a "for each
- *      opponent, choose …" choice. A v96 peer cannot deserialize it; the
- *      exact-match handshake refuses the pairing. P2P moves in lockstep
- *      (wire 79); lobby messages are unchanged.
+ * 98 — PerPlayerScope gains Opponents (CR 102.2 + CR 102.3), written inside
+ *      ZoneOwner as {"Each":"Opponents"}; ZoneOpponentChooserPurpose gains
+ *      PerPlayerChoiceOrder (CR 101.4c); the parked per-player zone-choice
+ *      frame gains current and carrier, and the resolution stack its occurrence
+ *      floor. A v97 peer cannot deserialize them; the exact-match handshake
+ *      refuses the pairing. P2P moves in lockstep (wire 80); lobby messages
+ *      are unchanged.
+ * 97 — ResolvedAbility.target_reads and AbilityDefinition.target_reads
+ *      (TargetReadOrigin) are serialized: a ParentAnnouncement instruction
+ *      reads the object its immediately preceding instruction announced
+ *      (CR 115.1 + CR 608.2c) and announces no target slot of its own. A v96
+ *      peer would default the field; the exact-match handshake refuses the
+ *      pairing. P2P moves in lockstep (wire 79); lobby messages are unchanged.
  * 96 — QuantityRef.NameStickerLetterCount adds a tagged name-sticker statistic
  *      to GameState ability definitions. A v95 peer cannot decode the new tag;
  *      full-game peers and P2P move in lockstep (wire 78). Lobby messages are
@@ -649,7 +657,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 97;
+export const PROTOCOL_VERSION = 98;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

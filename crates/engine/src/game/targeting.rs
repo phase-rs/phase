@@ -1068,7 +1068,7 @@ pub fn resolved_targets(
     // exposed through `resolving_stack_entry`; the live stack lookup covers
     // target resolution before the entry is popped.
     if matches!(target_filter, TargetFilter::ParentTargetSlot { .. }) {
-        return super::ability_utils::flatten_targets_in_chain(parent_slot_base(state, ability));
+        return super::ability_utils::declared_targets_in_chain(parent_slot_base(state, ability));
     }
     // CR 601.2c + CR 608.2b: Pre-selected targets take precedence over
     // event-context resolution when the player chose targets at activation/
@@ -1161,7 +1161,7 @@ pub(crate) fn parent_chain_targets_from_root(
     state: &GameState,
     ability: &ResolvedAbility,
 ) -> Vec<TargetRef> {
-    super::ability_utils::flatten_targets_in_chain(resolving_root_ability(state, ability))
+    super::ability_utils::declared_targets_in_chain(resolving_root_ability(state, ability))
 }
 
 /// CR 608.2c: The root `ResolvedAbility` of the currently-resolving stack
@@ -1227,7 +1227,7 @@ pub(crate) fn resolve_parent_slot_from_root(
     ability: &ResolvedAbility,
     index: usize,
 ) -> Option<TargetRef> {
-    super::ability_utils::flatten_targets_in_chain(parent_slot_base(state, ability))
+    super::ability_utils::declared_targets_in_chain(parent_slot_base(state, ability))
         .into_iter()
         .nth(index)
 }
@@ -1269,20 +1269,12 @@ pub(crate) fn resolve_live_parent_slot_from_root(
     let illegal_at_resolution = resolution_carrier_entry(state, ability)
         .and_then(StackEntry::ability)
         .is_some_and(|root| {
-            use super::ability_utils::flatten_targets_in_chain as flatten;
             let base = parent_slot_base(state, ability);
-            let branch =
-                |node: Option<&ResolvedAbility>| node.map_or(0, |node| flatten(node).len());
             // CR 608.2b: illegal targets won't be affected by parts of the effect for which they're illegal.
-            let ahead: usize =
-                std::iter::successors(Some(root), |node| node.sub_ability.as_deref())
-                    .take_while(|node| !std::ptr::eq(*node, base))
-                    .map(|node| {
-                        flatten(node).len()
-                            - branch(node.sub_ability.as_deref())
-                            - branch(node.else_ability.as_deref())
-                    })
-                    .sum();
+            // The stamp, this offset and the slot reader all count declared
+            // slots (`declared_targets_in_chain` numbering), so an inheriting
+            // rider's carried snapshot never shifts a later slot.
+            let ahead = super::ability_utils::declared_slots_ahead_of(root, base);
             root.illegal_target_slots.contains(&(ahead + index))
         });
     if illegal_at_resolution {

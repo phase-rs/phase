@@ -2788,6 +2788,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
             .declares_chosen_clause
             .map(|id| ChosenGroupId(id.0));
         def.reads_chosen_group = clause_ir.reads_chosen_clause.map(|id| ChosenGroupId(id.0));
+        def.target_reads = clause_ir.target_reads;
         if ir.clauses.iter().any(|reader| {
             reader
                 .reads_return_result
