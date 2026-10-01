@@ -1158,7 +1158,7 @@ describe("CardVfxLayer tiers", () => {
 describe("CardVfxLayer shatter", () => {
   const SHATTER_MS = (SHATTER_CRACK_S + SHATTER_FALL_S) * 1000 + 5 * FRAME_MS + 100;
   const shatter = (objectId: number, cardFace: AnimationImageSnapshot | null = face(objectId)): CardShatterSpec => ({
-    kind: "shatter",
+    kind: "shatter", destroyerId: null,
     objectId,
     face: cardFace,
     pace: 1,
@@ -1352,7 +1352,7 @@ describe("CardVfxLayer exile dissolve", () => {
 describe("CardVfxLayer damage strike", () => {
   const SPELL = 20;
   const strike = (target: DamageStrikeTarget): DamageStrikeSpec => ({
-    kind: "damage",
+    kind: "damage", snapshotSeq: queuedSeq(),
     cause: "fire",
     origin: { zone: "Stack", objectId: SPELL, ownerId: 0 },
     target,
@@ -1454,7 +1454,7 @@ describe("CardVfxLayer damage strike", () => {
     addFace(anchor({ "data-permanent-card": String(Y), "data-grouped-ids": `${Y} ${X}` }, 300, 100));
 
     expect(present(atPermanent())).toHaveBeenCalledTimes(1);
-    expect(present({ kind: "shatter", objectId: X, face: face(X), pace: 1, owningStepMs: 400, snapshotSeq: queuedSeq(), sweep: null })).toHaveBeenCalledTimes(1);
+    expect(present({ kind: "shatter", destroyerId: null, objectId: X, face: face(X), pace: 1, owningStepMs: 400, snapshotSeq: queuedSeq(), sweep: null })).toHaveBeenCalledTimes(1);
   });
 
   it("V10-15: unmounting before the impact lands the hit once and releases the veil it takes", async () => {
@@ -1494,6 +1494,35 @@ describe("CardVfxLayer damage strike", () => {
     const blows = last(calls("render"))?.children?.filter((child) => child.name === "damage-blow");
     expect(blows).toHaveLength(2);
     expect(veiled(Y)).toBe(false);
+  });
+
+  it("V16-7: a struck permanent stays itself until the slam lands, then its copy rocks back in its place", async () => {
+    const { present } = await readyLayer();
+    anchor({ "data-permanent-card": String(X) }, 40, 400);
+    addFace(anchor({ "data-permanent-card": String(Y) }, 300, 400));
+    const classic = present({
+      kind: "knockback",
+      objectId: Y,
+      face: face(Y),
+      sourceId: X,
+      amount: 3,
+      pace: 1,
+      owningStepMs: 500,
+      startMs: performance.now(),
+      impactDelayMs: 200,
+    });
+    const loader = faceLoader();
+    await act(async () => {
+      if (loader) fireEvent.load(loader);
+    });
+    await frames(2);
+    expect(veiled(Y)).toBe(false);
+    await advance(200);
+    expect(veiled(Y)).toBe(true);
+    expect(hasVisible(last(calls("render")) as RendererCall, "damage-hit")).toBe(true);
+    await advance(HIT_S * 1000 + 2 * FRAME_MS);
+    expect(veiled(Y)).toBe(false);
+    expect(classic).not.toHaveBeenCalled();
   });
 
   it("V12-5: a blow with no surface to land on, or at pace 0, presents Classic", async () => {
@@ -1555,7 +1584,7 @@ describe("CardVfxLayer damage strike", () => {
     expect(useAnimationStore.getState().cardVfxReady).toBe(false);
   });
 
-  it("V10-10: a shatter on a struck permanent ends its hit, and the permanent stays veiled for the shatter", async () => {
+  it("V17-1: a fire-struck permanent burns on a later SBA death and stays veiled for the burn", async () => {
     const { present } = await readyLayer();
     anchor({ "data-stack-entry": String(SPELL) }, 600, 300);
     addFace(anchor({ "data-permanent-card": String(X) }, 300, 100));
@@ -1564,13 +1593,32 @@ describe("CardVfxLayer damage strike", () => {
     await advance(DAMAGE_CAUSE_IMPACT_MS + 2 * FRAME_MS);
     expect(veiled(X)).toBe(true);
 
-    present({ kind: "shatter", objectId: X, face: face(X), pace: 1, owningStepMs: 400, snapshotSeq: queuedSeq(), sweep: null });
+    present({ kind: "shatter", destroyerId: null, objectId: X, face: face(X), pace: 1, owningStepMs: 400, snapshotSeq: queuedSeq(), sweep: null });
     await loadFace();
     await frames(2);
     expect(hasVisible(last(calls("render")) as RendererCall, "damage-hit")).toBe(false);
-    expect(hasVisible(last(calls("render")) as RendererCall, "card-shatter")).toBe(true);
+    expect(hasVisible(last(calls("render")) as RendererCall, "card-burn")).toBe(true);
     await advance(HIT_S * 1000);
     expect(veiled(X)).toBe(true);
+  });
+
+  it.each([
+    { label: "a different batch", seqOffset: 1, destroyerId: null, cause: "fire" as const },
+    { label: "a destroy instruction", seqOffset: 0, destroyerId: SPELL, cause: "fire" as const },
+    { label: "lightning damage", seqOffset: 0, destroyerId: null, cause: "lightning" as const },
+  ])("V17-2: $label shatters rather than borrowing a fire hit", async ({ seqOffset, destroyerId, cause }) => {
+    const { present } = await readyLayer();
+    anchor({ "data-stack-entry": String(SPELL) }, 600, 300);
+    addFace(anchor({ "data-permanent-card": String(X) }, 300, 100));
+    const snapshotSeq = queuedSeq();
+    present({ ...atPermanent(), cause, snapshotSeq });
+    await loadFace();
+    await advance(DAMAGE_CAUSE_IMPACT_MS + 2 * FRAME_MS);
+    present({ kind: "shatter", destroyerId, objectId: X, face: face(X), pace: 1, owningStepMs: 400, snapshotSeq: snapshotSeq + seqOffset, sweep: null });
+    await loadFace();
+    await frames(2);
+    expect(hasVisible(last(calls("render")) as RendererCall, "card-shatter")).toBe(true);
+    expect(hasVisible(last(calls("render")) as RendererCall, "card-burn")).toBe(false);
   });
 
   it("V10-20: a hit replacing one still before its impact stays hidden, with the permanent unveiled, until its own", async () => {
@@ -1631,7 +1679,7 @@ describe("CardVfxLayer damage strike", () => {
     const onImpact = vi.fn();
     present(atPermanent(), vi.fn(), onImpact);
     await loadFace();
-    present({ kind: "shatter", objectId: X, face: face(X), pace: 1, owningStepMs: 400, snapshotSeq: queuedSeq(), sweep: null });
+    present({ kind: "shatter", destroyerId: null, objectId: X, face: face(X), pace: 1, owningStepMs: 400, snapshotSeq: queuedSeq(), sweep: null });
     await loadFace();
     expect(veiled(X)).toBe(true);
 
@@ -1726,7 +1774,7 @@ describe("CardVfxLayer counter ripple", () => {
 describe("CardVfxLayer board sweep", () => {
   const sweep: SweepSpec = { look: "light", casterId: 1, memberIds: [X, Y] };
   const swept = (objectId: number, cardName: string): CardShatterSpec => ({
-    kind: "shatter",
+    kind: "shatter", destroyerId: null,
     objectId,
     face: face(objectId, cardName),
     pace: 1,
@@ -1828,6 +1876,21 @@ describe("CardVfxLayer board sweep", () => {
     await frames(2);
     expect(fronts()).toHaveLength(2);
     expect(cracked(300)).toBe(0);
+  });
+
+  it("V16-3: a face that loads after the front has passed still breaks from its first crack", async () => {
+    const { present } = await readyLayer();
+    anchor({ "data-player-hud": "1" }, 400, 20);
+    addFace(anchor({ "data-permanent-card": String(X) }, 300, 450));
+    addFace(anchor({ "data-permanent-card": String(Y) }, 300, 150));
+    // At half pace the front reaches the nearer card in about 70 ms.
+    present({ ...swept(X, "Llanowar Elves"), pace: 0.5 });
+    present({ ...swept(Y, "Hill Giant"), pace: 0.5 });
+    await loadFaces("Llanowar Elves");
+    await advance(110);
+    await loadFaces("Hill Giant");
+    await frames(1);
+    expect(cracked(150)).toBeLessThan(0.05);
   });
 
   it("V15-5: with fewer than two members on the board there is no front, and the one there breaks at once", async () => {

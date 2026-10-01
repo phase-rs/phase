@@ -27,10 +27,29 @@ export type Aim =
  *  pips cover under 0.01. */
 export const FACE_IMAGE_MIN_AREA_FRACTION = 0.25;
 
+/** The 2D linear part of a node's own transforms: its `rotate` and `scale`
+ *  properties, applied after its `transform` (CSS Transforms 2), or `null`
+ *  when it has none. A 3D `rotate` (an axis and an angle) is left out. */
+function nodeLinear(style: CSSStyleDeclaration): DOMMatrixReadOnly | null {
+  const { transform } = style;
+  const rotate = style.getPropertyValue("rotate");
+  const scale = style.getPropertyValue("scale");
+  const has = (value: string) => value !== "" && value !== "none";
+  if (!has(transform) && !has(rotate) && !has(scale)) return null;
+  let m = new DOMMatrix();
+  if (has(rotate) && /^-?[\d.]+deg$/.test(rotate)) m = m.rotate(parseFloat(rotate));
+  if (has(scale)) {
+    const [sx, sy = sx] = scale.split(" ").map(Number);
+    m = m.scale(sx, sy);
+  }
+  return has(transform) ? m.multiply(new DOMMatrixReadOnly(transform)) : m;
+}
+
 /** Measures `el` relative to `origin` (the overlay canvas rect). The centre
  *  comes from the viewport rect; size and angle come from layout size and the
  *  2D linear part of every transform from `el` up to the root, so a fanned,
- *  tapped or scaled card reports its own geometry rather than its bounding box.
+ *  tapped, scaled or slamming card reports its own geometry rather than its
+ *  bounding box.
  *  `opacity` is the product of every node's computed opacity from `el` up. */
 export function measureSurface(
   el: HTMLElement,
@@ -47,9 +66,8 @@ export function measureSurface(
     const style = getComputedStyle(node);
     // An empty value is the initial value (1), as an empty transform is `none`.
     opacity *= style.opacity === "" ? 1 : Number(style.opacity);
-    const transform = style.transform;
-    if (!transform || transform === "none") continue;
-    const m = new DOMMatrixReadOnly(transform);
+    const m = nodeLinear(style);
+    if (!m) continue;
     [a, b, c, d] = [m.a * a + m.c * b, m.b * a + m.d * b, m.a * c + m.c * d, m.b * c + m.d * d];
   }
   return {

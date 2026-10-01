@@ -233,9 +233,9 @@ describe("normalizeEvents", () => {
 
   it("consecutive CreatureDestroyed events group into one step (board wipe)", () => {
     const events: GameEvent[] = [
-      { type: "CreatureDestroyed", data: { object_id: 1 } },
-      { type: "CreatureDestroyed", data: { object_id: 2 } },
-      { type: "CreatureDestroyed", data: { object_id: 3 } },
+      { type: "CreatureDestroyed", data: { object_id: 1, source_id: null } },
+      { type: "CreatureDestroyed", data: { object_id: 2, source_id: null } },
+      { type: "CreatureDestroyed", data: { object_id: 3, source_id: null } },
     ];
 
     const steps = normalizeEvents(events);
@@ -247,7 +247,7 @@ describe("normalizeEvents", () => {
   it("V15-4: a board wipe in the engine's order, each move before its destruction, plays as one step", () => {
     const events: GameEvent[] = [1, 2, 3].flatMap((object_id): GameEvent[] => [
       { type: "ZoneChanged", data: { object_id, from: "Battlefield", to: "Graveyard" } },
-      { type: "CreatureDestroyed", data: { object_id } },
+      { type: "CreatureDestroyed", data: { object_id, source_id: 9 } },
     ]);
 
     const steps = normalizeEvents(events);
@@ -256,17 +256,36 @@ describe("normalizeEvents", () => {
     expect(steps[0].duration).toBe(400);
   });
 
-  it("V15-4: a destruction does not join a step that holds anything but destructions and moves off the battlefield", () => {
+  it("V15-4: a destruction and its move do not join a step that holds anything else", () => {
     const events: GameEvent[] = [
       { type: "LifeChanged", data: { player_id: 0, amount: -2 } },
       { type: "ZoneChanged", data: { object_id: 1, from: "Battlefield", to: "Graveyard" } },
-      { type: "CreatureDestroyed", data: { object_id: 1 } },
+      { type: "CreatureDestroyed", data: { object_id: 1, source_id: null } },
     ];
 
     const steps = normalizeEvents(events);
     expect(steps.map((step) => step.effects.map((effect) => effect.event.type))).toEqual([
-      ["LifeChanged", "ZoneChanged"],
-      ["CreatureDestroyed"],
+      ["LifeChanged"],
+      ["ZoneChanged", "CreatureDestroyed"],
+    ]);
+  });
+
+  it("V16-9: a destruction's move stays with it, across non-visual events, wherever a replacement sent it", () => {
+    const events: GameEvent[] = [
+      { type: "EffectResolved", data: { kind: "DealDamage", source_id: 9 } },
+      { type: "ZoneChanged", data: { object_id: 9, from: "Stack", to: "Graveyard" } },
+      { type: "ZoneChanged", data: { object_id: 1, from: "Battlefield", to: "Exile" } },
+      { type: "ReplacementApplied", data: { source_id: 5, event_type: "ZoneChange" } },
+      { type: "CreatureDestroyed", data: { object_id: 1, source_id: null } },
+      { type: "ZoneChanged", data: { object_id: 2, from: "Battlefield", to: "Graveyard" } },
+      { type: "PermanentSacrificed", data: { object_id: 2, player_id: 0 } },
+    ];
+
+    const steps = normalizeEvents(events);
+    expect(steps.map((step) => step.effects.map((effect) => effect.event.type))).toEqual([
+      ["EffectResolved", "ZoneChanged"],
+      ["ZoneChanged", "CreatureDestroyed"],
+      ["ZoneChanged", "PermanentSacrificed"],
     ]);
   });
 
@@ -405,8 +424,8 @@ describe("normalizeEvents", () => {
       { type: "DamageDealt", data: { source_id: 1, target: { Object: 2 }, amount: 3, is_combat: false } },
       { type: "DamageDealt", data: { source_id: 1, target: { Object: 3 }, amount: 2, is_combat: false } },
       { type: "LifeChanged", data: { player_id: 1, amount: -5 } },
-      { type: "CreatureDestroyed", data: { object_id: 2 } },
-      { type: "CreatureDestroyed", data: { object_id: 3 } },
+      { type: "CreatureDestroyed", data: { object_id: 2, source_id: null } },
+      { type: "CreatureDestroyed", data: { object_id: 3, source_id: null } },
     ];
 
     const steps = normalizeEvents(events);

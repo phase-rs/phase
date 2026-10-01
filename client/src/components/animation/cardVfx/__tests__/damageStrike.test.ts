@@ -5,6 +5,7 @@ import { DAMAGE_CAUSE_IMPACT_MS } from "../../../../animation/types.ts";
 import type { EffectHost } from "../cardVfxScene.ts";
 import {
   createDamageBlow,
+  createDamageKnockback,
   createDamageStrike,
   type DamageBlowParams,
   damageStrikeKind,
@@ -261,5 +262,66 @@ describe("damage blow", () => {
     createDamageBlow(reduced, blow({ tier: "reduced" }));
     const [fullLoad, reducedLoad] = [full, reduced].map((h) => strikeLoad(named(h.scene, "damage-blow") as Object3D));
     expect(reducedLoad.particles).toBeLessThan(fullLoad.particles * 0.6);
+  });
+});
+
+describe("damage knockback", () => {
+  const STRUCK = { x: 400, y: 300, w: 63, h: 88, angleDeg: 0 };
+  const uniforms = (scene: Scene) => {
+    const group = named(scene, "damage-hit") as Object3D;
+    return ((group.children[0] as Mesh).material as ShaderMaterial).uniforms;
+  };
+
+  it("V16-6: on the slam's clock, the copy shows only from the impact, rocks back unmarked, and reports its impact once", () => {
+    const effectHost = host();
+    const onImpact = vi.fn();
+    const copy = createDamageKnockback(effectHost, {
+      hit: hit({ pose: STRUCK }),
+      from: { x: 100, y: 300, w: 63, h: 88, angleDeg: 0 },
+      occluder: null,
+      amount: 3,
+      pace: 2,
+      startMs: 1000,
+      impactS: 0.2,
+      onImpact,
+    });
+    const group = named(effectHost.scene, "damage-hit") as Object3D;
+    // A first frame late on the slam's clock still lands at the slam's impact.
+    copy.update(1000 + 400 - 10);
+    expect(group.visible).toBe(false);
+    expect(onImpact).not.toHaveBeenCalled();
+    copy.update(1000 + 400 + 60);
+    copy.update(1000 + 400 + 90);
+    expect(group.visible).toBe(true);
+    expect(onImpact).toHaveBeenCalledTimes(1);
+    const U = uniforms(effectHost.scene);
+    // Pushed on along the blow, from the left: rightward.
+    expect(U.uPush.value.x).toBeGreaterThan(0);
+    expect(U.uScorch.value).toBe(0);
+    expect(copy.update(1000 + 400 + HIT_S * 2000 + 10)).toBe(false);
+  });
+
+  it("V16-6: the card lying over it is cut out of the copy, wherever it is each frame", () => {
+    const effectHost = host();
+    let over: { pose: typeof STRUCK; radius: number } | null = { pose: { ...STRUCK, x: 390, angleDeg: 10 }, radius: 5 };
+    const copy = createDamageKnockback(effectHost, {
+      hit: hit({ pose: STRUCK }),
+      from: null,
+      occluder: () => over,
+      amount: 3,
+      pace: 1,
+      startMs: 1000,
+      impactS: 0.2,
+      onImpact: vi.fn(),
+    });
+    copy.update(1250);
+    const U = uniforms(effectHost.scene);
+    expect(U.uOccCenter.value.toArray()).toEqual([390, -300]);
+    expect(U.uOccHalf.value.toArray()).toEqual([31.5, 44]);
+    expect(U.uOccAngle.value).toBeCloseTo((10 * Math.PI) / 180);
+    expect(U.uOccRadius.value).toBe(5);
+    over = null;
+    copy.update(1300);
+    expect(U.uOccHalf.value.toArray()).toEqual([0, 0]);
   });
 });

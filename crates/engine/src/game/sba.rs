@@ -1067,7 +1067,11 @@ fn perform_creature_deaths(
                     }
                 }
                 if destroyed {
-                    events.push(GameEvent::CreatureDestroyed { object_id });
+                    // CR 704.5g / CR 704.5h: a state-based destruction has no destroying source.
+                    events.push(GameEvent::CreatureDestroyed {
+                        object_id,
+                        source_id: None,
+                    });
                 }
                 performed_ids.push(object_id);
             }
@@ -1197,7 +1201,11 @@ fn perform_creature_deaths(
                             return;
                         }
                     }
-                    events.push(GameEvent::CreatureDestroyed { object_id });
+                    // CR 704.5g / CR 704.5h: a state-based destruction has no destroying source.
+                    events.push(GameEvent::CreatureDestroyed {
+                        object_id,
+                        source_id: None,
+                    });
                     performed_ids.push(object_id);
                 }
                 *any_performed = true;
@@ -6969,7 +6977,7 @@ mod tests {
 
         assert_eq!(zone_changed_for(&events, stale), 0);
         assert!(!events.iter().any(
-            |event| matches!(event, GameEvent::CreatureDestroyed { object_id } if *object_id == stale)
+            |event| matches!(event, GameEvent::CreatureDestroyed { object_id, .. } if *object_id == stale)
         ));
         assert!(zone_changed_for(&events, live) > 0);
         assert!(
@@ -7155,9 +7163,29 @@ mod tests {
         check_state_based_actions(&mut state, &mut events);
 
         assert!(state.players[0].graveyard.contains(&creature));
-        assert!(events.iter().any(
-            |event| matches!(event, GameEvent::CreatureDestroyed { object_id } if *object_id == creature)
-        ));
+        // CR 704.5h: a state-based destruction names no destroying source.
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::CreatureDestroyed { object_id, source_id: None } if *object_id == creature
+        )));
+    }
+
+    /// CR 704.5g: lethal damage destroys the creature, and the destruction names
+    /// no destroying source.
+    #[test]
+    fn sba_lethal_damage_destruction_has_no_source() {
+        let mut state = setup();
+        let creature = create_creature(&mut state, CardId(9910), PlayerId(0), "Burned", 2, 2);
+        state.objects.get_mut(&creature).unwrap().damage_marked = 2;
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(state.players[0].graveyard.contains(&creature));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::CreatureDestroyed { object_id, source_id: None } if *object_id == creature
+        )));
     }
 
     #[test]
@@ -7196,7 +7224,7 @@ mod tests {
         assert!(state.battlefield.contains(&zero));
         assert!(state.battlefield.contains(&negative));
         assert!(!events.iter().any(
-            |event| matches!(event, GameEvent::CreatureDestroyed { object_id } if *object_id == zero || *object_id == negative)
+            |event| matches!(event, GameEvent::CreatureDestroyed { object_id, .. } if *object_id == zero || *object_id == negative)
         ));
     }
 
@@ -7218,7 +7246,7 @@ mod tests {
 
         assert_eq!(zone_changed_for(&events, stale), 0);
         assert!(!events.iter().any(
-            |event| matches!(event, GameEvent::CreatureDestroyed { object_id } if *object_id == stale)
+            |event| matches!(event, GameEvent::CreatureDestroyed { object_id, .. } if *object_id == stale)
         ));
         assert!(state.players[0].graveyard.contains(&live));
     }

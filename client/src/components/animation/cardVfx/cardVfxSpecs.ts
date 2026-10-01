@@ -19,13 +19,14 @@ import {
   rippleLookFor,
   type SweepLook,
   type SweepSpec,
-  sweepOf,
 } from "./cardFlightSpecs.ts";
 import type { CounterChange } from "./tallyEffects.ts";
 
 /** A permanent broken apart where it lies. */
 export interface CardShatterSpec {
   kind: "shatter";
+  /** The engine destruction source; null for a state-based destruction. */
+  destroyerId: ObjectId | null;
   objectId: ObjectId;
   /** The face the viewer saw before the event; `null` shows the card back. */
   face: AnimationImageSnapshot | null;
@@ -37,7 +38,8 @@ export interface CardShatterSpec {
   sweep: SweepSpec | null;
 }
 
-/** A permanent exiled from the battlefield, dissolving where it lies. */
+/** A permanent exiled from the battlefield, or a sacrificed token ceasing to
+ *  exist, dissolving where it lies. */
 export interface ExileDissolveSpec {
   kind: "dissolve";
   objectId: ObjectId;
@@ -62,6 +64,8 @@ export type DamageStrikeTarget =
 /** A spell or ability's damage travelling from its source to its target. */
 export interface DamageStrikeSpec {
   kind: "damage";
+  /** The engine batch this strike belongs to, for its later death presentation. */
+  snapshotSeq: number;
   cause: DamageCause;
   origin: ResolvingOrigin;
   target: DamageStrikeTarget;
@@ -70,8 +74,8 @@ export interface DamageStrikeSpec {
   owningStepMs: number;
 }
 
-/** A creature's blow landing where its slam strikes; the slam itself, and
- *  the struck card's knockback, are the DOM's. */
+/** A creature's blow landing where its slam strikes; the slam itself is the
+ *  DOM's, and a struck permanent's knockback is a `DamageKnockbackSpec`. */
 export interface DamageBlowSpec {
   kind: "blow";
   /** The striking creature; `null` for a flurry of hits from many. */
@@ -79,6 +83,24 @@ export interface DamageBlowSpec {
   target: TargetRef;
   amount: number;
   pace: number;
+  /** When the slam started, on the frame clock (`performance.now()`). */
+  startMs: number;
+  /** When the slam lands, after `startMs`, already paced. */
+  impactDelayMs: number;
+}
+
+/** A permanent a creature's slam strikes, rocking back from the blow; the
+ *  slam itself is the DOM's. */
+export interface DamageKnockbackSpec {
+  kind: "knockback";
+  objectId: ObjectId;
+  /** The face the viewer saw before the event; `null` shows the card back. */
+  face: AnimationImageSnapshot | null;
+  /** The striking creature, lying over the struck one as its slam lands. */
+  sourceId: ObjectId;
+  amount: number;
+  pace: number;
+  owningStepMs: number;
   /** When the slam started, on the frame clock (`performance.now()`). */
   startMs: number;
   /** When the slam lands, after `startMs`, already paced. */
@@ -131,6 +153,7 @@ export type CardVfxSpec =
   | BoardEffectSpec
   | DamageStrikeSpec
   | DamageBlowSpec
+  | DamageKnockbackSpec
   | CounterRippleSpec
   | LifeChangeSpec
   | CounterChangeSpec
@@ -143,15 +166,49 @@ export function damageCauseState(): GameState | null {
   return useAnimationStore.getState().cardVfxReady ? useGameStore.getState().gameState : null;
 }
 
+/** Where the step reports `objectId` moving off the battlefield, if it does:
+ *  the normalizer keeps a destruction's or sacrifice's move in its step. */
+function battlefieldExit(objectId: ObjectId, stepEvents: readonly AnimationEvent[]) {
+  for (const event of stepEvents) {
+    if (event.type === "ZoneChanged" && event.data.object_id === objectId && event.data.from === "Battlefield") {
+      return event.data.to;
+    }
+  }
+  return null;
+}
+
 // CR 701.8a / CR 701.21a: a destroyed or sacrificed permanent moves to its
 // owner's graveyard, unless a replacement (CR 614.1a) sends it elsewhere. Its
-// move to exile then dissolves, and to a hand or library flies.
-function coveredSpecFor(event: AnimationEvent, { post, pace }: CardFlightSpecContext): CoveredSpec | null {
+// move to exile then dissolves, and to a hand or library flies. A token so
+// moved may have ceased to exist since (CR 111.7), so the move is read from
+// the step rather than from where the object ended.
+function coveredSpecFor(event: AnimationEvent, { pace, stepEvents }: CardFlightSpecContext): CoveredSpec | null {
   if (pace <= 0 || (event.type !== "CreatureDestroyed" && event.type !== "PermanentSacrificed")) return null;
   const objectId = event.data.object_id;
-  const zone = post?.objects[objectId]?.zone;
-  const presented = zone === "Exile" || (zone !== undefined && flightPresents("Battlefield", zone));
+  const to = battlefieldExit(objectId, stepEvents);
+  const presented = to === "Exile" || (to !== null && flightPresents("Battlefield", to));
   return presented ? { kind: "covered", objectId } : null;
+}
+
+// CR 701.21a + CR 111.7: a sacrificed token goes to its owner's graveyard and
+// ceases to exist there, so it has no card to fly; it dissolves where it lay.
+function sacrificedTokenSpecFor(
+  event: AnimationEvent,
+  { pre, post, pace, owningStepMs, snapshotSeq }: CardFlightSpecContext,
+): ExileDissolveSpec | null {
+  if (pace <= 0 || event.type !== "PermanentSacrificed") return null;
+  const objectId = event.data.object_id;
+  const object = pre?.objects[objectId];
+  if (!object?.is_token || post?.objects[objectId] !== undefined) return null;
+  return {
+    kind: "dissolve",
+    objectId,
+    face: visibleAnimationImageSnapshot(object),
+    holderId: null,
+    pace,
+    owningStepMs,
+    snapshotSeq,
+  };
 }
 
 // A black spell's destruction rolls over the board as smoke, and a white
@@ -172,15 +229,21 @@ function cardShatterSpecFor(
   const objectId = event.data.object_id;
   const object = pre?.objects[objectId];
   if (!object) return null;
-  const destroyed = stepEvents.flatMap((other) => (other.type === "CreatureDestroyed" ? [other.data.object_id] : []));
+  const destroyerId = event.data.source_id;
+  const source = destroyerId === null ? null : pre?.objects[destroyerId];
+  const look = source ? destructionLook(source.color) : null;
+  const destroyed = stepEvents.flatMap((other) =>
+    other.type === "CreatureDestroyed" && other.data.source_id === destroyerId ? [other.data.object_id] : [],
+  );
   return {
     kind: "shatter",
+    destroyerId,
     objectId,
     face: visibleAnimationImageSnapshot(object),
     pace,
     owningStepMs,
     snapshotSeq,
-    sweep: sweepOf(destroyed, destructionLook, pre),
+    sweep: source && look && destroyed.length > 1 ? { look, casterId: source.controller, memberIds: destroyed } : null,
   };
 }
 
@@ -211,7 +274,7 @@ function exileDissolveSpecFor(
 
 function damageStrikeSpecFor(
   event: AnimationEvent,
-  { pre, pace, owningStepMs }: CardFlightSpecContext,
+  { pre, pace, owningStepMs, snapshotSeq }: CardFlightSpecContext,
 ): DamageStrikeSpec | null {
   if (pace <= 0 || event.type !== "DamageDealt") return null;
   const cause = damageCauseOf(event, pre);
@@ -225,7 +288,7 @@ function damageStrikeSpecFor(
     if (!object) return null;
     target = { kind: "permanent", objectId: ref.Object, face: visibleAnimationImageSnapshot(object) };
   }
-  return { kind: "damage", ...cause, target, amount, pace, owningStepMs };
+  return { kind: "damage", ...cause, target, amount, pace, owningStepMs, snapshotSeq };
 }
 
 // CR 701.6a: to counter a spell or ability is to cancel it, removing it from
@@ -261,6 +324,7 @@ export function cardVfxSpecFor(event: AnimationEvent, context: CardFlightSpecCon
   return (
     cardFlightSpecFor(event, context) ??
     coveredSpecFor(event, context) ??
+    sacrificedTokenSpecFor(event, context) ??
     cardShatterSpecFor(event, context) ??
     exileDissolveSpecFor(event, context) ??
     damageStrikeSpecFor(event, context) ??

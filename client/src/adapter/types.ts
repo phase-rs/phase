@@ -3345,7 +3345,7 @@ export type GameEvent =
   | { type: "ObjectIntensified"; data: { object_id: ObjectId; amount: number } }
   | { type: "CounterRemoved"; data: { object_id: ObjectId; counter_type: string; count: number } }
   | { type: "TokenCreated"; data: { object_id: ObjectId; name: string; source_id: ObjectId } }
-  | { type: "CreatureDestroyed"; data: { object_id: ObjectId } }
+  | { type: "CreatureDestroyed"; data: { object_id: ObjectId; source_id: ObjectId | null } }
   | { type: "PermanentSacrificed"; data: { object_id: ObjectId; player_id: PlayerId } }
   | { type: "ArmyAmassed"; data: { object_id: ObjectId; source_id: ObjectId; controller: PlayerId } }
   | { type: "EffectResolved"; data: { kind: string; source_id: ObjectId } }

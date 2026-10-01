@@ -193,7 +193,12 @@ function lifeChanged(player_id: number, amount: number, state: GameState): GameE
 
 const CREATURES = [BEARS, ANGEL, HILL_GIANT, AIR_ELEMENTAL];
 
-const destroyed = (object_id: ObjectId): GameEvent => ({ type: "CreatureDestroyed", data: { object_id } });
+/** A destruction by `source_id`'s destroy instruction; `null` for a death from
+ *  lethal damage, as the engine reports it. */
+const destroyedBy =
+  (source_id: ObjectId | null) =>
+  (object_id: ObjectId): GameEvent => ({ type: "CreatureDestroyed", data: { object_id, source_id } });
+const diedOfDamage = destroyedBy(null);
 
 const damage = (source_id: ObjectId, target: TargetRef, amount: number, is_combat = false): GameEvent => ({
   type: "DamageDealt",
@@ -262,7 +267,7 @@ export const GALLERY_SCENARIOS: Record<string, GalleryScenario> = {
   destroy: {
     title: "Destroy a creature",
     description: "The opponent's Hill Giant cracks and shatters where it stands.",
-    batches: [moveAll([HILL_GIANT], "Battlefield", "Graveyard", destroyed)],
+    batches: [moveAll([HILL_GIANT], "Battlefield", "Graveyard", diedOfDamage)],
   },
   boardWipe: {
     title: "Board wipe (Wrath of God)",
@@ -270,7 +275,8 @@ export const GALLERY_SCENARIOS: Record<string, GalleryScenario> = {
     batches: [
       cast(WRATH, OPPONENT),
       (state) => [
-        ...moveAll(CREATURES, "Battlefield", "Graveyard", destroyed)(state),
+        ...moveAll(CREATURES, "Battlefield", "Graveyard", destroyedBy(WRATH))(state),
+        { type: "EffectResolved", data: { kind: "Destroy", source_id: WRATH } },
         ...moveAll([WRATH], "Stack", "Graveyard")(state),
       ],
     ],
@@ -281,7 +287,8 @@ export const GALLERY_SCENARIOS: Record<string, GalleryScenario> = {
     batches: [
       cast(DAMNATION, OPPONENT),
       (state) => [
-        ...moveAll(CREATURES, "Battlefield", "Graveyard", destroyed)(state),
+        ...moveAll(CREATURES, "Battlefield", "Graveyard", destroyedBy(DAMNATION))(state),
+        { type: "EffectResolved", data: { kind: "Destroy", source_id: DAMNATION } },
         ...moveAll([DAMNATION], "Stack", "Graveyard")(state),
       ],
     ],
@@ -307,7 +314,8 @@ export const GALLERY_SCENARIOS: Record<string, GalleryScenario> = {
         for (const id of [HILL_GIANT, AIR_ELEMENTAL]) {
           state.objects[id] = { ...state.objects[id], display_visible_to_viewer: false };
         }
-        return [...events, ...moveAll([EVACUATION], "Stack", "Graveyard")(state)];
+        return [...events, { type: "EffectResolved", data: { kind: "ChangeZone", source_id: EVACUATION } },
+        ...moveAll([EVACUATION], "Stack", "Graveyard")(state)];
       },
     ],
   },
@@ -338,13 +346,14 @@ export const GALLERY_SCENARIOS: Record<string, GalleryScenario> = {
   },
   burnCreature: {
     title: "Burn a creature (red spell)",
-    description: "Lightning Bolt throws fire at Hill Giant, which dies.",
+    description: "Lightning Bolt throws fire at Hill Giant, which chars and burns away.",
     batches: [
       cast(BOLT, YOU),
       (state) => [
         damage(BOLT, { Object: HILL_GIANT }, 3),
+        { type: "EffectResolved", data: { kind: "DealDamage", source_id: BOLT } },
         ...moveAll([BOLT], "Stack", "Graveyard")(state),
-        ...moveAll([HILL_GIANT], "Battlefield", "Graveyard", destroyed)(state),
+        ...moveAll([HILL_GIANT], "Battlefield", "Graveyard", diedOfDamage)(state),
       ],
     ],
   },
@@ -356,6 +365,7 @@ export const GALLERY_SCENARIOS: Record<string, GalleryScenario> = {
       (state) => [
         damage(BOLT, { Player: OPPONENT }, 3),
         lifeChanged(OPPONENT, -3, state),
+        { type: "EffectResolved", data: { kind: "DealDamage", source_id: BOLT } },
         ...moveAll([BOLT], "Stack", "Graveyard")(state),
       ],
     ],
@@ -370,6 +380,7 @@ export const GALLERY_SCENARIOS: Record<string, GalleryScenario> = {
         lifeChanged(OPPONENT, -4, state),
         damage(PSIONIC_BLAST, { Player: YOU }, 2),
         lifeChanged(YOU, -2, state),
+        { type: "EffectResolved", data: { kind: "DealDamage", source_id: PSIONIC_BLAST } },
         ...moveAll([PSIONIC_BLAST], "Stack", "Graveyard")(state),
       ],
     ],
@@ -428,7 +439,7 @@ export const GALLERY_SCENARIOS: Record<string, GalleryScenario> = {
           lifeChanged(OPPONENT, -4, state),
           damage(BEARS, { Object: HILL_GIANT }, 2, true),
           damage(HILL_GIANT, { Object: BEARS }, 3, true),
-          ...moveAll([BEARS], "Battlefield", "Graveyard", destroyed)(state),
+          ...moveAll([BEARS], "Battlefield", "Graveyard", diedOfDamage)(state),
         ];
       },
     ],

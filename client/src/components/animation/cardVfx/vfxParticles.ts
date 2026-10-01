@@ -15,13 +15,14 @@ import {
   OneFactor,
   PlaneGeometry,
   ShaderMaterial,
+  Vector2,
   Vector3,
   ZeroFactor,
 } from "three";
 
 import type { CardVfxTier } from "./cardFlight.ts";
 import type { EffectHost, SceneEffect } from "./cardVfxScene.ts";
-import { VALUE_NOISE_GLSL } from "./glslChunks.ts";
+import { BURN_KEY_GLSL, BURN_SPAN, VALUE_NOISE_GLSL } from "./glslChunks.ts";
 
 /** The share of the lab's particle counts each tier emits. */
 export const PARTICLE_SHARE: Record<CardVfxTier, number> = { full: 1, reduced: 0.5 };
@@ -81,7 +82,7 @@ export const RAMP_GLSL = /* glsl */ `
 
 /** FLAME and SPARK are light; SMOKE is a soft cloud and DROP a bead of
  *  water, both ordinary alpha in their `tint`. */
-export type ParticleKind = "FLAME" | "SPARK" | "SMOKE" | "DROP";
+export type ParticleKind = "FLAME" | "EMBER" | "SPARK" | "SMOKE" | "DROP";
 
 export interface Particle {
   pos: Vec3;
@@ -95,7 +96,18 @@ export interface Particle {
   stretch?: number;
 }
 
+/** Arrival uniforms shared with a card burning from the impact point. */
+export interface ParticleBurnKey {
+  uSize: { value: Vector2 };
+  uKeyImpact: { value: Vector2 };
+  uKeyMax: { value: number };
+  uKeyMode: { value: number };
+  uBurnStart: { value: number };
+  uBurnS: { value: number };
+}
+
 export interface ParticleLook {
+  key?: ParticleBurnKey;
   accZ: number;
   gain: number;
   cool?: number;
@@ -109,8 +121,17 @@ const particleVert = /* glsl */ `
   attribute vec3 aPos; attribute vec3 aVel; attribute vec4 aTime; attribute vec4 aLook;
   uniform float uTime, uAccZ;
   varying vec2 vUv; varying float vA, vHeat, vSeed;
+  #ifdef FROM_KEY
+  ${FBM_GLSL}
+  ${BURN_KEY_GLSL}
+  uniform float uBurnStart, uBurnS;
+  #endif
   void main() {
-    float age = uTime - aTime.x;
+    float spawn = aTime.x;
+    #ifdef FROM_KEY
+    spawn += uBurnStart + (burnKey(vec2(aPos.x, -aPos.y)) + 0.08) / ${BURN_SPAN.toFixed(2)} * uBurnS;
+    #endif
+    float age = uTime - spawn;
     float a = age / aTime.y;
     if (age < 0.0 || a >= 1.0) { gl_Position = vec4(0.0, 0.0, 2.0, 1.0); return; }
     float drag = aTime.z;
@@ -140,7 +161,7 @@ const particleVert = /* glsl */ `
   }`;
 
 const particleFrag = /* glsl */ `
-  uniform float uGain, uCool; uniform vec3 uTint;
+  uniform float uGain, uCool, uTime; uniform vec3 uTint;
   varying vec2 vUv; varying float vA, vHeat, vSeed;
   ${FBM_GLSL}
   ${RAMP_GLSL}
@@ -168,6 +189,10 @@ const particleFrag = /* glsl */ `
     float r = length(q) + (vnoise(q * 2.4 + vSeed * 37.0 + vA * 2.5) - 0.5) * 0.7;
     float shape = pow(max(1.0 - r, 0.0), 1.5);
     float fade = smoothstep(0.0, 0.1, vA) * (1.0 - vA);
+    #ifdef EMBER
+    shape = 1.0 - smoothstep(0.2, 1.0, length(q));
+    fade *= 0.65 + 0.35 * sin(uTime * 40.0 + vSeed * 60.0);
+    #endif
     gl_FragColor = vec4(ramp(vHeat * exp(-vA * uCool)) * shape * fade * uGain, 0.0);
     #endif
   }`;
@@ -176,7 +201,7 @@ export function particleLayer(
   list: readonly Particle[],
   kind: ParticleKind,
   clock: { value: number },
-  { accZ, gain, cool = 1.6, palette = "fire", tint = [0.09, 0.075, 0.065], order }: ParticleLook,
+  { accZ, gain, cool = 1.6, palette = "fire", tint = [0.09, 0.075, 0.065], order, key }: ParticleLook,
 ): Mesh<InstancedBufferGeometry, ShaderMaterial> {
   const n = list.length;
   const base = new PlaneGeometry(1, 1);
@@ -203,7 +228,7 @@ export function particleLayer(
     new ShaderMaterial({
       vertexShader: particleVert,
       fragmentShader: particleFrag,
-      defines: { [kind]: "" },
+      defines: { [kind]: "", ...(key ? { FROM_KEY: "" } : {}) },
       uniforms: {
         uTime: clock,
         uAccZ: { value: accZ },
@@ -211,6 +236,7 @@ export function particleLayer(
         uCool: { value: cool },
         uPalette: { value: PALETTE_INDEX[palette] },
         uTint: { value: new Vector3(...tint) },
+        ...key,
       },
       ...(kind === "SMOKE" || kind === "DROP" ? NORMAL : ADDITIVE),
     }),

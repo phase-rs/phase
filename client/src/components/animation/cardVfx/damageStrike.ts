@@ -9,7 +9,8 @@
 // Water is not light: its jet breaks over the target in a splash, and the
 // struck copy is soaked rather than scorched.
 // A creature's blow (`createDamageBlow`) lands where its DOM slam strikes,
-// with no light of its own: a puff of dust and a pale shock ring.
+// with no light of its own: a puff of dust and a pale shock ring; the struck
+// permanent's copy (`createDamageKnockback`) rocks back from it, unmarked.
 
 import {
   BufferGeometry,
@@ -30,7 +31,7 @@ import { DAMAGE_CAUSE_IMPACT_MS } from "../../../animation/types.ts";
 import type { CardPose } from "./cardAnchors.ts";
 import type { CardVfxTier } from "./cardFlight.ts";
 import type { EffectHost, SceneEffect, SceneEffectKind } from "./cardVfxScene.ts";
-import { CORNER_MASK_GLSL } from "./glslChunks.ts";
+import { CORNER_MASK_GLSL, SCORCH_GLSL } from "./glslChunks.ts";
 import {
   ADDITIVE,
   clamp01,
@@ -182,16 +183,21 @@ function boltMaterial() {
 
 // ---------- The struck card: knockback and scorch ----------
 
-const scorchChunk = /* glsl */ `
-  uniform vec2 uImpact; uniform float uScorchR;
-  float scorchMask(vec2 c) {
-    float r = distance(c, uImpact) / uScorchR;
-    return 1.0 - smoothstep(0.3, 1.0, r + (fbm(c * 0.09 + 7.0) - 0.5) * 0.7);
+// The card lying over the struck one (a slamming attacker, measured each
+// frame) hides the copy wherever it covers it, as the DOM card would.
+const occluderChunk = /* glsl */ `
+  uniform vec2 uOccCenter, uOccHalf; uniform float uOccAngle, uOccRadius;
+  varying vec2 vWorld;
+  bool occluded() {
+    if (uOccHalf.x <= 0.0) return false;
+    vec2 d = vWorld - uOccCenter;
+    float c = cos(uOccAngle), s = sin(uOccAngle);
+    return roundedBox(vec2(c * d.x - s * d.y, s * d.x + c * d.y), uOccHalf, uOccRadius) < 0.0;
   }`;
 
 const hitVert = /* glsl */ `
   uniform vec2 uSize, uPush; uniform float uTiltA, uSink; uniform vec3 uTiltAxis;
-  varying vec2 vCard, vUv; varying float vShade;
+  varying vec2 vCard, vUv, vWorld; varying float vShade;
   vec3 rot(vec3 v, vec3 k, float a) { float c = cos(a), s = sin(a); return v * c + cross(k, v) * s + k * dot(k, v) * (1.0 - c); }
   void main() {
     vUv = uv;
@@ -200,6 +206,7 @@ const hitVert = /* glsl */ `
     p.z -= uSink;
     p = rot(p, uTiltAxis, uTiltA);
     p.xy += uPush;
+    vWorld = (modelMatrix * vec4(p, 1.0)).xy;
     // Lit relative to rest, so the untouched copy matches the DOM card exactly.
     vec3 L = normalize(vec3(-0.35, 0.55, 0.76));
     vShade = 1.0 + 0.6 * (dot(rot(vec3(0.0, 0.0, 1.0), uTiltAxis, uTiltA), L) - L.z);
@@ -213,11 +220,12 @@ const hitFrag = /* glsl */ `
   varying vec2 vCard, vUv; varying float vShade;
   uniform vec2 uSize;
   ${FBM_GLSL}
-  ${scorchChunk}
+  ${SCORCH_GLSL}
   ${CORNER_MASK_GLSL}
+  ${occluderChunk}
   void main() {
     float corner = cornerMask(vCard, uSize, uRadius);
-    if (corner <= 0.0) discard;
+    if (corner <= 0.0 || occluded()) discard;
     vec3 col = texture2D(uMap, vUv).rgb;
     #ifdef WET
     col = mix(col, col * vec3(0.64, 0.72, 0.8), scorchMask(vCard) * uScorch * 0.75);
@@ -237,12 +245,13 @@ const hitGlowFrag = /* glsl */ `
   uniform vec2 uSize;
   varying vec2 vCard;
   ${FBM_GLSL}
-  ${scorchChunk}
+  ${SCORCH_GLSL}
   ${CORNER_MASK_GLSL}
+  ${occluderChunk}
   ${RAMP_GLSL}
   void main() {
     float corner = cornerMask(vCard, uSize, uRadius);
-    if (corner <= 0.0) discard;
+    if (corner <= 0.0 || occluded()) discard;
     float m = scorchMask(vCard);
     #ifdef WET
     float sheen = smoothstep(0.55, 0.9, vnoise(vCard * 0.06 + vec2(0.0, uTime * 0.7))) * m;
@@ -262,10 +271,10 @@ function hitMaterials(
   impact: Vector2,
   scale: number,
   clock: { value: number },
-  cause: DamageCause,
+  mark: DamageCause | null,
 ) {
   // Water soaks a wider patch than fire scorches.
-  const wet = cause === "water";
+  const wet = mark === "water";
   const defines = wet ? { WET: "" } : {};
   const uniforms = {
     uMap: { value: surface },
@@ -282,6 +291,10 @@ function hitMaterials(
     uTiltAxis: { value: new Vector3(0, 1, 0) },
     uPush: { value: new Vector2() },
     uSink: { value: 0 },
+    uOccCenter: { value: new Vector2() },
+    uOccHalf: { value: new Vector2() },
+    uOccAngle: { value: 0 },
+    uOccRadius: { value: 0 },
   };
   return {
     uniforms,
@@ -329,26 +342,51 @@ export interface DamageHitEffect extends SceneEffect {
   showAtRest(): void;
 }
 
+/** A card lying over the struck one, and its corner radius, in canvas px. */
+export interface Occluder {
+  pose: CardPose;
+  radius: number;
+}
+
+/** How a struck copy is hit. */
+interface HitMotion {
+  /** Where on the card it is hit, as fractions of its width and height. */
+  impact: { u: number; v: number };
+  /** The hit's direction, in world space. */
+  dir: Vec2;
+  scale: number;
+  amount: number;
+  pace: number;
+  /** The mark the damage leaves; `null` (a creature's blow) leaves none. */
+  mark: DamageCause | null;
+  /** When the hit lands, in seconds after the copy starts, before pace. */
+  impactS: number;
+  /** When the copy starts, on the frame clock; `null` starts it on its first frame. */
+  startMs: number | null;
+  /** The card lying over this one now, if any. */
+  occluder: ((origin: DOMRectReadOnly) => Occluder | null) | null;
+  /** Runs once, on the frame the hit lands. */
+  onImpact: (() => void) | null;
+}
+
 class DamageHit implements DamageHitEffect {
   private readonly group = new Group();
   private readonly geometry: PlaneGeometry;
   private readonly materials: ReturnType<typeof hitMaterials>;
   private readonly clock = { value: 0 };
   private readonly local: Vec2;
-  private startMs: number | null = null;
+  private startMs: number | null;
   private atRest = false;
+  private landed = false;
 
   constructor(
     private readonly host: EffectHost,
     private readonly params: DamageHitParams,
-    impact: { u: number; v: number },
-    dir: Vec2,
-    private readonly scale: number,
-    private readonly amount: number,
-    private readonly pace: number,
-    cause: DamageCause,
+    private readonly motion: HitMotion,
   ) {
     const { pose, surface, radius } = params;
+    const { impact, dir, scale, mark } = motion;
+    this.startMs = motion.startMs;
     const a = MathUtils.degToRad(pose.angleDeg);
     // The group turns by −a, so the hit direction in card space is the world direction turned by +a.
     this.local = [dir[0] * Math.cos(a) - dir[1] * Math.sin(a), dir[0] * Math.sin(a) + dir[1] * Math.cos(a)];
@@ -360,7 +398,7 @@ class DamageHit implements DamageHitEffect {
       new Vector2(impact.u * pose.w, impact.v * pose.h),
       scale,
       this.clock,
-      cause,
+      mark,
     );
     this.materials.uniforms.uTiltAxis.value.set(-this.local[1], this.local[0], 0);
     this.geometry = new PlaneGeometry(pose.w, pose.h);
@@ -378,20 +416,41 @@ class DamageHit implements DamageHitEffect {
 
   update(nowMs: number): boolean {
     this.startMs ??= nowMs;
-    const t = (nowMs - this.startMs) / 1000 / this.pace;
+    const { amount, scale, pace, impactS, mark } = this.motion;
+    const t = (nowMs - this.startMs) / 1000 / pace;
     this.clock.value = t;
-    const k = t - IMPACT_S;
+    const k = t - impactS;
     this.group.visible = this.atRest || k >= 0;
     if (k < 0) return true;
+    if (!this.landed) {
+      this.landed = true;
+      this.motion.onImpact?.();
+    }
     const U = this.materials.uniforms;
+    this.occlude(U);
     // Knocked back along the damage's path: the far edge dips, then a damped rock back to rest.
-    U.uTiltA.value = Math.min(0.1 + 0.03 * this.amount, 0.3) * Math.exp(-k * 8) * Math.sin(k * 22);
-    const push = 9 * this.scale * (1 - Math.exp(-k * 40)) * Math.exp(-k * 6);
+    U.uTiltA.value = Math.min(0.1 + 0.03 * amount, 0.3) * Math.exp(-k * 8) * Math.sin(k * 22);
+    const push = 9 * scale * (1 - Math.exp(-k * 40)) * Math.exp(-k * 6);
     U.uPush.value.set(this.local[0] * push, this.local[1] * push);
-    U.uSink.value = 8 * this.scale * (1 - Math.exp(-k * 50)) * Math.exp(-k * 9);
-    U.uScorch.value = Math.min(k / 0.05, 1) * (1 - MathUtils.smoothstep(k, 0.25, 0.75));
-    U.uScorchGlow.value = Math.exp(-k / 0.2) * Math.min(k / 0.02, 1);
+    U.uSink.value = 8 * scale * (1 - Math.exp(-k * 50)) * Math.exp(-k * 9);
+    if (mark) {
+      U.uScorch.value = Math.min(k / 0.05, 1) * (1 - MathUtils.smoothstep(k, 0.25, 0.75));
+      U.uScorchGlow.value = Math.exp(-k / 0.2) * Math.min(k / 0.02, 1);
+    }
     return k < HIT_S;
+  }
+
+  private occlude(U: ReturnType<typeof hitMaterials>["uniforms"]) {
+    const over = this.motion.occluder?.(this.host.canvasOrigin()) ?? null;
+    if (!over) {
+      U.uOccHalf.value.set(0, 0);
+      return;
+    }
+    const { pose, radius } = over;
+    U.uOccCenter.value.set(pose.x, -pose.y);
+    U.uOccHalf.value.set(pose.w / 2, pose.h / 2);
+    U.uOccAngle.value = MathUtils.degToRad(pose.angleDeg);
+    U.uOccRadius.value = radius;
   }
 
   showAtRest() {
@@ -710,7 +769,7 @@ function blowFrame({ group, unit, clock, T, dir, span, scale, share, impactS }: 
 export function createDamageStrike(
   host: EffectHost,
   { hit, ...params }: DamageStrikeParams,
-): { strike: SceneEffect; hit: DamageHitEffect | null } {
+): { strike: SceneEffect; hit: DamageHitEffect | null; impact: { u: number; v: number } } {
   // The hit lands somewhere central on a card, and in the middle of a HUD.
   const impact = hit ? { u: rand(0.35, 0.65), v: rand(0.3, 0.55) } : { u: 0.5, v: 0.5 };
   const S = worldPoint(params.from, 0.5, 0.5);
@@ -732,7 +791,21 @@ export function createDamageStrike(
     });
   return {
     strike: new TimedEffect(host, "damage-strike", timing, look),
-    hit: hit && new DamageHit(host, hit, impact, dir, scale, params.amount, params.pace, cause),
+    impact,
+    hit:
+      hit &&
+      new DamageHit(host, hit, {
+        impact,
+        dir,
+        scale,
+        amount: params.amount,
+        pace: params.pace,
+        mark: cause,
+        impactS: IMPACT_S,
+        startMs: null,
+        occluder: null,
+        onImpact: null,
+      }),
   };
 }
 
@@ -769,6 +842,46 @@ export function createDamageBlow(host: EffectHost, { from, to, amount, tier, pac
       impactS,
     });
   return new TimedEffect(host, "damage-blow", timing, look);
+}
+
+export interface DamageKnockbackParams {
+  /** The struck permanent. */
+  hit: DamageHitParams;
+  /** The striking creature where its slam set out; `null` has no direction. */
+  from: CardPose | null;
+  /** The striking creature as it lies over the struck one, measured each frame. */
+  occluder: ((origin: DOMRectReadOnly) => Occluder | null) | null;
+  amount: number;
+  pace: number;
+  /** When the slam started, on the frame clock (`performance.now()`). */
+  startMs: number;
+  /** When the slam lands, in seconds after it started, before pace. */
+  impactS: number;
+  /** Runs once, on the frame the slam lands. */
+  onImpact(): void;
+}
+
+/** Creates the copy of a permanent a creature's slam strikes: hidden until the
+ *  slam lands, then rocking back from the blow, unmarked. */
+export function createDamageKnockback(host: EffectHost, params: DamageKnockbackParams): DamageHitEffect {
+  const { hit, from, amount } = params;
+  const T = worldPoint(hit.pose, 0.5, 0.5);
+  const S = from ? worldPoint(from, 0.5, 0.5) : T;
+  const dist = Math.hypot(T[0] - S[0], T[1] - S[1]);
+  // With no direction, it is pressed straight down the screen.
+  const dir: Vec2 = dist > 0 ? [(T[0] - S[0]) / dist, (T[1] - S[1]) / dist] : [0, -1];
+  return new DamageHit(host, hit, {
+    impact: { u: 0.5, v: 0.5 },
+    dir,
+    scale: 0.8 + Math.min(amount, 8) * 0.07,
+    amount,
+    pace: params.pace,
+    mark: null,
+    impactS: params.impactS,
+    startMs: params.startMs,
+    occluder: params.occluder,
+    onImpact: params.onImpact,
+  });
 }
 
 export const damageStrikeKind: SceneEffectKind = {

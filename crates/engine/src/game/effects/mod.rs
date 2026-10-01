@@ -8982,7 +8982,7 @@ fn affected_objects_from_events(
         Effect::Destroy { .. } | Effect::DestroyAll { .. } => events
             .iter()
             .filter_map(|event| match event {
-                GameEvent::CreatureDestroyed { object_id } => Some(*object_id),
+                GameEvent::CreatureDestroyed { object_id, .. } => Some(*object_id),
                 _ => None,
             })
             .collect(),
@@ -18918,7 +18918,7 @@ pub(crate) fn evaluate_condition(
                     .current_trigger_event
                     .as_ref()
                     .and_then(|event| match event {
-                        GameEvent::CreatureDestroyed { object_id }
+                        GameEvent::CreatureDestroyed { object_id, .. }
                         | GameEvent::ZoneChanged { object_id, .. } => Some(*object_id),
                         _ => None,
                     })

@@ -1802,7 +1802,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             },
         ],
 
-        GameEvent::CreatureDestroyed { object_id } => {
+        GameEvent::CreatureDestroyed { object_id, .. } => {
             vec![card_seg(state, *object_id), text(" is destroyed")]
         }
 

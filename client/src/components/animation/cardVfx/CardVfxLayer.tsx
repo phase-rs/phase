@@ -47,6 +47,7 @@ import type {
   CounterChangeSpec,
   CounterRippleSpec,
   DamageBlowSpec,
+  DamageKnockbackSpec,
   DamageStrikeSpec,
   ExileDissolveSpec,
   LifeChangeSpec,
@@ -182,6 +183,9 @@ class CardVfxController {
   /** When each countering spell whose ripple is running may leave the stack,
    *  on the frame clock. */
   private readonly counterLeaves = new Map<ObjectId, number>();
+  /** Successful fire copies in the current engine batch, carrying the scorch
+   *  point into a later source-free destruction. */
+  private fireBatch: { snapshotSeq: number; hits: Map<ObjectId, { impact: { u: number; v: number }; amount: number }> } | null = null;
 
   constructor(
     private readonly publishRequests: (requests: FaceRequest[]) => void,
@@ -269,6 +273,9 @@ class CardVfxController {
             return;
           case "blow":
             this.presentBlow(this.scene, spec, classic);
+            return;
+          case "knockback":
+            this.presentKnockback(spec, classic);
             return;
           case "ripple":
             this.presentRipple(this.scene, spec, classic);
@@ -419,7 +426,11 @@ class CardVfxController {
     // A card waiting to leave the battlefield rests as its tile until it goes.
     const tile = spec.route.from === "Battlefield" && spec.delayMs > 0 ? ownPermanentSurface(objectId) : null;
     const waiting: PendingStart = {
-      ...{ token, presentedMs, spec, from, face },
+      token,
+      presentedMs,
+      spec,
+      from,
+      face,
       classics: [classic],
       rest: tile ? undefined : null,
       image: null,
@@ -497,9 +508,16 @@ class CardVfxController {
         const holder = this.startBoardEffect(objectId);
         const release = () => this.releaseAfterCommit(objectId, "board", holder, spec.snapshotSeq);
         switch (spec.kind) {
-          case "shatter":
-            scene.startShatter({ ...board, impact: shatterImpact(), startMs: sweptAtMs, onDone: release });
+          case "shatter": {
+            // A face that loads after the front has passed breaks from its first crack.
+            const startMs = sweptAtMs === null ? null : Math.max(sweptAtMs, performance.now());
+            const fire = spec.destroyerId === null && this.fireBatch?.snapshotSeq === spec.snapshotSeq
+              ? this.fireBatch.hits.get(objectId) : undefined;
+            this.fireBatch?.hits.delete(objectId);
+            if (fire) scene.startBurn({ ...board, ...fire, startMs, onDone: release });
+            else scene.startShatter({ ...board, impact: shatterImpact(), startMs, onDone: release });
             break;
+          }
           case "dissolve":
             scene.startDissolve({ ...board, link: this.linkAimFor(spec), onArrive: release });
             break;
@@ -561,12 +579,18 @@ class CardVfxController {
         // permanent in its place.
         const atRest = this.veilHolds.get(objectId)?.board != null;
         const holder = this.startBoardEffect(objectId);
-        liveScene.startDamageStrike({
+        const impact = liveScene.startDamageStrike({
           ...strike,
           hit: { ...surface, objectId, atRest, onDone: () => this.release(objectId, "board", holder) },
           onImpact: () => {
             // A hit already replaced has no copy left to hold for.
             if (this.boardEffects.get(objectId) === holder) this.hold(objectId, "board", holder);
+            if (spec.cause === "fire") {
+              if (this.fireBatch?.snapshotSeq !== spec.snapshotSeq) {
+                this.fireBatch = { snapshotSeq: spec.snapshotSeq, hits: new Map() };
+              }
+              this.fireBatch.hits.set(objectId, { impact, amount: spec.amount });
+            }
             onImpact();
           },
         });
@@ -594,6 +618,50 @@ class CardVfxController {
       startMs: spec.startMs,
       impactS: spec.impactDelayMs / 1000 / spec.pace,
     });
+  }
+
+  // The struck permanent is measured now, before the slam reaches it. Its copy
+  // hides it only from the impact on; the slamming creature, which the DOM
+  // still draws, lies over it, so the copy leaves out wherever it covers it.
+  private presentKnockback(spec: DamageKnockbackSpec, classic: () => void) {
+    const { objectId, sourceId } = spec;
+    const el = ownPermanentSurface(objectId);
+    if (!el || !this.canvas) {
+      classic();
+      return;
+    }
+    const attacker = permanentSurface(sourceId);
+    const from = attacker && measureCardPose(attacker, this.canvas.getBoundingClientRect());
+    const attackerRadius = (attacker && measureSurfaceLayout(attacker)?.radius) ?? 0;
+    const occluder =
+      attacker &&
+      ((origin: DOMRectReadOnly) => {
+        const pose = measureCardPose(attacker, origin);
+        return { pose, radius: (attackerRadius * pose.w) / (attacker.offsetWidth || pose.w) };
+      });
+    this.withBoardSurface(
+      el,
+      spec.face,
+      spec.owningStepMs,
+      (scene, surface) => {
+        const holder = this.startBoardEffect(objectId);
+        scene.startDamageKnockback({
+          objectId,
+          hit: { ...surface, onDone: () => this.release(objectId, "board", holder) },
+          from,
+          occluder,
+          amount: spec.amount,
+          pace: spec.pace,
+          startMs: spec.startMs,
+          impactS: spec.impactDelayMs / 1000 / spec.pace,
+          onImpact: () => {
+            // A copy already replaced has nothing left to hold for.
+            if (this.boardEffects.get(objectId) === holder) this.hold(objectId, "board", holder);
+          },
+        });
+      },
+      classic,
+    );
   }
 
   // Both stack entries are measured now: the commit takes them off the stack.
@@ -850,6 +918,7 @@ class CardVfxController {
     this.boardEffects.clear();
     this.sweeps.clear();
     this.counterLeaves.clear();
+    this.fireBatch = null;
   }
 
   private publish() {

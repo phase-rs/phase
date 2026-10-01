@@ -85,7 +85,7 @@ interface NormalizeEventsOptions {
 type AnnouncementState = Pick<GameState, "stack" | "has_pending_cast">;
 
 /** A permanent's move off the battlefield. */
-function leavesBattlefield(event: AnimationEvent): boolean {
+function leavesBattlefield(event: AnimationEvent): event is Extract<AnimationEvent, { type: "ZoneChanged" }> {
   return event.type === "ZoneChanged" && event.data.from === "Battlefield";
 }
 
@@ -97,6 +97,21 @@ function sameTypeGrouping(effect: StepEffect, lastStep: AnimationStep): boolean 
   return lastStep.effects.every(
     ({ event }) => event.type === effect.event.type || leavesBattlefield(event),
   );
+}
+
+type DestructionType = "CreatureDestroyed" | "PermanentSacrificed";
+
+/** The destruction or sacrifice whose move off the battlefield `events[index]`
+ *  is (CR 701.8a / CR 701.21a): the engine reports the move just before it,
+ *  with at most non-visual events between. The move belongs in its step, which
+ *  shows where it went: a replacement (CR 614.1a) may have sent it elsewhere. */
+function destructionOfMove(events: GameEvent[], index: number): DestructionType | null {
+  const move = events[index];
+  if (!leavesBattlefield(move)) return null;
+  const next = events.slice(index + 1).find(({ type }) => !NON_VISUAL_EVENTS.has(type));
+  const ofMove = (next?.type === "CreatureDestroyed" || next?.type === "PermanentSacrificed")
+    && next.data.object_id === move.data.object_id;
+  return ofMove ? next.type : null;
 }
 
 /**
@@ -870,6 +885,21 @@ export function normalizeEvents(
 
     if (OWN_STEP_TYPES.has(event.type) || isAnnouncement) {
       steps.push({ effects: [effect], duration: effect.duration });
+      continue;
+    }
+
+    const destruction = destructionOfMove(events, index);
+    if (destruction) {
+      // It joins a run of the same destructions, or starts its own.
+      const lastStep = steps[steps.length - 1];
+      const run = lastStep?.effects.some(({ event: other }) => other.type === destruction)
+        && lastStep.effects.every(({ event: other }) => other.type === destruction || leavesBattlefield(other));
+      if (lastStep && run) {
+        lastStep.effects.push(effect);
+        lastStep.duration = stepDuration(lastStep.effects);
+      } else {
+        steps.push({ effects: [effect], duration: effect.duration });
+      }
       continue;
     }
 

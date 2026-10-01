@@ -287,7 +287,7 @@ describe("cardFlightSpecFor zone moves", () => {
 });
 
 describe("cardVfxSpecFor", () => {
-  const destroyed: AnimationEvent = { type: "CreatureDestroyed", data: { object_id: X } };
+  const destroyed: AnimationEvent = { type: "CreatureDestroyed", data: { object_id: X, source_id: null } };
 
   it("V8-9: a destroyed permanent shatters with the face it showed; flights are unchanged", () => {
     const pre = stateWith(visible(card.onBattlefield().build()));
@@ -295,6 +295,7 @@ describe("cardVfxSpecFor", () => {
 
     expect(cardVfxSpecFor(destroyed, context(pre, post))).toEqual({
       kind: "shatter",
+      destroyerId: null,
       objectId: X,
       face: expect.objectContaining({ cardName: "Llanowar Elves" }),
       pace: 1,
@@ -308,15 +309,42 @@ describe("cardVfxSpecFor", () => {
   it("V11-5: a destruction or sacrifice a replacement sent to exile, a hand or a library is its zone change's to present", () => {
     const pre = stateWith(visible(card.onBattlefield().build()));
     const sacrificed: AnimationEvent = { type: "PermanentSacrificed", data: { object_id: X, player_id: 0 } };
+    const moved = (to: Zone): AnimationEvent => ({ type: "ZoneChanged", data: { object_id: X, from: "Battlefield", to } });
     for (const zone of ["Exile", "Hand", "Library"] as const) {
       const post = stateWith(visible(card.params({ zone }).build()));
-      expect(cardVfxSpecFor(destroyed, context(pre, post))).toEqual({ kind: "covered", objectId: X });
-      expect(cardVfxSpecFor(sacrificed, context(pre, post))).toEqual({ kind: "covered", objectId: X });
+      for (const event of [destroyed, sacrificed]) {
+        expect(cardVfxSpecFor(event, context(pre, post, 1, [moved(zone), event]))).toEqual({ kind: "covered", objectId: X });
+      }
     }
-    // A destroyed token that ceased to exist still shatters; a sacrificed one presents Classic.
-    expect(cardVfxSpecFor(destroyed, context(pre, stateWith()))?.kind).toBe("shatter");
-    expect(cardVfxSpecFor(sacrificed, context(pre, stateWith()))).toBeNull();
+    // Its own move to the graveyard leaves the destruction to shatter.
+    const graveyard = stateWith(visible(card.inGraveyard().build()));
+    expect(cardVfxSpecFor(destroyed, context(pre, graveyard, 1, [moved("Graveyard"), destroyed]))?.kind).toBe("shatter");
     expect(cardVfxSpecFor(destroyed, context(pre, pre, 0))).toBeNull();
+  });
+
+  it("V16-8: a token reads its move from the step, having ceased to exist wherever it went", () => {
+    const token = stateWith(visible(card.onBattlefield().params({ is_token: true }).build()));
+    const gone = stateWith();
+    const sacrificed: AnimationEvent = { type: "PermanentSacrificed", data: { object_id: X, player_id: 0 } };
+    const moved = (to: Zone): AnimationEvent => ({ type: "ZoneChanged", data: { object_id: X, from: "Battlefield", to } });
+    // Exiled by a replacement: its exile dissolves, and its destruction or sacrifice shows nothing more.
+    for (const event of [destroyed, sacrificed]) {
+      expect(cardVfxSpecFor(event, context(token, gone, 1, [moved("Exile"), event]))).toEqual({ kind: "covered", objectId: X });
+    }
+    // To the graveyard: a destroyed token shatters, and a sacrificed one dissolves where it lay.
+    expect(cardVfxSpecFor(destroyed, context(token, gone, 1, [moved("Graveyard"), destroyed]))?.kind).toBe("shatter");
+    expect(cardVfxSpecFor(sacrificed, context(token, gone, 1, [moved("Graveyard"), sacrificed]))).toEqual({
+      kind: "dissolve",
+      objectId: X,
+      face: expect.objectContaining({ objectId: X }),
+      holderId: null,
+      pace: 1,
+      owningStepMs: 500,
+      snapshotSeq: 1,
+    });
+    // A sacrificed card is still there, in the graveyard, and flies.
+    const inGraveyard = stateWith(visible(card.inGraveyard().build()));
+    expect(cardVfxSpecFor(sacrificed, context(token, inGraveyard, 1, [moved("Graveyard"), sacrificed]))?.kind).toBe("flight");
   });
 
   it("V11-5: a token's entry from no zone has no card VFX; its creation flies it", () => {
@@ -392,6 +420,7 @@ describe("cardVfxSpecFor damage", () => {
   it("V10-11: a resolving spell's damage strikes a player, or a permanent with the face it shows", () => {
     expect(cardVfxSpecFor(damage({ Player: 1 }), context(pre, pre))).toEqual({
       kind: "damage",
+      snapshotSeq: 1,
       cause: "fire",
       origin: { zone: "Stack", objectId: SPELL, ownerId: 0 },
       target: { kind: "player", playerId: 1 },
@@ -487,13 +516,13 @@ describe("a sweep", () => {
     type: "ZoneChanged",
     data: { object_id: objectId, from: "Battlefield", to: "Hand" },
   });
-  const destroyedEvent = (objectId: number): AnimationEvent => ({ type: "CreatureDestroyed", data: { object_id: objectId } });
+  const destroyedEvent = (objectId: number, sourceId: number | null = SPELL): AnimationEvent => ({ type: "CreatureDestroyed", data: { object_id: objectId, source_id: sourceId } });
 
   /** A spell of `color` its controller, player 1, is resolving, over two creatures. */
   function sweepContext(color: ManaColor[], step: readonly AnimationEvent[], to: Zone) {
     const pre = buildGameState({
       objects: buildObjectMap(
-        gameObjectFactory.withId(SPELL).named("Evacuation").instant().params({ zone: "Stack", color }).build(),
+        gameObjectFactory.withId(SPELL).named("Evacuation").instant().controlledBy(1).params({ zone: "Stack", color }).build(),
         visible(card.onBattlefield().build()),
         visible(other.onBattlefield().build()),
       ),
@@ -513,6 +542,18 @@ describe("a sweep", () => {
     // A spell of another colour, or a lone bounce, sends no wave; the batch keeps its stagger.
     expect(cardFlightSpecFor(step[1], sweepContext(["Red"], step, "Hand"))).toMatchObject({ delayMs: 90, sweep: null });
     expect(cardFlightSpecFor(step[0], sweepContext(["Blue"], [step[0]], "Hand"))?.sweep).toBeNull();
+  });
+
+  it("V17-3: destruction follows its source's colours and controller, apart from the top stack spell and other deaths", () => {
+    const DIFFERENT = 70;
+    const step = [destroyedEvent(X), destroyedEvent(OTHER), destroyedEvent(71, DIFFERENT), destroyedEvent(72, null)];
+    const ctx = sweepContext(["Black"], step, "Graveyard");
+    ctx.pre!.objects[DIFFERENT] = gameObjectFactory.withId(DIFFERENT).instant().controlledBy(0).params({ zone: "Stack" }).build({ color: ["White"] });
+    ctx.pre!.stack.push(buildStackEntry({ id: DIFFERENT, source_id: DIFFERENT, controller: 0 }));
+    expect(cardVfxSpecFor(step[0], ctx)).toMatchObject({
+      destroyerId: SPELL, sweep: { look: "smoke", casterId: 1, memberIds: [X, OTHER] },
+    });
+    expect(cardVfxSpecFor(destroyedEvent(X, null), ctx)).toMatchObject({ destroyerId: null, sweep: null });
   });
 
   it("V15-2: a spell destroying several permanents sweeps light when white and smoke when black; other colours break them at once", () => {

@@ -29,12 +29,15 @@ import {
   restingState,
 } from "./cardFlight.ts";
 import { type BoardSweepParams, boardSweepKind, createBoardSweep } from "./boardSweep.ts";
+import { type CardBurnParams, cardBurnKind, createCardBurn } from "./cardBurn.ts";
 import { type CardShatterParams, cardShatterKind, createCardShatter } from "./cardShatter.ts";
 import {
   createDamageBlow,
+  createDamageKnockback,
   createDamageStrike,
   type DamageBlowParams,
   type DamageHitParams,
+  type DamageKnockbackParams,
   type DamageStrikeParams,
   damageStrikeKind,
 } from "./damageStrike.ts";
@@ -78,6 +81,7 @@ export const SCENE_EFFECT_KINDS: readonly SceneEffectKind[] = [
   cardFlightKind,
   landingDustKind,
   cardShatterKind,
+  cardBurnKind,
   exileDissolveKind,
   damageStrikeKind,
   counterRippleKind,
@@ -111,6 +115,7 @@ interface OnPermanent {
   objectId: ObjectId;
 }
 /** A shatter to start; the scene supplies the pixel ratio. */
+export type CardBurnRequest = CardBurnParams & OnPermanent;
 export type CardShatterRequest = Omit<CardShatterParams, "pixelRatio"> & OnPermanent;
 /** A dissolve to start; the scene supplies the pixel ratio. */
 export type ExileDissolveRequest = Omit<ExileDissolveParams, "pixelRatio"> & OnPermanent;
@@ -119,6 +124,8 @@ export type ExileDissolveRequest = Omit<ExileDissolveParams, "pixelRatio"> & OnP
 type DamageHitRequest = DamageHitParams & OnPermanent & { atRest: boolean };
 /** A damage strike to start; a hit names the permanent it lands on. */
 export type DamageStrikeRequest = Omit<DamageStrikeParams, "hit"> & { hit: DamageHitRequest | null };
+/** A slam's struck permanent to rock back; it names the permanent it copies. */
+export type DamageKnockbackRequest = DamageKnockbackParams & OnPermanent;
 
 export interface CardVfxScene {
   setPixelRatio(ratio: number): void;
@@ -138,10 +145,12 @@ export interface CardVfxScene {
    *  permanent at a time: each silently disposes the permanent's running one,
    *  whose veil the new effect's completion then releases. */
   startShatter(request: CardShatterRequest): void;
+  startBurn(request: CardBurnRequest): void;
   startDissolve(request: ExileDissolveRequest): void;
-  startDamageStrike(request: DamageStrikeRequest): void;
-  /** A blow happens to no one permanent: the DOM slam moves the struck card. */
+  startDamageStrike(request: DamageStrikeRequest): { u: number; v: number };
+  /** A blow happens to no one permanent; its knockback is the struck one's. */
   startDamageBlow(request: DamageBlowParams): void;
+  startDamageKnockback(request: DamageKnockbackRequest): void;
   /** A counter's ripple veils nothing: the countered spell's flight holds it. */
   startCounterRipple(request: CounterRippleParams): void;
   /** A sweep veils nothing: the permanents it reaches hold their own. */
@@ -359,20 +368,30 @@ class CardVfxSceneRuntime implements CardVfxScene, EffectHost {
     this.addBoardEffect(objectId, createCardShatter(this, { ...request, pixelRatio: this.pixelRatio }));
   }
 
+  startBurn({ objectId, ...request }: CardBurnRequest) {
+    this.addBoardEffect(objectId, createCardBurn(this, request));
+  }
+
   startDissolve({ objectId, ...request }: ExileDissolveRequest) {
     this.addBoardEffect(objectId, createExileDissolve(this, { ...request, pixelRatio: this.pixelRatio }));
   }
 
   startDamageStrike(request: DamageStrikeRequest) {
-    const { strike, hit } = createDamageStrike(this, request);
+    const { strike, hit, impact } = createDamageStrike(this, request);
     this.add(strike);
-    if (!hit || !request.hit) return;
-    this.addBoardEffect(request.hit.objectId, hit);
-    if (request.hit.atRest) hit.showAtRest();
+    if (hit && request.hit) {
+      this.addBoardEffect(request.hit.objectId, hit);
+      if (request.hit.atRest) hit.showAtRest();
+    }
+    return impact;
   }
 
   startDamageBlow(request: DamageBlowParams) {
     this.add(createDamageBlow(this, request));
+  }
+
+  startDamageKnockback({ objectId, ...request }: DamageKnockbackRequest) {
+    this.addBoardEffect(objectId, createDamageKnockback(this, request));
   }
 
   startCounterRipple(request: CounterRippleParams) {

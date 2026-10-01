@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { objectAnchorSelector } from "../../../../utils/objectAnchorSelector.ts";
 import {
@@ -44,6 +44,7 @@ function mount(attributes: Record<string, string>, box: Box | null = { left: 0, 
 
 afterEach(() => {
   document.body.replaceChildren();
+  vi.restoreAllMocks();
 });
 
 describe("zone-scoped anchors", () => {
@@ -188,6 +189,29 @@ describe("zone-scoped anchors", () => {
     expect(pose.w).toBeCloseTo(60 * 1.5, 6);
     expect(pose.h).toBeCloseTo(80 * 1.5, 6);
     expect(pose.angleDeg).toBeCloseTo(30, 2);
+  });
+
+  it("V16-4: the separate rotate and scale properties a slam or knockback sets count too", () => {
+    const node = mount({ "data-permanent-card": String(X) }, { left: 110, top: 220, width: 60, height: 80 });
+    // happy-dom computes neither property; a browser reports what the slam set.
+    const computed: Record<string, string> = { scale: "1.12", rotate: "-8deg" };
+    const real = window.getComputedStyle.bind(window);
+    vi.spyOn(window, "getComputedStyle").mockImplementation((el) => {
+      const style = real(el);
+      if (el !== node) return style;
+      return new Proxy(style, {
+        get: (target, key) =>
+          key === "getPropertyValue"
+            ? (name: string) => computed[name] ?? target.getPropertyValue(name)
+            : Reflect.get(target, key),
+      });
+    });
+
+    const pose = measureCardPose(node, new DOMRect(10, 20, 500, 500));
+
+    expect(pose.w).toBeCloseTo(60 * 1.12, 6);
+    expect(pose.h).toBeCloseTo(80 * 1.12, 6);
+    expect(pose.angleDeg).toBeCloseTo(-8, 2);
   });
 });
 

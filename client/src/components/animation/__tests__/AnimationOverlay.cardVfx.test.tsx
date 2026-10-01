@@ -300,7 +300,13 @@ describe("AnimationOverlay combat blows", () => {
   }
 
   function seedHit() {
-    const bears = gameObjectFactory.withId(Y).named("Grizzly Bears").creature(2, 2).onBattlefield().build();
+    const bears = gameObjectFactory
+      .withId(Y)
+      .named("Grizzly Bears")
+      .creature(2, 2)
+      .onBattlefield()
+      .params({ display_visible_to_viewer: true })
+      .build();
     act(() => {
       useGameStore.setState({ gameState: buildGameState({ objects: buildObjectMap(elves.onBattlefield().build(), bears) }) });
       useAnimationStore.getState().enqueueSteps([{ effects: [{ event: hit, duration: 500 }], duration: 500 }], 1);
@@ -322,7 +328,7 @@ describe("AnimationOverlay combat blows", () => {
     document.body.replaceChildren();
   });
 
-  it("V12-4: under the New style a slam's impact is the layer's blow, and the struck card rocks back", () => {
+  it("V12-4: under the New style a slam's impact is the layer's blow, and the struck card's copy rocks back", () => {
     layer.supported = true;
     card(X, 40);
     const struck = card(Y, 400);
@@ -330,36 +336,60 @@ describe("AnimationOverlay combat blows", () => {
 
     renderOverlay();
 
-    expect(layer.present).toHaveBeenCalledTimes(1);
-    expect(layer.present.mock.calls[0][0]).toEqual({
-      kind: "blow",
-      sourceId: X,
-      target: { Object: Y },
-      amount: 3,
-      pace: 1,
-      startMs: expect.any(Number),
-      impactDelayMs: CARD_SLAM_FLIGHT_MS,
-    });
+    const slam = { amount: 3, pace: 1, startMs: expect.any(Number), impactDelayMs: CARD_SLAM_FLIGHT_MS };
+    expect(layer.present.mock.calls.map(([spec]) => spec)).toEqual([
+      { kind: "blow", sourceId: X, target: { Object: Y }, ...slam },
+      {
+        kind: "knockback",
+        objectId: Y,
+        face: expect.objectContaining({ objectId: Y, cardName: "Grizzly Bears" }),
+        sourceId: X,
+        owningStepMs: 500,
+        ...slam,
+      },
+    ]);
     advance(CARD_SLAM_FLIGHT_MS + 60);
     expect(particles.slamImpact).not.toHaveBeenCalled();
-    expect(struck.style.rotate).not.toBe("");
-    advance(CARD_KNOCKBACK_MS + 100);
-    expect(struck.style.rotate).toBe("");
+    // The layer's copy rocks back in its place; the real card stays still.
+    expect(struck.style.rotate || "").toBe("");
   });
 
-  it("V12-4: a blow the layer cannot present runs the Classic particles as the slam lands", () => {
+  it("V12-4: a blow the layer cannot present runs the Classic particles, and the real card rocks back, as the slam lands", () => {
     layer.supported = true;
     layer.present.mockImplementation((_spec, classic) => classic());
     card(X, 40);
-    card(Y, 400);
+    const struck = card(Y, 400);
     seedHit();
 
     renderOverlay();
 
     advance(CARD_SLAM_FLIGHT_MS - 40);
     expect(particles.slamImpact).not.toHaveBeenCalled();
+    expect(struck.style.rotate || "").toBe("");
     advance(80);
     expect(particles.slamImpact).toHaveBeenCalledTimes(1);
+    expect(struck.style.rotate).not.toBe("");
+    advance(CARD_KNOCKBACK_MS + 100);
+    expect(struck.style.rotate).toBe("");
+  });
+
+  it("V16-5: a knockback the layer gives up after the slam has landed rocks the real card back then", () => {
+    layer.supported = true;
+    let giveUp = () => {};
+    layer.present.mockImplementation((spec, classic) => {
+      if (spec.kind === "knockback") giveUp = classic;
+    });
+    card(X, 40);
+    const struck = card(Y, 400);
+    seedHit();
+
+    renderOverlay();
+
+    advance(CARD_SLAM_FLIGHT_MS + 60);
+    expect(struck.style.rotate || "").toBe("");
+    act(() => giveUp());
+    advance(60);
+    expect(struck.style.rotate).not.toBe("");
   });
 
   it("V12-4: a flurry of hits on a player lands one blow with no one direction, else its Classic burst", () => {

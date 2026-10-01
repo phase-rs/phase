@@ -39,7 +39,12 @@ import {
 import { applyScreenShake } from "./ScreenShake.tsx";
 import { CardVfxLayer, type CardVfxLayerHandle, cardVfxSupported } from "./cardVfx/CardVfxLayer.tsx";
 import { castAnnounced } from "./cardVfx/cardFlightSpecs.ts";
-import { cardVfxSpecFor, type DamageBlowSpec, damageCauseState } from "./cardVfx/cardVfxSpecs.ts";
+import {
+  cardVfxSpecFor,
+  type DamageBlowSpec,
+  type DamageKnockbackSpec,
+  damageCauseState,
+} from "./cardVfx/cardVfxSpecs.ts";
 
 
 interface ActiveFloat {
@@ -356,20 +361,27 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
     [getObjectPosition, getPlayerHudPosition],
   );
 
-  /** A slam's impact under the New style: the layer's dust and ring, or
-   *  `particles` when it cannot present them. Presented as the slam starts;
-   *  returns what runs as the slam lands. */
-  const presentBlow = useCallback((spec: DamageBlowSpec, particles: () => void): (() => void) => {
-    const layer = cardVfxRef.current;
-    if (!layer) return particles;
-    let classic = false;
-    layer.present(spec, () => {
-      classic = true;
-    });
-    return () => {
-      if (classic) particles();
-    };
-  }, []);
+  /** Something a slam's impact lands under the New style: the layer's dust
+   *  and ring, or the struck card's knockback. Presented as the slam starts;
+   *  returns what runs as the slam lands, which runs `classic` if the layer
+   *  could not present it. A layer that gives up after the impact runs it then. */
+  const presentBlow = useCallback(
+    (spec: DamageBlowSpec | DamageKnockbackSpec, classic: () => void): (() => void) => {
+      const layer = cardVfxRef.current;
+      if (!layer) return classic;
+      let fellBack = false;
+      let landed = false;
+      layer.present(spec, () => {
+        fellBack = true;
+        if (landed) classic();
+      });
+      return () => {
+        landed = true;
+        if (fellBack) classic();
+      };
+    },
+    [],
+  );
 
   const processClassicEffect = useCallback(
     (effect: StepEffect, stepEffects: StepEffect[], owningStepMs: number) => {
@@ -449,31 +461,38 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
             // Under the New style the struck card rocks back from the blow.
             const struckEl = cardVfxRef.current ? findCardElement(target.Object) : null;
             let landBlow = () => particleRef.current?.slamImpact(pos.x, pos.y, amount);
+            let knockBack = () => {
+              if (struckEl && sourceAt) {
+                applyCardKnockback(struckEl, pos.x - sourceAt.x, pos.y - sourceAt.y, amount, speedMultiplier);
+              }
+            };
             // One start for the slam and its blow, so both land on one frame.
             const slamStartMs = performance.now();
             const slammed = sourceEl
               ? applyCardSlam(sourceEl, pos.x, pos.y, speedMultiplier, () => {
                   // Impact effects: SFX, shockwave, floating number, screen shake
                   landBlow();
-                  if (struckEl && sourceAt) {
-                    applyCardKnockback(struckEl, pos.x - sourceAt.x, pos.y - sourceAt.y, amount, speedMultiplier);
-                  }
+                  knockBack();
                   landDamageHit(pos, amount, false);
                 }, slamStartMs)
               : false;
             if (slammed) {
-              landBlow = presentBlow(
-                {
-                  kind: "blow",
-                  sourceId: source_id,
-                  target,
-                  amount,
-                  pace: speedMultiplier,
-                  startMs: slamStartMs,
-                  impactDelayMs: CARD_SLAM_FLIGHT_MS * speedMultiplier,
-                },
-                landBlow,
-              );
+              const impactDelayMs = CARD_SLAM_FLIGHT_MS * speedMultiplier;
+              const slam = { amount, pace: speedMultiplier, startMs: slamStartMs, impactDelayMs };
+              landBlow = presentBlow({ kind: "blow", sourceId: source_id, target, ...slam }, landBlow);
+              if (struckEl) {
+                knockBack = presentBlow(
+                  {
+                    kind: "knockback",
+                    objectId: target.Object,
+                    face: visiblePreEventSnapshot(target.Object),
+                    sourceId: source_id,
+                    owningStepMs,
+                    ...slam,
+                  },
+                  knockBack,
+                );
+              }
             }
 
             if (!slammed) {
