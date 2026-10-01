@@ -44503,6 +44503,81 @@ fn conjure_multi_card_hand() {
 }
 
 #[test]
+fn conjure_named_group_power_nine_into_library() {
+    // Oracle of the Alpha (verbatim clause): a conjure by collective name
+    // expands to one `Named` entry per Power Nine member.
+    let e = parse_effect("conjure the Power Nine into your library");
+    match e {
+        Effect::Conjure {
+            cards,
+            destination,
+            tapped,
+            library_position,
+            library_players,
+        } => {
+            let names: Vec<_> = cards.iter().map(|c| c.named_name()).collect();
+            assert_eq!(
+                names,
+                [
+                    Some("Ancestral Recall"),
+                    Some("Black Lotus"),
+                    Some("Mox Pearl"),
+                    Some("Mox Sapphire"),
+                    Some("Mox Jet"),
+                    Some("Mox Ruby"),
+                    Some("Mox Emerald"),
+                    Some("Time Walk"),
+                    Some("Timetwister"),
+                ]
+            );
+            assert!(
+                cards
+                    .iter()
+                    .all(|c| c.count == QuantityExpr::Fixed { value: 1 }),
+                "every group member is conjured once: {cards:?}"
+            );
+            assert_eq!(destination, Zone::Library);
+            assert!(!tapped);
+            assert_eq!(library_position, None);
+            // "your library" targets the controller only — no per-player fan-out.
+            assert_eq!(library_players, None);
+        }
+        other => panic!("expected Conjure, got: {other:?}"),
+    }
+}
+
+#[test]
+fn conjure_named_group_unknown_group_stays_unimplemented() {
+    // Reach-guard: the known group parses first, proving the clause shape
+    // reaches the group arm (a bare `Unimplemented` assertion would pass
+    // vacuously if the input never got that far).
+    assert!(matches!(
+        parse_effect("conjure the Power Nine into your library"),
+        Effect::Conjure { .. }
+    ));
+    // An unlisted collective name fails closed — no silent partial conjure.
+    assert!(matches!(
+        parse_effect("conjure the Power Ten into your library"),
+        Effect::Unimplemented { .. }
+    ));
+}
+
+#[test]
+fn conjure_named_group_library_tapped_rider_stays_unimplemented() {
+    // Reach-guard: the bare clause parses (see above).
+    assert!(matches!(
+        parse_effect("conjure the Power Nine into your library"),
+        Effect::Conjure { .. }
+    ));
+    // "tapped" is only modeled after the battlefield; a library rider fails
+    // closed rather than being silently dropped.
+    assert!(matches!(
+        parse_effect("conjure the Power Nine into your library tapped"),
+        Effect::Unimplemented { .. }
+    ));
+}
+
+#[test]
 fn conjure_into_library() {
     let e = parse_effect("conjure four cards named Lightning Bolt into your library");
     match e {

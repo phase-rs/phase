@@ -153,6 +153,43 @@ fn dies_trigger_owner_subject_anchors_each_other_player_scope() {
     );
 }
 
+/// Oracle of the Alpha (verbatim ETB line): the collective-name conjure head
+/// lowers to a 9-entry `Conjure` with the `Shuffle` sub-ability chained — the
+/// full trigger body parses with zero `Unimplemented`.
+#[test]
+fn oracle_of_the_alpha_etb_conjures_power_nine_then_shuffles() {
+    let trigger = parse_trigger_line(
+        "When Oracle of the Alpha enters the battlefield, conjure the Power Nine into your library, then shuffle.",
+        "Oracle of the Alpha",
+    );
+
+    assert_eq!(trigger.mode, TriggerMode::ChangesZone);
+    assert_eq!(trigger.destination, Some(Zone::Battlefield));
+    let execute = trigger.execute.as_deref().expect("ETB trigger body");
+    assert_no_unimplemented(execute);
+
+    let Effect::Conjure {
+        cards, destination, ..
+    } = execute.effect.as_ref()
+    else {
+        panic!("expected Power Nine conjure head, got {:?}", execute.effect);
+    };
+    assert_eq!(cards.len(), 9);
+    assert_eq!(cards[0].named_name(), Some("Ancestral Recall"));
+    assert_eq!(cards[8].named_name(), Some("Timetwister"));
+    assert_eq!(*destination, Zone::Library);
+
+    let shuffle = execute
+        .sub_ability
+        .as_deref()
+        .expect("shuffle follows the conjure");
+    assert!(
+        matches!(shuffle.effect.as_ref(), Effect::Shuffle { .. }),
+        "expected Shuffle sub-ability, got {:?}",
+        shuffle.effect
+    );
+}
+
 /// CR 108.3 + CR 608.2c: After phase 3 extracts the intervening-if head, the
 /// remaining Goat-shaped body must still bind "each other player" to the owner
 /// subject immediately preceding it.

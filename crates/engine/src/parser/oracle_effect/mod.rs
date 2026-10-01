@@ -11308,6 +11308,14 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         return parsed_clause(effect);
     }
 
+    // Digital-only: "conjure the {card-group} into/onto zone" — a conjure by
+    // collective name, expanding to one `Named` entry per group member (Oracle
+    // of the Alpha's Power Nine). Disjoint from the sibling arms: this requires
+    // "conjure the ", the others "conjure a …".
+    if let Some(effect) = try_parse_conjure_named_group(tp) {
+        return parsed_clause(effect);
+    }
+
     // Digital-only: "conjure a card named X into/onto zone" — Conjure keyword action.
     if let Some(effect) = try_parse_conjure(tp) {
         return parsed_clause(effect);
@@ -12565,6 +12573,91 @@ fn try_parse_conjure_from_spellbook(tp: TextPair) -> Option<Effect> {
         tapped,
         random,
     })
+}
+
+/// Digital-only collective conjure names (no CR entry — the string "conjure"
+/// does not occur in `docs/MagicCompRules.txt`): lowercase group phrase →
+/// canonical member card names in printed order. The single extension point
+/// for future "conjure the {group}" wordings — a second collective name is a
+/// one-row data change with no new code paths.
+const NAMED_CARD_GROUPS: &[(&str, &[&str])] = &[(
+    "power nine",
+    &[
+        "Ancestral Recall",
+        "Black Lotus",
+        "Mox Pearl",
+        "Mox Sapphire",
+        "Mox Jet",
+        "Mox Ruby",
+        "Mox Emerald",
+        "Time Walk",
+        "Timetwister",
+    ],
+)];
+
+/// Digital-only keyword action: parse "conjure the {card-group} into/onto
+/// {zone}" — a conjure by collective name (Oracle of the Alpha's "conjure the
+/// Power Nine into your library"), expanding to one `Named` card per group
+/// member. The produced AST is shape-identical to the multi-card named form
+/// (Darksteel Hydra): `cards: Vec<ConjureCard>` with `count: Fixed { value: 1 }`
+/// each, so the resolver and registry-seeding paths are unchanged.
+///
+/// Uses nom combinators exclusively for dispatch and structure recognition.
+fn try_parse_conjure_named_group(tp: TextPair) -> Option<Effect> {
+    // Gate: must start with "conjure the " (nom tag dispatch). Disjoint from
+    // the sibling conjure arms, which all require "conjure a …".
+    let (rest, _) = tag::<_, _, OracleError<'_>>("conjure the ")
+        .parse(tp.lower)
+        .ok()?;
+
+    // Table-driven group match: each row is attempted with a nom `tag`
+    // application (a static `alt` tuple cannot be table-driven). Canonical
+    // member names come from the table, so no original-case slicing is needed.
+    for (group_lower, members) in NAMED_CARD_GROUPS {
+        let Ok((after_group, _)) = tag::<_, _, OracleError<'_>>(*group_lower).parse(rest) else {
+            continue;
+        };
+
+        let cards = members
+            .iter()
+            .map(|name| ConjureCard {
+                source: ConjureSource::Named {
+                    name: name.to_string(),
+                },
+                count: QuantityExpr::Fixed { value: 1 },
+            })
+            .collect();
+
+        // Destination via the shared conjure-zone parser; " tapped" only after
+        // the battlefield (mirrors the spellbook arm).
+        let Some((destination, library_position, library_players, zone_rest)) =
+            parse_conjure_zone(after_group)
+        else {
+            continue;
+        };
+        let (tail, tapped) = if destination == Zone::Battlefield {
+            match tag::<_, _, OracleError<'_>>(" tapped").parse(zone_rest) {
+                Ok((tail, _)) => (tail, true),
+                Err(_) => (zone_rest, false),
+            }
+        } else {
+            (zone_rest, false)
+        };
+        // Fully consume the tail (mirrors the duplicate arm): an unmodeled
+        // rider falls through to `Unimplemented` rather than being dropped.
+        if !tail.trim().trim_end_matches('.').trim().is_empty() {
+            continue;
+        }
+
+        return Some(Effect::Conjure {
+            cards,
+            destination,
+            tapped,
+            library_position,
+            library_players,
+        });
+    }
+    None
 }
 
 /// Digital-only keyword action: Parse "conjure [quantity] card(s) named {Name} into/onto {zone}"
