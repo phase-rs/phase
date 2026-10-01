@@ -2182,7 +2182,7 @@ pub(crate) fn illegal_declared_target_slots(
     illegal
 }
 
-/// Clears target-legality metadata before an execution path that skips the
+/// CR 608.2b: clears target-legality metadata before an execution path that skips the
 /// normal initial legality check.
 pub(crate) fn clear_illegal_local_target_slots(ability: &mut ResolvedAbility) {
     let mut ignored = Vec::new();

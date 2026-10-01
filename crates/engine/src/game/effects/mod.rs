@@ -4134,7 +4134,7 @@ pub(crate) fn should_propagate_parent_targets(
             && sub.target_choice_timing == TargetChoiceTiming::Resolution)
 }
 
-/// Whether an empty-targeted child can inherit the parent's bound targets.
+/// CR 608.2b: whether an empty-targeted child can inherit the parent's bound targets.
 /// A node emptied by initial target validation carries local removal evidence;
 /// intentionally empty nodes retain the original inheritance rules.
 pub(crate) fn can_inherit_parent_targets(sub: &ResolvedAbility) -> bool {
@@ -18708,7 +18708,7 @@ fn fails_shared_quality(state: &GameState, effective: &ResolvedAbility) -> bool 
     }
 }
 
-/// CR 115.6 + CR 608.2c: an empty child with local initial-legality removal
+/// CR 608.2b + CR 608.2c: an empty child with local initial-legality removal
 /// evidence inherits nothing. Other children retain players and objects unless
 /// the child owns an independent object slot.
 fn inherited_parent_targets(parent: &ResolvedAbility, sub: &ResolvedAbility) -> Vec<TargetRef> {
