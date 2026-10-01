@@ -647,10 +647,10 @@ fn art_keyword_family_name(keyword: &Keyword) -> String {
     }
 }
 
-/// Derivation-event counter for the allocation/reuse discrimination test:
-/// incremented on every intrinsic-descriptor materialization so tests can
-/// prove ordinary layer passes reuse live state. Thread-local so concurrently
-/// running tests cannot contribute to another test's measured interval. Test/support only.
+// Derivation-event counter for the allocation/reuse discrimination test:
+// incremented on every intrinsic-descriptor materialization so tests can
+// prove ordinary layer passes reuse live state. Thread-local so concurrently
+// running tests cannot contribute to another test's measured interval. Test/support only.
 #[cfg(any(test, feature = "test-support"))]
 std::thread_local! {
     static TOKEN_ART_DERIVATION_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
