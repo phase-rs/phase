@@ -76,12 +76,22 @@ pub fn resolve(
     // Find the target player from resolved targets. Targeted RevealHand
     // (Thoughtseize, Duress) builds a real `TargetRef::Player` slot — keep that
     // fast path unchanged (zero regression).
-    let target_player = ability
-        .targets
-        .iter()
-        .find_map(|t| match t {
-            TargetRef::Player(pid) => Some(*pid),
-            _ => None,
+    let declared_player = if matches!(target, TargetFilter::DeclaredPlayer { .. })
+        || super::declared_player_slot_is_empty(state, ability, &target)
+    {
+        match super::resolve_player_for_context_ref(state, ability, &target) {
+            Some(player) => Some(player),
+            None => return Ok(()),
+        }
+    } else {
+        None
+    };
+    let target_player = declared_player
+        .or_else(|| {
+            ability.targets.iter().find_map(|t| match t {
+                TargetRef::Player(pid) => Some(*pid),
+                _ => None,
+            })
         })
         // CR 608.2c + CR 109.4 + CR 108.3: a possessive-shift subject ("target
         // spell's/creature's controller|owner reveals their hand" — Denied!,

@@ -22722,12 +22722,12 @@ mod tests {
     /// a published offer.**
     ///
     /// Conjunct (a) calls `optional_prompt_player`, whose sole state-touching callee is
-    /// `targeting::resolve_effect_player_ref`, reaching eleven distinct `GameState` fields
+    /// `targeting::resolve_effect_player_ref`, reaching these distinct `GameState` fields
     /// (`players`, `seat_order`, `format_config`, `objects`, `lki_cache`, `stack`,
     /// `current_trigger_event`, `last_created_token_ids`, `last_revealed_ids`,
-    /// `last_zone_changed_ids`, `resolution_stack`). Every one of the three branches that
-    /// reach it is gated on an `Effect` that `effect_resolution_choice_freedom` puts in its
-    /// fail-closed grouped arm — so conjunct (6) refuses any offer carrying such an entry.
+    /// `last_zone_changed_ids`, `resolution_stack`, `resolving_stack_entry`). Every one of the
+    /// three branches that reach it is gated on an `Effect` that
+    /// `effect_resolution_choice_freedom` puts in its fail-closed grouped arm — so conjunct (6) refuses any offer carrying such an entry.
     /// The reads happen; they cannot bear on a published result.
     ///
     /// NO PRODUCTION DELTA: this row pins an ARGUMENT, which is why it needs a revert-probe

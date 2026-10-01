@@ -1302,6 +1302,11 @@ pub(crate) fn resolve_live_declared_player(
     (!illegal).then_some(player)
 }
 
+/// CR 608.2b: whether `ability` is the resolving stack entry or a node of it.
+pub(crate) fn resolves_on_stack(state: &GameState, ability: &ResolvedAbility) -> bool {
+    resolution_carrier_entry(state, ability).is_some()
+}
+
 pub(crate) fn is_pure_event_context_filter(target_filter: &TargetFilter) -> bool {
     matches!(
         target_filter,

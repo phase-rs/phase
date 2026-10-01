@@ -350,7 +350,10 @@ fn fertilids_favor_shuffle_is_dropped_when_the_declared_player_is_gone() {
             ..Default::default()
         },
     );
-    assert!(!seen.searches.is_empty(), "the search prompt was reached");
+    assert!(
+        seen.searches.is_empty(),
+        "the Search names an illegal slot and opens no prompt"
+    );
     assert_eq!(
         r.state().objects[&bear]
             .counters

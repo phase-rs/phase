@@ -3876,11 +3876,12 @@ fn entry_announces(
     // reads `waiting_for`, nor `pending_trigger_entry`, which is set exactly while a prompt
     // is up). NOT a claim of purity over a three-field surface: the CR 603.5 recipient
     // conjunct below resolves a player through `optional_prompt_player` →
-    // `resolve_effect_player_ref`, which reaches ELEVEN distinct `GameState` fields —
+    // `resolve_effect_player_ref`, which reaches these distinct `GameState` fields —
     // `state.players`, `state.seat_order`, `state.format_config`, `state.objects`,
     // `state.lki_cache`, `state.stack`, `state.current_trigger_event`,
     // `state.last_created_token_ids`, `state.last_revealed_ids`,
-    // `state.last_zone_changed_ids` and `state.resolution_stack`. The contract is narrower
+    // `state.last_zone_changed_ids`, `state.resolution_stack` and
+    // `state.resolving_stack_entry`. The contract is narrower
     // and exact — the mint is a function of the BOARD, never of the PROMPT — and it is what
     // keeps the mint's verdict stable across a prompted and an unprompted beat.
     // It is set exactly
@@ -4140,8 +4141,8 @@ fn entry_announces(
 /// A function of the BOARD, never of the PROMPT. NOT a purity claim over a three-field
 /// `(state.stack, state.objects, proposer)` surface — that would be false: the CR 603.5
 /// recipient conjunct in the body resolves a player through `optional_prompt_player` →
-/// `resolve_effect_player_ref`, which reaches ELEVEN distinct `GameState` fields (enumerated
-/// at that conjunct). What actually holds, and what the callers rely on, is the narrower
+/// `resolve_effect_player_ref`, which reaches the distinct `GameState` fields enumerated
+/// at that conjunct. What actually holds, and what the callers rely on, is the narrower
 /// PROMPT-independence: it deliberately does **not**
 /// read `state.waiting_for`, and it cannot: both production call sites run at
 /// `WaitingFor::Priority` (`interactive_loop_bridge`'s destructure, and the drive's

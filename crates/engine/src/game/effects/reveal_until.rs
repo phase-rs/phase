@@ -117,7 +117,9 @@ fn resolve_reveal(
     // → controller of the parent ability's targeted object (Polymorph, Proteus Staff,
     // Transmogrify); other player-resolving filters → player extracted from
     // `ability.targets` (e.g., Telemin Performance "target opponent reveals...").
-    let revealing_player = resolve_revealing_player(state, ability, player_filter);
+    let Some(revealing_player) = resolve_revealing_player(state, ability, player_filter) else {
+        return Ok(());
+    };
 
     let player = state
         .players
@@ -685,21 +687,27 @@ fn resolve_revealing_player(
     state: &GameState,
     ability: &ResolvedAbility,
     player_filter: &TargetFilter,
-) -> PlayerId {
+) -> Option<PlayerId> {
     match player_filter {
-        TargetFilter::Controller => ability.controller,
-        TargetFilter::ParentTargetController => {
+        TargetFilter::Controller => Some(ability.controller),
+        TargetFilter::ParentTargetController => Some(
             crate::game::ability_utils::parent_target_controller(ability, state)
-                .unwrap_or(ability.controller)
+                .unwrap_or(ability.controller),
+        ),
+        TargetFilter::DeclaredPlayer { .. } => {
+            super::resolve_player_for_context_ref(state, ability, player_filter)
         }
-        _ => ability
-            .targets
-            .iter()
-            .find_map(|target| match target {
-                TargetRef::Player(pid) => Some(*pid),
-                TargetRef::Object(id) => state.objects.get(id).map(|obj| obj.controller),
-            })
-            .unwrap_or(ability.controller),
+        _ if super::declared_player_slot_is_empty(state, ability, player_filter) => None,
+        _ => Some(
+            ability
+                .targets
+                .iter()
+                .find_map(|target| match target {
+                    TargetRef::Player(pid) => Some(*pid),
+                    TargetRef::Object(id) => state.objects.get(id).map(|obj| obj.controller),
+                })
+                .unwrap_or(ability.controller),
+        ),
     }
 }
 

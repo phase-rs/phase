@@ -2,9 +2,7 @@ use std::collections::HashSet;
 
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::replacement::{self, ReplacementResult};
-use crate::types::ability::{
-    Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
-};
+use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter};
 use crate::types::events::{GameEvent, LifeTotalReading};
 use crate::types::game_state::{
     GameState, PendingEffectResolutionEvent, PendingEffectResolved, PendingLifeTotalAssignment,
@@ -627,8 +625,12 @@ pub(super) fn resolve_life_loss_target(
     }
 
     // No filter and no Player target: defensive fallback to controller (matches
-    // historical behavior for `LoseLife { target: None }`).
-    Some(ability.controller)
+    // historical behavior for `LoseLife { target: None }`). CR 608.2b: a filter
+    // that declared its own target slot names no one once that slot is empty.
+    match target_filter {
+        Some(filter) if super::declared_player_slot_is_empty(state, ability, filter) => None,
+        _ => Some(ability.controller),
+    }
 }
 
 /// CR 119.5: Set a player's life total to a specific number.
@@ -656,17 +658,10 @@ pub fn resolve_set_life_total(
     let target_player_ids: Vec<PlayerId> = if matches!(target, TargetFilter::AllPlayers) {
         crate::game::players::apnap_order(state)
     } else {
-        vec![ability
-            .targets
-            .iter()
-            .find_map(|t| {
-                if let TargetRef::Player(pid) = t {
-                    Some(*pid)
-                } else {
-                    None
-                }
-            })
-            .unwrap_or(ability.controller)]
+        let Some(player) = resolve_life_loss_target(state, ability, Some(target)) else {
+            return Ok(());
+        };
+        vec![player]
     };
 
     // CR 119.5: Set each player's life total one at a time, decomposing into the

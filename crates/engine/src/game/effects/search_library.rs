@@ -648,6 +648,9 @@ pub(crate) fn prepare_effective_search(
             };
             player
         }
+        Some(filter) if super::declared_player_slot_is_empty(state, ability, filter) => {
+            return Ok(None);
+        }
         Some(filter) => resolve_library_owner(state, ability, filter),
         None => ability.controller,
     };

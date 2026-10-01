@@ -4149,6 +4149,7 @@ pub(crate) fn should_propagate_parent_targets(
 pub(crate) fn can_inherit_parent_targets(sub: &ResolvedAbility) -> bool {
     sub.targets.is_empty()
         && sub.illegal_local_target_slots.is_empty()
+        && sub.declares_chosen_group.is_none()
         && sub.reads_chosen_group.is_none()
         && !has_resolution_owned_zone_choice(sub)
         && (sub.target_choice_timing != TargetChoiceTiming::Resolution
@@ -11809,9 +11810,10 @@ pub(crate) fn controller_for_relative_filter(
 /// 4. Fall back to `ability.controller` (preserves prior semantics for context
 ///    refs whose state slots are empty in the current resolution window).
 ///
-/// CR 608.2b: `None` only for a [`TargetFilter::DeclaredPlayer`] whose target was
-/// illegal (or never announced); the effect then affects no one. Every other
-/// filter resolves to some player.
+/// CR 608.2b: `None` for a [`TargetFilter::DeclaredPlayer`] whose target was
+/// illegal (or never announced), and for a filter that declares its own slot on
+/// a resolving carrier while no player was announced into it; the effect then
+/// affects no one. Every other filter resolves to some player.
 pub(crate) fn resolve_player_for_context_ref(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -11821,6 +11823,7 @@ pub(crate) fn resolve_player_for_context_ref(
         TargetFilter::DeclaredPlayer { group } => {
             crate::game::targeting::resolve_live_declared_player(state, ability, *group)
         }
+        _ if declared_player_slot_is_empty(state, ability, target_filter) => None,
         _ => Some(resolve_context_player(state, ability, target_filter)),
     }
 }
@@ -18801,9 +18804,25 @@ fn fails_shared_quality(state: &GameState, effective: &ResolvedAbility) -> bool 
     }
 }
 
+/// CR 608.2b: whether `filter` is the effect's own declared player slot and no
+/// player was announced into it on a resolving carrier (zero targets chosen is
+/// a legal state, CR 115.6). The effect then affects no one.
+pub(crate) fn declared_player_slot_is_empty(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    filter: &TargetFilter,
+) -> bool {
+    crate::game::targeting::resolves_on_stack(state, ability)
+        && !filter.is_context_ref()
+        && crate::game::triggers::extract_target_filter_from_effect(&ability.effect) == Some(filter)
+        && crate::game::ability_utils::primary_announced_player(&ability.targets, ability).is_none()
+}
+
 /// CR 608.2b + CR 608.2c: an empty child with local initial-legality removal
 /// evidence inherits nothing. Other children retain players and objects unless
 /// the child owns an independent object slot.
+/// A node that declares its own player slot (`declares_chosen_group`) inherits
+/// no player.
 fn inherited_parent_targets(parent: &ResolvedAbility, sub: &ResolvedAbility) -> Vec<TargetRef> {
     if sub.targets.is_empty() && !sub.illegal_local_target_slots.is_empty() {
         return Vec::new();
@@ -18813,7 +18832,7 @@ fn inherited_parent_targets(parent: &ResolvedAbility, sub: &ResolvedAbility) -> 
         .targets
         .iter()
         .filter(|target_ref| match target_ref {
-            TargetRef::Player(_) => true,
+            TargetRef::Player(_) => sub.declares_chosen_group.is_none(),
             TargetRef::Object(_) => !has_independent_target_slot,
         })
         .cloned()

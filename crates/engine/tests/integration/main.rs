@@ -267,6 +267,7 @@ mod declare_attackers_end_combat_pairing;
 mod declared_player_reference;
 mod declared_player_slot_carry;
 mod declared_prevent_recipient_scope;
+mod declaring_clause_no_one;
 mod defending_player_controls_combat_anchor;
 mod deferred_card_type_reflexive_guard;
 mod deferred_target_cost_determination;
