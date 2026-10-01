@@ -11,7 +11,7 @@ use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::ManaColor;
+use engine::types::mana::{ManaColor, ManaCost};
 use engine::types::phase::Phase;
 
 fn create_via_etb(source_name: &str, oracle: &str) -> (GameScenario, ObjectId) {
@@ -187,6 +187,88 @@ fn enter_as_copy_recipient_rides_the_source_token_descriptor() {
     assert_eq!(art.colors, vec![ManaColor::Red]);
     assert_eq!(art.subtypes, vec!["Goblin".to_string()]);
     assert!(!art.has_abilities);
+}
+
+#[test]
+fn true_token_restores_its_own_descriptor_after_a_temporary_copy_expires() {
+    // The Saheeli pattern: a Servo token temporarily copies a Goblin
+    // token. While copying it rides the Goblin descriptor; once the
+    // until-end-of-turn effect expires (CR 514.2), the layer baseline
+    // re-derives the Servo's own descriptor from its printed base — the
+    // copy layer only ever wrote the live axes. (The nontoken control —
+    // a Mockingbird recipient resetting to `None` — lives in
+    // `become_copy::tests::copy_of_token_carries_source_art_descriptor_and_reverts`.)
+    const COPY: &str =
+        "Target creature you control becomes a copy of target creature until end of turn.";
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let servo_maker = scenario
+        .add_creature_to_hand_from_oracle(
+            P0,
+            "Servo Schematic",
+            2,
+            1,
+            "When this creature enters, create a 1/1 colorless Servo artifact creature token.",
+        )
+        .id();
+    let goblin_maker = scenario
+        .add_creature_to_hand_from_oracle(
+            P0,
+            "Backstreet Recruiter",
+            1,
+            1,
+            "When this creature enters, create a 1/1 red Goblin creature token.",
+        )
+        .id();
+    let copy_spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Temporary Copy", true, COPY)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(servo_maker).resolve();
+    runner.advance_until_stack_empty();
+    runner.cast(goblin_maker).resolve();
+    runner.advance_until_stack_empty();
+    let servo = token_named(&runner, "Servo");
+    let goblin = token_named(&runner, "Goblin");
+
+    let own = runner.state().objects[&servo]
+        .token_art
+        .clone()
+        .expect("precondition: the Servo carries its own descriptor");
+    assert_eq!(own.subtypes, vec!["Servo".to_string()]);
+
+    runner
+        .cast(copy_spell)
+        .target_objects(&[servo, goblin])
+        .resolve();
+    runner.advance_until_stack_empty();
+
+    // Positive copied observation: the Servo rides the Goblin body.
+    assert_eq!(runner.state().objects[&servo].name, "Goblin");
+    let copying = runner.state().objects[&servo]
+        .token_art
+        .clone()
+        .expect("while copying, the Servo rides a descriptor");
+    assert_eq!(copying.power, Some(1));
+    assert_eq!(copying.toughness, Some(1));
+    assert_eq!(copying.colors, vec![ManaColor::Red]);
+    assert_eq!(copying.subtypes, vec!["Goblin".to_string()]);
+    assert!(!copying.has_abilities);
+
+    // CR 514.2: the until-end-of-turn copy expires in cleanup.
+    runner.advance_to_phase(Phase::End);
+    runner.advance_to_phase(Phase::Upkeep);
+
+    assert_eq!(runner.state().objects[&servo].name, "Servo");
+    let restored = runner.state().objects[&servo]
+        .token_art
+        .clone()
+        .expect("expiry restores a descriptor");
+    assert_eq!(
+        restored, own,
+        "the Servo's own intrinsic body returns after expiry"
+    );
 }
 
 #[test]

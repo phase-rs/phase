@@ -131,9 +131,10 @@ pub struct TokenArtDescriptor {
     pub toughness: Option<i32>,
     pub colors: Vec<crate::types::mana::ManaColor>,
     pub subtypes: Vec<String>,
-    /// Keyword family names (`KeywordKind` discriminants, e.g.
-    /// `"FirstStrike"`); the client formats them into `kw:` predicates.
-    /// `Unknown` keywords carry their raw payload instead.
+    /// Keyword family names (`KeywordKind` discriminants via the declared
+    /// `IntoStaticStr` mapping — never `Debug` — e.g. `"FirstStrike"`); the
+    /// client formats them into `kw:` predicates. `Unknown` keywords carry
+    /// their raw payload instead.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub keywords: Vec<String>,
     /// Whether the printed body carries any abilities at all (keywords,

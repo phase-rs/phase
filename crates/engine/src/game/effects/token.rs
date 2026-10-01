@@ -4327,7 +4327,13 @@ pub(crate) fn token_art_descriptor_for(obj: &GameObject) -> TokenArtDescriptor {
     for keyword in obj.base_keywords.iter() {
         let name = match keyword {
             Keyword::Unknown(payload) => payload.clone(),
-            other => format!("{:?}", other.kind()),
+            // Declared `&'static str` mapping, not `Debug`: the descriptor
+            // is a wire contract, so family names must not depend on the
+            // debug representation.
+            other => {
+                let family: &'static str = other.kind().into();
+                family.to_owned()
+            }
         };
         if !name.is_empty() && !keywords.contains(&name) {
             keywords.push(name);

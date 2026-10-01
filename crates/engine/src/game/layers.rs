@@ -2868,11 +2868,20 @@ fn seed_live_characteristics_from_base(obj: &mut crate::game::game_object::GameO
     if !obj.is_token {
         obj.token_image_ref = None;
     }
-    // Same lifecycle for the intrinsic art body: only true tokens carry
-    // their own; copies ride the source's descriptor (applied below) and
-    // revert to this baseline on expiry.
+    // Intrinsic art body baseline. A nontoken never carries its own
+    // descriptor, so it resets to `None`; a copy-of-token effect
+    // re-applies the source's descriptor below while active. A true token
+    // re-derives its OWN descriptor from its printed base every pass: copy
+    // effects only ever write the live axes, so the base-derived body is
+    // always the token's own — and it self-restores here when a temporary
+    // copy expires (the copy layer overwrites it below while active).
+    // Deriving (rather than storing a `base_token_art`) also heals tokens
+    // from pre-descriptor snapshots on their first layer pass.
     if !obj.is_token {
         obj.token_art = None;
+    } else {
+        let own = crate::game::effects::token::token_art_descriptor_for(obj);
+        obj.token_art = Some(own);
     }
 }
 
