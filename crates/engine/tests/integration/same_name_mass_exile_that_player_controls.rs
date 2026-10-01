@@ -524,6 +524,38 @@ fn mass_only_until_exile_with_host_alive_moves_and_draws() {
     );
 }
 
+/// CR 118.12: with the host alive and no creature to exile, the mass exile was
+/// still performed ("started"), so its "if you do" draw happens exactly once.
+/// Only a CR 610.3b refusal is non-performance.
+#[test]
+fn mass_only_until_exile_with_nothing_to_exile_still_draws() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let mine = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    scenario.add_card_to_library_top(P0, "Island");
+    let host = scenario
+        .add_creature_to_hand_from_oracle(P0, "Detention Warden", 2, 2, MASS_UNTIL_HOST)
+        .with_mana_cost(free())
+        .id();
+    let mut runner = scenario.build();
+    assert_mass_only_fixture_shape(&runner, host);
+
+    stage_etb(&mut runner, host, None);
+    let hand_before = hand_size(runner.state(), P0);
+    settle(&mut runner);
+    assert!(on_battlefield(runner.state(), host), "host stays");
+    assert!(
+        on_battlefield(runner.state(), mine),
+        "nothing of mine moves"
+    );
+    assert_eq!(links_from(runner.state(), host), 0, "nothing exiled");
+    assert_eq!(
+        hand_size(runner.state(), P0),
+        hand_before + 1,
+        "an empty but performed mass exile still satisfies \"if you do\""
+    );
+}
+
 /// SHAPE guard for the typed fixture: root `ChangeZoneAll` carrying the
 /// until-leaves duration, with a conditioned draw rider.
 fn assert_mass_only_fixture_shape(runner: &GameRunner, host: ObjectId) {

@@ -1929,10 +1929,14 @@ pub fn resolve_all(
 ) -> Result<(), EffectError> {
     // CR 610.3b: an "until" event that already occurred before this mass
     // move's initial zone change means nothing moves and no return link is
-    // installed. A count of 0 and no `ZoneChanged` keep "if you do" readers
-    // reporting the instruction as not performed.
+    // installed. That is a refusal, not an empty move (CR 118.12: a started
+    // mass move that matches nothing is still performed), so it is signalled
+    // through the resolution's "did not happen" flag — the same authority a
+    // mandatory zone move with nothing eligible uses — which the "if you do"
+    // rider seed reads.
     if until_event_already_occurred(state, ability, events) {
         state.last_effect_count = Some(0);
+        state.cost_payment_failed_flag = true;
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
