@@ -78802,9 +78802,31 @@ fn prevention_target_role_gaps_survive_top_level_fallback() {
             "{name}: reach guard: the complete card produced executable definitions"
         );
         assert!(
-            parsed.replacements.is_empty(),
+            parsed
+                .replacements
+                .iter()
+                .all(|replacement| replacement.event != ReplacementEvent::DamageDone),
             "{name}: a rejected target role must not become a broad replacement: {:?}",
             parsed.replacements
+        );
+        let mut has_target_role_gap = false;
+        let mut visit = |effect: &Effect| {
+            has_target_role_gap |= matches!(
+                effect,
+                Effect::Unimplemented { name, .. }
+                    if name == "prevent_damage_recipient_target_role"
+            );
+            std::ops::ControlFlow::Continue(())
+        };
+        for ability in &parsed.abilities {
+            let _ = crate::types::ability_visit::visit_ability_def(ability, &mut visit);
+        }
+        for trigger in &parsed.triggers {
+            let _ = crate::types::ability_visit::visit_trigger(trigger, &mut visit);
+        }
+        assert!(
+            has_target_role_gap,
+            "{name}: the rejected prevention role must retain its specific gap"
         );
         let face = CardFace {
             name: name.to_string(),
