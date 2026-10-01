@@ -20476,33 +20476,49 @@ mod tests {
             ObjectId(1),
             PlayerId(0),
         );
-        for effect in [
-            Effect::GainLife {
-                amount: QuantityExpr::Fixed { value: 1 },
-                player: TargetFilter::Player,
-            },
-            Effect::DealDamage {
-                amount: QuantityExpr::Fixed { value: 1 },
-                target: TargetFilter::Any,
-                damage_source: None,
-                excess: None,
-            },
-            Effect::Destroy {
-                target: TargetFilter::ParentTarget,
-                cant_regenerate: false,
-            },
-            Effect::GainLife {
-                amount: QuantityExpr::Fixed { value: 1 },
-                player: TargetFilter::Any,
-            },
+        for (expected_targets, effect) in [
+            (
+                vec![TargetRef::Player(PlayerId(0))],
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Player,
+                },
+            ),
+            (
+                vec![TargetRef::Player(PlayerId(0))],
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Any,
+                    damage_source: None,
+                    excess: None,
+                },
+            ),
+            (
+                vec![
+                    TargetRef::Player(PlayerId(0)),
+                    TargetRef::Object(ObjectId(2)),
+                ],
+                Effect::Destroy {
+                    target: TargetFilter::ParentTarget,
+                    cant_regenerate: false,
+                },
+            ),
+            (
+                vec![
+                    TargetRef::Player(PlayerId(0)),
+                    TargetRef::Object(ObjectId(2)),
+                ],
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Any,
+                },
+            ),
         ] {
             let mut child = ResolvedAbility::new(effect, Vec::new(), ObjectId(1), PlayerId(0));
             assert!(can_inherit_parent_targets(&child));
             assert!(should_propagate_parent_targets(&parent, &child));
-            assert_eq!(
-                inherited_parent_targets(&parent, &child),
-                parent.targets.clone()
-            );
+            assert!(!expected_targets.is_empty());
+            assert_eq!(inherited_parent_targets(&parent, &child), expected_targets);
 
             child.illegal_local_target_slots = vec![0];
             assert!(!can_inherit_parent_targets(&child));
