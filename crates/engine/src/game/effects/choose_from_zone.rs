@@ -4280,8 +4280,16 @@ mod tests {
         });
 
         let mut events = Vec::new();
+        install_test_carrier(&mut state, ObjectId(100), PlayerId(0));
         // The first player DECLINES — an empty "up to one" pick.
         drain_active_per_player_zone_choice(&mut state, &[], &mut events);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::ChooseFromZone,
+                ..
+            }
+        )));
 
         let bound = state
             .chain_tracked_set_id
