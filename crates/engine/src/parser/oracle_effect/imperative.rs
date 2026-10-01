@@ -7723,19 +7723,25 @@ pub(super) fn resolve_prevent_recipient(
 /// after the "dealt [this turn] to" recipient marker.
 pub(super) fn parse_prevent_recipient_count(text: &str) -> Option<MultiTargetSpec> {
     let lower = text.to_lowercase();
-    let (_, _, recipient) = nom_primitives::scan_preceded(&lower, |i| {
+    let (_, recipient) = prevent_recipient_phrase(&lower)?;
+    let (after_quantifier, spec) = strip_leading_quantifier(recipient);
+    peek(tag::<_, _, OracleError<'_>>("target "))
+        .parse(after_quantifier)
+        .ok()?;
+    spec
+}
+
+/// CR 115.1a: the shared recipient marker for declaration classification and counts.
+fn prevent_recipient_phrase(lower: &str) -> Option<(&str, &str)> {
+    nom_primitives::scan_preceded(lower, |i| {
         (
             tag::<_, _, OracleError<'_>>("dealt "),
             opt(tag("this turn ")),
             tag("to "),
         )
             .parse(i)
-    })?;
-    let (after_quantifier, spec) = strip_leading_quantifier(recipient);
-    peek(tag::<_, _, OracleError<'_>>("target "))
-        .parse(after_quantifier)
-        .ok()?;
-    spec
+    })
+    .map(|(before, _, recipient)| (before, recipient))
 }
 
 /// CR 615: Parse "prevent" damage effects into `Effect::PreventDamage`.
@@ -7835,24 +7841,40 @@ fn parse_prevent_effect(text: &str, parent_target_available: bool) -> Effect {
         };
     }
 
-    // Determine target. CR 115.1a + CR 115.10a: `recipient_scope` records
-    // whether the recipient is declared (`Single`) or an untargeted population
-    // (`All`); only the descriptor recipient resolved below can be `All`.
-    let mut recipient_scope = EffectScope::Single;
-    let target = if nom_primitives::scan_contains(rest, "any target") {
-        TargetFilter::Any
-    } else if nom_primitives::scan_contains(rest, "target creature")
-        || nom_primitives::scan_contains(rest, "target permanent")
+    // CR 115.1a + CR 115.10a + CR 615.2: a declared recipient must follow
+    // "dealt [this turn] to". Other target placements name a damage source,
+    // an exclusion, or an additional recipient that this route cannot bind.
+    let (before_recipient, recipient) = prevent_recipient_phrase(rest).unzip();
+    let declared_recipient = recipient.and_then(|recipient| {
+        let (_, original_recipient) =
+            TextPair::new(text, &lower).split_at(lower.len() - recipient.len());
+        let (filter, remainder, syntax) =
+            parse_target_with_syntax(original_recipient.original, &mut ParseContext::default());
+        // The fixed "any target" phrase retains its existing Any shape.
+        let any_target = tag::<_, _, OracleError<'_>>("any target")
+            .parse(recipient)
+            .is_ok();
+        let (_, remainder) =
+            original_recipient.split_at(original_recipient.original.len() - remainder.len());
+        (syntax == TargetSyntax::TargetKeyword || any_target).then_some((filter, remainder.lower))
+    });
+    if nom_primitives::scan_contains(rest, "target ")
+        && (declared_recipient.is_none()
+            || before_recipient
+                .is_some_and(|before| nom_primitives::scan_contains(before, "target "))
+            || declared_recipient.as_ref().is_some_and(|(_, remainder)| {
+                nom_primitives::scan_contains(remainder, "and ")
+                    || nom_primitives::scan_contains(remainder, "target ")
+            }))
     {
-        // Extract the target from the text
-        let tp = TextPair::new(text, &lower);
-        if let Ok((_, before)) = take_until::<_, _, OracleError<'_>>("target ").parse(tp.lower) {
-            let (_, from_target) = tp.split_at(before.len());
-            let (t, _) = parse_target(from_target.original);
-            t
-        } else {
-            TargetFilter::Any
-        }
+        return Effect::unimplemented("prevent", text);
+    }
+
+    // CR 115.1a + CR 115.10a: only a declared recipient is Single here;
+    // untargeted descriptors are classified by resolve_prevent_recipient.
+    let mut recipient_scope = EffectScope::Single;
+    let target = if let Some((filter, _)) = declared_recipient {
+        filter
     } else if let Some(conjunct) = parse_compound_you_and_permanents(text, &lower) {
         // CR 615 + CR 614.1a: "to you and [other] [<type>] permanents you
         // control" — a compound player+permanent recipient (Comeuppance's "you

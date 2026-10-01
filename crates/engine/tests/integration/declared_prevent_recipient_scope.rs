@@ -12,7 +12,8 @@
 use engine::game::game_object::AttachTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::trigger_index::reindex_object_triggers;
-use engine::types::ability::EffectKind;
+use engine::parser::oracle::parse_oracle_text;
+use engine::types::ability::{Effect, EffectKind, EffectScope};
 use engine::types::actions::GameAction;
 use engine::types::counter::{parse_counter_type, CounterType};
 use engine::types::events::GameEvent;
@@ -241,9 +242,18 @@ fn noble_vestige_shields_only_the_chosen_player() {
     let bolt = scenario
         .add_spell_to_hand_from_oracle(P0, "Lightning Bolt", true, BOLT)
         .id();
+    let other_bolt = scenario
+        .add_spell_to_hand_from_oracle(P0, "Lightning Bolt", true, BOLT)
+        .id();
     let mut runner = scenario.build();
 
     runner.activate(vestige, 0).target_player(P0).resolve();
+    let other_hit = runner.cast(other_bolt).target_player(P1).resolve();
+    assert_eq!(
+        other_hit.life_delta(P1),
+        -3,
+        "the unchosen player takes full damage"
+    );
     let outcome = runner.cast(bolt).target_player(P0).resolve();
 
     assert_eq!(
@@ -524,4 +534,167 @@ fn fylgja_does_not_shield_a_creature_wearing_a_different_aura() {
         1,
         "reach guard: Fylgja's shield still protects its enchanted creature"
     );
+}
+
+/// Unsupported source placements must never install a recipient shield
+/// (CR 615.2). Both callers use the exact MTGJSON Oracle text.
+fn assert_unsupported_source_installs_no_recipient_shield(
+    name: &str,
+    oracle: &str,
+    power: i32,
+    toughness: i32,
+) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature_from_oracle(P0, name, power, toughness, oracle)
+        .id();
+    let victim = scenario.add_creature(P0, "Unprotected", 4, 4).id();
+    let blocker = scenario.add_creature(P1, "Blocker", 2, 5).id();
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::White, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+        ],
+    );
+    let mut runner = scenario.build();
+    let activation = runner.activate(source, 0).target_object(victim).resolve();
+    assert!(
+        activation
+            .events()
+            .iter()
+            .any(|event| matches!(event, GameEvent::AbilityActivated { .. })),
+        "reach guard: the ability was activated"
+    );
+    assert!(
+        runner.state().stack.is_empty(),
+        "reach guard: activation resolved"
+    );
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(victim, engine::game::combat::AttackTarget::Player(P1))])
+        .expect("attack");
+    for _ in 0..10 {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::DeclareBlockers { .. }
+        ) {
+            break;
+        }
+        runner.act(GameAction::PassPriority).expect("pass");
+    }
+    runner
+        .declare_blockers(&[(blocker, victim)])
+        .expect("block");
+    let outcome = runner.combat_damage();
+    // CR 615.2: the unsupported source clause cannot shield its selected source as a recipient.
+    assert_eq!(
+        outcome.state().objects[&victim].damage_marked,
+        2,
+        "{name}: no wrong recipient shield"
+    );
+    assert_eq!(
+        outcome.state().objects[&blocker].damage_marked,
+        4,
+        "reach guard: combat damage happened"
+    );
+}
+
+#[test]
+fn stonewise_fortifier_installs_no_wrong_recipient_shield() {
+    assert_unsupported_source_installs_no_recipient_shield(
+        "Stonewise Fortifier",
+        "{4}{W}: Prevent all damage that would be dealt to this creature by target creature this turn.",
+        2, 2,
+    );
+}
+
+#[test]
+fn resistance_fighter_installs_no_wrong_recipient_shield() {
+    assert_unsupported_source_installs_no_recipient_shield(
+        "Resistance Fighter",
+        "Sacrifice this creature: Prevent all combat damage target creature would deal this turn.",
+        1,
+        1,
+    );
+}
+
+/// Synthetic hostile fixture: Djeru's Resolve's targeting instruction followed
+/// by Blinding Fog's mass recipient. A floating shield must survive the
+/// inherited target leaving the battlefield (CR 611.2c + CR 400.7).
+#[test]
+fn mass_recipient_after_a_targeting_clause_shields_every_creature() {
+    let oracle =
+        "Untap target creature. Prevent all damage that would be dealt to creatures this turn.";
+    let parsed = parse_oracle_text(
+        oracle,
+        "Mass prevention probe",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    let ability = &parsed.abilities[0];
+    assert!(matches!(*ability.effect, Effect::SetTapState { .. }));
+    assert!(matches!(
+        *ability
+            .sub_ability
+            .as_ref()
+            .expect("mass prevention clause")
+            .effect,
+        Effect::PreventDamage {
+            recipient_scope: EffectScope::All,
+            ..
+        }
+    ));
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let a = scenario.add_creature(P0, "A", 2, 2).id();
+    let b = scenario.add_creature(P1, "B", 2, 2).id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Mass prevention probe", true, oracle)
+        .id();
+    let unsummon = scenario
+        .add_spell_to_hand_from_oracle(P0, "Unsummon", true, UNSUMMON)
+        .id();
+    let pyroclasm = scenario
+        .add_spell_to_hand_from_oracle(P0, "Pyroclasm", false, PYROCLASM)
+        .id();
+    let mut runner = scenario.build();
+    let cast = runner.cast(spell).target_object(a).resolve();
+    assert!(
+        prevention_resolved(cast.events()),
+        "reach guard: mass prevention resolved"
+    );
+    let bounced = runner.cast(unsummon).target_object(a).resolve();
+    assert_eq!(
+        bounced.zone_of(a),
+        Zone::Hand,
+        "reach guard: inherited target left"
+    );
+    let hit = runner.cast(pyroclasm).resolve();
+    assert_eq!(hit.zone_of(b), Zone::Battlefield);
+    assert_eq!(hit.damage_marked(b), 0);
+}
+
+#[test]
+fn djerus_resolve_shields_only_the_untapped_creature() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let a = scenario.add_creature(P0, "A", 2, 2).id();
+    let b = scenario.add_creature(P1, "B", 2, 2).id();
+    let spell = scenario.add_spell_to_hand_from_oracle(P0, "Djeru's Resolve", true,
+        "Untap target creature. Prevent all damage that would be dealt to it this turn.\nCycling {2} ({2}, Discard this card: Draw a card.)").id();
+    let pyroclasm = scenario
+        .add_spell_to_hand_from_oracle(P0, "Pyroclasm", false, PYROCLASM)
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(spell).target_object(a).resolve();
+    let hit = runner.cast(pyroclasm).resolve();
+    assert_eq!(hit.zone_of(a), Zone::Battlefield);
+    assert_eq!(hit.damage_marked(a), 0);
+    assert_eq!(hit.zone_of(b), Zone::Graveyard);
 }

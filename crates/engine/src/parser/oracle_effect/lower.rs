@@ -9188,11 +9188,10 @@ pub(super) fn try_parse_bidirectional_prevent(
 
     // CR 601.2c + CR 608.2c: a declared "target <X>" recipient is chosen once,
     // when the ability is put on the stack, and both halves must be scoped to
-    // that one object. The resolver cannot scope the "to" half to it: a declared
-    // recipient ("target creature you control") and a mass recipient ("creatures
-    // you control") lower to the same `Typed` filter, and the hosted shield keeps
-    // that filter as `valid_card`, so it would shield every object the filter
-    // matches. Fail closed until the declared form has its own representation.
+    // that one object. The "to" half now scopes to it (`recipient_scope: Single` hosts the
+    // shield on the chosen object), but the "by" half's `damage_source_filter`
+    // is still the bare `Typed` filter, which is not bound to the chosen object.
+    // Fail closed until the source half binds to the declared object.
     if parse_declared_target_prefix(anaphor_tp.lower).is_ok() {
         return Some(parsed_clause(Effect::unimplemented(
             super::imperative::BIDIRECTIONAL_PREVENT_DECLARED_TARGET_GAP,

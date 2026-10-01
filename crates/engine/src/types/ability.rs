@@ -18872,7 +18872,7 @@ pub enum Effect {
         on_exile: Option<ExiledSpellRider>,
     },
     /// CR 615: Prevent damage to a declared recipient (a chosen target, or a
-    /// singular/context reference) or to an untargeted population, per
+    /// context reference) or to an untargeted population, per
     /// `recipient_scope`.
     PreventDamage {
         amount: PreventionAmount,
@@ -18885,9 +18885,10 @@ pub enum Effect {
         amount_dynamic: Option<QuantityExpr>,
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
-        /// CR 115.1a + CR 115.10a: `Single` = a declared target or a
-        /// singular/context reference; `All` = an untargeted population matched
-        /// as each damage event happens (CR 615.1, CR 611.2c).
+        /// CR 115.1a + CR 115.10a: `Single` = a declared target, or a
+        /// context reference that mints no slot (`TargetFilter::is_context_ref`);
+        /// `All` = an untargeted descriptor, singular ones such as "enchanted
+        /// creature" included, matched as each damage event happens (CR 615.1, CR 611.2c).
         #[serde(default = "default_effect_scope_single")]
         recipient_scope: EffectScope,
         #[serde(default)]
@@ -22149,7 +22150,7 @@ impl Effect {
                 ..
             } => None,
 
-            // CR 615.1a + CR 115.10a: `PreventDamage` exposes its recipient only
+            // CR 115.1a + CR 115.10a: `PreventDamage` exposes its recipient only
             // when it is declared ("prevent all damage that would be dealt to
             // target creature"). An `All` recipient ("...to creatures this turn")
             // is an untargeted population matched as each damage event happens

@@ -3,6 +3,7 @@ use super::lower::{
     rewrite_parent_target_to_last_created, target_filter_is_explicit_target_player_graveyard_card,
 };
 use super::*;
+use crate::game::triggers::extract_target_filter_from_effect;
 use crate::parser::oracle_ir::ast::EntersUnderSpec;
 use crate::parser::oracle_ir::diagnostic::{ClauseGap, ClauseGapKind};
 use crate::parser::oracle_nom::enters_under::{
@@ -61201,8 +61202,6 @@ fn defend_the_hearth_prevent_binds_to_bare_players_recipient() {
 /// the single authority the stack-time slot builder consults.
 #[test]
 fn prevent_recipient_scope_classification() {
-    use crate::game::triggers::extract_target_filter_from_effect;
-
     // (oracle clause, scope, mints a declared slot, expected announced count)
     let rows: [(&str, EffectScope, bool, Option<MultiTargetSpec>); 8] = [
         (
@@ -78697,4 +78696,76 @@ fn vex_counter_target_spell_that_spells_controller_may_draw_card() {
         Some(TargetFilter::ParentTargetController),
         "the prompt must be presented to that spell's controller"
     );
+}
+
+/// SHAPE: only "dealt [this turn] to target" declares a prevention recipient
+/// (CR 115.1a + CR 615.2); other target roles must fail closed.
+#[test]
+fn prevent_unsupported_target_placements_fail_closed() {
+    for text in [
+        "Prevent all combat damage target creature would deal this turn.",
+        "Prevent all damage that would be dealt to this creature by target creature this turn.",
+        "Prevent all combat damage that would be dealt by creatures other than target creature this turn.",
+        "Prevent the next 1 damage that would be dealt to target creature and each other creature that shares a color with it this turn.",
+        "Prevent all damage target permanent would deal this turn.",
+    ] {
+        let ability = parse_effect_chain(text, AbilityKind::Spell);
+        assert!(matches!(*ability.effect, Effect::Unimplemented { .. }), "{text}: {:?}", ability.effect);
+    }
+    for text in [
+        "Prevent all damage that would be dealt to target creature this turn.",
+        "Prevent all damage that would be dealt this turn to up to two target creatures.",
+        "Prevent the next 1 damage that would be dealt to target player or planeswalker this turn.",
+    ] {
+        let ability = parse_effect_chain(text, AbilityKind::Spell);
+        assert!(
+            matches!(
+                *ability.effect,
+                Effect::PreventDamage {
+                    recipient_scope: EffectScope::Single,
+                    ..
+                }
+            ),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn specialized_prevention_sources_and_any_target_recipient_are_preserved() {
+    let spell_source = parse_effect_chain(
+        "Prevent all damage target instant or sorcery spell would deal this turn.",
+        AbilityKind::Spell,
+    );
+    assert!(matches!(
+        *spell_source.effect,
+        Effect::PreventDamage {
+            target: TargetFilter::Any,
+            damage_source_filter: Some(_),
+            ..
+        }
+    ));
+    let attacking_source = parse_effect_chain(
+        "Prevent all combat damage that would be dealt by target attacking creature this turn.",
+        AbilityKind::Spell,
+    );
+    assert!(matches!(
+        *attacking_source.effect,
+        Effect::PreventDamage {
+            target: TargetFilter::Any,
+            damage_source_filter: Some(_),
+            ..
+        }
+    ));
+    let any_recipient = parse_effect_chain(
+        "Prevent the next 1 damage that would be dealt to any target this turn.",
+        AbilityKind::Spell,
+    );
+    assert!(matches!(
+        *any_recipient.effect,
+        Effect::PreventDamage {
+            target: TargetFilter::Any,
+            ..
+        }
+    ));
 }
