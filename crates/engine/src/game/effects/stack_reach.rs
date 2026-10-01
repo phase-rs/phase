@@ -10,7 +10,7 @@ use crate::game::functioning_abilities::active_replacements;
 use crate::game::replacement::{find_applicable_replacements, replacement_registry};
 use crate::game::{stack, targeting};
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, Duration, Effect, EffectOutcomeSignal, EffectScope, ObjectScope,
+    AbilityCondition, AbilityCost, Effect, EffectOutcomeSignal, EffectScope, ObjectScope,
     ResolvedAbility, TapStateChange, TargetFilter, TargetRef,
 };
 use crate::types::game_state::{GameState, StackEntry, StackEntryKind};
@@ -931,9 +931,7 @@ fn node_acted_on(
         // move.
         Effect::ChangeZone { .. }
             if bound
-                .duration
-                .as_ref()
-                .and_then(Duration::zone_change_event)
+                .bounded_zone_change_event()
                 .is_some_and(|event| bound.context.duration_events.contains(&event)) =>
         {
             Vec::new()

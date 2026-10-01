@@ -33576,10 +33576,22 @@ impl PartialEq for ResolvedAbility {
 impl Eq for ResolvedAbility {}
 
 impl ResolvedAbility {
+    /// CR 610.3: The "until" event bounding this node's own zone change, for
+    /// every bounded zone-move shape (single-object `ChangeZone` and mass
+    /// `ChangeZoneAll`). The single classifier the CR 610.3b latch, the
+    /// resolvers' refusal, and stack-reach readers share.
+    pub(crate) fn bounded_zone_change_event(&self) -> Option<DurationEvent> {
+        match self.effect {
+            Effect::ChangeZone { .. } | Effect::ChangeZoneAll { .. } => {
+                self.duration.as_ref().and_then(Duration::zone_change_event)
+            }
+            _ => None,
+        }
+    }
+
     /// Whether this ability chain contains a zone change bounded by `event`.
     pub(crate) fn contains_duration_event(&self, event: DurationEvent) -> bool {
-        (matches!(self.effect, Effect::ChangeZone { .. })
-            && self.duration.as_ref().and_then(Duration::zone_change_event) == Some(event))
+        self.bounded_zone_change_event() == Some(event)
             || self
                 .sub_ability
                 .as_ref()
@@ -33591,8 +33603,7 @@ impl ResolvedAbility {
     }
 
     pub(crate) fn record_duration_event_recursive(&mut self, event: DurationEvent) {
-        if matches!(self.effect, Effect::ChangeZone { .. })
-            && self.duration.as_ref().and_then(Duration::zone_change_event) == Some(event)
+        if self.bounded_zone_change_event() == Some(event)
             && !self.context.duration_events.contains(&event)
         {
             self.context.duration_events.push(event);

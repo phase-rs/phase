@@ -9292,6 +9292,7 @@ fn mandatory_parent_effect_performed(effect: &Effect, events: &[GameEvent]) -> b
             .any(|event| matches!(event, GameEvent::PermanentSacrificed { .. })),
         Effect::Mill { .. }
         | Effect::ChangeZone { .. }
+        | Effect::ChangeZoneAll { .. }
         | Effect::Bounce { .. }
         | Effect::BounceAll { .. }
         | Effect::ExileTop { .. }

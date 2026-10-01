@@ -6622,12 +6622,26 @@ fn source_chosen_player(source: &SourceContext<'_>) -> Option<PlayerId> {
 /// LKI cache when the targeted object has already left its zone (e.g. exiled
 /// by the immediately preceding sub-effect).
 ///
+/// CR 608.2h + CR 201.2a + CR 707.2: when an earlier instruction of this same
+/// ability moved that exact object (the `effect_context_object` snapshot names
+/// it and is still current — the object is as that move left it), its name is
+/// the one it had as it left its zone, captured from the zone-change record. A
+/// copy's copied name reverts once it leaves the battlefield, so the live read
+/// would report the printed name instead.
+///
 /// Returns `None` when no ability is in scope, when the ability has no object
 /// targets, or when the referenced object has no record in either `state.objects`
 /// or `state.lki_cache`.
 fn parent_target_name(state: &GameState, ability: Option<&ResolvedAbility>) -> Option<String> {
     let ability = ability?;
     let id = first_object_target(ability)?;
+    if let Some(snapshot) = ability
+        .effect_context_object
+        .as_ref()
+        .filter(|snapshot| snapshot.object_id == id && snapshot.is_current(state))
+    {
+        return Some(snapshot.lki.name.clone());
+    }
     if let Some(obj) = state.objects.get(&id) {
         return Some(obj.name.clone());
     }
@@ -17719,6 +17733,120 @@ mod tests {
             ),
             "stale target id must fall through to the effect-context snapshot rung"
         );
+    }
+
+    /// CR 608.2h + CR 201.2a + CR 707.2: `SameNameAsParentTarget` reads the
+    /// parent target's name from the effect-context snapshot only when that
+    /// snapshot names the SAME object and is still current (the object is as
+    /// the parent instruction's move left it). A stale or mismatched snapshot
+    /// falls through to the live name, and with no snapshot the live name is
+    /// used (graveyard-origin queries).
+    #[test]
+    fn same_name_as_parent_target_reads_only_a_current_matching_move_snapshot() {
+        use crate::types::ability::CostPaidObjectSnapshot;
+        use crate::types::game_state::LKISnapshot;
+        use std::collections::HashMap;
+
+        let copied_lki = LKISnapshot {
+            name: "Grizzly Bears".to_string(),
+            token_image_ref: None,
+            power: Some(2),
+            toughness: Some(2),
+            base_power: Some(2),
+            base_toughness: Some(2),
+            mana_value: 2,
+            controller: PlayerId(1),
+            owner: PlayerId(1),
+            card_types: vec![CoreType::Creature],
+            subtypes: vec![],
+            supertypes: vec![],
+            keywords: vec![],
+            colors: vec![],
+            chosen_attributes: Vec::new(),
+            counters: HashMap::new(),
+            tapped: false,
+            is_suspected: false,
+            attachments: Vec::new(),
+        };
+        let filter = TargetFilter::Typed(
+            TypedFilter::default().properties(vec![FilterProp::SameNameAsParentTarget]),
+        );
+
+        let mut state = setup();
+        // The exiled copy: live (printed) name "Clone".
+        let target = create_object(
+            &mut state,
+            CardId(50),
+            PlayerId(1),
+            "Clone".to_string(),
+            Zone::Exile,
+        );
+        let bears = add_creature(&mut state, PlayerId(1), "Grizzly Bears");
+        let clone_named = add_creature(&mut state, PlayerId(1), "Clone");
+        let current = state.objects[&target].incarnation;
+
+        let ability_with = |snapshot: Option<CostPaidObjectSnapshot>| {
+            let mut ability = ResolvedAbility::new(
+                Effect::Unimplemented {
+                    name: String::new(),
+                    description: None,
+                },
+                vec![TargetRef::Object(target)],
+                bears,
+                PlayerId(0),
+            );
+            ability.effect_context_object = snapshot;
+            ability
+        };
+        let matches = |ability: &ResolvedAbility, candidate: ObjectId| {
+            super::matches_target_filter(
+                &state,
+                candidate,
+                &filter,
+                &FilterContext::from_ability(ability),
+            )
+        };
+
+        // Reach: a current snapshot of the same object yields its move-time name.
+        let fresh = ability_with(Some(CostPaidObjectSnapshot {
+            object_id: target,
+            lki: copied_lki.clone(),
+            incarnation: current,
+        }));
+        assert!(matches(&fresh, bears), "current snapshot: copied name");
+        assert!(
+            !matches(&fresh, clone_named),
+            "current snapshot: not the printed name"
+        );
+
+        // Stale: the object moved again since the snapshot — live name wins.
+        let stale = ability_with(Some(CostPaidObjectSnapshot {
+            object_id: target,
+            lki: copied_lki.clone(),
+            incarnation: current + 1,
+        }));
+        assert!(!matches(&stale, bears), "stale snapshot must be ignored");
+        assert!(matches(&stale, clone_named), "stale snapshot: live name");
+
+        // Mismatched: the snapshot names a different object.
+        let other = ability_with(Some(CostPaidObjectSnapshot {
+            object_id: bears,
+            lki: copied_lki,
+            incarnation: state.objects[&bears].incarnation,
+        }));
+        assert!(
+            !matches(&other, bears),
+            "mismatched snapshot must be ignored"
+        );
+        assert!(
+            matches(&other, clone_named),
+            "mismatched snapshot: live name"
+        );
+
+        // No snapshot (graveyard-origin queries): the live name.
+        let none = ability_with(None);
+        assert!(matches(&none, clone_named), "no snapshot: live name");
+        assert!(!matches(&none, bears), "no snapshot: not the copied name");
     }
 
     /// CR 608.2h + CR 400.7: A `Typed{controller: ScopedPlayer}` filter
