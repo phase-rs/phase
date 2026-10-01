@@ -466,6 +466,7 @@ pub fn apply_debug_action(
             if !obj.base_keywords.contains(&keyword) {
                 obj.base_keywords.push(keyword);
             }
+            obj.restore_token_art_baseline();
             crate::game::layers::mark_layers_full(state);
         }
 
@@ -474,6 +475,7 @@ pub fn apply_debug_action(
             // CR 613.1 + CR 613.1f: write the base keyword set (the Layer-6 input)
             // so the removal survives the layer recompute; see GrantKeyword above.
             obj.base_keywords.retain(|k| k != &keyword);
+            obj.restore_token_art_baseline();
             crate::game::layers::mark_layers_full(state);
         }
 
@@ -965,6 +967,7 @@ fn route_debug_token_to_battlefield(
         display_source: staged.display_source,
         printed_ref: staged.printed_ref.clone(),
         token_image_ref: staged.token_image_ref.clone(),
+        token_art: None,
         extra_keywords: Vec::new(),
         additional_modifications: Vec::new(),
         tapped: false,

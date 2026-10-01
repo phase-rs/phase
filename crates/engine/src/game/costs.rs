@@ -2486,10 +2486,21 @@ fn can_pay_resolution(
                 .fixed_count()
                 .is_some_and(|count| eligible.len() >= count as usize)
         }
-        // CR 117 + CR 118.3: Composite is payable iff every sub-cost is payable.
-        AbilityCost::Composite { costs } => costs
-            .iter()
-            .all(|cost| can_pay_resolution(state, payer, cost, ability)),
+        // CR 117 + CR 118.3: Composite is payable iff every sub-cost is payable
+        // AND its chosen hand-discard legs are jointly payable (CR 601.2h: one
+        // physical card cannot satisfy two legs, so a per-leg check alone would
+        // let the first leg pay and the second fail — a partial payment).
+        AbilityCost::Composite { costs } => {
+            costs
+                .iter()
+                .all(|cost| can_pay_resolution(state, payer, cost, ability))
+                && super::cost_payability::discard_legs_jointly_payable(
+                    state,
+                    payer,
+                    ability.source_id,
+                    costs,
+                )
+        }
         // CR 118.12a: Disjunctive — payable iff any sub-cost is payable. The
         // choice is made interactively via `UnlessPaymentChooseCost`; the
         // unconditional pre-flight check only needs at least one branch.
@@ -4479,5 +4490,78 @@ mod tests {
             ),
             "CR 601.2h: a fixed `count: 1` tap cost is NOT payable with zero eligible creatures"
         );
+    }
+
+    /// CR 118.3 + CR 601.2h: a resolution-time (unless / ward-style / optional
+    /// "you may pay") composite of two chosen hand-discard legs is payable only
+    /// when two DISTINCT cards can be discarded. The per-leg check alone passes a
+    /// lone Island for both legs, then the second leg fails after the first
+    /// discarded it (a partial payment).
+    ///
+    /// Reverting the joint-discard conjunct in `can_pay_resolution`'s Composite
+    /// arm flips the `[Island]` assertion below to `true`.
+    #[test]
+    fn resolution_composite_discard_legs_need_distinct_cards() {
+        let island_leg = AbilityCost::Discard {
+            count: QuantityExpr::Fixed { value: 1 },
+            filter: Some(TargetFilter::Typed(
+                TypedFilter::default().subtype("Island".to_string()),
+            )),
+            selection: CardSelectionMode::Chosen,
+            self_scope: DiscardSelfScope::FromHand,
+        };
+        let any_leg = AbilityCost::Discard {
+            count: QuantityExpr::Fixed { value: 1 },
+            filter: None,
+            selection: CardSelectionMode::Chosen,
+            self_scope: DiscardSelfScope::FromHand,
+        };
+        let composite = AbilityCost::Composite {
+            costs: vec![island_leg, any_leg],
+        };
+
+        let payable_with_hand = |hand: &[bool]| {
+            let mut scenario = GameScenario::new();
+            let src = scenario.add_creature(P0, "Warded Bear", 2, 2).id();
+            for (i, &is_island) in hand.iter().enumerate() {
+                let id = scenario.add_card_to_hand(P0, &format!("Hand Card {i}"));
+                if is_island {
+                    scenario
+                        .state
+                        .objects
+                        .get_mut(&id)
+                        .unwrap()
+                        .card_types
+                        .subtypes
+                        .push("Island".to_string());
+                }
+            }
+            let ability = tap_cost_stub_ability(src);
+            let hand_before = scenario.state.players[0].hand.clone();
+            let payable = can_pay(
+                &scenario.state,
+                P0,
+                src,
+                &composite,
+                &PaymentScope::Resolution {
+                    ability: &ability,
+                    cost_move_root: ResolutionCostMoveRoot::EffectPayCost,
+                },
+            );
+            assert_eq!(
+                scenario.state.players[0].hand, hand_before,
+                "the payability pre-flight must not move any card"
+            );
+            payable
+        };
+
+        // Positive reach guard: an Island plus a second card pays both legs.
+        assert!(payable_with_hand(&[true, false]));
+        // Two Islands also work (the second serves as "another card").
+        assert!(payable_with_hand(&[true, true]));
+        // Hostile: the lone Island cannot serve both legs.
+        assert!(!payable_with_hand(&[true]));
+        // Hostile: two cards but no Island.
+        assert!(!payable_with_hand(&[false, false]));
     }
 }

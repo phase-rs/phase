@@ -210,13 +210,18 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
- * 99 — Effect.AdditionalPhase carries segment, a TurnSegment, in place of
+ * 100 — Effect.AdditionalPhase carries segment, a TurnSegment, in place of
  *      phase, followed_by holds TurnSegments, and recipient, an
  *      ExtraPhaseRecipient, replaces target — see PROTOCOL_VERSION's own
- *      `/// 99` entry in crates/lobby-broker/src/protocol.rs. This client
- *      hands server frames to JSON.parse, so a v98 client would take the new
+ *      `/// 100` entry in crates/lobby-broker/src/protocol.rs. This client
+ *      hands server frames to JSON.parse, so a v99 client would take the new
  *      shape with no decode error; the exact-match version check at connect
  *      refuses the pairing instead.
+ * 99 — GraveyardCastPermission gains pool (GraveyardPermissionPool):
+ *      AnyGraveyard is "from any graveyard" (CR 404.1 + CR 601.3 — The Great
+ *      Work). A v98 peer would default it to the own graveyard and refuse a
+ *      cast the permission allows; the exact-match handshake refuses the
+ *      pairing. P2P moves in lockstep (wire 81); lobby messages are unchanged.
  * 98 — PerPlayerScope gains Opponents (CR 102.2 + CR 102.3), written inside
  *      ZoneOwner as {"Each":"Opponents"}; ZoneOpponentChooserPurpose gains
  *      PerPlayerChoiceOrder (CR 101.4c) and SubstituteChooser (CR 800.4g);
@@ -663,7 +668,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 99;
+export const PROTOCOL_VERSION = 100;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

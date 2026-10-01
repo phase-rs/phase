@@ -149,7 +149,9 @@ use crate::types::phase::{Phase, PhaseGroup, TurnSegment};
 use crate::types::replacements::ReplacementEvent;
 #[cfg(test)]
 use crate::types::statics::CastFreeOrigin;
-use crate::types::statics::{ActivationExemption, CastFrequency, StaticMode};
+use crate::types::statics::{
+    ActivationExemption, CastFrequency, GraveyardPermissionPool, StaticMode,
+};
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 
@@ -23436,6 +23438,117 @@ fn parse_spells_cast_this_way_graveyard_replacement_rider(
     Some(dest)
 }
 
+/// CR 601.3 + CR 611.2c + CR 404.1: a class-wide graveyard cast permission —
+/// "cast instant and sorcery spells from any graveyard" (The Great Work),
+/// "cast Zombie spells from your graveyard this turn" (Liliana, Untouched by
+/// Death), "cast spells from your graveyard this turn".
+///
+/// **Why not `Effect::CastFromZone`.** `cast_from_zone::resolve` casts the
+/// objects it is handed (targets, a linked set). A class names no object, so the
+/// `CastFromZone` this clause used to lower to granted nothing: measured, no
+/// matching graveyard card was castable afterwards. The channel the runtime
+/// reads for a graveyard permission is `StaticMode::GraveyardCastPermission`,
+/// and for a resolution-created one `casting::graveyard_permission_sources`
+/// reads it off the player-bound transient effect — the route the Will cycle
+/// already takes (`deliver_coordinated_graveyard_permission_in_ability`).
+///
+/// **CR 611.2c.** The permission modifies no object's characteristics, so it
+/// "modifies the rules of the game" and covers cards that reach the graveyard
+/// after it began. The grant is therefore bound to the player and its filter is
+/// read live, never stamped on the cards present at resolution.
+///
+/// **Only the plural class.** "You may cast a creature spell from your graveyard
+/// this turn" (Chainer, Nightmare Adept) grants ONE cast; an `Unlimited`
+/// permission would overstate it. The grammar accepts only a type list closed by
+/// the plural " spells" (or bare "spells"), so an article, a quantifier or
+/// "target" never reaches it, and it must consume the whole clause, so a
+/// clause carrying any further rider (a cost, a counter) keeps its old shape.
+fn try_parse_class_wide_graveyard_cast_grant(lower: &str) -> Option<Effect> {
+    type E<'a> = OracleError<'a>;
+    let (rest, _) = tag::<_, _, E>("cast ").parse(lower).ok()?;
+    // CR 601.3: the class the permission lets its player cast.
+    let (rest, mut filter) = alt((
+        map(
+            terminated(
+                pair(
+                    parse_cast_type_leg,
+                    many0(preceded(parse_cast_type_list_sep, parse_cast_type_leg)),
+                ),
+                tag(" spells"),
+            ),
+            |(first, more)| cast_type_legs_filter(first, more),
+        ),
+        value(TargetFilter::Typed(TypedFilter::card()), tag("spells")),
+    ))
+    .parse(rest)
+    .ok()?;
+    // CR 404.1: "your graveyard" is the caster's own; "any graveyard" is every
+    // player's.
+    let (rest, pool) = preceded(
+        tag::<_, _, E>(" from "),
+        alt((
+            value(GraveyardPermissionPool::OwnGraveyard, tag("your graveyard")),
+            value(GraveyardPermissionPool::AnyGraveyard, tag("any graveyard")),
+        )),
+    )
+    .parse(rest)
+    .ok()?;
+    // CR 611.2a: a trailing window ("… this turn"). A leading one ("Until end of
+    // turn, …") is stripped before this parser runs and stamped onto the
+    // effect's unset `duration` by `apply_duration_to_effect`.
+    let (_, duration) = terminated(
+        opt(preceded(
+            tag::<_, _, E>(" "),
+            super::oracle_nom::duration::parse_duration,
+        )),
+        (opt(tag(".")), multispace0, eof),
+    )
+    .parse(rest)
+    .ok()?;
+
+    let controller = pool.is_own_graveyard().then_some(ControllerRef::You);
+    add_cast_target_props(
+        &mut filter,
+        &[FilterProp::InZone {
+            zone: Zone::Graveyard,
+        }],
+        controller,
+    );
+    let permission = StaticDefinition::new(StaticMode::GraveyardCastPermission {
+        frequency: CastFrequency::Unlimited,
+        play_mode: CardPlayMode::Cast,
+        graveyard_destination_replacement: None,
+        extra_cost: None,
+        enters_with_counter: None,
+        required_cast_keyword: None,
+        pool,
+    })
+    .affected(filter);
+    Some(graveyard_permission_grant(permission, duration))
+}
+
+/// CR 611.2c: a resolution-created graveyard cast permission, bound to the
+/// resolving ability's controller for `window`. `casting::graveyard_permission_sources`
+/// reads it off the resulting transient effect (`SpecificPlayer`) and evaluates
+/// the permission's filter live.
+pub(crate) fn graveyard_permission_grant(
+    permission: StaticDefinition,
+    window: Option<Duration>,
+) -> Effect {
+    Effect::GenericEffect {
+        static_abilities: vec![StaticDefinition::continuous()
+            .affected(TargetFilter::Controller)
+            .modifications(vec![ContinuousModification::GrantStaticAbility {
+                definition: Box::new(permission),
+            }])],
+        // CR 611.2a + CR 514.2: `layers::prune_end_of_turn_effects` ends an
+        // `UntilEndOfTurn` window at cleanup.
+        duration: window,
+        target: Some(TargetFilter::Controller),
+        end_cost: None,
+    }
+}
+
 /// CR 115.1a + CR 601.2a + CR 608.2g: Parse a per-opponent graveyard free
 /// cast target. The enclosing `for each opponent` fanout binds the paired
 /// player/object targets on the stack; this clause only provides the typed
@@ -28015,10 +28128,25 @@ fn parse_cast_type_list(rest: &str) -> Option<TargetFilter> {
     // path.
     let (_rest, ()) = parse_cast_head_noun(rest).ok()?;
 
-    let mut legs = Vec::with_capacity(more.len() + 1);
-    legs.push(first);
-    legs.extend(more);
+    // CR 601.3: one leg with no quantifier is ordinary type-phrase territory —
+    // `parse_type_phrase_folding` already handles it and can carry
+    // controller/property legs this helper never builds. Reject, exactly as
+    // before this helper was composed.
+    if more.is_empty() && quantifier.is_none() {
+        return None;
+    }
+    Some(cast_type_legs_filter(first, more))
+}
 
+/// CR 601.3 + CR 205.2b: the filter a cast type list names, built from its legs
+/// (see [`parse_cast_type_list`] for the grammar).
+///
+/// * one leg → `Typed { type_filters: leg }`
+/// * every leg exactly one atom → `Typed { type_filters: [AnyOf(atoms)] }`
+/// * some leg wider than one atom → `Or` over one `Typed` per leg, because a
+///   per-object conjunction cannot collapse into a single `type_filters` vector
+///   alongside a disjunction.
+fn cast_type_legs_filter(first: Vec<TypeFilter>, more: Vec<Vec<TypeFilter>>) -> TargetFilter {
     fn typed(atoms: Vec<TypeFilter>) -> TargetFilter {
         TargetFilter::Typed(TypedFilter {
             type_filters: atoms,
@@ -28027,19 +28155,17 @@ fn parse_cast_type_list(rest: &str) -> Option<TargetFilter> {
         })
     }
 
+    let mut legs = Vec::with_capacity(more.len() + 1);
+    legs.push(first);
+    legs.extend(more);
     match legs.as_slice() {
-        // CR 601.3: one leg with no quantifier is ordinary type-phrase
-        // territory — `parse_type_phrase_folding` already handles it and can carry
-        // controller/property legs this helper never builds. Reject, exactly as
-        // before this helper was composed.
-        [_single] if quantifier.is_none() => None,
-        [single] => Some(typed(single.clone())),
-        many if many.iter().all(|leg| leg.len() == 1) => Some(typed(vec![TypeFilter::AnyOf(
+        [single] => typed(single.clone()),
+        many if many.iter().all(|leg| leg.len() == 1) => typed(vec![TypeFilter::AnyOf(
             many.iter().map(|leg| leg[0].clone()).collect(),
-        )])),
-        many => Some(TargetFilter::Or {
+        )]),
+        many => TargetFilter::Or {
             filters: many.iter().map(|leg| typed(leg.clone())).collect(),
-        }),
+        },
     }
 }
 
@@ -29441,6 +29567,10 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
         .unwrap_or(lower);
 
     if let Some(effect) = try_parse_per_opponent_graveyard_free_cast(lower) {
+        return Some(effect);
+    }
+
+    if let Some(effect) = try_parse_class_wide_graveyard_cast_grant(lower) {
         return Some(effect);
     }
 
@@ -42527,7 +42657,12 @@ fn parse_effect_chain_ir_body(
         // the controller twice for one choice. Listed here rather than folded into
         // the `FreeCastFromZones` arm because it is still an `Effect::CastFromZone`
         // at parse time; the window only exists at resolution.
+        //
+        // CR 601.3: a granted graveyard cast permission ("you may cast <type>
+        // spells from your graveyard this turn") lets the player cast later; its
+        // "may" is that later cast, not a choice made at resolution (CR 608.2d).
         let is_optional = if matches!(&clause.effect, Effect::FreeCastFromZones { .. })
+            || crate::parser::oracle_ir::ast::is_graveyard_permission_grant(&clause.effect)
             || matches!(
                 &clause.effect,
                 Effect::CastFromZone {

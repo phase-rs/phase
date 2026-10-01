@@ -1770,6 +1770,23 @@ fn effect_is_replacement_carrier(effect: &Effect) -> bool {
         // Feather return / Lilah plot parameterization is a second consequence
         // folded into the same carrier, so it stays exempt either way).
         | Effect::ExileResolvingSpellInsteadOfGraveyard { .. } => true,
+        // CR 614.1a: a resolution-created permission whose granted static carries
+        // the replacement ("If a spell cast this way would be put into a
+        // graveyard, exile it instead" folded into a graveyard cast permission —
+        // The Great Work). The granted static answers the same question it does
+        // when printed on a permanent.
+        Effect::GenericEffect {
+            static_abilities, ..
+        } => static_abilities
+            .iter()
+            .flat_map(|grant| grant.modifications.iter())
+            .any(|modification| {
+                matches!(
+                    modification,
+                    ContinuousModification::GrantStaticAbility { definition }
+                        if static_is_replacement_carrier(definition)
+                )
+            }),
         _ => false,
     }
 }
@@ -7989,6 +8006,35 @@ If you sang a song the whole time you were searching and shuffling, you may unta
         assert!(!has_swallowed_detector(&parsed, "Replacement_Instead"));
     }
 
+    /// CR 614.1a: The Great Work's chapter III folds "If a spell cast this way would
+    /// be put into a graveyard, exile it instead" into the graveyard cast
+    /// permission it grants, so the clause is represented. The same grant with a
+    /// destination the permission cannot carry (a library) is not folded and must
+    /// keep warning.
+    #[test]
+    fn replacement_instead_accepts_a_granted_graveyard_permission_rider() {
+        let folded = parse_named(
+            "Until end of turn, you may cast instant and sorcery spells from any graveyard. \
+             If a spell cast this way would be put into a graveyard, exile it instead.",
+            "Folded Grant",
+            &["Sorcery"],
+        );
+        assert!(!has_swallowed_detector(&folded, "Replacement_Instead"));
+
+        let unfolded = parse_named(
+            "Until end of turn, you may cast instant and sorcery spells from any graveyard. \
+             If a spell cast this way would be put into a graveyard, put it on the bottom of \
+             its owner's library instead.",
+            "Unfolded Grant",
+            &["Sorcery"],
+        );
+        assert!(
+            has_swallowed_detector(&unfolded, "Replacement_Instead"),
+            "{:?}",
+            unfolded.parse_warnings
+        );
+    }
+
     #[test]
     fn replacement_instead_accepts_power_pack_delayed_payload_rider() {
         let parsed = parse_named(
@@ -12640,6 +12686,7 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
             extra_cost: None,
             enters_with_counter: Some(CounterType::Finality),
             required_cast_keyword: None,
+            pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
         });
         let parsed = crate::parser::oracle::ParsedAbilities {
             abilities: Vec::new(),
@@ -12726,6 +12773,7 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
             extra_cost: None,
             enters_with_counter: Some(CounterType::Finality),
             required_cast_keyword: None,
+            pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
         });
         let parsed = crate::parser::oracle::ParsedAbilities {
             abilities: Vec::new(),
@@ -14053,6 +14101,7 @@ mod detect_condition_if_replacement_exemption_tests {
             extra_cost: None,
             enters_with_counter: Some(CounterType::Finality),
             required_cast_keyword: None,
+            pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
         });
         let parsed = crate::parser::oracle::ParsedAbilities {
             abilities: Vec::new(),

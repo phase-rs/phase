@@ -4293,6 +4293,20 @@ fn predefined_role_token_spec(name: &str) -> Option<RoleSpec> {
     }
 }
 
+/// Recompute `token_art` from the object's current base characteristics.
+/// Called by every token ability injector (which all creation, copy, and
+/// replay flows run once the base is final), so live and replayed tokens
+/// agree without any flow-specific hook.
+fn refresh_token_art_descriptor(
+    state: &mut GameState,
+    obj_id: crate::types::identifiers::ObjectId,
+) {
+    let Some(obj) = state.objects.get_mut(&obj_id) else {
+        return;
+    };
+    obj.restore_token_art_baseline();
+}
+
 /// Inject predefined token abilities based on the token's subtypes and name.
 ///
 /// Two dispatch paths:
@@ -4316,6 +4330,17 @@ pub(super) fn inject_resolved_token_abilities(
     state: &mut GameState,
     obj_id: crate::types::identifiers::ObjectId,
 ) {
+    inject_resolved_token_abilities_inner(state, obj_id);
+    // The base is final after injection (or was already final when there was
+    // nothing to inject): refresh the art descriptor on every path, including
+    // the early no-payload returns, so vanilla tokens carry one too.
+    refresh_token_art_descriptor(state, obj_id);
+}
+
+fn inject_resolved_token_abilities_inner(
+    state: &mut GameState,
+    obj_id: crate::types::identifiers::ObjectId,
+) {
     let Some(materialized) = materialize_token_ability_payload_for_object(state, obj_id) else {
         return;
     };
@@ -4334,6 +4359,14 @@ pub(super) fn inject_resolved_token_abilities(
 /// so the single authority `materialize_token_ability_payload` short-circuits
 /// on it and nothing catalog-derived is re-granted.
 pub(crate) fn inject_catalog_token_abilities(
+    state: &mut GameState,
+    obj_id: crate::types::identifiers::ObjectId,
+) {
+    inject_catalog_token_abilities_inner(state, obj_id);
+    refresh_token_art_descriptor(state, obj_id);
+}
+
+fn inject_catalog_token_abilities_inner(
     state: &mut GameState,
     obj_id: crate::types::identifiers::ObjectId,
 ) {
@@ -4492,6 +4525,15 @@ fn catalog_rules_text_abilities(
 }
 
 pub(super) fn inject_predefined_token_abilities(
+    state: &mut GameState,
+    obj_id: crate::types::identifiers::ObjectId,
+) -> bool {
+    let applied = inject_predefined_token_abilities_inner(state, obj_id);
+    refresh_token_art_descriptor(state, obj_id);
+    applied
+}
+
+fn inject_predefined_token_abilities_inner(
     state: &mut GameState,
     obj_id: crate::types::identifiers::ObjectId,
 ) -> bool {
@@ -8221,6 +8263,7 @@ mod tests {
                     display_source: DisplaySource::Token,
                     printed_ref: None,
                     token_image_ref: None,
+                    token_art: None,
                     extra_keywords: Vec::new(),
                     additional_modifications: Vec::new(),
                     tapped: false,
@@ -9750,5 +9793,125 @@ mod attach_host_authority_tests {
             ),
             "a composite naming an exile-linked object has no host authority here"
         );
+    }
+
+    // ─── TokenArtDescriptor derivation ────────────────────────────────────
+
+    use crate::types::ability::{ReplacementDefinition, StaticDefinition};
+    use crate::types::replacements::ReplacementEvent;
+    use crate::types::statics::StaticMode;
+
+    fn art_fixture() -> GameObject {
+        let mut obj = GameObject::new(
+            ObjectId(1),
+            CardId(1),
+            PlayerId(0),
+            "Goblin".to_string(),
+            Zone::Battlefield,
+        );
+        obj.is_token = true;
+        obj.base_power = Some(1);
+        obj.base_toughness = Some(1);
+        obj.base_color = vec![crate::types::mana::ManaColor::Red];
+        obj.base_card_types.subtypes = vec!["Goblin".to_string()];
+        obj
+    }
+
+    #[test]
+    fn art_descriptor_reports_the_printed_body() {
+        let descriptor = art_fixture().intrinsic_token_art();
+        assert_eq!(descriptor.power, Some(1));
+        assert_eq!(descriptor.toughness, Some(1));
+        assert_eq!(descriptor.colors, vec![crate::types::mana::ManaColor::Red]);
+        assert_eq!(descriptor.subtypes, vec!["Goblin".to_string()]);
+        assert!(descriptor.keywords.is_empty());
+        assert!(!descriptor.has_abilities);
+    }
+
+    #[test]
+    fn art_descriptor_ignores_live_grants_and_modifications() {
+        let mut obj = art_fixture();
+        // Pumped P/T, a color setter, an anthem keyword grant, and a granted
+        // activated ability: all live-layer, none of it printed.
+        obj.power = Some(4);
+        obj.toughness = Some(4);
+        obj.color = vec![crate::types::mana::ManaColor::Blue];
+        obj.keywords = vec![Keyword::Flying];
+        obj.abilities = Arc::new(vec![treasure_ability()]);
+        let descriptor = obj.intrinsic_token_art();
+        assert_eq!(descriptor.power, Some(1));
+        assert_eq!(descriptor.toughness, Some(1));
+        assert_eq!(descriptor.colors, vec![crate::types::mana::ManaColor::Red]);
+        assert!(descriptor.keywords.is_empty());
+        assert!(
+            !descriptor.has_abilities,
+            "live grants must not flip the printed ability summary"
+        );
+    }
+
+    #[test]
+    fn art_descriptor_names_keyword_families_and_passes_unknown_payloads_through() {
+        let mut obj = art_fixture();
+        obj.base_keywords = vec![
+            Keyword::Flying,
+            Keyword::FirstStrike,
+            Keyword::Ward(WardCost::Mana(crate::types::mana::ManaCost::generic(2))),
+            Keyword::Flying,
+            // `kind()` collapses Toxic to the catch-all `Unknown`; the art
+            // mapping must still name its own family.
+            Keyword::Toxic(1),
+            Keyword::Unknown("some-future-keyword".to_string()),
+        ];
+        let descriptor = obj.intrinsic_token_art();
+        assert_eq!(
+            descriptor.keywords,
+            vec![
+                "Flying".to_string(),
+                "FirstStrike".to_string(),
+                "Ward".to_string(),
+                "Toxic".to_string(),
+                "some-future-keyword".to_string(),
+            ]
+        );
+        assert!(descriptor.has_abilities);
+    }
+
+    #[test]
+    fn art_descriptor_has_abilities_covers_every_base_ability_store() {
+        // Each arm independently flips the summary; vanilla stays false.
+        assert!(!art_fixture().intrinsic_token_art().has_abilities);
+
+        let mut keyworded = art_fixture();
+        keyworded.base_keywords = vec![Keyword::Trample];
+        assert!(keyworded.intrinsic_token_art().has_abilities);
+
+        let mut activated = art_fixture();
+        activated.base_abilities = Arc::new(vec![treasure_ability()]);
+        assert!(activated.intrinsic_token_art().has_abilities);
+
+        let mut triggered = art_fixture();
+        triggered.base_trigger_definitions =
+            Arc::new(vec![TriggerDefinition::new(TriggerMode::ChangesZone)]);
+        assert!(triggered.intrinsic_token_art().has_abilities);
+
+        let mut staticed = art_fixture();
+        staticed.base_static_definitions =
+            Arc::new(vec![StaticDefinition::new(StaticMode::Continuous)]);
+        assert!(staticed.intrinsic_token_art().has_abilities);
+
+        let mut replaced = art_fixture();
+        replaced.base_replacement_definitions =
+            Arc::new(vec![ReplacementDefinition::new(ReplacementEvent::Untap)]);
+        assert!(replaced.intrinsic_token_art().has_abilities);
+    }
+
+    #[test]
+    fn art_descriptor_ignores_display_mirror_rules_text() {
+        // `token_rules_text` can mirror catalog text for abilities that were
+        // suppressed from functional injection; it must not flip the summary
+        // on a functionally vanilla token.
+        let mut obj = art_fixture();
+        obj.token_rules_text = Some("Flying".to_string());
+        assert!(!obj.intrinsic_token_art().has_abilities);
     }
 }

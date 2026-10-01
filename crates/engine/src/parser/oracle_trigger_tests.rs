@@ -36267,3 +36267,155 @@ fn card_parking_hand_reveal_is_a_chosen_object_boundary_for_the_event_source_lif
         false
     )));
 }
+
+fn assert_block_count_shape(condition: &TriggerCondition, minimum: i32, noun: &str) {
+    let TriggerCondition::EventTime { condition } = condition else {
+        panic!("expected event-time predicate: {condition:?}");
+    };
+    let TriggerCondition::QuantityComparison {
+        lhs:
+            QuantityExpr::Ref {
+                qty:
+                    QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(filter),
+                    },
+            },
+        comparator: Comparator::GE,
+        rhs: QuantityExpr::Fixed { value },
+    } = condition.as_ref()
+    else {
+        panic!("expected filtered minimum count: {condition:?}");
+    };
+    assert_eq!(*value, minimum);
+    let TargetFilter::Typed(mut expected) = parse_type_phrase_folding(noun).0 else {
+        panic!("expected typed noun");
+    };
+    expected
+        .properties
+        .push(FilterProp::Attacking { defender: None });
+    expected.properties.push(FilterProp::CombatRelation {
+        relation: CombatRelation::BlockingOrBlockedBy,
+        subject: CombatRelationSubject::Source,
+    });
+    assert_eq!(filter, &expected);
+}
+
+// SHAPE: public lowering preserves the event predicate and source-level cardinality.
+#[test]
+fn count_qualified_blocks_lowered_shape() {
+    for (name, text, keywords, threshold, noun) in [
+        ("Lairwatch Giant", "This creature can block an additional creature each combat.\nWhenever this creature blocks two or more creatures, it gains first strike until end of turn.", vec![], 2, "creatures"),
+        ("Rashka the Slayer", "Reach (This creature can block creatures with flying.)\nWhenever Rashka blocks one or more black creatures, Rashka gets +1/+2 until end of turn.", vec!["Reach".to_string()], 1, "black creatures"),
+    ] {
+        let parsed = parse_oracle_text(text, name, &keywords, &["Creature".to_string()], &[]);
+        assert_eq!(parsed.triggers.len(), 1);
+        let trigger = &parsed.triggers[0];
+        assert_eq!(trigger.mode, TriggerMode::Blocks);
+        assert_eq!(trigger.valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(trigger.valid_target, None);
+        assert!(trigger.batched);
+        assert_block_count_shape(trigger.condition.as_ref().unwrap(), threshold, noun);
+        assert_no_unimplemented(trigger.execute.as_deref().unwrap());
+    }
+}
+
+// SHAPE: numerical and characteristic axes share the complete noun parser.
+#[test]
+fn count_qualified_blocks_numeric_properties_and_strict_tail() {
+    for (count, noun) in [
+        (1, "creatures"),
+        (3, "black creatures"),
+        (2, "creatures with flying"),
+        (2147483647, "creatures"),
+    ] {
+        let text = format!("Whenever this creature blocks {count} or more {noun}, it gains first strike until end of turn.");
+        let parsed = parse_oracle_text(&text, "Guard", &[], &["Creature".to_string()], &[]);
+        assert_eq!(parsed.triggers.len(), 1);
+        let trigger = &parsed.triggers[0];
+        assert_eq!(trigger.mode, TriggerMode::Blocks);
+        assert_block_count_shape(trigger.condition.as_ref().unwrap(), count, noun);
+        assert!(trigger.batched);
+        assert_eq!(trigger.valid_target, None);
+        assert_no_unimplemented(trigger.execute.as_deref().unwrap());
+    }
+    // Paired positive above reaches the same public parse/lower route.
+    for event in [
+        "this creature blocks two or more",
+        "this creature blocks two or more artifacts",
+        "this creature blocks two or more creatures with teamwork",
+        "this creature blocks two or more creatures during your turn",
+        "this creature blocks exactly two creatures",
+        "this creature blocks two creatures",
+        "this creature blocks 2147483648 or more creatures",
+        "this creature blocks 4294967296 or more creatures",
+        "this creature blocks 999999999999999999999999 or more creatures",
+        "a creature you control blocks two or more creatures",
+    ] {
+        let text = format!("Whenever {event}, it gains first strike until end of turn.");
+        let parsed = parse_oracle_text(&text, "Guard", &[], &["Creature".to_string()], &[]);
+        assert_eq!(parsed.triggers.len(), 1, "{event}");
+        assert!(
+            matches!(parsed.triggers[0].mode, TriggerMode::Unknown(_)),
+            "{event}: {:?}",
+            parsed.triggers[0]
+        );
+        assert_eq!(
+            parsed.triggers[0].description.as_deref(),
+            Some(normalize_card_name_refs(&text, "Guard").as_str()),
+            "rejected event text is preserved"
+        );
+    }
+}
+
+// SHAPE: a genuine intervening-if must coexist with the event-time count.
+#[test]
+fn count_qualified_blocks_intervening_if_preserves_count() {
+    let parsed = parse_oracle_text("Whenever this creature blocks two or more creatures, if you control a Forest, it gains first strike until end of turn.", "Guard", &[], &["Creature".to_string()], &[]);
+    assert_eq!(parsed.triggers.len(), 1);
+    let trigger = &parsed.triggers[0];
+    assert_eq!(trigger.mode, TriggerMode::Blocks);
+    assert!(trigger.batched);
+    assert_eq!(trigger.valid_target, None);
+    assert_no_unimplemented(trigger.execute.as_deref().unwrap());
+    let Some(TriggerCondition::And { conditions }) = &trigger.condition else {
+        panic!("count and if must both survive: {:?}", trigger.condition);
+    };
+    assert_eq!(conditions.len(), 2);
+    let count = conditions
+        .iter()
+        .find(|condition| matches!(condition, TriggerCondition::EventTime { .. }))
+        .unwrap();
+    assert_block_count_shape(count, 2, "creatures");
+    let (rest, static_if) = parse_inner_condition("you control a forest").unwrap();
+    assert!(rest.is_empty());
+    let expected_if = static_condition_to_trigger_condition(&static_if).unwrap();
+    assert!(matches!(expected_if, TriggerCondition::ControlsType { .. }));
+    assert!(
+        conditions.iter().any(|condition| condition == &expected_if),
+        "{conditions:?}"
+    );
+}
+
+// SHAPE: articles retain the adjacent per-attacker route, including filters.
+#[test]
+fn count_qualified_blocks_preserves_article_qualified_shapes() {
+    for noun in ["creature", "creature with flying", "artifact creature"] {
+        let article = if noun == "artifact creature" {
+            "an"
+        } else {
+            "a"
+        };
+        let text = format!("Whenever this creature blocks {article} {noun}, it gains first strike until end of turn.");
+        let parsed = parse_oracle_text(&text, "Guard", &[], &["Creature".to_string()], &[]);
+        assert_eq!(parsed.triggers.len(), 1);
+        let trigger = &parsed.triggers[0];
+        assert_eq!(trigger.mode, TriggerMode::Blocks);
+        assert_eq!(trigger.valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(
+            trigger.valid_target,
+            Some(parse_type_phrase_folding(noun).0)
+        );
+        assert_eq!(trigger.condition, None);
+        assert_no_unimplemented(trigger.execute.as_deref().unwrap());
+    }
+}

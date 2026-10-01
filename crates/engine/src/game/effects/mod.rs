@@ -4932,6 +4932,7 @@ fn instruction_outlives_declined_gate(
         target_incarnations: _,
         selected_target_incarnations: _,
         illegal_target_slots: _,
+        illegal_local_target_slots: _,
         controller: _,
         original_controller: _,
         context: _,

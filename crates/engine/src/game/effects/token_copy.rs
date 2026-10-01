@@ -231,6 +231,10 @@ pub fn resolve(
                 display_source: source.display_source,
                 printed_ref: source.printed_ref.clone(),
                 token_image_ref: source.token_image_ref.clone(),
+                // Created copy-tokens derive their descriptor from their
+                // own base at injection (copy exceptions included), so the
+                // source's captured body is deliberately not carried here.
+                token_art: None,
                 extra_keywords: extra_keywords.clone(),
                 additional_modifications: additional_modifications.clone(),
                 tapped,
@@ -510,6 +514,7 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
         display_source,
         printed_ref,
         token_image_ref,
+        token_art,
         extra_keywords,
         additional_modifications,
         tapped,
@@ -574,6 +579,7 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
                 display_source,
                 printed_ref: printed_ref.clone(),
                 token_image_ref: token_image_ref.clone(),
+                token_art: token_art.clone(),
                 extra_keywords: extra_keywords.clone(),
                 additional_modifications: additional_modifications.clone(),
                 tapped,
@@ -703,6 +709,7 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
             display_source,
             printed_ref: printed_ref.clone(),
             token_image_ref: token_image_ref.clone(),
+            token_art: token_art.clone(),
             extra_keywords: extra_keywords.clone(),
             additional_modifications: additional_modifications.clone(),
             tapped,

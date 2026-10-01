@@ -1008,9 +1008,15 @@ fn spell_alternative_cost_is_payable(
         AbilityCost::Mana { cost } => {
             super::casting::can_pay_cost_after_auto_tap(state, player, object_id, cost)
         }
-        AbilityCost::Composite { costs } => costs
-            .iter()
-            .all(|sub_cost| spell_alternative_cost_is_payable(state, player, object_id, sub_cost)),
+        // CR 118.3 + CR 601.2h: every leg must be payable, and multiple chosen
+        // hand-discard legs must be payable together (one card cannot serve two).
+        AbilityCost::Composite { costs } => {
+            costs.iter().all(|sub_cost| {
+                spell_alternative_cost_is_payable(state, player, object_id, sub_cost)
+            }) && super::cost_payability::discard_legs_jointly_payable(
+                state, player, object_id, costs,
+            )
+        }
         other => other.is_payable(state, player, object_id),
     }
 }
@@ -16401,6 +16407,7 @@ mod tests {
                         extra_cost: None,
                         enters_with_counter: None,
                         required_cast_keyword: None,
+                        pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
                     },
                 )
                 .affected(crate::types::ability::TargetFilter::Typed(

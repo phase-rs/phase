@@ -378,8 +378,14 @@ fn fixup_bare_noun_continuations(costs: &mut [AbilityCost]) {
     #[derive(Clone, Copy)]
     enum PrecedingVerb {
         Sacrifice,
-        Exile { zone: Option<Zone> },
+        Exile {
+            zone: Option<Zone>,
+        },
         TapCreatures,
+        /// CR 701.9a: a chosen hand-discard leg ("discard an Island card and
+        /// another card"); its continuations use the article-anchored grammar in
+        /// `parse_discard_continuation`.
+        Discard,
     }
 
     let mut last_verb: Option<PrecedingVerb> = None;
@@ -391,12 +397,27 @@ fn fixup_bare_noun_continuations(costs: &mut [AbilityCost]) {
                 last_verb = Some(PrecedingVerb::Exile { zone: *zone })
             }
             AbilityCost::TapCreatures { .. } => last_verb = Some(PrecedingVerb::TapCreatures),
+            AbilityCost::Discard {
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                self_scope: crate::types::ability::DiscardSelfScope::FromHand,
+                ..
+            } => last_verb = Some(PrecedingVerb::Discard),
             AbilityCost::Unimplemented { description } if last_verb.is_some() => {
                 if description.trim().is_empty() {
                     continue;
                 }
                 let verb = last_verb.unwrap();
                 let lower = description.to_lowercase();
+                // CR 601.2b + CR 701.9a: a discard continuation is terminal. Either
+                // the whole segment is one article-led "<article> [<type>] card"
+                // leg, or it stays an honest `Unimplemented` (never falling through
+                // to the sacrifice/exile-shaped rehydration below).
+                if matches!(verb, PrecedingVerb::Discard) {
+                    if let Some(cost) = parse_discard_continuation(&lower) {
+                        costs[i] = cost;
+                    }
+                    continue;
+                }
                 // CR 601.2b/f + #2343 (Mechtitan Core): a continuation that names an
                 // explicit count of two or more objects ("four other artifact
                 // creatures and/or Vehicles you control") must recover that true
@@ -427,6 +448,8 @@ fn fixup_bare_noun_continuations(costs: &mut [AbilityCost]) {
                                 requirement: TapCreaturesRequirement::count(count),
                                 filter,
                             },
+                            // Handled (and `continue`d) before this branch.
+                            PrecedingVerb::Discard => continue,
                         };
                     }
                     // An explicit-count continuation is terminal: only the
@@ -463,6 +486,8 @@ fn fixup_bare_noun_continuations(costs: &mut [AbilityCost]) {
                         requirement: TapCreaturesRequirement::count(1),
                         filter,
                     },
+                    // Handled (and `continue`d) before this branch.
+                    PrecedingVerb::Discard => continue,
                 };
             }
             _ => {
@@ -470,6 +495,40 @@ fn fixup_bare_noun_continuations(costs: &mut [AbilityCost]) {
             }
         }
     }
+}
+
+/// CR 601.2b + CR 701.9a: a bare continuation of a hand-discard cost leg
+/// ("discard an Island card and another card"): exactly
+/// `<another|an|a> (card | <type> card)`, consuming the whole (period-trimmed)
+/// segment. Anything else (a trailing rider, a noun without `card`, a plural
+/// count) returns `None` so the leg stays an honest `Unimplemented`.
+fn parse_discard_continuation(lower: &str) -> Option<AbilityCost> {
+    type E<'a> = super::oracle_nom::error::OracleError<'a>;
+    let (_, noun) = all_consuming(preceded(
+        alt((tag::<_, _, E<'_>>("another "), tag("an "), tag("a "))),
+        rest,
+    ))
+    .parse(lower.trim().trim_end_matches('.'))
+    .ok()?;
+    let filter = if all_consuming(tag::<_, _, E<'_>>("card"))
+        .parse(noun)
+        .is_ok()
+    {
+        None
+    } else {
+        // The noun must be "<type phrase> card"; `parse_discard_card_filter`
+        // alone also accepts a bare type ("creature") with no `card` noun.
+        all_consuming(terminated(take_until::<_, _, E<'_>>(" card"), tag(" card")))
+            .parse(noun)
+            .ok()?;
+        Some(parse_discard_card_filter(noun)?)
+    };
+    Some(AbilityCost::Discard {
+        count: QuantityExpr::Fixed { value: 1 },
+        filter,
+        selection: crate::types::ability::CardSelectionMode::Chosen,
+        self_scope: crate::types::ability::DiscardSelfScope::FromHand,
+    })
 }
 
 /// CR 601.2b + CR 701.4a: Parse the pre-choice behold cost "choose a creature
@@ -5281,5 +5340,155 @@ mod tests {
             .is_none(),
             "qualified \"by\" continuation must not truncate to EventContextAmount"
         );
+    }
+
+    fn chosen_discard(filter: Option<TargetFilter>) -> AbilityCost {
+        AbilityCost::Discard {
+            count: QuantityExpr::Fixed { value: 1 },
+            filter,
+            selection: crate::types::ability::CardSelectionMode::Chosen,
+            self_scope: DiscardSelfScope::FromHand,
+        }
+    }
+
+    fn typed_card(subtype_or_type: TypeFilter) -> TargetFilter {
+        TargetFilter::Typed(TypedFilter {
+            type_filters: vec![subtype_or_type],
+            controller: None,
+            properties: vec![],
+        })
+    }
+
+    /// CR 601.2b + CR 701.9a: "discard an Island card and another card" is two
+    /// chosen hand-discard legs (Foil). The bare continuation is an untyped card.
+    #[test]
+    fn discard_cost_bare_another_card_continuation_is_a_second_discard_leg() {
+        assert_eq!(
+            parse_oracle_cost("discard an Island card and another card"),
+            AbilityCost::Composite {
+                costs: vec![
+                    chosen_discard(Some(typed_card(TypeFilter::Subtype("Island".to_string())))),
+                    chosen_discard(None),
+                ]
+            }
+        );
+        // Typed siblings and article variants of the same grammar.
+        assert_eq!(
+            parse_oracle_cost("Discard a creature card and another creature card"),
+            AbilityCost::Composite {
+                costs: vec![
+                    chosen_discard(Some(typed_card(TypeFilter::Creature))),
+                    chosen_discard(Some(typed_card(TypeFilter::Creature))),
+                ]
+            }
+        );
+        assert_eq!(
+            parse_oracle_cost("discard an Island card and a card"),
+            AbilityCost::Composite {
+                costs: vec![
+                    chosen_discard(Some(typed_card(TypeFilter::Subtype("Island".to_string())))),
+                    chosen_discard(None),
+                ]
+            }
+        );
+        // Three legs: every continuation keeps converting.
+        let three = parse_oracle_cost("discard an Island card and another card and a Swamp card");
+        assert!(matches!(&three, AbilityCost::Composite { costs } if costs.len() == 3));
+        assert!(!three.contains_unimplemented());
+    }
+
+    /// Hostile continuations stay an honest `Unimplemented` leg (never a swallowed
+    /// or re-scoped half-cost). Each is paired with the positive parse above as
+    /// its reach guard.
+    #[test]
+    fn discard_cost_hostile_continuations_stay_unimplemented() {
+        // Reach guard: the same shape with a well-formed continuation converts.
+        assert!(
+            !parse_oracle_cost("discard an Island card and another card").contains_unimplemented()
+        );
+        for text in [
+            // Noun lacks `card`.
+            "discard an Island card and another creature",
+            // Trailing rider after the noun.
+            "discard an Island card and another card you control",
+            "discard an Island card and another card at random",
+            // Plural / counted continuation.
+            "discard an Island card and two other cards",
+            "discard an Island card and two cards",
+            // Not article-led.
+            "discard an Island card and card",
+        ] {
+            let cost = parse_oracle_cost(text);
+            assert!(
+                matches!(&cost, AbilityCost::Composite { costs }
+                    if costs.len() == 2 && matches!(costs[1], AbilityCost::Unimplemented { .. })),
+                "{text:?} must keep an Unimplemented second leg, got {cost:?}"
+            );
+        }
+        // A bare `another card` after a non-discard leg is never a discard.
+        let after_life = parse_oracle_cost("pay 1 life and another card");
+        assert!(
+            matches!(&after_life, AbilityCost::Composite { costs }
+                if matches!(costs[1], AbilityCost::Unimplemented { .. })),
+            "got {after_life:?}"
+        );
+    }
+
+    /// Name-comma "Grandeur" costs (Baru, Skoa, ...) split at the comma in the
+    /// card name; the trailing name fragment is not an article-led card
+    /// continuation and must parse exactly as before.
+    #[test]
+    fn discard_cost_name_comma_grandeur_fragments_are_unchanged() {
+        for (text, fragment) in [
+            (
+                "Discard another card named Baru, Fist of Krosa",
+                "Fist of Krosa",
+            ),
+            (
+                "Discard another card named Korlash, Heir to Blackblade",
+                "Heir to Blackblade",
+            ),
+            (
+                "Discard another card named Linessa, Zephyr Mage",
+                "Zephyr Mage",
+            ),
+            (
+                "Discard another card named Oriss, Samite Guardian",
+                "Samite Guardian",
+            ),
+            ("Discard another card named Page, Loose Leaf", "Loose Leaf"),
+        ] {
+            let cost = parse_oracle_cost(text);
+            let AbilityCost::Composite { costs } = &cost else {
+                panic!("{text:?} must stay composite, got {cost:?}");
+            };
+            assert_eq!(costs.len(), 2, "{text:?}");
+            assert!(matches!(costs[0], AbilityCost::Discard { .. }), "{text:?}");
+            assert!(
+                matches!(&costs[1], AbilityCost::Unimplemented { description } if description == fragment),
+                "{text:?} fragment must stay Unimplemented, got {:?}",
+                costs[1]
+            );
+        }
+        let skoa = parse_oracle_cost(
+            "Discard another card named Skoa, Embermage, Sacrifice two Mountains",
+        );
+        assert!(
+            matches!(&skoa, AbilityCost::Composite { costs } if costs.len() == 3
+                && matches!(&costs[1], AbilityCost::Unimplemented { description } if description == "Embermage")),
+            "got {skoa:?}"
+        );
+    }
+
+    /// Regression: the sacrifice / exile continuations still rehydrate.
+    #[test]
+    fn discard_continuation_does_not_disturb_other_verb_continuations() {
+        let sac =
+            parse_oracle_cost("Sacrifice a green creature, a white creature, and a blue creature");
+        assert!(matches!(&sac, AbilityCost::Composite { costs } if costs.len() == 3));
+        assert!(!sac.contains_unimplemented());
+        let fow = parse_oracle_cost("pay 1 life and exile a blue card from your hand");
+        assert!(matches!(&fow, AbilityCost::Composite { costs } if costs.len() == 2));
+        assert!(!fow.contains_unimplemented());
     }
 }

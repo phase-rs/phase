@@ -4129,6 +4129,7 @@ mod tests {
                 display_source: DisplaySource::Card,
                 printed_ref: None,
                 token_image_ref: None,
+                token_art: None,
             }],
             None,
         );
@@ -4142,6 +4143,7 @@ mod tests {
                 display_source: DisplaySource::Card,
                 printed_ref: None,
                 token_image_ref: None,
+                token_art: None,
             }],
             None,
         );
@@ -4216,6 +4218,7 @@ mod tests {
                 display_source: DisplaySource::Card,
                 printed_ref: None,
                 token_image_ref: None,
+                token_art: None,
             }],
             None,
             crate::types::game_state::TransientContinuousEffectBindings {
@@ -4313,6 +4316,7 @@ mod tests {
                 display_source: DisplaySource::Card,
                 printed_ref: None,
                 token_image_ref: None,
+                token_art: None,
             }],
             None,
         );
@@ -4355,6 +4359,7 @@ mod tests {
                 display_source: DisplaySource::Card,
                 printed_ref: None,
                 token_image_ref: None,
+                token_art: None,
             }],
             None,
         );

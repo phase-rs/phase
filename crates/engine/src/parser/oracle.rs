@@ -33,7 +33,7 @@ use crate::types::mana::{ManaCost, ManaSpellGrant};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::replacements::ReplacementEvent;
-use crate::types::statics::{CastFrequency, StaticMode};
+use crate::types::statics::{CastFrequency, GraveyardPermissionPool, StaticMode};
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 
@@ -2349,6 +2349,18 @@ fn deliver_coordinated_graveyard_permission_in_ability(def: &mut AbilityDefiniti
             .as_deref()
             .filter(|_| sentence_is_fully_modelled)
             .and_then(|sub| match &*sub.effect {
+                // CR 601.3 + CR 611.2c: "cast spells from your graveyard" now
+                // lowers on its own to the graveyard permission
+                // (`oracle_effect::try_parse_class_wide_graveyard_cast_grant`);
+                // widen that grant to the land half as well. Only a plain grant
+                // is widened: a rider already folded into it would be lost.
+                effect @ Effect::GenericEffect {
+                    duration: Some(window),
+                    ..
+                } => plain_own_graveyard_cast_grant_filter(effect).and_then(|target| {
+                    coordinated_graveyard_permission(target)
+                        .map(|permission| (window.clone(), permission))
+                }),
                 Effect::CastFromZone {
                     target, duration, ..
                 } => duration
@@ -2365,21 +2377,12 @@ fn deliver_coordinated_graveyard_permission_in_ability(def: &mut AbilityDefiniti
                     .and_then(|window| {
                         coordinated_graveyard_permission(target)
                             .map(|permission| (window.clone(), permission))
-                    })
-                    .map(|(window, permission)| Effect::GenericEffect {
-                        static_abilities: vec![StaticDefinition::continuous()
-                            .affected(TargetFilter::Controller)
-                            .modifications(vec![ContinuousModification::GrantStaticAbility {
-                                definition: Box::new(permission),
-                            }])],
-                        // CR 611.2a: one stated window scopes both halves;
-                        // `layers::prune_end_of_turn_effects` ends it at cleanup
-                        // (CR 514.2).
-                        duration: Some(window),
-                        target: Some(TargetFilter::Controller),
-                        end_cost: None,
                     }),
                 _ => None,
+            })
+            // CR 611.2a: one stated window scopes both halves.
+            .map(|(window, permission)| {
+                crate::parser::oracle_effect::graveyard_permission_grant(permission, Some(window))
             });
 
         if let Some(effect) = recovered {
@@ -2461,6 +2464,38 @@ fn parse_graveyard_anchor_sentence_tail(input: &str) -> OracleResult<'_, &str> {
     take_till(|c: char| c == '.').parse(rest)
 }
 
+/// CR 601.3: the card filter of a plain "cast <class> spells from your
+/// graveyard" permission grant — unlimited, cast-only, own graveyard, no rider —
+/// or `None` for any other effect.
+fn plain_own_graveyard_cast_grant_filter(effect: &Effect) -> Option<&TargetFilter> {
+    if !crate::parser::oracle_ir::ast::is_graveyard_permission_grant(effect) {
+        return None;
+    }
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = effect
+    else {
+        return None;
+    };
+    let [ContinuousModification::GrantStaticAbility { definition }] =
+        static_abilities.first()?.modifications.as_slice()
+    else {
+        return None;
+    };
+    match &definition.mode {
+        StaticMode::GraveyardCastPermission {
+            frequency: CastFrequency::Unlimited,
+            play_mode: CardPlayMode::Cast,
+            graveyard_destination_replacement: None,
+            extra_cost: None,
+            enters_with_counter: None,
+            required_cast_keyword: None,
+            pool: GraveyardPermissionPool::OwnGraveyard,
+        } => definition.affected.as_ref(),
+        _ => None,
+    }
+}
+
 /// CR 116.2a + CR 601.2a: build the two-part permission from the cast half of the
 /// sentence -- the land axis and the card axis under ONE grant, because the
 /// printed sentence is one permission naming two actions.
@@ -2518,6 +2553,7 @@ fn coordinated_graveyard_permission(cast_target: &TargetFilter) -> Option<Static
             extra_cost: None,
             enters_with_counter: None,
             required_cast_keyword: None,
+            pool: GraveyardPermissionPool::OwnGraveyard,
         })
         // CR 611.2c: class-wide and re-evaluated live, so cards that reach the
         // graveyard later this turn are covered.
