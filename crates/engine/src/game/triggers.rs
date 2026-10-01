@@ -16601,42 +16601,51 @@ fn attackers_declared_count(
 
 /// CR 603.4 + CR 608.2h + CR 400.7 + CR 508.1: evaluate the resolution
 /// recheck's filter against one creature from the triggering attack
-/// declaration.
+/// declaration, pinned to the incarnation that attacked.
 ///
-/// While the creature is still on the battlefield, its live characteristics
-/// answer ("the ability will check the power and toughness of those creatures
-/// as it tries to resolve"). Once it has left, CR 608.2h routes the question
-/// to its last known information — Squall's official ruling is explicit:
-/// "If any of those creatures have left the battlefield since the first time
-/// the ability checked their power and toughness, use their power and
-/// toughness as they last existed on the battlefield." `state.lki_cache`
-/// holds exactly that exit-time snapshot (captured by
+/// The declaration ledger (`CombatState.attacking_incarnations_this_combat`,
+/// written by `combat::commit_attack_declaration`; at most one entry per
+/// storage id per combat, reset at BeginCombat) names that incarnation. While
+/// the live object still is it, its live characteristics answer ("the ability
+/// will check the power and toughness of those creatures as it tries to
+/// resolve"). Once the attacking incarnation has left, CR 400.7 makes a return
+/// a new object, so the recheck must not read the later incarnation's live
+/// values: CR 608.2h routes the question to the attacking incarnation's last
+/// known information — Squall's official ruling is explicit: "If any of those
+/// creatures have left the battlefield since the first time the ability
+/// checked their power and toughness, use their power and toughness as they
+/// last existed on the battlefield." `state.lki_by_incarnation` holds exactly
+/// that exit-time snapshot per incarnation (captured by
 /// `zones::apply_zone_exit_cleanup` before the zone-exit revert restores the
 /// printed base values, CR 400.7), so a departed attacker must NOT fall
 /// through to the live graveyard-card reading `filter_inner` would give it.
-/// Fail closed when neither the live battlefield object nor a snapshot exists.
+/// Fail closed when the declaration pin cannot be resolved.
 fn attack_declaration_attacker_matches_filter(
     state: &GameState,
     attacker_id: ObjectId,
     filter: &TargetFilter,
     context: &FilterContext<'_>,
 ) -> bool {
-    if state
-        .objects
-        .get(&attacker_id)
-        .is_some_and(|object| object.zone == Zone::Battlefield)
-    {
+    let Some(attacking) = state.combat.as_ref().and_then(|combat| {
+        combat
+            .attacking_incarnations_this_combat
+            .iter()
+            .find(|reference| reference.object_id == attacker_id)
+    }) else {
+        return false;
+    };
+    if state.objects.get(&attacker_id).is_some_and(|object| {
+        object.zone == Zone::Battlefield && object.incarnation == attacking.incarnation
+    }) {
         return matches_target_filter(state, attacker_id, filter, context);
     }
-    state.lki_cache.get(&attacker_id).is_some_and(|lki| {
-        super::filter::matches_target_filter_on_lki_snapshot(
-            state,
-            attacker_id,
-            lki,
-            filter,
-            context,
-        )
-    })
+    state
+        .lki_by_incarnation
+        .get(&attacker_id)
+        .and_then(|history| history.get(&attacking.incarnation))
+        .is_some_and(|lki| {
+            matches_target_filter_on_lki_snapshot(state, attacker_id, lki, filter, context)
+        })
 }
 
 fn controller_ref_matches_player(
@@ -20392,11 +20401,19 @@ pub mod tests {
     /// CR 603.4 + CR 608.2h + CR 400.7 + CR 208.1: the attack-declaration
     /// recheck's filter reads a live battlefield creature's characteristics,
     /// and a departed attacker's LAST BATTLEFIELD characteristics from the
-    /// exit-time `lki_cache` snapshot — never the reverted printed base.
+    /// pinned incarnation's `lki_by_incarnation` snapshot — never the reverted
+    /// printed base.
     #[test]
     fn attack_declaration_filter_reads_last_battlefield_pt_after_exit() {
+        use crate::game::combat::CombatState;
+
         let mut state = setup();
         let attacker = make_creature(&mut state, PlayerId(0), "Departed Qualifier", 2, 2);
+        let pin = ObjectIncarnationRef::from_object(&state.objects[&attacker]);
+        state.combat = Some(CombatState {
+            attacking_incarnations_this_combat: [pin].into_iter().collect(),
+            ..CombatState::default()
+        });
         let context = FilterContext::neutral();
         let power_eq = |value: i32| {
             TargetFilter::Typed(TypedFilter::creature().properties(vec![
@@ -20428,6 +20445,13 @@ pub mod tests {
             state.lki_cache.contains_key(&attacker),
             "the zone exit must have captured a last-battlefield snapshot"
         );
+        assert!(
+            state
+                .lki_by_incarnation
+                .get(&attacker)
+                .is_some_and(|history| history.contains_key(&pin.incarnation)),
+            "the zone exit must have captured the pinned incarnation's snapshot"
+        );
         assert_eq!(
             state.objects[&attacker].power,
             Some(2),
@@ -20440,6 +20464,66 @@ pub mod tests {
         assert!(
             !attack_declaration_attacker_matches_filter(&state, attacker, &power_eq(2), &context),
             "the reverted printed base must not be substituted for last-battlefield information"
+        );
+    }
+
+    /// CR 400.7 + CR 603.4 + CR 608.2h: the resolution recheck resolves the
+    /// attacker's attacking incarnation from the declaration ledger. With no
+    /// resolvable pin it fails closed — never the live object and never the newest
+    /// LKI. Every negative is paired with the same object resolving once its pin
+    /// exists.
+    #[test]
+    fn attack_declaration_recheck_fails_closed_without_the_declaration_pin() {
+        use crate::game::combat::CombatState;
+
+        let mut state = setup();
+        let attacker = make_creature(&mut state, PlayerId(0), "Unpinned Qualifier", 2, 2);
+        let context = FilterContext::neutral();
+        let power_eq = |value: i32| {
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::PtComparison {
+                    stat: PtStat::Power,
+                    scope: PtValueScope::Current,
+                    comparator: Comparator::EQ,
+                    value: QuantityExpr::Fixed { value },
+                },
+            ]))
+        };
+
+        // No combat at all: fail closed even though the live 2/2 matches.
+        assert!(
+            !attack_declaration_attacker_matches_filter(&state, attacker, &power_eq(2), &context),
+            "without a declaration pin the recheck must fail closed"
+        );
+
+        // Combat exists but carries no pin for this attacker.
+        state.combat = Some(CombatState::default());
+        assert!(
+            !attack_declaration_attacker_matches_filter(&state, attacker, &power_eq(2), &context),
+            "an empty declaration ledger must not answer from the live object"
+        );
+
+        // Paired positive reach guard: the same live object with its pin resolves.
+        let pin = ObjectIncarnationRef::from_object(&state.objects[&attacker]);
+        state.combat = Some(CombatState {
+            attacking_incarnations_this_combat: [pin].into_iter().collect(),
+            ..CombatState::default()
+        });
+        assert!(
+            attack_declaration_attacker_matches_filter(&state, attacker, &power_eq(2), &context),
+            "the pinned live incarnation resolves"
+        );
+
+        // A pin naming a different incarnation (with no LKI) must not fall back to
+        // the live object's matching values.
+        let stale = ObjectIncarnationRef::of(attacker, pin.incarnation + 1);
+        state.combat = Some(CombatState {
+            attacking_incarnations_this_combat: [stale].into_iter().collect(),
+            ..CombatState::default()
+        });
+        assert!(
+            !attack_declaration_attacker_matches_filter(&state, attacker, &power_eq(2), &context),
+            "a stale pin must fail closed rather than read the later live incarnation"
         );
     }
 
@@ -37879,6 +37963,8 @@ pub mod tests {
 
     #[test]
     fn attacks_you_typed_count_requires_matching_attackers_only() {
+        use crate::game::combat::CombatState;
+
         let mut state = setup();
         let trigger_controller = PlayerId(0);
         let dino1 = create_object(
@@ -37906,6 +37992,15 @@ pub mod tests {
             state.objects.get_mut(&id).unwrap().card_types.subtypes = vec!["Dinosaur".to_string()];
         }
         state.objects.get_mut(&goblin).unwrap().card_types.subtypes = vec!["Goblin".to_string()];
+
+        let ledger: HashSet<ObjectIncarnationRef> = [dino1, dino2, goblin]
+            .into_iter()
+            .map(|id| ObjectIncarnationRef::from_object(&state.objects[&id]))
+            .collect();
+        state.combat = Some(CombatState {
+            attacking_incarnations_this_combat: ledger,
+            ..CombatState::default()
+        });
 
         let dino_filter =
             TargetFilter::Typed(TypedFilter::default().subtype("Dinosaur".to_string()));
