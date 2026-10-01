@@ -27,6 +27,47 @@ afterEach(() => {
   document.body.replaceChildren();
 });
 
+describe("applyCardSlam", () => {
+  it("winds back before lunging, lands on the shared impact clock, and returns to rest", () => {
+    const el = card();
+    el.style.zIndex = "50";
+    const impact = vi.fn();
+    applyCardSlam(el, 231.5, 44, 1, impact, performance.now());
+
+    vi.advanceTimersByTime(3 * FRAME_MS);
+    expect(offset(el)[0]).toBeLessThan(0);
+    expect(impact).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(CARD_SLAM_FLIGHT_MS - 3 * FRAME_MS);
+    expect(impact).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(FRAME_MS);
+    expect(impact).toHaveBeenCalledOnce();
+    expect(offset(el)[0]).toBeGreaterThan(180);
+    vi.advanceTimersByTime(4 * FRAME_MS);
+    expect(offset(el)[0]).toBeLessThan(195);
+    vi.advanceTimersByTime(300);
+    expect(impact).toHaveBeenCalledOnce();
+    expect([el.style.translate, el.style.scale, el.style.zIndex]).toEqual(["", "", "50"]);
+    expect(applyCardSlam(el, 231.5, 44, 1, impact, performance.now())).toBe(true);
+    vi.advanceTimersByTime(600);
+  });
+
+  it("still reports one impact when a throttled frame skips the strike", () => {
+    const frames: FrameRequestCallback[] = [];
+    const raf = vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    const el = card();
+    const impact = vi.fn();
+    const start = performance.now();
+    applyCardSlam(el, 400, 0, 1, impact, start);
+    frames.shift()!(start + 1000);
+    expect(impact).toHaveBeenCalledOnce();
+    expect(el.style.translate).toBe("");
+    raf.mockRestore();
+  });
+});
+
 describe("applyCardKnockback", () => {
   it("V12-3: the struck card is pushed along the blow, rocks, and comes back to rest with its styles cleared", () => {
     const el = card();

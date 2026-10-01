@@ -1,4 +1,4 @@
-import { motion } from "framer-motion";
+import { motion, useReducedMotion } from "framer-motion";
 import type React from "react";
 import { memo, useCallback, useId, useMemo, useRef } from "react";
 import { useTranslation } from "react-i18next";
@@ -1298,39 +1298,53 @@ const ExileGhostCard = memo(function ExileGhostCard({ objectId, offset }: ExileG
   );
 });
 
-/** MTGA-style attack marker: a translucent teal gable behind the card's
- *  leading edge, its peak rising toward the defending side. It reaches only a
- *  little way behind the card, since a tapped card is drawn translucent, and
- *  it tilts with the card. */
+/** Two sharp chevrons pointing out of the attacking card's leading edge. */
 function AttackArrow({ upward }: { upward: boolean }) {
   const gradientId = `attack-arrow-${useId()}`;
+  const reduceMotion = useReducedMotion();
+  const quality = usePreferencesStore((s) => s.vfxQuality);
+  const animateEnergy = !reduceMotion && quality !== "minimal";
   return (
     <motion.div
       aria-hidden
       data-attack-arrow={upward ? "up" : "down"}
-      className={`pointer-events-none absolute -inset-x-[3%] z-0 ${upward ? "-top-[30%] bottom-[88%]" : "-bottom-[30%] top-[88%] rotate-180"}`}
-      initial={{ opacity: 0, scaleY: 0.6 }}
+      className={`pointer-events-none absolute inset-x-[4%] z-0 ${upward ? "-top-[34%] bottom-[94%]" : "-bottom-[34%] top-[94%] rotate-180"}`}
+      initial={{ opacity: 0, scaleY: reduceMotion ? 1 : 0.72 }}
       animate={{ opacity: 1, scaleY: 1 }}
       style={{ transformOrigin: upward ? "bottom" : "top" }}
       transition={{ duration: 0.2, ease: "easeOut" }}
     >
-      <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="block h-full w-full">
+      <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="block h-full w-full overflow-visible">
         <defs>
           <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0" stopColor="rgb(94,234,212)" stopOpacity="0.55" />
-            <stop offset="0.71" stopColor="rgb(45,212,191)" stopOpacity="0.25" />
-            <stop offset="1" stopColor="rgb(20,184,166)" stopOpacity="0" />
+            <stop offset="0" stopColor="#d9fbff" stopOpacity="0.9" />
+            <stop offset="0.35" stopColor="#67dcf2" stopOpacity="0.55" />
+            <stop offset="1" stopColor="#1495c0" stopOpacity="0" />
           </linearGradient>
         </defs>
-        <path d="M0 71 L50 0 L100 71 L100 100 L0 100 Z" fill={`url(#${gradientId})`} />
+        <path d="M4 62 L50 4 L96 62 L96 81 L50 28 L4 81 Z" fill={`url(#${gradientId})`} />
+        <path d="M20 90 L50 52 L80 90 L80 100 L50 68 L20 100 Z" fill={`url(#${gradientId})`} opacity="0.45" />
         <path
-          d="M0 71 L50 0 L100 71"
+          d="M4 62 L50 4 L96 62"
           fill="none"
-          stroke="rgba(153,246,228,0.85)"
+          stroke="#8cdeee"
           strokeWidth="1.5"
-          strokeLinejoin="round"
+          strokeLinejoin="miter"
           vectorEffect="non-scaling-stroke"
         />
+        {animateEnergy && (
+          <motion.path
+            d="M4 62 L50 4 L96 62"
+            fill="none"
+            stroke="#effeff"
+            strokeWidth="2"
+            vectorEffect="non-scaling-stroke"
+            pathLength={1}
+            strokeDasharray="0.22 0.78"
+            animate={{ strokeDashoffset: [1, 0], opacity: [0, 0.8, 0] }}
+            transition={{ duration: 0.7, repeat: Infinity, repeatDelay: 2, ease: "linear" }}
+          />
+        )}
       </svg>
     </motion.div>
   );

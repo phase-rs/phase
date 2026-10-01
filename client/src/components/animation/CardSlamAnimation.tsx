@@ -12,7 +12,7 @@ const activeSlams = new WeakSet<HTMLElement>();
 
 /**
  * Arena-style card slam: animates the ACTUAL card DOM element from its
- * battlefield position toward the target, impacts with jitter, then
+ * battlefield position toward the target, recoils from impact, then
  * slides back to its original position.
  *
  * Uses independent CSS `translate`/`scale` properties so the animation
@@ -44,9 +44,13 @@ export function applyCardSlam(
   const dy = targetY - centerY;
 
   const flightMs = CARD_SLAM_FLIGHT_MS * speedMultiplier;
-  const jitterMs = 300 * speedMultiplier;
-  const returnMs = 250 * speedMultiplier;
-  const totalMs = flightMs + jitterMs + returnMs;
+  const recoilMs = 80 * speedMultiplier;
+  const returnMs = 220 * speedMultiplier;
+  const totalMs = flightMs + recoilMs + returnMs;
+  const distance = Math.hypot(dx, dy);
+  const pullback = Math.min(16, distance * 0.08);
+  const ux = distance > 0 ? dx / distance : 0;
+  const uy = distance > 0 ? dy / distance : 0;
   let impactFired = false;
 
   // Elevate above other cards during animation
@@ -57,6 +61,8 @@ export function applyCardSlam(
     const elapsed = now - start;
 
     if (elapsed >= totalMs) {
+      // A throttled frame may skip the impact phase entirely.
+      if (!impactFired) onImpact();
       element.style.translate = "";
       element.style.scale = "";
       element.style.zIndex = originalZ;
@@ -65,27 +71,37 @@ export function applyCardSlam(
     }
 
     if (elapsed < flightMs) {
-      // Flight: quadratic ease-in toward target (accelerating lunge)
+      // Brief anticipation, then a fast lunge. Keep the shared impact clock.
       const t = elapsed / flightMs;
-      const eased = t * t;
-      element.style.translate = `${dx * eased}px ${dy * eased}px`;
-      element.style.scale = `${1 + 0.12 * eased}`;
-    } else if (elapsed < flightMs + jitterMs) {
-      // Impact + decaying jitter oscillation at target position
+      if (t < 0.3) {
+        const windup = Math.sin((t / 0.3) * Math.PI / 2);
+        element.style.translate = `${-ux * pullback * windup}px ${-uy * pullback * windup}px`;
+        element.style.scale = `${1 + 0.06 * windup}`;
+      } else {
+        const p = (t - 0.3) / 0.7;
+        const eased = p * p;
+        element.style.translate = `${-ux * pullback + (dx + ux * pullback) * eased}px ${-uy * pullback + (dy + uy * pullback) * eased}px`;
+        element.style.scale = `${1.06 + 0.04 * Math.sin(p * Math.PI) - 0.06 * eased}`;
+      }
+    } else if (elapsed < flightMs + recoilMs) {
+      // One short recoil along the strike, rather than shaking in place.
       if (!impactFired) {
         impactFired = true;
         onImpact();
       }
-      const jt = (elapsed - flightMs) / jitterMs;
-      const decay = 1 - jt;
-      const osc = Math.sin(jt * Math.PI * 6) * 8 * decay;
-      element.style.translate = `${dx + osc}px ${dy + osc * 0.5}px`;
-      element.style.scale = `${1 + decay * 0.04}`;
+      const t = (elapsed - flightMs) / recoilMs;
+      const recoil = 1 - 0.08 * (1 - (1 - t) ** 3);
+      element.style.translate = `${dx * recoil}px ${dy * recoil}px`;
+      element.style.scale = `${1 - 0.035 * Math.sin(t * Math.PI)}`;
     } else {
+      if (!impactFired) {
+        impactFired = true;
+        onImpact();
+      }
       // Return to original position: quadratic ease-out
-      const rt = (elapsed - flightMs - jitterMs) / returnMs;
+      const rt = (elapsed - flightMs - recoilMs) / returnMs;
       const eased = 1 - (1 - rt) * (1 - rt);
-      element.style.translate = `${dx * (1 - eased)}px ${dy * (1 - eased)}px`;
+      element.style.translate = `${dx * 0.92 * (1 - eased)}px ${dy * 0.92 * (1 - eased)}px`;
       element.style.scale = "";
     }
 
