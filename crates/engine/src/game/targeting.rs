@@ -1281,6 +1281,27 @@ pub(crate) fn resolve_live_parent_slot_from_root(
     })
 }
 
+/// CR 608.2c + CR 608.2b: the player announced by the chain clause tagged
+/// `declares_chosen_group == Some(group)`, read from the resolving chain's
+/// declared targets. `None` when that target was illegal as the chain began to
+/// resolve (`illegal_target_slots`, CR 608.2b: an illegal target is not
+/// affected and "any part of the effect that requires that information won't
+/// happen"), or when no player was announced.
+pub(crate) fn resolve_live_declared_player(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    group: crate::types::ability::ChosenGroupId,
+) -> Option<PlayerId> {
+    let (slot, player) = super::ability_utils::declared_group_player_slot(
+        resolving_root_ability(state, ability),
+        group,
+    )??;
+    let illegal = resolution_carrier_entry(state, ability)
+        .and_then(StackEntry::ability)
+        .is_some_and(|root| root.illegal_target_slots.contains(&slot));
+    (!illegal).then_some(player)
+}
+
 pub(crate) fn is_pure_event_context_filter(target_filter: &TargetFilter) -> bool {
     matches!(
         target_filter,
@@ -1993,6 +2014,9 @@ pub fn resolve_effect_player_ref(
             Some(ability.original_controller.unwrap_or(ability.controller))
         }
         TargetFilter::ScopedPlayer => ability.scoped_player,
+        TargetFilter::DeclaredPlayer { group } => {
+            resolve_live_declared_player(state, ability, *group)
+        }
         TargetFilter::Player => ability.targets.iter().find_map(|target| match target {
             TargetRef::Player(player) => Some(*player),
             _ => None,
@@ -5691,7 +5715,7 @@ mod tests {
             resolve_player_for_context_ref(&state, &ability, &TargetFilter::TriggeringPlayer);
         assert_eq!(
             resolved,
-            PlayerId(1),
+            Some(PlayerId(1)),
             "TriggeringPlayer on a ZoneChanged event must resolve to the entering \
              creature's controller (P1), not the Suture Priest controller (P0)",
         );

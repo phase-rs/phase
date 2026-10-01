@@ -12204,6 +12204,7 @@ fn filter_binding_diverges(filter: &TargetFilter) -> bool {
         // — the population-level counterpart of `ObjectScope::Target`.
         TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
         | TargetFilter::ScopedPlayer

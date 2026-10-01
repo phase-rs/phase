@@ -99,7 +99,11 @@ pub fn resolve(
         ),
     };
 
-    let library_owner = super::resolve_player_for_context_ref(state, ability, library_owner_filter);
+    let Some(library_owner) =
+        super::resolve_player_for_context_ref(state, ability, library_owner_filter)
+    else {
+        return Ok(());
+    };
 
     // CR 401.5 + CR 608.2c: This Dig's own outcome — not a stale value from an
     // earlier link in the same chain — is what `apply_parent_chain_context`

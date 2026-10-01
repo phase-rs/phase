@@ -39,7 +39,11 @@ pub fn resolve(
             // targeted parent does not inherit the parent's chosen player.
             super::resolve_player_for_context_ref(state, ability, target),
         ),
-        _ => (1, Zone::Graveyard, ability.controller),
+        _ => (1, Zone::Graveyard, Some(ability.controller)),
+    };
+    // CR 608.2b: a declared player whose target was illegal is not milled.
+    let Some(target_player) = target_player else {
+        return Ok(());
     };
 
     if destination == Zone::Graveyard {

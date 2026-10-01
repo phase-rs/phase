@@ -7842,6 +7842,16 @@ pub enum TargetFilter {
     ParentTargetSlot {
         index: usize,
     },
+    /// CR 608.2c + CR 115.1a: the player announced as the target of the chain
+    /// clause tagged `declares_chosen_group == Some(group)` ("Target player
+    /// draws a card. That player discards a card."). A later clause names that
+    /// player without declaring a second target, so it surfaces no target slot.
+    /// Resolved live from the resolving chain (`targeting::resolve_live_declared_player`),
+    /// never by position; names no player when that target was illegal
+    /// (CR 608.2b), so the clause affects no one.
+    DeclaredPlayer {
+        group: ChosenGroupId,
+    },
     /// CR 608.2c: Resolves to the controller of the parent ability's target object.
     /// Used for "its controller" in compound effects (e.g., "counter target spell. Its controller
     /// loses 2 life."). At resolution time, looks up the controller of the first parent target.
@@ -21544,6 +21554,7 @@ impl TargetFilter {
                 | TargetFilter::AmassedArmy
                 | TargetFilter::ParentTarget
                 | TargetFilter::ParentTargetSlot { .. }
+                | TargetFilter::DeclaredPlayer { .. }
                 | TargetFilter::ParentTargetController
                 // CR 115.1: only something identified by the word "target" is a
                 // target, so this reference — read from the triggering event at
@@ -25988,6 +25999,12 @@ impl TargetChoiceTiming {
 /// Identity of one announced target group within an ability definition chain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ChosenGroupId(pub u32);
+
+impl ChosenGroupId {
+    /// Ids the parser mints for a player-declaring clause start here, disjoint
+    /// from the `ClauseId`-derived ids of `TargetOnly` producers.
+    pub const DECLARED_PLAYER_BASE: u32 = 1 << 31;
+}
 
 /// Identity of one return instruction in a parsed ability chain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

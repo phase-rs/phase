@@ -64357,7 +64357,7 @@ fn is_unimplemented_def(def: &AbilityDefinition) -> bool {
 /// `V-PAIR`'s whole subject. So the compile-error net is total over the variant
 /// dimension of all three enums and over their filter-field dimension; it is
 /// NOT total over that quantity-field dimension, which is written down here
-/// rather than claimed away. The 49 leaf variants in this function's final arm
+/// rather than claimed away. The leaf variants in this function's final arm
 /// carry no nested filter at all, so `false` is their answer, not a default.
 fn filter_has_chosen_color(f: &TargetFilter) -> bool {
     match f {
@@ -64409,6 +64409,7 @@ fn filter_has_chosen_color(f: &TargetFilter) -> bool {
         | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
+        | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::SourceChosenPlayer
         | TargetFilter::OriginalController
         | TargetFilter::OriginalSource

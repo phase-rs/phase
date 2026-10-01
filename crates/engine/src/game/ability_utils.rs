@@ -2039,6 +2039,40 @@ pub fn flatten_targets_in_chain(ability: &ResolvedAbility) -> Vec<TargetRef> {
     targets
 }
 
+/// CR 608.2c + CR 115.1a: the first player target the chain node tagged
+/// `declares_chosen_group == Some(group)` announced, with its slot number as
+/// [`flatten_targets_in_chain`] numbers it (the numbering
+/// `ResolvedAbility::illegal_target_slots` uses). The outer `None` means no node
+/// carries `group`; the inner `None` means that node announced no player.
+pub(crate) fn declared_group_player_slot(
+    root: &ResolvedAbility,
+    group: crate::types::ability::ChosenGroupId,
+) -> Option<Option<(usize, PlayerId)>> {
+    fn walk(
+        node: &ResolvedAbility,
+        group: crate::types::ability::ChosenGroupId,
+        offset: &mut usize,
+    ) -> Option<Option<(usize, PlayerId)>> {
+        let own = chain_node_targets(node);
+        if node.declares_chosen_group == Some(group) {
+            return Some(own.iter().enumerate().find_map(|(i, target)| match target {
+                TargetRef::Player(player) => Some((*offset + i, *player)),
+                TargetRef::Object(_) => None,
+            }));
+        }
+        *offset += own.len();
+        node.sub_ability
+            .as_deref()
+            .and_then(|sub| walk(sub, group, offset))
+            .or_else(|| {
+                node.else_ability
+                    .as_deref()
+                    .and_then(|other| walk(other, group, offset))
+            })
+    }
+    walk(root, group, &mut 0)
+}
+
 /// CR 601.2c: The targets a chain declares, as [`flatten_targets_in_chain`]
 /// lists them except that a node delegating to a paid "instead" sub contributes
 /// only that sub's targets. When the additional cost was paid, the sub's targets
@@ -25146,5 +25180,53 @@ mod tests {
             assert_walk_accounting(outcome, &budget, work);
         }
         assert_eq!(exhausted, full_cost);
+    }
+
+    /// CR 608.2c: a declared group names the slot `flatten_targets_in_chain` numbers.
+    #[test]
+    fn declared_group_player_slot_follows_chain_numbering() {
+        use crate::types::ability::ChosenGroupId;
+        let base = ChosenGroupId::DECLARED_PLAYER_BASE;
+        let (g1, g2, g3, g4) = (
+            ChosenGroupId(base),
+            ChosenGroupId(base + 1),
+            ChosenGroupId(base + 2),
+            ChosenGroupId(base + 3),
+        );
+        let (p, o) = (
+            |n: u32| TargetRef::Player(PlayerId(n as u8)),
+            |n: u64| TargetRef::Object(ObjectId(n)),
+        );
+        let node = |group: Option<ChosenGroupId>, targets: Vec<TargetRef>| {
+            let mut n = ResolvedAbility::new(
+                Effect::TargetOnly {
+                    target: TargetFilter::Any,
+                },
+                targets,
+                ObjectId(1),
+                PlayerId(0),
+            );
+            n.declares_chosen_group = group;
+            n
+        };
+        // Numbering: root [o1], sub [p0, o2], sub.sub (g2) [p2], else (g1) [o3, p1],
+        // else.sub (g3) [o4].
+        let root = node(None, vec![o(1)])
+            .sub_ability(node(None, vec![p(0), o(2)]).sub_ability(node(Some(g2), vec![p(2)])))
+            .else_ability(node(Some(g1), vec![o(3), p(1)]).sub_ability(node(Some(g3), vec![o(4)])));
+        let flat = flatten_targets_in_chain(&root);
+        for (group, slot, player) in [(g2, 3, PlayerId(2)), (g1, 5, PlayerId(1))] {
+            assert_eq!(
+                declared_group_player_slot(&root, group),
+                Some(Some((slot, player)))
+            );
+            assert_eq!(flat[slot], TargetRef::Player(player));
+        }
+        assert_eq!(
+            declared_group_player_slot(&root, g3),
+            Some(None),
+            "a tagged node that announced no player"
+        );
+        assert_eq!(declared_group_player_slot(&root, g4), None, "no such group");
     }
 }

@@ -126,7 +126,9 @@ pub fn resolve(
     // change: loop the step-5 draw `count` times, consuming `state.rng` in
     // order for determinism, and enqueue one `PendingCopyTokenBatch { count: 1 }`
     // per pick.
-    let token_owner = resolve_token_owner(state, ability, &owner_filter);
+    let Some(token_owner) = resolve_token_owner(state, ability, &owner_filter) else {
+        return Ok(());
+    };
     let count = resolve_quantity_with_targets(state, count, ability).max(0) as u32;
 
     // 8. Emit the copy through the SHARED replacement + apply path. The drain

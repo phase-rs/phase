@@ -3807,6 +3807,7 @@ fn ability_reads_last_created(def: &AbilityDefinition) -> bool {
             | TargetFilter::EventTargetController
             | TargetFilter::ParentTarget
             | TargetFilter::ParentTargetSlot { .. }
+            | TargetFilter::DeclaredPlayer { .. }
             | TargetFilter::ParentTargetController
             | TargetFilter::ParentTargetOwner
             | TargetFilter::SourceChosenPlayer
@@ -3903,6 +3904,7 @@ pub(super) fn filter_tree_has_chosen_card(filter: &TargetFilter) -> bool {
         | TargetFilter::EventTargetController
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
         | TargetFilter::SourceChosenPlayer

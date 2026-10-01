@@ -210,6 +210,10 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 107 — TargetFilter gains DeclaredPlayer { group } (CR 608.2c + CR 115.1a), the
+ *      player a later clause names after a declared target player. A v106 peer
+ *      cannot deserialize it; the exact-match handshake refuses the pairing. P2P
+ *      moves in lockstep (wire 89); lobby messages are unchanged.
  * 106 — Full-game replacement-choice preferences, exact source/definition
  *       identities, remembered ordering/optional actions, and prompt
  *       eligibility metadata. P2P moves in lockstep (wire 88); lobby-only
@@ -694,7 +698,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 106;
+export const PROTOCOL_VERSION = 107;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

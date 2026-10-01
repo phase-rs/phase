@@ -5624,9 +5624,9 @@ fn referent_exists_without_gated_action(
                     ) => false,
                 }
         }
-        TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { index: _ } => {
-            parent_target_is_declared
-        }
+        TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { index: _ }
+        | TargetFilter::DeclaredPlayer { .. } => parent_target_is_declared,
         TargetFilter::Not { filter } => {
             referent_exists_without_gated_action(filter, parent_target_is_declared)
         }
@@ -11808,7 +11808,24 @@ pub(crate) fn controller_for_relative_filter(
 ///    `post_replacement_event_source` (PostReplacementSourceController).
 /// 4. Fall back to `ability.controller` (preserves prior semantics for context
 ///    refs whose state slots are empty in the current resolution window).
+///
+/// CR 608.2b: `None` only for a [`TargetFilter::DeclaredPlayer`] whose target was
+/// illegal (or never announced); the effect then affects no one. Every other
+/// filter resolves to some player.
 pub(crate) fn resolve_player_for_context_ref(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target_filter: &TargetFilter,
+) -> Option<PlayerId> {
+    match target_filter {
+        TargetFilter::DeclaredPlayer { group } => {
+            crate::game::targeting::resolve_live_declared_player(state, ability, *group)
+        }
+        _ => Some(resolve_context_player(state, ability, target_filter)),
+    }
+}
+
+fn resolve_context_player(
     state: &GameState,
     ability: &ResolvedAbility,
     target_filter: &TargetFilter,
@@ -26292,7 +26309,7 @@ mod tests {
 
         assert_eq!(
             resolve_player_for_context_ref(&state, &ability, &TargetFilter::ParentTargetController,),
-            PlayerId(1),
+            Some(PlayerId(1)),
         );
     }
 

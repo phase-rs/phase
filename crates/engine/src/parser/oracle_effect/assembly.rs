@@ -1789,6 +1789,7 @@ fn subject_anchored_optional_actor(
             | TargetFilter::EventTarget
             | TargetFilter::ParentTarget
             | TargetFilter::ParentTargetSlot { .. }
+            | TargetFilter::DeclaredPlayer { .. }
             | TargetFilter::SourceChosenPlayer
             | TargetFilter::OriginalController
             | TargetFilter::OriginalSource
@@ -1915,6 +1916,7 @@ fn subject_anchored_optional_actor(
             | TargetFilter::EventTarget
             | TargetFilter::ParentTarget
             | TargetFilter::ParentTargetSlot { .. }
+            | TargetFilter::DeclaredPlayer { .. }
             | TargetFilter::OriginalSource
             | TargetFilter::HasChosenName
             | TargetFilter::ChosenDamageSource { .. }

@@ -151,7 +151,10 @@ pub fn resolve(
     // context (CR 608.2c: the controller follows the spell/ability's
     // instructions), so e.g. Mirrored Depths' controller is the one who counters
     // the spell on a lost flip.
-    let flipper = super::resolve_player_for_context_ref(state, ability, flipper);
+    // CR 608.2b: a declared player whose target was illegal flips no coin.
+    let Some(flipper) = super::resolve_player_for_context_ref(state, ability, flipper) else {
+        return Ok(());
+    };
 
     // CR 705.1 + CR 614.1a: route the flip through the replacement pipeline so
     // Krark's Thumb can double it.
@@ -247,7 +250,10 @@ pub fn resolve_flip_coins(
     // player flips a coin" is NOT this case — it rides the surrounding
     // `player_scope` iteration, which rebinds `ability.controller` per player, so
     // a `Controller` flipper there flips once per player (CR 101.4 APNAP).
-    let flipper = super::resolve_player_for_context_ref(state, ability, flipper);
+    // CR 608.2b: a declared player whose target was illegal flips no coin.
+    let Some(flipper) = super::resolve_player_for_context_ref(state, ability, flipper) else {
+        return Ok(());
+    };
 
     // CR 107.1: resolve `count` in the ability's context; clamp at zero.
     let n = resolve_quantity_with_targets(state, count_expr, ability).max(0) as u32;

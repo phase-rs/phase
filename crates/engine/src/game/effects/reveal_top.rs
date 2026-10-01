@@ -79,7 +79,10 @@ pub fn resolve(
     // DefendingPlayer, etc.) must consult state slots, not `ability.targets`,
     // so a chained "reveal top of your library" sub-ability does not inherit
     // the parent's Player target and reveal from the wrong library.
-    let target_player = super::resolve_player_for_context_ref(state, ability, &player_filter);
+    let Some(target_player) = super::resolve_player_for_context_ref(state, ability, &player_filter)
+    else {
+        return Ok(());
+    };
 
     let library = &state.players[target_player.0 as usize].library;
     if library.is_empty() {

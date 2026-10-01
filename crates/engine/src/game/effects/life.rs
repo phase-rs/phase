@@ -58,7 +58,10 @@ pub fn resolve_gain(
     // authority for player resolution from a TargetFilter — context-refs
     // (Controller, ParentTargetController) resolve via state slots; explicit
     // Player targets come from `ability.targets`.
-    let player_id: PlayerId = resolve_life_loss_target(state, ability, Some(player_filter));
+    // CR 608.2b: a declared player whose target was illegal gains nothing.
+    let Some(player_id) = resolve_life_loss_target(state, ability, Some(player_filter)) else {
+        return Ok(());
+    };
 
     // CR 119.7: "If an effect says that a player can't gain life ... a replacement
     // effect that would replace a life gain event affecting that player won't do
@@ -580,7 +583,10 @@ pub fn resolve_lose(
         _ => return Err(EffectError::MissingParam("LoseLife amount".to_string())),
     };
 
-    let target_player_id = resolve_life_loss_target(state, ability, target_filter);
+    // CR 608.2b: a declared player whose target was illegal loses nothing.
+    let Some(target_player_id) = resolve_life_loss_target(state, ability, target_filter) else {
+        return Ok(());
+    };
 
     if apply_life_loss(state, target_player_id, amount.max(0) as u32, events).is_err() {
         return Ok(());
@@ -599,7 +605,7 @@ pub(super) fn resolve_life_loss_target(
     state: &GameState,
     ability: &ResolvedAbility,
     target_filter: Option<&TargetFilter>,
-) -> PlayerId {
+) -> Option<PlayerId> {
     // CR 115.1: When the filter is a context-ref (Controller, etc.) the acting
     // player MUST come from state slots — not `ability.targets`, which inherits
     // the parent's chosen Player target via chain target propagation. Mirrors
@@ -617,12 +623,12 @@ pub(super) fn resolve_life_loss_target(
     if let Some(player) =
         crate::game::ability_utils::primary_announced_player(&ability.targets, ability)
     {
-        return player;
+        return Some(player);
     }
 
     // No filter and no Player target: defensive fallback to controller (matches
     // historical behavior for `LoseLife { target: None }`).
-    ability.controller
+    Some(ability.controller)
 }
 
 /// CR 119.5: Set a player's life total to a specific number.

@@ -1427,7 +1427,9 @@ fn scope_of(target: &TargetFilter, chain_root: Option<WriteScope>) -> WriteScope
             WriteScope::SelfSource
         }
         TargetFilter::TriggeringSource => WriteScope::EventObject,
-        TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. } => {
+        TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. } => {
             chain_root.unwrap_or(WriteScope::EventObject)
         }
         TargetFilter::LastCreated => WriteScope::Created,
@@ -2410,6 +2412,7 @@ fn legacy_target_filter(f: &TargetFilter) -> bool {
                 || tf.properties.iter().any(legacy_filter_prop)
         }
         TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::EventTargetController
@@ -2652,6 +2655,7 @@ fn member_bound_target_filter(f: &TargetFilter) -> bool {
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::StackAbility { .. }
         // CR 201.5a (PR-6.75 c5, R3 axis): two normalized-identical granted bodies
         // whose granters DIFFER each read their OWN granter ⇒ per-member-divergent
@@ -7113,6 +7117,7 @@ fn rw_target_filter(x: &TargetFilter) -> RwProfile {
         // the write path `target_is_legacy_ref` excludes it too), so it must NOT
         // set `legacy_batch_prompt`; it is a live event read like the others here.
         TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::EventTargetController

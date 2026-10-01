@@ -254,7 +254,11 @@ pub fn resolve(
             // round-trip; it falls through to the mandatory path below and
             // resolves as a zero-count draw.
             if max > 0 {
-                let drawing_player = super::resolve_player_for_context_ref(state, ability, target);
+                let Some(drawing_player) =
+                    super::resolve_player_for_context_ref(state, ability, target)
+                else {
+                    return Ok(());
+                };
                 // CR 121.3: "if an effect says that a player can't draw cards
                 // and another effect offers that player the choice to draw a
                 // card, that player can't choose to do so." CR 121.3a extends
@@ -323,7 +327,11 @@ pub fn resolve(
             // like Swans of Bryn Argoll.
             super::resolve_player_for_context_ref(state, ability, target),
         ),
-        _ => (1, ability.controller),
+        _ => (1, Some(ability.controller)),
+    };
+    // CR 608.2b: a declared player whose target was illegal draws nothing.
+    let Some(drawing_player) = drawing_player else {
+        return Ok(());
     };
 
     // CR 121.2: Route through the draw-sequence stack so a multi-card draw

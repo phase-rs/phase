@@ -6613,6 +6613,7 @@ fn build_restriction_clause(
             | TargetFilter::TriggeringSourceController
             | TargetFilter::EventTargetController
             | TargetFilter::ParentTargetSlot { .. }
+            | TargetFilter::DeclaredPlayer { .. }
             | TargetFilter::ParentTargetController
             | TargetFilter::ParentTargetOwner
             | TargetFilter::SourceChosenPlayer

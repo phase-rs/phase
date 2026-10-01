@@ -536,7 +536,10 @@ pub fn resolve(
             None,
         ),
     };
-    let token_owner = resolve_token_owner(state, ability, owner_filter);
+    // CR 608.2b: a declared player whose target was illegal creates no token.
+    let Some(token_owner) = resolve_token_owner(state, ability, owner_filter) else {
+        return Ok(());
+    };
 
     // CR 303.4 + CR 303.4i: Resolve the specified Aura/Role host once, at propose
     // time. ParentTarget reads the first Object target (the for-each loop's
@@ -2867,7 +2870,7 @@ fn try_resolve_copy_batch(
     ) {
         return None;
     }
-    let owner = resolve_token_owner(state, ability, &TargetFilter::Controller);
+    let owner = resolve_token_owner(state, ability, &TargetFilter::Controller)?;
     if token_creation_needs_choice(
         state,
         &probe_spec,
@@ -3026,7 +3029,7 @@ pub(crate) fn resolve_token_spec(
     };
 
     let count = resolve_quantity_with_targets(state, count, ability).max(0) as u32;
-    let token_owner = resolve_token_owner(state, ability, owner);
+    let token_owner = resolve_token_owner(state, ability, owner)?;
     let host_request = TokenHostRequest::from_binding(
         attach_to.is_some(),
         attach_to
@@ -3298,6 +3301,7 @@ fn classify_attach_host_authority(filter: &TargetFilter) -> AttachHostAuthority 
         | TargetFilter::SourceController
         | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::Opponent
+        | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::PlayerWhoChoseLabel { .. }
         | TargetFilter::PlayerMatching { .. }
         | TargetFilter::Neighbor { .. }
@@ -3398,7 +3402,7 @@ pub(crate) fn resolve_token_owner(
     state: &GameState,
     ability: &ResolvedAbility,
     owner_filter: &TargetFilter,
-) -> PlayerId {
+) -> Option<PlayerId> {
     // CR 115.1: Context-ref filters route through the central helper so chain
     // target propagation cannot leak the parent's Player target into a sub
     // CreateToken whose `owner: Controller`. The helper handles
@@ -3414,15 +3418,17 @@ pub(crate) fn resolve_token_owner(
     // *source* alongside the player `owner` slot, and resolving the source
     // object's controller as the token owner would be wrong. When no player
     // slot exists, the controller creates the token.
-    ability
-        .targets
-        .iter()
-        .rev()
-        .find_map(|target| match target {
-            TargetRef::Player(pid) => Some(*pid),
-            TargetRef::Object(_) => None,
-        })
-        .unwrap_or(ability.controller)
+    Some(
+        ability
+            .targets
+            .iter()
+            .rev()
+            .find_map(|target| match target {
+                TargetRef::Player(pid) => Some(*pid),
+                TargetRef::Object(_) => None,
+            })
+            .unwrap_or(ability.controller),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]

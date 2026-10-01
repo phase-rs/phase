@@ -5770,6 +5770,7 @@ fn node_reads_mutable_resolution_local_state(node: &crate::types::ability::Targe
         // fixed-object family, not with the mutable slots.
         | TargetFilter::AmassedArmy
         | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
         | TargetFilter::PostReplacementSourceController
@@ -5897,6 +5898,7 @@ fn node_has_non_arrival_invariant_property(node: &crate::types::ability::TargetF
         | TargetFilter::ParentTarget
         | TargetFilter::AmassedArmy
         | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
         | TargetFilter::PostReplacementSourceController

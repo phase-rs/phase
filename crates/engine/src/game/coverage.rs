@@ -770,6 +770,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::DefendingPlayer => "defending player".into(),
         TargetFilter::ParentTarget => "parent target".into(),
         TargetFilter::ParentTargetSlot { index } => format!("parent target slot {index}"),
+        TargetFilter::DeclaredPlayer { .. } => "declared player".to_string(),
         TargetFilter::ParentTargetController => "parent target's controller".into(),
         TargetFilter::ParentTargetOwner => "parent target's owner".into(),
         TargetFilter::SourceChosenPlayer => "source's chosen player".into(),

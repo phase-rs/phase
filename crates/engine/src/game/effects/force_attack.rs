@@ -48,11 +48,8 @@ fn defender_referent(
             .next()
             .map(DefenderReferent::Object)
     };
-    let player_referent = || {
-        Some(DefenderReferent::Player(resolve_player_for_context_ref(
-            state, ability, filter,
-        )))
-    };
+    let player_referent =
+        || resolve_player_for_context_ref(state, ability, filter).map(DefenderReferent::Player);
     match filter {
         TargetFilter::SelfRef | TargetFilter::SpecificObject { .. } => object_referent(),
         // CR 608.2c: the parent's chosen target. A player-valued parent target,

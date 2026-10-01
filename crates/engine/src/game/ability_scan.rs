@@ -3389,7 +3389,7 @@ fn scan_target_filter(x: &TargetFilter, ctx: FilterReadContext, mode: ScanMode) 
             sibling: false,
             projected: false,
         },
-        TargetFilter::ParentTargetSlot { .. } => Axes {
+        TargetFilter::ParentTargetSlot { .. } | TargetFilter::DeclaredPlayer { .. } => Axes {
             event: true,
             sibling: false,
             projected: false,

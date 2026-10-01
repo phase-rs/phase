@@ -251,9 +251,10 @@ pub fn resolve(
     // target propagation would otherwise leak the parent's Player target into
     // a sub-ability with `target: Controller`. Mirror Draw / Mill / Discard.
     let players = if target.is_context_ref() {
-        vec![super::resolve_player_for_context_ref(
-            state, ability, target,
-        )]
+        // CR 608.2b: a declared player whose target was illegal is not affected.
+        super::resolve_player_for_context_ref(state, ability, target)
+            .into_iter()
+            .collect()
     } else {
         let targeted: Vec<_> = ability
             .targets
@@ -339,9 +340,10 @@ pub fn resolve_lose_all(
     // `ability.targets`, which would inherit a parent's chosen Player target
     // through chain propagation.
     let players: Vec<PlayerId> = if target.is_context_ref() {
-        vec![super::resolve_player_for_context_ref(
-            state, ability, target,
-        )]
+        // CR 608.2b: a declared player whose target was illegal is not affected.
+        super::resolve_player_for_context_ref(state, ability, target)
+            .into_iter()
+            .collect()
     } else {
         ability
             .targets

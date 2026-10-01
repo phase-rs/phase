@@ -3055,6 +3055,7 @@ fn matches_via_origin_scoped_branch(
         | TargetFilter::EventTargetController
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
         | TargetFilter::SourceChosenPlayer
@@ -28647,6 +28648,7 @@ fn target_filter_reads_chosen_target(filter: &TargetFilter, read: TargetRead) ->
     match filter {
         TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner => read.includes_bindable(),
         TargetFilter::Typed(TypedFilter {

@@ -32,6 +32,9 @@ pub fn resolve(
         }
         _ => return Ok(()),
     };
+    let Some(blighting_player) = blighting_player else {
+        return Ok(());
+    };
 
     let source_id = ability.source_id;
 

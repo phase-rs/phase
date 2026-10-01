@@ -197,6 +197,7 @@ pub(crate) fn affected_filter_uses_object_population(filter: &TargetFilter) -> b
         | TargetFilter::EventTarget
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
         | TargetFilter::SourceChosenPlayer
@@ -476,6 +477,7 @@ pub(crate) fn target_filter_characteristic_reads_at(
         | TargetFilter::EventTarget
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
         | TargetFilter::SourceChosenPlayer
@@ -859,6 +861,7 @@ pub(crate) fn entered_object_perturbs_affected_filter(
         | TargetFilter::EventTarget
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
         | TargetFilter::SourceChosenPlayer
@@ -1753,6 +1756,7 @@ pub(crate) fn filter_contains(filter: &TargetFilter, leaf: &dyn Fn(&TargetFilter
         | TargetFilter::EventTargetController
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
         | TargetFilter::SourceChosenPlayer
@@ -2004,6 +2008,7 @@ pub(crate) fn filter_contains_filter_prop(
         | TargetFilter::EventTargetController
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
         | TargetFilter::SourceChosenPlayer
@@ -2523,6 +2528,7 @@ fn rewrite_filter_props(
         | TargetFilter::EventTargetController
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
         | TargetFilter::SourceChosenPlayer
@@ -5032,6 +5038,7 @@ fn filter_inner_for_object(
         // mirrors ParentTargetController for the player-axis side of CR 108.3 vs CR 109.4.
         TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
+        | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::PostReplacementSourceController
         // CR 615.5: an object-typed resolution-time ref (the prevented event's
         // damage source) — resolved via `resolve_target_filter`, not by scanning
@@ -5397,6 +5404,7 @@ fn zone_change_filter_inner(
         | TargetFilter::EventTarget
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
         | TargetFilter::PostReplacementSourceController
@@ -5733,6 +5741,7 @@ pub fn spell_record_matches_filter(
         | TargetFilter::EventTarget
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
         | TargetFilter::SourceChosenPlayer
@@ -6056,6 +6065,7 @@ fn spell_object_matches_filter_inner(
         | TargetFilter::EventTarget
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
         | TargetFilter::SourceChosenPlayer
