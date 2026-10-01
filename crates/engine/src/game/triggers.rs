@@ -16458,6 +16458,16 @@ pub(crate) fn extract_target_filter_from_effect(effect: &Effect) -> Option<&Targ
     if matches!(effect, Effect::ReturnAsAura { .. }) {
         return None;
     }
+    // CR 115.10a + CR 609.7a: a SOURCE-scoped prevention ("the next time target
+    // creature would deal damage to one or more players …") declares exactly one
+    // target — its damage source, surfaced by `damage_replacement_source_slot_filter`.
+    // Its `target` field is the untargeted recipient SCOPE (`prevent_damage::resolve`
+    // never hosts a source-scoped shield on targets), so it contributes no slot.
+    if matches!(effect, Effect::PreventDamage { .. })
+        && super::ability_utils::damage_replacement_source_slot_filter(effect).is_some()
+    {
+        return None;
+    }
     // CR 115.1: ChangeZone from private zones (hand/library) uses resolution-time
     // selection, not stack-push-time targeting.
     if let Effect::ChangeZone { origin, target, .. } = effect {
@@ -16607,6 +16617,47 @@ pub mod tests {
 
     fn setup() -> GameState {
         GameState::new_two_player(42)
+    }
+
+    /// CR 115.10a + CR 609.7a: a SOURCE-scoped prevention's recipient field is
+    /// an untargeted scope, so `extract_target_filter_from_effect` surfaces no
+    /// slot for it — the only declared target is the damage source. Reach
+    /// guards: the carve-out's discriminator fires on the same input, and a
+    /// source-less `PreventDamage { target: Player }` (Defend the Hearth shape)
+    /// is unchanged.
+    #[test]
+    fn source_scoped_prevent_recipient_scope_is_not_a_target() {
+        use crate::types::ability::{PreventionAmount, PreventionScope};
+        let prevent = |damage_source_filter: Option<TargetFilter>| Effect::PreventDamage {
+            amount: PreventionAmount::All,
+            amount_dynamic: None,
+            target: TargetFilter::Player,
+            scope: PreventionScope::CombatDamage,
+            damage_source_filter,
+            prevention_duration: Some(Duration::UntilEndOfCombat),
+        };
+        let source_scoped = prevent(Some(TargetFilter::And {
+            filters: vec![
+                TargetFilter::ParentTargetSlot { index: 0 },
+                TargetFilter::Typed(TypedFilter::creature()),
+            ],
+        }));
+        assert_eq!(extract_target_filter_from_effect(&source_scoped), None);
+        // (i) the carve-out's discriminator fires on the input whose result is None.
+        assert!(
+            crate::game::ability_utils::damage_replacement_source_slot_filter(&source_scoped)
+                .is_some()
+        );
+        // (ii) the source-less shape keeps its recipient filter.
+        let source_less = prevent(None);
+        assert_eq!(
+            extract_target_filter_from_effect(&source_less),
+            Some(&TargetFilter::Player)
+        );
+        assert!(
+            crate::game::ability_utils::damage_replacement_source_slot_filter(&source_less)
+                .is_none()
+        );
     }
 
     /// CR 103.4e + CR 904.5 + CR 608.2c: Cecil's parsed resolution-time

@@ -2824,7 +2824,8 @@ pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -
     {
         // CR 608.2b + CR 609.7a: A source-scoped `PreventDamage` carries its
         // chosen source spell in `targets[0]`. `extract_target_filter_from_effect`
-        // returns `None` for its `Any` recipient, so the generic `None` arm below
+        // returns `None` for a source-scoped prevention (its recipient is an
+        // untargeted scope, CR 115.10a), so the generic `None` arm below
         // would fizzle-filter the spell to battlefield presence and drop it
         // (the spell lives on the STACK). Re-validate against the source leaf
         // (`InZone Stack`-aware) instead, preserving the spell target.
@@ -3045,7 +3046,7 @@ fn restamp_inherited_rider_target(parent: &mut ResolvedAbility) {
 /// Returns `None` for recipient-scoped or `ChosenDamageSource`/`IsChosenColor`
 /// ("by …" Arachnogenesis) prevents, so those are NOT diverted into a source
 /// target slot.
-fn damage_replacement_source_slot_filter(effect: &Effect) -> Option<&TargetFilter> {
+pub(crate) fn damage_replacement_source_slot_filter(effect: &Effect) -> Option<&TargetFilter> {
     let source_filter = match effect {
         Effect::PreventDamage {
             damage_source_filter,
@@ -3491,10 +3492,11 @@ fn collect_target_slots_inner(
     // target instant or sorcery spell would deal this turn") surfaces the
     // choosable source spell as a target slot. Declared FIRST (CR 601.2c
     // declaration order). The generic path below cannot reach it —
-    // `target_filter()` returns the `Any` recipient and short-circuits to `None`
-    // — so we surface it here, mirroring the `CreateDamageReplacement` arm. We
-    // do NOT `return`: the generic recipient logic still runs, but for the
-    // source-scoped form `target == Any` so it adds nothing.
+    // `extract_target_filter_from_effect` returns `None` for the source-scoped
+    // form (its `target` is an untargeted recipient scope —
+    // `Any`/`Player`/`Controller`) — so we surface it here, mirroring the
+    // `CreateDamageReplacement` arm. We do NOT `return`: the generic recipient
+    // logic still runs, but for the source-scoped form it adds nothing.
     if ability.target_choice_timing == TargetChoiceTiming::Stack {
         if let Some(roles) = damage_replacement_target_roles(&ability.effect) {
             for (index, role) in roles.into_iter().enumerate() {

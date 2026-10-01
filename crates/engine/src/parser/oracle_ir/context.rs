@@ -189,10 +189,12 @@ pub(crate) struct ParseContext {
     /// Whether we are inside a trigger effect (enables event context refs).
     ///
     /// Consumed by `oracle_replacement::parse_oneshot_target_source_prevent`
-    /// (the Awe Strike one-shot target-source prevention branch): inside a
-    /// trigger body "that creature" is an event-context anaphor resolved by
-    /// the trigger machinery, not a target-source capture, so the branch must
-    /// not claim trigger-body text (Ria Ivor keeps its fall-through shapes).
+    /// (the Awe Strike one-shot target-source prevention branch), which
+    /// admits a declared "target creature" subject in any body but rejects the
+    /// "that creature" anaphor inside a trigger body: there "that creature" is
+    /// an event-context anaphor resolved by the trigger machinery, not a
+    /// target-source capture (Impulsive Maneuvers keeps its fall-through; Ria
+    /// Ivor lowers).
     pub in_trigger: bool,
     /// Contextual source for the exact bare aggregate surface "those cards".
     /// Set per effect-chain chunk from the nearest typed producer, or from a

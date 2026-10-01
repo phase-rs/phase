@@ -411,10 +411,12 @@ pub fn resolve(
     // (`Typed(instant|sorcery)` leaf) is a duration-bound continuous
     // `Prevention { All }` that must keep re-firing, so it does NOT match here.
     //
-    // NOTE: `target: Any` on the parsed effect is deliberately not consulted on
-    // the `source_scoped_prevent` path below — the target slot is carried by
-    // the `damage_source_filter`'s `And`, and `Any` simply means "no recipient
-    // scope" (CR 115.1: the target slot is hosted by the source-filter `And`).
+    // NOTE: on the `source_scoped_prevent` path `target` is never a declared
+    // target (CR 115.10a) — the only target slot is hosted by the
+    // `damage_source_filter`'s `And` (CR 115.1). It is an untargeted recipient
+    // SCOPE (CR 120.1): `Any` = no recipient scope (Awe Strike); `Player` /
+    // `Controller` ("to one or more players" / "to you" — Ria Ivor) lower to
+    // `damage_target_filter` via `untargeted_damage_filter` below.
     let oneshot_source_shape = effect_source_filter
         .as_ref()
         .is_some_and(crate::types::ability::is_oneshot_target_source_prevent_shape);

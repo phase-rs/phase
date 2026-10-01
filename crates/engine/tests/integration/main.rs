@@ -1228,6 +1228,7 @@ mod retarget_prompt_softlock;
 mod rev_tithe_extractor_facedown_cast;
 mod revealed_card_type_disjunction_518;
 mod rhys_evermore_remove_counters;
+mod ria_ivor_bane_of_bladehold;
 mod riot_control_regression;
 mod ripples_of_undeath_regression;
 mod riptide_gearhulk_5994;
