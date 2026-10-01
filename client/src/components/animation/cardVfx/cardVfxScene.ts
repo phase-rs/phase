@@ -9,7 +9,10 @@
 // entry attributes it to this chunk.
 
 import {
+  type BufferGeometry,
+  type Material,
   MathUtils,
+  Mesh,
   type Object3D,
   PerspectiveCamera,
   Scene,
@@ -436,6 +439,21 @@ class CardVfxSceneRuntime implements CardVfxScene, EffectHost {
     cancelAnimationFrame(this.raf);
     this.raf = 0;
     this.disposeEffects();
+    const geometries = new Set<BufferGeometry>();
+    const materials = new Set<Material>();
+    for (const object of this.warmUpObjects ?? []) {
+      object.traverse((child) => {
+        if (!(child instanceof Mesh)) return;
+        geometries.add(child.geometry);
+        for (const material of Array.isArray(child.material) ? child.material : [child.material]) materials.add(material);
+      });
+    }
+    for (const geometry of geometries) geometry.dispose();
+    for (const material of materials) material.dispose();
+    this.placeholderTexture.dispose();
+    this.backTexture?.dispose();
+    this.scene.clear();
+    this.warmUpObjects = null;
     this.renderer.dispose();
     this.renderer.forceContextLoss();
   }

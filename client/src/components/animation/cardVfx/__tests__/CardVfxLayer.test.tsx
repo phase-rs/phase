@@ -627,6 +627,24 @@ describe("CardVfxLayer present contract", () => {
     expect(canvas().style.visibility).toBe("hidden");
   });
 
+  it("unmount releases retained warm-up resources exactly once", async () => {
+    const { unmount } = await readyLayer();
+    const objects: Mesh[] = [];
+    for (const root of calls("compileAsync")[0].children!) {
+      root.object.traverse((object) => {
+        if ((object as Mesh).isMesh) objects.push(object as Mesh);
+      });
+    }
+    const geometries = new Set(objects.map((object) => object.geometry));
+    const materials = new Set(objects.flatMap((object) => Array.isArray(object.material) ? object.material : [object.material]));
+    const card = objects.find((object) => object.name === "card-flight-warmup") as Mesh<never, ShaderMaterial>;
+    const textures = new Set<Texture>([card.material.uniforms.uFront.value, card.material.uniforms.uBack.value]);
+    const disposals = [...geometries, ...materials, ...textures].map((resource) => vi.spyOn(resource, "dispose"));
+    for (const dispose of disposals) expect(dispose).not.toHaveBeenCalled();
+    unmount();
+    for (const dispose of disposals) expect(dispose).toHaveBeenCalledTimes(1);
+  });
+
   it("V3-1m: unmount runs each waiting Classic once, releases each veil once, and nothing after", async () => {
     const { present, unmount } = await readyLayer();
     handCard(X);
