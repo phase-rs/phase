@@ -2187,8 +2187,8 @@ fn evils_thrall() {
 
 // CR 208.1 + CR 608.2c: a typed "if that creature has greater power than ~"
 // gate (QuantityCheck) on the tap's chained clause, linked to the tap's target
-// through the chosen-group channel, with "the difference" bound to the gate's
-// operands (Conformer Shuriken's granted attack trigger).
+// through `TargetReadOrigin::ParentAnnouncement`, with "the difference" bound
+// to the gate's operands (Conformer Shuriken's granted attack trigger).
 #[test]
 fn conformer_shuriken() {
     let (ir, lowered) = parse_two_layer(

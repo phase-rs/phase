@@ -13376,9 +13376,6 @@ mod tests {
     /// same rider with the default origin keeps its count-derived slot.
     #[test]
     fn parent_announcement_rider_inherits_and_keeps_descending() {
-        use crate::types::ability::TapStateChange;
-        use crate::types::counter::CounterType;
-
         let tap = || {
             ResolvedAbility::new(
                 Effect::SetTapState {

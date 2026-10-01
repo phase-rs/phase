@@ -9,6 +9,7 @@ use crate::parser::oracle_util::GRANTING_SELF_PLACEHOLDER;
 use crate::types::ability::{
     AdditionalCostOrigin, AdditionalCostPaymentSource, CountScope, CounterAdjustment,
     DamageKindFilter, DoorLockOp, PlayerRelation, SpellStackToGraveyardReplacement, SubAbilityLink,
+    TargetReadOrigin,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::triggers::AttackTargetFilter;
@@ -26086,7 +26087,6 @@ fn assert_comparative_difference_chain(
     stat: fn(ObjectScope) -> QuantityRef,
     comparator: Comparator,
 ) {
-    use crate::types::counter::CounterType;
     assert!(
         !format!("{r:?}").contains("Unimplemented"),
         "the whole card must parse with no Unimplemented: {r:#?}"
@@ -26227,7 +26227,6 @@ fn comparative_pt_gate_without_a_target_antecedent_fails_closed() {
 /// exists and either keeps its own default-origin `Target` read or fails closed.
 #[test]
 fn comparative_gate_naming_a_new_target_is_not_linked_to_the_parent() {
-    use crate::types::ability::TargetReadOrigin;
     let r = parse(
         "Equipped creature has \"Whenever this creature attacks, tap target creature defending player controls. If target creature has greater power than this creature, put a number of +1/+1 counters on this creature equal to the difference.\"\nEquip {2}",
         "Test Shuriken",
@@ -26347,7 +26346,6 @@ fn rider_declaring_its_own_target_fails_closed() {
 /// Real keyword gates (Toxic, Flying) are unchanged.
 #[test]
 fn unknown_keyword_gate_fails_closed() {
-    use crate::types::keywords::Keyword;
     for (name, text, types) in [
         (
             "Bring Low",

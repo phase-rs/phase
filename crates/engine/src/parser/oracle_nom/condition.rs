@@ -21606,7 +21606,6 @@ mod tests {
     /// stat-first "power greater than ~'s power" order are refused.
     #[test]
     fn test_parse_has_comparative_pt_vs_source_accepted_shapes() {
-        use crate::types::ability::ObjectScope;
         let power = |scope| QuantityRef::Power { scope };
         let toughness = |scope| QuantityRef::Toughness { scope };
         for (text, comparator, lhs, rhs) in [

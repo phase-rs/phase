@@ -17,16 +17,18 @@
 //! `GameRunner::cast` at P0's priority while the trigger waits on the stack.
 //! Their mana costs are left unset: the tests are about stack timing, not payment.
 
+use engine::game::ability_utils::validate_targets_in_chain;
 use engine::game::derived_views::derive_views;
 use engine::game::game_object::AttachTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::TargetRef;
+use engine::game::triggers::drain_order_triggers_with_identity;
+use engine::types::ability::{Effect, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
-use engine::types::game_state::{GameState, StackEntryKind, WaitingFor};
+use engine::types::game_state::{GameState, StackEntry, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaType, ManaUnit};
+use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -891,7 +893,6 @@ const STRIVE_LINE: &str = "This spell costs {1} more to cast for each target bey
 /// `generic` colorless. Returns the mana left in P0's pool, the creature's
 /// zone, P1's life change, and P0's draws.
 fn cast_strive_modal(body: &str, generic: usize) -> (usize, Zone, i32, i64) {
-    use engine::types::mana::{ManaCost, ManaCostShard};
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let creature = scenario.add_creature(P1, "Creature A", 3, 3).id();
@@ -989,8 +990,6 @@ const EXILE_OPP_GAIN_TAP: &str = "Exile target creature an opponent controls. It
 
 /// Returns (A's zone, B tapped, B's +1/+1 counters, P1's life change, B's zone).
 fn exile_gain_tap_with_slot_reader(response: Option<Response>) -> (Zone, bool, u32, i32, Zone) {
-    use engine::types::ability::QuantityExpr;
-    use engine::types::ability::{Effect, ResolvedAbility, TargetFilter};
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let leg2 = response == Some(Response::UnsummonA);
@@ -1165,11 +1164,6 @@ enum RiderHead {
 /// Returns (the rider's targets after validation, Surveil prompts, P1's life
 /// change, the victim's zone).
 fn life_gain_rider_under(head: RiderHead) -> (Vec<TargetRef>, usize, i32, Zone) {
-    use engine::game::ability_utils::validate_targets_in_chain;
-    use engine::game::triggers::drain_order_triggers_with_identity;
-    use engine::types::ability::{Effect, ResolvedAbility};
-    use engine::types::game_state::StackEntry;
-
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let victim = scenario.add_creature(P1, "Victim", 3, 3).id();
