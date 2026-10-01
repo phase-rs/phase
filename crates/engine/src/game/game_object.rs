@@ -649,21 +649,23 @@ fn art_keyword_family_name(keyword: &Keyword) -> String {
 
 /// Derivation-event counter for the allocation/reuse discrimination test:
 /// incremented on every intrinsic-descriptor materialization so tests can
-/// prove ordinary layer passes reuse live state. Test/support only.
+/// prove ordinary layer passes reuse live state. Thread-local so concurrently
+/// running tests cannot contribute to another test's measured interval. Test/support only.
 #[cfg(any(test, feature = "test-support"))]
-static TOKEN_ART_DERIVATION_COUNT: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+std::thread_local! {
+    static TOKEN_ART_DERIVATION_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 /// Reset the derivation counter. Test/support only.
 #[cfg(any(test, feature = "test-support"))]
 pub fn reset_token_art_derivation_count() {
-    TOKEN_ART_DERIVATION_COUNT.store(0, std::sync::atomic::Ordering::Relaxed);
+    TOKEN_ART_DERIVATION_COUNT.with(|count| count.set(0));
 }
 
 /// Read the derivation counter. Test/support only.
 #[cfg(any(test, feature = "test-support"))]
 pub fn token_art_derivation_count() -> usize {
-    TOKEN_ART_DERIVATION_COUNT.load(std::sync::atomic::Ordering::Relaxed)
+    TOKEN_ART_DERIVATION_COUNT.with(std::cell::Cell::get)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3380,7 +3382,7 @@ impl GameObject {
     /// vanilla token as ability-bearing.
     pub(crate) fn intrinsic_token_art(&self) -> TokenArtDescriptor {
         #[cfg(any(test, feature = "test-support"))]
-        TOKEN_ART_DERIVATION_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        TOKEN_ART_DERIVATION_COUNT.with(|count| count.set(count.get() + 1));
         let mut keywords = Vec::new();
         for keyword in self.base_keywords.iter() {
             let name = art_keyword_family_name(keyword);

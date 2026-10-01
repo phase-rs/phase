@@ -277,9 +277,9 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
         } else {
             card_face.attraction_lights.clone()
         };
-        // Face install rewrites the printed base: restore the derived art baseline.
-        obj.restore_token_art_baseline();
     }
+    // Face install rewrites the printed base: restore the derived art baseline.
+    obj.restore_token_art_baseline();
 }
 
 pub fn apply_card_face_to_back_face(back_face: &mut BackFaceData, card_face: &CardFace) {
