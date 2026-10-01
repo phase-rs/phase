@@ -12958,20 +12958,22 @@ mod tests {
         match_create_of_those_tokens, nest_whenever_this_turn_token_cleanup_delayed_trigger,
         parse_enter_counters_clause_body, parse_where_x_quantity_expression,
         patch_choose_from_zone_counter_continuation_target, relink_gated_token_referent_consumers,
-        strip_redundant_flip_win_quantifier, strip_return_destination_ext_with_remainder,
-        strip_temporal_prefix, strip_temporal_suffix, strip_trailing_duration,
-        strip_trailing_where_x, value_quantity_clause_owns_this_turn_suffix,
-        ControlClausePossessor,
+        relink_gated_tracked_set_consumers, strip_redundant_flip_win_quantifier,
+        strip_return_destination_ext_with_remainder, strip_temporal_prefix, strip_temporal_suffix,
+        strip_trailing_duration, strip_trailing_where_x,
+        value_quantity_clause_owns_this_turn_suffix, ControlClausePossessor,
     };
     use crate::parser::oracle_ir::diagnostic::ClauseGapKind;
     use crate::parser::oracle_util::TextPair;
     use crate::types::ability::{
-        AbilityCondition, AbilityDefinition, AbilityKind, AggregateFunction,
-        ContinuousModification, DelayedTriggerCondition, Duration, Effect, ModalChoice,
-        MultiTargetSpec, ObjectProperty, ObjectScope, PtValue, QuantityExpr, QuantityRef,
-        SubAbilityLink, TargetFilter, TriggerDefinition,
+        AbilityCondition, AbilityDefinition, AbilityKind, AggregateFunction, CardSelectionMode,
+        Chooser, ContinuousModification, DelayedTriggerCondition, Duration, Effect, ModalChoice,
+        MultiTargetSpec, ObjectProperty, ObjectScope, PerPlayerScope, PtValue, QuantityExpr,
+        QuantityRef, SubAbilityLink, TargetFilter, TriggerDefinition, ZoneChoiceCandidateSource,
+        ZoneOwner,
     };
     use crate::types::counter::CounterType;
+    use crate::types::identifiers::TrackedSetId;
     use crate::types::keywords::KeywordKind;
     use crate::types::phase::Phase;
     use crate::types::triggers::{PlaneswalkRole, TriggerMode};
@@ -13106,12 +13108,6 @@ mod tests {
     /// `ChooseFromZone` and the single-pool row is relinked.
     #[test]
     fn gated_tracked_set_relink_admits_only_the_per_opponent_destroy() {
-        use super::relink_gated_tracked_set_consumers;
-        use crate::types::ability::{
-            CardSelectionMode, Chooser, PerPlayerScope, ZoneChoiceCandidateSource, ZoneOwner,
-        };
-        use crate::types::identifiers::TrackedSetId;
-
         fn gated_choice(zone_owner: ZoneOwner) -> AbilityDefinition {
             let mut choice = AbilityDefinition::new(
                 AbilityKind::Spell,
