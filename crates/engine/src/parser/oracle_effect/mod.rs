@@ -4477,9 +4477,10 @@ fn parse_cast_this_way_gains_rider_prefix(text: &str) -> Option<&str> {
 /// Values come from the shared `parse_continuous_modifications` authority (the
 /// same classifier the existing counter/type rider family and the static route
 /// use), so a rider body and an identical static body cannot classify
-/// differently. The keyword/quoted grammar is the full-consumption witness;
-/// an unclassifiable quoted segment or an unknown keyword fails the match
-/// instead of silently dropping that segment.
+/// differently. The keyword/quoted grammar is the full-consumption witness:
+/// an empty quoted segment or an unknown keyword fails the match; an unknown
+/// non-empty quoted body is represented by the shared inner classifier as a
+/// GrantAbility carrying Unimplemented, never silently dropped.
 pub(crate) fn try_parse_cast_this_way_gains_rider_body(
     text: &str,
 ) -> Option<(&str, Vec<ContinuousModification>)> {
@@ -4529,8 +4530,10 @@ fn parse_cast_this_way_gains_rider_body_grammar(input: &str) -> OracleResult<'_,
 }
 
 /// One body segment: a quoted granted ability (required to classify non-empty
-/// through the shared inner classifier, so an unknown quoted ability fails
-/// closed) or an evergreen-keyword grant list.
+/// through the shared inner classifier — only an empty quoted body fails the
+/// segment match, while an unknown non-empty quoted ability is represented as
+/// a GrantAbility carrying Unimplemented, never silently dropped) or an
+/// evergreen-keyword grant list.
 fn parse_cast_this_way_gains_rider_segment(input: &str) -> OracleResult<'_, ()> {
     alt((
         parse_cast_this_way_gains_rider_quoted_segment,

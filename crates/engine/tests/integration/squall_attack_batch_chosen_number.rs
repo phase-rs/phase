@@ -34,7 +34,7 @@ use engine::types::ability::{
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::game_state::{StackEntryKind, WaitingFor};
-use engine::types::identifiers::ObjectId;
+use engine::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::triggers::AttackTargetFilter;
@@ -160,6 +160,30 @@ fn declare_squall_attack(fixture: &mut SquallFixture) {
         .declare_attackers(&[(fixture.attacker, AttackTarget::Player(P1))])
         .expect("the attack declaration must be legal");
     order_triggers_if_needed(&mut fixture.runner);
+}
+
+/// CR 400.7 + CR 603.4 + CR 608.2h: flicker the attacker between the trigger's
+/// stacking and its resolution — leave the battlefield (the exit-time snapshot
+/// is keyed to the attacking incarnation) and return as a new incarnation at
+/// the same storage id.
+fn blink_attacker(runner: &mut GameRunner, attacker: ObjectId) {
+    let mut events = Vec::new();
+    move_to_zone(runner.state_mut(), attacker, Zone::Exile, &mut events);
+    move_to_zone(runner.state_mut(), attacker, Zone::Battlefield, &mut events);
+}
+
+/// The attacking incarnation pinned by the declaration ledger.
+fn attacking_pin(runner: &GameRunner, attacker: ObjectId) -> ObjectIncarnationRef {
+    runner
+        .state()
+        .combat
+        .as_ref()
+        .expect("combat is active")
+        .attacking_incarnations_this_combat
+        .iter()
+        .find(|reference| reference.object_id == attacker)
+        .copied()
+        .expect("the declaration ledger pins the attacker")
 }
 
 /// Row 4.3 positive: a qualifying attacker attacking an opponent of Squall's
@@ -555,5 +579,152 @@ fn ceased_token_qualifier_reads_lki() {
         fixture.runner.life(P1),
         life_before - 3,
         "the purged token's LKI qualifies: the ability resolves"
+    );
+}
+
+/// Row F1(a): a matching-at-fire attacker blinks between stacking and
+/// resolution. The recheck is answered by the attacking incarnation's
+/// last-battlefield P/T (0/2), so the ability resolves even though the returned
+/// incarnation is 1/3; without the pin the live 1/3 removes it.
+#[test]
+fn blinked_attacker_resolves_from_the_attacking_incarnation() {
+    let mut fixture = squall_fixture(2, 0, 2);
+    let life_before = fixture.runner.life(P1);
+    declare_squall_attack(&mut fixture);
+    assert_eq!(
+        stack_condition_for_source(&fixture.runner, fixture.squall),
+        Some(chosen_number_condition(ControllerRef::Opponent)),
+        "reach guard: the retained condition is on the stack before the blink"
+    );
+
+    let pin = attacking_pin(&fixture.runner, fixture.attacker);
+    let incarnation_before = pin.incarnation;
+    blink_attacker(&mut fixture.runner, fixture.attacker);
+
+    assert_eq!(
+        fixture.runner.state().objects[&fixture.attacker].zone,
+        Zone::Battlefield,
+        "the blink must return the attacker to the battlefield"
+    );
+    assert_ne!(
+        fixture.runner.state().objects[&fixture.attacker].incarnation,
+        incarnation_before,
+        "CR 400.7: the returned object is a new incarnation"
+    );
+    assert!(
+        fixture
+            .runner
+            .state()
+            .combat
+            .as_ref()
+            .is_some_and(|combat| combat.attacking_incarnations_this_combat.contains(&pin)),
+        "the declaration ledger keeps pinning the attacking incarnation"
+    );
+    assert!(
+        fixture
+            .runner
+            .state()
+            .lki_by_incarnation
+            .get(&fixture.attacker)
+            .is_some_and(|history| history.contains_key(&incarnation_before)),
+        "the exit must have captured the attacking incarnation's snapshot"
+    );
+
+    fixture
+        .runner
+        .state_mut()
+        .objects
+        .get_mut(&fixture.attacker)
+        .expect("attacker exists")
+        .counters
+        .insert(CounterType::Plus1Plus1, 1);
+    fixture.runner.state_mut().layers_dirty.mark_full();
+    layers::evaluate_layers(fixture.runner.state_mut());
+    let object = &fixture.runner.state().objects[&fixture.attacker];
+    assert_eq!(
+        (object.power, object.toughness),
+        (Some(1), Some(3)),
+        "the returned incarnation no longer matches the chosen number"
+    );
+
+    fixture.runner.advance_until_stack_empty();
+    assert_eq!(
+        fixture.runner.life(P1),
+        life_before - 3,
+        "the pinned attacking incarnation (0/2) still qualifies: damage resolves"
+    );
+}
+
+/// Row F1(b): a matching-at-fire attacker becomes 1/3 (no longer matching) and
+/// then blinks. The pinned attacking incarnation's last-battlefield P/T (1/3)
+/// does not qualify, so the ability is removed; without the pin the returned
+/// live 0/2 would wrongly resolve it.
+#[test]
+fn blinked_attacker_is_removed_by_the_attacking_incarnations_lki() {
+    let mut fixture = squall_fixture(2, 0, 2);
+    let life_before = fixture.runner.life(P1);
+    declare_squall_attack(&mut fixture);
+    assert_eq!(
+        stack_condition_for_source(&fixture.runner, fixture.squall),
+        Some(chosen_number_condition(ControllerRef::Opponent)),
+        "reach guard: the retained condition is on the stack before the change"
+    );
+
+    let pin = attacking_pin(&fixture.runner, fixture.attacker);
+    let incarnation_before = pin.incarnation;
+
+    fixture
+        .runner
+        .state_mut()
+        .objects
+        .get_mut(&fixture.attacker)
+        .expect("attacker exists")
+        .counters
+        .insert(CounterType::Plus1Plus1, 1);
+    fixture.runner.state_mut().layers_dirty.mark_full();
+    layers::evaluate_layers(fixture.runner.state_mut());
+    let object = &fixture.runner.state().objects[&fixture.attacker];
+    assert_eq!(
+        (object.power, object.toughness),
+        (Some(1), Some(3)),
+        "the attacking incarnation no longer matches before it leaves"
+    );
+
+    blink_attacker(&mut fixture.runner, fixture.attacker);
+
+    assert_eq!(
+        fixture.runner.state().objects[&fixture.attacker].zone,
+        Zone::Battlefield,
+        "the blink must return the attacker to the battlefield"
+    );
+    assert_ne!(
+        fixture.runner.state().objects[&fixture.attacker].incarnation,
+        incarnation_before,
+        "CR 400.7: the returned object is a new incarnation"
+    );
+    let returned = &fixture.runner.state().objects[&fixture.attacker];
+    assert_eq!(
+        (returned.power, returned.toughness),
+        (Some(0), Some(2)),
+        "the returned incarnation is back to its printed 0/2 with no counters"
+    );
+    let pinned_lki = fixture
+        .runner
+        .state()
+        .lki_by_incarnation
+        .get(&fixture.attacker)
+        .and_then(|history| history.get(&incarnation_before))
+        .expect("the attacking incarnation's exit-time snapshot exists");
+    assert_eq!(
+        (pinned_lki.power, pinned_lki.toughness),
+        (Some(1), Some(3)),
+        "the attacking incarnation's last-battlefield P/T no longer qualifies"
+    );
+
+    fixture.runner.advance_until_stack_empty();
+    assert_eq!(
+        fixture.runner.life(P1),
+        life_before,
+        "the pinned attacking incarnation does not qualify: no damage"
     );
 }
