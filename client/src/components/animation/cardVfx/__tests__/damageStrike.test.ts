@@ -59,6 +59,23 @@ function strikeLoad(group: Object3D) {
 }
 
 describe("damage strike", () => {
+  it.each([10, 600])("a frost bolt over a %s px path fractures completely after impact", (distance) => {
+    const effectHost = host();
+    const { strike } = createDamageStrike(effectHost, params({
+      cause: "water",
+      from: { ...HUD, x: HUD.x - distance },
+    }));
+    const group = named(effectHost.scene, "damage-strike")!;
+    const bolt = group.children.find((child) => child instanceof Mesh && (child.material as ShaderMaterial).uniforms.uHead) as Mesh<never, ShaderMaterial>;
+    strike.update(0);
+    strike.update(DAMAGE_CAUSE_IMPACT_MS);
+    expect(bolt.visible).toBe(true);
+    strike.update(DAMAGE_CAUSE_IMPACT_MS + 300);
+    expect(bolt.material.uniforms.uTail.value).toBe(1);
+    expect(bolt.visible).toBe(false);
+    strike.dispose(true);
+  });
+
   it.each(["fire", "lightning", "water"] as const)(
     "V10-1: a %s strike lands once, at the impact scaled by pace, then ends and removes itself",
     (cause) => {

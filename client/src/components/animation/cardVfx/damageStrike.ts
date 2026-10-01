@@ -672,7 +672,10 @@ function waterCause({ group, unit, clock, S, T, span, scale, share }: CauseConte
   const bow = dist * 0.025;
   const path = { S, C: [(S[0] + T[0]) / 2 + up[0] * bow, (S[1] + T[1]) / 2 + up[1] * bow] as Vec2, T };
   const headAt = (t: number) => clamp01((t - FIRE_CHARGE_S) / (IMPACT_S - FIRE_CHARGE_S)) ** 1.15;
-  const tailAt = (t: number) => Math.max(0, headAt(t) - 65 * scale / dist + clamp01((t - IMPACT_S) / WATER_DRAIN_S));
+  const tailAt = (t: number) => {
+    const tail = Math.max(0, headAt(t) - Math.min(1, 65 * scale / dist));
+    return tail + (1 - tail) * clamp01((t - IMPACT_S) / WATER_DRAIN_S);
+  };
 
   const drops: Particle[] = [];
   const mist: Particle[] = [];
