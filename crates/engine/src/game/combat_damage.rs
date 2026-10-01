@@ -4475,6 +4475,7 @@ mod tests {
                 amount: PreventionAmount::All,
                 amount_dynamic: None,
                 target: TargetFilter::Controller,
+                recipient_scope: crate::types::ability::EffectScope::Single,
                 scope: PreventionScope::CombatDamage,
                 damage_source_filter: None,
                 prevention_duration: None,

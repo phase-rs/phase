@@ -76,6 +76,7 @@
   "visual": {
     "title": "Visual",
     "vfxQuality": "Calidad de los efectos visuales",
+    "cardAnimationStyle": "Animaciones de cartas",
     "keywordStrip": "Tira de palabras clave",
     "showKeywords": "Mostrar palabras clave en las cartas del campo de batalla",
     "opponentHoverPreview": "Vista previa al pasar el cursor sobre el oponente",
@@ -122,6 +123,10 @@
       "full": "Completa",
       "reduced": "Reducida",
       "minimal": "Mínima"
+    },
+    "cardAnimationStyleOptions": {
+      "webgl": "Nuevas",
+      "classic": "Clásicas"
     }
   },
   "flexLayout": {

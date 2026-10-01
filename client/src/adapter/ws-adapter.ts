@@ -1193,6 +1193,8 @@ export class WebSocketAdapter implements EngineAdapter {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private pingInterval: ReturnType<typeof setInterval> | null = null;
   private disposed = false;
+  // Aborts a handshake still in flight when the adapter is disposed.
+  private readonly disposeAbort = new AbortController();
   /** A rejected Full identity is terminal for this socket. */
   private sessionIdentityRejected = false;
   private gameEnded = false;
@@ -1350,14 +1352,19 @@ export class WebSocketAdapter implements EngineAdapter {
           return;
         }
 
+        if (this.mode === "host" && !this.isNativeSocket()) {
+          reject(new AdapterError("WS_ERROR", "A server game is created through the lobby", false));
+          this.initResolve = null;
+          this.initReject = null;
+          return;
+        }
+
         this.seedNativeReconnectSession();
         const setupFrame =
           this.options.nativeAi
             ? this.nativeAiSetupFrame(this.options.nativeAi)
             : this.options.nativePregame
               ? this.nativePregameSetupFrame(this.options.nativePregame)
-            : this.mode === "host"
-            ? { type: "CreateGame", data: { deck: this.deckData } }
             : this.mode === "spectate"
               ? { type: "SpectatorJoin", data: { game_code: this.joinGameCode! } }
               : {
@@ -1455,6 +1462,7 @@ export class WebSocketAdapter implements EngineAdapter {
     try {
       socket = await openPhaseSocket(this.serverUrl, {
         socketFactory: this.nativeSocketOptions()?.socketFactory,
+        signal: this.disposeAbort.signal,
       });
     } catch (err) {
       if (err instanceof HandshakeError) {
@@ -1477,6 +1485,11 @@ export class WebSocketAdapter implements EngineAdapter {
         return;
       }
       this.rejectInitialization(new AdapterError("WS_ERROR", String(err), true));
+      return;
+    }
+    // A handshake that settled before `dispose()` resumes here after it.
+    if (this.disposed) {
+      socket.close();
       return;
     }
 
@@ -1523,6 +1536,7 @@ export class WebSocketAdapter implements EngineAdapter {
     };
 
     socket.ws.onerror = () => {
+      if (this.sessionIdentityRejected) return;
       const err = new AdapterError("WS_ERROR", "WebSocket connection failed", true);
       if (this.initReject || this.pregameReject || this.gameStartedReject) {
         this.rejectInitialization(err);
@@ -1820,6 +1834,7 @@ export class WebSocketAdapter implements EngineAdapter {
       this.sendConcede();
     }
     this.disposed = true;
+    this.disposeAbort.abort();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;

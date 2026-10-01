@@ -1241,7 +1241,7 @@ mod tests {
         assert!(
             events
                 .iter()
-                .any(|e| matches!(e, GameEvent::CreatureDestroyed { object_id } if *object_id == source_permanent)),
+                .any(|e| matches!(e, GameEvent::CreatureDestroyed { object_id, .. } if *object_id == source_permanent)),
             "a destroy event should fire for the source permanent"
         );
     }

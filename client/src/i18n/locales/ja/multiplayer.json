@@ -128,7 +128,6 @@
     "waitTimeJustNow": "たった今",
     "waitTimeMinutes": "{{count}}分前",
     "waitTimeHours": "{{count}}時間前",
-    "buildMismatchTitle": "ホストは{{version}}（{{commit}}）です — あなたのビルドと異なります。更新してください。",
     "gameFull": "このゲームは満員です。",
     "youAreHosting": "このゲームをホストしています。",
     "hosting": "ホスト中",

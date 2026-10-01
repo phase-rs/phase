@@ -171,8 +171,9 @@ describe("WebSocketAdapter", () => {
     MockWebSocket.last = null;
     adapter = new WebSocketAdapter(
       "wss://localhost:9374/ws",
-      "host",
+      "join",
       { main_deck: [], sideboard: [] },
+      "GAME01",
     );
     const initPromise = adapter.initialize();
     ws = await completeHandshake(adapter);
@@ -274,6 +275,35 @@ describe("WebSocketAdapter", () => {
     } else {
       expect(ws.close).not.toHaveBeenCalled();
     }
+  });
+
+  it("stays silent on a late socket error after rejecting the session identity", () => {
+    const listener = vi.fn();
+    adapter.onEvent(listener);
+    ws.dispatchSynthetic(
+      "message",
+      JSON.stringify({
+        type: "GameCreated",
+        data: {
+          game_code: "GAME01",
+          player_token: "player-token",
+          full_key: { game_code: "GAME01", generation: 0 },
+        },
+      }),
+    );
+    expect(ws.close).toHaveBeenCalledOnce();
+
+    ws.onerror?.();
+
+    expect(listener.mock.calls.map(([event]) => event).filter((event) => event.type === "error"))
+      .toEqual([{ type: "error", message: "Server omitted a valid Full session identity" }]);
+  });
+
+  it("emits a live socket error before any identity rejection", () => {
+    const listener = vi.fn();
+    adapter.onEvent(listener);
+    ws.onerror!();
+    expect(listener).toHaveBeenCalledWith({ type: "error", message: "WebSocket connection failed" });
   });
 
   it("exports only the trusted snapshot returned by the server", async () => {
@@ -1653,13 +1683,28 @@ describe("WebSocketAdapter", () => {
     });
   });
 
+  it("refuses a server host bring-up outside the lobby without opening a socket", async () => {
+    MockWebSocket.last = null;
+    const hostAdapter = new WebSocketAdapter(
+      "ws://localhost:9374/ws",
+      "host",
+      { main_deck: [], sideboard: [] },
+    );
+
+    const outcome = trackRejection(hostAdapter.initialize());
+
+    await expect(outcome()).resolves.toMatchObject({ code: "WS_ERROR", recoverable: false });
+    expect(MockWebSocket.last).toBeNull();
+  });
+
   describe("send() error handling", () => {
     it("rejects initialize when the post-handshake setup frame cannot be sent", async () => {
       MockWebSocket.last = null;
       const setupFailingAdapter = new WebSocketAdapter(
         "ws://localhost:9374/ws",
-        "host",
+        "join",
         { main_deck: [], sideboard: [] },
+        "ABC123",
       );
       const initPromise = setupFailingAdapter.initialize();
       await Promise.resolve();
@@ -2217,4 +2262,30 @@ it.each(["resolve", "reject"] as const)("disposes during a pending LAN probe bef
   } finally {
     lanGate.probe.mockReset().mockResolvedValue(false);
   }
+});
+
+describe("WebSocketAdapter dispose during the handshake", () => {
+  it.each(["before ServerHello", "after ServerHello settles"] as const)(
+    "sends nothing after dispose and closes the socket (%s)",
+    async (order) => {
+      MockWebSocket.last = null;
+      const adapter = new WebSocketAdapter("wss://localhost:9374/ws", "join", { main_deck: [], sideboard: [] }, "GAME01");
+      void adapter.initialize().catch(() => {});
+      await Promise.resolve();
+      const socket = MockWebSocket.last!;
+      let sentAtDispose: number;
+      if (order === "before ServerHello") {
+        sentAtDispose = socket.send.mock.calls.length;
+        adapter.dispose();
+        socket.dispatchSynthetic("message", SERVER_HELLO);
+      } else {
+        socket.dispatchSynthetic("message", SERVER_HELLO);
+        sentAtDispose = socket.send.mock.calls.length;
+        adapter.dispose();
+      }
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(socket.send.mock.calls.slice(sentAtDispose)).toEqual([]);
+      expect(socket.close).toHaveBeenCalledOnce();
+    },
+  );
 });

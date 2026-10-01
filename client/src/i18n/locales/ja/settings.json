@@ -76,6 +76,7 @@
   "visual": {
     "title": "表示",
     "vfxQuality": "視覚効果の品質",
+    "cardAnimationStyle": "カードアニメーション",
     "keywordStrip": "キーワード帯",
     "showKeywords": "戦場のカードにキーワードを表示",
     "opponentHoverPreview": "対戦相手のホバープレビュー",
@@ -122,6 +123,10 @@
       "full": "完全",
       "reduced": "低減",
       "minimal": "最小"
+    },
+    "cardAnimationStyleOptions": {
+      "webgl": "新スタイル",
+      "classic": "クラシック"
     }
   },
   "flexLayout": {

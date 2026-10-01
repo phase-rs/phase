@@ -4139,6 +4139,7 @@ pub(crate) fn should_propagate_parent_targets(
 pub(crate) fn can_inherit_parent_targets(sub: &ResolvedAbility) -> bool {
     sub.targets.is_empty()
         && sub.reads_chosen_group.is_none()
+        && !has_resolution_owned_zone_choice(sub)
         && (sub.target_choice_timing != TargetChoiceTiming::Resolution
             // CR 608.2c: a resolution-time instruction can still consume an
             // object selected by its parent. `ParentTarget` is not a fresh
@@ -4163,11 +4164,18 @@ pub(crate) fn can_inherit_parent_targets(sub: &ResolvedAbility) -> bool {
 /// (Worldsoul's Rage), while context references such as Beseech the Mirror's
 /// exile-linked card remain bound continuations rather than fresh choices.
 fn has_resolution_owned_zone_choice(sub: &ResolvedAbility) -> bool {
-    if sub.target_choice_timing != TargetChoiceTiming::Resolution {
-        return false;
-    }
-    let Effect::ChangeZone { origin, target, .. } = &sub.effect else {
-        return false;
+    let (target, origin) = match &sub.effect {
+        Effect::ChangeZone { origin, target, .. }
+            if sub.target_choice_timing == TargetChoiceTiming::Resolution =>
+        {
+            (target, *origin)
+        }
+        Effect::PutAtLibraryPosition { target, .. }
+            if matches!(target.extract_in_zone(), Some(Zone::Hand | Zone::Library)) =>
+        {
+            (target, target.extract_in_zone())
+        }
+        _ => return false,
     };
     let selection_zones = origin.map_or_else(|| target.extract_zones(), |zone| vec![zone]);
     !selection_zones.is_empty()
@@ -8982,7 +8990,7 @@ fn affected_objects_from_events(
         Effect::Destroy { .. } | Effect::DestroyAll { .. } => events
             .iter()
             .filter_map(|event| match event {
-                GameEvent::CreatureDestroyed { object_id } => Some(*object_id),
+                GameEvent::CreatureDestroyed { object_id, .. } => Some(*object_id),
                 _ => None,
             })
             .collect(),
@@ -10980,6 +10988,23 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
             target: TargetFilter::ParentTarget,
             ..
         } => ability.parent_target_missing_reason.is_some(),
+        // CR 608.2d: "The player can’t choose an option that’s illegal or impossible".
+        // An optional placement from a private zone (e.g. Fire Prophecy / Volcanic Spite:
+        // "You may put a card from your hand on the bottom of your library. If
+        // you do, draw a card.") is impossible when the player has no eligible
+        // cards in that zone and must select a positive exact count. Zero
+        // cards remains a legal choice for zero-count and up-to placements.
+        Effect::PutAtLibraryPosition { target, count, .. } => {
+            if matches!(target, TargetFilter::ParentTarget)
+                && ability.parent_target_missing_reason.is_some()
+            {
+                return true;
+            }
+            !count.is_up_to()
+                && crate::game::quantity::resolve_quantity_with_targets(state, count, ability) > 0
+                && put_on_top::private_zone_selection(state, ability, target)
+                    .is_some_and(|(_, _, mut eligible)| eligible.next().is_none())
+        }
         Effect::CastFromZone {
             mode,
             target,
@@ -15642,6 +15667,7 @@ fn resolve_chain_body(
                 cardinality: Some(ObjectSelectionCardinality::Exactly { .. }),
                 ..
             }
+            | Effect::PutAtLibraryPosition { .. }
     );
     if optional_is_infeasible && auto_decline_infeasible_optional {
         return resolve_optional_effect_decision(
@@ -18918,7 +18944,7 @@ pub(crate) fn evaluate_condition(
                     .current_trigger_event
                     .as_ref()
                     .and_then(|event| match event {
-                        GameEvent::CreatureDestroyed { object_id }
+                        GameEvent::CreatureDestroyed { object_id, .. }
                         | GameEvent::ZoneChanged { object_id, .. } => Some(*object_id),
                         _ => None,
                     })
@@ -20358,6 +20384,65 @@ mod tests {
 
     fn effect_from_json(json: &str) -> Effect {
         serde_json::from_str(json).expect("test effect shape must deserialize")
+    }
+
+    /// CR 608.2d: choosing zero is legal for zero-count and up-to placements,
+    /// while an exact positive placement needs an eligible card.
+    #[test]
+    fn optional_private_zone_placement_preserves_zero_selection_choices() {
+        for zone in [Zone::Hand, Zone::Library] {
+            for count in [
+                QuantityExpr::Fixed { value: 0 },
+                QuantityExpr::up_to(QuantityExpr::Fixed { value: 1 }),
+                QuantityExpr::Fixed { value: 1 },
+            ] {
+                let mut state = GameState::new_two_player(42);
+                let source = create_object(
+                    &mut state,
+                    CardId(900),
+                    PlayerId(0),
+                    "Placement Source".to_string(),
+                    Zone::Battlefield,
+                );
+                let permits_zero =
+                    count.is_up_to() || matches!(count, QuantityExpr::Fixed { value: 0 });
+                let mut ability = ResolvedAbility::new(
+                    Effect::PutAtLibraryPosition {
+                        target: TargetFilter::Typed(
+                            TypedFilter::new(TypeFilter::Card)
+                                .properties(vec![FilterProp::InZone { zone }]),
+                        ),
+                        count,
+                        position: crate::types::ability::LibraryPosition::Bottom,
+                    },
+                    vec![],
+                    source,
+                    PlayerId(0),
+                );
+                ability.optional = true;
+                assert!(state.players[0].hand.is_empty());
+                assert!(state.players[0].library.is_empty());
+
+                resolve_ability_chain(&mut state, &ability, &mut Vec::new(), 0)
+                    .expect("empty private-zone placement must resolve or offer its legal choice");
+                assert_eq!(
+                    matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }),
+                    permits_zero,
+                    "only a positive exact count is impossible with an empty {zone:?}"
+                );
+                if permits_zero {
+                    crate::game::engine::apply_as_current(
+                        &mut state,
+                        crate::types::actions::GameAction::DecideOptionalEffect { accept: true },
+                    )
+                    .expect("accepting a zero-card placement must succeed");
+                }
+                assert!(state.active_optional_effect_frame().is_none());
+                assert!(state.players[0].hand.is_empty());
+                assert!(state.players[0].library.is_empty());
+                assert_eq!(state.objects[&source].zone, Zone::Battlefield);
+            }
+        }
     }
 
     #[test]

@@ -128,7 +128,6 @@
     "waitTimeJustNow": "agora mesmo",
     "waitTimeMinutes": "há {{count}}m",
     "waitTimeHours": "há {{count}}h",
-    "buildMismatchTitle": "O anfitrião está na {{version}} ({{commit}}) — sua build é diferente. Atualize para sincronizar.",
     "gameFull": "Este jogo está cheio.",
     "youAreHosting": "Você está hospedando este jogo.",
     "hosting": "Hospedando",

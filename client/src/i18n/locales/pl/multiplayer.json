@@ -128,7 +128,6 @@
     "waitTimeJustNow": "przed chwilą",
     "waitTimeMinutes": "{{count}} min temu",
     "waitTimeHours": "{{count}} godz. temu",
-    "buildMismatchTitle": "Gospodarz ma wersję {{version}} ({{commit}}) — twoja kompilacja jest inna. Odśwież, aby zaktualizować.",
     "gameFull": "Ta gra jest pełna.",
     "youAreHosting": "Hostujesz tę grę.",
     "hosting": "Hostowanie",

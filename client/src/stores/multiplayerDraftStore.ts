@@ -310,11 +310,10 @@ interface MultiplayerDraftState {
    * BECAUSE that guard excludes both paths — the store's `matchAdapter` is not
    * assigned until the success path, after `installMatchRuntime` returns.
    *
-   * It is ALSO cleared wherever `initialState` is spread, which is every
-   * session boundary and NOT only `leave`/`reset` — `hostDraft` and `joinDraft`
-   * each spread it on their success and offline-error paths too. Do not read
-   * the deliberate list above as exhaustive; grep `...initialState` for the
-   * full set.
+   * It is ALSO cleared by every new-session write — `replaceDraftSession`, and
+   * the `set(initialState)` writes of the route-owner aborts and `ownFailure` —
+   * not only `leave`/`reset`. Do not read the deliberate list above as
+   * exhaustive; grep `replaceDraftSession\|set(initialState)` for the full set.
    */
   commanderLaunch: DraftCommanderLaunch | null;
   /** This client's own seat in the launched Commander game. */
@@ -515,7 +514,7 @@ let activeHostAbort: AbortController | null = null;
  * `terminateGame()`, which flushes `host_left` before closing — `dispose()`
  * would race that).
  */
-let commanderLaunchInFlight: { adapter: P2PHostAdapter | null; abort: AbortController } | null = null;
+let commanderLaunchInFlight: { adapter: P2PHostAdapter | null; abort: AbortController; teardown?: Promise<void> } | null = null;
 /**
  * The Commander JOIN currently bringing its adapter up, on a guest.
  *
@@ -532,6 +531,21 @@ let commanderLaunchInFlight: { adapter: P2PHostAdapter | null; abort: AbortContr
  * window a double-press sails through.
  */
 let commanderJoinInFlight: { abort: AbortController } | null = null;
+/** The `startMatch` bring-up in flight; claimed before its first await so `abandonMatchStart` can abort it. */
+let matchStartInFlight: { matchId: string; abort: AbortController } | null = null;
+
+function abandonMatchStart(): void {
+  matchStartInFlight?.abort.abort();
+}
+
+/** Settles as `pending` does, or rejects once `signal` aborts: a wait on another party's reply that the abort alone would never end. */
+function settleOnAbort<T>(pending: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    if (signal.aborted) reject(signal.reason);
+    signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+    pending.then(resolve, reject);
+  });
+}
 
 /**
  * THE single authority for abandoning a Commander bring-up still in flight.
@@ -560,17 +574,19 @@ let commanderJoinInFlight: { abort: AbortController } | null = null;
  *     degrades to a dispose, so it is correct on both sides of that line.
  *
  * Returns the host teardown so a caller that can await it does; the aborts
- * themselves are synchronous, so a synchronous caller (`reset`) still gets the
- * whole unparking effect without awaiting.
+ * themselves are synchronous, so a synchronous caller still gets the whole
+ * unparking effect without awaiting.
  */
 function abandonCommanderBringUp(): Promise<void> {
   commanderJoinInFlight?.abort.abort();
   const handle = commanderLaunchInFlight;
   if (!handle) return Promise.resolve();
   handle.abort.abort();
+  // Once per handle: a launch parked on an await that ignores the abort keeps its handle across several session ends.
   // The `.catch` is not decoration: `send` has no rejection handling, so a
   // rejecting `host_left` would otherwise reject this whole teardown.
-  return handle.adapter?.terminateGame().catch(() => {}) ?? Promise.resolve();
+  handle.teardown ??= handle.adapter?.terminateGame().catch(() => {}) ?? Promise.resolve();
+  return handle.teardown;
 }
 
 let activeGuestAbort: AbortController | null = null;
@@ -1074,6 +1090,9 @@ interface DetachedDraftAdapters {
 }
 
 function detachDraftAdapters(): DetachedDraftAdapters {
+  // The pod session ends here, so its in-flight bring-ups end with it.
+  abandonMatchStart();
+  void abandonCommanderBringUp();
   const detached = {
     host: activeHostAdapter,
     guest: activeGuestAdapter,
@@ -1353,24 +1372,23 @@ export const DRAFT_BOT_AI_SEAT: AISeatBinding = { playerId: 1, difficulty: "Medi
 
 /**
  * Returns the `GameLoopController` it just created, so a caller whose OWN
- * `throwIfAborted()` fires right after this resolves — `launchCommanderGame`,
- * `joinCommanderGame` — can dispose exactly that controller by identity from
- * its own catch. Every other caller (`startMatch`) awaits and drops the
- * result; nothing after its own `installMatchRuntime` call can fail before
- * the runtime is handed to `leave`/`reset`'s usual path, so it needs no
- * catch-side disposal of its own.
+ * `throwIfAborted()` fires right after this resolves can dispose exactly that
+ * controller by identity from its own catch.
  */
 async function installMatchRuntime(
   gameId: string,
   adapter: EngineAdapter,
   initResult: SubmitResult,
   controllerMode: "ai" | "online",
+  signal: AbortSignal,
 ): Promise<GameLoopController> {
   // Fetched after this match's engine is up, so the snapshot is
   // newest-by-construction under the global seq counter: it always passes the
   // commit gate, and it inherently drops any commit still in flight from the
   // previous game of a Bo3 (whose stamps are strictly lower).
   const snapshot = await adapter.getSnapshot();
+  // Before any global write: an abandoned attempt must not replace, or dispose, a newer attempt's runtime.
+  signal.throwIfAborted();
   const initLogEntries: GameLogEntry[] = (initResult.log_entries ?? []).map((entry, i) => ({
     ...entry,
     seq: i,
@@ -1523,6 +1541,8 @@ function clearInstalledGameRuntime(adapter: unknown): void {
  */
 function disposeMatchAdapter(set: SetFn): void {
   const state = useMultiplayerDraftStore.getState();
+  // Ahead of the adapter check: a start still bringing the pairing up has published no adapter.
+  abandonMatchStart();
   disposeMatchController();
   if (state.matchAdapter) {
     const adapter = state.matchAdapter as { dispose?: () => void };
@@ -1567,7 +1587,7 @@ function disposeCapturedMatchController(controller: GameLoopController | null): 
  * its newer owner, and `disposeMatchAdapter`'s `set()` would overwrite it.
  *
  * Capturing by identity is what makes this reachable: by the time a newer
- * session's own opening `set({...initialState, ...})` clears the STORE'S
+ * session's own opening `replaceDraftSession` clears the STORE'S
  * `matchAdapter` field, `get().matchAdapter` no longer answers "what did this
  * call own", so the caller must have asked before its first `await`.
  */
@@ -1622,6 +1642,13 @@ const initialState: MultiplayerDraftState = {
   playDrawPrompt: null,
   sideboardSubmitted: false,
 };
+
+/** Abandon and write are one step because a bring-up can be pressed until this write clears the state its button renders from. */
+function replaceDraftSession(set: SetFn, next: Partial<MultiplayerDraftState>): void {
+  abandonMatchStart();
+  void abandonCommanderBringUp();
+  set({ ...initialState, ...next });
+}
 
 /**
  * Single authority for how long a pod error lives.
@@ -1713,12 +1740,17 @@ export const useMultiplayerDraftStore = create<
     retainDraftSessionTeardown(previous.hostPersistenceId, previousTeardown);
     if (previous.host || previous.guest) await previousTeardown;
     if (config.persistenceId) await claimDraftSessionOwner(config.persistenceId);
-    if (epoch !== draftAdapterEpoch || config.signal?.aborted) return { status: "superseded" };
+    if (epoch !== draftAdapterEpoch) return { status: "superseded" };
+    if (config.signal?.aborted) {
+      // No newer call has started, so the session this call ended must not stay published.
+      replaceDraftSession(set, {});
+      return { status: "superseded" };
+    }
     if (getEffectiveOffline()) {
       // Replacement teardown was authorized before connectivity changed. This
       // epoch now owns the detached lifecycle, so it must not leave the prior
       // role/phase live after declining to construct its successor.
-      set({ ...initialState, error: DRAFT_OFFLINE_ERROR });
+      replaceDraftSession(set, { error: DRAFT_OFFLINE_ERROR });
       return { status: "failed", error: DRAFT_OFFLINE_ERROR };
     }
 
@@ -1748,13 +1780,7 @@ export const useMultiplayerDraftStore = create<
     config.signal?.addEventListener("abort", abortOwner, { once: true });
     if (config.signal) activeHostRouteAbortListener = { signal: config.signal, listener: abortOwner };
 
-    set({
-      ...initialState,
-      role: "host",
-      phase: "connecting",
-      seatIndex: 0,
-      interactionGeneration: generation,
-    });
+    replaceDraftSession(set, { role: "host", phase: "connecting", seatIndex: 0, interactionGeneration: generation });
 
     let initialized = false;
     try {
@@ -1786,16 +1812,10 @@ export const useMultiplayerDraftStore = create<
         config.signal?.removeEventListener("abort", abortOwner);
         await disposeHostAdapter(adapter, true);
       } else if (!initialized || adapter.status === "error") {
-        activeHostAdapter = null;
-        activeHostAbort = null;
-        activeHostPersistenceId = null;
-        activeHostEventUnsub?.();
-        activeHostEventUnsub = null;
-        config.signal?.removeEventListener("abort", abortOwner);
-        activeHostRouteAbortListener = null;
+        detachDraftAdapters();
         await disposeHostAdapter(adapter, true);
         if (epoch === draftAdapterEpoch && generation === lifecycleGeneration && getEffectiveOffline()) {
-          set({ ...initialState, error: DRAFT_OFFLINE_ERROR });
+          replaceDraftSession(set, { error: DRAFT_OFFLINE_ERROR });
         }
       }
     }
@@ -1820,12 +1840,17 @@ export const useMultiplayerDraftStore = create<
     const previousTeardown = disposeDetachedDraftAdapters(previous, true);
     retainDraftSessionTeardown(previous.hostPersistenceId, previousTeardown);
     if (previous.host || previous.guest) await previousTeardown;
-    if (epoch !== draftAdapterEpoch || config.signal?.aborted) return { status: "superseded" };
+    if (epoch !== draftAdapterEpoch) return { status: "superseded" };
+    if (config.signal?.aborted) {
+      // No newer call has started, so the session this call ended must not stay published.
+      replaceDraftSession(set, {});
+      return { status: "superseded" };
+    }
     if (getEffectiveOffline()) {
       // See hostDraft: this current replacement owns the already-detached
       // lifecycle and must publish an idle offline state rather than a phantom
       // connecting/lobby owner with no adapter.
-      set({ ...initialState, error: DRAFT_OFFLINE_ERROR });
+      replaceDraftSession(set, { error: DRAFT_OFFLINE_ERROR });
       return ownFailure();
     }
 
@@ -1854,12 +1879,7 @@ export const useMultiplayerDraftStore = create<
     config.signal?.addEventListener("abort", abortOwner, { once: true });
     if (config.signal) activeGuestRouteAbortListener = { signal: config.signal, listener: abortOwner };
 
-    set({
-      ...initialState,
-      role: "guest",
-      phase: "connecting",
-      interactionGeneration: generation,
-    });
+    replaceDraftSession(set, { role: "guest", phase: "connecting", interactionGeneration: generation });
 
     let initialized = false;
     try {
@@ -1873,15 +1893,10 @@ export const useMultiplayerDraftStore = create<
         config.signal?.removeEventListener("abort", abortOwner);
         await disposeGuestAdapter(adapter);
       } else if (!initialized || adapter.status === "error") {
-        activeGuestAdapter = null;
-        activeGuestAbort = null;
-        activeGuestEventUnsub?.();
-        activeGuestEventUnsub = null;
-        config.signal?.removeEventListener("abort", abortOwner);
-        activeGuestRouteAbortListener = null;
+        detachDraftAdapters();
         await disposeGuestAdapter(adapter);
         if (epoch === draftAdapterEpoch && generation === lifecycleGeneration && getEffectiveOffline()) {
-          set({ ...initialState, error: DRAFT_OFFLINE_ERROR });
+          replaceDraftSession(set, { error: DRAFT_OFFLINE_ERROR });
         }
       }
     }
@@ -2196,7 +2211,7 @@ export const useMultiplayerDraftStore = create<
     // keys on `commanderLaunch`, which is not written until the launches have
     // been sent, so it leaves the whole `hostRoom` round-trip uncovered — the
     // guard belongs here as well, not instead.
-    if (commanderLaunchInFlight) return;
+    if (commanderLaunchInFlight && !commanderLaunchInFlight.abort.signal.aborted) return;
 
     // CR 903.13a pods can seat more players than this TRANSPORT carries: the
     // engine's Commander Draft format allows eight (`max_pod_size`), while
@@ -2263,7 +2278,7 @@ export const useMultiplayerDraftStore = create<
     // and a full `hostRoom` signalling round-trip) would otherwise be a window
     // a second press sails straight through.
     let host: HostResult | undefined;
-    const handle: { adapter: P2PHostAdapter | null; abort: AbortController } = { adapter: null, abort };
+    const handle: NonNullable<typeof commanderLaunchInFlight> = { adapter: null, abort };
     commanderLaunchInFlight = handle;
     // Declared above the `try` for the same reason `host` is: the catch's
     // aborted arm reaches it to dispose a runtime `installMatchRuntime` may
@@ -2465,7 +2480,7 @@ export const useMultiplayerDraftStore = create<
 
       await roomFull;
       const initResult = await matchAdapter.startPregameGame();
-      matchController = await installMatchRuntime(gameId, matchAdapter, initResult, "online");
+      matchController = await installMatchRuntime(gameId, matchAdapter, initResult, "online", abort.signal);
       // The launch tail is a cancel window like any other: an abort rejects a
       // PARKED promise, it never interrupts an await already in flight, so a
       // cancel landing across the two awaits above would otherwise tear the
@@ -2519,7 +2534,7 @@ export const useMultiplayerDraftStore = create<
       // rejecting `host_left` would throw OUT of this catch block, skip the
       // error banner below and reject a `void`-ed call site — the user would
       // see a launch that silently did nothing.
-      if (handle.adapter) await handle.adapter.terminateGame().catch(() => {});
+      if (handle.adapter) await (handle.teardown ??= handle.adapter.terminateGame().catch(() => {}));
       else host?.destroy();
       // A refusal from draft-wasm reaches here: `get_bot_deck_inner` returns
       // `Err` when it cannot judge a bot deck's legality (no card database) or
@@ -2549,12 +2564,12 @@ export const useMultiplayerDraftStore = create<
 
   joinCommanderGame: async (navigate) => {
     const launch = get().commanderLaunch;
-    if (!launch) return;
+    if (!launch || !activeGuestAdapter) return;
     // A second press opens a SECOND `joinRoom`, which the host answers with the
     // NEXT waiting seat — kicking a later human "Lobby full" and firing
     // `roomFull` on a ghost seat. Claimed before the first `await`, because the
     // dynamic import plus the PeerJS round-trip below is the whole window.
-    if (commanderJoinInFlight) return;
+    if (commanderJoinInFlight && !commanderJoinInFlight.abort.signal.aborted) return;
 
     // No UI affordance drives `handle.abort.abort()` directly — the only
     // Cancel button belongs to the host's `cancelCommanderLaunch` — but
@@ -2654,14 +2669,14 @@ export const useMultiplayerDraftStore = create<
       });
 
       await matchAdapter.initialize();
-      const initResult = await matchAdapter.initializeGame();
+      const initResult = await settleOnAbort(matchAdapter.initializeGame(), abort.signal);
       // The SHARED game id: every seat installs its runtime under the id the
       // host opened. Awaiting the whole bring-up BEFORE navigating is REQUIRED,
       // not stylistic — `GameProvider`'s `draft-match` branch is passive, it
       // asserts the runtime is already installed and bails to `onNoDeck`
       // otherwise. It is also what puts `commanderSeat` in the store before
       // `setupDraftMatchAvatars` reads it.
-      matchController = await installMatchRuntime(launch.gameId, matchAdapter, initResult, "online");
+      matchController = await installMatchRuntime(launch.gameId, matchAdapter, initResult, "online", abort.signal);
       abort.signal.throwIfAborted();
       // `matchAdapter` in the store is load-bearing, not bookkeeping:
       // `disposeMatchAdapter`'s whole body is fenced on it, so a guest that
@@ -2677,8 +2692,7 @@ export const useMultiplayerDraftStore = create<
       if (matchAdapter) {
         matchAdapter.dispose();
         // `installMatchRuntime` may ALREADY have committed this adapter into
-        // `useGameStore` before `throwIfAborted()` fired — it awaits a snapshot
-        // fetch, which is exactly the window a cancel lands in. `set({
+        // `useGameStore` before `throwIfAborted()` fired. `set({
         // matchAdapter })` never ran on this path and `disposeMatchAdapter`'s
         // whole body is fenced on that field, so this is the only place the
         // committed runtime can be released. Left behind it is a DISPOSED
@@ -2718,8 +2732,8 @@ export const useMultiplayerDraftStore = create<
     if (!handle) return;
 
     // Unparks the launch and tears its room down — see
-    // `abandonCommanderBringUp`, which `leave` and `reset` share so there is
-    // exactly one implementation of "abandon a bring-up" rather than three.
+    // `abandonCommanderBringUp`, the one implementation of "abandon a bring-up",
+    // shared with every path that ends the pod session.
     // Its `await roomFull` rejects, its catch reads `signal.aborted` and
     // returns silently, and its own identity-guarded `finally` releases the
     // module handle.
@@ -2777,8 +2791,19 @@ export const useMultiplayerDraftStore = create<
     if (!matchPairing) return null;
     const gameId = `draft-match-${matchPairing.matchId}`;
     if (matchAdapter) return gameId;
+    // A pod session already detached has no pod left to host or report this match.
+    if (!activeWorkspaceAdapter()) return null;
+    if (matchStartInFlight?.matchId === matchPairing.matchId && !matchStartInFlight.abort.signal.aborted) return null;
 
+    const abort = new AbortController();
+    const handle = { matchId: matchPairing.matchId, abort };
+    matchStartInFlight = handle;
+    // What this attempt built, released by the catch: the bare room or peer until an adapter owns it.
+    let unowned: { destroy: () => void } | undefined;
+    let built: { adapter: EngineAdapter; release: () => void } | undefined;
+    let controller: GameLoopController | undefined;
     try {
+      let runtime: { adapter: EngineAdapter; initResult: SubmitResult; mode: "ai" | "online" };
       if (matchPairing.type === "HumanHost") {
         // Lower seat# hosts the match (D-09).
         const [{ hostRoom }, { P2PHostAdapter }] = await Promise.all([
@@ -2786,9 +2811,11 @@ export const useMultiplayerDraftStore = create<
           import("../adapter/p2p-adapter"),
         ]);
 
-        const host = await hostRoom(undefined, {
+        const host = await hostRoom(abort.signal, {
           preferredRoomCode: matchPairing.matchRoomCode,
         });
+        unowned = host;
+        abort.signal.throwIfAborted();
 
         const matchAdapter = new P2PHostAdapter(
           matchPairing.deckPayload,
@@ -2807,11 +2834,21 @@ export const useMultiplayerDraftStore = create<
             onConcede: (concedingGamePlayer) => get().reportActiveMatchConcession(concedingGamePlayer),
           },
         );
+        // `terminateGame`, not `dispose`: a guest already seated must be told the game is over.
+        let teardown: Promise<void> | undefined;
+        built = {
+          adapter: matchAdapter,
+          release: () => { void (teardown ??= matchAdapter.terminateGame().catch(() => {})); },
+        };
+        abort.signal.addEventListener("abort", built.release, { once: true });
+        unowned = undefined;
 
         let resolveRoomFull!: () => void;
-        const roomFull = new Promise<void>((resolve) => {
+        const roomFull = new Promise<void>((resolve, reject) => {
           resolveRoomFull = resolve;
+          abort.signal.addEventListener("abort", () => reject(abort.signal.reason), { once: true });
         });
+        void roomFull.catch(() => {});
         matchAdapter.onEvent((event) => {
           if (event.type === "roomFull") {
             resolveRoomFull();
@@ -2878,10 +2915,7 @@ export const useMultiplayerDraftStore = create<
 
         await matchAdapter.initialize();
         await roomFull;
-        const initResult = await matchAdapter.startPregameGame();
-        await installMatchRuntime(gameId, matchAdapter, initResult, "online");
-        set({ matchAdapter, phase: "matchInProgress" });
-        return gameId;
+        runtime = { adapter: matchAdapter, initResult: await matchAdapter.startPregameGame(), mode: "online" };
       } else if (matchPairing.type === "HumanGuest") {
         // Higher seat# joins as guest.
         const [{ joinRoom }, { P2PGuestAdapter }] = await Promise.all([
@@ -2889,7 +2923,9 @@ export const useMultiplayerDraftStore = create<
           import("../adapter/p2p-adapter"),
         ]);
 
-        const { conn, peer } = await joinRoom(matchPairing.matchRoomCode);
+        const { conn, peer, destroyPeer } = await joinRoom(matchPairing.matchRoomCode, abort.signal);
+        unowned = { destroy: destroyPeer };
+        abort.signal.throwIfAborted();
 
         const matchAdapter = new P2PGuestAdapter(
           {
@@ -2905,6 +2941,8 @@ export const useMultiplayerDraftStore = create<
           undefined,
           true,
         );
+        built = { adapter: matchAdapter, release: () => matchAdapter.dispose() };
+        unowned = undefined;
 
         matchAdapter.onEvent((event) => {
           if (event.type === "stateChanged") {
@@ -2935,13 +2973,15 @@ export const useMultiplayerDraftStore = create<
         });
 
         await matchAdapter.initialize();
-        const initResult = await matchAdapter.initializeGame();
-        await installMatchRuntime(gameId, matchAdapter, initResult, "online");
-        set({ matchAdapter, phase: "matchInProgress" });
-        return gameId;
+        runtime = {
+          adapter: matchAdapter,
+          initResult: await settleOnAbort(matchAdapter.initializeGame(), abort.signal),
+          mode: "online",
+        };
       } else {
         const { WasmAdapter } = await import("../adapter/wasm-adapter");
         const matchAdapter = new WasmAdapter();
+        built = { adapter: matchAdapter, release: () => matchAdapter.dispose() };
         // #7920: a bot match installs no transport-side whole-match concede,
         // so the menu's Concede was refused as unbound. Bind the capability
         // to a plain game-level Concede for the local seat (game player 0 —
@@ -2964,14 +3004,27 @@ export const useMultiplayerDraftStore = create<
           2,
           matchPairing.matchConfig,
         );
-        await installMatchRuntime(gameId, matchAdapter, initResult, "ai");
-        set({ matchAdapter, phase: "matchInProgress" });
-        return gameId;
+        runtime = { adapter: matchAdapter, initResult, mode: "ai" };
       }
+      abort.signal.throwIfAborted();
+      controller = await installMatchRuntime(gameId, runtime.adapter, runtime.initResult, runtime.mode, abort.signal);
+      abort.signal.throwIfAborted();
+      set({ matchAdapter: runtime.adapter, phase: "matchInProgress" });
+      return gameId;
     } catch (err) {
+      unowned?.destroy();
+      disposeCapturedMatchController(controller ?? null);
+      if (built) {
+        clearInstalledGameRuntime(built.adapter);
+        built.release();
+      }
+      if (abort.signal.aborted) return null;
       console.error("[multiplayerDraftStore] startMatch failed:", err);
       set({ error: err instanceof Error ? err.message : String(err) });
       return null;
+    } finally {
+      if (built) abort.signal.removeEventListener("abort", built.release);
+      if (matchStartInFlight === handle) matchStartInFlight = null;
     }
   },
 
@@ -3184,6 +3237,7 @@ export const useMultiplayerDraftStore = create<
     // launch in this tab is silently refused. Aborting before the pod adapters
     // are disposed also stops the launch reaching `sendCommanderLaunches` on a
     // session that is about to be torn down.
+    abandonMatchStart();
     await abandonCommanderBringUp();
     if (epoch !== draftAdapterEpoch) {
       disposeCapturedMatchRuntime(ownedMatchAdapter, ownedMatchController);
@@ -3220,18 +3274,13 @@ export const useMultiplayerDraftStore = create<
     if (activeGuestAdapter === guest) {
       activeGuestAdapter = null;
     }
-    set({ ...initialState, interactionGeneration: lifecycleGeneration });
+    replaceDraftSession(set, { interactionGeneration: lifecycleGeneration });
   },
 
   reset: () => {
-    // Same obligation as `leave`, and the aborts inside are synchronous, so a
-    // synchronous `reset` still unparks both bring-ups. Only the host's
-    // `terminateGame()` flush is left to settle on its own — `void`, because
-    // `reset` cannot await and a dropped rejection here would be unhandled.
-    void abandonCommanderBringUp();
     beginDraftLifecycle();
     disposeMatchAdapter(set);
-    set({ ...initialState, interactionGeneration: lifecycleGeneration });
+    replaceDraftSession(set, { interactionGeneration: lifecycleGeneration });
   },
 })));
 
@@ -3413,6 +3462,8 @@ function handleHostEvent(event: DraftPodHostEvent, set: SetFn): void {
       saveDraftPodProgress("matchInProgress");
       break;
     case "matchStart":
+      // A pairing replaced by another match ends the start bound to the old one.
+      if (matchStartInFlight?.matchId !== event.launch.matchId) abandonMatchStart();
       set({ matchPairing: event.launch, phase: "matchInProgress" });
       void retryDraftSettlement(event.launch, "host");
       break;
@@ -3561,6 +3612,8 @@ function handleGuestEvent(event: DraftPodGuestEvent, set: SetFn): void {
       set({ timerRemainingMs: event.remainingMs });
       break;
     case "matchStart":
+      // A pairing replaced by another match ends the start bound to the old one.
+      if (matchStartInFlight?.matchId !== event.launch.matchId) abandonMatchStart();
       set({
         matchPairing: event.launch,
         phase: "matchInProgress",
@@ -3576,6 +3629,10 @@ function handleGuestEvent(event: DraftPodGuestEvent, set: SetFn): void {
       // written — the pod stays `complete`, which is the view the guest's join
       // affordance renders from — and this does NOT join the game.
       // Joining is the user's decision, made through `joinCommanderGame`.
+      // A replaced launch ends the join bound to it.
+      if (useMultiplayerDraftStore.getState().commanderLaunch?.gameId !== event.launch.gameId) {
+        void abandonCommanderBringUp();
+      }
       set({ commanderLaunch: event.launch });
       break;
     case "matchSettlementAcknowledged": {

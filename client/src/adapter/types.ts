@@ -3305,7 +3305,8 @@ export type GameEvent =
   | { type: "XValueChosen"; data: { player: PlayerId; object_id: ObjectId; value: number } }
   | { type: "AbilityActivated"; data: { player_id: PlayerId; source_id: ObjectId } }
   | { type: "ExhaustAbilityActivated"; data: { player_id: PlayerId; source_id: ObjectId; is_mana_ability: boolean } }
-  | { type: "ZoneChanged"; data: { object_id: ObjectId; from: Zone; to: Zone } }
+  // `from` is null for an object that enters from no zone (a created token).
+  | { type: "ZoneChanged"; data: { object_id: ObjectId; from: Zone | null; to: Zone } }
   // `new_total` is the player's life total once this change is applied, supplied
   // by the engine (`LifeTotalReading`, serialized transparently) so a mid-animation
   // display can show intermediate totals. Absent on an event from a peer older than
@@ -3344,7 +3345,7 @@ export type GameEvent =
   | { type: "ObjectIntensified"; data: { object_id: ObjectId; amount: number } }
   | { type: "CounterRemoved"; data: { object_id: ObjectId; counter_type: string; count: number } }
   | { type: "TokenCreated"; data: { object_id: ObjectId; name: string; source_id: ObjectId } }
-  | { type: "CreatureDestroyed"; data: { object_id: ObjectId } }
+  | { type: "CreatureDestroyed"; data: { object_id: ObjectId; source_id: ObjectId | null } }
   | { type: "PermanentSacrificed"; data: { object_id: ObjectId; player_id: PlayerId } }
   | { type: "ArmyAmassed"; data: { object_id: ObjectId; source_id: ObjectId; controller: PlayerId } }
   | { type: "EffectResolved"; data: { kind: string; source_id: ObjectId } }
@@ -4144,6 +4145,9 @@ export interface GameState {
   next_object_id: number;
   battlefield: ObjectId[];
   stack: StackEntry[];
+  /** The stack entry whose resolution is under way, while it waits on a
+   *  choice mid-resolution; absent between resolutions. */
+  resolving_stack_entry?: StackEntry;
   exile: ObjectId[];
   rng_seed: number;
   combat: CombatState | null;

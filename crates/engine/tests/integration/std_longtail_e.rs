@@ -510,8 +510,10 @@ fn vraska_returned_creature_becomes_treasure_artifact_not_vraska() {
         .id();
     let mut runner = scenario.build();
     // The dies event: TriggeringSource resolves to the dead creature's card.
-    runner.state_mut().current_trigger_event =
-        Some(GameEvent::CreatureDestroyed { object_id: dead });
+    runner.state_mut().current_trigger_event = Some(GameEvent::CreatureDestroyed {
+        object_id: dead,
+        source_id: None,
+    });
 
     let ability = build_resolved_from_def(&return_def, vraska, P0);
     let mut events = Vec::new();

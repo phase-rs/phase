@@ -1001,12 +1001,13 @@ export function GameProvider({
                 formatConfig: formatConfig ?? null,
                 roomName: roomName ?? null,
                 draftMetadata: null,
-              });
-              signal.throwIfAborted();
+              }, signal);
+              // Owned before the abort check, so the catch releases a broker that resolved late.
               if (result) {
                 broker = result.broker;
                 serverGameCode = result.gameCode;
               }
+              signal.throwIfAborted();
             }
 
             // Only show the lobby tile for fresh hosts waiting for guests.
@@ -1139,6 +1140,7 @@ export function GameProvider({
               /* best-effort */
             });
           }
+          if (broker) useMultiplayerStore.getState().closeBroker(broker);
           hostPeerHandle?.destroy();
           if (signal.aborted) return;
           const message = err instanceof Error ? err.message : String(err);
@@ -1231,6 +1233,13 @@ export function GameProvider({
       const setupWs = async () => {
         if (cancelled) return;
         const reconnectSession = isReconnect ? loadWsSession() : null;
+        if (wsMode === "host" && !reconnectSession) {
+          // Online play is entered by a join code or a saved session; with neither there is no game to attach to.
+          useMultiplayerStore.getState().setConnectionStatus("disconnected");
+          useMultiplayerStore.getState().showToast(tRef.current("gameProvider.toasts.connectionFailed"));
+          onWsEventRef.current?.({ type: "reconnectFailed" });
+          return;
+        }
         if (reconnectSession) {
           const terminalDelivery = await loadFullTerminalDelivery(reconnectSession.fullKey);
           if (cancelled) return;

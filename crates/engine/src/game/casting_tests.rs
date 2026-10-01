@@ -16101,7 +16101,7 @@ fn snuff_out_alt_cost_paid_resolves_destroy_on_chosen_target() {
         "Snuff Out should have destroyed the target creature on resolution"
     );
     assert!(events.iter().any(
-        |e| matches!(e, GameEvent::CreatureDestroyed { object_id } if *object_id == target_id)
+        |e| matches!(e, GameEvent::CreatureDestroyed { object_id, .. } if *object_id == target_id)
     ));
 }
 

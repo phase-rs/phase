@@ -128,7 +128,6 @@
     "waitTimeJustNow": "proprio ora",
     "waitTimeMinutes": "{{count}}m fa",
     "waitTimeHours": "{{count}}h fa",
-    "buildMismatchTitle": "L'host è sulla versione {{version}} ({{commit}}) — la tua build è diversa. Aggiorna per allinearti.",
     "gameFull": "Questa partita è al completo.",
     "youAreHosting": "Stai ospitando questa partita.",
     "hosting": "Ospitando",

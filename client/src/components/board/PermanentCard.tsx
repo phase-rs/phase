@@ -1,6 +1,6 @@
-import { motion } from "framer-motion";
+import { motion, useReducedMotion } from "framer-motion";
 import type React from "react";
-import { memo, useCallback, useMemo, useRef } from "react";
+import { memo, useCallback, useId, useMemo, useRef } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { GameObject, Keyword, ObjectId } from "../../adapter/types.ts";
@@ -13,6 +13,7 @@ import { PTBox } from "./PTBox.tsx";
 import { useCardHover } from "../../hooks/useCardHover.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
+import { useFlightVeil } from "../../hooks/useFlightVeil.ts";
 import { useLongPress } from "../../hooks/useLongPress.ts";
 import { isUnbounded, pillsOf, useCounterDisplay } from "../../hooks/useCounterDisplay.ts";
 import { useAnimationStore } from "../../stores/animationStore.ts";
@@ -296,8 +297,10 @@ export const PermanentCard = memo(function PermanentCard({
     (s.gameState?.derived?.copied_permanents ?? []).includes(objectId),
   );
   const counterDisplay = useCounterDisplay(objectId);
-  // An active animation (the meld forge) is presenting this card itself.
+  // An active animation (the meld forge) or a card flight is presenting this
+  // card itself.
   const isVeiledByAnimation = useAnimationStore((s) => s.veiledObjectIds.has(objectId));
+  const flightHidden = useFlightVeil(objectId);
   const isManaPaymentPreviewSource = useGameStore((s) =>
     s.manaPaymentPreviewSourceIds.includes(objectId),
   );
@@ -549,7 +552,7 @@ export const PermanentCard = memo(function PermanentCard({
   let glowClass = "";
   if (isAttacking) {
     glowClass =
-      "ring-2 ring-orange-500 shadow-[0_0_12px_3px_rgba(249,115,22,0.7)]";
+      "ring-2 ring-teal-300 shadow-[0_0_12px_3px_rgba(94,234,212,0.6)]";
   } else if (isBlocking) {
     glowClass =
       "ring-2 ring-orange-500 shadow-[0_0_12px_3px_rgba(249,115,22,0.7)]";
@@ -622,7 +625,8 @@ export const PermanentCard = memo(function PermanentCard({
   // Attacker slide-forward: player creatures slide up, opponent creatures slide down.
   // Reduced on compact-height where 30px would overflow the small creature row.
   const attackSlideMagnitude = isCompactHeight ? 12 : 30;
-  const attackSlide = isAttacking ? (obj.controller === playerId ? -attackSlideMagnitude : attackSlideMagnitude) : 0;
+  const attacksUpward = obj.controller === playerId;
+  const attackSlide = isAttacking ? (attacksUpward ? -attackSlideMagnitude : attackSlideMagnitude) : 0;
 
   const handleClick = (e: React.MouseEvent) => {
     if (longPressFired.current) { longPressFired.current = false; return; }
@@ -789,13 +793,14 @@ export const PermanentCard = memo(function PermanentCard({
     <motion.div
       ref={cardRef}
       data-object-id={objectId}
+      data-permanent-card={objectId}
       data-grouped-ids={coveredIds && coveredIds.length > 1 ? coveredIds.join(" ") : undefined}
       data-card-hover
       layoutId={`permanent-${objectId}`}
       className="relative inline-flex w-fit cursor-pointer overflow-visible rounded-lg self-end select-none"
       style={{
         zIndex: attachmentsLifted ? HOVERED_ATTACHMENT_HOST_Z_INDEX : isHovered ? HOVERED_CARD_Z_INDEX : isAttacking ? 50 : undefined,
-        visibility: isVeiledByAnimation ? "hidden" : undefined,
+        visibility: isVeiledByAnimation || flightHidden ? "hidden" : undefined,
         transformOrigin: "center center",
         // Reserve space below for exile ghost cards
         marginBottom:
@@ -814,6 +819,7 @@ export const PermanentCard = memo(function PermanentCard({
       onPointerEnter={handlePointerEnter}
       onPointerLeave={handlePointerLeave}
     >
+      {isAttacking && <AttackArrow upward={attacksUpward} />}
       {isManaPaymentPreviewSource && (
         <div
           aria-hidden
@@ -1256,6 +1262,7 @@ const ExileGhostCard = memo(function ExileGhostCard({ objectId, offset }: ExileG
   const obj = useGameStore((s) => s.gameState?.objects[objectId]);
   const { handlers: hoverHandlers } = useCardHover(objectId);
   const battlefieldCardDisplay = usePreferencesStore((s) => s.battlefieldCardDisplay);
+  const flightHidden = useFlightVeil(objectId);
   const controllerIdentity = useGameStore(
     (s) => obj && s.gameState?.players?.find((p) => p.id === obj.controller)?.commander_color_identity,
   );
@@ -1275,8 +1282,9 @@ const ExileGhostCard = memo(function ExileGhostCard({ objectId, offset }: ExileG
 
   return (
     <div
+      data-exile-ghost={objectId}
       className="absolute z-0 cursor-default opacity-70"
-      style={{ bottom: `-${offset}px`, left: `${offset}px` }}
+      style={{ bottom: `-${offset}px`, left: `${offset}px`, visibility: flightHidden ? "hidden" : undefined }}
       {...hoverHandlers}
     >
       {/* Purple exile tint */}
@@ -1289,3 +1297,55 @@ const ExileGhostCard = memo(function ExileGhostCard({ objectId, offset }: ExileG
     </div>
   );
 });
+
+/** Two sharp chevrons pointing out of the attacking card's leading edge. */
+function AttackArrow({ upward }: { upward: boolean }) {
+  const gradientId = `attack-arrow-${useId()}`;
+  const reduceMotion = useReducedMotion();
+  const quality = usePreferencesStore((s) => s.vfxQuality);
+  const animateEnergy = !reduceMotion && quality !== "minimal";
+  return (
+    <motion.div
+      aria-hidden
+      data-attack-arrow={upward ? "up" : "down"}
+      className={`pointer-events-none absolute inset-x-[4%] z-0 ${upward ? "-top-[34%] bottom-[94%]" : "-bottom-[34%] top-[94%] rotate-180"}`}
+      initial={{ opacity: 0, scaleY: reduceMotion ? 1 : 0.72 }}
+      animate={{ opacity: 1, scaleY: 1 }}
+      style={{ transformOrigin: upward ? "bottom" : "top" }}
+      transition={{ duration: 0.2, ease: "easeOut" }}
+    >
+      <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="block h-full w-full overflow-visible">
+        <defs>
+          <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stopColor="#d9fbff" stopOpacity="0.9" />
+            <stop offset="0.35" stopColor="#67dcf2" stopOpacity="0.55" />
+            <stop offset="1" stopColor="#1495c0" stopOpacity="0" />
+          </linearGradient>
+        </defs>
+        <path d="M4 62 L50 4 L96 62 L96 81 L50 28 L4 81 Z" fill={`url(#${gradientId})`} />
+        <path d="M20 90 L50 52 L80 90 L80 100 L50 68 L20 100 Z" fill={`url(#${gradientId})`} opacity="0.45" />
+        <path
+          d="M4 62 L50 4 L96 62"
+          fill="none"
+          stroke="#8cdeee"
+          strokeWidth="1.5"
+          strokeLinejoin="miter"
+          vectorEffect="non-scaling-stroke"
+        />
+        {animateEnergy && (
+          <motion.path
+            d="M4 62 L50 4 L96 62"
+            fill="none"
+            stroke="#effeff"
+            strokeWidth="2"
+            vectorEffect="non-scaling-stroke"
+            pathLength={1}
+            strokeDasharray="0.22 0.78"
+            animate={{ strokeDashoffset: [1, 0], opacity: [0, 0.8, 0] }}
+            transition={{ duration: 0.7, repeat: Infinity, repeatDelay: 2, ease: "linear" }}
+          />
+        )}
+      </svg>
+    </motion.div>
+  );
+}

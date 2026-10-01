@@ -265,6 +265,9 @@ const nativeWebSocketMocks = vi.hoisted(() => {
     sentActions,
     preSendRejections,
     dispose: vi.fn(),
+    // Plain functions, not vi.fns: a vi.fn's result tracking handles the promise it returns.
+    parkSlots: undefined as ((client: object) => Promise<never>) | undefined,
+    parkStarted: undefined as ((client: object) => Promise<never>) | undefined,
   };
 });
 
@@ -278,14 +281,18 @@ vi.mock("../ws-adapter", async (original) => {
       get playerId() {
         return playerId;
       },
-      initializePregame: async () => {
-        const attachment = await nativeWebSocketMocks.initializePregame();
+      async initializePregame() {
+        const attachment = await nativeWebSocketMocks.initializePregame.call(this);
         playerId = attachment.playerId;
         if (playerId !== null) nativeWebSocketMocks.openSockets.add(playerId);
         return attachment;
       },
-      waitForPlayerSlots: nativeWebSocketMocks.waitForPlayerSlots,
-      waitForGameStarted: nativeWebSocketMocks.waitForGameStarted,
+      waitForPlayerSlots(this: object) {
+        return nativeWebSocketMocks.parkSlots?.(this) ?? nativeWebSocketMocks.waitForPlayerSlots();
+      },
+      waitForGameStarted(this: object) {
+        return nativeWebSocketMocks.parkStarted?.(this) ?? nativeWebSocketMocks.waitForGameStarted();
+      },
       submitAction: (action: unknown, actor: number) =>
         nativeWebSocketMocks.submitAction(playerId, action, actor),
       onEvent: nativeWebSocketMocks.onEvent,
@@ -7427,5 +7434,248 @@ describe("P2P interaction preview", () => {
     await flushPromises();
     expect(mocks.getViewerTransitionSnapshot).toHaveBeenCalled();
     adapter.dispose();
+  });
+});
+
+describe("NativeP2PBridge — dispose during a native client's handshake", () => {
+  type BridgeView = { clients: Map<number, unknown> };
+  const bridgeOf = (adapter: P2PHostAdapter) =>
+    (adapter as unknown as { nativeBridge: BridgeView }).nativeBridge;
+  const fireLatestSessionAttached = (attachment: typeof NATIVE_HOST_ATTACHMENT) => {
+    const { calls } = nativeWebSocketMocks.onEvent.mock;
+    const onNativeEvent = calls[calls.length - 1][0] as (event: WsAdapterEvent) => void;
+    onNativeEvent({ type: "sessionAttached", attachment } as unknown as WsAdapterEvent);
+  };
+  function makeNativeResumeHost() {
+    const { peer, onGuestConnected } = createFakePeer();
+    const hostDeckData = {
+      player: { main_deck: ["Mountain"], sideboard: [] },
+      opponent: { main_deck: ["Forest"], sideboard: [] },
+      ai_decks: [],
+    };
+    return new P2PHostAdapter(hostDeckData, peer as unknown as Peer, onGuestConnected, 2, commanderConfig(), undefined, 5_000, undefined, true, undefined, {
+      gameId: "native-resume-dispose",
+      roomCode: "ABCDE",
+      resumeData: {
+        session: {
+          gameId: "native-resume-dispose",
+          roomCode: "ABCDE",
+          sessionKey: "native-resume-dispose-session",
+          useBroker: false,
+          playerTokens: {},
+          guestDecks: {},
+          kickedTokens: [],
+          eliminatedSeats: [],
+          playerCount: 2,
+          hostDeckData,
+          gameStarted: true,
+          nativeSession: {
+            gameCode: "native-game",
+            fullKey: { game_code: "native-game", generation: 1 },
+            playerTokens: { 0: "native-host-token", 1: "native-guest-token" },
+          },
+        },
+      },
+    }, {});
+  }
+
+  it("host bring-up: the disposed bridge registers the client at neither site and disposes it", async () => {
+    const { adapter } = makeNativeHost();
+    const hostAttachment = deferred<typeof NATIVE_HOST_ATTACHMENT>();
+    nativeWebSocketMocks.waitForPlayerSlots.mockResolvedValue([]);
+    nativeWebSocketMocks.initializePregame.mockImplementationOnce(() => hostAttachment.promise);
+    const init = adapter.initialize().catch(() => undefined);
+    await flushPromises(10);
+    expect(nativeWebSocketMocks.initializePregame).toHaveBeenCalledOnce();
+    const bridge = bridgeOf(adapter);
+
+    adapter.dispose();
+    fireLatestSessionAttached(NATIVE_HOST_ATTACHMENT);
+    hostAttachment.resolve(NATIVE_HOST_ATTACHMENT);
+    await init;
+    await flushPromises(10);
+
+    expect(bridge.clients.size).toBe(0);
+    expect(nativeWebSocketMocks.dispose).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    { host: "fresh host", make: () => makeNativeHost().adapter },
+    { host: "resume", make: makeNativeResumeHost },
+  ])("$host: a dispose during the engine load dials no client and disposes the one it built", async ({ make }) => {
+    const adapter = make();
+    const engineLoad = deferred<undefined>();
+    mocks.initialize.mockImplementationOnce(() => engineLoad.promise);
+    nativeWebSocketMocks.waitForPlayerSlots.mockResolvedValue([]);
+    nativeWebSocketMocks.initializePregame.mockResolvedValueOnce(NATIVE_HOST_ATTACHMENT);
+    const init = adapter.initialize().catch(() => undefined);
+    await flushPromises(10);
+
+    adapter.dispose();
+    engineLoad.resolve(undefined);
+    await init;
+    await flushPromises(10);
+
+    expect(nativeWebSocketMocks.initializePregame).not.toHaveBeenCalled();
+    expect(nativeWebSocketMocks.dispose).toHaveBeenCalledOnce();
+  });
+
+  it("resume: a dispose during seat 0's reconnect dials no later seat", async () => {
+    const adapter = makeNativeResumeHost();
+    const hostAttachment = deferred<typeof NATIVE_HOST_ATTACHMENT>();
+    nativeWebSocketMocks.initializePregame
+      .mockImplementationOnce(() => hostAttachment.promise)
+      .mockResolvedValueOnce(NATIVE_GUEST_ATTACHMENT);
+    const init = adapter.initialize().catch(() => undefined);
+    await flushPromises(10);
+    expect(nativeWebSocketMocks.initializePregame).toHaveBeenCalledOnce();
+    const bridge = bridgeOf(adapter);
+
+    adapter.dispose();
+    fireLatestSessionAttached(NATIVE_HOST_ATTACHMENT);
+    hostAttachment.resolve(NATIVE_HOST_ATTACHMENT);
+    await init;
+    await flushPromises(10);
+
+    expect(nativeWebSocketMocks.initializePregame).toHaveBeenCalledOnce();
+    expect(bridge.clients.size).toBe(0);
+    expect(nativeWebSocketMocks.dispose).toHaveBeenCalledOnce();
+  });
+
+  it("guest attachment: disposes the attached host once and the in-flight guest, holding neither", async () => {
+    const { adapter, emitConnection } = makeNativeHost();
+    const guestAttachment = deferred<typeof NATIVE_GUEST_ATTACHMENT>();
+    nativeWebSocketMocks.waitForPlayerSlots.mockResolvedValue([]);
+    nativeWebSocketMocks.initializePregame
+      .mockResolvedValueOnce(NATIVE_HOST_ATTACHMENT)
+      .mockImplementationOnce(() => guestAttachment.promise);
+    await adapter.initialize();
+    await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: ["Plains"], sideboard: [] } },
+    });
+    await flushPromises(10);
+    expect(nativeWebSocketMocks.initializePregame).toHaveBeenCalledTimes(2);
+    const bridge = bridgeOf(adapter);
+
+    adapter.dispose();
+    fireLatestSessionAttached(NATIVE_GUEST_ATTACHMENT);
+    guestAttachment.resolve(NATIVE_GUEST_ATTACHMENT);
+    await flushPromises(20);
+
+    expect(bridge.clients.size).toBe(0);
+    expect(nativeWebSocketMocks.dispose).toHaveBeenCalledTimes(2);
+  });
+
+  it("control: a dispose after the handshake settles disposes the client once", async () => {
+    const { adapter } = makeNativeHost();
+    nativeWebSocketMocks.waitForPlayerSlots.mockResolvedValue([]);
+    nativeWebSocketMocks.initializePregame.mockResolvedValueOnce(NATIVE_HOST_ATTACHMENT);
+    await adapter.initialize();
+    const bridge = bridgeOf(adapter);
+    expect(bridge.clients.size).toBe(1);
+
+    adapter.dispose();
+
+    expect(bridge.clients.size).toBe(0);
+    expect(nativeWebSocketMocks.dispose).toHaveBeenCalledOnce();
+  });
+  describe("a dispose mid-handshake rejects the parked slot wait", () => {
+    const parked = new Map<object, Array<(error: Error) => void>>();
+    const park = (client: object) =>
+      new Promise<never>((_, reject) => parked.set(client, [...(parked.get(client) ?? []), reject]));
+    const parkThisPregame = function (this: object) {
+      return park(this);
+    };
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    let prior: NodeJS.UnhandledRejectionListener[] = [];
+
+    beforeEach(() => {
+      parked.clear();
+      unhandled.length = 0;
+      // Mirrors `WebSocketAdapter.dispose`: the disposed client's parked handshake and slot wait reject.
+      nativeWebSocketMocks.dispose.mockImplementation(function (this: object) {
+        for (const reject of parked.get(this) ?? []) reject(new Error("Adapter disposed"));
+        parked.delete(this);
+      });
+      prior = process.listeners("unhandledRejection");
+      process.removeAllListeners("unhandledRejection");
+      process.on("unhandledRejection", onUnhandled);
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+    });
+
+    afterEach(() => {
+      process.off("unhandledRejection", onUnhandled);
+      for (const listener of prior) process.on("unhandledRejection", listener);
+      nativeWebSocketMocks.parkSlots = undefined;
+      nativeWebSocketMocks.parkStarted = undefined;
+      nativeWebSocketMocks.dispose.mockReset();
+      vi.mocked(console.warn).mockRestore();
+    });
+
+    it("fresh host: leaves no unhandled rejection", async () => {
+      const { adapter } = makeNativeHost();
+      nativeWebSocketMocks.parkSlots = park;
+      nativeWebSocketMocks.initializePregame.mockImplementationOnce(parkThisPregame);
+      let settled = false;
+      void adapter.initialize().catch(() => undefined).finally(() => { settled = true; });
+      await flushPromises(10);
+      expect(nativeWebSocketMocks.initializePregame).toHaveBeenCalledOnce();
+
+      adapter.dispose();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(settled).toBe(true);
+      expect(unhandled).toEqual([]);
+    });
+
+    it("guest attachment: leaves no unhandled rejection", async () => {
+      const { adapter, emitConnection } = makeNativeHost();
+      nativeWebSocketMocks.waitForPlayerSlots.mockResolvedValue([]);
+      nativeWebSocketMocks.initializePregame
+        .mockResolvedValueOnce(NATIVE_HOST_ATTACHMENT)
+        .mockImplementationOnce(parkThisPregame);
+      await adapter.initialize();
+      nativeWebSocketMocks.parkSlots = park;
+      await joinGuest(emitConnection, {
+        type: "guest_deck",
+        deckData: { player: { main_deck: ["Plains"], sideboard: [] } },
+      });
+      await flushPromises(10);
+      expect(nativeWebSocketMocks.initializePregame).toHaveBeenCalledTimes(2);
+
+      adapter.dispose();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(console.warn).toHaveBeenCalledWith("[P2PHost] native guest attachment failed; using WASM host", expect.anything());
+      expect(unhandled).toEqual([]);
+    });
+
+    it("start: a dispose during the Start round trip leaves no unhandled rejection", async () => {
+      const { adapter, emitConnection } = makeNativeHost();
+      nativeWebSocketMocks.waitForPlayerSlots.mockResolvedValue([]);
+      nativeWebSocketMocks.initializePregame
+        .mockResolvedValueOnce(NATIVE_HOST_ATTACHMENT)
+        .mockResolvedValueOnce(NATIVE_GUEST_ATTACHMENT);
+      await adapter.initialize();
+      await joinGuest(emitConnection, {
+        type: "guest_deck",
+        deckData: { player: { main_deck: ["Plains"], sideboard: [] } },
+      });
+      await flushPromises(10);
+      nativeWebSocketMocks.parkStarted = park;
+      nativeWebSocketMocks.sendSeatMutation.mockImplementation(parkThisPregame);
+      let settled = false;
+      void adapter.startPregameGame().catch(() => undefined).finally(() => { settled = true; });
+      await flushPromises(10);
+      expect(nativeWebSocketMocks.sendSeatMutation).toHaveBeenCalledWith({ type: "Start" });
+
+      adapter.dispose();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(settled).toBe(true);
+      expect(unhandled).toEqual([]);
+    });
   });
 });

@@ -1506,6 +1506,11 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             prevention_duration,
             amount: _,
             scope: _,
+            // CR 615.1 + CR 115.10a: static targeted-vs-mass discriminant; a mass
+            // prevention shield does no resolution-time board enumeration (it is
+            // matched per damage event), so it stays in the relaxed group like
+            // `ForceAttack`.
+            recipient_scope: _,
         } => {
             let mut acc = Axes::NONE;
             if let Some(x) = amount_dynamic {

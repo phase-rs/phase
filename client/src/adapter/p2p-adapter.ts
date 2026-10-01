@@ -239,6 +239,9 @@ class NativeP2PBridge {
   private readonly pendingFaults = new Map<number, { id: number; revision: number; message: string }>();
   private gameCode: string | null = null;
   private fullKey: FullSessionKey | null = null;
+  /** Clients still in their pregame handshake; `dispose()` releases them. */
+  private readonly pending = new Set<WebSocketAdapter>();
+  private disposed = false;
 
   constructor(
     private readonly hostDeckData: DeckListPayload,
@@ -290,6 +293,8 @@ class NativeP2PBridge {
       },
     );
     const initialSlots = host.waitForPlayerSlots();
+    // `dispose()` can reject the slot wait while `attachClient` is still pending.
+    void initialSlots.catch(() => {});
     const attachment = await this.attachClient(host);
     await initialSlots;
     if (attachment.playerId !== 0) {
@@ -326,6 +331,8 @@ class NativeP2PBridge {
       },
     );
     const hostSlots = this.clientFor(0).waitForPlayerSlots();
+    // `dispose()` can reject the slot wait while `attachClient` is still pending.
+    void hostSlots.catch(() => {});
     const attachment = await this.attachClient(guest);
     await hostSlots;
     if (attachment.playerId !== p2pPlayerId) {
@@ -343,8 +350,11 @@ class NativeP2PBridge {
     const host = this.clientFor(0);
     const started = new Promise<NativeViewerUpdate>((resolve) => this.startWaiters.push(resolve));
     const waits = [...this.clients.values()].map((client) => client.waitForGameStarted());
+    const all = Promise.all(waits);
+    // `dispose()` can reject the waits while the Start round trip is still pending.
+    void all.catch(() => {});
     await host.sendSeatMutation({ type: "Start" });
-    await Promise.all(waits);
+    await all;
     const hostUpdate = await started;
     return { events: hostUpdate.events, log_entries: hostUpdate.logEntries };
   }
@@ -413,6 +423,8 @@ class NativeP2PBridge {
   }
 
   dispose(): void {
+    this.disposed = true;
+    for (const client of this.pending) client.dispose();
     for (const client of this.clients.values()) client.dispose();
     this.clients.clear();
     this.playerTokens.clear();
@@ -421,8 +433,14 @@ class NativeP2PBridge {
   }
 
   private async attachClient(client: WebSocketAdapter): Promise<NativeSessionAttachment> {
+    if (this.disposed) {
+      // `dispose()` already ran, so it will never release this client.
+      client.dispose();
+      throw new AdapterError("P2P_ERROR", "Native bridge disposed during attachment", true);
+    }
     client.onEvent((event) => {
       if (event.type === "sessionAttached") {
+        if (this.disposed) return;
         // Register the exact authenticated seat before GameStarted/reconnect
         // can release a local state frame. This membership is the barrier's
         // recipient set for every following revision.
@@ -465,7 +483,11 @@ class NativeP2PBridge {
         for (const resolve of this.startWaiters.splice(0)) resolve(hostUpdate);
       }
     });
-    const attachment = await client.initializePregame();
+    this.pending.add(client);
+    const attachment = await client.initializePregame().finally(() => this.pending.delete(client));
+    if (this.disposed) {
+      throw new AdapterError("P2P_ERROR", "Native bridge disposed during attachment", true);
+    }
     this.clients.set(attachment.playerId, client);
     this.playerTokens.set(attachment.playerId, attachment.playerToken);
     return attachment;

@@ -128,7 +128,6 @@
     "waitTimeJustNow": "gerade eben",
     "waitTimeMinutes": "vor {{count}}m",
     "waitTimeHours": "vor {{count}}h",
-    "buildMismatchTitle": "Host nutzt {{version}} ({{commit}}) — dein Build ist anders. Aktualisiere, um auf den neuesten Stand zu kommen.",
     "gameFull": "Dieses Spiel ist voll.",
     "youAreHosting": "Du hostest dieses Spiel.",
     "hosting": "Hosten",

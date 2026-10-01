@@ -3738,12 +3738,19 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::PreventDamage {
             amount,
             target,
+            recipient_scope,
             scope,
             damage_source_filter,
             ..
         } => {
             d.push(("amount".into(), format!("{amount:?}")));
-            d.push(("target".into(), fmt_target(target)));
+            // CR 115.10a: a declared recipient is a `target`; an untargeted
+            // population is a `filter` (mirrors `ForceAttack`'s subject key).
+            let recipient_key = match recipient_scope {
+                EffectScope::Single => "target",
+                EffectScope::All => "filter",
+            };
+            d.push((recipient_key.into(), fmt_target(target)));
             d.push(("scope".into(), format!("{scope:?}")));
             // CR 615 + CR 614.1a: the source-restriction qualifier (#5492). Omitting
             // it made a change from unqualified `ChosenDamageSource` to
@@ -14400,6 +14407,7 @@ mod tests {
                 amount: PreventionAmount::All,
                 amount_dynamic: None,
                 target: TargetFilter::Any,
+                recipient_scope: EffectScope::Single,
                 scope: PreventionScope::AllDamage,
                 damage_source_filter: dsf,
                 prevention_duration: None,
@@ -14420,6 +14428,33 @@ mod tests {
                 .any(|k| k == "damage_source_filter"),
             "an absent damage_source_filter must not appear",
         );
+    }
+
+    /// CR 115.10a: the parse-diff signature keys a declared recipient as
+    /// `target` and an untargeted population as `filter`, so a Single -> All
+    /// reclassification is visible to `coverage-parse-diff`.
+    #[test]
+    fn prevent_damage_signature_keys_recipient_by_scope() {
+        let keys = |recipient_scope: EffectScope| -> Vec<String> {
+            effect_details(&Effect::PreventDamage {
+                amount: PreventionAmount::All,
+                amount_dynamic: None,
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                recipient_scope,
+                scope: PreventionScope::AllDamage,
+                damage_source_filter: None,
+                prevention_duration: None,
+            })
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect()
+        };
+        let single = keys(EffectScope::Single);
+        assert!(single.iter().any(|k| k == "target"));
+        assert!(!single.iter().any(|k| k == "filter"));
+        let all = keys(EffectScope::All);
+        assert!(all.iter().any(|k| k == "filter"));
+        assert!(!all.iter().any(|k| k == "target"));
     }
 
     #[test]
@@ -14548,6 +14583,7 @@ mod tests {
                 amount: PreventionAmount::All,
                 amount_dynamic: None,
                 target: TargetFilter::Any,
+                recipient_scope: EffectScope::Single,
                 scope: PreventionScope::AllDamage,
                 damage_source_filter: Some(TargetFilter::ChosenDamageSource { filter: None }),
                 prevention_duration: None,
@@ -18843,6 +18879,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                     amount: PreventionAmount::All,
                     amount_dynamic: None,
                     target: TargetFilter::Any,
+                    recipient_scope: EffectScope::Single,
                     scope: PreventionScope::AllDamage,
                     damage_source_filter: None,
                     prevention_duration: None,

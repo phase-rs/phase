@@ -1050,10 +1050,6 @@ fn loyal_unicorn(with_commander: bool) -> (bool, bool, bool, Vec<EffectKind>) {
                 drain_order_triggers_with_identity(runner.state_mut());
                 continue;
             }
-            // The engine asks for a creature for the prevention instruction.
-            WaitingFor::TriggerTargetSelection { .. } => runner.act(GameAction::ChooseTarget {
-                target: Some(TargetRef::Object(c1)),
-            }),
             WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
             WaitingFor::Priority { .. } => runner.act(GameAction::PassPriority),
             other => panic!("unexpected wait {other:?}"),
@@ -1105,8 +1101,10 @@ fn loyal_unicorn(with_commander: bool) -> (bool, bool, bool, Vec<EffectKind>) {
 /// J-6 (c): Loyal Unicorn's intervening "if" (CR 603.4) is not an "if you do"
 /// gate. With a commander, combat damage to every creature its controller
 /// controls is prevented and the other creatures gain vigilance.
-/// GREEN AT BASE, NON-DISCRIMINATING: there is no `OptionalEffectPerformed`
-/// gate, so the declined walk is unreachable.
+/// RED AT BASE: the "creatures you control" recipient names no target
+/// (CR 115.10a), but at base the trigger raised a spurious
+/// `TriggerTargetSelection` prompt that `loyal_unicorn` no longer answers, so
+/// the helper panics on the unexpected wait.
 #[test]
 fn loyal_unicorn_with_commander_prevents_combat_damage_and_grants_vigilance() {
     let (c1_survived, c3_survived, vigilance, kinds) = loyal_unicorn(true);
@@ -1118,8 +1116,9 @@ fn loyal_unicorn_with_commander_prevents_combat_damage_and_grants_vigilance() {
     assert!(vigilance);
 }
 
-/// J-6 (c): without a commander, nothing happens. GREEN AT BASE,
-/// NON-DISCRIMINATING, as above.
+/// J-6 (c): without a commander, nothing happens. The negative sibling of the
+/// test above: the trigger never fires, so the prompt it once raised is never
+/// reached and this stays green at base.
 #[test]
 fn loyal_unicorn_without_commander_does_nothing() {
     let (c1_survived, c3_survived, vigilance, kinds) = loyal_unicorn(false);

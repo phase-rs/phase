@@ -39,6 +39,7 @@ import {
   clearWsSession,
   loadWsSession,
   saveWsSession,
+  type WsSessionData,
 } from "../services/multiplayerSession";
 import {
   BrokerRequestError,
@@ -159,11 +160,15 @@ let hostPingStop: (() => void) | null = null;
 // navigations so the lobby entry stays alive while the tile is showing.
 let activeBroker: BrokerClient | null = null;
 let activeBrokerGameCode: string | null = null;
+// Only the latest `openBroker` call may publish its broker.
+let brokerOpenAttempt = 0;
 let activeP2PHostAdapter: P2PHostAdapter | null = null;
 let activeP2PHostGameId: string | null = null;
 let p2pHostingAttempt = 0;
 // A server-host dial acts after its socket opens only while it is the latest.
 let serverHostAttempt = 0;
+// A host socket acts only while no `GameStarted` has handed the page off since it was dialed.
+let hostHandoffs = 0;
 
 function asDeckPayload(deck: HostingDeck): {
   main_deck: string[];
@@ -1718,8 +1723,12 @@ interface MultiplayerActions {
   cancelHosting: () => void;
   clearPendingGameRoute: () => void;
   setServerInfo: (info: ServerInfo | null) => void;
-  openBroker: (req: RegisterHostRequest) => Promise<{ broker: BrokerClient; gameCode: string } | null>;
-  closeBroker: () => void;
+  openBroker: (
+    req: RegisterHostRequest,
+    signal?: AbortSignal,
+  ) => Promise<{ broker: BrokerClient; gameCode: string } | null>;
+  /** Closes `broker`, and clears the active slot only if it holds that broker. */
+  closeBroker: (broker: BrokerClient) => void;
   getBroker: () => { broker: BrokerClient; gameCode: string } | null;
   startP2PHostingSession: (
     settings: HostingSettings,
@@ -1975,25 +1984,6 @@ async function startActiveP2PHostGame(
     hostGameCode: null,
     hostingStatus: "idle",
   });
-}
-
-/**
- * Checks whether a lobby entry's host is running a compatible build with
- * the browsing client. Used by the lobby list to disable incompatible
- * rows. A missing `hostBuildCommit` (restored session, legacy entry) is
- * treated as unknown-but-allowed, matching the server's behavior at the
- * join gate. We compare against this client's `__BUILD_HASH__` rather
- * than the server's commit because in `LobbyOnly` mode the server is a
- * P2P peer broker — its commit is independent of the host/guest engine
- * build that actually has to agree at game time. In `Full` mode the
- * protocol-version check in `isServerCompatible` covers the client-to-
- * server direction, and host/guest still need matching engine builds.
- */
-export function isLobbyEntryCompatible(
-  hostBuildCommit: string | undefined,
-): boolean {
-  if (!hostBuildCommit) return true;
-  return hostBuildCommit === __BUILD_HASH__;
 }
 
 /**
@@ -2636,11 +2626,12 @@ function savePregameHostSession(
   get: MultiplayerGet,
   data: { game_code: string; player_token: string; full_key?: { game_code: string; generation: number } },
   serverUrl: string,
+  held: { session: WsSessionData | null },
 ): void {
   if (!data.full_key || data.full_key.game_code !== data.game_code) return;
   const existing = loadWsSession();
   const hostSession = get().hostSession ?? existing?.hostSession;
-  saveWsSession({
+  held.session = {
     gameCode: data.game_code,
     playerToken: data.player_token,
     fullKey: data.full_key,
@@ -2648,11 +2639,12 @@ function savePregameHostSession(
     timestamp: Date.now(),
     ...(hostSession ? { hostSession } : {}),
     ...(hostSession ? { hostIsPublic: get().hostIsPublic } : {}),
-  });
+  };
+  saveWsSession(held.session);
 }
 
-function clearPregameHostMetadataFromWsSession(): void {
-  const session = loadWsSession();
+function clearPregameHostMetadataFromWsSession(held: { session: WsSessionData | null }): void {
+  const session = held.session;
   if (!session) return;
   saveWsSession({
     gameCode: session.gameCode,
@@ -2669,6 +2661,7 @@ function handleServerHostMessage(
   ws: PhaseSocketTransport,
   msg: { type: string; data?: unknown },
   serverUrl: string,
+  held: { session: WsSessionData | null },
   requestedCode?: string,
 ): void {
   if (msg.type === "GameCreated") {
@@ -2684,14 +2677,16 @@ function handleServerHostMessage(
       get().cancelHosting();
       return;
     }
-    savePregameHostSession(get, data, serverUrl);
+    savePregameHostSession(get, data, serverUrl, held);
     // Reset reconnect counter on successful (re)connection.
     hostReconnectAttempt = 0;
     set({ hostGameCode: data.game_code, hostingStatus: "waiting" });
   } else if (msg.type === "GameStarted") {
     gameStartedFired = true;
-    clearPregameHostMetadataFromWsSession();
+    hostHandoffs += 1;
+    clearPregameHostMetadataFromWsSession(held);
     ws.close();
+    if (hostWs && hostWs !== ws) hostWs.close();
     hostWs = null;
     // This arm performs the handoff itself and never routes through
     // `closeHostWebSocket`, so the keepalive has to be stopped here.
@@ -2746,6 +2741,7 @@ async function openServerHostSocket(
   setupFrame: () => unknown,
   onReopen: () => void,
   serverUrl: string,
+  dialed: WsSessionData | null,
   requestedCode?: string,
 ): Promise<void> {
   // The dialed URL arrives as an argument rather than being read from store
@@ -2762,6 +2758,7 @@ async function openServerHostSocket(
   }
 
   const attempt = ++serverHostAttempt;
+  const handoffs = hostHandoffs;
   let socket;
   try {
     socket = await openPhaseSocket(url);
@@ -2781,7 +2778,7 @@ async function openServerHostSocket(
     }
     return;
   }
-  if (attempt !== serverHostAttempt) {
+  if (attempt !== serverHostAttempt || handoffs !== hostHandoffs) {
     socket.ws.close();
     return;
   }
@@ -2791,15 +2788,22 @@ async function openServerHostSocket(
   const stopPing = startSocketKeepalive(socket.ws);
   hostPingStop = stopPing;
 
+  // Each host socket carries the session it dialed, so `GameStarted`
+  // re-stamps this socket's game even if the stored copy expired or was refused.
+  const held = { session: dialed };
   socket.ws.onmessage = (event) => {
+    if (handoffs !== hostHandoffs) {
+      socket.ws.close();
+      return;
+    }
     const msg = JSON.parse(event.data as string) as {
       type: string;
       data?: unknown;
     };
-    handleServerHostMessage(set, get, socket.ws, msg, url, requestedCode);
+    handleServerHostMessage(set, get, socket.ws, msg, url, held, requestedCode);
   };
   socket.ws.onerror = () => {
-    if (!gameStartedFired) {
+    if (!gameStartedFired && hostWs === socket.ws) {
       hostWs = null;
       onReopen();
     }
@@ -2848,6 +2852,7 @@ function attemptServerHostReconnect(
       // mid-game host-socket drop, and it must return to the server the game
       // is actually on even if the browsing anchor has since moved.
       session.serverUrl,
+      session,
     );
   }, delay);
 }
@@ -3172,6 +3177,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
           }),
           () => attemptServerHostReconnect(set, get),
           serverUrl,
+          null,
           settings.requestedCode,
         );
       },
@@ -3214,6 +3220,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
           }),
           () => attemptServerHostReconnect(set, get),
           session.serverUrl,
+          session,
         );
 
         return true;
@@ -3251,7 +3258,9 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
 
       clearPendingGameRoute: () => set({ pendingGameRoute: null }),
 
-      openBroker: async (req) => {
+      openBroker: async (req, signal) => {
+        const attempt = ++brokerOpenAttempt;
+        const isStale = () => attempt !== brokerOpenAttempt || signal?.aborted === true;
         if (activeBroker) {
           activeBroker.close();
           activeBroker = null;
@@ -3265,7 +3274,15 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
         let broker: BrokerClient | null = null;
         try {
           broker = await openBrokerClient(url);
+          if (isStale()) {
+            broker.close();
+            return null;
+          }
           const registered = await broker.registerHost(req);
+          if (isStale()) {
+            broker.close();
+            return null;
+          }
           activeBroker = broker;
           activeBrokerGameCode = registered.gameCode;
           return { broker, gameCode: registered.gameCode };
@@ -3280,10 +3297,12 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
         }
       },
 
-      closeBroker: () => {
-        activeBroker?.close();
-        activeBroker = null;
-        activeBrokerGameCode = null;
+      closeBroker: (broker) => {
+        broker.close();
+        if (activeBroker === broker) {
+          activeBroker = null;
+          activeBrokerGameCode = null;
+        }
       },
 
       getBroker: () => {

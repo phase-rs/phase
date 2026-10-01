@@ -1674,7 +1674,7 @@ describe("GameProvider online deck rejection", () => {
     );
 
     render(
-      <GameProvider gameId="online-deck-rejected" mode="online" onWsEvent={onWsEvent}>
+      <GameProvider gameId="online-deck-rejected" mode="online" joinCode="ABC123" onWsEvent={onWsEvent}>
         <div />
       </GameProvider>,
     );
@@ -1698,7 +1698,7 @@ describe("GameProvider online deck rejection", () => {
     );
 
     render(
-      <GameProvider gameId="online-action-rejected" mode="online" onWsEvent={onWsEvent}>
+      <GameProvider gameId="online-action-rejected" mode="online" joinCode="ABC123" onWsEvent={onWsEvent}>
         <div />
       </GameProvider>,
     );

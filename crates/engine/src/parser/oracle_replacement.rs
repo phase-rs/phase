@@ -7465,6 +7465,7 @@ pub(crate) fn parse_oneshot_damage_replacement(
             // creature") is intentionally left as `Any` here (unchanged), since
             // it takes `target_filter == None`.
             target: damage_target_filter_to_prevent_target(target_filter.as_ref()),
+            recipient_scope: crate::types::ability::EffectScope::Single,
             scope: combat_scope
                 .map(|_| crate::types::ability::PreventionScope::CombatDamage)
                 .unwrap_or(crate::types::ability::PreventionScope::AllDamage),
@@ -7628,6 +7629,7 @@ fn parse_oneshot_target_source_prevent(norm_lower: &str, ctx: &ParseContext) -> 
         // `Any` here means "no additional recipient scope" and is not consulted
         // on the source-scoped prevent path.
         target: TargetFilter::Any,
+        recipient_scope: crate::types::ability::EffectScope::Single,
         scope,
         damage_source_filter: Some(TargetFilter::And {
             filters: vec![
@@ -9266,17 +9268,32 @@ fn body_is_lifegain_negation(lower_body: &str) -> bool {
     combinator.parse(lower_body.trim()).is_ok()
 }
 
+/// CR 614.6 + CR 121.6: The predicate of a draw-suppression clause —
+/// `"skip[s] that/the draw"`. Single authority shared by the pure-skip body
+/// (`body_is_draw_skip`) and the compound "skips that draw and <effect>" body
+/// (`strip_leading_draw_skip_conjunct`). "that draw" and "the draw" are leaf
+/// variants of the same anaphor back to the replaced draw event.
+fn draw_skip_predicate(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        (
+            alt((tag("skips "), tag("skip "))),
+            alt((tag("that draw"), tag("the draw"))),
+        ),
+    )
+    .parse(input)
+}
+
 /// CR 614.6 + CR 121.6: Recognize a PURE draw-suppression replacement body
 /// "[subject] skip[s] that/the draw" (Living Conundrum). The optional subject
-/// prefix mirrors `body_is_lifegain_negation`; "that draw" and "the draw" are
-/// leaf variants of the same anaphor back to the replaced draw event.
+/// prefix mirrors `body_is_lifegain_negation`.
 ///
 /// `all_consuming` (modulo a trailing period) is load-bearing: a compound body
 /// that only *begins* with a skip and then adds a follow-on effect — Notion
-/// Thief / Hullbreacher's "that player skips that draw AND you draw a card" —
-/// must NOT collapse to a bare `Prevent`, which would drop the "you draw a card"
-/// execute (and the except-first-draw condition). Those compound bodies fall
-/// through to the normal `execute` path.
+/// Thief's "that player skips that draw AND you draw a card" — must NOT
+/// collapse to a bare `Prevent`, which would drop the "you draw a card"
+/// execute (and the except-first-draw condition). Those compound bodies are
+/// handled by `strip_leading_draw_skip_conjunct` and the normal `execute` path.
 fn body_is_draw_skip(lower_body: &str) -> bool {
     let subject = opt(alt((
         tag::<_, _, OracleError<'_>>("that player "),
@@ -9284,19 +9301,48 @@ fn body_is_draw_skip(lower_body: &str) -> bool {
         tag("you "),
         tag("they "),
     )));
-    let mut combinator = all_consuming(preceded(
-        subject,
-        value(
-            (),
-            (
-                alt((tag("skips "), tag("skip "))),
-                alt((tag("that draw"), tag("the draw"))),
-            ),
-        ),
-    ));
+    let mut combinator = all_consuming(preceded(subject, draw_skip_predicate));
     combinator
         .parse(lower_body.trim().trim_end_matches('.').trim_end())
         .is_ok()
+}
+
+/// CR 614.6 + CR 121.6: Strip the leading skip conjunct of a compound draw
+/// replacement body — `"that player skips that draw and <effect>"` (Notion
+/// Thief) — returning the `<effect>` remainder. The replacement itself is the
+/// skip (CR 614.6: the replaced draw never happens; the draw pipeline zeroes an
+/// opponent's draw whenever the replacement's `execute` substitutes for it), so
+/// the clause has no effect representation and is dropped rather than lowered
+/// to an `Unimplemented` no-op.
+///
+/// Anchored at both ends: the body must BEGIN with the mandatory subject
+/// (`that player` / `the player` / `they` — `you` is excluded, no printed card
+/// uses it and the caller's own draw is a rescale, not a substitution) and the
+/// anaphor must be followed immediately by the conjunction. The whole remainder
+/// is handed to `parse_effect_chain`, so anything it cannot lower stays an
+/// honest `Unimplemented`. `None` when the shape does not match or the
+/// remainder is empty.
+fn strip_leading_draw_skip_conjunct<'a>(
+    lower_body: &str,
+    original_body: &'a str,
+) -> Option<&'a str> {
+    let (_, rest) = nom_on_lower(original_body, lower_body, |input| {
+        value(
+            (),
+            (
+                alt((
+                    tag::<_, _, OracleError<'_>>("that player "),
+                    tag("the player "),
+                    tag("they "),
+                )),
+                draw_skip_predicate,
+                alt((tag(", and "), tag(" and "))),
+            ),
+        )
+        .parse(input)
+    })?;
+    let rest = rest.trim_start();
+    (!rest.is_empty()).then_some(rest)
 }
 
 /// CR 614.6 + CR 121.6 + CR 614.1a: Strip a leading optional draw-suppression
@@ -9454,6 +9500,10 @@ fn parse_draw_replacement(
         }
         return Some(def);
     }
+    // CR 614.1a: Player scope for draw replacements. Assigned before effect
+    // lowering because the compound-skip strip below is only meaningful for a
+    // scoped replacement (`valid_player` is `Some`).
+    apply_draw_player_scope(lower, &mut def);
     if let Some(e) = effect_text {
         // CR 614.1a + CR 614.6 + CR 121.6: "you may instead {effect}" makes
         // the draw replacement optional. The player is offered an
@@ -9463,7 +9513,19 @@ fn parse_draw_replacement(
         // draw-on-decline ability (which would double-draw on accept and
         // shadow the engine's native draw on decline). Strip the lead-in
         // before handing the remainder to `parse_effect_chain`.
-        let (optional_modal_present, effect_after_modal) = strip_optional_instead_lead_in(&e);
+        // CR 614.6 + CR 121.6: "that player skips that draw and {effect}"
+        // (Notion Thief) — the replacement is itself the skip, so drop that
+        // leading clause and lower only the substitute. Requires an explicit
+        // draw-player scope: an unscoped antecedent ("target player would
+        // draw", Plagiarize) has no replaced-player binding and stays whole.
+        let e_lower = e.to_lowercase();
+        let effect_after_skip = def
+            .valid_player
+            .as_ref()
+            .and_then(|_| strip_leading_draw_skip_conjunct(&e_lower, &e))
+            .unwrap_or(&e);
+        let (optional_modal_present, effect_after_modal) =
+            strip_optional_instead_lead_in(effect_after_skip);
         if optional_modal_present {
             def = def.mode(ReplacementMode::Optional { decline: None });
         }
@@ -9471,8 +9533,6 @@ fn parse_draw_replacement(
         rewrite_draw_replacement_execute_referents(&mut execute, effect_after_modal);
         def = def.execute(execute);
     }
-    // CR 614.1a: Player scope for draw replacements.
-    apply_draw_player_scope(lower, &mut def);
     // CR 614.1a: A parsed "As long as <state>" gate takes precedence — it is
     // the antecedent's own restriction, not a mid-clause "while" or
     // except-first exception.
@@ -25348,6 +25408,122 @@ mod tests {
         );
     }
 
+    fn assert_no_unimplemented_in_chain(mut node: Option<&AbilityDefinition>) {
+        while let Some(def) = node {
+            assert!(
+                !matches!(&*def.effect, Effect::Unimplemented { .. }),
+                "unexpected Unimplemented in chain: {:?}",
+                def.effect
+            );
+            node = def.sub_ability.as_deref();
+        }
+    }
+
+    fn chain_has_unimplemented(mut node: Option<&AbilityDefinition>) -> bool {
+        while let Some(def) = node {
+            if matches!(&*def.effect, Effect::Unimplemented { .. }) {
+                return true;
+            }
+            node = def.sub_ability.as_deref();
+        }
+        false
+    }
+
+    const NOTION_THIEF_ANTECEDENT: &str =
+        "If an opponent would draw a card except the first one they draw in each of their draw steps, ";
+
+    /// Reach guard shared by the hostile rows: the verbatim Notion Thief text
+    /// takes the compound-skip strip path (clean `Draw` head, no gap marker).
+    fn assert_notion_thief_strip_fires() {
+        let def = parse_replacement_line(
+            &format!(
+                "{NOTION_THIEF_ANTECEDENT}instead that player skips that draw and you draw a card."
+            ),
+            "Notion Thief",
+        )
+        .expect("Notion Thief parses");
+        assert_no_unimplemented_in_chain(def.execute.as_deref());
+        assert!(matches!(
+            &*def.execute.as_ref().unwrap().effect,
+            Effect::Draw { .. }
+        ));
+    }
+
+    /// Plagiarize ("target player" antecedent has no draw-player scope) must
+    /// never collapse to a clean Draw head: the skip clause is not stripped.
+    #[test]
+    fn compound_draw_skip_refuses_unscoped_plagiarize_antecedent() {
+        assert_notion_thief_strip_fires();
+        let text = "Until end of turn, if target player would draw a card, instead that player skips that draw and you draw a card.";
+        match parse_replacement_line(text, "Plagiarize") {
+            None => {}
+            Some(def) => assert!(
+                chain_has_unimplemented(def.execute.as_deref()),
+                "Plagiarize must keep an Unimplemented marker, got {:?}",
+                def.execute
+            ),
+        }
+    }
+
+    /// Hostile rows: every non-matching shape keeps an honest gap marker (or a
+    /// condition), never a clean unconditioned Draw.
+    #[test]
+    fn compound_draw_skip_declines_hostile_shapes() {
+        assert_notion_thief_strip_fires();
+        // Pure skip is unchanged: Prevent, no execute.
+        let pure = parse_replacement_line(
+            &format!("{NOTION_THIEF_ANTECEDENT}instead that player skips that draw."),
+            "Synthetic",
+        )
+        .expect("pure skip parses");
+        assert_eq!(
+            pure.quantity_modification,
+            Some(QuantityModification::Prevent)
+        );
+        assert!(pure.execute.is_none());
+
+        // Not stripped: empty remainder, wrong anaphor, trailing position,
+        // "you" subject — each keeps an honest `Unimplemented` gap marker.
+        for body in [
+            "instead that player skips that draw and",
+            "instead that player skips that drawn card and you draw a card.",
+            "instead that player skips that draw twice and you draw a card.",
+            "instead you draw a card and that player skips that draw.",
+            "instead you skip that draw and you draw a card.",
+        ] {
+            let text = format!("{NOTION_THIEF_ANTECEDENT}{body}");
+            let def = parse_replacement_line(&text, "Synthetic")
+                .unwrap_or_else(|| panic!("{body:?} should still parse as a Draw replacement"));
+            assert!(
+                chain_has_unimplemented(def.execute.as_deref()),
+                "{body:?} must keep an Unimplemented marker, got {:?}",
+                def.execute
+            );
+        }
+
+        // The optional modal is not the mandatory compound: fails closed.
+        assert!(parse_replacement_line(
+            &format!(
+                "{NOTION_THIEF_ANTECEDENT}instead you may skip that draw and you draw a card."
+            ),
+            "Synthetic",
+        )
+        .is_none());
+
+        // Remainder carries a rider: the "unless" must not be dropped — it
+        // survives as a condition on the substitute Draw.
+        let text = format!(
+            "{NOTION_THIEF_ANTECEDENT}instead that player skips that draw and you draw a card unless you control a creature."
+        );
+        let def = parse_replacement_line(&text, "Synthetic").expect("unless variant parses");
+        let execute = def.execute.as_deref().expect("execute present");
+        assert!(
+            execute.condition.is_some(),
+            "the unless clause must survive as a condition: {:?}",
+            def.execute
+        );
+    }
+
     /// CR 614.1a + CR 121.1: Opponent draw replacements with the shared
     /// except-first-draw-in-draw-step clause (Notion Thief / Hullbreacher class).
     #[test]
@@ -25366,10 +25542,20 @@ mod tests {
             notion_thief.condition,
             Some(ReplacementCondition::ExceptFirstDrawInDrawStep)
         );
+        assert_no_unimplemented_in_chain(notion_thief.execute.as_deref());
+        let execute = notion_thief.execute.as_deref().expect("execute present");
         assert!(
-            notion_thief.execute.is_some(),
-            "replacement execute chain must be present"
+            matches!(
+                &*execute.effect,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                }
+            ),
+            "the skip clause is the replacement itself; execute is just the controller's draw, got {:?}",
+            execute.effect
         );
+        assert!(execute.sub_ability.is_none());
 
         let hullbreacher = parse_replacement_line(
             "If an opponent would draw a card except the first one they draw in each of their draw steps, instead you create a Treasure token.",

@@ -128,7 +128,6 @@
     "waitTimeJustNow": "à l'instant",
     "waitTimeMinutes": "il y a {{count}} min",
     "waitTimeHours": "il y a {{count}} h",
-    "buildMismatchTitle": "L'hôte est en {{version}} ({{commit}}) — votre version est différente. Actualisez pour mettre à jour.",
     "gameFull": "Cette partie est complète.",
     "youAreHosting": "Vous hébergez cette partie.",
     "hosting": "Hébergement",

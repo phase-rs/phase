@@ -55,8 +55,8 @@ use engine::game::effects;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::zones::create_object;
 use engine::types::ability::{
-    Effect, PreventionAmount, PreventionScope, QuantityExpr, QuantityRef, ResolvedAbility,
-    RestrictionExpiry, ShieldKind, TargetFilter, TargetRef,
+    Effect, EffectScope, PreventionAmount, PreventionScope, QuantityExpr, QuantityRef,
+    ResolvedAbility, RestrictionExpiry, ShieldKind, TargetFilter, TargetRef,
 };
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
@@ -122,6 +122,7 @@ fn build_gatta_prevention_chain(
             amount: PreventionAmount::All,
             amount_dynamic: None,
             target: TargetFilter::ParentTarget,
+            recipient_scope: EffectScope::Single,
             scope: PreventionScope::AllDamage,
             damage_source_filter: None,
             prevention_duration: None,

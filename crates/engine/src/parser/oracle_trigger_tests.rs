@@ -153,6 +153,43 @@ fn dies_trigger_owner_subject_anchors_each_other_player_scope() {
     );
 }
 
+/// Oracle of the Alpha (verbatim ETB line): the collective-name conjure head
+/// lowers to a 9-entry `Conjure` with the `Shuffle` sub-ability chained — the
+/// full trigger body parses with zero `Unimplemented`.
+#[test]
+fn oracle_of_the_alpha_etb_conjures_power_nine_then_shuffles() {
+    let trigger = parse_trigger_line(
+        "When Oracle of the Alpha enters the battlefield, conjure the Power Nine into your library, then shuffle.",
+        "Oracle of the Alpha",
+    );
+
+    assert_eq!(trigger.mode, TriggerMode::ChangesZone);
+    assert_eq!(trigger.destination, Some(Zone::Battlefield));
+    let execute = trigger.execute.as_deref().expect("ETB trigger body");
+    assert_no_unimplemented(execute);
+
+    let Effect::Conjure {
+        cards, destination, ..
+    } = execute.effect.as_ref()
+    else {
+        panic!("expected Power Nine conjure head, got {:?}", execute.effect);
+    };
+    assert_eq!(cards.len(), 9);
+    assert_eq!(cards[0].named_name(), Some("Ancestral Recall"));
+    assert_eq!(cards[8].named_name(), Some("Timetwister"));
+    assert_eq!(*destination, Zone::Library);
+
+    let shuffle = execute
+        .sub_ability
+        .as_deref()
+        .expect("shuffle follows the conjure");
+    assert!(
+        matches!(shuffle.effect.as_ref(), Effect::Shuffle { .. }),
+        "expected Shuffle sub-ability, got {:?}",
+        shuffle.effect
+    );
+}
+
 /// CR 108.3 + CR 608.2c: After phase 3 extracts the intervening-if head, the
 /// remaining Goat-shaped body must still bind "each other player" to the owner
 /// subject immediately preceding it.
@@ -17689,6 +17726,51 @@ fn trigger_blocks_a_creature() {
         );
     assert_eq!(def.mode, TriggerMode::Blocks);
     assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+}
+
+/// CR 509.1 + CR 603.7a + CR 608.2c: Wall of Tears
+/// "Whenever this creature blocks a creature, return that creature to its owner's hand at end of combat."
+/// "that creature" inside the delayed trigger refers to the blocked creature (the attacker),
+/// which resolves to `ParentTarget` from the `BlockersDeclared` trigger event.
+#[test]
+fn trigger_wall_of_tears_blocks_a_creature() {
+    let def = parse_trigger_line(
+        "Whenever Wall of Tears blocks a creature, return that creature to its owner's hand at end of combat.",
+        "Wall of Tears",
+    );
+    assert_eq!(def.mode, TriggerMode::Blocks);
+    assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    assert_eq!(
+        def.valid_target,
+        Some(TargetFilter::Typed(TypedFilter::creature()))
+    );
+    let execute = def
+        .execute
+        .as_deref()
+        .expect("Wall of Tears must lower to an execute ability");
+    match execute.effect.as_ref() {
+        Effect::CreateDelayedTrigger {
+            condition, effect, ..
+        } => {
+            assert_eq!(
+                *condition,
+                DelayedTriggerCondition::AtNextPhase {
+                    phase: Phase::EndCombat
+                }
+            );
+            match effect.effect.as_ref() {
+                Effect::Bounce { target, .. } | Effect::ChangeZone { target, .. } => {
+                    assert_eq!(
+                        *target,
+                        TargetFilter::ParentTarget,
+                        "Wall of Tears must target the blocked creature via ParentTarget, not SelfRef"
+                    );
+                }
+                other => panic!("expected Bounce or ChangeZone, got {other:?}"),
+            }
+        }
+        other => panic!("expected CreateDelayedTrigger, got {other:?}"),
+    }
 }
 
 #[test]

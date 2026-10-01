@@ -20,8 +20,9 @@ pub mod tournament;
 pub mod validation;
 
 pub use broker::{
-    check_build_commit, Broker, BuildCommitCheck, ClientHelloInfo, ConnState, Outbound,
-    ReapOutcome, MAX_LOBBY_ENTRIES,
+    check_build_commit, lobby_frame_for_viewer, lobby_frame_json_for_viewer, lobby_row_visible_to,
+    row_delivery, Broker, BuildCommitCheck, ClientHelloInfo, ConnState, Outbound, ReapOutcome,
+    RowDelivery, RowDelta, MAX_LOBBY_ENTRIES,
 };
 pub use directory::{
     compare_announcement_to_info, info_url, normalize_announced_url, score, validate_announcement,

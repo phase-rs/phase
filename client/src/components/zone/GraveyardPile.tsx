@@ -2,6 +2,7 @@ import { useTranslation } from "react-i18next";
 
 import type { GameObject } from "../../adapter/types.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
+import { useAnimationStore } from "../../stores/animationStore.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { getWaitingForObjectChoiceIds } from "../../viewmodel/gameStateView.ts";
@@ -60,11 +61,17 @@ export function GraveyardPile({ playerId, onClick, size }: GraveyardPileProps) {
   const graveyard = useGameStore(
     (s) => s.gameState?.players[playerId]?.graveyard ?? EMPTY,
   );
-  const topObject = useGameStore((s) => {
-    const gy = s.gameState?.players[playerId]?.graveyard;
-    const id = gy && gy.length > 0 ? gy[gy.length - 1] : null;
-    return id != null ? (s.gameState?.objects[id] ?? null) : null;
+  // A card still in flight toward this pile is not shown yet: the top slot
+  // shows what would be visible without it (the count still includes it).
+  const shownTopId = useAnimationStore((s) => {
+    for (let i = graveyard.length - 1; i >= 0; i--) {
+      if (!s.flightVeiledObjectIds.has(graveyard[i])) return graveyard[i];
+    }
+    return null;
   });
+  const topObject = useGameStore((s) =>
+    shownTopId != null ? (s.gameState?.objects[shownTopId] ?? null) : null,
+  );
 
   // Check if any graveyard card is selectable for the current engine prompt.
   const canActForWaitingState = useCanActForWaitingState();

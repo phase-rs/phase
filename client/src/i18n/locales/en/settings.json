@@ -76,6 +76,7 @@
   "visual": {
     "title": "Visual",
     "vfxQuality": "VFX Quality",
+    "cardAnimationStyle": "Card Animations",
     "keywordStrip": "Keyword Strip",
     "showKeywords": "Show keywords on battlefield cards",
     "opponentHoverPreview": "Opponent Hover Preview",
@@ -122,6 +123,10 @@
       "full": "Full",
       "reduced": "Reduced",
       "minimal": "Minimal"
+    },
+    "cardAnimationStyleOptions": {
+      "webgl": "New",
+      "classic": "Classic"
     }
   },
   "flexLayout": {

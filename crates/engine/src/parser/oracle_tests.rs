@@ -28065,9 +28065,14 @@ fn gideon_of_the_trials_emblem_full_parse() {
         "three loyalty abilities, got {:#?}",
         r.abilities
     );
-    // Positive reach guard for the swallow assertion below: every ability
-    // parses with zero residual `Effect::Unimplemented`.
-    for def in &r.abilities {
+    assert!(matches!(
+        r.abilities[0].effect.as_ref(),
+        Effect::Unimplemented { name, .. }
+            if name == "prevent_damage_recipient_target_role"
+    ));
+    // The unsupported source-prevention clause must not demote either of the
+    // other loyalty abilities.
+    for def in r.abilities.iter().skip(1) {
         assert!(
             !has_unimplemented(def),
             "no residual Unimplemented node, got {:#?}",
@@ -28123,15 +28128,25 @@ fn gideon_of_the_trials_emblem_full_parse() {
         );
     }
 
-    // The `Condition_AsLongAs` swallow flag must clear — non-vacuously: the
-    // fully-typed positive shape asserted above IS the reach guard.
+    // Parse the exact third loyalty clause independently so the unsupported
+    // prevention ability cannot suppress the swallow detector's reach guard.
+    let emblem_only = parse(
+        "[0]: You get an emblem with \"As long as you control a Gideon planeswalker, you can't lose the game and your opponents can't win the game.\"",
+        "Gideon of the Trials",
+        &[],
+        &["Planeswalker"],
+        &["Gideon"],
+    );
+    assert_eq!(emblem_only.abilities.len(), 1);
+    assert!(!has_unimplemented(&emblem_only.abilities[0]));
+    assert_eq!(emblem_only.abilities[0].effect, r.abilities[2].effect);
     assert!(
-        r.parse_warnings.iter().all(|warning| {
+        emblem_only.parse_warnings.iter().all(|warning| {
             let s = warning.to_string();
             s.split_whitespace().next() != Some("Swallow:Condition_AsLongAs")
         }),
         "as-long-as gate is typed, so the swallow flag must clear: {:?}",
-        r.parse_warnings
+        emblem_only.parse_warnings
     );
 }
 
@@ -28687,10 +28702,9 @@ fn unenforceable_untap_rider_lifetime_stays_honestly_unimplemented() {
         "the CONTROL wording must still lower to AddTargetReplacement"
     );
 
-    // The PRINTED member of the same class, on the prevention seam rather than
-    // the rider seam: Old Fat Spider Can't See Me chapter II states the presence
-    // wording on a `PreventDamage` clause. Before the refusal it resolved
-    // successfully and installed nothing, while the card reported as supported.
+    // Old Fat Spider Can't See Me chapter II has both an unsupported source
+    // target and a presence lifetime. The earlier target-role refusal must
+    // remain honest instead of reaching the replacement lifetime seam.
     let saga = parse_oracle_text(
         "(As this Saga enters and after your draw step, add a lore counter. \
          Sacrifice after IV.)\nI — Target creature you control gains hexproof for \
@@ -28703,9 +28717,11 @@ fn unenforceable_untap_rider_lifetime_stays_honestly_unimplemented() {
         &["Saga".to_string()],
     );
     assert!(
-        unimplemented_keys(&saga).iter().any(|k| k == KEY),
-        "the printed prevention member of this class must lower to an honest \
-         `{KEY}` marker; keys={:?}",
+        unimplemented_keys(&saga)
+            .iter()
+            .any(|k| k == "prevent_damage_recipient_target_role"),
+        "the printed prevention clause must retain its earlier target-role \
+         refusal; keys={:?}",
         unimplemented_keys(&saga),
     );
 

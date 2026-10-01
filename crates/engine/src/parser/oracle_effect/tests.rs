@@ -3,6 +3,8 @@ use super::lower::{
     rewrite_parent_target_to_last_created, target_filter_is_explicit_target_player_graveyard_card,
 };
 use super::*;
+use crate::game::coverage::card_face_has_unimplemented_parts;
+use crate::game::triggers::extract_target_filter_from_effect;
 use crate::parser::oracle_ir::ast::EntersUnderSpec;
 use crate::parser::oracle_ir::diagnostic::{ClauseGap, ClauseGapKind};
 use crate::parser::oracle_nom::enters_under::{
@@ -18,6 +20,7 @@ use crate::types::ability::{
     MassLibraryShuffleMode, ModalChoice, PerpetualModification, PileSource, SeatDirection,
     TurnJournalKind, VoteTally, VoteVisibility, VoterScope,
 };
+use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
 use crate::types::mana::{ManaCost, ManaCostShard};
 use crate::types::statics::CostModifyMode;
@@ -44503,6 +44506,81 @@ fn conjure_multi_card_hand() {
 }
 
 #[test]
+fn conjure_named_group_power_nine_into_library() {
+    // Oracle of the Alpha (verbatim clause): a conjure by collective name
+    // expands to one `Named` entry per Power Nine member.
+    let e = parse_effect("conjure the Power Nine into your library");
+    match e {
+        Effect::Conjure {
+            cards,
+            destination,
+            tapped,
+            library_position,
+            library_players,
+        } => {
+            let names: Vec<_> = cards.iter().map(|c| c.named_name()).collect();
+            assert_eq!(
+                names,
+                [
+                    Some("Ancestral Recall"),
+                    Some("Black Lotus"),
+                    Some("Mox Pearl"),
+                    Some("Mox Sapphire"),
+                    Some("Mox Jet"),
+                    Some("Mox Ruby"),
+                    Some("Mox Emerald"),
+                    Some("Time Walk"),
+                    Some("Timetwister"),
+                ]
+            );
+            assert!(
+                cards
+                    .iter()
+                    .all(|c| c.count == QuantityExpr::Fixed { value: 1 }),
+                "every group member is conjured once: {cards:?}"
+            );
+            assert_eq!(destination, Zone::Library);
+            assert!(!tapped);
+            assert_eq!(library_position, None);
+            // "your library" targets the controller only — no per-player fan-out.
+            assert_eq!(library_players, None);
+        }
+        other => panic!("expected Conjure, got: {other:?}"),
+    }
+}
+
+#[test]
+fn conjure_named_group_unknown_group_stays_unimplemented() {
+    // Reach-guard: the known group parses first, proving the clause shape
+    // reaches the group arm (a bare `Unimplemented` assertion would pass
+    // vacuously if the input never got that far).
+    assert!(matches!(
+        parse_effect("conjure the Power Nine into your library"),
+        Effect::Conjure { .. }
+    ));
+    // An unlisted collective name fails closed — no silent partial conjure.
+    assert!(matches!(
+        parse_effect("conjure the Power Ten into your library"),
+        Effect::Unimplemented { .. }
+    ));
+}
+
+#[test]
+fn conjure_named_group_library_tapped_rider_stays_unimplemented() {
+    // Reach-guard: the bare clause parses (see above).
+    assert!(matches!(
+        parse_effect("conjure the Power Nine into your library"),
+        Effect::Conjure { .. }
+    ));
+    // "tapped" is only modeled after the battlefield; a library rider fails
+    // closed rather than being silently dropped.
+    assert!(matches!(
+        parse_effect("conjure the Power Nine into your library tapped"),
+        Effect::Unimplemented { .. }
+    ));
+}
+
+#[test]
 fn conjure_into_library() {
     let e = parse_effect("conjure four cards named Lightning Bolt into your library");
     match e {
@@ -61143,7 +61221,12 @@ fn blinding_fog_prevent_binds_to_bare_creatures_recipient() {
          control gain hexproof until end of turn.",
         AbilityKind::Spell,
     );
-    let Effect::PreventDamage { target, .. } = &*def.effect else {
+    let Effect::PreventDamage {
+        target,
+        recipient_scope,
+        ..
+    } = &*def.effect
+    else {
         panic!("expected PreventDamage, got {:?}", def.effect);
     };
     assert!(
@@ -61153,6 +61236,11 @@ fn blinding_fog_prevent_binds_to_bare_creatures_recipient() {
                 if tf.type_filters.contains(&TypeFilter::Creature) && tf.controller.is_none()
         ),
         "bare \"creatures\" must resolve to an unqualified Typed(Creature) filter, got {target:?}"
+    );
+    assert_eq!(
+        *recipient_scope,
+        EffectScope::All,
+        "CR 115.10a: a bare mass recipient is untargeted"
     );
 }
 
@@ -61165,11 +61253,142 @@ fn defend_the_hearth_prevent_binds_to_bare_players_recipient() {
         "Prevent all combat damage that would be dealt to players this turn.",
         AbilityKind::Spell,
     );
-    let Effect::PreventDamage { target, scope, .. } = &*def.effect else {
+    let Effect::PreventDamage {
+        target,
+        scope,
+        recipient_scope,
+        ..
+    } = &*def.effect
+    else {
         panic!("expected PreventDamage, got {:?}", def.effect);
     };
     assert_eq!(*target, TargetFilter::Player);
     assert_eq!(*scope, PreventionScope::CombatDamage);
+    assert_eq!(
+        *recipient_scope,
+        EffectScope::All,
+        "CR 115.10a: a bare mass recipient is untargeted"
+    );
+}
+
+/// CR 115.1a + CR 115.10a + CR 601.2c: the prevention recipient is classified
+/// by its phrase. A "target" phrase is declared (`Single`, mints a slot, and
+/// carries its announced count); a descriptor population is untargeted (`All`,
+/// mints no slot); a singular or context reference is `Single` but mints no
+/// slot. The slot column is read through `extract_target_filter_from_effect`,
+/// the single authority the stack-time slot builder consults.
+#[test]
+fn prevent_recipient_scope_classification() {
+    // (oracle clause, scope, mints a declared slot, expected announced count)
+    let rows: [(&str, EffectScope, bool, Option<MultiTargetSpec>); 8] = [
+        (
+            "Prevent all damage that would be dealt to target creature this turn.",
+            EffectScope::Single,
+            true,
+            None,
+        ),
+        (
+            "Prevent all damage that would be dealt this turn to up to two target creatures.",
+            EffectScope::Single,
+            true,
+            Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 2 })),
+        ),
+        (
+            "Prevent the next 1 damage that would be dealt to target player or planeswalker this turn.",
+            EffectScope::Single,
+            true,
+            None,
+        ),
+        (
+            "Prevent the next 1 damage that would be dealt to target player, planeswalker, or Sliver creature this turn.",
+            EffectScope::Single,
+            true,
+            None,
+        ),
+        (
+            "Prevent all combat damage that would be dealt to creatures you control this turn.",
+            EffectScope::All,
+            false,
+            None,
+        ),
+        (
+            "Prevent the next 1 damage that would be dealt to enchanted creature this turn.",
+            EffectScope::All,
+            false,
+            None,
+        ),
+        (
+            "Prevent all combat damage that would be dealt to players this turn.",
+            EffectScope::All,
+            false,
+            None,
+        ),
+        (
+            "Prevent all damage that would be dealt to artifact creatures this turn.",
+            EffectScope::All,
+            false,
+            None,
+        ),
+    ];
+    for (text, scope, declares_slot, count) in rows {
+        let clause = parse_effect_chain(text, AbilityKind::Spell);
+        let Effect::PreventDamage {
+            recipient_scope, ..
+        } = &*clause.effect
+        else {
+            panic!(
+                "expected PreventDamage for {text:?}, got {:?}",
+                clause.effect
+            );
+        };
+        assert_eq!(*recipient_scope, scope, "{text}");
+        assert_eq!(
+            extract_target_filter_from_effect(&clause.effect).is_some(),
+            declares_slot,
+            "{text}"
+        );
+        assert_eq!(
+            clause.effect.target_filter().is_some(),
+            scope == EffectScope::Single,
+            "{text}"
+        );
+        assert_eq!(clause.multi_target, count, "{text}");
+    }
+
+    // Singular references are `Single` but mint no slot: Gideon's printed-name
+    // self-reference and Energy Arc's frozen tracked set.
+    let gideon = parse_effect_chain(
+        "Prevent all damage that would be dealt to him this turn.",
+        AbilityKind::Spell,
+    );
+    assert!(matches!(
+        &*gideon.effect,
+        Effect::PreventDamage {
+            target: TargetFilter::SelfRef,
+            recipient_scope: EffectScope::Single,
+            ..
+        }
+    ));
+    assert!(extract_target_filter_from_effect(&gideon.effect).is_none());
+
+    let arc = parse_effect_chain(
+        "Untap any number of target creatures. Prevent all combat damage that would be \
+         dealt to and dealt by those creatures this turn.",
+        AbilityKind::Spell,
+    );
+    let to_half = arc
+        .sub_ability
+        .as_deref()
+        .expect("the prevent clause chains after the untap");
+    assert!(matches!(
+        &*to_half.effect,
+        Effect::PreventDamage {
+            target: TargetFilter::TrackedSet { .. },
+            recipient_scope: EffectScope::Single,
+            ..
+        }
+    ));
+    assert!(extract_target_filter_from_effect(&to_half.effect).is_none());
 }
 
 /// CR 608.2c + CR 615 (issue #6682): Energy Arc's bidirectional "dealt to and
@@ -78586,4 +78805,174 @@ fn vex_counter_target_spell_that_spells_controller_may_draw_card() {
         Some(TargetFilter::ParentTargetController),
         "the prompt must be presented to that spell's controller"
     );
+}
+
+/// SHAPE: only "dealt [this turn] to target" declares a prevention recipient
+/// (CR 115.1a + CR 615.2); other target roles must fail closed.
+#[test]
+fn prevent_unsupported_target_placements_fail_closed() {
+    for text in [
+        "Prevent all combat damage target creature would deal this turn.",
+        "Prevent all damage that would be dealt to this creature by target creature this turn.",
+        "Prevent all combat damage that would be dealt by creatures other than target creature this turn.",
+        "Prevent the next 1 damage that would be dealt to target creature and each other creature that shares a color with it this turn.",
+        "Prevent all damage target permanent would deal this turn.",
+    ] {
+        let ability = parse_effect_chain(text, AbilityKind::Spell);
+        assert!(matches!(*ability.effect, Effect::Unimplemented { .. }), "{text}: {:?}", ability.effect);
+    }
+    for text in [
+        "Prevent all damage that would be dealt to target creature this turn.",
+        "Prevent all damage that would be dealt this turn to up to two target creatures.",
+        "Prevent the next 1 damage that would be dealt to target player or planeswalker this turn.",
+    ] {
+        let ability = parse_effect_chain(text, AbilityKind::Spell);
+        assert!(
+            matches!(
+                *ability.effect,
+                Effect::PreventDamage {
+                    recipient_scope: EffectScope::Single,
+                    ..
+                }
+            ),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn specialized_prevention_sources_and_any_target_recipient_are_preserved() {
+    let spell_source = parse_effect_chain(
+        "Prevent all damage target instant or sorcery spell would deal this turn.",
+        AbilityKind::Spell,
+    );
+    assert!(matches!(
+        *spell_source.effect,
+        Effect::PreventDamage {
+            target: TargetFilter::Any,
+            damage_source_filter: Some(_),
+            ..
+        }
+    ));
+    let attacking_source = parse_effect_chain(
+        "Prevent all combat damage that would be dealt by target attacking creature this turn.",
+        AbilityKind::Spell,
+    );
+    assert!(matches!(
+        *attacking_source.effect,
+        Effect::PreventDamage {
+            target: TargetFilter::Any,
+            damage_source_filter: Some(_),
+            ..
+        }
+    ));
+    let any_recipient = parse_effect_chain(
+        "Prevent the next 1 damage that would be dealt to any target this turn.",
+        AbilityKind::Spell,
+    );
+    assert!(matches!(
+        *any_recipient.effect,
+        Effect::PreventDamage {
+            target: TargetFilter::Any,
+            ..
+        }
+    ));
+}
+
+/// SHAPE + coverage honesty: unsupported target roles survive the complete
+/// top-level router instead of becoming broad prevention replacements.
+#[test]
+fn prevention_target_role_gaps_survive_top_level_fallback() {
+    let fixtures: &[(&str, &str, &[&str], &[&str])] = &[
+        ("Resistance Fighter", "Sacrifice this creature: Prevent all combat damage target creature would deal this turn.", &["Creature"], &["Human", "Soldier"]),
+        ("Falling Timber", "Kicker—Sacrifice a land. (You may sacrifice a land in addition to any other costs as you cast this spell.)\nPrevent all combat damage target creature would deal this turn. If this spell was kicked, prevent all combat damage another target creature would deal this turn.", &["Instant"], &[]),
+        ("Chain of Silence", "Prevent all damage target creature would deal this turn. That creature's controller may sacrifice a land of their choice. If the player does, they may copy this spell and may choose a new target for that copy.", &["Instant"], &[]),
+        ("Serene Sunset", "Prevent all combat damage X target creatures would deal this turn.", &["Instant"], &[]),
+        ("Soul Parry", "Prevent all damage one or two target creatures would deal this turn.", &["Instant"], &[]),
+        ("Guard Dogs", "{2}{W}, {T}: Choose a permanent you control. Prevent all combat damage target creature would deal this turn if it shares a color with that permanent.", &["Creature"], &["Dog"]),
+        ("Azorius Ploy", "Prevent all combat damage target creature would deal this turn.\nPrevent all combat damage that would be dealt to target creature this turn.", &["Instant"], &[]),
+        ("Gideon of the Trials", "[+1]: Until your next turn, prevent all damage target permanent would deal.\n[0]: Until end of turn, Gideon becomes a 4/4 Human Soldier creature with indestructible that's still a planeswalker. Prevent all damage that would be dealt to him this turn.\n[0]: You get an emblem with \"As long as you control a Gideon planeswalker, you can't lose the game and your opponents can't win the game.\"", &["Planeswalker"], &["Gideon"]),
+        ("Shieldmage Elder", "Tap two untapped Clerics you control: Prevent all damage target creature would deal this turn.\nTap two untapped Wizards you control: Prevent all damage target spell would deal this turn.", &["Creature"], &["Human", "Cleric", "Wizard"]),
+        ("Stonewise Fortifier", "{4}{W}: Prevent all damage that would be dealt to this creature by target creature this turn.", &["Creature"], &["Human", "Wizard"]),
+        ("Terrifying Presence", "Prevent all combat damage that would be dealt by creatures other than target creature this turn.", &["Instant"], &[]),
+        ("Wojek Apothecary", "Radiance — {T}: Prevent the next 1 damage that would be dealt to target creature and each other creature that shares a color with it this turn.", &["Creature"], &["Human", "Cleric"]),
+        ("Encircling Fissure", "Prevent all combat damage that would be dealt this turn by creatures target opponent controls.\nAwaken 2—{4}{W} (If you cast this spell for {4}{W}, also put two +1/+1 counters on target land you control and it becomes a 0/0 Elemental creature with haste. It's still a land.)", &["Instant"], &[]),
+        ("Inquisitor's Snare", "Prevent all damage target attacking or blocking creature would deal this turn. If that creature is black or red, destroy it.", &["Instant"], &[]),
+        ("Old Fat Spider Can't See Me", "(As this Saga enters and after your draw step, add a lore counter. Sacrifice after IV.)\nI — Target creature you control gains hexproof for as long as this Saga remains on the battlefield.\nII — Prevent all damage that would be dealt by up to one target creature for as long as this Saga remains on the battlefield.\nIII, IV — Draw a card.", &["Enchantment"], &["Saga"]),
+    ];
+    for &(name, oracle, types, subtypes) in fixtures {
+        let types = types.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let subtypes = subtypes.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let parsed = parse_oracle_text(oracle, name, &[], &types, &subtypes);
+        assert!(
+            !parsed.abilities.is_empty() || !parsed.triggers.is_empty(),
+            "{name}: reach guard: the complete card produced executable definitions"
+        );
+        assert!(
+            parsed
+                .replacements
+                .iter()
+                .all(|replacement| replacement.event != ReplacementEvent::DamageDone),
+            "{name}: a rejected target role must not become a broad replacement: {:?}",
+            parsed.replacements
+        );
+        let mut has_target_role_gap = false;
+        let mut visit = |effect: &Effect| {
+            has_target_role_gap |= matches!(
+                effect,
+                Effect::Unimplemented { name, .. }
+                    if name == "prevent_damage_recipient_target_role"
+            );
+            std::ops::ControlFlow::Continue(())
+        };
+        for ability in &parsed.abilities {
+            let _ = crate::types::ability_visit::visit_ability_def(ability, &mut visit);
+        }
+        for trigger in &parsed.triggers {
+            let _ = crate::types::ability_visit::visit_trigger(trigger, &mut visit);
+        }
+        assert!(
+            has_target_role_gap,
+            "{name}: the rejected prevention role must retain its specific gap"
+        );
+        let face = CardFace {
+            name: name.to_string(),
+            oracle_text: Some(oracle.to_string()),
+            abilities: parsed.abilities,
+            triggers: parsed.triggers,
+            static_abilities: parsed.statics,
+            replacements: parsed.replacements,
+            additional_cost: parsed.additional_cost,
+            ..Default::default()
+        };
+        assert!(
+            card_face_has_unimplemented_parts(&face),
+            "{name}: strict unsupported coverage must survive the top-level router"
+        );
+    }
+}
+
+#[test]
+fn prevention_declared_prefixes_keep_full_filters_and_counts() {
+    for (text, expected_count) in [
+        ("Prevent all damage that would be dealt to another target creature this turn.", None),
+        ("Prevent all damage that would be dealt to other target creature this turn.", None),
+        ("Prevent all damage that would be dealt this turn to up to two another target creatures.", Some(MultiTargetSpec::fixed(0, 2))),
+        ("Prevent all damage that would be dealt this turn to up to two other target creatures.", Some(MultiTargetSpec::fixed(0, 2))),
+    ] {
+        let ability = parse_effect_chain(text, AbilityKind::Spell);
+        assert!(matches!(
+            *ability.effect,
+            Effect::PreventDamage {
+                target: TargetFilter::Typed(_),
+                recipient_scope: EffectScope::Single,
+                ..
+            }
+        ), "{text}: {:?}", ability.effect);
+        assert_eq!(
+            ability.multi_target,
+            expected_count,
+            "{text}: announced count"
+        );
+    }
 }
