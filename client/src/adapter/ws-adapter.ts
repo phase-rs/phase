@@ -1689,7 +1689,7 @@ export class WebSocketAdapter implements EngineAdapter {
     // native sidecar is a local trusted transport rather than a network socket.
     if (
       !this.serverUrl.startsWith("wss://")
-      && !this.serverUrl.startsWith("native-engine://")
+      && !this.isNativeSocket()
     ) {
       throw new AdapterError(
         "WS_ERROR",

@@ -12,6 +12,7 @@ import { getSeatColor } from "../../hooks/useSeatColor";
 import {
   copyGameStateDebugSnapshot,
   exportAuthoritativeGameStateZip,
+  exportGameStateDebugZip,
 } from "../../services/gameStateExport";
 import { gameStateFromImportText, readImportFile } from "../../services/gameStateImport";
 import { canExportAuthoritativeState, useGameStore } from "../../stores/gameStore";
@@ -173,9 +174,12 @@ export function DebugPanel({
       .catch(() => setStatus({ type: "error", message: "Failed to copy" }));
   }, [gameState]);
 
-  const handleExportGameState = useCallback(() => {
-    if (!adapter) return;
-    exportAuthoritativeGameStateZip(adapter)
+  const handleExportGameState = useCallback((kind: "authoritative" | "display") => {
+    const exported = kind === "authoritative"
+      ? adapter && exportAuthoritativeGameStateZip(adapter)
+      : gameState && exportGameStateDebugZip(gameState);
+    if (!exported) return;
+    exported
       .then((result) => {
         // Under the desktop shell the message waits for the real destination;
         // a browser can only ever name the file it asked for.
@@ -192,9 +196,11 @@ export function DebugPanel({
       })
       .catch((err: unknown) => {
         if (err instanceof DOMException && err.name === "AbortError") return;
-        setStatus({ type: "error", message: t("help.status.exportFailed") });
+        console.error("Game state export failed:", err);
+        const detail = err instanceof Error ? err.message : String(err);
+        setStatus({ type: "error", message: `${t("help.status.exportFailed")} ${detail}` });
       });
-  }, [adapter, t]);
+  }, [adapter, gameState, t]);
 
   // Same destination as the top-left report flag. Close this panel first — it
   // renders at z-[9999], above the report dialog's z-50 overlay, so leaving it
@@ -540,7 +546,14 @@ export function DebugPanel({
             {t("debug.copyDisplaySnapshot")}
           </button>
           <button
-            onClick={handleExportGameState}
+            onClick={() => handleExportGameState("display")}
+            disabled={!gameState}
+            className="mt-1 w-full rounded bg-gray-800 px-2 py-1 text-xs transition-colors hover:bg-gray-700 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {t("game:engineLost.exportClientSnapshot")}
+          </button>
+          <button
+            onClick={() => handleExportGameState("authoritative")}
             disabled={!canExportAuthoritative}
             className="mt-1 w-full rounded bg-gray-800 px-2 py-1 text-xs transition-colors hover:bg-gray-700 disabled:cursor-not-allowed disabled:opacity-40"
             title={t("debug.exportAuthoritativeTitle")}
