@@ -1,18 +1,20 @@
 import { describe, expect, it } from "vitest";
 import type { GameObject } from "../../adapter/types.ts";
-import { cardImageLookup, tokenFiltersForObject } from "../cardImageLookup.ts";
+import {
+  cardImageLookup,
+  decodeTokenFilterKeywords,
+  encodeTokenFilterKeywords,
+  formatKeywordForScryfall,
+  tokenFiltersForObject,
+} from "../cardImageLookup.ts";
 
 function tokenObj(overrides: Record<string, unknown>): GameObject {
   return {
     power: null,
     toughness: null,
-    base_power: null,
-    base_toughness: null,
     color: [],
-    base_color: [],
     card_types: { subtypes: [] },
     keywords: [],
-    base_keywords: [],
     abilities: [],
     ...overrides,
   } as unknown as GameObject;
@@ -170,19 +172,24 @@ describe("cardImageLookup", () => {
 });
 
 describe("tokenFiltersForObject", () => {
-  it("reads P/T and colors from printed base_* values, not pumped live ones", () => {
-    // A 1/1 white Soldier under Giant Growth + a color setter is still a
-    // 1/1 white Soldier in every printing — art must follow the base body.
+  it("formats the engine descriptor without re-deriving anything", () => {
+    // The descriptor is authoritative: live values disagree (pumped P/T,
+    // color setter, anthem grant) and must be ignored wholesale.
     expect(
       tokenFiltersForObject(
         tokenObj({
           power: 4,
           toughness: 4,
-          base_power: 1,
-          base_toughness: 1,
           color: ["Blue"],
-          base_color: ["White"],
-          card_types: { subtypes: ["Soldier"] },
+          keywords: ["Flying"],
+          token_art: {
+            power: 1,
+            toughness: 1,
+            colors: ["White"],
+            subtypes: ["Soldier"],
+            keywords: [],
+            has_abilities: false,
+          },
         }),
       ),
     ).toEqual({
@@ -195,65 +202,78 @@ describe("tokenFiltersForObject", () => {
     });
   });
 
-  it("falls back to live values when base_* axes are absent (legacy paths)", () => {
+  it("passes descriptor keywords through the Scryfall formatter", () => {
+    expect(
+      tokenFiltersForObject(
+        tokenObj({
+          token_art: {
+            power: 1,
+            toughness: 1,
+            colors: ["White"],
+            subtypes: ["Spirit"],
+            keywords: ["Flying", "FirstStrike", "Flying"],
+            has_abilities: true,
+          },
+        }),
+      ).keywords,
+    ).toEqual(["flying", "first strike"]);
+  });
+
+  it("falls back to live fields when no descriptor is present", () => {
+    // Cards, non-tokens, and tokens from older snapshots: pre-descriptor
+    // behavior, preserved exactly.
     expect(
       tokenFiltersForObject(
         tokenObj({
           power: 2,
           toughness: 2,
-          base_power: null,
-          base_toughness: null,
           color: ["Green"],
-          base_color: undefined,
+          card_types: { subtypes: ["Elf", "Warrior"] },
+          token_art: null,
         }),
       ),
-    ).toEqual(
-      expect.objectContaining({ power: 2, toughness: 2, colors: ["Green"] }),
-    );
-  });
-
-  it("extracts Scryfall keyword names from printed base_keywords", () => {
+    ).toEqual({
+      power: 2,
+      toughness: 2,
+      colors: ["Green"],
+      subtypes: ["Elf", "Warrior"],
+      hasAbilities: false,
+    });
     expect(
-      tokenFiltersForObject(
-        tokenObj({
-          base_keywords: [
-            "Flying",
-            "FirstStrike",
-            { Protection: { from: "red" } },
-            "Flying",
-          ],
-          keywords: ["Flying", "FirstStrike"],
-        }),
-      ).keywords,
-    ).toEqual(["flying", "first strike", "protection"]);
-  });
-
-  it("omits keywords for vanilla tokens", () => {
-    expect(tokenFiltersForObject(tokenObj({})).keywords).toBeUndefined();
-  });
-
-  it("ignores granted keywords for hasAbilities so anthems keep vanilla art", () => {
-    // Live keywords include the anthem grant; printed base has none.
-    expect(
-      tokenFiltersForObject(tokenObj({ keywords: ["Flying"], base_keywords: [] }))
-        .hasAbilities,
-    ).toBe(false);
-    expect(
-      tokenFiltersForObject(tokenObj({ base_keywords: ["Flying"] })).hasAbilities,
+      tokenFiltersForObject(tokenObj({ keywords: ["Flying"] })).hasAbilities,
     ).toBe(true);
   });
+});
 
-  it("treats abilities and token rules text as abilities", () => {
-    expect(
-      tokenFiltersForObject(tokenObj({ abilities: [{}, {}] as never }))
-        .hasAbilities,
-    ).toBe(true);
-    expect(
-      tokenFiltersForObject(
-        tokenObj({
-          token_rules_text: "{T}, Sacrifice this token: Add one mana.",
-        }),
-      ).hasAbilities,
-    ).toBe(true);
+describe("formatKeywordForScryfall", () => {
+  it.each([
+    ["Flying", "flying"],
+    ["FirstStrike", "first strike"],
+    ["Protection", "protection"],
+    ["some-future-keyword", "some-future-keyword"],
+  ])("formats %s as %s", (family, expected) => {
+    expect(formatKeywordForScryfall(family)).toBe(expected);
+  });
+
+  it("drops empty names", () => {
+    expect(formatKeywordForScryfall("")).toBeNull();
+  });
+});
+
+describe("token filter keyword codec", () => {
+  it("round-trips lists containing commas without ambiguity", () => {
+    // An `Unknown` payload is an arbitrary string: ["foo,bar","baz"] and
+    // ["foo","bar,baz"] must encode (and key) distinctly.
+    const a = ["foo,bar", "baz"];
+    const b = ["foo", "bar,baz"];
+    expect(encodeTokenFilterKeywords(a)).not.toBe(encodeTokenFilterKeywords(b));
+    expect(decodeTokenFilterKeywords(encodeTokenFilterKeywords(a))).toEqual(a);
+    expect(decodeTokenFilterKeywords(encodeTokenFilterKeywords(b))).toEqual(b);
+  });
+
+  it("decodes empty and corrupt payloads to an empty list", () => {
+    expect(decodeTokenFilterKeywords("")).toEqual([]);
+    expect(decodeTokenFilterKeywords("not-json{{")).toEqual([]);
+    expect(decodeTokenFilterKeywords('"just-a-string"')).toEqual([]);
   });
 });

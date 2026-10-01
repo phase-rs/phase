@@ -432,11 +432,6 @@ describe("CardPreview chosen attributes", () => {
       power: 2,
       toughness: 2,
       color: ["Green"],
-      // No continuous effects apply, so printed base_* mirrors live values
-      // (the engine invariant); art filters read the base axes.
-      base_power: 2,
-      base_toughness: 2,
-      base_color: ["Green"],
       card_types: { supertypes: [], core_types: ["Creature"], subtypes: ["Elf", "Warrior"] },
       token_image_ref: {
         scryfall_id: "token-printing-id",

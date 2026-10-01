@@ -21,6 +21,10 @@ import {
 import type { ImageSize, PrintingEntry, TokenSearchFilters } from "../services/scryfall.ts";
 import type { CardImageAsset } from "../services/scryfall.ts";
 import { applyChain } from "../services/artSelection.ts";
+import {
+  decodeTokenFilterKeywords,
+  encodeTokenFilterKeywords,
+} from "../services/cardImageLookup.ts";
 import type { TokenImageRef } from "../adapter/types.ts";
 import {
   cardBackCandidate,
@@ -722,7 +726,9 @@ async function acquireCachedImageSrc(
         colors: filterColors ? filterColors.split(",") : undefined,
         subtypes: filterSubtypes ? filterSubtypes.split(",") : undefined,
         hasAbilities: filterHasAbilities ?? undefined,
-        keywords: filterKeywords ? filterKeywords.split(",") : undefined,
+        keywords: filterKeywords
+          ? decodeTokenFilterKeywords(filterKeywords)
+          : undefined,
       });
       asset = remoteAsset(
         remoteSrc,
@@ -818,7 +824,11 @@ export function useCardImage(
   const filterSubtypes = tokenFilters?.subtypes?.join(",") ?? "";
   const filterColors = tokenFilters?.colors?.join(",") ?? "";
   const filterHasAbilities = tokenFilters?.hasAbilities ?? null;
-  const filterKeywords = tokenFilters?.keywords?.join(",") ?? "";
+  // JSON codec (not comma-joined): an `Unknown` keyword payload is an
+  // arbitrary string that may itself contain commas.
+  const filterKeywords = tokenFilters?.keywords
+    ? encodeTokenFilterKeywords(tokenFilters.keywords)
+    : "";
 
   const artOverrides = usePreferencesStore((s) => s.artOverrides);
   const artChain = usePreferencesStore((s) => s.artChain);

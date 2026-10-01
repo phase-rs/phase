@@ -2472,6 +2472,7 @@ fn tibalt_later_copy_effect_exile_does_not_feed_emblem() {
             display_source: engine::game::game_object::DisplaySource::Card,
             printed_ref: None,
             token_image_ref: None,
+            token_art: None,
         }],
         None,
     );

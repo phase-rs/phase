@@ -41389,6 +41389,7 @@ mod tests {
                 display_source: crate::game::game_object::DisplaySource::Card,
                 printed_ref: Some(printed_ref.clone()),
                 token_image_ref: None,
+                token_art: None,
             }],
             None,
             TransientContinuousEffectBindings {
@@ -41482,6 +41483,7 @@ mod tests {
                 display_source: crate::game::game_object::DisplaySource::Card,
                 printed_ref: Some(top_printed_ref),
                 token_image_ref: None,
+                token_art: None,
             }],
             None,
             TransientContinuousEffectBindings {

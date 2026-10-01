@@ -13,7 +13,9 @@ use crate::types::ability::{
     SpellCastingOption, StaticDefinition, TriggerBaseSetInstanceRef, TriggerDefinition,
     TriggerDefinitionOccurrenceRef, TriggerEntry, TriggerOccurrenceState, TriggerPrintedOrigin,
 };
-use crate::types::card::{LayoutKind, PrintedCardRef, PrintedLoyalty, TokenImageRef};
+use crate::types::card::{
+    LayoutKind, PrintedCardRef, PrintedLoyalty, TokenArtDescriptor, TokenImageRef,
+};
 use crate::types::card_type::{CardType, CoreType};
 use crate::types::counter::{counter_map_serde, CounterType};
 use crate::types::definitions::Definitions;
@@ -625,6 +627,13 @@ pub struct GameObject {
     /// identify one printed token catalog entry without guessing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_image_ref: Option<TokenImageRef>,
+    /// Intrinsic token body for shape-based art lookup (see
+    /// `TokenArtDescriptor`). Refreshed by the token creation injectors once
+    /// the base is final, and carried by copy effects alongside
+    /// `token_image_ref`. Absent for cards, non-token objects, and tokens
+    /// from older snapshots — the client falls back to live fields there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_art: Option<TokenArtDescriptor>,
     /// MTGJSON token UUIDs linked from this printed source card. Display/catalog
     /// metadata copied from `CardFace`; game rules never read it directly.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1478,6 +1487,7 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         color: _,
         printed_ref: _,
         token_image_ref: _,
+        token_art: _,
         source_related_token_ids: _,
         spellbook: _,
         // OMITTED, SAFE BY WRITE SITE. Every write is a FACE INSTALL:
@@ -2662,6 +2672,7 @@ impl GameObject {
             printed_ref: None,
             base_printed_ref: None,
             token_image_ref: None,
+            token_art: None,
             source_related_token_ids: Vec::new(),
             spellbook: Vec::new(),
             parse_warnings: Vec::new(),

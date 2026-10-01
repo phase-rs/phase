@@ -1357,6 +1357,7 @@ mod timely_ward_regression;
 mod tinybones_joins_up_multi_target;
 mod tinybones_pocket_nuisance;
 mod tobita_master_of_winds_flying_grant;
+mod token_art_descriptor;
 mod tom_bombadil_lore_counter_gate;
 mod tomb_tyrant_graveyard_count_activation;
 mod tombstone_stairwell_per_player_tokens;

@@ -1938,6 +1938,7 @@ mod tests {
             display_source: crate::game::game_object::DisplaySource::default(),
             printed_ref: None,
             token_image_ref: None,
+            token_art: None,
         }
     }
 

@@ -965,6 +965,7 @@ fn route_debug_token_to_battlefield(
         display_source: staged.display_source,
         printed_ref: staged.printed_ref.clone(),
         token_image_ref: staged.token_image_ref.clone(),
+        token_art: None,
         extra_keywords: Vec::new(),
         additional_modifications: Vec::new(),
         tapped: false,

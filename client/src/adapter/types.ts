@@ -1300,6 +1300,22 @@ export interface TokenImageRef {
   preset_id: string;
 }
 
+/** Engine-owned intrinsic token body for shape-based art lookup (mirrors
+ *  Rust `TokenArtDescriptor`). Derived from printed (`base_*`) stores only —
+ *  pumps, color setters, and grants never contribute. Absent for cards,
+ *  non-token objects, and tokens from older snapshots (which fall back to
+ *  the legacy live-field lookup). */
+export interface TokenArtDescriptor {
+  power: number | null;
+  toughness: number | null;
+  colors: ManaColor[];
+  subtypes: string[];
+  /** Keyword family names (`KeywordKind` discriminants, e.g. "FirstStrike";
+   *  `Unknown` keywords carry their raw payload instead). */
+  keywords: string[];
+  has_abilities: boolean;
+}
+
 export type TokenPtProvenance =
   | "FixedOrAbsent"
   | {
@@ -1634,6 +1650,7 @@ export interface GameObject {
    *  image is unavailable. Absent for non-predefined objects. */
   token_rules_text?: string;
   token_image_ref?: TokenImageRef | null;
+  token_art?: TokenArtDescriptor | null;
   source_related_token_ids?: string[];
   unimplemented_mechanics?: string[];
   has_summoning_sickness?: boolean;

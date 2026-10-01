@@ -2868,6 +2868,12 @@ fn seed_live_characteristics_from_base(obj: &mut crate::game::game_object::GameO
     if !obj.is_token {
         obj.token_image_ref = None;
     }
+    // Same lifecycle for the intrinsic art body: only true tokens carry
+    // their own; copies ride the source's descriptor (applied below) and
+    // revert to this baseline on expiry.
+    if !obj.is_token {
+        obj.token_art = None;
+    }
 }
 
 /// CR 613.1d: Recover the off-battlefield objects whose types were derived in
@@ -8962,6 +8968,7 @@ fn apply_continuous_effect_filtered(
                 display_source,
                 printed_ref,
                 token_image_ref,
+                token_art,
             } => {
                 let copy_effect = crate::types::ability::CopyEffectInstanceRef {
                     continuous_effect_id: effect
@@ -8985,6 +8992,7 @@ fn apply_continuous_effect_filtered(
                 obj.display_source = *display_source;
                 obj.printed_ref = printed_ref.clone();
                 obj.token_image_ref = token_image_ref.clone();
+                obj.token_art = token_art.clone();
             }
             // CR 707.9b + CR 707.2: Name override is a copiable-value override
             // applied at Layer 1 after the base CopyValues (ordered by timestamp
@@ -10916,6 +10924,7 @@ mod tests {
                 display_source: crate::game::game_object::DisplaySource::Card,
                 printed_ref: None,
                 token_image_ref: None,
+                token_art: None,
             }],
             None,
         );
@@ -11384,6 +11393,7 @@ mod tests {
                 display_source: crate::game::game_object::DisplaySource::Card,
                 printed_ref: None,
                 token_image_ref: None,
+                token_art: None,
             },
         );
         install_until_end_of_turn(
@@ -23733,6 +23743,7 @@ mod tests {
                 display_source: crate::game::game_object::DisplaySource::Card,
                 printed_ref: None,
                 token_image_ref: None,
+                token_art: None,
             }],
             None,
         );
@@ -25017,6 +25028,7 @@ mod tests {
                 display_source: crate::game::game_object::DisplaySource::Card,
                 printed_ref: None,
                 token_image_ref: None,
+                token_art: None,
             }],
             None,
         );
@@ -25043,6 +25055,7 @@ mod tests {
                 display_source: crate::game::game_object::DisplaySource::Card,
                 printed_ref: None,
                 token_image_ref: None,
+                token_art: None,
             }],
             None,
         );
@@ -25936,6 +25949,7 @@ mod tests {
                 display_source: crate::game::game_object::DisplaySource::Card,
                 printed_ref: None,
                 token_image_ref: None,
+                token_art: None,
             }],
             None,
         );
@@ -26021,6 +26035,7 @@ mod tests {
                 display_source: crate::game::game_object::DisplaySource::Card,
                 printed_ref: None,
                 token_image_ref: None,
+                token_art: None,
             }],
             None,
         );
@@ -26110,6 +26125,7 @@ mod tests {
             display_source: crate::game::game_object::DisplaySource::Card,
             printed_ref: None,
             token_image_ref: None,
+            token_art: None,
         };
 
         // The whole `Layer::Copy` set: (modification, adds ANY generator, adds a
@@ -26278,6 +26294,7 @@ mod tests {
                     display_source: crate::game::game_object::DisplaySource::Card,
                     printed_ref: None,
                     token_image_ref: None,
+                    token_art: None,
                 }],
                 None,
             );
@@ -26373,6 +26390,7 @@ mod tests {
                     display_source: crate::game::game_object::DisplaySource::Card,
                     printed_ref: None,
                     token_image_ref: None,
+                    token_art: None,
                 }],
                 None,
             );
@@ -26510,6 +26528,7 @@ mod tests {
                 display_source: Default::default(),
                 printed_ref: None,
                 token_image_ref: None,
+                token_art: None,
             },
             ContinuousModification::CopyChosen,
             ContinuousModification::SetName {
