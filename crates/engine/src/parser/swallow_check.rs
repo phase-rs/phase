@@ -4314,6 +4314,75 @@ fn enters_with_finality_this_way_is_only_if_marker(
     !has_other_if
 }
 
+/// CR 608.2c + CR 611.2a: the delivering read for the gains-modifications rider —
+/// a `CastFromZone` host's transitive `sub_ability` chain, `sub_ability` links
+/// only and with no `sub_link` gate. The parser-side mirror of the runtime
+/// authority `game::effects::cast_from_zone::cast_from_zone_enters_with_modifications`
+/// (walk `ability.sub_ability`, then each `sub.sub_ability`), which every
+/// delivering route (`resolve`, `open_resolution_cast_window`,
+/// `resolution_cast_request_for_single_target`, `record_lingering_permissions`)
+/// reads. A rider that chain would not deliver must not exempt the sentence.
+fn def_is_delivered_gains_rider_carrier(def: &AbilityDefinition) -> bool {
+    matches!(&*def.effect, Effect::AddPendingEntersModifications { .. })
+        || def
+            .sub_ability
+            .as_deref()
+            .is_some_and(def_is_delivered_gains_rider_carrier)
+}
+
+/// True when any definition in this tree is a `CastFromZone` whose transitive
+/// `sub_ability` chain carries the gains-modifications rider (the delivering
+/// class). Tree recursion mirrors `def_tree_has_cast_from_zone_alt_ability_cost`:
+/// `CreateDelayedTrigger` inner definitions plus `sub_ability`, `else_ability`,
+/// and `mode_abilities` are visited to find hosts. The carrier test is anchored
+/// to the host's own `sub_ability` chain — a host's `else_ability` /
+/// `mode_abilities` branch is not read, because delivery does not read it.
+fn def_tree_has_delivered_gains_rider(def: &AbilityDefinition) -> bool {
+    if matches!(&*def.effect, Effect::CastFromZone { .. })
+        && def
+            .sub_ability
+            .as_deref()
+            .is_some_and(def_is_delivered_gains_rider_carrier)
+    {
+        return true;
+    }
+    if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
+        if def_tree_has_delivered_gains_rider(effect) {
+            return true;
+        }
+    }
+    if let Some(ref sub) = def.sub_ability {
+        if def_tree_has_delivered_gains_rider(sub) {
+            return true;
+        }
+    }
+    if let Some(ref else_ab) = def.else_ability {
+        if def_tree_has_delivered_gains_rider(else_ab) {
+            return true;
+        }
+    }
+    def.mode_abilities
+        .iter()
+        .any(def_tree_has_delivered_gains_rider)
+}
+
+/// Any ability or trigger-execute tree in this scoped unit delivers the
+/// gains-modifications rider. Mirrors the sibling `any_ability_has_*` helpers
+/// (`parsed.abilities` plus each `parsed.triggers[].execute`); `scope_to_unit`
+/// has already reduced `parsed` to this audit unit.
+fn any_ability_has_delivered_gains_rider(parsed: &ParsedAbilities) -> bool {
+    parsed
+        .abilities
+        .iter()
+        .any(def_tree_has_delivered_gains_rider)
+        || parsed.triggers.iter().any(|trigger| {
+            trigger
+                .execute
+                .as_deref()
+                .is_some_and(def_tree_has_delivered_gains_rider)
+        })
+}
+
 /// CR 608.2c + CR 611.2a: a gains-modifications cast-permission rider ("If you
 /// cast a [quality] spell this way, it gains …" — Strago and Relm) is
 /// represented by the typed `Effect::AddPendingEntersModifications` carrier
@@ -4321,7 +4390,12 @@ fn enters_with_finality_this_way_is_only_if_marker(
 /// leading "if" is the CR 608.2c back-reference to the granted cast, not a
 /// swallowed game-state condition — so the represented carrier sentence is
 /// exempted exactly like the counter/alt-cost rider siblings, and only when
-/// the unit's evidence actually contains the typed carrier.
+/// that carrier is DELIVERED: it sits in the transitive `sub_ability` chain of
+/// a `CastFromZone` parent, the exact shape
+/// `game::effects::cast_from_zone::cast_from_zone_enters_with_modifications`
+/// reads at every delivering route. A represented-but-undelivered carrier —
+/// under a `CastCopyOfCard` parent (which records, it does not apply) or under
+/// any other non-`CastFromZone` parent — keeps the warning standing.
 ///
 /// The sentence is located by the recognizer's OWN consumed span
 /// (`cast_this_way_gains_rider_consumed_len`) rather than a pre-split sentence
@@ -4330,8 +4404,8 @@ fn enters_with_finality_this_way_is_only_if_marker(
 /// sever. Exactly one match is required — zero (no carrier sentence) or two or
 /// more (the evidence cannot name which sentence produced it) both leave every
 /// " if " visible to the caller's marker scan.
-fn cast_this_way_gains_rider_is_only_if_marker(stripped: &str, evidence: &UnitEvidence) -> bool {
-    if !evidence.any_effect(|e| matches!(e, Effect::AddPendingEntersModifications { .. })) {
+fn cast_this_way_gains_rider_is_only_if_marker(stripped: &str, parsed: &ParsedAbilities) -> bool {
+    if !any_ability_has_delivered_gains_rider(parsed) {
         return false;
     }
     let Some(residual) = cast_this_way_gains_rider_residual(stripped) else {
@@ -4643,9 +4717,10 @@ fn detect_condition_if(
     }
     // CR 608.2c + CR 611.2a: "If you cast a [quality] spell this way, it gains …"
     // — represented by the typed `AddPendingEntersModifications` carrier
-    // (Strago and Relm). Mirrors the counter-rider sibling exemption's evidence
-    // gate and cardinality guard.
-    if cast_this_way_gains_rider_is_only_if_marker(&stripped, evidence) {
+    // (Strago and Relm). Scopes the carrier to a `CastFromZone` parent's
+    // transitive `sub_ability` chain (the delivering class every runtime route
+    // reads); the cardinality guard is shared with the sibling riders.
+    if cast_this_way_gains_rider_is_only_if_marker(&stripped, parsed) {
         return;
     }
     if cast_this_way_alt_cost_is_only_if_marker(&stripped, evidence) {
@@ -14711,6 +14786,9 @@ mod detect_condition_if_replacement_exemption_tests {
     // `ReplacementDefinition` (the description-channel helpers that did are deleted), so a
     // lib-level import would be dead. Only this fixture still builds one.
     use crate::types::ability::ReplacementDefinition;
+    use crate::types::ability::{AbilityKind, CardPlayMode, CastFromZoneDriver, SubAbilityLink};
+    use crate::types::counter::CounterType;
+    use crate::types::identifiers::TrackedSetId;
     use crate::types::replacements::ReplacementEvent;
 
     /// Plague Drone-class text: a single represented gain-life replacement,
@@ -14890,13 +14968,11 @@ mod detect_condition_if_replacement_exemption_tests {
         );
     }
 
-    /// CR 608.2c + CR 611.2a: the gains-modifications carrier fixture — a
-    /// parsed tree whose representation is the typed
-    /// `AddPendingEntersModifications` effect (the shape Strago and Relm's
-    /// rider produces).
-    fn parsed_with_gains_rider_carrier() -> ParsedAbilities {
-        use crate::types::ability::AbilityKind;
-        let carrier = AbilityDefinition::new(
+    /// The typed gains-modifications carrier (Strago and Relm's rider body
+    /// shape): `AddPendingEntersModifications { [AddKeyword Haste] }`, linked
+    /// as a sequential sibling like the live parse.
+    fn gains_rider_carrier_def() -> AbilityDefinition {
+        let mut carrier = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::AddPendingEntersModifications {
                 modifications: vec![ContinuousModification::AddKeyword {
@@ -14904,8 +14980,37 @@ mod detect_condition_if_replacement_exemption_tests {
                 }],
             },
         );
+        carrier.sub_link = SubAbilityLink::SequentialSibling;
+        carrier
+    }
+
+    /// The delivering host shape: Strago and Relm's `CastFromZone` grant (free,
+    /// during resolution), with no sub-ability attached.
+    fn cast_from_zone_host_def() -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::CastFromZone {
+                target: TargetFilter::ParentTarget,
+                without_paying_mana_cost: true,
+                mode: CardPlayMode::Cast,
+                cast_transformed: false,
+                alt_ability_cost: None,
+                constraint: None,
+                duration: None,
+                driver: CastFromZoneDriver::DuringResolution,
+                mana_spend_permission: None,
+                additional_cost: None,
+                cast_cost_modifier: None,
+            },
+        )
+    }
+
+    /// Minimal `ParsedAbilities` carrying exactly `abilities` (all other fields
+    /// empty). Field list taken verbatim from `ParsedAbilities` in
+    /// `parser/oracle.rs`.
+    fn parsed_with_abilities(abilities: Vec<AbilityDefinition>) -> ParsedAbilities {
         ParsedAbilities {
-            abilities: vec![carrier],
+            abilities,
             triggers: Vec::new(),
             statics: Vec::new(),
             replacements: Vec::new(),
@@ -14918,6 +15023,80 @@ mod detect_condition_if_replacement_exemption_tests {
             strive_cost: None,
             parse_warnings: Vec::new(),
         }
+    }
+
+    /// `host` as the sole ability, with the gains-rider carrier as its
+    /// sequential `sub_ability` — the delivery shape
+    /// `cast_from_zone_enters_with_modifications` reads.
+    fn parsed_with_host_and_gains_rider(host: AbilityDefinition) -> ParsedAbilities {
+        let mut host = host;
+        host.sub_ability = Some(Box::new(gains_rider_carrier_def()));
+        parsed_with_abilities(vec![host])
+    }
+
+    /// CR 608.2c + CR 611.2a: the delivering carrier fixture — a `CastFromZone`
+    /// parent (Strago and Relm's shape) whose `sub_ability` chain carries the
+    /// typed `AddPendingEntersModifications` effect.
+    fn parsed_with_gains_rider_carrier() -> ParsedAbilities {
+        parsed_with_host_and_gains_rider(cast_from_zone_host_def())
+    }
+
+    /// The Tomb-of-Aclazotz depth-1 shape: the gains rider nested under the
+    /// counter rider (`CastFromZone` → `AddPendingETBCounters` → APEM), the
+    /// chain `cast_from_zone_enters_with_modifications` walks transitively.
+    fn parsed_with_nested_gains_rider_carrier() -> ParsedAbilities {
+        let mut counter = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::AddPendingETBCounters {
+                counter_type: CounterType::Finality,
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+        );
+        counter.sub_link = SubAbilityLink::SequentialSibling;
+        counter.sub_ability = Some(Box::new(gains_rider_carrier_def()));
+        let mut host = cast_from_zone_host_def();
+        host.sub_ability = Some(Box::new(counter));
+        parsed_with_abilities(vec![host])
+    }
+
+    /// The Mysterious Sphere's recorded-not-applied shape: a `CastCopyOfCard`
+    /// parent with the carrier as its sub-ability (the copy route consumes no
+    /// `enters_with_modifications`, so this carrier is never delivered).
+    fn parsed_with_copy_gains_rider_carrier() -> ParsedAbilities {
+        parsed_with_host_and_gains_rider(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::CastCopyOfCard {
+                target: TargetFilter::TrackedSet {
+                    id: TrackedSetId(0),
+                },
+                cost: ManaCost::zero(),
+                count: None,
+            },
+        ))
+    }
+
+    /// A bare carrier with no delivering parent (the pre-fix fixture shape),
+    /// next to a `CastFromZone` host that carries no rider: a sibling outside
+    /// any `CastFromZone` sub-chain even though a delivering host exists in the
+    /// unit.
+    fn parsed_with_sibling_gains_rider_carrier() -> ParsedAbilities {
+        parsed_with_abilities(vec![cast_from_zone_host_def(), gains_rider_carrier_def()])
+    }
+
+    /// The direct-parsed `FreeCastFromZones` + rider shape (BF-P2-9): the rider
+    /// becomes a sequential sibling of a non-`CastFromZone` host, so no
+    /// delivering route reads it. No corpus card produces this shape today.
+    fn parsed_with_free_cast_gains_rider_carrier() -> ParsedAbilities {
+        parsed_with_host_and_gains_rider(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::FreeCastFromZones {
+                count: None,
+                max_total_mv: None,
+                filter: TargetFilter::Any,
+                zones: vec![Zone::Graveyard],
+                graveyard_replacement: None,
+            },
+        ))
     }
 
     /// The exact rider sentence shape Strago and Relm print, with a quoted
@@ -14990,14 +15169,21 @@ mod detect_condition_if_replacement_exemption_tests {
         let text = gains_rider_unit_text();
         let cleaned = text.to_ascii_lowercase();
 
-        // Negative — no typed evidence: the sentence shape alone must keep
-        // warning.
-        let no_evidence = UnitEvidence::from_json_for_test("{}");
+        // Negative — no carrier in the parsed tree: the sentence shape alone
+        // must keep warning.
+        let no_carrier = parsed_with_abilities(Vec::new());
+        let no_carrier_evidence = UnitEvidence::of(&no_carrier);
         let mut diagnostics = Vec::new();
-        detect_condition_if(&cleaned, &text, &no_evidence, &parsed, &mut diagnostics);
+        detect_condition_if(
+            &cleaned,
+            &text,
+            &no_carrier_evidence,
+            &no_carrier,
+            &mut diagnostics,
+        );
         assert!(
             has_condition_if_swallow(&diagnostics),
-            "the sentence shape without typed evidence must keep warning, got {diagnostics:?}"
+            "the sentence shape without a carrier must keep warning, got {diagnostics:?}"
         );
 
         // Positive reach guard — the same text with evidence suppresses, so
@@ -15062,6 +15248,164 @@ mod detect_condition_if_replacement_exemption_tests {
             !has_condition_if_swallow(&diagnostics),
             "reach guard: the complete sentence with the same evidence must suppress, \
              got {diagnostics:?}"
+        );
+    }
+
+    /// CR 608.2c + CR 611.2a: the delivering walk is TRANSITIVE. The Tomb of
+    /// Aclazotz shape nests the gains rider under the counter rider
+    /// (`CastFromZone` → `AddPendingETBCounters` → APEM), which the runtime
+    /// `cast_from_zone_enters_with_modifications` walks at depth 1. A depth-0-only
+    /// chain test would fail this row; the card's own clearance comes from its
+    /// condition slot, so this hand-built fixture is the only discriminator for
+    /// transitivity.
+    #[test]
+    fn gains_rider_carrier_is_delivered_through_a_nested_counter_rider() {
+        let parsed = parsed_with_nested_gains_rider_carrier();
+        let evidence = UnitEvidence::of(&parsed);
+
+        // White-box reach guard: the transitive walk finds the depth-1 carrier.
+        assert!(
+            any_ability_has_delivered_gains_rider(&parsed),
+            "the walk must find the carrier nested under the counter rider"
+        );
+        // Carrier-present reach guard: the APEM node exists in this tree, so the
+        // clear below cannot pass by an empty fixture.
+        assert!(
+            evidence.any_effect(|e| matches!(e, Effect::AddPendingEntersModifications { .. })),
+            "the nested fixture must carry the APEM node"
+        );
+
+        let text = gains_rider_unit_text();
+        let cleaned = text.to_ascii_lowercase();
+        let mut diagnostics = Vec::new();
+        detect_condition_if(&cleaned, &text, &evidence, &parsed, &mut diagnostics);
+        assert!(
+            !has_condition_if_swallow(&diagnostics),
+            "the depth-1 delivered carrier must clear the rider sentence, got {diagnostics:?}"
+        );
+    }
+
+    /// CR 608.2c + CR 611.2a: a represented-but-undelivered carrier keeps the
+    /// warning. The Mysterious Sphere's shape is a `CastCopyOfCard` parent; the
+    /// copy route RECORDS the rider as permission metadata and never applies it
+    /// (`game/effects/mod.rs`: "records, it does not apply"), so this carrier is
+    /// not delivered and the sentence must stay honest red. Revert-fail: the
+    /// pre-fix tree-global probe (an APEM under an `effect` key) clears it.
+    #[test]
+    fn cast_copy_of_card_gains_rider_carrier_keeps_warning() {
+        let parsed = parsed_with_copy_gains_rider_carrier();
+        let evidence = UnitEvidence::of(&parsed);
+
+        // Reach guard: the APEM node is present in this tree, so the negative
+        // below cannot pass by a missing carrier.
+        assert!(
+            evidence.any_effect(|e| matches!(e, Effect::AddPendingEntersModifications { .. })),
+            "the copy-parent fixture must carry the APEM node"
+        );
+
+        let text = gains_rider_unit_text();
+        let cleaned = text.to_ascii_lowercase();
+        let mut diagnostics = Vec::new();
+        detect_condition_if(&cleaned, &text, &evidence, &parsed, &mut diagnostics);
+        assert!(
+            has_condition_if_swallow(&diagnostics),
+            "a carrier under a CastCopyOfCard parent must keep the warning, got {diagnostics:?}"
+        );
+
+        // Paired reach guard — the same text with the delivered fixture clears.
+        let delivered = parsed_with_gains_rider_carrier();
+        let delivered_evidence = UnitEvidence::of(&delivered);
+        let mut diagnostics = Vec::new();
+        detect_condition_if(
+            &cleaned,
+            &text,
+            &delivered_evidence,
+            &delivered,
+            &mut diagnostics,
+        );
+        assert!(
+            !has_condition_if_swallow(&diagnostics),
+            "reach guard: the same text with a delivered carrier must clear, got {diagnostics:?}"
+        );
+    }
+
+    /// CR 608.2c + CR 611.2a: a carrier outside any `CastFromZone` sub-chain
+    /// keeps the warning. Two hostile shapes: a bare carrier next to a
+    /// `CastFromZone` host that carries no rider (co-present authority must not
+    /// clear the sentence), and the direct-parsed `FreeCastFromZones` +
+    /// sibling-rider shape (BF-P2-9), which has no delivering reader at all.
+    /// Revert-fail: the pre-fix tree-global probe clears both fixtures.
+    #[test]
+    fn gains_rider_carrier_outside_cast_from_zone_chain_keeps_warning() {
+        let text = gains_rider_unit_text();
+        let cleaned = text.to_ascii_lowercase();
+
+        for (label, parsed) in [
+            ("sibling", parsed_with_sibling_gains_rider_carrier()),
+            ("free-cast", parsed_with_free_cast_gains_rider_carrier()),
+        ] {
+            let evidence = UnitEvidence::of(&parsed);
+
+            // Reach guard: the APEM node is present in this tree, so each
+            // negative below cannot pass by a missing carrier.
+            assert!(
+                evidence.any_effect(|e| matches!(e, Effect::AddPendingEntersModifications { .. })),
+                "{label}: the fixture must carry the APEM node"
+            );
+
+            let mut diagnostics = Vec::new();
+            detect_condition_if(&cleaned, &text, &evidence, &parsed, &mut diagnostics);
+            assert!(
+                has_condition_if_swallow(&diagnostics),
+                "{label}: a carrier outside any CastFromZone sub-chain must keep the \
+                 warning, got {diagnostics:?}"
+            );
+        }
+
+        // Paired reach guard — the same text with the delivered fixture clears.
+        let delivered = parsed_with_gains_rider_carrier();
+        let delivered_evidence = UnitEvidence::of(&delivered);
+        let mut diagnostics = Vec::new();
+        detect_condition_if(
+            &cleaned,
+            &text,
+            &delivered_evidence,
+            &delivered,
+            &mut diagnostics,
+        );
+        assert!(
+            !has_condition_if_swallow(&diagnostics),
+            "reach guard: the same text with a delivered carrier must clear, got {diagnostics:?}"
+        );
+    }
+
+    /// Strago and Relm's verbatim Oracle text (Scryfall / MTGJSON), the same
+    /// string pinned by the whole-card parser test in `oracle_effect/tests.rs`.
+    const STRAGO_ORACLE_TEXT: &str = "Sketch and Lore — {2}{R}, {T}: Target opponent exiles cards from the top of their library until they exile an instant, sorcery, or creature card. You may cast that card without paying its mana cost. If you cast a creature spell this way, it gains haste and \"At the beginning of the end step, sacrifice this creature.\" Activate only as a sorcery.";
+
+    /// CR 608.2c + CR 611.2a: production-path positive — the live Strago parse
+    /// must carry the rider in a `CastFromZone` chain (the delivering shape) and
+    /// must not be flagged as a swallowed `Condition_If`. This attributes R1's
+    /// measured clear to the re-pointed exemption: it fails if the walk misses
+    /// the live shape or if the parser stops parenting the rider.
+    #[test]
+    fn strago_and_relm_gains_rider_is_not_swallowed_condition() {
+        let parsed = parse_oracle_text(
+            STRAGO_ORACLE_TEXT,
+            "Strago and Relm",
+            &[],
+            &["Creature".to_string()],
+            &["Human".to_string(), "Wizard".to_string()],
+        );
+        assert!(
+            any_ability_has_delivered_gains_rider(&parsed),
+            "the live Strago parse must carry the rider in a CastFromZone chain"
+        );
+        assert!(
+            !has_condition_if_swallow(&parsed.parse_warnings),
+            "Strago's delivered rider must not be flagged as a swallowed Condition_If; \
+             warnings: {:?}",
+            parsed.parse_warnings
         );
     }
 
