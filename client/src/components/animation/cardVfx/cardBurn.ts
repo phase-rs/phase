@@ -50,7 +50,7 @@ const cardFrag = /* glsl */ `
     vec3 charCol = vec3(0.018, 0.013, 0.01) * (0.6 + 0.8 * vnoise(vCard * 0.35));
     col = mix(col, charCol, 1.0 - smoothstep(-0.01, 0.06, d));
     // Grey ash right before it falls apart.
-    col = mix(col, vec3(0.1, 0.095, 0.09), smoothstep(crumble + 0.06, crumble, d));
+    col = mix(col, vec3(0.1, 0.095, 0.09), (1.0 - smoothstep(crumble, crumble + 0.06, d)));
     col = mix(col, vec3(1.0, 0.25, 0.03), exp(-abs(d) * 90.0));
     gl_FragColor = vec4(col, corner);
     #include <colorspace_fragment>
@@ -79,7 +79,7 @@ const fireFrag = /* glsl */ `
     vec2 c = toCard(w);
     if (c.x < 0.0 || c.y < 0.0 || c.x > uSize.x || c.y > uSize.y) return 0.0;
     float d = burnKey(c) - uFront;
-    return smoothstep(0.03, 0.0, d) * smoothstep(-uBand, -uBand * 0.35, d);
+    return (1.0 - smoothstep(0.0, 0.03, d)) * smoothstep(-uBand, -uBand * 0.35, d);
   }
   vec3 blackbody(float f) {
     vec3 c = mix(vec3(0.0), vec3(0.5, 0.05, 0.0), smoothstep(0.0, 0.25, f));

@@ -95,23 +95,34 @@ function leavesBattlefield(event: AnimationEvent): event is Extract<AnimationEve
  *  graveyard just before the destruction or sacrifice itself. */
 function sameTypeGrouping(effect: StepEffect, lastStep: AnimationStep): boolean {
   return lastStep.effects.every(
-    ({ event }) => event.type === effect.event.type || leavesBattlefield(event),
+    ({ event }) => event.type === effect.event.type || leavesBattlefield(event)
+      || ((effect.event.type === "CreatureDestroyed" || effect.event.type === "PermanentSacrificed") && libraryShuffle(event)),
   );
 }
 
 type DestructionType = "CreatureDestroyed" | "PermanentSacrificed";
 
+/** CR 701.24a: a library redirect may report its shuffle before the destruction completes. */
+function libraryShuffle(event: AnimationEvent): boolean {
+  return event.type === "PlayerPerformedAction" && event.data.action === "ShuffledLibrary";
+}
+
 /** The destruction or sacrifice whose move off the battlefield `events[index]`
  *  is (CR 701.8a / CR 701.21a): the engine reports the move just before it,
- *  with at most non-visual events between. The move belongs in its step, which
+ *  with non-visual events and a library redirect's shuffle tail between.
+ *  The move and its tail belong in the destruction's step, which
  *  shows where it went: a replacement (CR 614.1a) may have sent it elsewhere. */
-function destructionOfMove(events: GameEvent[], index: number): DestructionType | null {
+function destructionOfMove(events: GameEvent[], index: number): { type: DestructionType; index: number } | null {
   const move = events[index];
   if (!leavesBattlefield(move)) return null;
-  const next = events.slice(index + 1).find(({ type }) => !NON_VISUAL_EVENTS.has(type));
-  const ofMove = (next?.type === "CreatureDestroyed" || next?.type === "PermanentSacrificed")
-    && next.data.object_id === move.data.object_id;
-  return ofMove ? next.type : null;
+  for (let nextIndex = index + 1; nextIndex < events.length; nextIndex++) {
+    const next = events[nextIndex];
+    if (NON_VISUAL_EVENTS.has(next.type) || (move.data.to === "Library" && libraryShuffle(next))) continue;
+    if ((next.type === "CreatureDestroyed" || next.type === "PermanentSacrificed")
+      && next.data.object_id === move.data.object_id) return { type: next.type, index: nextIndex };
+    return null;
+  }
+  return null;
 }
 
 /**
@@ -844,6 +855,7 @@ export function normalizeEvents(
 ): AnimationStep[] {
   const pacingMultipliers = options?.pacingMultipliers ?? defaultPacingMultipliers();
   const steps: AnimationStep[] = [];
+  let destructionTail: { step: AnimationStep; until: number } | null = null;
   const { replacements: aggregateReplacements, fallbackBlockedIndices } = findAggregateReplacements(events, pacingMultipliers);
   const replacementByAggregateIndex = new Map(
     aggregateReplacements.map((replacement) => [replacement.aggregateIndex, replacement]),
@@ -883,6 +895,13 @@ export function normalizeEvents(
 
     const effect = toEffect(event, pacingMultipliers);
 
+    if (destructionTail && index <= destructionTail.until) {
+      destructionTail.step.effects.push(effect);
+      destructionTail.step.duration = stepDuration(destructionTail.step.effects);
+      continue;
+    }
+    destructionTail = null;
+
     if (OWN_STEP_TYPES.has(event.type) || isAnnouncement) {
       steps.push({ effects: [effect], duration: effect.duration });
       continue;
@@ -892,14 +911,15 @@ export function normalizeEvents(
     if (destruction) {
       // It joins a run of the same destructions, or starts its own.
       const lastStep = steps[steps.length - 1];
-      const run = lastStep?.effects.some(({ event: other }) => other.type === destruction)
-        && lastStep.effects.every(({ event: other }) => other.type === destruction || leavesBattlefield(other));
+      const run = lastStep?.effects.some(({ event: other }) => other.type === destruction.type)
+        && lastStep.effects.every(({ event: other }) => other.type === destruction.type || leavesBattlefield(other) || libraryShuffle(other));
       if (lastStep && run) {
         lastStep.effects.push(effect);
         lastStep.duration = stepDuration(lastStep.effects);
       } else {
         steps.push({ effects: [effect], duration: effect.duration });
       }
+      destructionTail = { step: steps[steps.length - 1], until: destruction.index };
       continue;
     }
 

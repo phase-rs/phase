@@ -289,6 +289,19 @@ describe("normalizeEvents", () => {
     ]);
   });
 
+  it("V17-5: a shuffle-back replacement stays in a run of destructions with its shuffle preserved", () => {
+    const events: GameEvent[] = [
+      { type: "ZoneChanged", data: { object_id: 1, from: "Battlefield", to: "Library" } },
+      { type: "PlayerPerformedAction", data: { player_id: 0, action: "ShuffledLibrary" } },
+      { type: "CreatureDestroyed", data: { object_id: 1, source_id: 9 } },
+      { type: "ZoneChanged", data: { object_id: 2, from: "Battlefield", to: "Graveyard" } },
+      { type: "CreatureDestroyed", data: { object_id: 2, source_id: 9 } },
+    ];
+    const steps = normalizeEvents(events);
+    expect(steps).toHaveLength(1);
+    expect(steps[0].effects.map(({ event }) => event)).toEqual(events);
+  });
+
   it("ZoneChanged groups with preceding cause (SpellCast)", () => {
     const events: GameEvent[] = [
       { type: "SpellCast", data: { card_id: 1, controller: 0, object_id: 1 } },

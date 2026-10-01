@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import type { GameObject, GameState, ManaColor, TargetRef, Zone } from "../../../../adapter/types.ts";
+import type { GameEvent, GameObject, GameState, ManaColor, TargetRef, Zone } from "../../../../adapter/types.ts";
+import { normalizeEvents } from "../../../../animation/eventNormalizer.ts";
 import type { AnimationEvent } from "../../../../animation/types.ts";
 import { buildObjectMap, gameObjectFactory } from "../../../../test/factories/gameObjectFactory.ts";
 import { buildGameState, buildStackEntry } from "../../../../test/factories/gameStateFactory.ts";
@@ -320,6 +321,29 @@ describe("cardVfxSpecFor", () => {
     const graveyard = stateWith(visible(card.inGraveyard().build()));
     expect(cardVfxSpecFor(destroyed, context(pre, graveyard, 1, [moved("Graveyard"), destroyed]))?.kind).toBe("shatter");
     expect(cardVfxSpecFor(destroyed, context(pre, pre, 0))).toBeNull();
+  });
+
+  it.each(["CreatureDestroyed", "PermanentSacrificed"] as const)("V17-4: a %s library redirect keeps its shuffle and shows only its flight", (type) => {
+    const pre = stateWith(visible(card.onBattlefield().build()));
+    const post = stateWith(hidden(card.params({ zone: "Library" }).build()));
+    const terminal: GameEvent = type === "CreatureDestroyed"
+      ? { type, data: { object_id: X, source_id: 9 } }
+      : { type, data: { object_id: X, player_id: 0 } };
+    // zone_pipeline's library delivery tail reports the shuffle before the
+    // destruction/sacrifice reports completion.
+    const events: GameEvent[] = [
+      { type: "ZoneChanged", data: { object_id: X, from: "Battlefield", to: "Library" } },
+      { type: "PlayerPerformedAction", data: { player_id: 0, action: "ShuffledLibrary" } },
+      terminal,
+    ];
+    const steps = normalizeEvents(events);
+    expect(steps).toHaveLength(1);
+    const stepEvents = steps[0].effects.map(({ event }) => event);
+    expect(stepEvents).toEqual(events);
+    const ctx = context(pre, post, 1, stepEvents);
+    expect(cardVfxSpecFor(stepEvents[0], ctx)).toMatchObject({ kind: "flight", route: { from: "Battlefield", to: "Library" } });
+    expect(cardVfxSpecFor(stepEvents[1], ctx)).toBeNull();
+    expect(cardVfxSpecFor(stepEvents[2], ctx)).toEqual({ kind: "covered", objectId: X });
   });
 
   it("V16-8: a token reads its move from the step, having ceased to exist wherever it went", () => {

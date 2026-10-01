@@ -125,7 +125,7 @@ type DamageHitRequest = DamageHitParams & OnPermanent & { atRest: boolean };
 /** A damage strike to start; a hit names the permanent it lands on. */
 export type DamageStrikeRequest = Omit<DamageStrikeParams, "hit"> & { hit: DamageHitRequest | null };
 /** A slam's struck permanent to rock back; it names the permanent it copies. */
-export type DamageKnockbackRequest = DamageKnockbackParams & OnPermanent;
+export type DamageKnockbackRequest = DamageKnockbackParams & OnPermanent & { atRest: boolean };
 
 export interface CardVfxScene {
   setPixelRatio(ratio: number): void;
@@ -390,8 +390,10 @@ class CardVfxSceneRuntime implements CardVfxScene, EffectHost {
     this.add(createDamageBlow(this, request));
   }
 
-  startDamageKnockback({ objectId, ...request }: DamageKnockbackRequest) {
-    this.addBoardEffect(objectId, createDamageKnockback(this, request));
+  startDamageKnockback({ objectId, atRest, ...request }: DamageKnockbackRequest) {
+    const effect = createDamageKnockback(this, request);
+    this.addBoardEffect(objectId, effect);
+    if (atRest) effect.showAtRest();
   }
 
   startCounterRipple(request: CounterRippleParams) {

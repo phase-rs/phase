@@ -421,13 +421,13 @@ class DamageHit implements DamageHitEffect {
     this.clock.value = t;
     const k = t - impactS;
     this.group.visible = this.atRest || k >= 0;
+    if (this.group.visible) this.occlude(this.materials.uniforms);
     if (k < 0) return true;
     if (!this.landed) {
       this.landed = true;
       this.motion.onImpact?.();
     }
     const U = this.materials.uniforms;
-    this.occlude(U);
     // Knocked back along the damage's path: the far edge dips, then a damped rock back to rest.
     U.uTiltA.value = Math.min(0.1 + 0.03 * amount, 0.3) * Math.exp(-k * 8) * Math.sin(k * 22);
     const push = 9 * scale * (1 - Math.exp(-k * 40)) * Math.exp(-k * 6);

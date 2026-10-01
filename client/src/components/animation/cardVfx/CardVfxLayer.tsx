@@ -644,9 +644,11 @@ class CardVfxController {
       spec.face,
       spec.owningStepMs,
       (scene, surface) => {
+        const atRest = this.veilHolds.get(objectId)?.board != null;
         const holder = this.startBoardEffect(objectId);
         scene.startDamageKnockback({
           objectId,
+          atRest,
           hit: { ...surface, onDone: () => this.release(objectId, "board", holder) },
           from,
           occluder,

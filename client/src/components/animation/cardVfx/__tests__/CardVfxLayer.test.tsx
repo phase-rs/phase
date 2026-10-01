@@ -1471,6 +1471,37 @@ describe("CardVfxLayer damage strike", () => {
     expect(veiled(X)).toBe(false);
   });
 
+  it("V17-6: a consecutive knockback keeps a resting, occluded copy visible until its new impact", async () => {
+    const { present } = await readyLayer();
+    anchor({ "data-permanent-card": String(X) }, 40, 400);
+    addFace(anchor({ "data-permanent-card": String(Y) }, 300, 400));
+    const knockback = (): CardVfxSpec => ({
+      kind: "knockback", objectId: Y, face: face(Y), sourceId: X,
+      amount: 3, pace: 1, owningStepMs: 900, startMs: performance.now(), impactDelayMs: 200,
+    });
+    const load = async () => {
+      const loader = faceLoader();
+      expect(loader).not.toBeNull();
+      await act(async () => { if (loader) fireEvent.load(loader); });
+    };
+    present(knockback());
+    await load();
+    await advance(900);
+    expect(veiled(Y)).toBe(true);
+    const classic = present(knockback());
+    await load();
+    await frames(2);
+    const copy = last(calls("render"))?.children?.find((child) => child.name === "damage-hit" && child.visible)?.object;
+    expect(copy).toBeDefined();
+    const uniforms = ((copy!.children[0] as Mesh).material as ShaderMaterial).uniforms;
+    expect(uniforms.uPush.value.length()).toBe(0);
+    expect(uniforms.uOccHalf.value.x).toBe(CARD_W / 2);
+    expect(veiled(Y)).toBe(true);
+    await advance(200 + HIT_S * 1000 + 2 * FRAME_MS);
+    expect(veiled(Y)).toBe(false);
+    expect(classic).not.toHaveBeenCalled();
+  });
+
   it("V12-5: a blow lands dust on a player's HUD or a permanent at once, with no face to load and no veil", async () => {
     const { present } = await readyLayer();
     anchor({ "data-permanent-card": String(X) }, 40, 600);
