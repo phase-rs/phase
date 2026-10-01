@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 
 import type { GameState } from "../../../../adapter/types.ts";
 import type { CardAnimationStyle, VfxQuality } from "../../../../animation/types.ts";
@@ -24,6 +24,7 @@ export type GalleryScenarioId = keyof typeof GALLERY_SCENARIOS;
 
 interface CardVfxGalleryProps {
   scenario: GalleryScenarioId;
+  background?: ReactNode;
 }
 
 const PILE_SIZE = { width: "clamp(45px, 4.5vw, 70px)", height: "clamp(63px, 6.3vw, 98px)" };
@@ -45,7 +46,7 @@ function commit(state: GameState) {
  * pipeline: each engine update's events go to `processRemoteUpdate`, which
  * animates them and then commits the state they leave, as a live game does.
  */
-export function CardVfxGallery({ scenario }: CardVfxGalleryProps) {
+export function CardVfxGallery({ scenario, background }: CardVfxGalleryProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const gridTemplateRows = useResolvedGridRows();
   const hasBoard = useGameStore((s) => s.gameState !== null);
@@ -77,6 +78,7 @@ export function CardVfxGallery({ scenario }: CardVfxGalleryProps) {
       ref={containerRef}
       className="game-no-select relative h-[100dvh] w-full overflow-hidden bg-gray-950 contain-paint"
     >
+      {background}
       {hasBoard && (
         <>
           <StackDisplay effectiveMultiplayerBoardLayout="focused" />

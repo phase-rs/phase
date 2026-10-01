@@ -4,6 +4,24 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { usePreferencesStore } from "../preferencesStore";
 
 describe("preferencesStore", () => {
+  it.each([
+    ["water_frozen_aurora", "water_moonlit_ocean_temple"],
+    ["shadow_haunted_graveyard", "shadow_moon_coven_sanctum"],
+    ["shadow_ruined_archway", "shadow_moon_coven_sanctum"],
+    ["earth_jurassic", "earth_snowy_forest"],
+    ["air_angelic_sky", "air_angelic_sky"],
+    ["none", "none"],
+    ["custom", "custom"],
+    ["auto-wubrg", "auto-wubrg"],
+  ])("migrates saved background %s to %s", (previous, expected) => {
+    localStorage.setItem("phase-preferences", JSON.stringify({
+      state: { boardBackground: previous },
+      version: 36,
+    }));
+    usePreferencesStore.persist.rehydrate();
+    expect(usePreferencesStore.getState().boardBackground).toBe(expected);
+  });
+
   beforeEach(() => {
     // Reset store state between tests
     act(() => {

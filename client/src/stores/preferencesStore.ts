@@ -109,7 +109,7 @@ export type OpponentHudDensity = "comfortable" | "compact";
 export type MultiplayerBoardLayout = "auto" | "focused" | "split";
 /** A layout after viewport/table-size resolution, suitable for board chrome. */
 export type ResolvedMultiplayerBoardLayout = Exclude<MultiplayerBoardLayout, "auto">;
-/** "auto-wubrg" picks a random battlefield matching the dominant mana color.
+/** "auto-wubrg" picks the arena matching the dominant mana color.
  *  "random" picks a random battlefield each game regardless of color.
  *  "none" disables the background image.
  *  "custom" uses the URL stored in `customBackgroundUrl`.
@@ -831,7 +831,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
     }),
     {
       name: "phase-preferences",
-      version: 36,
+      version: 37,
       // v0 → v1: flat aiDifficulty + aiDeckName become aiSeats[0].
       // v1 → v2: discrete animationSpeed/combatPacing enums become numeric
       //          animationSpeedMultiplier/combatPacingMultiplier.
@@ -920,6 +920,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       // v35 → v36: Add cardAnimationStyle. Existing users get "webgl" (the New
       //          card animations) through the shallow merge, the same as fresh
       //          stores, so no migrate block is needed.
+      // v36 → v37: Consolidate battlefield art to one animated arena per color.
       migrate: (persisted: unknown, version: number) => {
         if (!persisted || typeof persisted !== "object") return persisted;
         let migrated = persisted as Record<string, unknown>;
@@ -1117,6 +1118,21 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
           const { logDefaultState: _legacyLogDefault, ...rest } = migrated;
           void _legacyLogDefault;
           migrated = { ...rest, logPanelLastChoice: "open" };
+        }
+
+        if (version < 37) {
+          switch (migrated.boardBackground) {
+            case "water_frozen_aurora":
+              migrated = { ...migrated, boardBackground: "water_moonlit_ocean_temple" };
+              break;
+            case "shadow_haunted_graveyard":
+            case "shadow_ruined_archway":
+              migrated = { ...migrated, boardBackground: "shadow_moon_coven_sanctum" };
+              break;
+            case "earth_jurassic":
+              migrated = { ...migrated, boardBackground: "earth_snowy_forest" };
+              break;
+          }
         }
 
         return {
