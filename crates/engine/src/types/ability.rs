@@ -5794,6 +5794,15 @@ pub enum ResolutionCastSuccessAction {
             deserialize_with = "deserialize_graveyard_replacement_compat"
         )]
         graveyard_replacement: Option<SpellStackToGraveyardReplacement>,
+        /// CR 608.2c + CR 611.2a: the gains-modifications rider re-offered to
+        /// every remaining cast of the window (Strago and Relm). Unlike
+        /// `graveyard_replacement` — installed post-finalize — the rider must
+        /// ride each cast's `ResolutionCastRequest` into the elected
+        /// permission, which is its only application point (CR 611.2c). Empty
+        /// for windows without a rider and for saved states predating the
+        /// field.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        enters_with_modifications: Vec<ContinuousModification>,
         /// CR 607.2a + CR 608.2g: THIS resolution's "exiled this way" batch,
         /// threaded from the window that offered the cast so the re-offer's
         /// candidate set stays confined to the current resolution's exile
@@ -5831,6 +5840,7 @@ mod resolution_cast_face_policy_serde_tests {
             face_policy: policy,
             zones: vec![Zone::Exile],
             graveyard_replacement: None,
+            enters_with_modifications: Vec::new(),
             member_pool: vec![ObjectId(702)],
         }
     }
@@ -5851,6 +5861,7 @@ mod resolution_cast_face_policy_serde_tests {
                 face_policy: Box::new(policy.clone()),
                 zones: vec![Zone::Exile],
                 graveyard_replacement: None,
+                enters_with_modifications: Vec::new(),
                 member_pool: vec![ObjectId(702)],
             },
             delayed_trigger_receipts: Vec::new(),
@@ -5871,6 +5882,106 @@ mod resolution_cast_face_policy_serde_tests {
             panic!("fixture must carry the re-offer chain");
         };
         assert_eq!(*face_policy, policy);
+    }
+
+    /// CR 608.2c + CR 611.2a (row 6.8): both serialized carriers of the gains
+    /// rider (`CastOfferKind::FreeCastWindow`,
+    /// `ResolutionCastSuccessAction::FreeCastOfferRemaining`) deserialize a
+    /// pre-fix payload without the field to `Vec::new()`, omit the field when
+    /// the rider is empty, and round-trip a carried rider exactly.
+    #[test]
+    fn gains_rider_field_back_compat_and_round_trip_on_both_carriers() {
+        use crate::types::ability::ContinuousModification;
+        use crate::types::keywords::Keyword;
+
+        let rider = vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Haste,
+        }];
+
+        // FreeCastWindow — an empty rider is skipped on the wire and the
+        // field-less shape deserializes to the same value.
+        let window_value = serde_json::to_value(window(policy())).unwrap();
+        assert!(
+            window_value
+                .as_object()
+                .is_some_and(|object| !object.contains_key("enters_with_modifications")),
+            "an empty window rider must be skipped on the wire"
+        );
+        assert_eq!(
+            serde_json::from_value::<CastOfferKind>(window_value).unwrap(),
+            window(policy())
+        );
+
+        // FreeCastWindow — a carried rider round-trips exactly.
+        let ridden_window = CastOfferKind::FreeCastWindow {
+            candidates: vec![ObjectId(702)],
+            remaining_casts: Some(2),
+            remaining_mv_budget: Some(7),
+            face_policy: policy(),
+            zones: vec![Zone::Exile],
+            graveyard_replacement: None,
+            enters_with_modifications: rider.clone(),
+            member_pool: vec![ObjectId(702)],
+        };
+        let encoded = serde_json::to_value(&ridden_window).unwrap();
+        assert_eq!(
+            encoded["enters_with_modifications"],
+            serde_json::to_value(&rider).unwrap(),
+            "a carried rider must serialize under the engine field name"
+        );
+        assert_eq!(
+            serde_json::from_value::<CastOfferKind>(encoded).unwrap(),
+            ridden_window
+        );
+
+        // FreeCastOfferRemaining — the same three properties on the re-offer
+        // carrier.
+        let ridden_action = ResolutionCastSuccessAction::FreeCastOfferRemaining {
+            controller: PlayerId(1),
+            remaining_casts: Some(2),
+            remaining_mv_budget: Some(7),
+            face_policy: Box::new(policy()),
+            zones: vec![Zone::Exile],
+            graveyard_replacement: None,
+            enters_with_modifications: rider.clone(),
+            member_pool: vec![ObjectId(702)],
+        };
+        let encoded_action = serde_json::to_value(&ridden_action).unwrap();
+        assert_eq!(
+            encoded_action["enters_with_modifications"],
+            serde_json::to_value(&rider).unwrap()
+        );
+        assert_eq!(
+            serde_json::from_value::<ResolutionCastSuccessAction>(encoded_action).unwrap(),
+            ridden_action
+        );
+        let empty_action = ResolutionCastSuccessAction::FreeCastOfferRemaining {
+            controller: PlayerId(1),
+            remaining_casts: Some(2),
+            remaining_mv_budget: Some(7),
+            face_policy: Box::new(policy()),
+            zones: vec![Zone::Exile],
+            graveyard_replacement: None,
+            enters_with_modifications: Vec::new(),
+            member_pool: vec![ObjectId(702)],
+        };
+        let mut pre_fix_action = serde_json::to_value(&empty_action).unwrap();
+        assert!(
+            pre_fix_action
+                .as_object()
+                .is_some_and(|object| !object.contains_key("enters_with_modifications")),
+            "an empty re-offer rider must be skipped on the wire"
+        );
+        // A pre-fix payload that never had the key at all is the same shape.
+        pre_fix_action
+            .as_object_mut()
+            .unwrap()
+            .remove("enters_with_modifications");
+        assert_eq!(
+            serde_json::from_value::<ResolutionCastSuccessAction>(pre_fix_action).unwrap(),
+            empty_action,
+            "a field-less payload must read as an empty rider"
+        );
     }
 
     #[test]

@@ -2662,12 +2662,14 @@ mod tests {
             ),
             zones: vec![Zone::Hand],
             graveyard_replacement: None,
+            enters_with_modifications: Vec::new(),
             member_pool: Vec::new(),
         };
         let paid_graveyard = |hit_card| CastOfferKind::GraveyardPaidCast {
             hit_card,
             mana_spend_permission: None,
             graveyard_replacement: None,
+            enters_with_modifications: Vec::new(),
             cast_transformed: false,
             additional_cost: None,
             cleanup: ResolutionCastCleanup {

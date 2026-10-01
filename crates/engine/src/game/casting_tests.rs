@@ -55336,6 +55336,71 @@ fn resolve_graveyard_paid_grant_with_exile_rider(state: &mut GameState, spell: O
     crate::game::effects::cast_from_zone::resolve(state, &grant, &mut Vec::new()).unwrap();
 }
 
+/// A `{U}` creature in `owner`'s graveyard with a nonzero body, for the paid
+/// during-resolution offer rows.
+fn make_graveyard_blue_creature(state: &mut GameState, owner: PlayerId) -> ObjectId {
+    let creature = create_object(
+        state,
+        CardId(8310),
+        owner,
+        "Graveyard Rider Creature".to_string(),
+        Zone::Graveyard,
+    );
+    let obj = state.objects.get_mut(&creature).unwrap();
+    obj.card_types.core_types.push(CoreType::Creature);
+    obj.base_card_types = obj.card_types.clone();
+    obj.mana_cost = ManaCost::Cost {
+        shards: vec![ManaCostShard::Blue],
+        generic: 0,
+    };
+    obj.power = Some(2);
+    obj.toughness = Some(2);
+    obj.base_power = obj.power;
+    obj.base_toughness = obj.toughness;
+    creature
+}
+
+/// Resolve a paid during-resolution `CastFromZone` targeting `spell` with the
+/// gains-modifications rider attached as its sub-ability (when `with_rider`) —
+/// the shape Strago and Relm's rider produces on the paid route.
+fn resolve_graveyard_paid_grant_with_gains_rider(
+    state: &mut GameState,
+    spell: ObjectId,
+    with_rider: bool,
+) {
+    let mut grant = ResolvedAbility::new(
+        Effect::CastFromZone {
+            target: TargetFilter::ParentTarget,
+            without_paying_mana_cost: false,
+            mode: CardPlayMode::Cast,
+            cast_transformed: false,
+            alt_ability_cost: None,
+            constraint: None,
+            duration: None,
+            driver: crate::types::ability::CastFromZoneDriver::DuringResolution,
+            mana_spend_permission: Some(ManaSpendPermission::AnyColor),
+            additional_cost: None,
+            cast_cost_modifier: None,
+        },
+        vec![TargetRef::Object(spell)],
+        ObjectId(9200),
+        PlayerId(0),
+    );
+    if with_rider {
+        grant.sub_ability = Some(Box::new(ResolvedAbility::new(
+            Effect::AddPendingEntersModifications {
+                modifications: vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Haste,
+                }],
+            },
+            vec![],
+            ObjectId(9200),
+            PlayerId(0),
+        )));
+    }
+    crate::game::effects::cast_from_zone::resolve(state, &grant, &mut Vec::new()).unwrap();
+}
+
 /// Install the exact CR 603.7 tail that a paid resolution offer transports.
 /// The effect is observably small (`gain 1 life`), so the accepted-cast test
 /// below proves the receipt is retained through payment and then really fires.
@@ -55510,6 +55575,181 @@ fn graveyard_paid_cast_with_exile_rider_installs_single_redirect_and_exiles_once
     );
 }
 
+/// CR 608.2c + CR 611.2a + CR 611.2c (row 6.2): accepting a paid
+/// during-resolution offer threads the offer's gains-modifications rider into
+/// the elected permission, which applies it exactly once at finalization
+/// scoped to the cast object. Reverting the accept's threading (back to
+/// `Vec::new()`) drops it. Paired: an empty-rider offer applies nothing.
+#[test]
+fn paid_offer_accept_applies_the_gains_rider() {
+    let rider = vec![ContinuousModification::AddKeyword {
+        keyword: Keyword::Haste,
+    }];
+
+    // Positive — the rider-bearing offer applies exactly one scoped effect.
+    let mut state = setup_game_at_main_phase();
+    let creature = make_graveyard_blue_creature(&mut state, PlayerId(0));
+    add_mana(&mut state, PlayerId(0), ManaType::Blue, 1);
+    resolve_graveyard_paid_grant_with_gains_rider(&mut state, creature, true);
+    let WaitingFor::CastOffer {
+        kind:
+            crate::types::game_state::CastOfferKind::GraveyardPaidCast {
+                enters_with_modifications,
+                ..
+            },
+        ..
+    } = &state.waiting_for
+    else {
+        panic!("reach guard: the rider-bearing paid offer must be minted");
+    };
+    assert_eq!(
+        enters_with_modifications, &rider,
+        "reach guard: the mint carries the gains rider"
+    );
+    let accepted = apply_as_current(
+        &mut state,
+        GameAction::GraveyardPaidCastChoice {
+            choice: crate::types::actions::CastChoice::Cast,
+        },
+    )
+    .expect("accepting the rider-bearing paid offer must succeed");
+    assert!(matches!(state.waiting_for, WaitingFor::ManaPayment { .. }));
+    let paid = apply_as_current(&mut state, GameAction::PassPriority)
+        .expect("paying the {U} cost must finalize the cast");
+    assert!(
+        state.stack.iter().any(|entry| entry.source_id == creature),
+        "reach guard: the paid rider cast reached the stack"
+    );
+    let applied: Vec<_> = state
+        .transient_continuous_effects
+        .iter()
+        .filter(|effect| {
+            effect.affected == TargetFilter::SpecificObject { id: creature }
+                && effect.modifications == rider
+        })
+        .collect();
+    assert_eq!(
+        applied.len(),
+        1,
+        "the accept must apply the offer's rider exactly once at finalize"
+    );
+    assert!(
+        !accepted
+            .events
+            .iter()
+            .chain(&paid.events)
+            .any(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: crate::types::ability::EffectKind::AddPendingEntersModifications,
+                    ..
+                }
+            )),
+        "the rider must never resolve standalone"
+    );
+    stack::resolve_top(&mut state, &mut Vec::new());
+    crate::game::layers::evaluate_layers(&mut state);
+    assert_eq!(state.objects[&creature].zone, Zone::Battlefield);
+    assert!(
+        crate::game::keywords::object_has_effective_keyword_kind(
+            &state,
+            creature,
+            KeywordKind::Haste,
+        ),
+        "the paid cast creature must have effective haste"
+    );
+
+    // Negative (paired) — an empty-rider offer applies nothing.
+    let mut state = setup_game_at_main_phase();
+    let creature = make_graveyard_blue_creature(&mut state, PlayerId(0));
+    add_mana(&mut state, PlayerId(0), ManaType::Blue, 1);
+    resolve_graveyard_paid_grant_with_gains_rider(&mut state, creature, false);
+    apply_as_current(
+        &mut state,
+        GameAction::GraveyardPaidCastChoice {
+            choice: crate::types::actions::CastChoice::Cast,
+        },
+    )
+    .expect("accepting the empty-rider offer must succeed");
+    apply_as_current(&mut state, GameAction::PassPriority)
+        .expect("paying the {U} cost must finalize the empty-rider cast");
+    assert!(
+        state.transient_continuous_effects.iter().all(|effect| {
+            !(effect.affected == TargetFilter::SpecificObject { id: creature }
+                && effect.modifications == rider)
+        }),
+        "an empty-rider offer must apply no rider"
+    );
+}
+
+/// CR 608.2c + CR 611.2a (row 6.2 sibling): declining a rider-bearing paid
+/// offer latches nothing — the card stays in the graveyard, no rider effect is
+/// installed, and a later manual move shows no haste.
+#[test]
+fn paid_offer_decline_installs_nothing() {
+    let mut state = setup_game_at_main_phase();
+    let creature = make_graveyard_blue_creature(&mut state, PlayerId(0));
+    resolve_graveyard_paid_grant_with_gains_rider(&mut state, creature, true);
+    assert!(
+        matches!(
+            &state.waiting_for,
+            WaitingFor::CastOffer {
+                kind: crate::types::game_state::CastOfferKind::GraveyardPaidCast { .. },
+                ..
+            }
+        ),
+        "reach guard: the rider-bearing paid offer must be minted"
+    );
+
+    let declined = apply_as_current(
+        &mut state,
+        GameAction::GraveyardPaidCastChoice {
+            choice: crate::types::actions::CastChoice::Decline,
+        },
+    )
+    .expect("declining the rider-bearing paid offer must succeed");
+    assert!(
+        !declined.events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: crate::types::ability::EffectKind::AddPendingEntersModifications,
+                ..
+            }
+        )),
+        "the decline path must not resolve the rider standalone; events: {:?}",
+        declined.events
+    );
+    assert_eq!(
+        state.objects[&creature].zone,
+        Zone::Graveyard,
+        "a declined offer leaves the card in the graveyard"
+    );
+    assert!(
+        state.transient_continuous_effects.iter().all(|effect| {
+            !(effect.affected == TargetFilter::SpecificObject { id: creature }
+                && effect.modifications
+                    == vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Haste,
+                    }])
+        }),
+        "a declined offer must install no rider effect"
+    );
+
+    // A later route moves the card to the battlefield; the rider must not
+    // manifest.
+    let mut events = Vec::new();
+    crate::game::zones::move_to_zone(&mut state, creature, Zone::Battlefield, &mut events);
+    crate::game::layers::evaluate_layers(&mut state);
+    assert!(
+        !crate::game::keywords::object_has_effective_keyword_kind(
+            &state,
+            creature,
+            KeywordKind::Haste,
+        ),
+        "a later route must not inherit the declined offer's rider"
+    );
+}
+
 /// TEST 4 (router): the paid gate produces a `CastOffer::GraveyardPaidCast` and
 /// stamps NO lingering permission. Reverting the paid gate falls through to
 /// `grant_lingering_permissions`, which stamps an `ExileWithAltCost` immediately
@@ -55620,6 +55860,7 @@ fn declining_a_paid_offer_withdraws_only_the_triggers_it_recorded() {
             hit_card: spell,
             mana_spend_permission: None,
             graveyard_replacement: None,
+            enters_with_modifications: Vec::new(),
             cast_transformed: false,
             additional_cost: None,
             cleanup: crate::types::ability::ResolutionCastCleanup {
@@ -55709,6 +55950,7 @@ fn cancelling_an_accepted_paid_offer_withdraws_its_tail_receipt() {
             hit_card: spell,
             mana_spend_permission: None,
             graveyard_replacement: None,
+            enters_with_modifications: Vec::new(),
             cast_transformed: false,
             additional_cost: None,
             cleanup: crate::types::ability::ResolutionCastCleanup {

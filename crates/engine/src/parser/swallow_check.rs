@@ -15026,6 +15026,45 @@ mod detect_condition_if_replacement_exemption_tests {
         );
     }
 
+    /// CR 608.2c + CR 611.2a (P2-6 r2): the exemption keys on the recognizer's
+    /// COMPLETE-clause span. A partially-consumed rider sentence yields no
+    /// span, so even with the typed carrier present the " if " stays visible to
+    /// the residual scan. The reach guard in the same test proves the same
+    /// evidence suppresses the complete sentence, so this negative cannot pass
+    /// vacuously.
+    #[test]
+    fn partial_gains_rider_sentence_stays_warned() {
+        let parsed = parsed_with_gains_rider_carrier();
+        let evidence = UnitEvidence::of(&parsed);
+
+        // Negative — the Dash-style partial body (a mid-list stop) with the
+        // typed carrier present.
+        let text = "You may cast that card without paying its mana cost. If you cast a creature \
+                    spell this way, it gains haste, and it's returned from the battlefield to \
+                    its owner's hand at the beginning of the next end step. Activate only as a \
+                    sorcery.";
+        let cleaned = text.to_ascii_lowercase();
+        let mut diagnostics = Vec::new();
+        detect_condition_if(&cleaned, text, &evidence, &parsed, &mut diagnostics);
+        assert!(
+            has_condition_if_swallow(&diagnostics),
+            "a partial rider sentence must keep its Condition_If warning even with the typed \
+             carrier present, got {diagnostics:?}"
+        );
+
+        // Reach guard — the same evidence suppresses the COMPLETE sentence
+        // (the sibling positive's fixture), so the negative is discriminating.
+        let complete = gains_rider_unit_text();
+        let cleaned = complete.to_ascii_lowercase();
+        let mut diagnostics = Vec::new();
+        detect_condition_if(&cleaned, &complete, &evidence, &parsed, &mut diagnostics);
+        assert!(
+            !has_condition_if_swallow(&diagnostics),
+            "reach guard: the complete sentence with the same evidence must suppress, \
+             got {diagnostics:?}"
+        );
+    }
+
     /// Second maintainer finding on PR #8007 (review submitted 2026-08-28,
     /// following the earlier cost-pipeline + card-wide-exemption fix in
     /// `42137f9f5`): `play_from_exile_alt_ability_cost_is_only_if_marker`

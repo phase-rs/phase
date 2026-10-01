@@ -55589,6 +55589,89 @@ fn cast_this_way_gains_rider_prefix_and_body_grammar() {
     );
 }
 
+/// CR 608.2c + CR 611.2a (P2-6 r2): the detector's consumed span is the
+/// LOWERING's accepted span — a partially-consumed body yields no span. The
+/// trailing-sentence tolerance exists because the detector runs on the rest of
+/// the unit (BF-P2-7): at the real Strago rider the remainder is
+/// `" activate only as a sorcery."`, so the literal whole-remainder emptiness
+/// test cannot be the only leg. Every negative below shares its shape with a
+/// positive in the same test, so no negative can pass vacuously.
+#[test]
+fn cast_this_way_gains_rider_consumed_len_requires_a_complete_clause() {
+    // Positive — the rider sentence alone.
+    let alone = "if you cast a creature spell this way, it gains haste.";
+    assert_eq!(
+        cast_this_way_gains_rider_consumed_len(alone),
+        Some(alone.len()),
+        "a fully-consumed rider sentence is the lowering's accepted span"
+    );
+    // Positive — the detector's rest-of-unit case: the rider sentence is
+    // followed by further printed sentences (Strago's "Activate only as a
+    // sorcery."), so the returned span is the rider sentence only.
+    let rider = "if you cast a creature spell this way, it gains haste.";
+    let unit = format!("{rider} Activate only as a sorcery.");
+    assert_eq!(
+        cast_this_way_gains_rider_consumed_len(&unit),
+        Some(rider.len()),
+        "a rider followed by another printed sentence still yields the rider's span"
+    );
+    // Positive — the detector's sentence-join normalization inserts a space
+    // after every period, so a QUOTED rider's closing quote arrives as `. "`
+    // (BF-P2-7 measured shape). The span still ends at the quoted terminal.
+    let quoted_rider = "if you cast a creature spell this way, it gains haste and \"At the beginning of the end step, sacrifice this creature. \"";
+    let normalized = format!("{quoted_rider} Activate only as a sorcery.");
+    assert_eq!(
+        cast_this_way_gains_rider_consumed_len(&normalized),
+        Some(quoted_rider.len()),
+        "the detector-normalized quoted terminal `. \"` must still yield the rider's span"
+    );
+
+    // Negative — the Dash-style partial body (a mid-list stop), with and
+    // without a terminal period. Paired with the keyword positive above.
+    for partial in [
+        "if you cast a creature spell this way, it gains haste, and it's returned from the battlefield to its owner's hand at the beginning of the next end step",
+        "if you cast a creature spell this way, it gains haste, and it's returned from the battlefield to its owner's hand at the beginning of the next end step.",
+    ] {
+        assert_eq!(
+            cast_this_way_gains_rider_consumed_len(partial),
+            None,
+            "a partially-consumed body must yield no span: {partial:?}"
+        );
+    }
+
+    // Negative — a quoted partial stop: the quoted segment closes, then the
+    // modification list resumes at a separator. Paired with the quoted-body
+    // positive in `cast_this_way_gains_rider_prefix_and_body_grammar`.
+    assert_eq!(
+        cast_this_way_gains_rider_consumed_len(
+            "if you cast a creature spell this way, it gains \"Haste.\" and it's returned from the battlefield to its owner's hand at the beginning of the next end step"
+        ),
+        None,
+        "a quoted partial that resumes the modification list must yield no span"
+    );
+
+    // Negative — a non-separator trailing token never reaches a sentence
+    // terminal. Paired with the keyword positive above.
+    assert_eq!(
+        cast_this_way_gains_rider_consumed_len(
+            "if you cast a creature spell this way, it gains haste frobnicated"
+        ),
+        None,
+        "a non-separator trailing token must yield no span"
+    );
+
+    // Reach guard: the bare keyword body (no trailing token) still returns its
+    // span, so the negatives above are not passing because the recognizer
+    // failed to fire at all.
+    assert_eq!(
+        cast_this_way_gains_rider_consumed_len(
+            "if you cast a creature spell this way, it gains haste"
+        ),
+        Some("if you cast a creature spell this way, it gains haste".len()),
+        "reach guard: the bare keyword body is a complete rider"
+    );
+}
+
 /// CR 608.2c + CR 611.2a: whole-card production parse of Strago and Relm
 /// (verbatim Oracle). The rider clause must attach to the activated ability's
 /// `CastFromZone` grant as its `AddPendingEntersModifications` sub-ability —

@@ -22,9 +22,9 @@ use engine::types::ability::{
     CastingPermission, ContinuousModification, Duration, EffectKind, ExileGrantCostProvenance,
     TargetFilter,
 };
-use engine::types::actions::GameAction;
+use engine::types::actions::{CastChoice, GameAction};
 use engine::types::events::GameEvent;
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{CastOfferKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::{Keyword, KeywordKind};
 use engine::types::mana::{ManaCost, ManaType, ManaUnit};
@@ -32,6 +32,12 @@ use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
 const STRAGO: &str = "Sketch and Lore — {2}{R}, {T}: Target opponent exiles cards from the top of their library until they exile an instant, sorcery, or creature card. You may cast that card without paying its mana cost. If you cast a creature spell this way, it gains haste and \"At the beginning of the end step, sacrifice this creature.\" Activate only as a sorcery.";
+
+/// Row 6.3's synthetic paid chosen-target grant with the same gains rider: the
+/// "you may cast target creature card from your graveyard" clause lowers to a
+/// paid `DuringResolution` `CastFromZone`, and the rider attaches as its
+/// sub-ability exactly as on the free route.
+const PAID_RIDER: &str = "{T}: You may cast target creature card from your graveyard. If you cast a creature spell this way, it gains haste and \"At the beginning of the end step, sacrifice this creature.\" Activate only as a sorcery.";
 
 /// P0 has Strago and Relm plus exactly the {2}{R} activation cost in the pool;
 /// `configure_top` stages the single card on top of P1's library (the only card
@@ -69,6 +75,27 @@ fn library_top_instant(scenario: &mut GameScenario) -> ObjectId {
     scenario
         .add_spell_to_library_top(P1, "Lightning Bolt", true)
         .id()
+}
+
+/// P0 has the paid-rider source plus one red mana (the graveyard creature's
+/// {1} cost); the graveyard creature is the chosen target the paid offer mints
+/// for.
+fn build_paid_rider_runner() -> (GameRunner, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature_from_oracle(P0, "Paid Rider Source", 1, 1, PAID_RIDER)
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![])],
+    );
+    let creature = scenario
+        .add_spell_to_graveyard(P0, "Graveyard Bear", false)
+        .as_creature()
+        .with_mana_cost(ManaCost::generic(1))
+        .id();
+    (scenario.build(), source, creature)
 }
 
 /// The library-top spell builder seeds only the card TYPE; give the creature a
@@ -391,5 +418,87 @@ fn noncreature_cast_shows_no_rider_manifestation() {
         runner.state().objects[&instant].zone,
         Zone::Graveyard,
         "the granted trigger is battlefield-gated and must not sacrifice a non-permanent"
+    );
+}
+
+/// Row 6.3: the PAID during-resolution route end-to-end — the activated
+/// ability mints a `GraveyardPaidCast` offer for the chosen graveyard creature;
+/// accepting it, paying its printed cost, and resolving grants the rider
+/// (haste + the end-step sacrifice), and the rider is consumed as metadata.
+/// Reverting the mint or the accept threading flips the assertions.
+#[test]
+fn paid_cast_this_way_gains_haste_and_sacrifice() {
+    let (mut runner, source, creature) = build_paid_rider_runner();
+    give_body(&mut runner, creature);
+    let outcome = runner.activate(source, 0).target_object(creature).resolve();
+    let mut events = outcome.events().to_vec();
+
+    // Reach guard: the activation minted the paid offer for the chosen card.
+    assert!(
+        matches!(
+            &runner.state().waiting_for,
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::GraveyardPaidCast { hit_card, .. },
+                ..
+            } if *hit_card == creature
+        ),
+        "reach guard: the paid during-resolution offer must be minted, found {:?}",
+        runner.state().waiting_for
+    );
+
+    let accepted = runner
+        .act(GameAction::GraveyardPaidCastChoice {
+            choice: CastChoice::Cast,
+        })
+        .expect("accepting the paid offer must succeed");
+    events.extend(accepted.events);
+    for _ in 0..8 {
+        if !matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }) {
+            break;
+        }
+        let paid = runner
+            .act(GameAction::PassPriority)
+            .expect("paying the offered cast must succeed");
+        events.extend(paid.events);
+    }
+    assert!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .any(|entry| entry.source_id == creature),
+        "reach guard: the paid cast is on the stack, found {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        !standalone_rider_resolution(&events),
+        "the rider must be consumed as metadata, never resolved standalone; events: {events:?}"
+    );
+
+    runner.advance_until_stack_empty();
+    assert_eq!(
+        runner.state().objects[&creature].zone,
+        Zone::Battlefield,
+        "the paid cast creature must enter the battlefield"
+    );
+    engine::game::layers::evaluate_layers(runner.state_mut());
+    assert!(
+        object_has_effective_keyword_kind(runner.state(), creature, KeywordKind::Haste),
+        "the paid cast creature must gain haste from the rider"
+    );
+
+    drive_to_end_step(&mut runner);
+    assert!(
+        !runner.state().stack.is_empty()
+            || matches!(runner.state().waiting_for, WaitingFor::OrderTriggers { .. }),
+        "reach guard: the granted end-step sacrifice trigger must be put on the stack, \
+         found {:?}",
+        runner.state().waiting_for
+    );
+    runner.advance_until_stack_empty();
+    assert_eq!(
+        runner.state().objects[&creature].zone,
+        Zone::Graveyard,
+        "the granted end-step sacrifice trigger must resolve the creature to the graveyard"
     );
 }

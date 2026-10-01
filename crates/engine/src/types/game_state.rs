@@ -11104,6 +11104,15 @@ pub enum CastOfferKind {
         /// the unrestricted behavior.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         member_pool: Vec<ObjectId>,
+        /// CR 608.2c + CR 611.2a: the cast-permission gains-modifications rider
+        /// ("If you cast a [quality] spell this way, it gains …", Strago and
+        /// Relm) snapshotted from the converting `CastFromZone` ability. Every
+        /// cast of the window receives it through its `ResolutionCastRequest`
+        /// (the elected-permission application point, CR 611.2c), and the
+        /// re-offers carry it through `FreeCastOfferRemaining`. Empty for
+        /// windows without a rider and for saved states predating the field.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        enters_with_modifications: Vec<crate::types::ability::ContinuousModification>,
     },
     /// CR 608.2g + CR 609.4b: A during-resolution PAID cast of a single card
     /// from a graveyard — "you may cast target X card from a graveyard", with
@@ -11124,6 +11133,13 @@ pub enum CastOfferKind {
         /// (e.g. "if that spell would be put into a graveyard, exile it instead").
         #[serde(default, skip_serializing_if = "Option::is_none")]
         graveyard_replacement: Option<crate::types::ability::SpellStackToGraveyardReplacement>,
+        /// CR 608.2c + CR 611.2a: the cast-permission gains-modifications rider
+        /// ("If you cast a [quality] spell this way, it gains …", Strago and
+        /// Relm) snapshotted from the offering `CastFromZone` ability; the
+        /// accept threads it into the elected permission (CR 611.2c). Empty
+        /// for every other paid offer and for saved states predating the field.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        enters_with_modifications: Vec<crate::types::ability::ContinuousModification>,
         /// CR 712.14a: Whether the spell is cast transformed. Rare for this
         /// class; carried for parity with the free during-resolution casts.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -34304,6 +34320,7 @@ mod tests {
                 hit_card,
                 mana_spend_permission: None,
                 graveyard_replacement: None,
+                enters_with_modifications: Vec::new(),
                 cast_transformed: false,
                 additional_cost: None,
                 cleanup: crate::types::ability::ResolutionCastCleanup {
@@ -34456,6 +34473,129 @@ mod tests {
                 "{label}: {error}"
             );
         }
+    }
+
+    /// CR 608.2c + CR 611.2a (row 6.8): the two `CastOfferKind` carriers of the
+    /// gains-modifications rider deserialize a pre-fix payload without the
+    /// field to `Vec::new()` with the rest of the payload intact, omit the
+    /// field when the rider is empty, and round-trip a carried rider exactly.
+    #[test]
+    fn cast_offer_rider_field_back_compat_and_skip_when_empty() {
+        use crate::types::ability::{
+            ContinuousModification, ResolutionCastFacePolicy, ResolutionCastSuccessAction,
+            ResolutionMvRejectAction,
+        };
+        use crate::types::keywords::Keyword;
+
+        let rider = vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Haste,
+        }];
+        let policy =
+            ResolutionCastFacePolicy::new(TargetFilter::Any, ObjectId(7), PlayerId(0), None);
+        let cleanup = crate::types::ability::ResolutionCastCleanup {
+            source_id: ObjectId(7),
+            offer_id: None,
+            face_policy: policy.clone(),
+            exiled_misses: Vec::new(),
+            reject_action: ResolutionMvRejectAction::RemainExiled,
+            success_action: ResolutionCastSuccessAction::BottomMisses,
+            delayed_trigger_receipts: Vec::new(),
+        };
+
+        // GraveyardPaidCast — an empty rider is skipped and a carried rider
+        // round-trips exactly.
+        let paid = CastOfferKind::GraveyardPaidCast {
+            hit_card: ObjectId(8),
+            mana_spend_permission: None,
+            graveyard_replacement: None,
+            enters_with_modifications: Vec::new(),
+            cast_transformed: false,
+            additional_cost: None,
+            cleanup: cleanup.clone(),
+        };
+        let paid_value = serde_json::to_value(&paid).unwrap();
+        assert!(
+            paid_value
+                .as_object()
+                .is_some_and(|object| !object.contains_key("enters_with_modifications")),
+            "an empty paid rider must be skipped on the wire"
+        );
+        assert_eq!(
+            serde_json::from_value::<CastOfferKind>(paid_value).unwrap(),
+            paid
+        );
+        let ridden_paid = CastOfferKind::GraveyardPaidCast {
+            hit_card: ObjectId(8),
+            mana_spend_permission: None,
+            graveyard_replacement: None,
+            enters_with_modifications: rider.clone(),
+            cast_transformed: false,
+            additional_cost: None,
+            cleanup: cleanup.clone(),
+        };
+        let ridden_value = serde_json::to_value(&ridden_paid).unwrap();
+        assert_eq!(
+            ridden_value["enters_with_modifications"],
+            serde_json::to_value(&rider).unwrap()
+        );
+        assert_eq!(
+            serde_json::from_value::<CastOfferKind>(ridden_value).unwrap(),
+            ridden_paid
+        );
+
+        // FreeCastWindow — the same properties.
+        let window = CastOfferKind::FreeCastWindow {
+            candidates: vec![ObjectId(8)],
+            remaining_casts: Some(1),
+            remaining_mv_budget: None,
+            face_policy: policy.clone(),
+            zones: vec![Zone::Exile],
+            graveyard_replacement: None,
+            enters_with_modifications: Vec::new(),
+            member_pool: Vec::new(),
+        };
+        let window_value = serde_json::to_value(&window).unwrap();
+        assert!(
+            window_value
+                .as_object()
+                .is_some_and(|object| !object.contains_key("enters_with_modifications")),
+            "an empty window rider must be skipped on the wire"
+        );
+        assert_eq!(
+            serde_json::from_value::<CastOfferKind>(window_value).unwrap(),
+            window
+        );
+        let ridden_window = CastOfferKind::FreeCastWindow {
+            candidates: vec![ObjectId(8)],
+            remaining_casts: Some(1),
+            remaining_mv_budget: None,
+            face_policy: policy,
+            zones: vec![Zone::Exile],
+            graveyard_replacement: None,
+            enters_with_modifications: rider.clone(),
+            member_pool: Vec::new(),
+        };
+        let ridden_window_value = serde_json::to_value(&ridden_window).unwrap();
+        assert_eq!(
+            ridden_window_value["enters_with_modifications"],
+            serde_json::to_value(&rider).unwrap()
+        );
+        assert_eq!(
+            serde_json::from_value::<CastOfferKind>(ridden_window_value).unwrap(),
+            ridden_window
+        );
+
+        // A pre-fix payload that never had the key at all is the same shape.
+        let mut pre_fix = serde_json::to_value(&ridden_paid).unwrap();
+        pre_fix
+            .as_object_mut()
+            .unwrap()
+            .remove("enters_with_modifications");
+        assert_eq!(
+            serde_json::from_value::<CastOfferKind>(pre_fix).unwrap(),
+            paid,
+            "a field-less pre-fix payload must read as an empty rider with the rest intact"
+        );
     }
 
     #[test]
