@@ -466,14 +466,15 @@ pub fn eliminate_players_simultaneously(
         }
         state.waiting_for = WaitingFor::GameOver { winner };
     } else {
-        // CR 800.4a + CR 101.4c: once every departure, control-effect end and
-        // stack removal above has settled, reconcile an active per-player zone
-        // choice against the final set of living players — its departed
-        // controller's occurrence is abandoned, or its order candidates / current
-        // pool are recomputed. Runs before the generic dead-actor repoint below,
-        // which would otherwise hand priority on while leaving the frame parked.
-        // Acts only when that frame owns `waiting_for`; a refusal is reported
-        // and leaves the frame parked rather than guessing.
+        // CR 800.4a + CR 608.2m + CR 800.4g/800.4h: once every departure,
+        // control-effect end and stack removal above has settled, reconcile an
+        // active per-player zone choice against the final set of living
+        // players. The resolution keeps going: order candidates and the pending
+        // pool are recomputed, and a choice whose maker left goes to the player
+        // the rules name. Runs before the generic dead-actor repoint below,
+        // which would otherwise hand priority on while leaving the frame
+        // parked. Acts only when that frame owns `waiting_for`; a refusal is
+        // reported and leaves the frame parked rather than guessing.
         if let Err(refusal) =
             super::effects::choose_from_zone::reconcile_per_player_choice_after_departure(
                 state, events,

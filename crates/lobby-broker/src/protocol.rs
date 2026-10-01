@@ -64,10 +64,10 @@ pub struct TournamentRequestId(pub u64);
 ///      team-relative population of "for each opponent, choose …" (Ultimate
 ///      Magic: Meteor), written as `{"Each":"Opponents"}` inside `ZoneOwner`.
 ///      `ZoneOpponentChooserPurpose` gains `PerPlayerChoiceOrder` (CR 101.4c:
-///      the chooser picks whose selection to make next), the parked per-player
-///      zone-choice frame gains `current` and `carrier`, and the resolution
-///      stack records its carrier's occurrence floor. A v97 peer cannot
-///      deserialize the new values. Full-game peers and P2P move in lockstep
+///      the chooser picks whose selection to make next) and `SubstituteChooser`
+///      (CR 800.4g: electing who makes a departed player's pick), and the
+///      parked per-player zone-choice frame gains `current` and `nominee`. A
+///      v97 peer cannot deserialize the new values. Full-game peers and P2P move in lockstep
 ///      (wire 80); lobby messages are unchanged.
 /// 97 — `ResolvedAbility.target_reads` and `AbilityDefinition.target_reads`
 ///      (`TargetReadOrigin`, `#[serde(default, skip_serializing_if = ...)]`) are

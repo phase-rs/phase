@@ -46,8 +46,6 @@ pub enum ResolutionCarrierError {
 ///
 /// CR 608.2: Exactly one stack object resolves at a time. Refuses, leaving the
 /// installed carrier and its firing untouched, when one is already resolving.
-/// Records the resolution stack's occurrence floor: every frame pushed above it
-/// until the carrier finishes is this occurrence's own work.
 pub(super) fn begin_resolving_stack_entry(
     state: &mut GameState,
     entry: StackEntry,
@@ -62,7 +60,6 @@ pub(super) fn begin_resolving_stack_entry(
     );
     state.resolving_stack_entry = Some(entry);
     state.resolving_trigger_firing = firing;
-    state.resolution_stack.begin_occurrence_floor();
     Ok(())
 }
 
@@ -73,7 +70,6 @@ pub(super) fn finish_resolving_stack_entry(
 ) {
     let entry = state.resolving_stack_entry.take();
     let firing = state.resolving_trigger_firing.take();
-    state.resolution_stack.clear_occurrence_floor();
     // CR 608.2c: the resolving stack entry owns every nested instruction-result
     // occurrence, including ones parked across replacement choices.
     state.return_result_frames.clear();
@@ -111,51 +107,6 @@ fn record_illegal_target_slots(state: &mut GameState, validated: Option<&Resolve
             illegal_declared_target_slots(root, validated)
         });
     }
-}
-
-/// CR 800.4a: The resolution carrier whose controller left the game is
-/// abandoned as one occurrence. Only the frames above its occurrence floor —
-/// the work this carrier created — are retired; frames at or below the floor
-/// survive untouched. `stamp` is the carrier id the abandoning frame recorded
-/// when it parked; any disagreement with the live carrier is a refusal, as is a
-/// missing or broken floor. A refusal retires and finishes nothing.
-pub(super) fn abandon_departed_resolution_occurrence(
-    state: &mut GameState,
-    stamp: ObjectId,
-    disposition: super::lifecycle::DelayedTerminalDisposition,
-) -> Result<(), DepartedOccurrenceRefusal> {
-    match state.resolving_stack_entry.as_ref() {
-        None => return Err(DepartedOccurrenceRefusal::NoCarrier),
-        Some(entry) if entry.id != stamp => {
-            return Err(DepartedOccurrenceRefusal::StampMismatch {
-                stamp,
-                carrier: entry.id,
-            })
-        }
-        Some(_) => {}
-    }
-    state
-        .resolution_stack
-        .retire_frames_above_occurrence_floor()
-        .map_err(DepartedOccurrenceRefusal::Floor)?;
-    super::priority::clear_priority_passes(state);
-    finish_resolving_stack_entry(state, disposition);
-    state.resolution_source_relatch = None;
-    state.deferred_entry_events.clear();
-    state.pending_token_battlefield_entry = None;
-    Ok(())
-}
-
-/// Why a departed occurrence was not abandoned. Every variant leaves the
-/// carrier and the resolution stack exactly as they were.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub enum DepartedOccurrenceRefusal {
-    #[error("no resolution carrier is installed")]
-    NoCarrier,
-    #[error("frame carrier stamp {stamp:?} does not match the live carrier {carrier:?}")]
-    StampMismatch { stamp: ObjectId, carrier: ObjectId },
-    #[error("occurrence floor refused retirement: {0}")]
-    Floor(crate::types::resolution::OccurrenceRetireRefusal),
 }
 
 /// Abandon the currently resolving family as one lifecycle unit. Prompt owners

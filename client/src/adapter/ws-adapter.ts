@@ -212,9 +212,8 @@ export class NativeEngineVersionMismatchError extends Error {
  *
  * 98 — PerPlayerScope gains Opponents (CR 102.2 + CR 102.3), written inside
  *      ZoneOwner as {"Each":"Opponents"}; ZoneOpponentChooserPurpose gains
- *      PerPlayerChoiceOrder (CR 101.4c); the parked per-player zone-choice
- *      frame gains current and carrier, and the resolution stack its occurrence
- *      floor. A v97 peer cannot deserialize them; the exact-match handshake
+ *      PerPlayerChoiceOrder (CR 101.4c) and SubstituteChooser (CR 800.4g);
+ *      the parked per-player zone-choice frame gains current and nominee. A v97 peer cannot deserialize them; the exact-match handshake
  *      refuses the pairing. P2P moves in lockstep (wire 80); lobby messages
  *      are unchanged.
  * 97 — ResolvedAbility.target_reads and AbilityDefinition.target_reads

@@ -1,4 +1,5 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import i18n from "i18next";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { GameAction, WaitingFor } from "../../../adapter/types.ts";
@@ -101,5 +102,54 @@ describe("ZoneOpponentChooserModalContent", () => {
       type: "ChooseZoneOpponentChooser",
       data: { opponent: 1 },
     });
+  });
+
+  it("asks who makes the choice when electing a substitute", () => {
+    useMultiplayerStore.setState({
+      playerNames: new Map([[2, "Bob"]]),
+    });
+    const dispatch = renderModal({
+      type: "ChooseFromZoneOpponentChooser",
+      data: {
+        player: 1,
+        candidates: [1, 2],
+        ability: {},
+        purpose: "SubstituteChooser",
+      },
+    });
+
+    expect(
+      screen.getByRole("heading", { name: "Choose Player" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getAllByRole("button").map((button) => button.textContent),
+    ).toEqual(["You", "Bob"]);
+    fireEvent.click(screen.getByRole("button", { name: "Bob" }));
+    expect(dispatch).toHaveBeenCalledWith({
+      type: "ChooseZoneOpponentChooser",
+      data: { opponent: 2 },
+    });
+  });
+
+  it("labels the chooser with the translated self label", async () => {
+    i18n.addResourceBundle("de", "game", { player: { you: "Du" } }, true, true);
+    await i18n.changeLanguage("de");
+    try {
+      useMultiplayerStore.setState({ playerNames: new Map([[1, "Alice"]]) });
+      renderModal({
+        type: "ChooseFromZoneOpponentChooser",
+        data: {
+          player: 0,
+          candidates: [0, 1],
+          ability: {},
+          purpose: "PerPlayerChoiceOrder",
+        },
+      });
+      expect(
+        screen.getAllByRole("button").map((button) => button.textContent),
+      ).toEqual(["Du", "Alice"]);
+    } finally {
+      await i18n.changeLanguage("en");
+    }
   });
 });

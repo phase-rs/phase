@@ -62,9 +62,9 @@ const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
 // +25: the v96 QuantityRef::NameStickerLetterCount tagged quantity.
 // +26: the v97 serialized TargetReadOrigin (`target_reads`) instruction
 // provenance.
-// +27: the v98 PerPlayerScope::Opponents value, the PerPlayerChoiceOrder
-// chooser purpose, and the per-player frame's current/carrier fields with the
-// resolution stack's occurrence floor.
+// +27: the v98 PerPlayerScope::Opponents value, the PerPlayerChoiceOrder and
+// SubstituteChooser chooser purposes, and the per-player frame's current and
+// nominee fields.
 const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 27;
 // The LOBBY message-set version, not derived from the full-game number above.
 // The classifier below refuses an expression only on the SOURCE constants; this

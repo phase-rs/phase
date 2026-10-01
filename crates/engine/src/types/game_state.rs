@@ -4583,15 +4583,16 @@ pub struct PendingPerPlayerZoneChoice {
     /// published, then `true` for the remainder of the iteration.
     #[serde(default)]
     pub accumulated: bool,
-    /// The iterated player whose pool prompt is outstanding, or `None` while
-    /// the controller's order prompt (CR 101.4c) is outstanding.
+    /// The iterated player whose pool choice is pending, or `None` while the
+    /// order choice (CR 101.4c) is pending. Kept through an election, so a
+    /// pending pool is never lost while its maker is being replaced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current: Option<PlayerId>,
-    /// CR 608.2 + CR 800.4a: The `StackEntry` id of the resolution carrier
-    /// whose own occurrence parked this iteration. Departure teardown acts on
-    /// the frame only while this matches the live carrier.
+    /// CR 800.4g: the player elected to make the pending pool choice when the
+    /// player who would make it has left the game. Bound to that one choice:
+    /// cleared when it completes or is skipped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub carrier: Option<ObjectId>,
+    pub nominee: Option<PlayerId>,
 }
 
 /// CR 401.4 + CR 608.2c: Per-owner library-order prompts for one
@@ -13398,8 +13399,8 @@ pub enum PersistedRestoreError {
     DeferredTriggerSettlement,
     #[error("persisted priority settlement failed: {0}")]
     PrioritySettlementFailed(String),
-    #[error("persisted resolution occurrence is incoherent: {0}")]
-    InvalidResolutionOccurrence(String),
+    #[error("persisted per-player choice cannot be restored: {0}")]
+    InvalidPerPlayerChoice(String),
 }
 
 impl PreparedPersistedGameState {
@@ -13585,9 +13586,10 @@ impl PersistedGameState {
         state
             .validate_payment_transaction()
             .map_err(PersistedRestoreError::InvalidPaymentTransaction)?;
-        state
-            .reconcile_resolution_occurrence_on_restore()
-            .map_err(PersistedRestoreError::InvalidResolutionOccurrence)?;
+        crate::game::effects::choose_from_zone::migrate_legacy_per_player_frame_on_restore(
+            &mut state,
+        )
+        .map_err(PersistedRestoreError::InvalidPerPlayerChoice)?;
         state
             .format_config
             .reject_unimplemented_range_of_influence()
@@ -13650,6 +13652,10 @@ pub enum ZoneOpponentChooserPurpose {
     /// CR 101.4c: the single chooser of a per-player iteration picks whose
     /// selection to make next. Candidates may include the chooser themself.
     PerPlayerChoiceOrder,
+    /// CR 800.4g + CR 800.4h: the player who would make a pending per-player
+    /// pick has left the game; the next player in turn order after the
+    /// object's controller elects another player to make that one choice.
+    SubstituteChooser,
 }
 
 impl ZoneOpponentChooserPurpose {
@@ -24928,25 +24934,6 @@ impl GameState {
     /// Park a per-player zone-choice iteration.
     pub fn push_per_player_zone_choice(&mut self, pending: PendingPerPlayerZoneChoice) {
         self.resolution_stack.push_per_player_zone_choice(pending);
-    }
-
-    /// CR 608.2 + CR 800.4a: Restore-time coherence between the resolution
-    /// carrier, the resolution stack's occurrence floor, and per-player frame
-    /// carrier stamps. A carrier persisted before floors existed owned the
-    /// whole stack (floor zero); a floor without a carrier, a floor above the
-    /// stack, or a stamp naming another carrier is rejected.
-    pub fn reconcile_resolution_occurrence_on_restore(&mut self) -> Result<(), String> {
-        let carrier = self.resolving_stack_entry.as_ref().map(|entry| entry.id);
-        match (carrier, self.resolution_stack.occurrence_floor()) {
-            (None, Some(_)) => {
-                return Err("occurrence floor recorded without a resolution carrier".to_string())
-            }
-            (Some(_), None) => self.resolution_stack.adopt_legacy_occurrence_floor(),
-            (Some(_), Some(_)) | (None, None) => {}
-        }
-        self.resolution_stack.validate_occurrence_floor()?;
-        self.resolution_stack
-            .reconcile_per_player_carrier_stamps(carrier)
     }
 
     /// Returns the per-category zone-choice owner only when it owns the stack top.

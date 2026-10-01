@@ -108,8 +108,8 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * Bumps to date:
  *  80 — game_setup and state_update carry GameState, whose abilities can now
  *       serialize ZoneOwner {"Each":"Opponents"}, the PerPlayerChoiceOrder
- *       chooser purpose, and per-player frame current/carrier fields with the
- *       resolution stack's occurrence floor. A v79 peer cannot deserialize
+ *       and SubstituteChooser chooser purposes, and per-player frame
+ *       current/nominee fields. A v79 peer cannot deserialize
  *       them, so first contact rejects the skew. Bumped in lockstep with
  *       full-game protocol 98.
  *  79 — game_setup and state_update carry GameState, whose stack abilities now

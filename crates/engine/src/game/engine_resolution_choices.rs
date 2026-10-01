@@ -3953,9 +3953,26 @@ pub(super) fn handle_resolution_choice(
                 // A pool that emptied since the prompt re-advanced instead; if
                 // that disposed the whole iteration, its continuation resumes.
                 if state.active_per_player_zone_choice().is_none() {
-                    set_priority(state, player);
-                    super::engine::resume_pending_continuation_if_priority(state, events)
-                        .expect("a settled per-player iteration must resume its continuation");
+                    effects::choose_from_zone::settle_finished_per_player_iteration(
+                        state, &ability, events,
+                    )
+                    .expect("a settled per-player iteration must resume its continuation");
+                }
+                return Ok(ResolutionChoiceOutcome::WaitingFor(
+                    state.waiting_for.clone(),
+                ));
+            }
+            if matches!(purpose, ZoneOpponentChooserPurpose::SubstituteChooser) {
+                // CR 800.4g: the elected player makes the pending pick only.
+                effects::choose_from_zone::answer_substitute_chooser(
+                    state, &ability, opponent, events,
+                )
+                .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+                if state.active_per_player_zone_choice().is_none() {
+                    effects::choose_from_zone::settle_finished_per_player_iteration(
+                        state, &ability, events,
+                    )
+                    .expect("a settled per-player iteration must resume its continuation");
                 }
                 return Ok(ResolutionChoiceOutcome::WaitingFor(
                     state.waiting_for.clone(),
@@ -5462,14 +5479,23 @@ pub(super) fn handle_resolution_choice(
             // that tracked set. Hand the choice straight to the drain so it can
             // accumulate and prompt the next player (Breach the Multiverse).
             if state.active_per_player_zone_choice().is_some() {
+                let ability = state
+                    .active_per_player_zone_choice()
+                    .map(|frame| frame.ability.as_ref().clone())
+                    .expect("the active per-player frame was just read");
                 effects::choose_from_zone::drain_active_per_player_zone_choice(
                     state, &chosen, events,
                 );
-                // Only after every player has been prompted (the drain leaves no
-                // pending iteration and is no longer waiting on a choice) does
-                // the parked continuation run.
-                super::engine::resume_pending_continuation_if_priority(state, events)
+                // Only after every player has been chosen for (the drain leaves
+                // no pending iteration and is no longer waiting on a choice)
+                // does the parked continuation run — with priority on a player
+                // still in the game (CR 800.4j).
+                if state.active_per_player_zone_choice().is_none() {
+                    effects::choose_from_zone::settle_finished_per_player_iteration(
+                        state, &ability, events,
+                    )
                     .expect("a settled zone choice must resume its continuation");
+                }
                 return Ok(ResolutionChoiceOutcome::WaitingFor(
                     state.waiting_for.clone(),
                 ));

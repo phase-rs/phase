@@ -75,7 +75,17 @@ pub fn resolve(
     if let ZoneOwner::Each(scope) = zone_owner {
         let players = per_player_iteration_population(state, ability, scope);
         // No pick has accumulated yet — the first one must start a fresh set.
-        return advance_per_player_iteration(state, ability, players, false, events);
+        return advance_per_player_iteration(
+            state,
+            ability,
+            PerPlayerCursor {
+                remaining: players,
+                current: None,
+                nominee: None,
+                accumulated: false,
+            },
+            events,
+        );
     }
 
     let cards = resolve_candidate_cards(
@@ -878,36 +888,27 @@ fn per_player_order_chooser(
 
 const PER_PLAYER_PARK_REFUSED: &str = "per-player zone choice outside its resolution carrier";
 
-/// CR 608.2 + CR 605.3b + CR 605.4a: A per-player iteration may park only
-/// inside the resolution carrier that is resolving this ability's own
-/// occurrence. Returns that carrier's `StackEntry` id for the frame's stamp.
-/// Refuses — before any state changes, and reported on the error channel —
-/// with no carrier, inside an inline mana subresolution, or when the carrier's
-/// source or controller is not this ability's.
-fn admit_per_player_park(
-    state: &GameState,
-    ability: &ResolvedAbility,
-) -> Result<ObjectId, EffectError> {
-    let ability_controller = ability.original_controller.unwrap_or(ability.controller);
-    let refusal = match state.resolving_stack_entry.as_ref() {
-        None => Some("no resolution carrier is installed"),
-        Some(_)
-            if state.mana_subresolution_depth > 0
-                || state.active_accepted_triggered_mana_node.is_some() =>
-        {
-            Some("an inline mana subresolution is executing")
-        }
-        Some(entry)
-            if entry.source_id != ability.source_id || entry.controller != ability_controller =>
-        {
-            Some("the installed carrier resolves another occurrence")
-        }
-        Some(entry) => return Ok(entry.id),
+/// CR 608.2 + CR 605.3b + CR 605.4a: A per-player iteration is part of a
+/// resolving spell or ability, so it may park only while a resolution carrier
+/// is installed, and never inside an inline mana subresolution (mana abilities
+/// resolve immediately and cannot pause for a choice). Refuses — before any
+/// state change, and reported on the error channel — otherwise.
+fn admit_per_player_park(state: &GameState, ability: &ResolvedAbility) -> Result<(), EffectError> {
+    let refusal = if state.resolving_stack_entry.is_none() {
+        Some("no resolution carrier is installed")
+    } else if state.mana_subresolution_depth > 0
+        || state.active_accepted_triggered_mana_node.is_some()
+    {
+        Some("an inline mana subresolution is executing")
+    } else {
+        None
     };
-    let reason = refusal.expect("every non-admitting arm names its refusal");
+    let Some(reason) = refusal else {
+        return Ok(());
+    };
     tracing::error!(
         source = ?ability.source_id,
-        controller = ?ability_controller,
+        controller = ?ability.controller,
         reason,
         "{PER_PLAYER_PARK_REFUSED}"
     );
@@ -916,110 +917,191 @@ fn admit_per_player_park(
     )))
 }
 
-/// CR 101.4 + CR 101.4c + CR 608.2c: Advance a `ChooseFromZone { zone_owner:
-/// Each(_) }` iteration. Only live players with a non-empty pool are eligible
-/// (CR 608.2d — there is nothing to choose otherwise). When one player makes
-/// every choice and two or more players are eligible, that player picks whose
-/// selection to make next (CR 101.4c); otherwise the next eligible player in
-/// APNAP order is presented. When none is eligible the iteration is disposed
-/// and the parked `pending_continuation` then runs. Drives the initial call
-/// from `resolve`, each resumed call from `drain_active_per_player_zone_choice`,
-/// and departure reconciliation.
-fn advance_per_player_iteration(
-    state: &mut GameState,
-    ability: &ResolvedAbility,
-    mut remaining_players: Vec<PlayerId>,
+/// The resumable position of a per-player iteration between prompts.
+struct PerPlayerCursor {
+    /// Players not yet chosen for (never including `current`).
+    remaining: Vec<PlayerId>,
+    /// The player whose pool choice is pending; `None` while the order is.
+    current: Option<PlayerId>,
+    /// CR 800.4g: the player elected to make the pending pool choice only.
+    nominee: Option<PlayerId>,
     accumulated: bool,
-    events: &mut Vec<GameEvent>,
-) -> Result<(), EffectError> {
-    let spec = PerPlayerSpec::of(ability)?;
-    // CR 800.4a: a player who has left the game is no longer iterated.
-    remaining_players.retain(|&player| players::is_alive(state, player));
-    let eligible: Vec<PlayerId> = remaining_players
-        .iter()
-        .copied()
-        .filter(|&player| !spec.pool(state, ability, player).is_empty())
-        .collect();
+}
 
-    let Some(&first) = eligible.first() else {
-        finish_per_player_iteration(state, ability, accumulated, events);
-        return Ok(());
-    };
-    let carrier = admit_per_player_park(state, ability)?;
+impl PerPlayerCursor {
+    fn of(frame: PendingPerPlayerZoneChoice) -> (Box<ResolvedAbility>, Self) {
+        let PendingPerPlayerZoneChoice {
+            ability,
+            remaining_players,
+            accumulated,
+            current,
+            nominee,
+        } = frame;
+        (
+            ability,
+            Self {
+                remaining: remaining_players,
+                current,
+                nominee,
+                accumulated,
+            },
+        )
+    }
 
-    match per_player_order_chooser(ability, spec.chooser) {
-        Some(order_chooser) if eligible.len() >= 2 => {
-            capture_per_player_trigger_context(state);
-            state.waiting_for = WaitingFor::ChooseFromZoneOpponentChooser {
-                player: order_chooser,
-                candidates: eligible,
-                ability: Box::new(ability.clone()),
-                purpose: ZoneOpponentChooserPurpose::PerPlayerChoiceOrder,
-            };
-            state.push_per_player_zone_choice(PendingPerPlayerZoneChoice {
-                ability: Box::new(ability.clone()),
-                remaining_players,
-                accumulated,
-                current: None,
-                carrier: Some(carrier),
-            });
-            Ok(())
-        }
-        Some(_) | None => {
-            remaining_players.retain(|&player| player != first);
-            present_per_player_pool(
-                state,
-                ability,
-                &spec,
-                first,
-                remaining_players,
-                accumulated,
-                carrier,
-            )
+    fn park(self, ability: &ResolvedAbility) -> PendingPerPlayerZoneChoice {
+        PendingPerPlayerZoneChoice {
+            ability: Box::new(ability.clone()),
+            remaining_players: self.remaining,
+            accumulated: self.accumulated,
+            current: self.current,
+            nominee: self.nominee,
         }
     }
 }
 
-/// CR 101.4 + CR 608.2d: Present `owner`'s pool for a per-player iteration,
-/// parking the frame with `owner` as its current player.
-fn present_per_player_pool(
+/// CR 101.4 + CR 101.4c + CR 608.2c + CR 800.4g + CR 800.4h: Advance a
+/// `ChooseFromZone { zone_owner: Each(_) }` iteration to its next choice.
+///
+/// * A pending pool choice (`current`) resumes if its owner is still in the
+///   game and their pool is non-empty; otherwise it is skipped (CR 608.2d —
+///   nothing to choose), together with any nominee bound to it.
+/// * With no pending pool, only live players with a non-empty pool are
+///   eligible. When one player makes every choice and two or more are
+///   eligible, that player chooses whose selection to make next (CR 101.4c).
+///   The order is a rule-required choice: if its maker has left, the next
+///   player in turn order makes it (CR 800.4h). Otherwise the next eligible
+///   player in APNAP order becomes `current`.
+/// * Each pool pick is a choice the object requires. If its maker has left,
+///   the next player in turn order after the object's controller elects
+///   another player to make THAT choice (CR 800.4g + CR 800.4h); the nominee
+///   is bound to that one choice and expires with it.
+/// * With no eligible player left the iteration is disposed and the parked
+///   `pending_continuation` then runs.
+fn advance_per_player_iteration(
     state: &mut GameState,
     ability: &ResolvedAbility,
-    spec: &PerPlayerSpec,
-    owner: PlayerId,
-    remaining_players: Vec<PlayerId>,
-    accumulated: bool,
-    carrier: ObjectId,
+    cursor: PerPlayerCursor,
+    events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let cards = spec.pool(state, ability, owner);
-    let clamped_count = spec.count.min(cards.len());
+    let spec = PerPlayerSpec::of(ability)?;
+    // CR 608.2 + CR 605.3b + CR 605.4a: admission precedes every outcome —
+    // including the empty-pool disposal, which publishes a fresh tracked set
+    // and reports completion — so an inadmissible choice changes nothing.
+    admit_per_player_park(state, ability)?;
+    let PerPlayerCursor {
+        mut remaining,
+        mut current,
+        mut nominee,
+        accumulated,
+    } = cursor;
+    // CR 800.4a: a player who has left the game is no longer iterated.
+    remaining.retain(|&player| players::is_alive(state, player));
+    if let Some(owner) = current {
+        if !players::is_alive(state, owner) || spec.pool(state, ability, owner).is_empty() {
+            current = None;
+        }
+    }
+
+    let owner = match current {
+        Some(owner) => owner,
+        None => {
+            nominee = None;
+            let eligible: Vec<PlayerId> = remaining
+                .iter()
+                .copied()
+                .filter(|&player| !spec.pool(state, ability, player).is_empty())
+                .collect();
+            let Some(&first) = eligible.first() else {
+                finish_per_player_iteration(state, ability, accumulated, events);
+                return Ok(());
+            };
+            if let Some(order_maker) = per_player_order_chooser(ability, spec.chooser) {
+                if eligible.len() >= 2 {
+                    // CR 101.4c + CR 800.4h: the order is a rule-required
+                    // choice; a departed maker's falls to the next player in
+                    // turn order.
+                    let maker = if players::is_alive(state, order_maker) {
+                        order_maker
+                    } else {
+                        players::next_player_in_turn_order(state, order_maker)
+                    };
+                    capture_per_player_trigger_context(state);
+                    state.waiting_for = WaitingFor::ChooseFromZoneOpponentChooser {
+                        player: maker,
+                        candidates: eligible,
+                        ability: Box::new(ability.clone()),
+                        purpose: ZoneOpponentChooserPurpose::PerPlayerChoiceOrder,
+                    };
+                    state.push_per_player_zone_choice(
+                        PerPlayerCursor {
+                            remaining,
+                            current: None,
+                            nominee: None,
+                            accumulated,
+                        }
+                        .park(ability),
+                    );
+                    return Ok(());
+                }
+            }
+            remaining.retain(|&player| player != first);
+            first
+        }
+    };
+
     // CR 101.4 + CR 608.2c: For "for each player, choose ...", the spell's
     // controller is the chooser regardless of whose zone is scanned (Breach the
     // Multiverse). `Chooser::Opponent` would route to an opponent; honor it.
     // `Chooser::OwningPlayer` binds the choice to THIS iteration's owner — each
-    // player picks from their own (hidden) zone (Kozilek, the Broken Reality:
-    // "target players each manifest two cards from their hands").
-    let choosing_player = match spec.chooser {
+    // player picks from their own (hidden) zone (Kozilek, the Broken Reality).
+    let base_maker = match spec.chooser {
         ZoneChoiceChooser::OwningPlayer => owner,
         _ => resolve_chooser(state, ability, spec.chooser)?,
     };
-    capture_per_player_trigger_context(state);
-    state.waiting_for = WaitingFor::ChooseFromZoneChoice {
-        player: choosing_player,
-        cards,
-        count: clamped_count,
-        up_to: spec.up_to,
-        constraint: spec.constraint.clone(),
-        source_id: ability.source_id,
-        reciprocal_role: None,
+    let maker = if players::is_alive(state, base_maker) {
+        Some(base_maker)
+    } else {
+        nominee.filter(|&player| players::is_alive(state, player))
     };
-    state.push_per_player_zone_choice(PendingPerPlayerZoneChoice {
-        ability: Box::new(ability.clone()),
-        remaining_players,
-        accumulated,
+    let cursor = PerPlayerCursor {
+        remaining,
         current: Some(owner),
-        carrier: Some(carrier),
-    });
+        nominee: maker.and(nominee),
+        accumulated,
+    };
+    capture_per_player_trigger_context(state);
+    match maker {
+        Some(maker) => {
+            let cards = spec.pool(state, ability, owner);
+            state.waiting_for = WaitingFor::ChooseFromZoneChoice {
+                player: maker,
+                count: spec.count.min(cards.len()),
+                cards,
+                up_to: spec.up_to,
+                constraint: spec.constraint.clone(),
+                source_id: ability.source_id,
+                reciprocal_role: None,
+            };
+        }
+        None => {
+            // CR 800.4g + CR 800.4h: the object requires this pick of a player
+            // who has left; the next player in turn order after the object's
+            // controller elects another player to make it. The pending pool
+            // (`current`) is carried through the election unchanged.
+            let elector = players::next_player_in_turn_order(state, ability.controller);
+            let candidates: Vec<PlayerId> = players::apnap_order(state)
+                .into_iter()
+                .filter(|&player| players::is_alive(state, player))
+                .collect();
+            state.waiting_for = WaitingFor::ChooseFromZoneOpponentChooser {
+                player: elector,
+                candidates,
+                ability: Box::new(ability.clone()),
+                purpose: ZoneOpponentChooserPurpose::SubstituteChooser,
+            };
+        }
+    }
+    state.push_per_player_zone_choice(cursor.park(ability));
     Ok(())
 }
 
@@ -1062,97 +1144,92 @@ fn finish_per_player_iteration(
     });
 }
 
-/// CR 101.4c: The order prompt's answer — the chooser picked whose selection
-/// to make next. Validates the pick against the active per-player frame (the
-/// prompt's own frame, still choosing the order), then presents that player's
-/// pool. A pool that emptied since the prompt re-advances instead.
+/// The active per-player frame, checked against the prompt being answered.
+fn take_frame_for_prompt(
+    state: &mut GameState,
+    prompt_ability: &ResolvedAbility,
+    expects_pool: bool,
+) -> Result<(Box<ResolvedAbility>, PerPlayerCursor), EffectError> {
+    let frame = state.active_per_player_zone_choice().ok_or_else(|| {
+        EffectError::InvalidParam("no per-player iteration owns this prompt".to_string())
+    })?;
+    if frame.current.is_some() != expects_pool
+        || frame.ability.source_id != prompt_ability.source_id
+    {
+        return Err(EffectError::InvalidParam(
+            "the active per-player iteration is not waiting on this prompt".to_string(),
+        ));
+    }
+    let frame = state
+        .take_active_per_player_zone_choice()
+        .expect("the active per-player frame was just read")
+        .expect("the active per-player frame was just read");
+    Ok(PerPlayerCursor::of(frame))
+}
+
+/// CR 101.4c: The order prompt's answer — whose selection to make next. The
+/// picked player's pool becomes the pending choice; a pool that emptied since
+/// the prompt is skipped and the iteration re-advances.
 pub(crate) fn answer_per_player_order(
     state: &mut GameState,
     prompt_ability: &ResolvedAbility,
     picked: PlayerId,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let frame = state.active_per_player_zone_choice().ok_or_else(|| {
-        EffectError::InvalidParam("no per-player iteration owns this order prompt".to_string())
-    })?;
-    if frame.current.is_some() || frame.ability.source_id != prompt_ability.source_id {
-        return Err(EffectError::InvalidParam(
-            "the active per-player iteration is not choosing an order".to_string(),
-        ));
-    }
-    if !frame.remaining_players.contains(&picked) || !players::is_alive(state, picked) {
+    let frame = state.active_per_player_zone_choice();
+    if !frame.is_some_and(|frame| frame.remaining_players.contains(&picked))
+        || !players::is_alive(state, picked)
+    {
         return Err(EffectError::InvalidParam(format!(
             "{picked:?} is not a remaining player of this per-player iteration"
         )));
     }
-    let pending = state
-        .take_active_per_player_zone_choice()
-        .expect("the active per-player frame was just read")
-        .expect("the active per-player frame was just read");
-    let PendingPerPlayerZoneChoice {
-        ability,
-        mut remaining_players,
-        accumulated,
-        current: _,
-        carrier: _,
-    } = pending;
-    let spec = PerPlayerSpec::of(&ability)?;
-    if spec.pool(state, &ability, picked).is_empty() {
-        return advance_per_player_iteration(
-            state,
-            &ability,
-            remaining_players,
-            accumulated,
-            events,
-        );
+    let (ability, mut cursor) = take_frame_for_prompt(state, prompt_ability, false)?;
+    cursor.remaining.retain(|&player| player != picked);
+    cursor.current = Some(picked);
+    cursor.nominee = None;
+    advance_per_player_iteration(state, &ability, cursor, events)
+}
+
+/// CR 800.4g: The election's answer — the player elected to make the pending
+/// pool choice. The nominee is bound to that one choice; the iteration then
+/// resumes the same pending pool.
+pub(crate) fn answer_substitute_chooser(
+    state: &mut GameState,
+    prompt_ability: &ResolvedAbility,
+    elected: PlayerId,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    if !players::is_alive(state, elected) {
+        return Err(EffectError::InvalidParam(format!(
+            "{elected:?} has left the game and cannot be elected"
+        )));
     }
-    let carrier = admit_per_player_park(state, &ability)?;
-    remaining_players.retain(|&player| player != picked);
-    present_per_player_pool(
-        state,
-        &ability,
-        &spec,
-        picked,
-        remaining_players,
-        accumulated,
-        carrier,
-    )
+    let (ability, mut cursor) = take_frame_for_prompt(state, prompt_ability, true)?;
+    cursor.nominee = Some(elected);
+    advance_per_player_iteration(state, &ability, cursor, events)
 }
 
 /// CR 101.4 + CR 608.2c: Resume a per-player `ChooseFromZone { EachPlayer }`
-/// iteration after the current player's pick resolves. Accumulates the chosen
+/// iteration after the current pool pick resolves. Accumulates the chosen
 /// cards into the resolution chain's tracked set (a fresh set on the first
 /// pick, extended on each subsequent pick) so a downstream "put those cards
 /// onto the battlefield" reads exactly the cards chosen across all players,
-/// then advances to the next eligible player. Called only once a pool prompt
-/// was answered (the order prompt has its own handler). Mirrors
-/// `vote::drain_active_vote_ballot` through its typed frame.
+/// then advances to the next choice. The pick completes its pool choice, so
+/// any nominee bound to it expires. Mirrors `vote::drain_active_vote_ballot`
+/// through its typed frame.
 pub(crate) fn drain_active_per_player_zone_choice(
     state: &mut GameState,
     chosen: &[ObjectId],
     events: &mut Vec<GameEvent>,
 ) {
-    // CR 800.4a: a parked iteration whose resolution controller has left can
-    // never be revived — abandon its occurrence instead of advancing it. A
-    // refused abandonment leaves the frame parked (and reported), never
-    // advanced.
-    if departed_per_player_occurrence(state) != DepartedOccurrence::Live {
-        return;
-    }
     let Some(pending) = state
         .take_active_per_player_zone_choice()
         .expect("per-player zone-choice drain may consume only its active frame")
     else {
         return;
     };
-
-    let PendingPerPlayerZoneChoice {
-        ability,
-        remaining_players,
-        accumulated,
-        current: _,
-        carrier: _,
-    } = pending;
+    let (ability, mut cursor) = PerPlayerCursor::of(pending);
 
     // CR 603.7 + CR 608.2c: The FIRST resolution of this per-player iteration
     // STARTS a fresh chosen-card set — even when that first player declines (an
@@ -1169,108 +1246,42 @@ pub(crate) fn drain_active_per_player_zone_choice(
     // players' chosen cards unify under one "those cards" reference. The Cyberman /
     // impulse "milled this way" path is unaffected — it never uses this per-player
     // drain.
-    let accumulated = if accumulated {
+    if cursor.accumulated {
         if !chosen.is_empty() {
             super::publish_tracked_set(state, chosen.to_vec());
         }
-        true
     } else {
         super::publish_fresh_tracked_set(state, chosen.to_vec());
-        true
-    };
+        cursor.accumulated = true;
+    }
+    cursor.current = None;
+    cursor.nominee = None;
 
-    if let Err(error) =
-        advance_per_player_iteration(state, &ability, remaining_players, accumulated, events)
-    {
+    if let Err(error) = advance_per_player_iteration(state, &ability, cursor, events) {
         tracing::error!(?error, "per-player zone-choice iteration could not advance");
-    }
-}
-
-/// CR 800.4a: The resolution controller of the active per-player iteration —
-/// the controller of the carrier it is stamped with — when that carrier is live.
-fn active_per_player_occurrence(state: &GameState) -> Option<(ObjectId, PlayerId)> {
-    let stamp = state.active_per_player_zone_choice()?.carrier?;
-    let entry = state.resolving_stack_entry.as_ref()?;
-    (entry.id == stamp).then_some((stamp, entry.controller))
-}
-
-/// Whether the active per-player iteration's resolution is still live.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DepartedOccurrence {
-    /// No departed controller (or no active per-player frame).
-    Live,
-    /// The departed controller's occurrence was abandoned; priority passed on.
-    Abandoned,
-    /// The departed controller's occurrence refused retirement (reported); the
-    /// frame stays parked, which keeps the continuation behind it from running.
-    Refused,
-}
-
-/// CR 800.4a: If the active per-player iteration's resolution controller has
-/// left the game, abandon that carrier's occurrence and hand priority on.
-fn departed_per_player_occurrence(state: &mut GameState) -> DepartedOccurrence {
-    let Some(frame) = state.active_per_player_zone_choice() else {
-        return DepartedOccurrence::Live;
-    };
-    let resolution_controller = match active_per_player_occurrence(state) {
-        Some((_, controller)) => controller,
-        None => frame
-            .ability
-            .original_controller
-            .unwrap_or(frame.ability.controller),
-    };
-    if players::is_alive(state, resolution_controller) {
-        return DepartedOccurrence::Live;
-    }
-    let stamp = frame.carrier;
-    let refusal = match stamp {
-        Some(stamp) => crate::game::stack::abandon_departed_resolution_occurrence(
-            state,
-            stamp,
-            crate::game::lifecycle::DelayedTerminalDisposition::Eliminated,
-        )
-        .err()
-        .map(|refusal| refusal.to_string()),
-        None => Some("the parked frame carries no carrier stamp".to_string()),
-    };
-    match refusal {
-        None => {
-            state.waiting_for = WaitingFor::Priority {
-                player: players::next_player(state, resolution_controller),
-            };
-            DepartedOccurrence::Abandoned
-        }
-        Some(refusal) => {
-            tracing::error!(
-                %refusal,
-                "departed per-player resolution was not abandoned; its frame stays parked"
-            );
-            DepartedOccurrence::Refused
-        }
     }
 }
 
 /// Why departure reconciliation could not proceed. The frame stays parked.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PerPlayerDepartureRefusal {
-    #[error("departed resolution was not abandoned: {0}")]
-    Abandon(String),
     #[error("per-player iteration could not re-advance: {0}")]
     Advance(String),
 }
 
-/// CR 800.4a + CR 101.4c: After players leave the game, reconcile the active
-/// per-player iteration's own prompt against the final set of living players.
-/// Acts only when the active frame owns `waiting_for` (its order prompt, or its
-/// current player's pool prompt); any other prompt family is untouched.
+/// CR 800.4a + CR 608.2m + CR 800.4g + CR 800.4h: After players leave the game,
+/// reconcile the active per-player iteration's own prompt against the final set
+/// of living players. Acts only when the active frame owns `waiting_for` (its
+/// order prompt, its election prompt, or its current pool prompt); any other
+/// prompt family is untouched.
 ///
-/// * The resolution controller left → that carrier's occurrence is abandoned
-///   (no further pick, no continuation) and priority passes on.
-/// * Otherwise the order candidates or the current pool are recomputed: a
-///   departed owner's objects have left the game, and a control effect that
-///   ended moved objects between pools. A current player who left, or whose
-///   pool emptied, is skipped; with no eligible player left the iteration
-///   finishes and its continuation resumes.
+/// The resolution is never cancelled: a spell that started resolving continues
+/// to resolve fully (CR 608.2m). Re-advancing recomputes the pending choice —
+/// a departed owner's objects have left the game, an ended control effect moved
+/// objects between pools, a pending pool whose owner left is skipped, a choice
+/// whose maker left goes to the player the rules name (CR 800.4g/800.4h) — and
+/// with no eligible player left the iteration finishes and its continuation
+/// resumes.
 ///
 /// Returns `Ok(false)` when there was nothing to reconcile.
 pub(crate) fn reconcile_per_player_choice_after_departure(
@@ -1288,6 +1299,14 @@ pub(crate) fn reconcile_per_player_choice_after_departure(
                 ..
             },
             None,
+        )
+        | (
+            WaitingFor::ChooseFromZoneOpponentChooser {
+                ability,
+                purpose: ZoneOpponentChooserPurpose::SubstituteChooser,
+                ..
+            },
+            Some(_),
         ) => ability.source_id == frame.ability.source_id,
         (WaitingFor::ChooseFromZoneChoice { source_id, .. }, Some(_)) => {
             *source_id == frame.ability.source_id
@@ -1297,90 +1316,136 @@ pub(crate) fn reconcile_per_player_choice_after_departure(
     if !owns_prompt {
         return Ok(false);
     }
-    let resolution_controller = active_per_player_occurrence(state)
-        .map(|(_, controller)| controller)
-        .unwrap_or_else(|| {
-            frame
-                .ability
-                .original_controller
-                .unwrap_or(frame.ability.controller)
-        });
-    if !players::is_alive(state, resolution_controller) {
-        return match departed_per_player_occurrence(state) {
-            DepartedOccurrence::Abandoned => Ok(true),
-            DepartedOccurrence::Live | DepartedOccurrence::Refused => {
-                Err(PerPlayerDepartureRefusal::Abandon(
-                    "the departed controller's occurrence refused retirement".to_string(),
-                ))
-            }
-        };
-    }
 
     let pending = state
         .take_active_per_player_zone_choice()
         .expect("the active per-player frame was just read")
         .expect("the active per-player frame was just read");
-    let PendingPerPlayerZoneChoice {
-        ability,
-        mut remaining_players,
-        accumulated,
-        current,
-        carrier,
-    } = pending;
-    let spec = PerPlayerSpec::of(&ability)
+    let (ability, cursor) = PerPlayerCursor::of(pending);
+    advance_per_player_iteration(state, &ability, cursor, events)
         .map_err(|e| PerPlayerDepartureRefusal::Advance(e.to_string()))?;
-    let advance = match current {
-        Some(owner)
-            if players::is_alive(state, owner) && !spec.pool(state, &ability, owner).is_empty() =>
-        {
-            let carrier = carrier.ok_or_else(|| {
-                PerPlayerDepartureRefusal::Advance(
-                    "the parked frame carries no carrier stamp".to_string(),
-                )
-            });
-            match carrier {
-                Ok(carrier) => present_per_player_pool(
-                    state,
-                    &ability,
-                    &spec,
-                    owner,
-                    remaining_players,
-                    accumulated,
-                    carrier,
-                ),
-                Err(refusal) => {
-                    state.push_per_player_zone_choice(PendingPerPlayerZoneChoice {
-                        ability,
-                        remaining_players,
-                        accumulated,
-                        current,
-                        carrier: None,
-                    });
-                    return Err(refusal);
-                }
-            }
-        }
-        Some(owner) => {
-            remaining_players.retain(|&player| player != owner);
-            advance_per_player_iteration(state, &ability, remaining_players, accumulated, events)
-        }
-        None => {
-            advance_per_player_iteration(state, &ability, remaining_players, accumulated, events)
-        }
-    };
-    advance.map_err(|e| PerPlayerDepartureRefusal::Advance(e.to_string()))?;
     if state.active_per_player_zone_choice().is_none() {
-        let priority_player = state
-            .active_ability_continuation()
-            .map(|continuation| continuation.chain.controller)
-            .unwrap_or(resolution_controller);
-        state.waiting_for = WaitingFor::Priority {
-            player: priority_player,
-        };
-        crate::game::engine::resume_pending_continuation_if_priority(state, events)
+        settle_finished_per_player_iteration(state, &ability, events)
             .map_err(|e| PerPlayerDepartureRefusal::Advance(format!("{e:?}")))?;
     }
     Ok(true)
+}
+
+/// A per-player iteration finished outside its own prompt handler: hand
+/// priority to a living player as the gate for the parked continuation, then
+/// resume it. CR 800.4j: a departed player never receives priority.
+pub(crate) fn settle_finished_per_player_iteration(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), crate::game::engine::EngineError> {
+    let controller = state
+        .active_ability_continuation()
+        .map(|continuation| continuation.chain.controller)
+        .unwrap_or(ability.controller);
+    let player = if players::is_alive(state, controller) {
+        controller
+    } else {
+        players::next_player_in_turn_order(state, controller)
+    };
+    state.waiting_for = WaitingFor::Priority { player };
+    crate::game::engine::resume_pending_continuation_if_priority(state, events)
+}
+
+/// The scope relation of a per-player population, evaluated WITHOUT a liveness
+/// filter, in static APNAP order (seat order from the active player). Used
+/// only to establish the provenance of a legacy (v97) parked pool prompt.
+fn static_per_player_population(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    scope: PerPlayerScope,
+) -> Vec<PlayerId> {
+    let seats = &state.seat_order;
+    let start = seats
+        .iter()
+        .position(|&player| player == state.active_player)
+        .unwrap_or(0);
+    let apnap = (0..seats.len()).map(|offset| seats[(start + offset) % seats.len()]);
+    match scope {
+        PerPlayerScope::AllPlayers => apnap.collect(),
+        PerPlayerScope::OtherPlayers => apnap.filter(|&p| p != ability.controller).collect(),
+        PerPlayerScope::Opponents => apnap
+            .filter(|&p| players::is_opponent(state, ability.controller, p))
+            .collect(),
+        PerPlayerScope::TargetedPlayers => apnap
+            .filter(|p| ability.targets.contains(&TargetRef::Player(*p)))
+            .collect(),
+    }
+}
+
+/// Restore-time migration of a legacy (v97) parked per-player pool prompt,
+/// whose frame predates `current`. Only the ACTIVE top frame is considered,
+/// and only when `waiting_for` is that frame's own `ChooseFromZoneChoice`.
+///
+/// Provenance, not containment, establishes the owner: v97 popped the next
+/// player and parked the population suffix strictly after them, so
+/// `remaining_players` must be the suffix of the static population and the
+/// owner is the member immediately preceding it. The owner must still be in
+/// the game (a departed preceding member is either a stale owner or a player
+/// who left before the iteration began; the snapshot cannot say which). Only
+/// after provenance is established is live containment checked, as
+/// consistency: every prompt card still in the game must lie in the owner's
+/// pool. Anything else rejects the snapshot.
+pub(crate) fn migrate_legacy_per_player_frame_on_restore(
+    state: &mut GameState,
+) -> Result<(), String> {
+    let Some(frame) = state.active_per_player_zone_choice() else {
+        return Ok(());
+    };
+    if frame.current.is_some() {
+        return Ok(());
+    }
+    let prompt_cards = match &state.waiting_for {
+        WaitingFor::ChooseFromZoneChoice {
+            source_id, cards, ..
+        } if *source_id == frame.ability.source_id => cards.clone(),
+        _ => return Ok(()),
+    };
+    const UNESTABLISHED: &str = "legacy per-player pool owner cannot be established";
+    let scope = match &frame.ability.effect {
+        Effect::ChooseFromZone {
+            zone_owner: ZoneOwner::Each(scope),
+            ..
+        } => *scope,
+        _ => return Err(UNESTABLISHED.to_string()),
+    };
+    let population = static_per_player_population(state, &frame.ability, scope);
+    let suffix_start = population.len().checked_sub(frame.remaining_players.len());
+    let owner = match suffix_start {
+        Some(start) if population[start..] == frame.remaining_players[..] && start > 0 => {
+            population[start - 1]
+        }
+        _ => return Err(UNESTABLISHED.to_string()),
+    };
+    if !players::is_alive(state, owner) {
+        return Err(UNESTABLISHED.to_string());
+    }
+    let spec = PerPlayerSpec::of(&frame.ability).map_err(|e| e.to_string())?;
+    let pool = spec.pool(state, &frame.ability, owner);
+    let consistent = prompt_cards
+        .iter()
+        .filter(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|object| object.zone == spec.zone)
+        })
+        .all(|id| pool.contains(id));
+    if !consistent {
+        return Err("legacy per-player pool prompt is inconsistent with its owner".to_string());
+    }
+    let mut frame = state
+        .take_active_per_player_zone_choice()
+        .map_err(|e| e.to_string())?
+        .expect("the active per-player frame was just read");
+    frame.current = Some(owner);
+    state.push_per_player_zone_choice(frame);
+    Ok(())
 }
 
 /// CR 101.4: Candidate cards in a SINGLE player's zone(s) for a per-player
@@ -4182,7 +4247,7 @@ mod tests {
             remaining_players: vec![],
             accumulated: false,
             current: Some(PlayerId(1)),
-            carrier: None,
+            nominee: None,
         });
 
         let mut events = Vec::new();
@@ -4263,8 +4328,10 @@ mod tests {
         );
 
         let mut events = Vec::new();
-        // `resolve` routes EachOpponent directly into `prompt_next_each_player`
-        // with accumulated=false; no opponent is eligible → exhaustion branch.
+        // The choice resolves inside its own carrier (admission precedes the
+        // empty-pool exit). With accumulated=false and no opponent eligible,
+        // the iteration takes its exhaustion branch.
+        install_test_carrier(&mut state, ObjectId(100), PlayerId(0));
         resolve(&mut state, &ability, &mut events).unwrap();
 
         // No interactive prompt was raised (the loop never parked one).
@@ -4716,17 +4783,126 @@ mod tests {
         state
     }
 
-    /// N1 (CR 605.3b + CR 608.2): a per-player choice from ANOTHER occurrence —
-    /// P1's, nested while P0's carrier is paused with its continuation parked —
-    /// is refused before it parks anything, both inside an inline mana
-    /// subresolution and as a direct call. P1 then leaving cannot touch P0's
-    /// carrier or continuation.
+    /// N1, empty pools: admission runs BEFORE the empty-pool exit. An
+    /// inadmissible per-player choice — (a) inside an inline mana
+    /// subresolution under another occurrence's carrier, or (b) with no carrier
+    /// at all — whose every pool is empty must still be refused: no fresh
+    /// tracked set, no `EffectResolved`, and an outer resolution's current set
+    /// left bound. (c) An admitted choice with empty pools still publishes its
+    /// empty result.
     ///
-    /// REVERT PROBE: skip `admit_per_player_park` and the nested frame parks
-    /// above P0's floor; P1 leaving then retires P0's continuation and finishes
-    /// P0's carrier.
+    /// REVERT PROBE: run admission after the empty-pool exit and (a) and (b)
+    /// report completion and rebind the chain to a fresh empty set.
     #[test]
-    fn nested_per_player_choice_outside_its_carrier_is_refused() {
+    fn an_inadmissible_choice_with_empty_pools_is_refused_before_any_publish() {
+        fn creature_choice(source: ObjectId, controller: PlayerId) -> ResolvedAbility {
+            let mut ability = per_opponent_battlefield_choice(source, controller);
+            if let Effect::ChooseFromZone { filter, .. } = &mut ability.effect {
+                *filter = Some(TargetFilter::Typed(TypedFilter::creature()));
+            }
+            ability
+        }
+        fn publishes_or_resolves(events: &[GameEvent]) -> bool {
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    GameEvent::EffectResolved {
+                        kind: EffectKind::ChooseFromZone,
+                        ..
+                    }
+                )
+            })
+        }
+
+        // (a) Nested mana subresolution under P0's carrier; P0's current
+        // chain set holds a legal P0 object.
+        let mut state = three_player_with_relics(79);
+        let p0_relic = state.battlefield.iter().copied().find(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|o| o.controller == PlayerId(0))
+        });
+        let p0_relic = p0_relic.expect("P0 controls a relic");
+        install_test_carrier(&mut state, ObjectId(790), PlayerId(0));
+        super::super::publish_fresh_tracked_set(&mut state, vec![p0_relic]);
+        let outer_set = state.chain_tracked_set_id;
+        let before = resolution_slice(&state);
+        state.mana_subresolution_depth = 1;
+        let mut events = Vec::new();
+        let refused = resolve(
+            &mut state,
+            &creature_choice(ObjectId(791), PlayerId(1)),
+            &mut events,
+        );
+        state.mana_subresolution_depth = 0;
+        assert!(
+            matches!(&refused, Err(EffectError::InvalidParam(message)) if message.contains(PER_PLAYER_PARK_REFUSED)),
+            "(a) refused explicitly: {refused:?}"
+        );
+        assert!(
+            !publishes_or_resolves(&events),
+            "(a) no EffectResolved: {events:?}"
+        );
+        assert_eq!(
+            state.chain_tracked_set_id, outer_set,
+            "(a) the outer set stays bound"
+        );
+        assert_eq!(resolution_slice(&state), before, "(a) nothing changed");
+
+        // (b) No carrier at all.
+        let mut state = three_player_with_relics(80);
+        let before = resolution_slice(&state);
+        let mut events = Vec::new();
+        let refused = resolve(
+            &mut state,
+            &creature_choice(ObjectId(800), PlayerId(0)),
+            &mut events,
+        );
+        assert!(
+            matches!(&refused, Err(EffectError::InvalidParam(message)) if message.contains(PER_PLAYER_PARK_REFUSED)),
+            "(b) refused explicitly: {refused:?}"
+        );
+        assert!(
+            !publishes_or_resolves(&events),
+            "(b) no EffectResolved: {events:?}"
+        );
+        assert_eq!(resolution_slice(&state), before, "(b) nothing changed");
+
+        // (c) Positive: an admitted choice with empty pools publishes its
+        // empty result and reports completion.
+        let mut state = three_player_with_relics(81);
+        install_test_carrier(&mut state, ObjectId(810), PlayerId(0));
+        let mut events = Vec::new();
+        resolve(
+            &mut state,
+            &creature_choice(ObjectId(810), PlayerId(0)),
+            &mut events,
+        )
+        .expect("(c) the admitted choice resolves");
+        assert!(
+            publishes_or_resolves(&events),
+            "(c) EffectResolved is emitted"
+        );
+        let bound = state
+            .chain_tracked_set_id
+            .expect("(c) a fresh set is bound");
+        assert_eq!(state.tracked_object_sets.get(&bound), Some(&vec![]));
+        assert!(
+            state.active_per_player_zone_choice().is_none(),
+            "(c) nothing parks"
+        );
+    }
+
+    /// N1 (CR 605.3b + CR 605.4a): a per-player choice resolved inside an
+    /// inline mana subresolution — nested under P0's paused carrier — is
+    /// refused before it parks anything (mana abilities resolve immediately and
+    /// cannot pause for a choice). P0's carrier and continuation are untouched.
+    ///
+    /// REVERT PROBE: skip `admit_per_player_park` and the nested choice parks a
+    /// per-player frame and an order prompt inside the mana subresolution.
+    #[test]
+    fn per_player_choice_inside_a_mana_subresolution_is_refused() {
         let mut state = three_player_with_relics(71);
         let p0_source = ObjectId(700);
         let carrier = install_test_carrier(&mut state, p0_source, PlayerId(0));
@@ -4734,34 +4910,30 @@ mod tests {
         let before = resolution_slice(&state);
 
         let nested = per_opponent_battlefield_choice(ObjectId(701), PlayerId(1));
-        for inside_mana in [true, false] {
-            state.mana_subresolution_depth = u32::from(inside_mana);
-            // The resolver refuses explicitly ...
-            let error = resolve(&mut state, &nested, &mut Vec::new())
-                .expect_err("a nested per-player choice must be refused");
-            assert!(
-                matches!(&error, EffectError::InvalidParam(message) if message.contains(PER_PLAYER_PARK_REFUSED)),
-                "refused explicitly: {error:?}"
-            );
-            // ... and through the production chain entry nothing parks.
-            let _ = super::super::resolve_ability_chain(&mut state, &nested, &mut Vec::new(), 0);
-            state.mana_subresolution_depth = 0;
-            assert_eq!(
-                resolution_slice(&state),
-                before,
-                "a refusal changes nothing (inside mana: {inside_mana})"
-            );
-        }
-
-        crate::game::elimination::eliminate_player(&mut state, PlayerId(1), &mut Vec::new());
+        state.mana_subresolution_depth = 1;
+        // The resolver refuses explicitly ...
+        let error = resolve(&mut state, &nested, &mut Vec::new())
+            .expect_err("a per-player choice inside a mana subresolution must be refused");
+        assert!(
+            matches!(&error, EffectError::InvalidParam(message) if message.contains(PER_PLAYER_PARK_REFUSED)),
+            "refused explicitly: {error:?}"
+        );
+        // ... and through the production chain entry nothing parks.
+        let _ = super::super::resolve_ability_chain(&mut state, &nested, &mut Vec::new(), 0);
+        state.mana_subresolution_depth = 0;
+        assert_eq!(
+            resolution_slice(&state),
+            before,
+            "a refusal changes nothing"
+        );
         assert_eq!(
             state.resolving_stack_entry.as_ref().map(|entry| entry.id),
             Some(carrier),
-            "P0's carrier survives P1 leaving"
+            "P0's carrier is untouched"
         );
         assert!(
             state.active_ability_continuation().is_some(),
-            "P0's continuation survives P1 leaving"
+            "P0's continuation is untouched"
         );
     }
 
@@ -4830,290 +5002,6 @@ mod tests {
         assert_eq!(
             state.resolving_stack_entry.as_ref().map(|entry| entry.id),
             Some(first)
-        );
-    }
-
-    /// N2: restore-time coherence of carrier, floor and stamps.
-    #[test]
-    fn restore_rejects_an_incoherent_occurrence_and_adopts_legacy_shapes() {
-        // A floor recorded without a carrier.
-        let mut state = three_player_with_relics(74);
-        install_test_carrier(&mut state, ObjectId(740), PlayerId(0));
-        state.resolving_stack_entry = None;
-        assert!(state.reconcile_resolution_occurrence_on_restore().is_err());
-
-        // A persisted floor above the stack it belongs to.
-        let mut state = three_player_with_relics(74);
-        install_test_carrier(&mut state, ObjectId(741), PlayerId(0));
-        let mut stack = serde_json::to_value(&*state.resolution_stack).unwrap();
-        stack["occurrence_floor"] = serde_json::json!({ "depth": 5 });
-        *state.resolution_stack = serde_json::from_value(stack).expect("the forged floor decodes");
-        assert!(state.reconcile_resolution_occurrence_on_restore().is_err());
-
-        // A frame stamped with another carrier.
-        let mut state = three_player_with_relics(74);
-        install_test_carrier(&mut state, ObjectId(742), PlayerId(0));
-        state.push_per_player_zone_choice(PendingPerPlayerZoneChoice {
-            ability: Box::new(per_opponent_battlefield_choice(ObjectId(742), PlayerId(0))),
-            remaining_players: vec![PlayerId(1)],
-            accumulated: false,
-            current: Some(PlayerId(2)),
-            carrier: Some(ObjectId(1)),
-        });
-        assert!(state.reconcile_resolution_occurrence_on_restore().is_err());
-
-        // Legacy: a carrier with no floor owns the whole stack, and an
-        // unstamped frame adopts the installed carrier.
-        let mut state = three_player_with_relics(74);
-        let carrier = install_test_carrier(&mut state, ObjectId(743), PlayerId(0));
-        state.resolution_stack.clear_occurrence_floor();
-        state.push_per_player_zone_choice(PendingPerPlayerZoneChoice {
-            ability: Box::new(per_opponent_battlefield_choice(ObjectId(743), PlayerId(0))),
-            remaining_players: vec![PlayerId(1)],
-            accumulated: false,
-            current: Some(PlayerId(2)),
-            carrier: None,
-        });
-        state
-            .reconcile_resolution_occurrence_on_restore()
-            .expect("legacy shapes are admitted");
-        assert_eq!(
-            state
-                .resolution_stack
-                .occurrence_floor()
-                .map(|floor| floor.depth()),
-            Some(0)
-        );
-        assert_eq!(
-            state
-                .active_per_player_zone_choice()
-                .and_then(|frame| frame.carrier),
-            Some(carrier)
-        );
-    }
-
-    /// O1 (CR 113.7a + CR 800.4a): two occurrences share `(source, controller)`
-    /// — a copy or a second activation. Occurrence A's frames are parked with
-    /// no carrier installed; occurrence B then becomes the carrier and parks
-    /// its per-player choice above its floor. When their shared controller
-    /// leaves, only B's frames are retired and only B's carrier finishes; A's
-    /// frames survive byte-identical.
-    ///
-    /// REVERT PROBE: retire by `(source, controller)` (or clear the whole
-    /// stack) instead of by the floor, and A's frames are popped too.
-    #[test]
-    fn departure_retires_only_the_carrier_occurrence_above_its_floor() {
-        let mut state = three_player_with_relics(75);
-        let shared = ObjectId(750);
-        // Occurrence A: continuation beneath its repeat driver, no carrier.
-        state.park_ability_continuation(noop_continuation(&state, shared, PlayerId(0)));
-        state.push_repeat_for(crate::types::game_state::PendingRepeatIteration {
-            ability: Box::new(ResolvedAbility::new(
-                Effect::NoOp,
-                vec![],
-                shared,
-                PlayerId(0),
-            )),
-            tracked_members: Vec::new(),
-            iterated_counter_kinds: Vec::new(),
-            next_iteration: 1,
-            total_iterations: 2,
-        });
-        let occurrence_a = serde_json::to_value(&*state.resolution_stack).unwrap();
-
-        // Occurrence B: the same source and controller, a distinct stack entry.
-        let carrier_b = install_test_carrier(&mut state, shared, PlayerId(0));
-        assert_eq!(
-            state
-                .resolution_stack
-                .occurrence_floor()
-                .map(|floor| floor.depth()),
-            Some(2),
-            "reach: B's floor sits above A's two frames"
-        );
-        let choice = per_opponent_battlefield_choice(shared, PlayerId(0));
-        super::super::resolve_ability_chain(&mut state, &choice, &mut Vec::new(), 0)
-            .expect("B's own occurrence is admitted");
-        assert_eq!(
-            state
-                .active_per_player_zone_choice()
-                .and_then(|frame| frame.carrier),
-            Some(carrier_b),
-            "reach: B's per-player frame is stamped with B's carrier"
-        );
-
-        crate::game::elimination::eliminate_player(&mut state, PlayerId(0), &mut Vec::new());
-
-        assert!(
-            state.resolving_stack_entry.is_none(),
-            "B's carrier finished"
-        );
-        let mut remaining = serde_json::to_value(&*state.resolution_stack).unwrap();
-        remaining
-            .as_object_mut()
-            .expect("stack object")
-            .remove("occurrence_floor");
-        assert_eq!(
-            remaining, occurrence_a,
-            "A's frames survive byte-identical; only B's were retired"
-        );
-        assert!(
-            !matches!(
-                state.waiting_for,
-                WaitingFor::ChooseFromZoneOpponentChooser { .. }
-                    | WaitingFor::ChooseFromZoneChoice { .. }
-            ),
-            "no per-player prompt outlives its departed controller"
-        );
-    }
-
-    /// O1: work of an unrelated occurrence (another source and controller)
-    /// parked below the floor survives the carrier's abandonment.
-    #[test]
-    fn departure_preserves_unrelated_work_below_the_floor() {
-        let mut state = three_player_with_relics(76);
-        state.park_ability_continuation(noop_continuation(&state, ObjectId(761), PlayerId(1)));
-        let below = serde_json::to_value(&*state.resolution_stack).unwrap();
-        install_test_carrier(&mut state, ObjectId(760), PlayerId(0));
-        let choice = per_opponent_battlefield_choice(ObjectId(760), PlayerId(0));
-        super::super::resolve_ability_chain(&mut state, &choice, &mut Vec::new(), 0)
-            .expect("the carrier's own occurrence is admitted");
-
-        crate::game::elimination::eliminate_player(&mut state, PlayerId(0), &mut Vec::new());
-
-        let mut remaining = serde_json::to_value(&*state.resolution_stack).unwrap();
-        remaining
-            .as_object_mut()
-            .expect("stack object")
-            .remove("occurrence_floor");
-        assert_eq!(
-            remaining, below,
-            "the unrelated continuation survives untouched"
-        );
-    }
-
-    /// N2 + T1: a frame crossing the floor after it was recorded (here the
-    /// unrelated frame beneath it is consumed mid-resolution) breaks the floor.
-    /// When the controller then leaves, retirement is REFUSED — observably, as a
-    /// typed refusal — and nothing is retired, finished or revived: the
-    /// per-player frame stays parked, which keeps the continuation behind it
-    /// from running.
-    ///
-    /// REVERT PROBE: ignore `broken` in `retire_frames_above_occurrence_floor`
-    /// and the refusal disappears (the carrier is finished over frames whose
-    /// attribution is unknown).
-    #[test]
-    fn a_broken_floor_refuses_retirement_observably() {
-        let mut state = three_player_with_relics(77);
-        state.park_ability_continuation(noop_continuation(&state, ObjectId(771), PlayerId(1)));
-        let carrier = install_test_carrier(&mut state, ObjectId(770), PlayerId(0));
-        let _ = state
-            .take_active_ability_continuation()
-            .expect("the unrelated continuation is the top");
-        assert!(
-            state
-                .resolution_stack
-                .occurrence_floor()
-                .is_some_and(|floor| floor.is_broken()),
-            "reach: popping beneath the floor broke it"
-        );
-        let choice = per_opponent_battlefield_choice(ObjectId(770), PlayerId(0));
-        super::super::resolve_ability_chain(&mut state, &choice, &mut Vec::new(), 0)
-            .expect("the carrier's own occurrence is admitted");
-
-        state.players[0].is_eliminated = true;
-        let refusal = crate::game::stack::abandon_departed_resolution_occurrence(
-            &mut state,
-            carrier,
-            crate::game::lifecycle::DelayedTerminalDisposition::Eliminated,
-        )
-        .expect_err("a broken floor refuses retirement");
-        assert_eq!(
-            refusal,
-            crate::game::stack::DepartedOccurrenceRefusal::Floor(
-                crate::types::resolution::OccurrenceRetireRefusal::BrokenFloor
-            )
-        );
-        assert_eq!(
-            state.resolving_stack_entry.as_ref().map(|entry| entry.id),
-            Some(carrier),
-            "nothing was finished"
-        );
-        assert!(
-            state.active_per_player_zone_choice().is_some(),
-            "the frame stays parked"
-        );
-
-        // The departure reconciliation reports the same refusal.
-        let reported = reconcile_per_player_choice_after_departure(&mut state, &mut Vec::new());
-        assert!(
-            matches!(reported, Err(PerPlayerDepartureRefusal::Abandon(_))),
-            "reported: {reported:?}"
-        );
-        assert!(state.active_per_player_zone_choice().is_some());
-    }
-
-    /// T1 (CR 800.4a): a per-player choice under `repeat_for: 2` parks its
-    /// `RepeatFor` driver beneath the per-player frame. When the controller
-    /// concedes at the first prompt, the whole occurrence — choice frame and
-    /// repeat driver — is retired with no panic and no second iteration.
-    ///
-    /// REVERT PROBE: route the departure through
-    /// `finish_abandoned_source_bound_resolution_carrier` and the abandonment
-    /// panics on the `RepeatFor` top (or the repeat driver survives and revives).
-    #[test]
-    fn controller_leaving_under_repeat_retires_the_repeat_driver_too() {
-        let mut state = GameState::new(FormatConfig::free_for_all(), 4, 78);
-        state.turn_number = 1;
-        for (card, owner) in [(1, 1), (2, 2), (3, 3)] {
-            create_object(
-                &mut state,
-                CardId(780 + card),
-                PlayerId(owner),
-                format!("P{owner} Relic"),
-                Zone::Battlefield,
-            );
-        }
-        install_test_carrier(&mut state, ObjectId(780), PlayerId(0));
-        let mut choice = per_opponent_battlefield_choice(ObjectId(780), PlayerId(0));
-        choice.repeat_for = Some(crate::types::ability::QuantityExpr::Fixed { value: 2 });
-        super::super::resolve_ability_chain(&mut state, &choice, &mut Vec::new(), 0)
-            .expect("the first iteration parks");
-        let kinds: Vec<_> = state
-            .resolution_stack
-            .iter()
-            .map(crate::types::resolution::ResolutionFrame::kind)
-            .collect();
-        assert_eq!(
-            kinds,
-            vec![
-                crate::types::resolution::FrameKind::RepeatFor,
-                crate::types::resolution::FrameKind::PerPlayerZoneChoice,
-            ],
-            "reach: the per-player frame sits above its repeat driver"
-        );
-        assert!(matches!(
-            state.waiting_for,
-            WaitingFor::ChooseFromZoneOpponentChooser { .. }
-        ));
-
-        crate::game::elimination::eliminate_player(&mut state, PlayerId(0), &mut Vec::new());
-
-        assert!(
-            state.resolution_stack.is_empty(),
-            "the whole occurrence retired"
-        );
-        assert!(state.resolving_stack_entry.is_none());
-        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
-        crate::game::engine::resume_pending_continuation_if_priority(&mut state, &mut Vec::new())
-            .expect("nothing to resume");
-        assert!(
-            !matches!(
-                state.waiting_for,
-                WaitingFor::ChooseFromZoneOpponentChooser { .. }
-                    | WaitingFor::ChooseFromZoneChoice { .. }
-            ),
-            "no second iteration is revived"
         );
     }
 }

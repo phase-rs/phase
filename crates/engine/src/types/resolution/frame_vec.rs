@@ -97,45 +97,6 @@ impl std::fmt::Display for ChildStackDepth {
     }
 }
 
-/// CR 608.2 + CR 800.4a: The resolution-stack depth recorded when a stack
-/// entry became the resolution carrier.
-///
-/// Every frame above `depth` was pushed while that one carrier resolved, so
-/// the frames above the floor are that occurrence's own work, and nothing
-/// below it is. The attribution holds only while no frame crosses the floor:
-/// the index-shifting mutators below ([`FrameVec::pop`],
-/// [`FrameVec::insert_below`], [`FrameVec::insert_at_child_boundary`],
-/// [`FrameVec::swap`]) take the floor and mark it `broken` when they remove,
-/// insert or exchange a frame across it. `push` only adds above it, and
-/// `replace` / `get_mut` / `last_mut` never move a frame between indices, so
-/// those four are the whole surface. A broken floor is never repaired: the
-/// occurrence's retirement then refuses instead of guessing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OccurrenceFloor {
-    depth: usize,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    broken: bool,
-}
-
-impl OccurrenceFloor {
-    /// A carrier persisted before occurrence floors existed owned the whole
-    /// resolution stack; restore adopts that as a floor of zero.
-    pub(super) const LEGACY_WHOLE_STACK: Self = Self {
-        depth: 0,
-        broken: false,
-    };
-
-    /// Whether a frame has crossed the floor since it was recorded.
-    pub fn is_broken(&self) -> bool {
-        self.broken
-    }
-
-    /// The recorded depth: the number of frames that predate the carrier.
-    pub fn depth(&self) -> usize {
-        self.depth
-    }
-}
-
 /// The backing storage for [`ResolutionStack`]'s frames.
 ///
 /// Serialized transparently, so the wire format is exactly the `Vec` this
@@ -180,24 +141,8 @@ impl FrameVec {
         self.frames.push(frame);
     }
 
-    /// Removes the top frame. Removing a frame that predates the carrier's
-    /// [`OccurrenceFloor`] marks the floor broken.
-    pub(super) fn pop(&mut self, floor: &mut Option<OccurrenceFloor>) -> Option<ResolutionFrame> {
-        if let Some(floor) = floor.as_mut() {
-            if !self.frames.is_empty() && self.frames.len() <= floor.depth {
-                floor.broken = true;
-            }
-        }
+    pub(super) fn pop(&mut self) -> Option<ResolutionFrame> {
         self.frames.pop()
-    }
-
-    /// Record the current depth as the resolution carrier's occurrence floor.
-    /// The sole constructor of a live [`OccurrenceFloor`].
-    pub(super) fn capture_occurrence_floor(&self) -> OccurrenceFloor {
-        OccurrenceFloor {
-            depth: self.frames.len(),
-            broken: false,
-        }
     }
 
     /// The top of the stack, if any.
@@ -285,31 +230,14 @@ impl FrameVec {
         self.frames.get_mut(slot.0)
     }
 
-    /// Exchange two located frames, preserving stack length. An exchange
-    /// across the [`OccurrenceFloor`] marks it broken.
-    pub(super) fn swap(&mut self, a: FrameSlot, b: FrameSlot, floor: &mut Option<OccurrenceFloor>) {
-        if let Some(floor) = floor.as_mut() {
-            if (a.0 < floor.depth) != (b.0 < floor.depth) {
-                floor.broken = true;
-            }
-        }
+    /// Exchange two located frames, preserving stack length.
+    pub(super) fn swap(&mut self, a: FrameSlot, b: FrameSlot) {
         self.frames.swap(a.0, b.0);
     }
 
     /// Insert `frame` so that it sits immediately beneath the frame currently
-    /// at `slot`, lifting `slot` and everything above it by one. Inserting
-    /// below the [`OccurrenceFloor`] marks it broken.
-    pub(super) fn insert_below(
-        &mut self,
-        slot: FrameSlot,
-        frame: ResolutionFrame,
-        floor: &mut Option<OccurrenceFloor>,
-    ) {
-        if let Some(floor) = floor.as_mut() {
-            if slot.0 < floor.depth {
-                floor.broken = true;
-            }
-        }
+    /// at `slot`, lifting `slot` and everything above it by one.
+    pub(super) fn insert_below(&mut self, slot: FrameSlot, frame: ResolutionFrame) {
         self.frames.insert(slot.0, frame);
     }
 
@@ -326,20 +254,13 @@ impl FrameVec {
     ///
     /// Returns `false` when `depth` does not name a boundary with at least one
     /// child frame above it; the caller reports that as a typed error.
-    /// Inserting below the [`OccurrenceFloor`] marks it broken.
     pub(super) fn insert_at_child_boundary(
         &mut self,
         depth: ChildStackDepth,
         frame: ResolutionFrame,
-        floor: &mut Option<OccurrenceFloor>,
     ) -> bool {
         if depth.0 >= self.frames.len() {
             return false;
-        }
-        if let Some(floor) = floor.as_mut() {
-            if depth.0 < floor.depth {
-                floor.broken = true;
-            }
         }
         self.frames.insert(depth.0, frame);
         true

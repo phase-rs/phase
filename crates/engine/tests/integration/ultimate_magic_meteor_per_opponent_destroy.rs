@@ -958,15 +958,34 @@ fn targeted_forms_keep_their_parent_target_reading() {
         parsed.abilities
     );
 
-    // Kaya's exile arm keeps its own two prefixes.
+    // Kaya's exile arm keeps its own prefix ("for each other player"; a bare
+    // "for each player" exile is taken earlier by the player-scope fan-out),
+    // and an opponent-prefixed exile is not claimed by it: it keeps its
+    // existing single-exile fallback shape.
+    let text = "For each other player, exile up to one creature that player controls.";
+    let parsed = parse(text, "Probe", &[], &["Sorcery"]);
+    assert!(
+        all_defs(&parsed).iter().any(|d| matches!(
+            &*d.effect,
+            Effect::ChooseFromZone {
+                zone_owner: ZoneOwner::Each(PerPlayerScope::OtherPlayers),
+                zone: Zone::Battlefield,
+                up_to: true,
+                ..
+            }
+        )),
+        "positive control: {text}\n{:#?}",
+        parsed.abilities
+    );
     let parsed = parse(
         "For each opponent, exile up to one creature that player controls.",
         "Probe",
         &[],
         &["Sorcery"],
     );
+    let defs = all_defs(&parsed);
     assert!(
-        !all_defs(&parsed).iter().any(|d| matches!(
+        !defs.iter().any(|d| matches!(
             &*d.effect,
             Effect::ChooseFromZone {
                 zone_owner: ZoneOwner::Each(_),
@@ -974,6 +993,20 @@ fn targeted_forms_keep_their_parent_target_reading() {
             }
         )),
         "{:#?}",
+        parsed.abilities
+    );
+    assert_eq!(defs.len(), 1, "{:#?}", parsed.abilities);
+    assert!(
+        matches!(
+            &*defs[0].effect,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::Typed(filter),
+                ..
+            } if filter.type_filters == vec![engine::types::ability::TypeFilter::Creature]
+                && filter.controller == Some(engine::types::ability::ControllerRef::TargetPlayer)
+        ),
+        "the opponent-prefixed exile keeps its single-exile fallback shape: {:#?}",
         parsed.abilities
     );
 }
@@ -1472,34 +1505,11 @@ fn per_opponent_choice_with_a_trailing_instruction_is_not_claimed() {
 }
 
 /// A game paused on Meteor's per-opponent choice serializes the new
-/// population, the order prompt's purpose, the frame's `current` / `carrier`
-/// fields and the resolution stack's occurrence floor, and loads back — both
-/// parked on the caster's order prompt and parked on one opponent's pool.
+/// population, the order prompt's purpose and the frame's `current` field, and
+/// loads back through the persisted-state restore — parked on the caster's
+/// order prompt and parked on one opponent's pool.
 #[test]
 fn game_state_paused_on_the_per_opponent_choice_round_trips() {
-    fn round_trip(runner: &GameRunner, must_contain: &[&str]) {
-        let json = serde_json::to_string(runner.state()).expect("serialize");
-        for needle in must_contain {
-            assert!(json.contains(needle), "{needle} is written");
-        }
-        let back: GameState = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(
-            serde_json::to_string(&back).expect("re-serialize"),
-            json,
-            "round trip is lossless"
-        );
-        let persisted = serde_json::to_string(
-            &engine::types::game_state::PersistedGameState::capture(runner.state().clone()),
-        )
-        .expect("persisted state serializes");
-        serde_json::from_str::<engine::types::game_state::PersistedGameState>(&persisted)
-            .expect("persisted state decodes")
-            .prepare_for_restore(
-                engine::types::game_state::PersistedRestoreFinalization::DeferUntilRehydrated,
-            )
-            .expect("the parked carrier, floor and stamp are coherent on restore");
-    }
-
     let mut scenario = GameScenario::new_n_player(3, 112);
     scenario.at_phase(Phase::PreCombatMain);
     add_artifact(&mut scenario, P1, "P1 Relic");
@@ -1514,15 +1524,7 @@ fn game_state_paused_on_the_per_opponent_choice_round_trips() {
         vec![P1, P2],
         "reach: order prompt"
     );
-    round_trip(
-        &runner,
-        &[
-            "\"Opponents\"",
-            "\"PerPlayerChoiceOrder\"",
-            "\"carrier\"",
-            "\"occurrence_floor\"",
-        ],
-    );
+    round_trip(&runner, &["\"Opponents\"", "\"PerPlayerChoiceOrder\""]);
 
     runner
         .act(GameAction::ChooseZoneOpponentChooser { opponent: P2 })
@@ -1532,13 +1534,58 @@ fn game_state_paused_on_the_per_opponent_choice_round_trips() {
         .active_per_player_zone_choice()
         .expect("reach: the pool prompt's frame is parked");
     assert_eq!(frame.current, Some(P2), "reach: P2's pool is current");
-    round_trip(&runner, &["\"current\"", "\"carrier\""]);
+    round_trip(&runner, &["\"current\""]);
 }
 
-/// A per-player frame persisted before `current` and `carrier` existed loads
+/// Serialize `runner`'s state, check each needle is written, check the plain
+/// serde round trip is lossless, then restore it through the persisted-state
+/// pipeline.
+fn round_trip(runner: &GameRunner, must_contain: &[&str]) {
+    let json = serde_json::to_string(runner.state()).expect("serialize");
+    for needle in must_contain {
+        assert!(json.contains(needle), "{needle} is written");
+    }
+    let back: GameState = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(
+        serde_json::to_string(&back).expect("re-serialize"),
+        json,
+        "round trip is lossless"
+    );
+    restore(runner).expect("the parked per-player choice restores");
+}
+
+/// The engine's own save/restore pipeline.
+fn restore(
+    runner: &GameRunner,
+) -> Result<GameState, engine::types::game_state::PersistedRestoreError> {
+    let persisted = serde_json::to_string(&engine::types::game_state::PersistedGameState::capture(
+        runner.state().clone(),
+    ))
+    .expect("persisted state serializes");
+    serde_json::from_str::<engine::types::game_state::PersistedGameState>(&persisted)
+        .expect("persisted state decodes")
+        .prepare_for_restore(
+            engine::types::game_state::PersistedRestoreFinalization::DeferUntilRehydrated,
+        )?
+        .finalize_after_rehydration(|_| Ok(()))
+}
+
+/// Reshape the live parked frame into its legacy (v97) form: no `current`.
+fn make_frame_legacy(runner: &mut GameRunner) {
+    let mut frame = runner
+        .state_mut()
+        .take_active_per_player_zone_choice()
+        .expect("the per-player frame is the top")
+        .expect("reach: a parked frame");
+    frame.current = None;
+    frame.nominee = None;
+    runner.state_mut().push_per_player_zone_choice(frame);
+}
+
+/// A per-player frame persisted before `current` and `nominee` existed decodes
 /// with both absent.
 #[test]
-fn legacy_per_player_frame_without_current_or_carrier_loads() {
+fn legacy_per_player_frame_without_current_decodes() {
     let mut scenario = GameScenario::new_n_player(3, 113);
     scenario.at_phase(Phase::PreCombatMain);
     add_artifact(&mut scenario, P1, "P1 Relic");
@@ -1547,6 +1594,7 @@ fn legacy_per_player_frame_without_current_or_carrier_loads() {
     let mut runner = scenario.build();
     cast_from_exile(&mut runner, meteor);
     advance_to_per_player_prompt(&mut runner);
+    order(&mut runner, P1);
     let frame = runner
         .state()
         .active_per_player_zone_choice()
@@ -1555,14 +1603,154 @@ fn legacy_per_player_frame_without_current_or_carrier_loads() {
     let mut value = serde_json::to_value(&frame).expect("serialize frame");
     let object = value.as_object_mut().expect("frame object");
     assert!(
-        object.remove("carrier").is_some(),
-        "reach: carrier is written"
+        object.remove("current").is_some(),
+        "reach: current is written"
     );
-    object.remove("current");
+    object.remove("nominee");
     let legacy: engine::types::game_state::PendingPerPlayerZoneChoice =
-        serde_json::from_value(value).expect("a legacy frame loads");
+        serde_json::from_value(value).expect("a legacy frame decodes");
     assert_eq!(legacy.current, None);
-    assert_eq!(legacy.carrier, None);
+    assert_eq!(legacy.nominee, None);
+}
+
+/// R6-R3 / S3: a legacy (v97) snapshot parked on P1's pool restores with the
+/// pool's owner re-established from the queue's provenance — v97 parked the
+/// population suffix after the owner — and play continues: P1 concedes and
+/// P2's pool is presented.
+///
+/// REVERT PROBE: drop the migration and the restored frame keeps
+/// `current: None`; P1 conceding then leaves P1's stale pool prompt pending.
+#[test]
+fn legacy_pool_prompt_restores_its_owner_from_the_queue() {
+    let mut scenario = GameScenario::new_n_player(3, 114);
+    scenario.at_phase(Phase::PreCombatMain);
+    let p1_art = add_artifact(&mut scenario, P1, "P1 Relic");
+    let p2_art = add_artifact(&mut scenario, P2, "P2 Relic");
+    let meteor = add_meteor(&mut scenario);
+    let mut runner = scenario.build();
+    cast_from_exile(&mut runner, meteor);
+    advance_to_per_player_prompt(&mut runner);
+    order(&mut runner, P1);
+    assert_eq!(pool(&runner), vec![p1_art], "reach: P1's pool is pending");
+    make_frame_legacy(&mut runner);
+    assert_eq!(
+        runner
+            .state()
+            .active_per_player_zone_choice()
+            .map(|frame| frame.remaining_players.clone()),
+        Some(vec![P2]),
+        "reach: the v97 queue is the suffix after P1"
+    );
+
+    let restored = restore(&runner).expect("a provenance-established legacy prompt restores");
+    assert_eq!(
+        restored
+            .active_per_player_zone_choice()
+            .and_then(|frame| frame.current),
+        Some(P1),
+        "the owner is re-established from the queue"
+    );
+    let mut runner = GameRunner::from_state(restored);
+    runner
+        .act(GameAction::Concede { player_id: P1 })
+        .expect("a player may concede at any time");
+    assert_eq!(pool(&runner), vec![p2_art], "P2's pool is presented next");
+}
+
+/// S3 (hostile): P2 is the active player, so the static opponent population
+/// is [P2, P1]. P2's pick is made first; P1's pool — offering the artifact P1
+/// stole from P2 — is pending with an empty queue. P1 leaves (in the legacy
+/// shape, so nothing reconciles), control returns to P2, and P2 now uniquely
+/// holds that artifact. Then the game is saved. The owner the queue names (P1)
+/// has left, so the snapshot is rejected rather than silently rebound to P2.
+///
+/// REVERT PROBE: infer the owner by live containment and the restore adopts
+/// P2.
+#[test]
+fn hostile_legacy_pool_prompt_is_rejected_not_rebound() {
+    const CHOICE: &str =
+        "For each opponent, choose an artifact or land that player controls. Destroy the chosen permanents.";
+    let mut scenario = GameScenario::new_n_player(3, 115);
+    scenario.at_phase(Phase::PreCombatMain);
+    let stolen = add_artifact(&mut scenario, P2, "P2 Relic Held By P1");
+    let p2_land = add_land(&mut scenario, P2, "P2 Land");
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Instant Probe", true, CHOICE)
+        .id();
+    let mut runner = scenario.build();
+    steal(&mut runner, stolen, P1);
+    runner.state_mut().active_player = P2;
+    runner.state_mut().priority_player = P0;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P0 };
+    assert_eq!(runner.state().seat_order, vec![P0, P1, P2]);
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast the instant on P2's turn");
+    advance_to_per_player_prompt(&mut runner);
+    assert_eq!(
+        order_candidates(&runner),
+        vec![P2, P1],
+        "reach: the static opponent population is [P2, P1]"
+    );
+    order(&mut runner, P2);
+    pick(&mut runner, p2_land);
+    assert_eq!(
+        pool(&runner),
+        vec![stolen],
+        "reach: P1's pool offers the stolen artifact"
+    );
+    assert_eq!(
+        runner
+            .state()
+            .active_per_player_zone_choice()
+            .map(|frame| frame.remaining_players.clone()),
+        Some(vec![]),
+        "reach: the queue after P1 is empty"
+    );
+    make_frame_legacy(&mut runner);
+    engine::game::elimination::eliminate_player(runner.state_mut(), P1, &mut Vec::new());
+    assert_eq!(
+        controller(&runner, stolen),
+        P2,
+        "reach: control returned to P2"
+    );
+
+    let restored = restore(&runner);
+    assert!(
+        matches!(
+            restored,
+            Err(engine::types::game_state::PersistedRestoreError::InvalidPerPlayerChoice(_))
+        ),
+        "the stale snapshot is rejected, never rebound to P2: {:?}",
+        restored.map(|state| state.active_per_player_zone_choice().cloned())
+    );
+}
+
+/// S3: a queue that is not the static population's suffix (here P0 ordered
+/// P2 before P1, a shape v97 could not produce) has no established owner.
+#[test]
+fn legacy_pool_prompt_with_a_non_suffix_queue_is_rejected() {
+    let mut scenario = GameScenario::new_n_player(3, 116);
+    scenario.at_phase(Phase::PreCombatMain);
+    add_artifact(&mut scenario, P1, "P1 Relic");
+    let p2_art = add_artifact(&mut scenario, P2, "P2 Relic");
+    let meteor = add_meteor(&mut scenario);
+    let mut runner = scenario.build();
+    cast_from_exile(&mut runner, meteor);
+    advance_to_per_player_prompt(&mut runner);
+    order(&mut runner, P2);
+    assert_eq!(pool(&runner), vec![p2_art], "reach: P2's pool is pending");
+    make_frame_legacy(&mut runner);
+    assert!(matches!(
+        restore(&runner),
+        Err(engine::types::game_state::PersistedRestoreError::InvalidPerPlayerChoice(_))
+    ));
 }
 
 // ---------------------------------------------------------------------------
@@ -1995,18 +2183,53 @@ fn an_unrelated_departure_leaves_the_prompt_unchanged() {
     );
 }
 
-/// E2: the caster concedes at the order prompt. The resolution is abandoned
-/// as one occurrence: no further choice, no destroy, priority passes on, and
-/// nothing revives it later.
+/// The outstanding election prompt (CR 800.4g): who elects, and the
+/// candidates.
+fn election(runner: &GameRunner) -> (PlayerId, Vec<PlayerId>) {
+    match &runner.state().waiting_for {
+        WaitingFor::ChooseFromZoneOpponentChooser {
+            player,
+            candidates,
+            purpose: ZoneOpponentChooserPurpose::SubstituteChooser,
+            ..
+        } => (*player, candidates.clone()),
+        other => panic!("expected an election prompt, got {other:?}"),
+    }
+}
+
+/// The outstanding pool prompt: who chooses, and the candidates.
+fn pool_prompt(runner: &GameRunner) -> (PlayerId, Vec<ObjectId>) {
+    match &runner.state().waiting_for {
+        WaitingFor::ChooseFromZoneChoice { player, cards, .. } => (*player, sorted(cards.clone())),
+        other => panic!("expected a pool prompt, got {other:?}"),
+    }
+}
+
+fn act_as(runner: &mut GameRunner, action: GameAction) {
+    runner.act(action).expect("a legal answer is accepted");
+}
+
+fn elect(runner: &mut GameRunner, nominee: PlayerId) {
+    act_as(
+        runner,
+        GameAction::ChooseZoneOpponentChooser { opponent: nominee },
+    );
+}
+
+/// E2 / S1 (CR 608.2m + CR 800.4h + CR 800.4g): the caster concedes at the
+/// order prompt. The spell keeps resolving. The order is a rule-required
+/// choice, so it goes straight to the next player in turn order (P1) — no
+/// election. Each pool pick is an object-required choice, elected separately
+/// by P1: P2 for P1's pool, then P1 for P2's pool. Both picks are destroyed.
 ///
-/// REVERT PROBE: drop the departure abandonment and only the generic repoint
-/// runs — the frame stays parked under a `Priority` prompt.
+/// REVERT PROBE: keep the first nominee for the rest of the iteration and the
+/// second pool goes to P2 with no second election.
 #[test]
-fn caster_conceding_at_the_order_prompt_abandons_the_resolution() {
+fn caster_leaving_hands_the_order_on_and_elects_each_pick_separately() {
     let mut scenario = GameScenario::new_n_player(3, 221);
     scenario.at_phase(Phase::PreCombatMain);
     let p1_art = add_artifact(&mut scenario, P1, "P1 Relic");
-    let p2_art = add_artifact(&mut scenario, P2, "P2 Relic");
+    let p2_land = add_land(&mut scenario, P2, "P2 Land");
     let meteor = add_meteor(&mut scenario);
     let mut runner = scenario.build();
 
@@ -2017,30 +2240,97 @@ fn caster_conceding_at_the_order_prompt_abandons_the_resolution() {
         vec![P1, P2],
         "reach: order prompt"
     );
+    assert!(
+        runner.state().resolving_stack_entry.is_some(),
+        "reach: Meteor is resolving"
+    );
     runner
         .act(GameAction::Concede { player_id: P0 })
         .expect("a player may concede at any time");
 
-    assert!(runner.state().active_per_player_zone_choice().is_none());
-    assert!(runner.state().active_ability_continuation().is_none());
-    assert!(runner.state().resolving_stack_entry.is_none());
-    match runner.state().waiting_for {
-        WaitingFor::Priority { player } => assert_ne!(player, P0),
-        ref other => panic!("priority passes on, got {other:?}"),
+    match &runner.state().waiting_for {
+        WaitingFor::ChooseFromZoneOpponentChooser {
+            player,
+            candidates,
+            purpose: ZoneOpponentChooserPurpose::PerPlayerChoiceOrder,
+            ..
+        } => {
+            assert_eq!(
+                *player, P1,
+                "the next player in turn order makes the order choice"
+            );
+            assert_eq!(
+                candidates,
+                &vec![P1, P2],
+                "P0's opponents, by last-known information"
+            );
+        }
+        other => panic!("expected P1's ORDER prompt, not an election: {other:?}"),
     }
+    act_as(
+        &mut runner,
+        GameAction::ChooseZoneOpponentChooser { opponent: P1 },
+    );
+
+    assert_eq!(
+        election(&runner),
+        (P1, vec![P1, P2]),
+        "P1 elects for P1's pool"
+    );
+    elect(&mut runner, P2);
+    assert_eq!(
+        pool_prompt(&runner),
+        (P2, vec![p1_art]),
+        "P2 makes P1's pick"
+    );
+    act_as(
+        &mut runner,
+        GameAction::SelectCards {
+            cards: vec![p1_art],
+        },
+    );
+
+    assert_eq!(
+        election(&runner),
+        (P1, vec![P1, P2]),
+        "a fresh election for P2's pool, though P2 is still in the game"
+    );
+    elect(&mut runner, P1);
+    assert_eq!(
+        pool_prompt(&runner),
+        (P1, vec![p2_land]),
+        "P1 makes P2's pick"
+    );
+    act_as(
+        &mut runner,
+        GameAction::SelectCards {
+            cards: vec![p2_land],
+        },
+    );
     runner.advance_until_stack_empty();
-    assert!(on_battlefield(&runner, p1_art), "no destroy");
-    assert!(on_battlefield(&runner, p2_art), "no destroy");
-    assert!(no_per_player_prompt(&runner));
+
+    assert_eq!(zone_of(&runner, p1_art), Some(Zone::Graveyard));
+    assert_eq!(zone_of(&runner, p2_land), Some(Zone::Graveyard));
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P1 },
+        "CR 800.4j: with the active player gone, the next player in turn order"
+    );
 }
 
-/// E2: the caster concedes at a pool prompt — the same abandonment.
+/// E2 / S2: the caster concedes while P2's pool is pending, after a pick was
+/// already published. The pending pool survives its election: P1 elects
+/// themself, picks from P2's pool, and both the earlier pick and this one are
+/// destroyed.
+///
+/// REVERT PROBE: clear `current` at the election and P2's pool is never
+/// presented again.
 #[test]
-fn caster_conceding_at_a_pool_prompt_abandons_the_resolution() {
+fn caster_leaving_at_a_pool_keeps_that_pool_through_its_election() {
     let mut scenario = GameScenario::new_n_player(3, 222);
     scenario.at_phase(Phase::PreCombatMain);
     let p1_art = add_artifact(&mut scenario, P1, "P1 Relic");
-    let p2_art = add_artifact(&mut scenario, P2, "P2 Relic");
+    let p2_land = add_land(&mut scenario, P2, "P2 Land");
     let meteor = add_meteor(&mut scenario);
     let mut runner = scenario.build();
 
@@ -2048,20 +2338,149 @@ fn caster_conceding_at_a_pool_prompt_abandons_the_resolution() {
     advance_to_per_player_prompt(&mut runner);
     order(&mut runner, P1);
     pick(&mut runner, p1_art);
-    assert_eq!(pool(&runner), vec![p2_art], "reach: P2's pool outstanding");
+    let chosen = runner
+        .state()
+        .chain_tracked_set_id
+        .and_then(|id| runner.state().tracked_object_sets.get(&id).cloned())
+        .unwrap_or_default();
+    assert!(
+        chosen.contains(&p1_art),
+        "reach: the first pick was published"
+    );
+    let frame = runner
+        .state()
+        .active_per_player_zone_choice()
+        .expect("reach: a parked frame");
+    assert_eq!(frame.current, Some(P2), "reach: P2's pool is pending");
+    assert!(
+        !frame.remaining_players.contains(&P2),
+        "reach: the pending pool is held only by `current`"
+    );
+
     runner
         .act(GameAction::Concede { player_id: P0 })
         .expect("a player may concede at any time");
-
-    assert!(runner.state().active_per_player_zone_choice().is_none());
-    assert!(runner.state().resolving_stack_entry.is_none());
-    runner.advance_until_stack_empty();
-    assert!(
-        on_battlefield(&runner, p1_art),
-        "the earlier pick is never destroyed"
+    assert_eq!(election(&runner), (P1, vec![P1, P2]));
+    elect(&mut runner, P1);
+    assert_eq!(
+        pool_prompt(&runner),
+        (P1, vec![p2_land]),
+        "the same pending pool"
     );
-    assert!(on_battlefield(&runner, p2_art));
-    assert!(no_per_player_prompt(&runner));
+    act_as(
+        &mut runner,
+        GameAction::SelectCards {
+            cards: vec![p2_land],
+        },
+    );
+    runner.advance_until_stack_empty();
+
+    assert_eq!(zone_of(&runner, p1_art), Some(Zone::Graveyard));
+    assert_eq!(zone_of(&runner, p2_land), Some(Zone::Graveyard));
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P1 }
+    );
+}
+
+/// S2: a nominee who leaves while choosing is replaced for the SAME pending
+/// pool by a fresh election (4 players).
+#[test]
+fn a_departing_nominee_is_replaced_for_the_same_pool() {
+    let mut scenario = GameScenario::new_n_player(4, 223);
+    scenario.at_phase(Phase::PreCombatMain);
+    add_artifact(&mut scenario, P1, "P1 Relic");
+    let p2_art = add_artifact(&mut scenario, P2, "P2 Relic");
+    let p3_art = add_artifact(&mut scenario, P3, "P3 Relic");
+    let meteor = add_meteor(&mut scenario);
+    let mut runner = scenario.build();
+
+    cast_from_exile(&mut runner, meteor);
+    advance_to_per_player_prompt(&mut runner);
+    runner
+        .act(GameAction::Concede { player_id: P0 })
+        .expect("a player may concede at any time");
+    act_as(
+        &mut runner,
+        GameAction::ChooseZoneOpponentChooser { opponent: P2 },
+    );
+    assert_eq!(election(&runner).0, P1, "P1 elects for P2's pool");
+    elect(&mut runner, P1);
+    assert_eq!(pool_prompt(&runner), (P1, vec![p2_art]));
+    let frame = runner
+        .state()
+        .active_per_player_zone_choice()
+        .expect("reach: a parked frame");
+    assert_eq!(frame.current, Some(P2), "reach: P2's pool is pending");
+    assert!(
+        !frame.remaining_players.contains(&P2),
+        "reach: `current` is not in `remaining`"
+    );
+
+    runner
+        .act(GameAction::Concede { player_id: P1 })
+        .expect("a player may concede at any time");
+    let (elector, candidates) = election(&runner);
+    assert_eq!(
+        elector, P2,
+        "the next player in turn order after P0 still in the game"
+    );
+    assert_eq!(candidates, vec![P2, P3]);
+    elect(&mut runner, P3);
+    assert_eq!(
+        pool_prompt(&runner),
+        (P3, vec![p2_art]),
+        "the same pool, a new nominee"
+    );
+    act_as(
+        &mut runner,
+        GameAction::SelectCards {
+            cards: vec![p2_art],
+        },
+    );
+    assert_eq!(election(&runner).0, P2, "P3's pool is elected afresh");
+    elect(&mut runner, P2);
+    act_as(
+        &mut runner,
+        GameAction::SelectCards {
+            cards: vec![p3_art],
+        },
+    );
+    runner.advance_until_stack_empty();
+
+    assert_eq!(zone_of(&runner, p2_art), Some(Zone::Graveyard));
+    assert_eq!(zone_of(&runner, p3_art), Some(Zone::Graveyard));
+}
+
+/// The AI's legal actions at an election prompt are exactly the surviving
+/// players.
+#[test]
+fn ai_legal_actions_at_an_election_are_the_surviving_players() {
+    let mut scenario = GameScenario::new_n_player(3, 224);
+    scenario.at_phase(Phase::PreCombatMain);
+    add_artifact(&mut scenario, P1, "P1 Relic");
+    add_artifact(&mut scenario, P2, "P2 Relic");
+    let meteor = add_meteor(&mut scenario);
+    let mut runner = scenario.build();
+    cast_from_exile(&mut runner, meteor);
+    advance_to_per_player_prompt(&mut runner);
+    order(&mut runner, P1);
+    runner
+        .act(GameAction::Concede { player_id: P0 })
+        .expect("a player may concede at any time");
+    assert_eq!(election(&runner).0, P1, "reach: an election is pending");
+    round_trip(&runner, &["\"SubstituteChooser\""]);
+    let mut offered: Vec<PlayerId> = engine::ai_support::legal_actions(runner.state())
+        .into_iter()
+        .filter_map(|action| match action {
+            GameAction::ChooseZoneOpponentChooser { opponent } => Some(opponent),
+            _ => None,
+        })
+        .collect();
+    offered.sort();
+    assert_eq!(offered, vec![P1, P2]);
+    elect(&mut runner, P2);
+    round_trip(&runner, &["\"nominee\""]);
 }
 
 /// E2 terminal: the last opponent concedes at their pool prompt — the game is
@@ -2138,14 +2557,14 @@ fn a_departure_without_a_per_player_choice_is_untouched() {
     assert_eq!(runner.state().waiting_for, before);
 }
 
-/// T1 (CR 800.4a), production path: "For each land you control, for each
-/// opponent, choose an artifact that player controls." parses to `repeat_for`
-/// (P0's two lands) over the per-opponent choice, so the first iteration parks
-/// its per-player frame above a `RepeatFor` driver. When the caster concedes
-/// at the first prompt, the whole occurrence — choice frame and repeat driver
-/// — is retired: no panic, no second iteration, nothing revived.
+/// E2 under `repeat_for` (CR 608.2m + CR 800.4g/800.4h), production path:
+/// "For each land you control, for each opponent, choose an artifact that
+/// player controls." parses to `repeat_for` over the per-opponent choice. When
+/// the caster concedes at the first prompt the resolution continues: every
+/// later choice is made by a player still in the game, each pick through its
+/// own election, and no prompt is ever addressed to the departed caster.
 #[test]
-fn caster_conceding_under_a_repeated_choice_retires_the_repeat_driver() {
+fn caster_leaving_under_a_repeated_choice_keeps_resolving() {
     const TEXT: &str =
         "For each land you control, for each opponent, choose an artifact that player controls.";
     let parsed = parse(TEXT, "Repeated Probe", &[], &["Sorcery"]);
@@ -2165,9 +2584,9 @@ fn caster_conceding_under_a_repeated_choice_retires_the_repeat_driver() {
     scenario.at_phase(Phase::PreCombatMain);
     add_land(&mut scenario, P0, "P0 Land A");
     add_land(&mut scenario, P0, "P0 Land B");
-    let p1_art = add_artifact(&mut scenario, P1, "P1 Relic");
-    let p2_art = add_artifact(&mut scenario, P2, "P2 Relic");
-    let p3_art = add_artifact(&mut scenario, P3, "P3 Relic");
+    add_artifact(&mut scenario, P1, "P1 Relic");
+    add_artifact(&mut scenario, P2, "P2 Relic");
+    add_artifact(&mut scenario, P3, "P3 Relic");
     let spell = scenario
         .add_spell_to_hand_from_oracle(P0, "Repeated Probe", false, TEXT)
         .id();
@@ -2182,37 +2601,64 @@ fn caster_conceding_under_a_repeated_choice_retires_the_repeat_driver() {
         })
         .expect("cast");
     advance_to_per_player_prompt(&mut runner);
-
     let kinds: Vec<_> = runner
         .state()
         .resolution_stack
         .iter()
         .map(engine::types::resolution::ResolutionFrame::kind)
         .collect();
-    assert_eq!(
-        kinds.last(),
-        Some(&engine::types::resolution::FrameKind::PerPlayerZoneChoice),
-        "reach: the per-player frame is active: {kinds:?}"
-    );
     assert!(
         kinds.contains(&engine::types::resolution::FrameKind::RepeatFor),
-        "reach: a repeat driver is parked beneath it: {kinds:?}"
+        "reach: a repeat driver is parked beneath the choice: {kinds:?}"
     );
 
     runner
         .act(GameAction::Concede { player_id: P0 })
         .expect("a player may concede at any time");
+
+    let mut elections = 0;
+    let mut picks = 0;
+    for _ in 0..200 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::ChooseFromZoneOpponentChooser {
+                player,
+                candidates,
+                purpose,
+                ..
+            } => {
+                assert_ne!(player, P0, "no prompt for the departed caster");
+                assert!(!candidates.contains(&P0));
+                if purpose == ZoneOpponentChooserPurpose::SubstituteChooser {
+                    elections += 1;
+                }
+                act_as(
+                    &mut runner,
+                    GameAction::ChooseZoneOpponentChooser {
+                        opponent: candidates[0],
+                    },
+                );
+            }
+            WaitingFor::ChooseFromZoneChoice { player, cards, .. } => {
+                assert_ne!(player, P0, "no prompt for the departed caster");
+                picks += 1;
+                act_as(
+                    &mut runner,
+                    GameAction::SelectCards {
+                        cards: vec![cards[0]],
+                    },
+                );
+            }
+            WaitingFor::Priority { .. } if !runner.state().stack.is_empty() => {
+                runner.act(GameAction::PassPriority).expect("pass");
+            }
+            _ => break,
+        }
+    }
+    assert!(picks >= 1, "the resolution continued after the concession");
+    assert_eq!(elections, picks, "every pick was elected separately");
     assert!(
         runner.state().resolution_stack.is_empty(),
-        "the whole occurrence is retired"
+        "nothing left parked"
     );
-    assert!(runner.state().resolving_stack_entry.is_none());
-    runner.advance_until_stack_empty();
-    assert!(
-        no_per_player_prompt(&runner),
-        "no second iteration is revived"
-    );
-    for id in [p1_art, p2_art, p3_art] {
-        assert!(on_battlefield(&runner, id));
-    }
+    assert!(runner.state().stack.is_empty());
 }

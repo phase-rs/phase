@@ -2048,7 +2048,9 @@
     "title": "Choose Opponent",
     "subtitle": "Choose which opponent makes the choice.",
     "orderTitle": "Choose Next Player",
-    "orderSubtitle": "Choose whose selection to make next."
+    "orderSubtitle": "Choose whose selection to make next.",
+    "substituteTitle": "Choose Player",
+    "substituteSubtitle": "Choose who makes this choice."
   },
   "pileOpponent": {
     "title": "Choose Opponent",

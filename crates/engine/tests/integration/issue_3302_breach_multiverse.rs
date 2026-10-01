@@ -352,8 +352,8 @@ fn breach_reanimates_only_chosen_cards_under_caster_as_phyrexian() {
 /// CR 101.4c + CR 707.10: a COPY of Breach the Multiverse resolves its own
 /// per-player iteration under its own resolution carrier (the copy's stack
 /// entry), then the original resolves under its own. Each iteration is
-/// admitted, stamped with the carrier resolving it, and ordered by the caster
-/// — whose own graveyard is a candidate. A validation control for the carrier
+/// admitted while its own carrier resolves, and ordered by the caster — whose
+/// own graveyard is a candidate. A validation control for the carrier
 /// admission rule, not evidence of a known mismatch.
 #[test]
 fn copied_breach_resolves_each_iteration_under_its_own_carrier() {
@@ -427,11 +427,10 @@ fn copied_breach_resolves_each_iteration_under_its_own_carrier() {
                     .resolving_stack_entry
                     .clone()
                     .expect("an installed carrier resolves the iteration");
-                let stamp = runner
-                    .state()
-                    .active_per_player_zone_choice()
-                    .and_then(|frame| frame.carrier);
-                assert_eq!(stamp, Some(entry.id), "stamped with the resolving carrier");
+                assert!(
+                    runner.state().active_per_player_zone_choice().is_some(),
+                    "the order prompt belongs to the parked iteration"
+                );
                 carriers.push(entry.id);
                 runner
                     .act(GameAction::ChooseZoneOpponentChooser { opponent: P1 })

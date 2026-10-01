@@ -4,7 +4,7 @@ import type { GameAction, WaitingFor } from "../../adapter/types.ts";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
-import { getPlayerDisplayName } from "../../stores/multiplayerStore.ts";
+import { getOpponentDisplayName } from "../../stores/multiplayerStore.ts";
 import { ChoiceModal } from "./ChoiceModal.tsx";
 
 type ZoneOpponentChooserWaitingFor = Extract<
@@ -27,6 +27,9 @@ interface ZoneOpponentChooserModalContentProps {
  * "for each player/opponent, choose …" iteration picks whose selection to make
  * next. Candidates may include the chooser themself, labelled "You".
  *
+ * CR 800.4g: with purpose `SubstituteChooser`, the player who would make a
+ * pending pick has left the game, and this player elects who makes it.
+ *
  * Candidates render in the ENGINE-SUPPLIED order: candidate ordering is game
  * ordering and belongs to the engine, so the client must not re-sort it.
  */
@@ -36,29 +39,41 @@ export function ZoneOpponentChooserModalContent({
 }: ZoneOpponentChooserModalContentProps) {
   const { t } = useTranslation("game");
   const { candidates, player, purpose } = waitingFor.data;
-  const choosingOrder = purpose === "PerPlayerChoiceOrder";
+  const [title, subtitle] =
+    purpose === "PerPlayerChoiceOrder"
+      ? [
+          t("zoneOpponentChooser.orderTitle", "Choose Next Player"),
+          t(
+            "zoneOpponentChooser.orderSubtitle",
+            "Choose whose selection to make next.",
+          ),
+        ]
+      : purpose === "SubstituteChooser"
+        ? [
+            t("zoneOpponentChooser.substituteTitle", "Choose Player"),
+            t(
+              "zoneOpponentChooser.substituteSubtitle",
+              "Choose who makes this choice.",
+            ),
+          ]
+        : [
+            t("zoneOpponentChooser.title", "Choose Opponent"),
+            t(
+              "zoneOpponentChooser.subtitle",
+              "Choose which opponent makes the choice.",
+            ),
+          ];
 
   return (
     <ChoiceModal
-      title={
-        choosingOrder
-          ? t("zoneOpponentChooser.orderTitle", "Choose Next Player")
-          : t("zoneOpponentChooser.title", "Choose Opponent")
-      }
-      subtitle={
-        choosingOrder
-          ? t(
-              "zoneOpponentChooser.orderSubtitle",
-              "Choose whose selection to make next.",
-            )
-          : t(
-              "zoneOpponentChooser.subtitle",
-              "Choose which opponent makes the choice.",
-            )
-      }
+      title={title}
+      subtitle={subtitle}
       options={candidates.map((candidate) => ({
         id: String(candidate),
-        label: getPlayerDisplayName(candidate, player),
+        label:
+          candidate === player
+            ? t("player.you", "You")
+            : getOpponentDisplayName(candidate),
       }))}
       onChoose={(id) => {
         dispatch({

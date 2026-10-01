@@ -2010,7 +2010,9 @@
     "title": "Elegir oponente",
     "subtitle": "Elige qué oponente hace la elección.",
     "orderTitle": "Elegir siguiente jugador",
-    "orderSubtitle": "Elige para quién harás la siguiente selección."
+    "orderSubtitle": "Elige para quién harás la siguiente selección.",
+    "substituteTitle": "Elegir jugador",
+    "substituteSubtitle": "Elige quién hace esta elección."
   },
   "pileOpponent": {
     "title": "Choose Opponent",

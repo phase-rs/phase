@@ -3318,9 +3318,9 @@ mod tests {
         }
     }
 
-    /// `ZoneOpponentChooserPurpose::PerPlayerChoiceOrder` (CR 101.4c), the
-    /// per-player frame's `current`/`carrier` fields, the resolution stack's
-    /// occurrence floor, and `PerPlayerScope::Opponents` (CR 102.2 + CR 102.3)
+    /// `ZoneOpponentChooserPurpose::PerPlayerChoiceOrder` (CR 101.4c) and
+    /// `SubstituteChooser` (CR 800.4g), the per-player frame's `current` and
+    /// `nominee` fields, and `PerPlayerScope::Opponents` (CR 102.2 + CR 102.3)
     /// are serialized; a v97 peer cannot deserialize them, so it must be
     /// refused before it receives v98 state.
     /// `ResolvedAbility.target_reads` and `AbilityDefinition.target_reads`
