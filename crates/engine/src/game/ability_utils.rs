@@ -2169,19 +2169,44 @@ fn paid_instead_delegate(ability: &ResolvedAbility) -> Option<&ResolvedAbility> 
 /// consumed) leaves that slot unmarked.
 pub(crate) fn illegal_declared_target_slots(
     declared: &ResolvedAbility,
-    validated: &ResolvedAbility,
+    validated: &mut ResolvedAbility,
 ) -> Vec<usize> {
-    fn visit(
-        declared: &ResolvedAbility,
-        validated: Option<&ResolvedAbility>,
-        targets_are_inherited: bool,
-        next_slot: &mut usize,
-        illegal: &mut Vec<usize>,
-    ) {
+    let mut illegal = Vec::new();
+    visit_illegal_declared_target_slots(
+        Some(declared),
+        Some(validated),
+        false,
+        &mut 0,
+        &mut illegal,
+    );
+    illegal
+}
+
+/// Clears target-legality metadata before an execution path that skips the
+/// normal initial legality check.
+pub(crate) fn clear_illegal_local_target_slots(ability: &mut ResolvedAbility) {
+    let mut ignored = Vec::new();
+    visit_illegal_declared_target_slots(None, Some(ability), false, &mut 0, &mut ignored);
+}
+
+fn visit_illegal_declared_target_slots(
+    declared: Option<&ResolvedAbility>,
+    mut validated: Option<&mut ResolvedAbility>,
+    targets_are_inherited: bool,
+    next_slot: &mut usize,
+    illegal: &mut Vec<usize>,
+) {
+    if let Some(validated) = validated.as_deref_mut() {
+        validated.illegal_local_target_slots.clear();
+    }
+
+    if let Some(declared) = declared {
         if let Some(delegate) = paid_instead_delegate(declared) {
-            let validated_delegate = validated.and_then(|node| node.sub_ability.as_deref());
-            visit(
-                delegate,
+            let validated_delegate = validated
+                .as_deref_mut()
+                .and_then(|node| node.sub_ability.as_deref_mut());
+            visit_illegal_declared_target_slots(
+                Some(delegate),
                 validated_delegate,
                 targets_are_inherited,
                 next_slot,
@@ -2190,31 +2215,65 @@ pub(crate) fn illegal_declared_target_slots(
             return;
         }
         if !targets_are_inherited {
-            let mut survivors = validated.map_or_else(Vec::new, |node| node.targets.clone());
-            for target in chain_node_targets(declared) {
-                match survivors.iter().position(|survivor| *survivor == target) {
+            let mut survivors = validated
+                .as_deref()
+                .map_or_else(Vec::new, |node| node.targets.clone());
+            for (local_slot, target) in declared.targets.iter().enumerate().filter(|(_, target)| {
+                !is_per_opponent_target_fanout(declared) || matches!(target, TargetRef::Object(_))
+            }) {
+                match survivors.iter().position(|survivor| survivor == target) {
                     Some(found) => {
                         survivors.swap_remove(found);
                     }
-                    None => illegal.push(*next_slot),
+                    None => {
+                        illegal.push(*next_slot);
+                        if let Some(validated) = validated.as_deref_mut() {
+                            validated.illegal_local_target_slots.push(local_slot);
+                        }
+                    }
                 }
                 *next_slot += 1;
             }
         }
         if let Some(sub_ability) = declared.sub_ability.as_deref() {
-            let validated_sub = validated.and_then(|node| node.sub_ability.as_deref());
+            let validated_sub = validated
+                .as_deref_mut()
+                .and_then(|node| node.sub_ability.as_deref_mut());
             let inherited = rider_entries_are_inherited(declared, sub_ability);
-            visit(sub_ability, validated_sub, inherited, next_slot, illegal);
+            visit_illegal_declared_target_slots(
+                Some(sub_ability),
+                validated_sub,
+                inherited,
+                next_slot,
+                illegal,
+            );
         }
         if let Some(else_ability) = declared.else_ability.as_deref() {
-            let validated_else = validated.and_then(|node| node.else_ability.as_deref());
-            visit(else_ability, validated_else, false, next_slot, illegal);
+            let validated_else = validated
+                .as_deref_mut()
+                .and_then(|node| node.else_ability.as_deref_mut());
+            visit_illegal_declared_target_slots(
+                Some(else_ability),
+                validated_else,
+                false,
+                next_slot,
+                illegal,
+            );
+        }
+    } else if let Some(validated) = validated {
+        if let Some(sub_ability) = validated.sub_ability.as_deref_mut() {
+            visit_illegal_declared_target_slots(None, Some(sub_ability), false, next_slot, illegal);
+        }
+        if let Some(else_ability) = validated.else_ability.as_deref_mut() {
+            visit_illegal_declared_target_slots(
+                None,
+                Some(else_ability),
+                false,
+                next_slot,
+                illegal,
+            );
         }
     }
-
-    let mut illegal = Vec::new();
-    visit(declared, Some(validated), false, &mut 0, &mut illegal);
-    illegal
 }
 
 /// CR 608.2b + CR 115.10a: the targets this chain SPECIFIED — one entry per
@@ -13175,16 +13234,27 @@ mod tests {
             )
         };
         let declared = node(vec![a, b.clone()]).sub_ability(node(vec![c.clone(), d]));
-        let validated = node(vec![b]).sub_ability(node(vec![c]));
+        let mut validated = node(vec![b]).sub_ability(node(vec![c]));
 
         assert_eq!(flatten_targets_in_chain(&declared).len(), 4);
         assert_eq!(
-            illegal_declared_target_slots(&declared, &validated),
+            illegal_declared_target_slots(&declared, &mut validated),
             vec![0, 3],
             "slot 0 (pruned, compacted away) and slot 3 (pruned in the sub) are illegal"
         );
+        assert_eq!(validated.illegal_local_target_slots, vec![0]);
+        assert_eq!(
+            validated
+                .sub_ability
+                .as_deref()
+                .unwrap()
+                .illegal_local_target_slots,
+            vec![1],
+            "local slots retain each node's pre-compaction indices"
+        );
+        let mut unpruned = declared.clone();
         assert!(
-            illegal_declared_target_slots(&declared, &declared).is_empty(),
+            illegal_declared_target_slots(&declared, &mut unpruned).is_empty(),
             "an unpruned chain has no illegal slots"
         );
     }
@@ -13206,13 +13276,118 @@ mod tests {
             )
         };
         let declared = node(vec![x.clone(), x.clone(), y.clone()]);
-        let validated = node(vec![x, y]);
+        let mut validated = node(vec![x, y]);
 
         assert_eq!(
-            illegal_declared_target_slots(&declared, &validated),
+            illegal_declared_target_slots(&declared, &mut validated),
             vec![1],
             "one pruned copy of a duplicated target marks one slot"
         );
+        assert_eq!(validated.illegal_local_target_slots, vec![1]);
+    }
+
+    /// CR 608.2b: the global carrier stamp retains its existing accounting when
+    /// a corresponding validated child is absent; there is simply no local node
+    /// on which to publish removal evidence.
+    #[test]
+    fn illegal_declared_target_slots_keeps_missing_child_global_accounting() {
+        let child = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(ObjectId(7))],
+            ObjectId(99),
+            PlayerId(0),
+        );
+        let declared = ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(99), PlayerId(0))
+            .sub_ability(child);
+        let mut validated = ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(99), PlayerId(0));
+
+        assert_eq!(
+            illegal_declared_target_slots(&declared, &mut validated),
+            vec![0]
+        );
+        assert!(validated.illegal_local_target_slots.is_empty());
+    }
+
+    /// CR 608.2b: local removal evidence is measured from the seeded execution
+    /// ability, not from the stack carrier whose context snapshot may be reseeded
+    /// before validation.
+    #[test]
+    fn local_illegal_target_slots_are_overwritten_from_the_seeded_execution_chain() {
+        let node = |target| {
+            ResolvedAbility::new(
+                Effect::TargetOnly {
+                    target: TargetFilter::Any,
+                },
+                vec![TargetRef::Object(ObjectId(target))],
+                ObjectId(99),
+                PlayerId(0),
+            )
+        };
+        let carrier = node(1);
+        let seeded = node(2);
+        let mut validated = seeded.clone();
+
+        assert_eq!(
+            illegal_declared_target_slots(&carrier, &mut validated),
+            vec![0],
+            "the global carrier comparison remains unchanged"
+        );
+        assert_eq!(validated.illegal_local_target_slots, vec![0]);
+
+        assert!(
+            illegal_declared_target_slots(&seeded, &mut validated).is_empty(),
+            "the seeded execution comparison replaces the carrier-derived reading"
+        );
+        assert!(validated.illegal_local_target_slots.is_empty());
+    }
+
+    /// CR 608.2b: an execution route that skips target validation cannot consume
+    /// a stale local removal stamp carried by a cloned or restored ability.
+    #[test]
+    fn clear_illegal_local_target_slots_visits_all_execution_branches() {
+        let node = || {
+            let mut ability = ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(99), PlayerId(0));
+            ability.illegal_local_target_slots = vec![0];
+            ability
+        };
+        let mut root = node();
+        root.sub_ability = Some(Box::new(node()));
+        root.else_ability = Some(Box::new(node()));
+
+        // The clear-only route must not mirror legality traversal's paid-instead
+        // delegation: both the delegator and its selected replacement can carry
+        // stale serialized metadata before an unvalidated execution.
+        let mut paid_instead_delegator = node();
+        paid_instead_delegator.context.additional_cost_paid = true;
+        let mut paid_instead_replacement = node();
+        paid_instead_replacement.condition = Some(AbilityCondition::AdditionalCostPaidInstead);
+        paid_instead_delegator.sub_ability = Some(Box::new(paid_instead_replacement));
+
+        clear_illegal_local_target_slots(&mut root);
+        clear_illegal_local_target_slots(&mut paid_instead_delegator);
+
+        assert!(root.illegal_local_target_slots.is_empty());
+        assert!(root
+            .sub_ability
+            .as_deref()
+            .unwrap()
+            .illegal_local_target_slots
+            .is_empty());
+        assert!(root
+            .else_ability
+            .as_deref()
+            .unwrap()
+            .illegal_local_target_slots
+            .is_empty());
+        assert!(paid_instead_delegator.illegal_local_target_slots.is_empty());
+        assert!(paid_instead_delegator
+            .sub_ability
+            .as_deref()
+            .unwrap()
+            .illegal_local_target_slots
+            .is_empty());
     }
 
     /// Helper: the Swords head — `ChangeZone { origin: None, destination:
@@ -13515,14 +13690,20 @@ mod tests {
             &declared,
             declared.sub_ability.as_deref().unwrap()
         ));
-        let a_pruned = chain(vec![], vec![], vec![TargetRef::Object(b)]);
-        assert_eq!(illegal_declared_target_slots(&declared, &a_pruned), vec![0]);
-        let b_pruned = chain(
+        let mut a_pruned = chain(vec![], vec![], vec![TargetRef::Object(b)]);
+        assert_eq!(
+            illegal_declared_target_slots(&declared, &mut a_pruned),
+            vec![0]
+        );
+        let mut b_pruned = chain(
             vec![TargetRef::Object(a)],
             vec![TargetRef::Object(a)],
             vec![],
         );
-        assert_eq!(illegal_declared_target_slots(&declared, &b_pruned), vec![1]);
+        assert_eq!(
+            illegal_declared_target_slots(&declared, &mut b_pruned),
+            vec![1]
+        );
         let tap_node = declared
             .sub_ability
             .as_deref()

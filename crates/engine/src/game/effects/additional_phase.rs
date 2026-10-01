@@ -64,9 +64,10 @@ fn added_to_turn_in_progress(
         ExtraPhaseRecipient::TargetedPlayer(_) => {
             // CR 115.1 + CR 608.2b: the embedded recipient filter assigned
             // this instruction its own player slot at announcement and the
-            // chain's initial legality pass retained only its legal target.
-            // Independent empty slots never inherit another clause's player;
-            // legality is not checked again after earlier instructions run.
+            // chain's initial legality pass retained only its legal target. A
+            // recipient pruned by that pass carries removal evidence and cannot
+            // be refilled by an earlier instruction; legality is not checked
+            // again after earlier instructions run.
             ability.targets.iter().find_map(|target| match target {
                 TargetRef::Player(player) => Some(*player),
                 TargetRef::Object(_) => None,
@@ -311,6 +312,7 @@ mod tests {
             target_incarnations: Vec::new(),
             selected_target_incarnations: Vec::new(),
             illegal_target_slots: Vec::new(),
+            illegal_local_target_slots: Vec::new(),
             targets: vec![],
             kind: AbilityKind::Spell,
             sub_ability: None,

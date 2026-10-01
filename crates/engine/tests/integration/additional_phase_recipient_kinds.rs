@@ -297,6 +297,75 @@ fn a_player_becoming_hexproof_mid_resolution_keeps_the_announced_phase_grant() {
     assert_eq!(outcome.state().extra_phases.len(), 1);
 }
 
+/// CR 608.2b: a child player target pruned before an interactive Scry pause
+/// remains empty after its continuation resumes; the legal earlier target still
+/// resolves. The positive row proves an unstamped child still receives its own
+/// announced recipient.
+#[test]
+fn scry_parked_continuation_preserves_pruned_child_target_evidence() {
+    const TEXT: &str =
+        "Target player gains 3 life. Scry 1. Target player gets an additional combat phase after this phase.";
+
+    for (hexproof, expected_phases) in [(false, 1), (true, 0)] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_card_to_library_top(P1, "Plains");
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P1, "Scry Recipient Probe", true, TEXT)
+            .with_mana_cost(ManaCost::generic(0))
+            .id();
+        let mut runner = scenario.build();
+        runner.act(GameAction::PassPriority).expect("P0 passes");
+        let mut committed = runner.cast(spell).target_players(&[P1, P0]).commit();
+        if hexproof {
+            grant_hexproof(committed.state_mut(), P0);
+            assert!(player_has_hexproof(committed.state(), P0));
+        }
+
+        let mut events = committed
+            .act(GameAction::PassPriority)
+            .expect("P1 passes")
+            .events;
+        events.extend(
+            committed
+                .act(GameAction::PassPriority)
+                .expect("P0 resolves the spell")
+                .events,
+        );
+        let cards = match &committed.state().waiting_for {
+            WaitingFor::ScryChoice { cards, .. } => cards.clone(),
+            other => panic!("expected ScryChoice, got {other:?}"),
+        };
+        assert!(
+            committed
+                .state()
+                .active_ability_continuation()
+                .is_some_and(|continuation| {
+                    matches!(&continuation.chain.effect, Effect::AdditionalPhase { .. })
+                        && (hexproof == !continuation.chain.illegal_local_target_slots.is_empty())
+                }),
+            "the parked child preserves its validation evidence"
+        );
+        events.extend(
+            committed
+                .act(GameAction::SelectCards { cards })
+                .expect("answer Scry through apply")
+                .events,
+        );
+
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                GameEvent::LifeChanged { player_id, amount, .. }
+                    if *player_id == P1 && *amount == 3
+            )),
+            "reach guard: the earlier legal instruction resolved"
+        );
+        assert!(resolved_additional_phase(&events));
+        assert_eq!(committed.state().extra_phases.len(), expected_phases);
+    }
+}
+
 /// CR 500.10a: "each player gets" grants the phase to each player in turn,
 /// and each grant is gated on that player's own turn. On P0's and P1's turns
 /// exactly one combat is added. Reach guard: the effect resolves once per player.

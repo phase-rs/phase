@@ -4135,11 +4135,11 @@ pub(crate) fn should_propagate_parent_targets(
 }
 
 /// Whether an empty-targeted child can inherit the parent's bound targets.
-/// Kept separate from the parent's current target population so structural
-/// continuation analysis can use the same authority as runtime propagation.
+/// A node emptied by initial target validation carries local removal evidence;
+/// intentionally empty nodes retain the original inheritance rules.
 pub(crate) fn can_inherit_parent_targets(sub: &ResolvedAbility) -> bool {
     sub.targets.is_empty()
-        && !sub_has_independent_primary_stack_target_slot(sub)
+        && sub.illegal_local_target_slots.is_empty()
         && sub.reads_chosen_group.is_none()
         && !has_resolution_owned_zone_choice(sub)
         && (sub.target_choice_timing != TargetChoiceTiming::Resolution
@@ -4157,15 +4157,6 @@ pub(crate) fn can_inherit_parent_targets(sub: &ResolvedAbility) -> bool {
             .target_filter()
             .is_some_and(TargetFilter::references_exiled_by_source)
             && !effect_refs_parent_target(&sub.effect))
-}
-
-/// CR 115.1 + CR 608.2b: a primary independently announced slot keeps its
-/// own chosen target, or no target after initial resolution-time legality
-/// checking. Another instruction's surviving target must never replace it.
-/// Specialized multi-role target layouts retain their existing handling.
-fn sub_has_independent_primary_stack_target_slot(sub: &ResolvedAbility) -> bool {
-    sub.target_choice_timing == TargetChoiceTiming::Stack
-        && crate::game::triggers::extract_target_filter_from_effect(&sub.effect).is_some()
 }
 
 /// CR 115.10 + CR 608.2d: a nontargeted zone choice announced while the effect
@@ -18717,12 +18708,11 @@ fn fails_shared_quality(state: &GameState, effective: &ResolvedAbility) -> bool 
     }
 }
 
-/// CR 115.6 + CR 608.2c: the parent targets an undeclared child inherits on the
-/// chain's ordinary descent: an independently announced primary stack slot
-/// inherits nothing. Other children retain players and objects unless the child owns an
-/// independent object slot.
+/// CR 115.6 + CR 608.2c: an empty child with local initial-legality removal
+/// evidence inherits nothing. Other children retain players and objects unless
+/// the child owns an independent object slot.
 fn inherited_parent_targets(parent: &ResolvedAbility, sub: &ResolvedAbility) -> Vec<TargetRef> {
-    if sub_has_independent_primary_stack_target_slot(sub) {
+    if sub.targets.is_empty() && !sub.illegal_local_target_slots.is_empty() {
         return Vec::new();
     }
     let has_independent_target_slot = sub_has_independent_object_target_slot(sub);
@@ -20469,10 +20459,10 @@ mod tests {
     use super::*;
     use crate::database::synthesis::synthesize_extort;
 
-    /// CR 115.1 + CR 608.2b: independent declared slots cannot be refilled,
-    /// while a context reference still consumes its parent's target.
+    /// CR 608.2b: only an empty node carrying measured removal evidence refuses
+    /// parent-target inheritance; an intentionally empty node retains it.
     #[test]
-    fn independent_empty_target_slots_do_not_inherit_parent_targets() {
+    fn only_pruned_empty_target_slots_do_not_inherit_parent_targets() {
         let parent = ResolvedAbility::new(
             Effect::GainLife {
                 amount: QuantityExpr::Fixed { value: 1 },
@@ -20485,49 +20475,38 @@ mod tests {
             ObjectId(1),
             PlayerId(0),
         );
-        for (effect, expected) in [
-            (
-                Effect::GainLife {
-                    amount: QuantityExpr::Fixed { value: 1 },
-                    player: TargetFilter::Player,
-                },
-                false,
-            ),
-            (
-                Effect::DealDamage {
-                    amount: QuantityExpr::Fixed { value: 1 },
-                    target: TargetFilter::Any,
-                    damage_source: None,
-                    excess: None,
-                },
-                false,
-            ),
-            (
-                Effect::Destroy {
-                    target: TargetFilter::ParentTarget,
-                    cant_regenerate: false,
-                },
-                true,
-            ),
-            (
-                Effect::GainLife {
-                    amount: QuantityExpr::Fixed { value: 1 },
-                    player: TargetFilter::Any,
-                },
-                true,
-            ),
+        for effect in [
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Player,
+            },
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Any,
+                damage_source: None,
+                excess: None,
+            },
+            Effect::Destroy {
+                target: TargetFilter::ParentTarget,
+                cant_regenerate: false,
+            },
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Any,
+            },
         ] {
-            let child = ResolvedAbility::new(effect, Vec::new(), ObjectId(1), PlayerId(0));
-            assert_eq!(can_inherit_parent_targets(&child), expected);
-            assert_eq!(should_propagate_parent_targets(&parent, &child), expected);
+            let mut child = ResolvedAbility::new(effect, Vec::new(), ObjectId(1), PlayerId(0));
+            assert!(can_inherit_parent_targets(&child));
+            assert!(should_propagate_parent_targets(&parent, &child));
             assert_eq!(
                 inherited_parent_targets(&parent, &child),
-                if expected {
-                    parent.targets.clone()
-                } else {
-                    Vec::new()
-                }
+                parent.targets.clone()
             );
+
+            child.illegal_local_target_slots = vec![0];
+            assert!(!can_inherit_parent_targets(&child));
+            assert!(!should_propagate_parent_targets(&parent, &child));
+            assert!(inherited_parent_targets(&parent, &child).is_empty());
         }
     }
 
