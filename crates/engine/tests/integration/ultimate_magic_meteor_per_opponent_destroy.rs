@@ -2654,8 +2654,10 @@ fn caster_leaving_under_a_repeated_choice_keeps_resolving() {
             _ => break,
         }
     }
-    assert!(picks >= 1, "the resolution continued after the concession");
-    assert_eq!(elections, picks, "every pick was elected separately");
+    // Two P0 lands x three opponents with an artifact each: six pool picks,
+    // each needing its own election (CR 800.4g).
+    assert_eq!(picks, 6, "every repeated pool pick was made");
+    assert_eq!(elections, 6, "every pick was elected separately");
     assert!(
         runner.state().resolution_stack.is_empty(),
         "nothing left parked"

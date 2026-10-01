@@ -588,3 +588,183 @@ fn ghouls_night_out_caster_orders_every_graveyard() {
         assert_eq!(controller_of(&runner, creature), P0);
     }
 }
+
+/// The engine's own save/restore pipeline.
+fn restore(
+    runner: &GameRunner,
+) -> Result<engine::types::game_state::GameState, engine::types::game_state::PersistedRestoreError>
+{
+    let persisted = serde_json::to_string(&engine::types::game_state::PersistedGameState::capture(
+        runner.state().clone(),
+    ))
+    .expect("persisted state serializes");
+    serde_json::from_str::<engine::types::game_state::PersistedGameState>(&persisted)
+        .expect("persisted state decodes")
+        .prepare_for_restore(
+            engine::types::game_state::PersistedRestoreFinalization::DeferUntilRehydrated,
+        )?
+        .finalize_after_rehydration(|_| Ok(()))
+}
+
+/// Reshape the live parked frame into its legacy (v97) form.
+fn make_frame_legacy(runner: &mut GameRunner) {
+    let mut frame = runner
+        .state_mut()
+        .take_active_per_player_zone_choice()
+        .expect("the per-player frame is the top")
+        .expect("reach: a parked frame");
+    frame.current = None;
+    frame.nominee = None;
+    runner.state_mut().push_per_player_zone_choice(frame);
+}
+
+/// Cast Breach in a 3-player game (optionally after reversing the turn order
+/// with a real "Reverse the game's turn order." spell), order `first` then
+/// pick from its graveyard, then order `second`, leaving `second`'s pool
+/// pending. Returns the runner and every graveyard creature.
+fn breach_parked_on_second_pool(
+    seed: u64,
+    reverse: bool,
+    first: PlayerId,
+    second: PlayerId,
+) -> (GameRunner, Vec<ObjectId>) {
+    const P2: PlayerId = PlayerId(2);
+    let mut scenario = GameScenario::new_n_player(3, seed);
+    scenario.at_phase(Phase::PreCombatMain);
+    for &pid in &[P0, P1, P2] {
+        let names: Vec<String> = (0..10).map(|i| format!("Filler {i}")).collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        scenario.with_library_top(pid, &names);
+    }
+    let creatures: Vec<ObjectId> = [P0, P1, P2]
+        .iter()
+        .map(|&pid| {
+            scenario
+                .add_creature_to_graveyard(pid, &format!("P{} Creature", pid.0), 2, 2)
+                .id()
+        })
+        .collect();
+    let reverser = scenario
+        .add_spell_to_hand_from_oracle(P0, "Aeon Probe", false, "Reverse the game's turn order.")
+        .id();
+    let breach = scenario
+        .add_spell_to_hand_from_oracle(P0, "Breach the Multiverse", false, BREACH_ORACLE)
+        .id();
+    let mut runner = scenario.build();
+    let cast = |runner: &mut GameRunner, id: ObjectId| {
+        let card_id = runner.state().objects[&id].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: id,
+                card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("cast");
+    };
+    if reverse {
+        cast(&mut runner, reverser);
+        runner.advance_until_stack_empty();
+    }
+    cast(&mut runner, breach);
+    advance_to_choice_or_empty(&mut runner);
+    runner
+        .act(GameAction::ChooseZoneOpponentChooser { opponent: first })
+        .expect("order the first graveyard");
+    let first_pick = creatures[first.0 as usize];
+    answer_pick(&mut runner, P0, first_pick);
+    runner
+        .act(GameAction::ChooseZoneOpponentChooser { opponent: second })
+        .expect("order the second graveyard");
+    (runner, creatures)
+}
+
+fn finish_breach(runner: &mut GameRunner, picks: &[ObjectId]) {
+    for &pick in picks {
+        advance_to_choice_or_empty(runner);
+        answer_pick(runner, P0, pick);
+    }
+    runner.advance_until_stack_empty();
+    for &pick in picks {
+        assert_eq!(
+            zone_of(runner, pick),
+            Zone::Battlefield,
+            "{pick:?} reanimated"
+        );
+    }
+}
+
+/// R7-B: a genuine v97 Breach save under REVERSED turn order (APNAP
+/// [P0, P2, P1]) parked on P2's pool with `remaining = [P1]` restores with P2
+/// as owner — the migration's population follows the turn-order direction —
+/// and the resolution finishes.
+///
+/// REVERT PROBE: order the static population clockwise and this save is
+/// rejected.
+#[test]
+fn legacy_breach_save_under_reversed_turn_order_restores() {
+    const P2: PlayerId = PlayerId(2);
+    let (mut runner, creatures) = breach_parked_on_second_pool(3306, true, P0, P2);
+    assert_eq!(
+        engine::game::players::apnap_order(runner.state()),
+        vec![P0, P2, P1],
+        "reach: reversed APNAP order"
+    );
+    assert!(
+        runner.state().players.iter().all(|p| !p.is_eliminated),
+        "reach: no departures"
+    );
+    let frame = runner
+        .state()
+        .active_per_player_zone_choice()
+        .expect("reach: a parked frame")
+        .clone();
+    assert_eq!(frame.current, Some(P2), "reach: P2's pool is pending");
+    assert_eq!(frame.remaining_players, vec![P1], "reach: the v97 queue");
+    make_frame_legacy(&mut runner);
+
+    let restored = restore(&runner).expect("a reversed-order v97 save restores");
+    assert_eq!(
+        restored
+            .active_per_player_zone_choice()
+            .and_then(|frame| frame.current),
+        Some(P2),
+        "the owner is re-established"
+    );
+    let mut runner = GameRunner::from_state(restored);
+    finish_breach(&mut runner, &[creatures[2], creatures[1]]);
+}
+
+/// R7-B control: the same reversed position saved in the current schema
+/// (explicit `current`) restores and finishes without any inference.
+#[test]
+fn current_schema_breach_save_under_reversed_turn_order_restores() {
+    const P2: PlayerId = PlayerId(2);
+    let (runner, creatures) = breach_parked_on_second_pool(3307, true, P0, P2);
+    let restored = restore(&runner).expect("a current-schema save restores");
+    let mut runner = GameRunner::from_state(restored);
+    finish_breach(&mut runner, &[creatures[2], creatures[1]]);
+}
+
+/// R7-B control: a v97 Breach save under the NORMAL turn order (APNAP
+/// [P0, P1, P2]) parked on P1's pool with `remaining = [P2]` restores with P1
+/// as owner.
+#[test]
+fn legacy_breach_save_under_normal_turn_order_restores() {
+    const P2: PlayerId = PlayerId(2);
+    let (mut runner, creatures) = breach_parked_on_second_pool(3308, false, P0, P1);
+    assert_eq!(
+        engine::game::players::apnap_order(runner.state()),
+        vec![P0, P1, P2]
+    );
+    make_frame_legacy(&mut runner);
+    let restored = restore(&runner).expect("a normal-order v97 save restores");
+    assert_eq!(
+        restored
+            .active_per_player_zone_choice()
+            .and_then(|frame| frame.current),
+        Some(P1)
+    );
+    let mut runner = GameRunner::from_state(restored);
+    finish_breach(&mut runner, &[creatures[1], creatures[2]]);
+}

@@ -2,6 +2,7 @@ use rand::seq::IndexedRandom; // rand 0.9: `choose_multiple` on `[T]` lives here
 
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::players;
+use crate::game::topology;
 use crate::types::ability::{
     ChooseFromZoneConstraint, Effect, EffectError, EffectKind, ForEachCategoryAction,
     ParentTargetMissingReason, PerPlayerScope, ReciprocalZoneChoiceRole, ResolvedAbility,
@@ -1058,10 +1059,22 @@ fn advance_per_player_iteration(
         ZoneChoiceChooser::OwningPlayer => owner,
         _ => resolve_chooser(state, ability, spec.chooser)?,
     };
-    let maker = if players::is_alive(state, base_maker) {
-        Some(base_maker)
-    } else {
-        nominee.filter(|&player| players::is_alive(state, player))
+    let maker = match spec.chooser {
+        // CR 800.4g: substitution for a departed maker is modelled only for the
+        // controller chooser, whose iteration the controller's own object
+        // requires. A live base maker always makes the pick.
+        ZoneChoiceChooser::Controller if !players::is_alive(state, base_maker) => {
+            nominee.filter(|&player| players::is_alive(state, player))
+        }
+        ZoneChoiceChooser::Controller => Some(base_maker),
+        // Each owner picks from their own zone; a departed owner has no pool.
+        ZoneChoiceChooser::OwningPlayer => Some(base_maker),
+        // An elected opponent's lifetime and replacement (the controller elects
+        // a substitute, CR 800.4g) are not modelled: the resolved opponent keeps
+        // making every pick, as before.
+        ZoneChoiceChooser::Opponent => Some(base_maker),
+        // A single-pool reciprocal consumer, never a per-player population.
+        ZoneChoiceChooser::ImmediatePriorSelectedCardOwner { .. } => Some(base_maker),
     };
     let cursor = PerPlayerCursor {
         remaining,
@@ -1144,18 +1157,26 @@ fn finish_per_player_iteration(
     });
 }
 
-/// The active per-player frame, checked against the prompt being answered.
+/// The active per-player frame, checked against the prompt being answered: an
+/// order prompt is raised with no pending pool, and an election with a pending
+/// pool that has no nominee yet.
 fn take_frame_for_prompt(
     state: &mut GameState,
     prompt_ability: &ResolvedAbility,
-    expects_pool: bool,
+    purpose: ZoneOpponentChooserPurpose,
 ) -> Result<(Box<ResolvedAbility>, PerPlayerCursor), EffectError> {
     let frame = state.active_per_player_zone_choice().ok_or_else(|| {
         EffectError::InvalidParam("no per-player iteration owns this prompt".to_string())
     })?;
-    if frame.current.is_some() != expects_pool
-        || frame.ability.source_id != prompt_ability.source_id
-    {
+    let frame_awaits_prompt = match purpose {
+        ZoneOpponentChooserPurpose::PerPlayerChoiceOrder => frame.current.is_none(),
+        ZoneOpponentChooserPurpose::SubstituteChooser => {
+            frame.current.is_some() && frame.nominee.is_none()
+        }
+        ZoneOpponentChooserPurpose::Ordinary
+        | ZoneOpponentChooserPurpose::BindReciprocalConsume => false,
+    };
+    if !frame_awaits_prompt || frame.ability.source_id != prompt_ability.source_id {
         return Err(EffectError::InvalidParam(
             "the active per-player iteration is not waiting on this prompt".to_string(),
         ));
@@ -1184,7 +1205,11 @@ pub(crate) fn answer_per_player_order(
             "{picked:?} is not a remaining player of this per-player iteration"
         )));
     }
-    let (ability, mut cursor) = take_frame_for_prompt(state, prompt_ability, false)?;
+    let (ability, mut cursor) = take_frame_for_prompt(
+        state,
+        prompt_ability,
+        ZoneOpponentChooserPurpose::PerPlayerChoiceOrder,
+    )?;
     cursor.remaining.retain(|&player| player != picked);
     cursor.current = Some(picked);
     cursor.nominee = None;
@@ -1205,7 +1230,11 @@ pub(crate) fn answer_substitute_chooser(
             "{elected:?} has left the game and cannot be elected"
         )));
     }
-    let (ability, mut cursor) = take_frame_for_prompt(state, prompt_ability, true)?;
+    let (ability, mut cursor) = take_frame_for_prompt(
+        state,
+        prompt_ability,
+        ZoneOpponentChooserPurpose::SubstituteChooser,
+    )?;
     cursor.nominee = Some(elected);
     advance_per_player_iteration(state, &ability, cursor, events)
 }
@@ -1360,12 +1389,14 @@ fn static_per_player_population(
     ability: &ResolvedAbility,
     scope: PerPlayerScope,
 ) -> Vec<PlayerId> {
-    let seats = &state.seat_order;
-    let start = seats
-        .iter()
-        .position(|&player| player == state.active_player)
-        .unwrap_or(0);
-    let apnap = (0..seats.len()).map(|offset| seats[(start + offset) % seats.len()]);
+    // CR 101.4 + CR 103.1: the same direction- and topology-aware APNAP walk
+    // the producer used, admitting players who have since left the game.
+    let apnap = topology::apnap_order_admitting(
+        state,
+        state.active_player,
+        topology::SeatAdmission::IncludingDeparted,
+    )
+    .into_iter();
     match scope {
         PerPlayerScope::AllPlayers => apnap.collect(),
         PerPlayerScope::OtherPlayers => apnap.filter(|&p| p != ability.controller).collect(),
@@ -4657,7 +4688,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Resolution carrier, occurrence floor and departure (CR 608.2, CR 800.4a)
+    // Resolution carrier admission and departure (CR 608.2, CR 800.4a)
     // -----------------------------------------------------------------------
 
     use crate::types::format::FormatConfig;
@@ -4891,6 +4922,93 @@ mod tests {
         assert!(
             state.active_per_player_zone_choice().is_none(),
             "(c) nothing parks"
+        );
+    }
+
+    /// R7-A: a per-player iteration whose chooser is a (targeted) OPPONENT
+    /// keeps its earlier, deferred behaviour when that opponent has left: no
+    /// substitute election (which CR 800.4g would give to the still-present
+    /// controller, not to the next player in turn order). Electing, latching
+    /// and replacing an opponent chooser is a disclosed, unimplemented gap.
+    ///
+    /// REVERT PROBE: apply the dead-maker election to every chooser and this
+    /// iteration raises a `SubstituteChooser` prompt.
+    #[test]
+    fn opponent_chooser_keeps_its_deferred_path_when_the_opponent_leaves() {
+        let mut state = GameState::new(FormatConfig::free_for_all(), 4, 82);
+        state.turn_number = 1;
+        for (card, owner) in [(1, 1), (2, 2), (3, 3)] {
+            create_object(
+                &mut state,
+                CardId(820 + card),
+                PlayerId(owner),
+                format!("P{owner} Relic"),
+                Zone::Battlefield,
+            );
+        }
+        install_test_carrier(&mut state, ObjectId(820), PlayerId(0));
+        let mut ability = per_opponent_battlefield_choice(ObjectId(820), PlayerId(0));
+        if let Effect::ChooseFromZone { chooser, .. } = &mut ability.effect {
+            *chooser = Chooser::Opponent.into();
+        }
+        ability.targets = vec![TargetRef::Player(PlayerId(1))];
+        crate::game::elimination::eliminate_player(&mut state, PlayerId(1), &mut Vec::new());
+        assert!(
+            !players::is_alive(&state, PlayerId(1)) && players::is_alive(&state, PlayerId(0)),
+            "reach: the targeted chooser left; the controller is still in the game"
+        );
+
+        resolve(&mut state, &ability, &mut Vec::new()).expect("the iteration parks");
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ChooseFromZoneChoice { .. }),
+            "the deferred path presents a pool, never an election: {:?}",
+            state.waiting_for
+        );
+        let frame = state
+            .active_per_player_zone_choice()
+            .expect("reach: the iteration parked");
+        assert_eq!(frame.nominee, None, "no substitute was elected");
+        assert_eq!(
+            frame.current,
+            Some(PlayerId(2)),
+            "the APNAP walk is unchanged"
+        );
+    }
+
+    /// R7-A sibling: with an opponent chooser still in the game, the iteration
+    /// keeps its earlier APNAP walk — no order prompt (CR 101.4c ordering is
+    /// implemented only for the controller chooser).
+    #[test]
+    fn opponent_chooser_keeps_the_apnap_walk() {
+        let mut state = GameState::new(FormatConfig::free_for_all(), 4, 83);
+        state.turn_number = 1;
+        for (card, owner) in [(1, 1), (2, 2), (3, 3)] {
+            create_object(
+                &mut state,
+                CardId(830 + card),
+                PlayerId(owner),
+                format!("P{owner} Relic"),
+                Zone::Battlefield,
+            );
+        }
+        install_test_carrier(&mut state, ObjectId(830), PlayerId(0));
+        let mut ability = per_opponent_battlefield_choice(ObjectId(830), PlayerId(0));
+        if let Effect::ChooseFromZone { chooser, .. } = &mut ability.effect {
+            *chooser = Chooser::Opponent.into();
+        }
+        ability.targets = vec![TargetRef::Player(PlayerId(1))];
+        resolve(&mut state, &ability, &mut Vec::new()).expect("the iteration parks");
+        match &state.waiting_for {
+            WaitingFor::ChooseFromZoneChoice { player, .. } => {
+                assert_eq!(*player, PlayerId(1), "the targeted opponent chooses")
+            }
+            other => panic!("expected the APNAP walk's first pool, got {other:?}"),
+        }
+        assert_eq!(
+            state
+                .active_per_player_zone_choice()
+                .and_then(|frame| frame.current),
+            Some(PlayerId(1))
         );
     }
 
