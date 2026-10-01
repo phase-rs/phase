@@ -135,10 +135,11 @@ pub fn resolve(
             max_total_mv,
             zones,
             graveyard_replacement,
-            // A directly parsed `FreeCastFromZones` has no gains-rider producer:
-            // the recognizer attaches riders to `CastFromZone`/`CastCopyOfCard`
-            // parents (BF-P2-9), and the effect carries no rider field
-            // (BF-P2-8). Only the `CastFromZone` conversions snapshot one.
+            // A directly parsed `FreeCastFromZones` keeps a following rider as
+            // a sequential sibling rather than a sub-ability, so the
+            // chain-metadata skip does not claim it and no rider reaches these
+            // casts (BF-P2-9); the effect also carries no rider field (BF-P2-8).
+            // Only the `CastFromZone` conversions snapshot one.
             enters_with_modifications: Vec::new(),
             face_policy,
         },
