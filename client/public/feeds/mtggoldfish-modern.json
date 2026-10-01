@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "modern",
   "version": 1,
-  "updated": "2026-09-30T00:00:00Z",
+  "updated": "2026-10-01T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/modern",
   "decks": [
     {
@@ -1028,9 +1028,10 @@
       ]
     },
     {
-      "name": "Boros Ponza",
+      "name": "Ruby Storm",
       "author": "MTGGoldfish",
       "colors": [
+        "B",
         "R",
         "W"
       ],
@@ -1039,122 +1040,134 @@
       ],
       "main": [
         {
-          "count": 4,
-          "name": "Erode"
-        },
-        {
-          "count": 4,
-          "name": "Cori Mountain Monastery"
-        },
-        {
-          "count": 4,
-          "name": "Demolition Field"
-        },
-        {
-          "count": 4,
-          "name": "Price of Freedom"
-        },
-        {
-          "count": 3,
-          "name": "Avengers Disassembled"
-        },
-        {
-          "count": 1,
-          "name": "Castle Ardenvale"
-        },
-        {
-          "count": 4,
-          "name": "Sunken Citadel"
-        },
-        {
-          "count": 4,
-          "name": "Field of Ruin"
+          "count": 2,
+          "name": "Arid Mesa"
         },
         {
           "count": 2,
+          "name": "Artist's Talent"
+        },
+        {
+          "count": 1,
+          "name": "Blood Crypt"
+        },
+        {
+          "count": 2,
+          "name": "Bloodstained Mire"
+        },
+        {
+          "count": 4,
+          "name": "Desperate Ritual"
+        },
+        {
+          "count": 1,
+          "name": "Elegant Parlor"
+        },
+        {
+          "count": 1,
+          "name": "Fiery Islet"
+        },
+        {
+          "count": 1,
+          "name": "Gemstone Caverns"
+        },
+        {
+          "count": 1,
+          "name": "Grapeshot"
+        },
+        {
+          "count": 4,
+          "name": "Hex Magic"
+        },
+        {
+          "count": 4,
+          "name": "Manamorphose"
+        },
+        {
+          "count": 4,
           "name": "Mountain"
         },
         {
           "count": 3,
-          "name": "Galvanic Discharge"
+          "name": "Past in Flames"
         },
         {
           "count": 4,
-          "name": "Cleansing Wildfire"
+          "name": "Pyretic Ritual"
         },
         {
-          "count": 3,
+          "count": 4,
+          "name": "Ral, Monsoon Mage"
+        },
+        {
+          "count": 4,
+          "name": "Reckless Impulse"
+        },
+        {
+          "count": 4,
+          "name": "Ruby Medallion"
+        },
+        {
+          "count": 1,
           "name": "Sacred Foundry"
         },
         {
           "count": 1,
-          "name": "The Legend of Roku"
-        },
-        {
-          "count": 4,
-          "name": "Plains"
-        },
-        {
-          "count": 4,
-          "name": "Solitude"
-        },
-        {
-          "count": 4,
-          "name": "Wrath of the Skies"
+          "name": "Shatterskull Smashing"
         },
         {
           "count": 1,
-          "name": "Wrath of God"
+          "name": "Thundering Falls"
         },
         {
-          "count": 3,
-          "name": "Relic of Progenitus"
+          "count": 1,
+          "name": "Valakut Awakening"
+        },
+        {
+          "count": 2,
+          "name": "Wish"
         },
         {
           "count": 4,
-          "name": "Path to Exile"
+          "name": "Wooded Foothills"
+        },
+        {
+          "count": 4,
+          "name": "Wrenn's Resolve"
         }
       ],
       "sideboard": [
         {
-          "count": 4,
-          "name": "High Noon"
-        },
-        {
-          "count": 1,
-          "name": "Elixir of Immortality"
-        },
-        {
           "count": 2,
-          "name": "Surgical Extraction"
+          "name": "Brotherhood's End"
         },
         {
           "count": 1,
-          "name": "Rest in Peace"
-        },
-        {
-          "count": 2,
-          "name": "Disruptor Flute"
+          "name": "Galvanic Relay"
         },
         {
           "count": 1,
-          "name": "Chandra, Awakened Inferno"
+          "name": "Grapeshot"
+        },
+        {
+          "count": 3,
+          "name": "Orim's Chant"
         },
         {
           "count": 1,
+          "name": "Past in Flames"
+        },
+        {
+          "count": 3,
+          "name": "Prismatic Ending"
+        },
+        {
+          "count": 1,
+          "name": "Untimely Malfunction"
+        },
+        {
+          "count": 3,
           "name": "Wear // Tear"
-        },
-        {
-          "count": 1,
-          "name": "Avengers Disassembled"
-        },
-        {
-          "count": 1,
-          "name": "Wrath of God"
-        },
-        {
-          "count": 1,
-          "name": "Kaheera, the Orphanguard"
         }
       ]
     },
@@ -1319,10 +1332,9 @@
       ]
     },
     {
-      "name": "Ruby Storm",
+      "name": "Boros Ponza",
       "author": "MTGGoldfish",
       "colors": [
-        "B",
         "R",
         "W"
       ],
@@ -1331,134 +1343,122 @@
       ],
       "main": [
         {
+          "count": 4,
+          "name": "Erode"
+        },
+        {
+          "count": 4,
+          "name": "Cori Mountain Monastery"
+        },
+        {
+          "count": 4,
+          "name": "Demolition Field"
+        },
+        {
+          "count": 4,
+          "name": "Price of Freedom"
+        },
+        {
+          "count": 3,
+          "name": "Avengers Disassembled"
+        },
+        {
+          "count": 1,
+          "name": "Castle Ardenvale"
+        },
+        {
+          "count": 4,
+          "name": "Sunken Citadel"
+        },
+        {
+          "count": 4,
+          "name": "Field of Ruin"
+        },
+        {
           "count": 2,
-          "name": "Arid Mesa"
-        },
-        {
-          "count": 2,
-          "name": "Artist's Talent"
-        },
-        {
-          "count": 1,
-          "name": "Blood Crypt"
-        },
-        {
-          "count": 2,
-          "name": "Bloodstained Mire"
-        },
-        {
-          "count": 4,
-          "name": "Desperate Ritual"
-        },
-        {
-          "count": 1,
-          "name": "Elegant Parlor"
-        },
-        {
-          "count": 1,
-          "name": "Fiery Islet"
-        },
-        {
-          "count": 1,
-          "name": "Gemstone Caverns"
-        },
-        {
-          "count": 1,
-          "name": "Grapeshot"
-        },
-        {
-          "count": 4,
-          "name": "Hex Magic"
-        },
-        {
-          "count": 4,
-          "name": "Manamorphose"
-        },
-        {
-          "count": 4,
           "name": "Mountain"
         },
         {
           "count": 3,
-          "name": "Past in Flames"
+          "name": "Galvanic Discharge"
         },
         {
           "count": 4,
-          "name": "Pyretic Ritual"
+          "name": "Cleansing Wildfire"
         },
         {
-          "count": 4,
-          "name": "Ral, Monsoon Mage"
-        },
-        {
-          "count": 4,
-          "name": "Reckless Impulse"
-        },
-        {
-          "count": 4,
-          "name": "Ruby Medallion"
-        },
-        {
-          "count": 1,
+          "count": 3,
           "name": "Sacred Foundry"
         },
         {
           "count": 1,
-          "name": "Shatterskull Smashing"
-        },
-        {
-          "count": 1,
-          "name": "Thundering Falls"
-        },
-        {
-          "count": 1,
-          "name": "Valakut Awakening"
-        },
-        {
-          "count": 2,
-          "name": "Wish"
+          "name": "The Legend of Roku"
         },
         {
           "count": 4,
-          "name": "Wooded Foothills"
+          "name": "Plains"
         },
         {
           "count": 4,
-          "name": "Wrenn's Resolve"
+          "name": "Solitude"
+        },
+        {
+          "count": 4,
+          "name": "Wrath of the Skies"
+        },
+        {
+          "count": 1,
+          "name": "Wrath of God"
+        },
+        {
+          "count": 3,
+          "name": "Relic of Progenitus"
+        },
+        {
+          "count": 4,
+          "name": "Path to Exile"
         }
       ],
       "sideboard": [
         {
+          "count": 4,
+          "name": "High Noon"
+        },
+        {
+          "count": 1,
+          "name": "Elixir of Immortality"
+        },
+        {
           "count": 2,
-          "name": "Brotherhood's End"
+          "name": "Surgical Extraction"
         },
         {
           "count": 1,
-          "name": "Galvanic Relay"
+          "name": "Rest in Peace"
+        },
+        {
+          "count": 2,
+          "name": "Disruptor Flute"
         },
         {
           "count": 1,
-          "name": "Grapeshot"
-        },
-        {
-          "count": 3,
-          "name": "Orim's Chant"
+          "name": "Chandra, Awakened Inferno"
         },
         {
           "count": 1,
-          "name": "Past in Flames"
-        },
-        {
-          "count": 3,
-          "name": "Prismatic Ending"
-        },
-        {
-          "count": 1,
-          "name": "Untimely Malfunction"
-        },
-        {
-          "count": 3,
           "name": "Wear // Tear"
+        },
+        {
+          "count": 1,
+          "name": "Avengers Disassembled"
+        },
+        {
+          "count": 1,
+          "name": "Wrath of God"
+        },
+        {
+          "count": 1,
+          "name": "Kaheera, the Orphanguard"
         }
       ]
     }

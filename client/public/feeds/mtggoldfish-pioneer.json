@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-09-30T00:00:00Z",
+  "updated": "2026-10-01T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -680,125 +680,6 @@
       ]
     },
     {
-      "name": "Izzet Phoenix",
-      "author": "MTGGoldfish",
-      "colors": [
-        "U",
-        "R"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 4,
-          "name": "Arclight Phoenix"
-        },
-        {
-          "count": 4,
-          "name": "Artist's Talent"
-        },
-        {
-          "count": 4,
-          "name": "Consider"
-        },
-        {
-          "count": 4,
-          "name": "Fiery Impulse"
-        },
-        {
-          "count": 1,
-          "name": "Temporal Trespass"
-        },
-        {
-          "count": 3,
-          "name": "Into the Flood Maw"
-        },
-        {
-          "count": 3,
-          "name": "Lightning Axe"
-        },
-        {
-          "count": 4,
-          "name": "Island"
-        },
-        {
-          "count": 4,
-          "name": "Spirebluff Canal"
-        },
-        {
-          "count": 1,
-          "name": "Otawara, Soaring City"
-        },
-        {
-          "count": 4,
-          "name": "Picklock Prankster"
-        },
-        {
-          "count": 1,
-          "name": "Prismari Command"
-        },
-        {
-          "count": 1,
-          "name": "Proft's Eidetic Memory"
-        },
-        {
-          "count": 1,
-          "name": "Stormcarved Coast"
-        },
-        {
-          "count": 4,
-          "name": "Treasure Cruise"
-        },
-        {
-          "count": 4,
-          "name": "Opt"
-        },
-        {
-          "count": 4,
-          "name": "Riverglide Pathway"
-        },
-        {
-          "count": 4,
-          "name": "Sleight of Hand"
-        },
-        {
-          "count": 1,
-          "name": "Galvanic Iteration"
-        },
-        {
-          "count": 4,
-          "name": "Steam Vents"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 1,
-          "name": "Abrade"
-        },
-        {
-          "count": 2,
-          "name": "Disdainful Stroke"
-        },
-        {
-          "count": 4,
-          "name": "Ledger Shredder"
-        },
-        {
-          "count": 3,
-          "name": "Mystical Dispute"
-        },
-        {
-          "count": 3,
-          "name": "Redcap Melee"
-        },
-        {
-          "count": 2,
-          "name": "Brazen Borrower"
-        }
-      ]
-    },
-    {
       "name": "Rakdos Sacrifice",
       "author": "MTGGoldfish",
       "colors": [
@@ -918,6 +799,125 @@
         {
           "count": 2,
           "name": "Ghost Vacuum"
+        }
+      ]
+    },
+    {
+      "name": "Izzet Phoenix",
+      "author": "MTGGoldfish",
+      "colors": [
+        "U",
+        "R"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 4,
+          "name": "Arclight Phoenix"
+        },
+        {
+          "count": 4,
+          "name": "Artist's Talent"
+        },
+        {
+          "count": 4,
+          "name": "Consider"
+        },
+        {
+          "count": 4,
+          "name": "Fiery Impulse"
+        },
+        {
+          "count": 1,
+          "name": "Temporal Trespass"
+        },
+        {
+          "count": 3,
+          "name": "Into the Flood Maw"
+        },
+        {
+          "count": 3,
+          "name": "Lightning Axe"
+        },
+        {
+          "count": 4,
+          "name": "Island"
+        },
+        {
+          "count": 4,
+          "name": "Spirebluff Canal"
+        },
+        {
+          "count": 1,
+          "name": "Otawara, Soaring City"
+        },
+        {
+          "count": 4,
+          "name": "Picklock Prankster"
+        },
+        {
+          "count": 1,
+          "name": "Prismari Command"
+        },
+        {
+          "count": 1,
+          "name": "Proft's Eidetic Memory"
+        },
+        {
+          "count": 1,
+          "name": "Stormcarved Coast"
+        },
+        {
+          "count": 4,
+          "name": "Treasure Cruise"
+        },
+        {
+          "count": 4,
+          "name": "Opt"
+        },
+        {
+          "count": 4,
+          "name": "Riverglide Pathway"
+        },
+        {
+          "count": 4,
+          "name": "Sleight of Hand"
+        },
+        {
+          "count": 1,
+          "name": "Galvanic Iteration"
+        },
+        {
+          "count": 4,
+          "name": "Steam Vents"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 1,
+          "name": "Abrade"
+        },
+        {
+          "count": 2,
+          "name": "Disdainful Stroke"
+        },
+        {
+          "count": 4,
+          "name": "Ledger Shredder"
+        },
+        {
+          "count": 3,
+          "name": "Mystical Dispute"
+        },
+        {
+          "count": 3,
+          "name": "Redcap Melee"
+        },
+        {
+          "count": 2,
+          "name": "Brazen Borrower"
         }
       ]
     },
@@ -1053,166 +1053,137 @@
       ]
     },
     {
-      "name": "Jeskai Lessons",
+      "name": "Dimir Self-Bounce",
       "author": "MTGGoldfish",
       "colors": [
-        "W",
         "U",
-        "R"
+        "B"
       ],
       "tags": [
         "metagame"
       ],
       "main": [
         {
-          "count": 3,
-          "name": "Abandon Attachments"
+          "count": 4,
+          "name": "Boomerang Basics"
         },
         {
-          "count": 3,
-          "name": "Accumulate Wisdom"
+          "count": 4,
+          "name": "Clearwater Pathway"
         },
         {
-          "count": 3,
-          "name": "Combustion Technique"
+          "count": 4,
+          "name": "Cryogen Relic"
         },
         {
           "count": 1,
-          "name": "Deserted Beach"
+          "name": "Otawara, Soaring City"
         },
         {
           "count": 4,
-          "name": "Divide by Zero"
+          "name": "Fear of Isolation"
         },
         {
           "count": 4,
-          "name": "Firebending Lesson"
+          "name": "Hopeless Nightmare"
         },
         {
           "count": 4,
-          "name": "Gran-Gran"
-        },
-        {
-          "count": 3,
-          "name": "Hallowed Fountain"
+          "name": "Momentum Breaker"
         },
         {
           "count": 4,
-          "name": "Spirebluff Canal"
+          "name": "Narset, Parter of Veils"
+        },
+        {
+          "count": 4,
+          "name": "Nowhere to Run"
+        },
+        {
+          "count": 4,
+          "name": "Watery Grave"
+        },
+        {
+          "count": 4,
+          "name": "Shipwreck Marsh"
+        },
+        {
+          "count": 4,
+          "name": "Stormchaser's Talent"
         },
         {
           "count": 1,
-          "name": "Iroh's Demonstration"
+          "name": "Takenuma, Abandoned Mire"
         },
         {
-          "count": 3,
+          "count": 4,
+          "name": "This Town Ain't Big Enough"
+        },
+        {
+          "count": 2,
           "name": "Island"
         },
         {
           "count": 2,
-          "name": "It'll Quench Ya!"
+          "name": "Urborg, Tomb of Yawgmoth"
         },
         {
           "count": 4,
-          "name": "Jeskai Revelation"
-        },
-        {
-          "count": 1,
-          "name": "Pop Quiz"
-        },
-        {
-          "count": 3,
-          "name": "Riverglide Pathway"
+          "name": "Petrified Hamlet"
         },
         {
           "count": 2,
-          "name": "Riverpyre Verge"
+          "name": "Swamp"
         },
         {
-          "count": 1,
-          "name": "Spell Pierce"
+          "count": 2,
+          "name": "Underground River"
         },
         {
           "count": 4,
-          "name": "Steam Vents"
+          "name": "Darkslick Shores"
         },
         {
-          "count": 1,
+          "count": 2,
           "name": "Stock Up"
         },
         {
           "count": 4,
-          "name": "Tablet of Discovery"
+          "name": "Fatal Push"
         },
         {
-          "count": 2,
-          "name": "Thor, God of Thunder"
+          "count": 4,
+          "name": "Thoughtseize"
         },
         {
-          "count": 3,
-          "name": "Great Hall of the Biblioplex"
+          "count": 4,
+          "name": "Gloomlake Verge"
         }
       ],
       "sideboard": [
         {
-          "count": 1,
-          "name": "Abrade"
-        },
-        {
-          "count": 1,
-          "name": "Accumulate Wisdom"
-        },
-        {
-          "count": 1,
-          "name": "Airbender's Reversal"
-        },
-        {
-          "count": 1,
-          "name": "Anger of the Gods"
-        },
-        {
-          "count": 1,
-          "name": "Annul"
-        },
-        {
-          "count": 1,
+          "count": 2,
           "name": "Change the Equation"
         },
         {
-          "count": 1,
-          "name": "Combustion Technique"
+          "count": 3,
+          "name": "Invoke Despair"
         },
         {
           "count": 1,
-          "name": "Ghost Vacuum"
+          "name": "Yorion, Sky Nomad"
         },
         {
-          "count": 1,
-          "name": "Improvisation Capstone"
+          "count": 3,
+          "name": "Unlicensed Hearse"
         },
         {
-          "count": 1,
-          "name": "Iroh's Demonstration"
+          "count": 4,
+          "name": "Grim Bauble"
         },
         {
-          "count": 1,
-          "name": "Negate"
-        },
-        {
-          "count": 1,
-          "name": "Price of Freedom"
-        },
-        {
-          "count": 1,
-          "name": "Sokka's Haiku"
-        },
-        {
-          "count": 1,
-          "name": "Soul-Guide Lantern"
-        },
-        {
-          "count": 1,
-          "name": "Teachings of the Archaics"
+          "count": 2,
+          "name": "Go Blank"
         }
       ]
     },
