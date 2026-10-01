@@ -1,4 +1,4 @@
-import { type InstancedBufferGeometry, Mesh, NormalBlending, type Object3D, Scene, type ShaderMaterial, Texture } from "three";
+import { type BufferGeometry, type InstancedBufferGeometry, Mesh, NormalBlending, type Object3D, Scene, type ShaderMaterial, Texture } from "three";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { DAMAGE_CAUSE_IMPACT_MS } from "../../../../animation/types.ts";
@@ -11,6 +11,7 @@ import {
   damageStrikeKind,
   type DamageHitParams,
   type DamageStrikeParams,
+  FIRE_CHARGE_S,
   HIT_S,
 } from "../damageStrike.ts";
 
@@ -59,6 +60,31 @@ function strikeLoad(group: Object3D) {
 }
 
 describe("damage strike", () => {
+  it.each([100, 700])("the fire tail meets the elevated head when travelling from x=%s", (x) => {
+    const effectHost = host();
+    const { strike } = createDamageStrike(effectHost, params({ from: { ...HUD, x, y: 500 } }));
+    const group = named(effectHost.scene, "damage-strike")!;
+    const trail = group.children.find((child) => child instanceof Mesh && (child.material as ShaderMaterial).uniforms.uHead) as Mesh<BufferGeometry, ShaderMaterial>;
+    const core = group.children.find((child) => child instanceof Mesh && child.renderOrder === 8) as Mesh;
+    strike.update(0);
+    const halfway = FIRE_CHARGE_S + (DAMAGE_CAUSE_IMPACT_MS / 1000 - FIRE_CHARGE_S) * 0.5 ** (1 / 1.35);
+    strike.update(halfway * 1000);
+    expect(trail.visible).toBe(true);
+    expect(trail.material.uniforms.uHead.value).toBeCloseTo(0.5);
+    const positions = trail.geometry.getAttribute("position");
+    const along = trail.geometry.getAttribute("aAlong");
+    const across = trail.geometry.getAttribute("aAcross");
+    const indices = Array.from({ length: along.count }, (_, index) => index);
+    const i = indices.find((index) => along.getX(index) === 0.5 && across.getX(index) === 1)!;
+    const j = indices.find((index) => along.getX(index) === 0.5 && across.getX(index) === -1)!;
+    expect((positions.getX(i) + positions.getX(j)) / 2).toBeCloseTo(core.position.x, 3);
+    expect((positions.getY(i) + positions.getY(j)) / 2).toBeCloseTo(core.position.y, 3);
+    expect(positions.getZ(i)).toBeCloseTo(core.position.z - 1, 3);
+    strike.update(DAMAGE_CAUSE_IMPACT_MS);
+    expect(trail.visible).toBe(false);
+    strike.dispose(true);
+  });
+
   it.each([10, 600])("a frost bolt over a %s px path fractures completely after impact", (distance) => {
     const effectHost = host();
     const { strike } = createDamageStrike(effectHost, params({

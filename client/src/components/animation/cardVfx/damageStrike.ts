@@ -522,6 +522,21 @@ interface CauseContext extends EffectParts {
 }
 
 // The fireball gathers at its source, flies a bowed path, and bursts on the target.
+const fireTrailFrag = /* glsl */ `
+  uniform float uHead, uTail, uTime; varying float vAcross, vAlong;
+  ${FBM_GLSL}
+  ${RAMP_GLSL}
+  void main() {
+    if (vAlong > uHead || vAlong < uTail) discard;
+    float along = (vAlong - uTail) / max(uHead - uTail, 0.001);
+    float churn = vnoise(vec2(vAlong * 80.0 - uTime * 18.0, vAcross * 3.0));
+    float width = pow(along, 0.65) * (0.75 + 0.25 * churn);
+    float edge = abs(vAcross) / max(width, 0.001);
+    float body = 1.0 - smoothstep(0.35, 1.0, edge);
+    float heat = mix(0.5, 1.0, along) * (1.0 - 0.35 * edge);
+    gl_FragColor = vec4(ramp(heat) * body * smoothstep(0.0, 0.15, along), 0.0);
+  }`;
+
 function fireCause({ group, unit, clock, S, T, span, scale, share, boardLight }: CauseContext): EffectFrame {
   const dx = T[0] - S[0];
   const dy = T[1] - S[1];
@@ -532,10 +547,29 @@ function fireCause({ group, unit, clock, S, T, span, scale, share, boardLight }:
   const bow = dist * 0.1;
   const lift = 30 + dist * 0.07;
   const C: Vec2 = [(S[0] + T[0]) / 2 + up[0] * bow, (S[1] + T[1]) / 2 + up[1] * bow];
+  const progress = (t: number) => clamp01((t - FIRE_CHARGE_S) / (IMPACT_S - FIRE_CHARGE_S)) ** 1.35;
+  const heightAt = (u: number) => 14 * (1 - u) + Math.sin(Math.PI * u) * lift;
   const headAt = (t: number): Vec3 => {
-    const u = clamp01((t - FIRE_CHARGE_S) / (IMPACT_S - FIRE_CHARGE_S)) ** 1.35;
-    return [bezier(S[0], C[0], T[0], u), bezier(S[1], C[1], T[1], u), 14 * (1 - u) + Math.sin(Math.PI * u) * lift];
+    const u = progress(t);
+    return [bezier(S[0], C[0], T[0], u), bezier(S[1], C[1], T[1], u), heightAt(u)];
   };
+  // A continuous flame body shares the head's exact path and height. Shed
+  // particles alone fade in behind a fast head and leave a visible gap.
+  const path = { S, C, T };
+  const trailSpan = Math.min(1, 120 * scale / jetLength(path));
+  const trailGeometry = jetGeometry(path, 24 * scale);
+  const positions = trailGeometry.getAttribute("position");
+  const along = trailGeometry.getAttribute("aAlong");
+  for (let i = 0; i < positions.count; i++) positions.setZ(i, heightAt(along.getX(i)));
+  const trail = new Mesh(trailGeometry, new ShaderMaterial({
+    vertexShader: boltVert,
+    fragmentShader: fireTrailFrag,
+    ...ADDITIVE,
+    uniforms: { uHead: { value: 0 }, uTail: { value: 0 }, uTime: clock },
+  }));
+  trail.renderOrder = 7;
+  trail.frustumCulled = false;
+  group.add(trail);
 
   const L: Layers = { flames: [], smoke: [], sparks: [] };
   for (let i = 0; i < count(26, share); i++) {
@@ -575,10 +609,13 @@ function fireCause({ group, unit, clock, S, T, span, scale, share, boardLight }:
   return (t) => {
     const kc = clamp01(t / FIRE_CHARGE_S);
     const flying = t < IMPACT_S;
+    trail.material.uniforms.uHead.value = progress(t);
+    trail.material.uniforms.uTail.value = Math.max(0, progress(t) - trailSpan);
+    trail.visible = t >= FIRE_CHARGE_S && flying;
     const [hx, hy, hz] = headAt(t);
-    place(core, hx, hy, hz + 1, 24 * scale * (0.35 + 0.65 * kc) * rand(0.9, 1.1), flying ? 1.1 * kc : 0);
-    place(halo, hx, hy, hz, 130 * scale * (0.5 + 0.5 * kc), flying ? 0.5 * GLOW * kc : 0);
-    if (headLight) place(headLight, hx, hy, 0, 420 * scale, flying ? 0.14 * GLOW * kc : 0);
+    place(core, hx, hy, hz + 1, 42 * scale * (0.35 + 0.65 * kc), flying ? 1.1 * kc : 0);
+    place(halo, hx, hy, hz, 80 * scale * (0.5 + 0.5 * kc), flying ? 0.35 * GLOW * kc : 0);
+    if (headLight) place(headLight, hx, hy, 0, 180 * scale, flying ? 0.08 * GLOW * kc : 0);
     if (headShadow) place(headShadow, hx + 0.32 * hz, hy - 0.42 * hz, 0, 30 * scale + hz * 0.25, flying ? 0.28 * kc : 0);
     const k = t - IMPACT_S;
     const env = k < 0 ? 0 : k < 0.03 ? k / 0.03 : Math.exp(-(k - 0.03) / 0.09);
@@ -643,13 +680,15 @@ const frostBoltFrag = /* glsl */ `
   varying float vAcross, vAlong;
   void main() {
     if (vAlong > uHead || vAlong < uTail) discard;
-    float behind = (uHead - vAlong) * uLength;
-    float width = min(behind / 15.0, 1.0) * min((vAlong - uTail) * uLength / 25.0, 1.0);
+    float along = (vAlong - uTail) / max(uHead - uTail, 0.001);
+    float width = min((1.0 - along) / 0.35, 1.0) * min(along / 0.6, 1.0);
     float across = abs(vAcross) / max(width, 0.001);
     if (across > 1.0) discard;
     vec3 col = mix(vec3(0.12, 0.4, 0.64), vec3(0.76, 0.94, 1.0), step(0.0, vAcross));
     float core = 1.0 - smoothstep(0.04, 0.15, across);
     col = mix(col, vec3(0.96, 1.0, 1.0), core);
+    float vein = pow(max(0.0, sin(vAlong * uLength * 0.3 + abs(vAcross) * 12.0)), 16.0);
+    col = mix(col, vec3(0.85, 0.97, 1.0), vein * 0.35);
     gl_FragColor = vec4(col, 0.95);
   }`;
 
@@ -673,7 +712,7 @@ function waterCause({ group, unit, clock, S, T, span, scale, share }: CauseConte
   const path = { S, C: [(S[0] + T[0]) / 2 + up[0] * bow, (S[1] + T[1]) / 2 + up[1] * bow] as Vec2, T };
   const headAt = (t: number) => clamp01((t - FIRE_CHARGE_S) / (IMPACT_S - FIRE_CHARGE_S)) ** 1.15;
   const tailAt = (t: number) => {
-    const tail = Math.max(0, headAt(t) - Math.min(1, 65 * scale / dist));
+    const tail = Math.max(0, headAt(t) - Math.min(1, 110 * scale / dist));
     return tail + (1 - tail) * clamp01((t - IMPACT_S) / WATER_DRAIN_S);
   };
 
@@ -691,24 +730,25 @@ function waterCause({ group, unit, clock, S, T, span, scale, share }: CauseConte
     const [px, py] = jetPoint(path, headAt(ts));
     const side = (Math.random() < 0.5 ? -1 : 1) * rand(15, 55);
     drops.push({ pos: [px, py, 12], vel: [up[0] * side - dir[0] * 35, up[1] * side - dir[1] * 35, rand(5, 30)], spawn: ts, life: rand(0.2, 0.4), drag: 4, s0: rand(3, 6) * scale });
-    mist.push({ pos: [px, py, 5], vel: [up[0] * side * 0.2, up[1] * side * 0.2, 8], spawn: ts, life: 0.4, drag: 3, s0: 8 * scale, s1: 25 * scale });
+    mist.push({ pos: [px, py, 5], vel: [up[0] * side * 0.2, up[1] * side * 0.2, 8], spawn: ts, life: 0.4, drag: 3, s0: 16 * scale, s1: 38 * scale });
   }
-  for (let i = 0; i < count(55, share); i++) {
+  for (let i = 0; i < count(85, share); i++) {
     const a = rand(0, Math.PI * 2);
-    const speed = rand(90, 370) * scale;
-    drops.push({ pos: [T[0], T[1], 8], vel: [Math.cos(a) * speed, Math.sin(a) * speed, rand(50, 180)], spawn: IMPACT_S + rand(0, 0.04), life: rand(0.35, 0.75), drag: 3, s0: rand(5, 13) * scale, s1: 2 });
-    if (i % 3 === 0) mist.push({ pos: [T[0], T[1], 3], vel: [Math.cos(a) * 80, Math.sin(a) * 80, 12], spawn: IMPACT_S, life: 0.8, drag: 3, s0: 15 * scale, s1: 55 * scale });
+    const speed = rand(140, 500) * scale;
+    drops.push({ pos: [T[0], T[1], 8], vel: [Math.cos(a) * speed, Math.sin(a) * speed, rand(50, 180)], spawn: IMPACT_S + rand(0, 0.04), life: rand(0.35, 0.75), drag: 3, s0: rand(9, 20) * scale, s1: 2 });
+    if (i % 2 === 0) mist.push({ pos: [T[0], T[1], 3], vel: [Math.cos(a) * 130, Math.sin(a) * 130, 12], spawn: IMPACT_S, life: 0.8, drag: 3, s0: 28 * scale, s1: 80 * scale });
   }
   group.add(
     particleLayer(mist, "SMOKE", clock, { accZ: 20, gain: 0.4, tint: MIST, order: 3 }),
     particleLayer(drops, "ICE", clock, { accZ: -600, gain: 1, tint: WATER, order: 6 }),
   );
-  const jet = new Mesh(jetGeometry(path, 12 * scale), frostBoltMaterial(jetLength(path)));
+  const jet = new Mesh(jetGeometry(path, 24 * scale), frostBoltMaterial(jetLength(path)));
   jet.renderOrder = 5;
   jet.frustumCulled = false;
   const swell = sprite(unit, "RIPPLE", [0.92, 0.96, 1], 4);
+  const flash = sprite(unit, "GLOW", [0.65, 0.88, 1], 7);
   const rings = RIPPLE_RINGS_S.map(() => sprite(unit, "RING", [0.65, 0.88, 1], 4));
-  group.add(jet, swell, ...rings);
+  group.add(jet, swell, flash, ...rings);
   const U = jet.material.uniforms;
 
   return (t) => {
@@ -718,10 +758,12 @@ function waterCause({ group, unit, clock, S, T, span, scale, share }: CauseConte
     const kc = clamp01(t / FIRE_CHARGE_S);
     const gathered = 1 - clamp01((t - FIRE_CHARGE_S) / 0.2);
     place(swell, S[0], S[1], 2, (0.6 + 0.8 * kc) * 48 * scale, 0.6 * kc * gathered);
+    const impactAge = t - IMPACT_S;
+    place(flash, T[0], T[1], 14, 180 * scale, impactAge >= 0 ? 0.8 * Math.exp(-impactAge / 0.12) : 0);
     rings.forEach((ring, i) => {
       const rp = clamp01((t - IMPACT_S - RIPPLE_RINGS_S[i]) / 0.6);
       const on = t >= IMPACT_S + RIPPLE_RINGS_S[i] && rp < 1;
-      place(ring, T[0], T[1], 2, (0.2 + 1.5 * (1 - (1 - rp) ** 2)) * span * scale, on ? (1 - rp) ** 2 * 0.55 : 0);
+      place(ring, T[0], T[1], 2, (0.2 + 2.2 * (1 - (1 - rp) ** 2)) * span * scale, on ? (1 - rp) ** 2 * 0.7 : 0);
     });
   };
 }
