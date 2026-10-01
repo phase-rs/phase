@@ -6649,7 +6649,7 @@ pub(crate) fn static_condition_to_trigger_condition(
     }
 }
 
-/// CR 603.4 + CR 601.2 + CR 603.2c + CR 603.10a: Build the disjunctive
+/// CR 603.4 + CR 601.2 + CR 603.2c: Build the disjunctive
 /// "entered-from-<zone> OR cast-from-<zone>" intervening-if.
 ///
 /// The entering object either changed zones into the battlefield from the
@@ -7441,7 +7441,7 @@ fn extract_if_condition_with_card_name(
         }
     }
 
-    // CR 603.4 + CR 601.2 + CR 603.2c + CR 603.10a: disjunctive
+    // CR 603.4 + CR 601.2 + CR 603.2c: disjunctive
     // "entered/was-cast from [a|your] graveyard" intervening-if. Scan at word
     // boundaries so the clause is recognized wherever it sits in the effect
     // text; `parse_graveyard_origin_intervening_if` covers both the compact
