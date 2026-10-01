@@ -51,7 +51,7 @@ describe("applyCardSlam", () => {
     vi.advanceTimersByTime(600);
   });
 
-  it("still reports one impact when a throttled frame skips the strike", () => {
+  it("cleans up an expired slam without replaying its damage feedback", () => {
     const frames: FrameRequestCallback[] = [];
     const raf = vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
       frames.push(callback);
@@ -62,7 +62,7 @@ describe("applyCardSlam", () => {
     const start = performance.now();
     applyCardSlam(el, 400, 0, 1, impact, start);
     frames.shift()!(start + 1000);
-    expect(impact).toHaveBeenCalledOnce();
+    expect(impact).not.toHaveBeenCalled();
     expect(el.style.translate).toBe("");
     raf.mockRestore();
   });

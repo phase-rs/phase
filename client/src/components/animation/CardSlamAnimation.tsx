@@ -61,8 +61,6 @@ export function applyCardSlam(
     const elapsed = now - start;
 
     if (elapsed >= totalMs) {
-      // A throttled frame may skip the impact phase entirely.
-      if (!impactFired) onImpact();
       element.style.translate = "";
       element.style.scale = "";
       element.style.zIndex = originalZ;
@@ -94,10 +92,6 @@ export function applyCardSlam(
       element.style.translate = `${dx * recoil}px ${dy * recoil}px`;
       element.style.scale = `${1 - 0.035 * Math.sin(t * Math.PI)}`;
     } else {
-      if (!impactFired) {
-        impactFired = true;
-        onImpact();
-      }
       // Return to original position: quadratic ease-out
       const rt = (elapsed - flightMs - recoilMs) / returnMs;
       const eased = 1 - (1 - rt) * (1 - rt);
