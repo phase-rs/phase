@@ -13677,6 +13677,7 @@ mod tests {
             mode: CostModifyMode::Reduce,
             amount: ManaCost::generic(1),
             spell_filter: None,
+            reach: CostReductionReach::SpillsToGeneric,
             dynamic_count: Some(QuantityRef::SharedCardTypes {
                 source: CardTypeSetSource::ExiledBySource,
             }),
@@ -13685,6 +13686,7 @@ mod tests {
             mode: CostModifyMode::Reduce,
             amount: ManaCost::generic(1),
             spell_filter: None,
+            reach: CostReductionReach::SpillsToGeneric,
             dynamic_count: Some(QuantityRef::ObjectCount {
                 filter: TargetFilter::Typed(TypedFilter::card()),
             }),
@@ -13693,6 +13695,7 @@ mod tests {
             mode: CostModifyMode::Reduce,
             amount: ManaCost::generic(1),
             spell_filter: None,
+            reach: CostReductionReach::SpillsToGeneric,
             dynamic_count: None,
         });
         // CR 601.2f + CR 118.7: the ability-cost sibling carries the same axis.
@@ -13706,6 +13709,8 @@ mod tests {
             }),
             exemption: crate::types::statics::ActivationExemption::None,
             activator: None,
+            targets: None,
+            frequency: None,
         });
 
         let dyn_shared = super::static_details(&with_shared)

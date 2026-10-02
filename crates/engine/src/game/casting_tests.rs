@@ -13289,6 +13289,7 @@ fn prowler_shared_card_type_reduction(
                 mode: crate::types::statics::CostModifyMode::Reduce,
                 amount: ManaCost::generic(1),
                 spell_filter: None,
+                reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
                 dynamic_count: Some(QuantityRef::SharedCardTypes {
                     source: crate::types::ability::CardTypeSetSource::ExiledBySource,
                 }),
