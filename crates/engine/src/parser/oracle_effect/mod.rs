@@ -25036,7 +25036,7 @@ fn clause_announces_own_target(clause: &ClauseIr) -> bool {
 /// ([`LeadingConditionRoute::TargetPtThreshold`]) whose own instruction announces
 /// a target becomes the strict-failure gap
 /// `target_pt_threshold_rider_declares_target`. The gate's `TargetMatchesFilter
-/// { subject_slot: None }` would read the clause's own object rather than the
+/// { subject_slot: None }` would read the clause's own object as well as the
 /// antecedent "that creature", so the clause is refused, and
 /// `ClauseIr::replace_with_gap` drops the misbinding gate together with every
 /// other executable field.
@@ -40452,33 +40452,41 @@ fn parse_effect_chain_ir_body(
         } else {
             None
         };
-        let (if_you_do, text, deferred_when_you_do_guard) = if let Some(remainder) = reveal_gate {
-            // CR 603.12 + CR 701.20a: the reflexive's trigger event is the
-            // reveal-until's until-condition, so its creation gate carries the
-            // reveal-until-hit guard (a generic "When you do" does not).
-            (
-                Some(AbilityCondition::when_you_do_with_guard(
-                    AbilityCondition::EffectOutcome {
-                        signal: EffectOutcomeSignal::RevealUntilMatched,
-                    },
-                )),
-                remainder,
-                None,
-            )
-        } else if condition.is_none() {
-            match strip_if_you_do_conditional_with_context(&text, ctx) {
-                conditions::ReflexiveConditionalStrip::Parsed {
-                    condition,
+        let (if_you_do, text, deferred_when_you_do_guard, reflexive_guard_route) =
+            if let Some(remainder) = reveal_gate {
+                // CR 603.12 + CR 701.20a: the reflexive's trigger event is the
+                // reveal-until's until-condition, so its creation gate carries the
+                // reveal-until-hit guard (a generic "When you do" does not).
+                (
+                    Some(AbilityCondition::when_you_do_with_guard(
+                        AbilityCondition::EffectOutcome {
+                            signal: EffectOutcomeSignal::RevealUntilMatched,
+                        },
+                    )),
                     remainder,
-                } => (condition, remainder, None),
-                conditions::ReflexiveConditionalStrip::DeferredWhenYouDoGuard {
-                    condition,
-                    remainder,
-                } => (Some(condition.clone()), remainder, Some(condition)),
-            }
-        } else {
-            (None, text, None)
-        };
+                    None,
+                    None,
+                )
+            } else if condition.is_none() {
+                match strip_if_you_do_conditional_with_context(&text, ctx) {
+                    conditions::ReflexiveConditionalStrip::Parsed {
+                        condition,
+                        guard_route,
+                        remainder,
+                    } => (condition, remainder, None, guard_route),
+                    conditions::ReflexiveConditionalStrip::DeferredWhenYouDoGuard {
+                        condition,
+                        remainder,
+                    } => (Some(condition.clone()), remainder, Some(condition), None),
+                }
+            } else {
+                (None, text, None, None)
+            };
+        // CR 603.12 + CR 608.2c: a `When you do, if <guard>, <body>` guard is
+        // stamped on the reflexive body exactly as a leading general conditional
+        // is stamped on its instruction, so its route joins the same binding
+        // guard below.
+        let leading_route = leading_route.or(reflexive_guard_route);
         // CR 603.4 + CR 608.2c: Counter threshold condition — runs unconditionally
         // on the text output from strip_if_you_do_conditional. For compound
         // "when you do, if it has N counters" patterns, WhenYouDo is always true for
@@ -40655,10 +40663,18 @@ fn parse_effect_chain_ir_body(
             && turn_cond.is_none()
             && target_has_cond.is_none()
         {
-            strip_suffix_conditional(&text, ctx)
+            strip_routed_suffix_conditional(&text, ctx)
         } else {
             (None, text)
         };
+        // CR 608.2c: a trailing "<instruction> if <condition>" gate is stamped on
+        // that same instruction, so its route joins the leading conditional's
+        // binding guard below.
+        let leading_route = match (leading_route, suffix_cond.as_ref().map(|(_, route)| *route)) {
+            (Some(route), Some(suffix_route)) => Some(route.merge(suffix_route)),
+            (route, suffix_route) => route.or(suffix_route),
+        };
+        let suffix_cond = suffix_cond.map(|(condition, _)| condition);
         let guard_condition = condition
             .or(counter_cond)
             .or(mv_cond)

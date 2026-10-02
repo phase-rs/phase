@@ -271,8 +271,9 @@ pub(crate) fn strip_leading_general_conditional(
 /// stripped, for a caller that must apply a family-specific binding guard to the
 /// clause it gates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum LeadingConditionRoute {
-    /// Any recognizer whose gate needs no route-specific binding guard.
+pub(crate) enum LeadingConditionRoute {
+    /// Any recognizer this route's binding guard does not cover (sibling
+    /// target-anaphoric families keep their existing behavior).
     General,
     /// CR 115.1 + CR 608.2c: `parse_target_pt_threshold_condition` — "that
     /// creature has power 4 or greater" / "that creature's power is 2 or less".
@@ -289,7 +290,7 @@ impl LeadingConditionRoute {
     /// `self` and `other`: a P/T threshold member anywhere in the tree carries
     /// its binding hazard to the whole gate, since the compound is stamped on
     /// the same gated instruction.
-    fn merge(self, other: Self) -> Self {
+    pub(super) fn merge(self, other: Self) -> Self {
         match (self, other) {
             (Self::General, Self::General) => Self::General,
             (Self::TargetPtThreshold, _) | (_, Self::TargetPtThreshold) => Self::TargetPtThreshold,
@@ -300,7 +301,7 @@ impl LeadingConditionRoute {
 /// [`strip_leading_general_conditional`], also naming the recognizer family
 /// ([`LeadingConditionRoute`]) that produced the stripped gate. Same grammar and
 /// precedence: the route only labels which recognizer claimed the condition.
-pub(super) fn strip_routed_leading_general_conditional(
+pub(crate) fn strip_routed_leading_general_conditional(
     text: &str,
     ctx: &mut ParseContext,
 ) -> (Option<(AbilityCondition, LeadingConditionRoute)>, String) {
@@ -1112,6 +1113,11 @@ pub(super) fn strip_if_you_do_conditional(text: &str) -> (Option<AbilityConditio
 pub(super) enum ReflexiveConditionalStrip {
     Parsed {
         condition: Option<AbilityCondition>,
+        /// The recognizer family of the `When you do, if <guard>` guard folded
+        /// into `condition`; `None` when no guard was stripped. Lets the chain
+        /// parser apply the same route-specific binding guard it applies to a
+        /// leading general conditional.
+        guard_route: Option<LeadingConditionRoute>,
         remainder: String,
     },
     DeferredWhenYouDoGuard {
@@ -1128,20 +1134,23 @@ pub(super) fn strip_if_you_do_conditional_with_context(
     let Some(condition) = condition else {
         return ReflexiveConditionalStrip::Parsed {
             condition: None,
+            guard_route: None,
             remainder,
         };
     };
     if !condition.has_when_you_do_marker() {
         return ReflexiveConditionalStrip::Parsed {
             condition: Some(condition),
+            guard_route: None,
             remainder,
         };
     }
 
-    let (guard, body) = strip_leading_general_conditional(&remainder, ctx);
+    let (guard, body) = strip_routed_leading_general_conditional(&remainder, ctx);
     match guard {
-        Some(guard) => ReflexiveConditionalStrip::Parsed {
+        Some((guard, route)) => ReflexiveConditionalStrip::Parsed {
             condition: Some(condition.with_when_you_do_guard(guard)),
+            guard_route: Some(route),
             remainder: body,
         },
         // A syntactically present leading guard must never be treated like an
@@ -1156,6 +1165,7 @@ pub(super) fn strip_if_you_do_conditional_with_context(
         }
         None => ReflexiveConditionalStrip::Parsed {
             condition: Some(condition),
+            guard_route: None,
             remainder,
         },
     }
@@ -4076,10 +4086,24 @@ fn parse_trigger_event_target_damaged_by_source_this_turn(input: &str) -> Oracle
     }
 }
 
+#[cfg(test)]
 pub(super) fn strip_suffix_conditional(
     text: &str,
     ctx: &mut ParseContext,
 ) -> (Option<AbilityCondition>, String) {
+    let (routed, body) = strip_routed_suffix_conditional(text, ctx);
+    (routed.map(|(condition, _)| condition), body)
+}
+
+/// Strip a trailing "<effect> if <condition>" rider into a clause-level gate,
+/// also naming the recognizer family ([`LeadingConditionRoute`]) that produced
+/// it, so the chain parser applies the same route-specific binding guard it
+/// applies to a leading general conditional.
+pub(super) fn strip_routed_suffix_conditional(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> (Option<(AbilityCondition, LeadingConditionRoute)>, String) {
+    let general = |condition| Some((condition, LeadingConditionRoute::General));
     let lower = text.to_lowercase();
     let Some(if_pos) = find_trailing_condition_start(&lower) else {
         return (None, text.to_string());
@@ -4095,7 +4119,7 @@ pub(super) fn strip_suffix_conditional(
             .is_ok()
     {
         return (
-            Some(AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn),
+            general(AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn),
             text[..if_pos].trim().to_string(),
         );
     }
@@ -4104,7 +4128,7 @@ pub(super) fn strip_suffix_conditional(
     // the rehomeable bail or it would never run. effect_prefix/effect_text are
     // not computed yet, so return the stripped effect text directly.
     if let Some(cond) = parse_colored_mana_symbol_count_target_condition(condition_text) {
-        return (Some(cond), text[..if_pos].trim().to_string());
+        return (general(cond), text[..if_pos].trim().to_string());
     }
     // CR 201.5 + CR 208.1: source-referential "if its power is exactly N" (Amalia
     // Benavides Aguirre). "its power is " / "its toughness is " are in
@@ -4113,7 +4137,7 @@ pub(super) fn strip_suffix_conditional(
     // would never reach the condition parser. Fires solely on the "exactly N" form
     // (threshold forms are owned upstream by strip_property_conditional).
     if let Some(cond) = parse_source_pt_comparison_condition_text(condition_text) {
-        return (Some(cond), text[..if_pos].trim().to_string());
+        return (general(cond), text[..if_pos].trim().to_string());
     }
     // CR 208.1 + CR 608.2c: trailing "…on that creature if its power is less
     // than ~'s power" (Shelinda, Yevon Acolyte) compares the trigger's event
@@ -4126,7 +4150,7 @@ pub(super) fn strip_suffix_conditional(
         if let Some(cond) =
             parse_event_object_pt_vs_source_condition_text(&lower[..if_pos], condition_text)
         {
-            return (Some(cond), text[..if_pos].trim().to_string());
+            return (general(cond), text[..if_pos].trim().to_string());
         }
     }
     // CR 608.2c: "that creature has <keyword>" / "that permanent has <keyword>"
@@ -4152,7 +4176,7 @@ pub(super) fn strip_suffix_conditional(
     // rather than misfire an event-bound gate against a spell target.
     if ctx.in_trigger {
         if let Some(cond) = parse_zone_change_object_has_keyword_condition(condition_text) {
-            return (Some(cond), text[..if_pos].trim().to_string());
+            return (general(cond), text[..if_pos].trim().to_string());
         }
     }
     if !condition_text_is_rehomeable(condition_text) {
@@ -4178,29 +4202,34 @@ pub(super) fn strip_suffix_conditional(
     };
 
     if let Some(cond) = parse_its_a_type_condition(condition_core, ctx) {
-        return (Some(cond), effect_text);
+        return (general(cond), effect_text);
     }
 
     if let Some(cond) = parse_no_mana_spent_to_cast_target_condition_text(condition_core) {
-        return (Some(cond), effect_text);
+        return (general(cond), effect_text);
     }
 
     if let Some(cond) = parse_additional_cost_paid_gate_condition_text(condition_core) {
-        return (Some(cond), effect_text);
+        return (general(cond), effect_text);
     }
 
     if let Some(cond) = parse_cast_using_teamwork_condition_text(condition_core) {
-        return (Some(cond), effect_text);
+        return (general(cond), effect_text);
     }
 
     if let Some(cond) = parse_mana_spent_vs_mana_value_target_condition_text(condition_core) {
-        return (Some(cond), effect_text);
+        return (general(cond), effect_text);
     }
 
-    if let Some(condition) = parse_triggering_spell_targets_filter_ability_condition(condition_core)
-        .or_else(|| try_nom_condition_as_ability_condition(condition_core, ctx))
-        .or_else(|| parse_condition_text_in(condition_core, ctx))
-        .or_else(|| parse_control_count_as_ability_condition(condition_core))
+    if let Some((condition, route)) =
+        parse_triggering_spell_targets_filter_ability_condition(condition_core)
+            .map(|condition| (condition, LeadingConditionRoute::General))
+            .or_else(|| try_routed_nom_condition_as_ability_condition(condition_core, ctx))
+            .or_else(|| {
+                parse_condition_text_in(condition_core, ctx)
+                    .or_else(|| parse_control_count_as_ability_condition(condition_core))
+                    .map(|condition| (condition, LeadingConditionRoute::General))
+            })
     {
         // CR 608.2c + CR 109.2: in an " or if " chain on a targeting effect, a
         // bare "it's a <type>" disjunct describes the effect's target, not a
@@ -4218,7 +4247,7 @@ pub(super) fn strip_suffix_conditional(
             }
             other => other,
         };
-        return (Some(condition), effect_text);
+        return (Some((condition, route)), effect_text);
     }
 
     (None, text.to_string())
@@ -6707,9 +6736,10 @@ pub(super) fn try_routed_nom_condition_as_ability_condition(
 }
 
 /// The arms of [`try_routed_nom_condition_as_ability_condition`] after the
-/// target P/T threshold recognizer, in the same order. None of them produces a
-/// gate that needs a route-specific binding guard, so the routed dispatcher
-/// labels every result here [`LeadingConditionRoute::General`].
+/// target P/T threshold recognizer, in the same order. None of them is covered
+/// by this route's binding guard (sibling target-anaphoric families keep their
+/// existing behavior), so the routed dispatcher labels every result here
+/// [`LeadingConditionRoute::General`].
 fn try_unrouted_nom_condition_tail(text: &str, ctx: &mut ParseContext) -> Option<AbilityCondition> {
     use crate::parser::oracle_nom::condition::parse_inner_condition;
 

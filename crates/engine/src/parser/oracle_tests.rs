@@ -26777,6 +26777,144 @@ fn target_pt_threshold_or_gate_over_context_target_body_refuses_nothing() {
     );
 }
 
+/// CR 603.12 + CR 115.1 + CR 608.2c: a `When you do, if <guard>, <body>`
+/// reflexive guard is stamped on the reflexive body, so a target P/T threshold
+/// guard over a body that announces its own target fails closed there exactly as
+/// a leading one does — in both surface forms of the recognizer. The same guard
+/// over a targetless body still lowers as `WhenYouDo` + the threshold gate.
+#[test]
+fn target_pt_threshold_reflexive_guard_refuses_own_target_body() {
+    for subject in ["that creature has power", "that creature's power is"] {
+        let refused = format!(
+            "Whenever a land you control enters, put a +1/+1 counter on target creature you control. When you do, if {subject} 4 or greater, destroy target creature."
+        );
+        let execute = pt_threshold_landfall_execute(&refused);
+        let rider = execute
+            .sub_ability
+            .as_deref()
+            .unwrap_or_else(|| panic!("{refused}: the rider must follow: {execute:#?}"));
+        assert_target_pt_threshold_rider_gap(&refused, rider);
+
+        // REACH GUARD: the same reflexive guard is recognized, and kept beside
+        // the reflexive marker, when the body announces no target.
+        let kept = format!(
+            "Whenever a land you control enters, put a +1/+1 counter on target creature you control. When you do, if {subject} 4 or greater, draw a card."
+        );
+        let execute = pt_threshold_landfall_execute(&kept);
+        let rider = execute
+            .sub_ability
+            .as_deref()
+            .unwrap_or_else(|| panic!("{kept}: the rider must follow: {execute:#?}"));
+        assert!(
+            matches!(&*rider.effect, Effect::Draw { .. }),
+            "{kept}: rider is the draw: {rider:#?}"
+        );
+        assert!(
+            rider
+                .condition
+                .as_ref()
+                .is_some_and(AbilityCondition::has_when_you_do_marker)
+                && rider
+                    .condition
+                    .as_ref()
+                    .is_some_and(condition_tree_has_target_matches_filter),
+            "{kept}: the reflexive body keeps WhenYouDo and the threshold gate: {rider:#?}"
+        );
+    }
+}
+
+/// CR 115.1 + CR 608.2c: a trailing "<instruction> if that creature's power is
+/// N or greater" gate is stamped on that instruction, so one that announces its
+/// own target fails closed; the same suffix gate on a targetless instruction
+/// still lowers to the threshold gate.
+#[test]
+fn target_pt_threshold_suffix_gate_refuses_own_target_instruction() {
+    let refused = "Whenever a land you control enters, put a +1/+1 counter on target creature you control. Destroy target creature if that creature's power is 4 or greater.";
+    let execute = pt_threshold_landfall_execute(refused);
+    let rider = execute
+        .sub_ability
+        .as_deref()
+        .unwrap_or_else(|| panic!("{refused}: the rider must follow: {execute:#?}"));
+    assert_target_pt_threshold_rider_gap(refused, rider);
+
+    // REACH GUARD: the suffix strip recognizes the same gate on a targetless
+    // instruction.
+    let kept = "Whenever a land you control enters, put a +1/+1 counter on target creature you control. Draw a card if that creature's power is 4 or greater.";
+    let execute = pt_threshold_landfall_execute(kept);
+    let rider = execute
+        .sub_ability
+        .as_deref()
+        .unwrap_or_else(|| panic!("{kept}: the rider must follow: {execute:#?}"));
+    assert!(
+        matches!(&*rider.effect, Effect::Draw { .. }),
+        "{kept}: rider is the draw: {rider:#?}"
+    );
+    assert!(
+        rider
+            .condition
+            .as_ref()
+            .is_some_and(condition_tree_has_target_matches_filter),
+        "{kept}: the targetless instruction keeps the threshold gate: {rider:#?}"
+    );
+}
+
+/// CR 603.12 + CR 115.1 + CR 608.2c: a target P/T threshold guard between a
+/// reflexive connector and a modal header ("When you do, if that creature has
+/// power 4 or greater, choose one —") would gate modes that may announce their
+/// own targets, so the reflexive modal fails closed as
+/// `modal_reflexive_condition` in both surface forms. A guard of another family
+/// in the same position still lowers to the guarded reflexive modal.
+#[test]
+fn target_pt_threshold_reflexive_modal_guard_fails_closed() {
+    let modes = "choose one —\n• Destroy target creature.\n• Draw a card.";
+    for subject in ["that creature has power", "that creature's power is"] {
+        let refused = format!(
+            "Whenever a land you control enters, put a +1/+1 counter on target creature you control. When you do, if {subject} 4 or greater, {modes}"
+        );
+        let r = parse(&refused, "Test Warden", &[], &["Creature"], &[]);
+        let [trigger] = r.triggers.as_slice() else {
+            panic!("{refused}: expected exactly one trigger: {r:#?}");
+        };
+        let execute = trigger
+            .execute
+            .as_deref()
+            .unwrap_or_else(|| panic!("{refused}: trigger must have an execute body"));
+        assert!(
+            matches!(
+                &*execute.effect,
+                Effect::Unimplemented { name, description: Some(fragment) }
+                    if name == "modal_reflexive_condition"
+                        && fragment.contains(&format!("if {subject} 4 or greater")) // allow-noncombinator: assertion over diagnostic output, not parsing dispatch
+            ),
+            "{refused}: the threshold-guarded reflexive modal must fail closed: {execute:#?}"
+        );
+        assert!(
+            execute.sub_ability.is_none(),
+            "{refused}: no modal may hang beneath the gap: {execute:#?}"
+        );
+    }
+
+    // REACH GUARD: the same reflexive modal entry lowers a guard of another
+    // family, so the refusal above is the threshold route, not the position.
+    let kept = format!(
+        "Whenever a land you control enters, put a +1/+1 counter on target creature you control. When you do, if you control a Forest, {modes}"
+    );
+    let execute = pt_threshold_landfall_execute(&kept);
+    let modal = execute
+        .sub_ability
+        .as_deref()
+        .unwrap_or_else(|| panic!("{kept}: the reflexive modal must follow: {execute:#?}"));
+    assert!(
+        modal.modal.is_some()
+            && modal
+                .condition
+                .as_ref()
+                .is_some_and(AbilityCondition::has_when_you_do_marker)
+            && matches!(modal.condition, Some(AbilityCondition::And { .. })),
+        "{kept}: the reflexive modal keeps WhenYouDo with its guard: {modal:#?}"
+    );
+}
+
 /// CR 508.6 + CR 608.2c: The Commander 2017 "whenever enchanted player is
 /// attacked" curse cycle carries the rider "Each opponent attacking that player
 /// does the same." — a player-scoped replication of the antecedent effect.
