@@ -9547,7 +9547,7 @@ fn try_parse_choose_player_to_verb(
         }
         // CR 109.4: The verb's actor/recipient is the chosen player, not the
         // ability controller. Rebind the player-recipient field.
-        retarget_effect_to_chosen_player(&mut verb_clause.effect, index);
+        retarget_effect_to_chosen_player(&mut verb_clause.effect, index, tp.original);
         let mut sub = AbilityDefinition::new(AbilityKind::Spell, verb_clause.effect);
         sub.sub_ability = verb_clause.sub_ability;
         sub.duration = verb_clause.duration;
@@ -9592,9 +9592,9 @@ fn try_parse_an_opponent_to_verb(
     if matches!(verb_clause.effect, Effect::Unimplemented { .. }) {
         return None;
     }
-    rebind_opponent_player_recipient_to_chosen(&mut verb_clause.effect, index);
+    rebind_opponent_player_recipient_to_chosen(&mut verb_clause.effect, index, tp.original);
     if let Some(sub) = verb_clause.sub_ability.as_mut() {
-        rebind_opponent_player_recipient_in_chain(sub, index);
+        rebind_opponent_player_recipient_in_chain(sub, index, tp.original);
     }
 
     let mut clause = parsed_clause(Effect::Choose {
@@ -9818,7 +9818,11 @@ fn filter_is_bare_opponent_player(filter: &TargetFilter) -> bool {
     )
 }
 
-fn rebind_opponent_player_recipient_to_chosen(effect: &mut Effect, index: u8) {
+fn rebind_opponent_player_recipient_to_chosen(
+    effect: &mut Effect,
+    index: u8,
+    original_clause: &str,
+) {
     let chosen = TargetFilter::Typed(crate::types::ability::TypedFilter {
         controller: Some(ControllerRef::ChosenPlayer { index }),
         ..Default::default()
@@ -9830,23 +9834,27 @@ fn rebind_opponent_player_recipient_to_chosen(effect: &mut Effect, index: u8) {
             if filter_is_bare_opponent_player(target) {
                 *target = chosen;
             } else {
-                retarget_effect_to_chosen_player(effect, index);
+                retarget_effect_to_chosen_player(effect, index, original_clause);
             }
         }
         Effect::GainLife { player, .. } if filter_is_bare_opponent_player(player) => {
             *player = chosen;
         }
-        _ => retarget_effect_to_chosen_player(effect, index),
+        _ => retarget_effect_to_chosen_player(effect, index, original_clause),
     }
 }
 
-fn rebind_opponent_player_recipient_in_chain(def: &mut AbilityDefinition, index: u8) {
-    rebind_opponent_player_recipient_to_chosen(&mut def.effect, index);
+fn rebind_opponent_player_recipient_in_chain(
+    def: &mut AbilityDefinition,
+    index: u8,
+    original_clause: &str,
+) {
+    rebind_opponent_player_recipient_to_chosen(&mut def.effect, index, original_clause);
     if let Some(sub) = def.sub_ability.as_mut() {
-        rebind_opponent_player_recipient_in_chain(sub, index);
+        rebind_opponent_player_recipient_in_chain(sub, index, original_clause);
     }
     if let Some(else_branch) = def.else_ability.as_mut() {
-        rebind_opponent_player_recipient_in_chain(else_branch, index);
+        rebind_opponent_player_recipient_in_chain(else_branch, index, original_clause);
     }
 }
 
@@ -9869,7 +9877,7 @@ fn rebind_opponent_player_recipient_in_chain(def: &mut AbilityDefinition, index:
 /// *who*) are a deliberate class-boundary deferral: no current card pairs
 /// "choose a player to <verb>" with those verbs. Extending to them is a
 /// follow-up if such a card prints — it is not a bug in this helper.
-fn retarget_effect_to_chosen_player(effect: &mut Effect, index: u8) {
+fn retarget_effect_to_chosen_player(effect: &mut Effect, index: u8, original_clause: &str) {
     let chosen = TargetFilter::Typed(crate::types::ability::TypedFilter {
         controller: Some(ControllerRef::ChosenPlayer { index }),
         ..Default::default()
@@ -9907,7 +9915,7 @@ fn retarget_effect_to_chosen_player(effect: &mut Effect, index: u8) {
         Effect::AdditionalPhase {
             recipient: ExtraPhaseRecipient::Controller,
             ..
-        } => *effect = additional_phase_unnamed_recipient(),
+        } => *effect = additional_phase_unnamed_recipient(original_clause),
         _ => {}
     }
 }
@@ -9915,11 +9923,8 @@ fn retarget_effect_to_chosen_player(effect: &mut Effect, index: u8) {
 /// Engine limitation: the `additional_phase` strict failure for a sentence that
 /// grants an added step or phase to a player no `ExtraPhaseRecipient` kind
 /// names.
-fn additional_phase_unnamed_recipient() -> Effect {
-    Effect::unimplemented(
-        "additional_phase",
-        "the player who gets the added step or phase has no recipient kind",
-    )
+fn additional_phase_unnamed_recipient(original_clause: &str) -> Effect {
+    Effect::unimplemented("additional_phase", original_clause)
 }
 
 /// CR 109.4 (issue #534): Tree-walk a `TargetFilter` and rewrite every
@@ -11403,7 +11408,7 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     }
 
     let ast = parse_clause_ast(text, ctx);
-    lower_clause_ast(ast, ctx)
+    lower_clause_ast(ast, ctx, tp.original)
 }
 
 /// Digital-only Alchemy keyword action: parse "intensify" clauses into
@@ -13035,7 +13040,7 @@ fn try_parse_have_redirection(text: &str, ctx: &mut ParseContext) -> Option<Pars
                 if let Some(ast) =
                     subject::try_parse_subject_predicate_ast(&self_named_redirected, ctx)
                 {
-                    return Some(lower_clause_ast(ast, ctx));
+                    return Some(lower_clause_ast(ast, ctx, text));
                 }
             }
         }
@@ -13058,7 +13063,7 @@ fn try_parse_have_redirection(text: &str, ctx: &mut ParseContext) -> Option<Pars
     // the prior allowlist (`target | it | that | each | all | them | another
     // | this | ~ | enchanted | equipped`) rejected.
     if let Some(ast) = subject::try_parse_subject_predicate_ast(redirected_text, ctx) {
-        return Some(lower_clause_ast(ast, ctx));
+        return Some(lower_clause_ast(ast, ctx, text));
     }
 
     // Guard: for the recursive `parse_effect_clause` fallback below (handles
@@ -13709,10 +13714,15 @@ impl EqualToQtyVerb {
     /// lowers its loss exactly like "you lose life equal to …" and a
     /// propagated parent player target cannot re-route it (CR 109.5: "you" is
     /// the controller; CR 119.3).
-    fn lower_conjunct(self, qty: QuantityExpr, subject: Option<&SubjectPhraseAst>) -> Effect {
+    fn lower_conjunct(
+        self,
+        qty: QuantityExpr,
+        subject: Option<&SubjectPhraseAst>,
+        original_clause: &str,
+    ) -> Effect {
         let mut effect = imperative::lower_numeric_imperative_ast(self.into_numeric_ast(qty));
         if let Some(subject) = subject {
-            inject_subject_target(&mut effect, subject);
+            inject_subject_target(&mut effect, subject, original_clause);
         }
         effect
     }
@@ -19026,7 +19036,11 @@ fn refine_put_at_library_position(
     placement_target_set
 }
 
-fn lower_clause_ast(ast: ClauseAst, ctx: &mut ParseContext) -> ParsedEffectClause {
+fn lower_clause_ast(
+    ast: ClauseAst,
+    ctx: &mut ParseContext,
+    original_clause: &str,
+) -> ParsedEffectClause {
     match ast {
         ClauseAst::Imperative { text } => {
             let mut clause = lower_imperative_clause(&text, ctx);
@@ -19037,14 +19051,14 @@ fn lower_clause_ast(ast: ClauseAst, ctx: &mut ParseContext) -> ParsedEffectClaus
             clause
         }
         ClauseAst::SubjectPredicate { subject, predicate } => {
-            lower_subject_predicate_ast(*subject, *predicate, ctx)
+            lower_subject_predicate_ast(*subject, *predicate, ctx, original_clause)
         }
         ClauseAst::Conditional {
             guard,
             clause_text,
             clause,
         } => {
-            let mut result = lower_clause_ast(*clause, ctx);
+            let mut result = lower_clause_ast(*clause, ctx, original_clause);
             match guard {
                 // CR 608.2c: thread a lowered guard into the clause's condition field.
                 ConditionalGuard::Lowered(cond) => result.condition = Some(*cond),
@@ -20691,7 +20705,7 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
     let mut sub_player_scope: Option<PlayerFilter> = None;
     if subject_application_is_player_scoped(sub_text, &mut continuation_ctx) {
         if let Some(ast) = try_parse_subject_predicate_ast(sub_text, &mut continuation_ctx) {
-            let mut rerouted = lower_clause_ast(ast, &mut continuation_ctx);
+            let mut rerouted = lower_clause_ast(ast, &mut continuation_ctx, sub_text);
             if !matches!(rerouted.effect, Effect::Unimplemented { .. }) {
                 sub_player_scope = lift_effect_player_class_to_scope(&mut rerouted.effect);
                 sub_clause = rerouted;
@@ -23015,7 +23029,7 @@ fn try_parse_shared_equal_to_quantity_compound(tp: TextPair) -> Option<ParsedEff
     let sub_ability = tail.iter().rev().fold(None, |next, verb| {
         let link = AbilityDefinition::new(
             AbilityKind::Spell,
-            verb.lower_conjunct(qty.clone(), subject.as_ref()),
+            verb.lower_conjunct(qty.clone(), subject.as_ref(), tp.original),
         );
         Some(match next {
             Some(next) => link.sub_ability(next),
@@ -23024,7 +23038,7 @@ fn try_parse_shared_equal_to_quantity_compound(tp: TextPair) -> Option<ParsedEff
     });
     Some(ParsedEffectClause {
         sub_ability: sub_ability.map(Box::new),
-        ..parsed_clause(head.lower_conjunct(qty, subject.as_ref()))
+        ..parsed_clause(head.lower_conjunct(qty, subject.as_ref(), tp.original))
     })
 }
 
@@ -25393,6 +25407,7 @@ fn lower_subject_predicate_ast(
     subject: SubjectPhraseAst,
     predicate: PredicateAst,
     ctx: &mut ParseContext,
+    original_clause: &str,
 ) -> ParsedEffectClause {
     // CR 115.1d: Propagate multi_target from the subject phrase (e.g., "any number of
     // target creatures", "up to two target artifacts") into the lowered clause so the
@@ -26039,8 +26054,8 @@ fn lower_subject_predicate_ast(
                     ctx.pending_repeat_for = Some(qty);
                 }
             }
-            inject_subject_target(&mut clause.effect, &subject);
-            inject_subject_into_shared_token_sequence(&mut clause, &subject);
+            inject_subject_target(&mut clause.effect, &subject, original_clause);
+            inject_subject_into_shared_token_sequence(&mut clause, &subject, original_clause);
             if let Some(subject_filter) = subject.target.as_ref().or(subject.affected.as_ref()) {
                 sync_player_into_nested_shuffle_sub(&mut clause, subject_filter);
             }
@@ -27340,7 +27355,7 @@ fn bind_player_recipient_to_possessive_actor(effect: &mut Effect, actor: &Target
     }
 }
 
-fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
+fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst, original_clause: &str) {
     // Issue #6965: no bound subject and no target means there is nothing to
     // rebind — return rather than fabricate a filter.
     let Some(subject_filter) = subject.target.clone().or_else(|| subject.affected.clone()) else {
@@ -27437,7 +27452,7 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
             ..
         } => match imperative::additional_phase_recipient_for_subject(&subject_filter) {
             Some(kind) => *recipient = kind,
-            None => *effect = additional_phase_unnamed_recipient(),
+            None => *effect = additional_phase_unnamed_recipient(original_clause),
         },
         // CR 119.3 (issue #6381): "that player gains N life" / "target player
         // gains N life" — the imperative path defaults `player` to the
@@ -27749,6 +27764,7 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
 fn inject_subject_into_shared_token_sequence(
     clause: &mut ParsedEffectClause,
     subject: &SubjectPhraseAst,
+    original_clause: &str,
 ) {
     if !matches!(&clause.effect, Effect::Token { .. }) {
         return;
@@ -27759,7 +27775,7 @@ fn inject_subject_into_shared_token_sequence(
         if !matches!(definition.effect.as_ref(), Effect::Token { .. }) {
             return;
         }
-        inject_subject_target(&mut definition.effect, subject);
+        inject_subject_target(&mut definition.effect, subject, original_clause);
         next = definition.sub_ability.as_deref_mut();
     }
 }
@@ -42242,7 +42258,11 @@ fn parse_effect_chain_ir_body(
         // CR 608.2c: re-supply the elided player subject exactly as a printed
         // subject would be applied (`inject_subject_target` is that authority).
         if let Some(carried) = inherited_player_subject {
-            inject_subject_target(&mut clause.effect, &carried.subject_phrase());
+            inject_subject_target(
+                &mut clause.effect,
+                &carried.subject_phrase(),
+                normalized_text,
+            );
         }
         if nom_primitives::scan_contains(&text.to_lowercase(), "villainous choice") {
             if let (Effect::ChooseOneOf { chooser, .. }, Some(scope)) =
@@ -47409,6 +47429,124 @@ mod additional_phase_recipient_subject_tests {
         ] {
             assert_eq!(recipients("Synthetic Probe", "Sorcery", None, text), vec![None], "{text:?}");
         }
+    }
+
+    #[test]
+    fn synthetic_unsupported_phase_subject_preserves_original_clause() {
+        for text in [
+            "The active player gets an additional combat phase after this phase",
+            "Defending player gets an additional combat phase after this phase",
+            "Target creature gets an additional combat phase after this phase",
+        ] {
+            let parsed = parse_oracle_text(text, "Synthetic Probe", &[], &["Sorcery".into()], &[]);
+            assert_eq!(parsed.abilities.len(), 1, "{text:?}");
+            let def = &parsed.abilities[0];
+            assert!(
+                matches!(&*def.effect,
+                    Effect::Unimplemented { name, .. } if name == "additional_phase"
+                ),
+                "{text:?}: {:?}",
+                def.effect
+            );
+            assert_eq!(
+                def.effect.unimplemented_description(),
+                Some(text),
+                "{text:?}"
+            );
+            assert!(
+                def.sub_ability.is_none() && def.else_ability.is_none(),
+                "{text:?}"
+            );
+        }
+
+        for (text, expected) in [
+            (
+                "You get an additional combat phase after this phase",
+                ExtraPhaseRecipient::Controller,
+            ),
+            (
+                "Target player gets an additional combat phase after this phase",
+                ExtraPhaseRecipient::TargetedPlayer(TargetFilter::Player),
+            ),
+            (
+                "Target opponent gets an additional combat phase after this phase",
+                ExtraPhaseRecipient::TargetedPlayer(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent),
+                )),
+            ),
+        ] {
+            assert_eq!(
+                recipients("Synthetic Probe", "Sorcery", None, text),
+                vec![Some(expected)],
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn synthetic_chosen_phase_recipient_preserves_enclosing_clause() {
+        for text in [
+            "Choose a player to get an additional combat phase after this phase",
+            "Choose an opponent to get an additional combat phase after this phase",
+            "An opponent gets an additional combat phase after this phase",
+        ] {
+            let parsed = parse_oracle_text(text, "Synthetic Probe", &[], &["Sorcery".into()], &[]);
+            assert_eq!(parsed.abilities.len(), 1, "{text:?}");
+            let def = &parsed.abilities[0];
+            assert!(matches!(&*def.effect, Effect::Choose { .. }), "{text:?}");
+            let sub = def
+                .sub_ability
+                .as_deref()
+                .expect("chosen verb must be retained");
+            assert!(
+                matches!(&*sub.effect,
+                    Effect::Unimplemented { name, .. } if name == "additional_phase"
+                ),
+                "{text:?}: {:?}",
+                sub.effect
+            );
+            assert_eq!(
+                sub.effect.unimplemented_description(),
+                Some(text),
+                "{text:?}"
+            );
+            assert!(
+                sub.sub_ability.is_none() && sub.else_ability.is_none(),
+                "{text:?}"
+            );
+        }
+
+        for text in [
+            "Choose a player to draw a card",
+            "Choose an opponent to draw a card",
+            "An opponent draws a card",
+        ] {
+            let parsed = parse_oracle_text(text, "Synthetic Probe", &[], &["Sorcery".into()], &[]);
+            assert_eq!(parsed.abilities.len(), 1, "{text:?}");
+            let def = &parsed.abilities[0];
+            assert!(matches!(&*def.effect, Effect::Choose { .. }), "{text:?}");
+            let sub = def
+                .sub_ability
+                .as_deref()
+                .expect("chosen verb must be retained");
+            assert!(
+                matches!(&*sub.effect,
+                    Effect::Draw { target: TargetFilter::Typed(tf), .. }
+                        if tf.controller == Some(ControllerRef::ChosenPlayer { index: 0 })
+                ),
+                "{text:?}: {:?}",
+                sub.effect
+            );
+        }
+        assert_eq!(
+            recipients(
+                "Synthetic Probe",
+                "Sorcery",
+                None,
+                "You get an additional combat phase after this phase",
+            ),
+            vec![Some(ExtraPhaseRecipient::Controller)]
+        );
     }
 
     /// Every `AdditionalPhase` recipient in the parsed card, and every
