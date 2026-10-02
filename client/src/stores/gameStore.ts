@@ -26,7 +26,7 @@ import { MAX_UNDO_HISTORY, UNDOABLE_ACTIONS } from "../constants/game";
 import { applySpellPaymentPreference } from "../game/castPaymentMode";
 import { reportStructuredActionRejection } from "../game/actionRejectionReporter";
 import { getPlayerId } from "../hooks/usePlayerId";
-import { loadCheckpoints, saveAuthoritativeGame, saveAuthoritativeGameStrict } from "../services/gamePersistence";
+import { captureTrustedCheckpoint, loadCheckpoints, saveAuthoritativeGame, saveAuthoritativeGameStrict } from "../services/gamePersistence";
 import { resetStackThroughput } from "../utils/stackThroughput";
 
 /** Map a LegalActionsResult to the store fields it owns — single source of truth. */
@@ -49,6 +49,7 @@ export type { ActiveGameMeta, PersistedP2PHostSession } from "../services/gamePe
 export {
   saveGame,
   saveAuthoritativeGame,
+  captureTrustedCheckpoint,
   loadGame,
   clearGame,
   saveCheckpoints,
@@ -242,8 +243,10 @@ interface GameStoreState {
   stuckDiagnostic: StuckDecisionDiagnostic | null;
   /** Viewer-scoped interaction projection from the same engine snapshot. */
   viewerInteraction: ViewerInteraction | null;
-  stateHistory: GameState[];
-  turnCheckpoints: GameState[];
+  /** Undo ring: engine-authored trusted checkpoints, never screen projections. */
+  stateHistory: PersistedGameState[];
+  /** Debug rewind targets: trusted envelopes for the same reason. */
+  turnCheckpoints: PersistedGameState[];
   /**
    * Server-published turn boundaries offered as rollback targets. Mirrors the
    * server exactly — never appended to client-side, never derived. Empty on
@@ -391,7 +394,7 @@ interface GameStoreActions {
       /** Seq-stamped and appended to `logHistory`. Applied even when the pair is dropped. */
       logEntries?: GameLogEntry[];
       /** Undo checkpoints. Applied even when the pair is dropped. */
-      stateHistory?: GameState[];
+      stateHistory?: PersistedGameState[];
       /**
        * Site-specific fields applied in the SAME `set()` — but only when the
        * pair commit is accepted, and after the base commit + history handling,
@@ -686,6 +689,16 @@ export const useGameStore = create<GameStore>()(
         !isAuthorityRemote(gameMode) &&
         gameState.stack.length === 0;
 
+      // Fire the trusted-envelope capture WITHOUT awaiting it: both engine
+      // transports execute requests strictly in call order (worker message
+      // FIFO; fallback promise chain), so an export issued here runs before
+      // the submit below and observes the pre-action state — while the action
+      // itself pays no added latency. Awaited at commit time. A failed capture
+      // degrades to no checkpoint for this action rather than failing it.
+      const checkpointPromise = shouldSaveHistory
+        ? captureTrustedCheckpoint(adapter).catch(() => null)
+        : null;
+
       // `getPlayerId()` returns the local human's authenticated seat ID.
       // The engine rejects the action if this doesn't match the authorized
       // submitter — never trust the UI to route actions to the right seat.
@@ -706,8 +719,9 @@ export const useGameStore = create<GameStore>()(
       const snapshot = await adapter.getSnapshot();
 
       // Read-then-commit with no `await` between, so no other commit interleaves.
-      const stateHistory = shouldSaveHistory
-        ? [...get().stateHistory, gameState].slice(-MAX_UNDO_HISTORY)
+      const checkpoint = checkpointPromise ? await checkpointPromise : null;
+      const stateHistory = checkpoint
+        ? [...get().stateHistory, checkpoint].slice(-MAX_UNDO_HISTORY)
         : undefined;
       get().commitEngineSnapshot(snapshot, {
         events: result.events,
@@ -728,7 +742,7 @@ export const useGameStore = create<GameStore>()(
 
       const previous = stateHistory[stateHistory.length - 1];
 
-      // Sync WASM engine state with the restored client state
+      // Sync engine state with the restored trusted checkpoint
       await adapter.restoreState(previous);
       // Commit the snapshot's OWN state, not `previous`: post-restore the engine
       // is the source of truth, and taking both halves from one snapshot is what
