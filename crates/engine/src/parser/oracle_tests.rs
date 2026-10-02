@@ -26511,6 +26511,33 @@ fn target_has_pt_threshold_gate_lowers_to_target_filter() {
                 other => panic!("{name}: expected GenericEffect gated body, got {other:?}"),
             }
         }
+        // "this enchantment" / "this creature" in the gated body refers to the
+        // trigger source, not the gate's target: the body must stay `SelfRef`.
+        if name == "Dormant Grove" {
+            assert!(
+                matches!(
+                    &*gated.effect,
+                    Effect::Transform {
+                        target: TargetFilter::SelfRef,
+                        ..
+                    }
+                ),
+                "{name}: gated body transforms the source: {:?}",
+                gated.effect
+            );
+        }
+        if name == "Yavimaya Bloomsage" {
+            assert!(
+                matches!(
+                    &*gated.effect,
+                    Effect::BecomePrepared {
+                        target: TargetFilter::SelfRef,
+                    }
+                ),
+                "{name}: gated body prepares the source: {:?}",
+                gated.effect
+            );
+        }
     }
 }
 
