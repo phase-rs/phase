@@ -60,6 +60,36 @@ pub struct TournamentRequestId(pub u64);
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
+/// 102 — `QuantityRef::SharedCardTypes` adds a tagged quantity carried in
+///      serialized ability definitions and saved GameState. Readers without
+///      this tag cannot deserialize that quantity. P2P moves in lockstep
+///      (wire 84), following the mana-activation schema in full-game 101 / wire 83.
+/// 101 — `ActivatedAbilityKind` gains `Mana` (CR 605.1a): activating a mana
+///      ability now emits `GameEvent::AbilityActivated { kind: "Mana" }`
+///      (CR 605.3). The event also gains `departed_source_lki`
+///      (`Option<Box<LKISnapshot>>`, omitted when absent) — the source's last
+///      known information when a cost moved it off the battlefield (CR 113.7) —
+///      and `AbilityActivationRecord` gains `source_zone` (omitted when it is the
+///      battlefield). Events ride in `GameState` (`current_trigger_event`,
+///      stack trigger batches), so a v100 peer cannot parse a `Mana` kind — a
+///      PARSE bump. Lobby messages are unchanged, and P2P moves in lockstep
+///      (wire 83).
+/// 100 — `Effect::AdditionalPhase` states what it adds as the text words it
+///      (CR 500.8–500.10). Its `phase` field (a `Phase`) was replaced by
+///      `segment`, the adjacently tagged `TurnSegment` 82 introduced
+///      (`{"type":"Phase","data":"Combat"}`,
+///      `{"type":"CreatedPhase","data":"Untap"}`,
+///      `{"type":"Step","data":"End"}`), and `followed_by` changed its
+///      element type from `Phase` to `TurnSegment`. Its `target` field (a
+///      `TargetFilter`) was replaced by `recipient`, the adjacently tagged
+///      `ExtraPhaseRecipient` (`{"type":"NoPlayer"}`, `{"type":"Controller"}`,
+///      `{"type":"TriggeringPlayer"}`,
+///      `{"type":"TargetedPlayer","data":{"type":"Player"}}`). Neither
+///      `segment` nor `recipient` has a serde default and abilities ride inside
+///      `GameObject`, so every full-GameState frame holding any
+///      additional-phase card is unparseable across the pair — an
+///      unconditional PARSE bump like 82. Lobby messages are unchanged, and
+///      P2P moves in lockstep (wire 82).
 /// 99 — `StaticMode::GraveyardCastPermission` gains `pool`
 ///      (`GraveyardPermissionPool`, `#[serde(default, skip_serializing_if = ...)]`):
 ///      `AnyGraveyard` is "from any graveyard" (CR 404.1 + CR 601.3 — The Great
@@ -819,7 +849,7 @@ pub struct TournamentRequestId(pub u64);
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 99;
+pub const PROTOCOL_VERSION: u32 = 102;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -2060,12 +2090,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 99);
+        assert_eq!(PROTOCOL_VERSION, 102);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which refuses an older full-game peer that cannot preserve the exact
         // Full-session identity across draft match attachment and follow-ups.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 98);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 101);
     }
 
     #[test]

@@ -46,6 +46,7 @@ const {
   const fetchAvatarArtUrl = vi.fn<() => Promise<string | null>>();
   const preferences = {
     aiArchetypeFilter: "Any",
+    aiBracketFilter: [] as CommanderBracket[],
     aiCoverageFloor: 0,
     aiSeats: [{ difficulty: "Medium", deckId: "Random" }],
     cedhMode: false,
@@ -60,7 +61,10 @@ const {
   class WebSocketAdapter {
     private listener: ((event: NativeAdapterEvent) => void) | null = null;
     readonly nativeAiOptions:
-      | { aiSeats: Array<{ difficulty: string }>; formatConfig?: { starting_life: number } }
+      | {
+          aiSeats: Array<{ difficulty: string; deck: { main_deck: string[] } }>;
+          formatConfig?: { starting_life: number };
+        }
       | undefined;
     readonly nativePregameOptions: NativePregameReconnect | undefined;
     dispose = vi.fn();
@@ -81,7 +85,7 @@ const {
       _displayName?: string,
       options?: {
         nativeAi?: {
-          aiSeats: Array<{ difficulty: string }>;
+          aiSeats: Array<{ difficulty: string; deck: { main_deck: string[] } }>;
           formatConfig?: { starting_life: number };
         };
         nativePregame?: NativePregameReconnect;
@@ -254,9 +258,12 @@ vi.mock("../../services/randomDeckSelection", () => ({
 }));
 
 vi.mock("../../services/deckParser", () => ({
-  expandParsedDeck: (deck: { main: string[]; sideboard: string[] }) => ({
-    main_deck: deck.main,
-    sideboard: deck.sideboard,
+  expandParsedDeck: (deck: {
+    main: Array<string | { count: number; name: string }>;
+    sideboard: Array<string | { count: number; name: string }>;
+  }) => ({
+    main_deck: deck.main.map((entry) => (typeof entry === "string" ? entry : entry.name)),
+    sideboard: deck.sideboard.map((entry) => (typeof entry === "string" ? entry : entry.name)),
     commander: [],
     planar_deck: [],
     scheme_deck: [],
@@ -266,7 +273,8 @@ vi.mock("../../services/deckParser", () => ({
   }),
 }));
 
-vi.mock("../../data/formatRegistry", () => ({
+vi.mock("../../data/formatRegistry", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../data/formatRegistry")>(),
   formatSuppliesDeck: () => false,
 }));
 
@@ -277,7 +285,8 @@ vi.mock("../../stores/preferencesStore", () => {
   };
 });
 
-vi.mock("../../services/cedhLock", () => ({
+vi.mock("../../services/cedhLock", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../services/cedhLock")>(),
   effectiveAiDifficulty: (difficulty: string) => difficulty,
 }));
 
@@ -340,12 +349,45 @@ vi.mock("../../services/serverDetection", () => ({
 
 import type { FormatConfig } from "../../adapter/types";
 import { GameProvider } from "../GameProvider";
+import type { CommanderBracket } from "../../types/bracket";
+import type { AiDeckCandidate } from "../../services/aiDeckCatalog";
+import { buildLegalAiDeckCatalog } from "../../services/aiDeckCatalog";
 import { AdapterError, AdapterErrorCode } from "../../adapter/types";
 import { clearPromptOverlayState } from "../../game/sessionCleanup";
 import { createGameLoopController } from "../../game/controllers/gameLoopController";
 import { loadGame } from "../../stores/gameStore";
 
 const UNAVAILABLE = "This draft run is unavailable. End Run to draft again.";
+
+function aiCandidate(id: string, main: string[], bracket: CommanderBracket | null): AiDeckCandidate {
+  return {
+    id,
+    name: id,
+    source: { type: "saved" },
+    deck: { main: main.map((name) => ({ count: 1, name })), sideboard: [] },
+    coveragePct: 100,
+    archetype: null,
+    bracket,
+  };
+}
+
+const COMMANDER_FORMAT_CONFIG: FormatConfig = {
+  format: "Commander",
+  starting_life: 40,
+  min_players: 2,
+  max_players: 4,
+  deck_size: { type: "Exactly", data: 100 },
+  singleton: true,
+  command_zone: true,
+  commander_damage_threshold: 21,
+  range_of_influence: null,
+  team_based: false,
+  sideboard_policy: { type: "Forbidden" },
+  default_deck_copy_limit: { type: "UpTo", data: 1 },
+  uses_commander: true,
+  allow_debug_actions: false,
+  allow_experimental_dungeons: false,
+};
 
 function publishedPayload(playerDeck = ["Player"], opponentDeck = ["Opponent"], pool?: string[] | null) {
   return {
@@ -406,6 +448,11 @@ describe("GameProvider native AI routing", () => {
     multiplayerGetState.mockReturnValue(multiplayerState);
     preferences.aiSeats = [{ difficulty: "Medium", deckId: "Random" }];
     preferences.cedhMode = false;
+    preferences.aiBracketFilter = [];
+    vi.mocked(buildLegalAiDeckCatalog).mockReset();
+    vi.mocked(buildLegalAiDeckCatalog).mockResolvedValue({
+      candidates: [aiCandidate("ai-deck", ["Mountain"], null)],
+    });
     gameStoreState.adapter = null;
     gameStoreState.gameId = null;
     gameStoreState.gameState = null;
@@ -1487,6 +1534,179 @@ describe("GameProvider native AI routing", () => {
       "VeryHard",
       "CEDH",
     ]);
+  });
+
+  it("restricts AI random draws to the selected brackets at game start", async () => {
+    preferences.aiSeats = [{ difficulty: "Medium", deckId: "Random" }];
+    preferences.aiBracketFilter = [2];
+    vi.mocked(buildLegalAiDeckCatalog).mockResolvedValue({
+      candidates: [
+        aiCandidate("saved:B4 Deck", ["B4-Card"], 4),
+        aiCandidate("saved:B2 Deck", ["B2-Card"], 2),
+      ],
+    });
+
+    render(
+      <GameProvider gameId="bracket-restricted-draw" mode="ai" formatConfig={COMMANDER_FORMAT_CONFIG}>
+        <div />
+      </GameProvider>,
+    );
+
+    await waitFor(() => {
+      expect(gameStoreState.setEngineMode).toHaveBeenCalledWith("native");
+      expect(nativeAdapters).toHaveLength(1);
+    });
+
+    // pickRandomDeckCandidate is mocked to take the first candidate, so an
+    // unfiltered draw would hand the AI the bracket-4 deck listed first.
+    expect(nativeAdapters[0]!.nativeAiOptions?.aiSeats[0]?.deck.main_deck).toEqual(["B2-Card"]);
+  });
+
+  it("restricts AI random draws to bracket 5 in cEDH mode at game start", async () => {
+    preferences.aiSeats = [{ difficulty: "Medium", deckId: "Random" }];
+    preferences.cedhMode = true;
+    preferences.aiBracketFilter = [];
+    vi.mocked(buildLegalAiDeckCatalog).mockResolvedValue({
+      candidates: [
+        aiCandidate("saved:B4 Deck", ["B4-Card"], 4),
+        aiCandidate("saved:cEDH Deck", ["B5-Card"], 5),
+      ],
+    });
+
+    render(
+      <GameProvider gameId="cedh-restricted-draw" mode="ai" formatConfig={COMMANDER_FORMAT_CONFIG}>
+        <div />
+      </GameProvider>,
+    );
+
+    await waitFor(() => {
+      expect(gameStoreState.setEngineMode).toHaveBeenCalledWith("native");
+      expect(nativeAdapters).toHaveLength(1);
+    });
+
+    expect(nativeAdapters[0]!.nativeAiOptions?.aiSeats[0]?.deck.main_deck).toEqual(["B5-Card"]);
+  });
+
+  it("falls back to the full catalog when the bracket filter matches nothing", async () => {
+    // Soft gate: the setup page warns about the empty pool but Start stays
+    // enabled, so game start draws from all legal decks rather than failing.
+    preferences.aiSeats = [{ difficulty: "Medium", deckId: "Random" }];
+    preferences.aiBracketFilter = [1];
+    vi.mocked(buildLegalAiDeckCatalog).mockResolvedValue({
+      candidates: [aiCandidate("saved:B4 Deck", ["B4-Card"], 4)],
+    });
+    const onNoDeck = vi.fn();
+
+    render(
+      <GameProvider
+        gameId="bracket-empty-pool"
+        mode="ai"
+        formatConfig={COMMANDER_FORMAT_CONFIG}
+        onNoDeck={onNoDeck}
+      >
+        <div />
+      </GameProvider>,
+    );
+
+    await waitFor(() => {
+      expect(gameStoreState.setEngineMode).toHaveBeenCalledWith("native");
+      expect(nativeAdapters).toHaveLength(1);
+    });
+
+    expect(nativeAdapters[0]!.nativeAiOptions?.aiSeats[0]?.deck.main_deck).toEqual(["B4-Card"]);
+    expect(onNoDeck).not.toHaveBeenCalled();
+  });
+
+  it("fails game start when cEDH mode has no bracket-5 decks to draw", async () => {
+    // Unlike the manual filter, cEDH has no legal fallback: the engine
+    // rejects any non-bracket-5 deck at init (validate_cedh_bracket), so a
+    // Random seat with an empty B5 pool must fail here, not draw elsewhere.
+    preferences.aiSeats = [{ difficulty: "Medium", deckId: "Random" }];
+    preferences.cedhMode = true;
+    preferences.aiBracketFilter = [];
+    vi.mocked(buildLegalAiDeckCatalog).mockResolvedValue({
+      candidates: [aiCandidate("saved:B4 Deck", ["B4-Card"], 4)],
+    });
+    const onNoDeck = vi.fn();
+
+    render(
+      <GameProvider
+        gameId="cedh-empty-pool"
+        mode="ai"
+        formatConfig={COMMANDER_FORMAT_CONFIG}
+        onNoDeck={onNoDeck}
+      >
+        <div />
+      </GameProvider>,
+    );
+
+    await waitFor(() => {
+      expect(onNoDeck).toHaveBeenCalledTimes(1);
+    });
+    expect(nativeAdapters).toHaveLength(0);
+    expect(gameStoreState.initGame).not.toHaveBeenCalled();
+    expect(ensureNativeEngine).not.toHaveBeenCalled();
+    expect(multiplayerState.showToast).not.toHaveBeenCalled();
+    expect(saveActiveGame).not.toHaveBeenCalled();
+  });
+
+  it("lets pinned seats bypass an empty cEDH pool", async () => {
+    preferences.aiSeats = [{ difficulty: "Medium", deckId: "saved:B4 Deck" }];
+    preferences.cedhMode = true;
+    preferences.aiBracketFilter = [];
+    vi.mocked(buildLegalAiDeckCatalog).mockResolvedValue({
+      candidates: [aiCandidate("saved:B4 Deck", ["B4-Card"], 4)],
+    });
+    const onNoDeck = vi.fn();
+
+    render(
+      <GameProvider
+        gameId="cedh-pinned-bypass"
+        mode="ai"
+        formatConfig={COMMANDER_FORMAT_CONFIG}
+        onNoDeck={onNoDeck}
+      >
+        <div />
+      </GameProvider>,
+    );
+
+    await waitFor(() => {
+      expect(gameStoreState.setEngineMode).toHaveBeenCalledWith("native");
+      expect(nativeAdapters).toHaveLength(1);
+    });
+
+    // The pinned deck plays as-is; whether a non-B5 pin survives cEDH
+    // engine validation is the engine's call at init, as with the human seat.
+    expect(nativeAdapters[0]!.nativeAiOptions?.aiSeats[0]?.deck.main_deck).toEqual(["B4-Card"]);
+    expect(onNoDeck).not.toHaveBeenCalled();
+  });
+
+  it("lets pinned seats bypass an empty bracket pool", async () => {
+    preferences.aiSeats = [{ difficulty: "Medium", deckId: "saved:B4 Deck" }];
+    preferences.aiBracketFilter = [1];
+    vi.mocked(buildLegalAiDeckCatalog).mockResolvedValue({
+      candidates: [aiCandidate("saved:B4 Deck", ["B4-Card"], 4)],
+    });
+    const onNoDeck = vi.fn();
+
+    render(
+      <GameProvider
+        gameId="bracket-pinned-bypass"
+        mode="ai"
+        formatConfig={COMMANDER_FORMAT_CONFIG}
+        onNoDeck={onNoDeck}
+      >
+        <div />
+      </GameProvider>,
+    );
+
+    await waitFor(() => {
+      expect(gameStoreState.setEngineMode).toHaveBeenCalledWith("native");
+      expect(nativeAdapters).toHaveLength(1);
+    });
+
+    expect(nativeAdapters[0]!.nativeAiOptions?.aiSeats[0]?.deck.main_deck).toEqual(["B4-Card"]);
+    expect(onNoDeck).not.toHaveBeenCalled();
   });
 
   // The Tauri solo route writes no resume pointer, so `GameSetupPage` hands its

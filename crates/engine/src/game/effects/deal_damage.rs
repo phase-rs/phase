@@ -2214,6 +2214,7 @@ fn collect_matching_players(
                                 recipient: None,
                                 scoped_player: Some(p.id),
                                 damage_source: None,
+                                spell: None,
                                 event_amount: None,
                             },
                         );
@@ -2489,6 +2490,7 @@ pub fn resolve_each_player(
                                 recipient: None,
                                 scoped_player: Some(p.id),
                                 damage_source: None,
+                                spell: None,
                                 event_amount: None,
                             },
                         );

@@ -5,15 +5,15 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-10-01T00:00:00Z",
+  "updated": "2026-10-02T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
       "name": "Golgari Midrange",
       "author": "MTGGoldfish",
       "colors": [
-        "G",
-        "B"
+        "B",
+        "G"
       ],
       "tags": [
         "metagame"
@@ -21,7 +21,7 @@
       "main": [
         {
           "count": 4,
-          "name": "Badgermole Cub"
+          "name": "Mutavault"
         },
         {
           "count": 4,
@@ -32,8 +32,8 @@
           "name": "Bitter Triumph"
         },
         {
-          "count": 4,
-          "name": "Mutavault"
+          "count": 3,
+          "name": "Overgrown Tomb"
         },
         {
           "count": 1,
@@ -77,15 +77,15 @@
         },
         {
           "count": 4,
-          "name": "Professor Dellian Fel"
-        },
-        {
-          "count": 4,
           "name": "Thoughtseize"
         },
         {
-          "count": 2,
-          "name": "Restless Cottage"
+          "count": 4,
+          "name": "Unholy Annex // Ritual Chamber"
+        },
+        {
+          "count": 3,
+          "name": "Abrupt Decay"
         },
         {
           "count": 3,
@@ -101,29 +101,25 @@
         },
         {
           "count": 4,
-          "name": "Unholy Annex // Ritual Chamber"
+          "name": "Badgermole Cub"
         },
         {
           "count": 1,
           "name": "Urborg, Tomb of Yawgmoth"
         },
         {
-          "count": 3,
-          "name": "Abrupt Decay"
+          "count": 4,
+          "name": "Professor Dellian Fel"
         },
         {
-          "count": 3,
-          "name": "Overgrown Tomb"
+          "count": 2,
+          "name": "Restless Cottage"
         }
       ],
       "sideboard": [
         {
           "count": 1,
           "name": "Ashiok, Dream Render"
-        },
-        {
-          "count": 2,
-          "name": "Cruelclaw's Heist"
         },
         {
           "count": 2,
@@ -134,7 +130,7 @@
           "name": "Duress"
         },
         {
-          "count": 1,
+          "count": 2,
           "name": "Go Blank"
         },
         {
@@ -150,8 +146,12 @@
           "name": "Nowhere to Run"
         },
         {
-          "count": 3,
+          "count": 2,
           "name": "Unlicensed Hearse"
+        },
+        {
+          "count": 2,
+          "name": "Cruelclaw's Heist"
         }
       ]
     },
@@ -1153,11 +1153,11 @@
         },
         {
           "count": 4,
-          "name": "Thoughtseize"
+          "name": "Gloomlake Verge"
         },
         {
           "count": 4,
-          "name": "Gloomlake Verge"
+          "name": "Thoughtseize"
         }
       ],
       "sideboard": [

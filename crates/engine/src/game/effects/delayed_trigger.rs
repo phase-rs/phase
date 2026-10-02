@@ -1879,12 +1879,12 @@ mod tests {
     use crate::game::game_object::GameObject;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, BounceSelection, DamageKindFilter, DelayedTriggerCondition,
-        Effect, ExtraPhaseAnchor, ManaProduction, ObjectScope, PtValue, QuantityExpr, QuantityRef,
-        TriggerDefinition,
+        Effect, ExtraPhaseAnchor, ExtraPhaseRecipient, ManaProduction, ObjectScope, PtValue,
+        QuantityExpr, QuantityRef, TriggerDefinition,
     };
     use crate::types::identifiers::{CardId, ExtraPhaseId, ObjectId, TrackedSetId};
     use crate::types::mana::ManaCost;
-    use crate::types::phase::{Phase, PhaseGroup};
+    use crate::types::phase::{Phase, PhaseGroup, TurnSegment};
     use crate::types::player::PlayerId;
     use crate::types::triggers::{PlaneswalkRole, TriggerMode};
 
@@ -2342,10 +2342,10 @@ mod tests {
         )
     }
 
-    fn add_combat(target: TargetFilter, after: ExtraPhaseAnchor, count: i32) -> Effect {
+    fn add_combat(recipient: ExtraPhaseRecipient, after: ExtraPhaseAnchor, count: i32) -> Effect {
         Effect::AdditionalPhase {
-            target,
-            phase: Phase::BeginCombat,
+            recipient,
+            segment: TurnSegment::Phase(PhaseGroup::Combat),
             after,
             followed_by: vec![],
             count: QuantityExpr::Fixed { value: count },
@@ -2384,7 +2384,7 @@ mod tests {
         let mut state = precombat_main();
         let chain = add_then_that_combat(
             add_combat(
-                TargetFilter::None,
+                ExtraPhaseRecipient::NoPlayer,
                 ExtraPhaseAnchor::ThisPhase { named: None },
                 1,
             ),
@@ -2432,7 +2432,7 @@ mod tests {
                 "first-of-turn phase already ended",
                 late,
                 add_combat(
-                    TargetFilter::Controller,
+                    ExtraPhaseRecipient::Controller,
                     ExtraPhaseAnchor::FirstOfTurn(PhaseGroup::PostcombatMain),
                     1,
                 ),
@@ -2441,7 +2441,7 @@ mod tests {
                 "granted phase on an opponent's turn",
                 opponents_turn,
                 add_combat(
-                    TargetFilter::Controller,
+                    ExtraPhaseRecipient::Controller,
                     ExtraPhaseAnchor::ThisPhase { named: None },
                     1,
                 ),
@@ -2453,13 +2453,17 @@ mod tests {
                     state.phase = Phase::Upkeep;
                     state
                 },
-                add_combat(TargetFilter::None, ExtraPhaseAnchor::this_main_phase(), 1),
+                add_combat(
+                    ExtraPhaseRecipient::NoPlayer,
+                    ExtraPhaseAnchor::this_main_phase(),
+                    1,
+                ),
             ),
             (
                 "two combats added",
                 precombat_main(),
                 add_combat(
-                    TargetFilter::None,
+                    ExtraPhaseRecipient::NoPlayer,
                     ExtraPhaseAnchor::ThisPhase { named: None },
                     2,
                 ),
@@ -2502,7 +2506,7 @@ mod tests {
             &mut state,
             &ResolvedAbility::new(
                 add_combat(
-                    TargetFilter::None,
+                    ExtraPhaseRecipient::NoPlayer,
                     ExtraPhaseAnchor::ThisPhase { named: None },
                     1,
                 ),
@@ -2539,7 +2543,7 @@ mod tests {
         let mut events = Vec::new();
         let chain = ResolvedAbility::new(
             add_combat(
-                TargetFilter::None,
+                ExtraPhaseRecipient::NoPlayer,
                 ExtraPhaseAnchor::ThisPhase { named: None },
                 1,
             ),
@@ -2550,7 +2554,7 @@ mod tests {
         .sub_ability(
             ResolvedAbility::new(
                 add_combat(
-                    TargetFilter::None,
+                    ExtraPhaseRecipient::NoPlayer,
                     ExtraPhaseAnchor::ThisPhase { named: None },
                     0,
                 ),

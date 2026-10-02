@@ -5025,6 +5025,7 @@ fn counters_on_source_provably_excludes_class(
         scoped_player: None,
         damage_source: None,
         event_amount: None,
+        spell: None,
     };
     crate::game::quantity::object_id_for_scope(state, ObjectScope::Source, ctx, &[])
         .is_some_and(|read_id| read_id != class_member)
@@ -8218,6 +8219,7 @@ fn project_out_resources(state: &GameState) -> GameState {
     s.created_tokens_this_turn.clear();
     s.players_who_created_token_this_turn.clear();
     s.sacrificed_permanents_this_turn.clear();
+    s.creatures_exploited_this_turn.clear();
     s.players_who_sacrificed_artifact_this_turn.clear();
     s.counter_added_this_turn.clear();
     s.player_actions_this_turn.clear();
@@ -27201,6 +27203,7 @@ mod tests {
             scoped_player: None,
             damage_source: None,
             event_amount: None,
+            spell: None,
         };
         assert_eq!(
             crate::game::quantity::object_id_for_scope(
@@ -27227,6 +27230,7 @@ mod tests {
             scoped_player: None,
             damage_source: None,
             event_amount: None,
+            spell: None,
         };
         assert_eq!(
             crate::game::quantity::object_id_for_scope(

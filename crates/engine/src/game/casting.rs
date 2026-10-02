@@ -12708,8 +12708,16 @@ fn collect_battlefield_cost_modifiers(
                 let qty_expr = crate::types::ability::QuantityExpr::Ref {
                     qty: qty_ref.clone(),
                 };
-                super::quantity::resolve_quantity(state, &qty_expr, source_controller, bf_id).max(0)
-                    as u32
+                // CR 205.2a + CR 607.2a: thread the spell as the `SharedCardTypes`
+                // intersection subject while `bf_id` remains the exile-link anchor.
+                super::quantity::resolve_quantity_with_spell(
+                    state,
+                    &qty_expr,
+                    source_controller,
+                    bf_id,
+                    spell_id,
+                )
+                .max(0) as u32
             } else {
                 1
             };
@@ -27341,16 +27349,27 @@ pub(crate) fn record_activated_ability_placed(
                 )),
         "record_activated_ability_placed must name the entry its caller just pushed"
     );
+    // CR 606.1 + CR 602.2: the kind and announcement zone are the facts bound
+    // when the ability was announced — never re-read from the source after its
+    // costs were paid (a cost may have moved it, resetting its abilities).
+    let kind = if record.is_loyalty_ability {
+        ActivatedAbilityKind::Loyalty
+    } else {
+        ActivatedAbilityKind::Normal
+    };
+    let announced_zone = record.source_zone;
     restrictions::record_ability_activation(state, source_id, ability_index, Some(record));
     // CR 117.1b: Priority permits unbounded activation. `pending_activations`
     // is a per-priority-window AI-guard — see `GameState::pending_activations`.
     state.pending_activations.push((source_id, ability_index));
-    events.push(GameEvent::AbilityActivated {
-        player_id: player,
+    super::casting_targets::emit_ability_activated(
+        state,
+        player,
         source_id,
-        // CR 606.2: Classify loyalty vs. normal from the source ability cost.
-        kind: super::planeswalker::activated_ability_kind(state, source_id, ability_index),
-    });
+        kind,
+        announced_zone,
+        events,
+    );
     // CR 702.142b: Emit additional event when a boast ability is activated.
     super::casting_targets::emit_keyword_ability_event_if_tagged(
         state,
@@ -27415,10 +27434,9 @@ pub(crate) fn capture_activation_record_from(
 ) -> Option<AbilityActivationRecord> {
     // The source exists whenever its ability is announced; a missing one
     // yields no record, which the placement authority refuses (fail-closed).
-    let source_lki = state
-        .objects
-        .get(&source_id)?
-        .snapshot_public_characteristics();
+    let source = state.objects.get(&source_id)?;
+    let source_lki = source.snapshot_public_characteristics();
+    let source_zone = source.zone;
     let targets = targets
         .iter()
         .filter_map(|target| match target {
@@ -27438,10 +27456,11 @@ pub(crate) fn capture_activation_record_from(
         activator: player,
         source: source_id,
         source_lki,
+        source_zone,
         ability_tag: def.and_then(|def| def.ability_tag),
-        is_loyalty_ability: def
-            .and_then(|def| def.cost.as_ref())
-            .is_some_and(crate::types::ability::is_loyalty_ability_cost),
+        // CR 606.1: classified once, from the announcement-bound definition.
+        is_loyalty_ability: def.map(ActivatedAbilityKind::of_definition)
+            == Some(ActivatedAbilityKind::Loyalty),
         targets,
     })
 }
@@ -28373,6 +28392,7 @@ fn quantity_ref_reads_target_object(qty: &QuantityRef, read: TargetRead) -> bool
             card_type_set_source_reads_chosen_target(aggregate.source(), read)
         }
         QuantityRef::DistinctCardTypes { source }
+        | QuantityRef::SharedCardTypes { source }
         | QuantityRef::DistinctSubtypes { source, .. }
         | QuantityRef::DistinctColorsAmong { source } => {
             card_type_set_source_reads_chosen_target(source, read)
@@ -30854,21 +30874,15 @@ fn cant_be_activated_static_hits(
     }
     // CR 606.1 + CR 606.2: The ability-KIND axis. A loyalty-only prohibition
     // (The Immortal Sun) blocks only loyalty abilities — activated abilities
-    // with a loyalty symbol in their cost (CR 606.2) — classified through the
-    // single-authority `is_loyalty_ability_cost` the activation path itself
-    // uses. `Some(Normal)` blocks only ordinary activated abilities; `None`
+    // with a loyalty symbol in their cost (CR 606.2). The kind comes from the
+    // single classifier the activation event uses; the axis reads
+    // `Some(Normal)` as "non-loyalty" (it predates the `Mana` kind), so a
+    // saved `Some(Normal)` prohibition still covers mana abilities. `None`
     // blocks any activated ability (Chalice/Karn/Pithing Needle class).
     if let Some(required_kind) = kind {
-        let is_loyalty = activating_ability
-            .cost
-            .as_ref()
-            .is_some_and(crate::types::ability::is_loyalty_ability_cost);
-        let ability_kind = if is_loyalty {
-            ActivatedAbilityKind::Loyalty
-        } else {
-            ActivatedAbilityKind::Normal
-        };
-        if *required_kind != ability_kind {
+        if !ActivatedAbilityKind::of_definition(activating_ability)
+            .satisfies_prohibition_kind(*required_kind)
+        {
             return false;
         }
     }
