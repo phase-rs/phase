@@ -15,16 +15,20 @@
 //! - Dormant Grove // Gnarled Grovestrider: "At the beginning of combat on your
 //!   turn, put a +1/+1 counter on target creature you control. Then if that
 //!   creature has toughness 6 or greater, transform this enchantment."
+//! - Yavimaya Bloomsage // Channel (2/2, prepare layout): "At the beginning of
+//!   your end step, put a +1/+1 counter on target creature you control. Then if
+//!   that creature has power 7 or greater, this creature becomes prepared."
 //!
 //! RED AT BASE: the gate falls through to the target-has keyword gate, which
-//! fails it closed as `Unimplemented`, so first strike is never granted and the
-//! Grove never transforms.
+//! fails it closed as `Unimplemented`, so first strike is never granted, the
+//! Grove never transforms, and the Bloomsage never becomes prepared.
 
 use engine::game::printed_cards::snapshot_object_face;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::triggers::drain_order_triggers_with_identity;
 use engine::types::ability::{ContinuousModification, TargetFilter, TargetRef};
 use engine::types::actions::GameAction;
+use engine::types::card::LayoutKind;
 use engine::types::counter::CounterType;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
@@ -35,6 +39,11 @@ use engine::types::player::PlayerId;
 const STRIDER_ORACLE: &str = "Landfall — Whenever a land you control enters, target creature gets +1/+1 until end of turn. Then if that creature has power 4 or greater, it gains first strike until end of turn.";
 
 const DORMANT_GROVE_ORACLE: &str = "At the beginning of combat on your turn, put a +1/+1 counter on target creature you control. Then if that creature has toughness 6 or greater, transform this enchantment.";
+
+const YAVIMAYA_BLOOMSAGE_ORACLE: &str = "At the beginning of your end step, put a +1/+1 counter on target creature you control. Then if that creature has power 7 or greater, this creature becomes prepared. (While it's prepared, you may cast a copy of its spell. Doing so unprepares it.)";
+
+/// The prepare spell printed in Yavimaya Bloomsage's inset frame.
+const CHANNEL_ORACLE: &str = "Until end of turn, any time you could activate a mana ability, you may pay 1 life. If you do, add {C}.";
 
 fn grant_priority(runner: &mut GameRunner, player: PlayerId) {
     let state = runner.state_mut();
@@ -338,4 +347,128 @@ fn dormant_grove_toughness_five_does_not_transform() {
         "CR 608.2c: toughness 5 fails the gate, so Dormant Grove stays untransformed"
     );
     assert_eq!(grove_obj.name, "Dormant Grove");
+}
+
+fn is_prepared(runner: &GameRunner, id: ObjectId) -> bool {
+    runner.state().objects[&id].prepared.is_some()
+}
+
+/// Yavimaya Bloomsage on P0's battlefield beside a P0 recipient of the given
+/// size and a P0 power-7 bystander. All three carry the Channel prepare spell
+/// as a `LayoutKind::Prepare` back face (CR 722.2a), so each is eligible to
+/// become prepared (CR 722.3a) and only the gate's resolution decides which one
+/// does. Advances to P0's end step, declares the recipient for the counter
+/// trigger, and drives it to resolution. Returns `(runner, bloomsage,
+/// recipient, bystander)`.
+fn bloomsage_end_step(power: i32, toughness: i32) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PostCombatMain);
+    let bloomsage = scenario
+        .add_creature_from_oracle(P0, "Yavimaya Bloomsage", 2, 2, YAVIMAYA_BLOOMSAGE_ORACLE)
+        .with_subtypes(vec!["Dryad", "Druid"])
+        .id();
+    // The donor supplies the prepare-spell face (pattern: the Dormant Grove
+    // back face above; `LayoutKind::Prepare` as in fra_bloodline_recollector.rs).
+    let donor = scenario
+        .add_spell_to_hand_from_oracle(P1, "Channel", false, CHANNEL_ORACLE)
+        .id();
+    let recipient = scenario
+        .add_creature(P0, "Elder Oak", power, toughness)
+        .id();
+    // A second legal recipient forces a real target declaration, and its power
+    // 7 would satisfy the gate if it were (wrongly) the one read.
+    let bystander = scenario.add_creature(P0, "Bystander Oak", 7, 7).id();
+    let mut runner = scenario.build();
+    let mut prepare_face = snapshot_object_face(&runner.state().objects[&donor]);
+    prepare_face.layout_kind = Some(LayoutKind::Prepare);
+    for id in [bloomsage, recipient, bystander] {
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&id)
+            .expect("prepare-faced creature exists")
+            .back_face = Some(prepare_face.clone());
+    }
+
+    runner.advance_to_phase(Phase::End);
+    assert_eq!(
+        runner.state().phase,
+        Phase::End,
+        "reach guard: the game reached P0's end step"
+    );
+    for id in [bloomsage, recipient, bystander] {
+        assert!(
+            !is_prepared(&runner, id),
+            "no creature is prepared before the end-step trigger resolves"
+        );
+    }
+    drive_board(
+        &mut runner,
+        TargetRef::Object(recipient),
+        "Yavimaya Bloomsage end step",
+    );
+    (runner, bloomsage, recipient, bystander)
+}
+
+/// CR 608.2c + CR 608.2h + CR 722.3a: a 6/6 recipient that receives the +1/+1
+/// counter has power 7 as the rider resolves, so "this creature" — the
+/// Bloomsage, the trigger's source — becomes prepared. The recipient and the
+/// bystander, though both have prepare spells, do not.
+#[test]
+fn bloomsage_power_seven_prepares_the_source() {
+    let (runner, bloomsage, recipient, bystander) = bloomsage_end_step(6, 6);
+
+    assert_eq!(
+        plus_one_counters(&runner, recipient),
+        1,
+        "reach guard: the counter landed on the declared recipient"
+    );
+    assert_eq!(
+        power(&runner, recipient),
+        Some(7),
+        "reach guard: the declared recipient has power 7"
+    );
+    assert!(
+        is_prepared(&runner, bloomsage),
+        "CR 722.3a: power 7 meets the gate, so the Bloomsage becomes prepared"
+    );
+    assert!(
+        !is_prepared(&runner, recipient),
+        "\"this creature\" is the source; the counter's recipient is not prepared"
+    );
+    assert!(
+        !is_prepared(&runner, bystander),
+        "the bystander is neither the source nor the recipient"
+    );
+}
+
+/// CR 608.2c: a 5/5 recipient that receives the counter has power 6, failing
+/// "power 7 or greater", so the Bloomsage stays unprepared — the power-7
+/// bystander is not "that creature".
+#[test]
+fn bloomsage_power_six_leaves_the_source_unprepared() {
+    let (runner, bloomsage, recipient, bystander) = bloomsage_end_step(5, 5);
+
+    assert_eq!(
+        plus_one_counters(&runner, recipient),
+        1,
+        "reach guard: the counter landed on the declared recipient"
+    );
+    assert_eq!(
+        power(&runner, recipient),
+        Some(6),
+        "reach guard: the declared recipient has power 6"
+    );
+    assert!(
+        !is_prepared(&runner, bloomsage),
+        "CR 608.2c: power 6 fails the gate, so the Bloomsage stays unprepared"
+    );
+    assert!(
+        !is_prepared(&runner, recipient),
+        "the counter's recipient is not prepared"
+    );
+    assert!(
+        !is_prepared(&runner, bystander),
+        "the bystander is not prepared"
+    );
 }
