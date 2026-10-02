@@ -5,7 +5,7 @@ use crate::types::ability::{
 #[cfg(test)]
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{DelayedTrigger, GameState};
+use crate::types::game_state::{BattlefieldDepartureSourceContext, DelayedTrigger, GameState};
 use crate::types::identifiers::TrackedSetId;
 use crate::types::zones::Zone;
 
@@ -15,7 +15,7 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (mut condition, effect_def, uses_tracked_set) = match &ability.effect {
+    let (mut condition, mut effect_def, uses_tracked_set) = match &ability.effect {
         Effect::CreateDelayedTrigger {
             condition,
             effect,
@@ -180,6 +180,7 @@ pub fn resolve(
         // is out of scope for #8721, which is why they stay `Vec::new()` here.
         DelayedTriggerCondition::AtNextPhase { .. }
         | DelayedTriggerCondition::AtNextPhaseForPlayer { .. }
+        | DelayedTriggerCondition::AtBeginningOfAddedPhase { .. }
         | DelayedTriggerCondition::WhenLeavesPlay { .. }
         | DelayedTriggerCondition::WhenDies { .. }
         | DelayedTriggerCondition::WhenLeavesPlayFiltered { .. }
@@ -264,6 +265,66 @@ pub fn resolve(
         if matches!(gate, crate::types::ability::TurnGate::AfterCreationTurn) {
             *gate = crate::types::ability::TurnGate::After(state.turn_number);
         }
+    }
+
+    // CR 603.7a + CR 500.8: "that combat" names the phase the preceding
+    // instruction of this resolution added (`last_added_phase_ids`). When none
+    // was added (CR 500.10a; "this main phase" outside a main phase; a
+    // first-of-turn phase that has already ended, CR 505.1b), no such phase
+    // exists and no delayed trigger is created. The anaphor is singular and
+    // every printed producer adds one phase, so several published phases are
+    // not a reading of the text either, and also create nothing.
+    if let DelayedTriggerCondition::AtBeginningOfAddedPhase { entry, .. } = &mut condition {
+        let [added] = state.last_added_phase_ids.as_slice() else {
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::CreateDelayedTrigger,
+                source_id: ability.source_id,
+                subject: None,
+            });
+            return Ok(());
+        };
+        *entry = Some(*added);
+    }
+
+    // CR 608.2h + CR 603.7a: Freeze this instruction's replacement-settled
+    // result when the delayed ability is created. The later upkeep may see an
+    // entirely different battlefield, so the token body stores a fixed count.
+    if let Some((result_id, spec)) = &ability.reads_return_result {
+        let occurrence = state
+            .active_return_result_occurrence
+            .ok_or_else(|| EffectError::MissingParam("return result occurrence".to_string()))?;
+        let records = state
+            .return_result_frames
+            .get(&occurrence)
+            .and_then(|frame| frame.get(result_id))
+            .ok_or_else(|| EffectError::MissingParam("settled return result".to_string()))?;
+        if spec.recipient != crate::types::ability::ControllerRef::You {
+            return Err(EffectError::InvalidParam(
+                "unsupported return recipient".to_string(),
+            ));
+        }
+        let ctx = crate::game::filter::FilterContext::from_ability(ability);
+        let count = records
+            .iter()
+            .filter(|record| {
+                record.to_zone == spec.destination
+                    && record.owner == ability.controller
+                    && crate::game::filter::matches_target_filter_on_zone_change_record(
+                        state, record, &spec.noun, &ctx,
+                    )
+            })
+            .count();
+        let count = i32::try_from(count)
+            .map_err(|_| EffectError::InvalidParam("return result count overflow".to_string()))?;
+        let Effect::Token {
+            count: token_count, ..
+        } = effect_def.effect.as_mut()
+        else {
+            return Err(EffectError::InvalidParam(
+                "return reader has no token body".to_string(),
+            ));
+        };
+        *token_count = QuantityExpr::Fixed { value: count };
     }
 
     // CR 603.7c: Build the delayed trigger's resolved ability from the full
@@ -370,9 +431,7 @@ pub fn resolve(
     //    `false` for every card in the class.
     //
     // Scoped to the ParentTarget arm: the event-subject arm computes its own
-    // pins inline against the same operative test (see below); the LastCreated
-    // arm names tokens, which cease to exist on a zone change (CR 111.7) rather
-    // than returning as a new incarnation.
+    // pins inline against the same operative test (see below).
     let creation_time_provenance = condition_uses_creation_time_provenance(&condition);
     // CR 608.2k: TWO different questions, deliberately asked separately.
     //
@@ -439,13 +498,24 @@ pub fn resolve(
     } else if effect_references_last_created(&delayed_ability.effect)
         && !state.last_created_token_ids.is_empty()
     {
+        // CR 603.7c + CR 400.7: pin the snapshotted referents, gated on `condition_expects_referent_move` as the parent-target arm is. Unpinned, a delayed sacrifice whose referents are all gone falls past `pinned_object_targets_all_stale` into an untargeted sacrifice matched against the live `last_created_token_ids`.
+        let pins = if condition_expects_referent_move {
+            Vec::new()
+        } else {
+            state
+                .last_created_token_ids
+                .iter()
+                .filter_map(|id| state.objects.get(id))
+                .map(crate::types::identifiers::ObjectIncarnationRef::from_object)
+                .collect()
+        };
         (
             state
                 .last_created_token_ids
                 .iter()
                 .map(|&id| TargetRef::Object(id))
                 .collect(),
-            Vec::new(),
+            pins,
         )
     } else {
         (vec![], Vec::new())
@@ -502,6 +572,24 @@ pub fn resolve(
     // CR 603.7c: A delayed triggered ability that refers to information from
     // its creation event keeps that creation-time binding for later resolution.
     delayed_ability.scoped_player = ability.scoped_player;
+    // CR 603.7 + CR 603.10a + CR 608.2h: a phase-delayed ability created under
+    // a battlefield departure ("When this creature dies, at the beginning of the
+    // next end step, …") fires on a phase event that names no object. Carry the
+    // departure itself so every object look-back read in the payload ("that
+    // many", "its power", "this creature's counters") answers from the departed
+    // object's last-known information. Event-delayed triggers are never stamped:
+    // they read the event that actually fires them.
+    if creation_time_provenance {
+        if let Some(
+            event @ GameEvent::ZoneChanged {
+                from: Some(Zone::Battlefield),
+                ..
+            },
+        ) = state.current_trigger_event.as_ref()
+        {
+            delayed_ability.set_creation_lookback_event_recursive(event);
+        }
+    }
     // A delayed trigger is a continuation of this resolved ability, so preserve
     // the same exact trigger source across its later match and resolution. Spell
     // and activated-ability sources may not already carry trigger provenance;
@@ -767,7 +855,8 @@ fn concretize_event_subject_leaves(filter: &mut TargetFilter) {
 fn condition_uses_creation_time_provenance(condition: &DelayedTriggerCondition) -> bool {
     match condition {
         DelayedTriggerCondition::AtNextPhase { .. }
-        | DelayedTriggerCondition::AtNextPhaseForPlayer { .. } => true,
+        | DelayedTriggerCondition::AtNextPhaseForPlayer { .. }
+        | DelayedTriggerCondition::AtBeginningOfAddedPhase { .. } => true,
         DelayedTriggerCondition::WhenLeavesPlay { .. }
         | DelayedTriggerCondition::WhenDies { .. }
         | DelayedTriggerCondition::WhenLeavesPlayFiltered { .. }
@@ -790,9 +879,16 @@ fn parent_target_snapshot(state: &GameState, ability: &ResolvedAbility) -> Vec<T
     crate::game::targeting::parent_chain_referents(state, ability).unwrap_or_else(|| {
         crate::game::targeting::resolve_event_context_target(
             state,
-            &TargetFilter::TriggeringSource,
+            &TargetFilter::ParentTarget,
             ability.source_id,
         )
+        .or_else(|| {
+            crate::game::targeting::resolve_event_context_target(
+                state,
+                &TargetFilter::TriggeringSource,
+                ability.source_id,
+            )
+        })
         .map(|target| vec![target])
         .unwrap_or_default()
     })
@@ -936,6 +1032,7 @@ fn condition_filter_groups(condition: &mut DelayedTriggerCondition) -> Vec<Vec<&
             .collect(),
         DelayedTriggerCondition::AtNextPhase { .. }
         | DelayedTriggerCondition::AtNextPhaseForPlayer { .. }
+        | DelayedTriggerCondition::AtBeginningOfAddedPhase { .. }
         | DelayedTriggerCondition::WhenLeavesPlay { .. } => Vec::new(),
     }
 }
@@ -1384,6 +1481,25 @@ fn snapshot_quantity_ref(
         }
     ) && ability.targets.is_empty()
     {
+        // CR 603.10a + CR 608.2h + CR 708.2a: when the creation event is a
+        // battlefield departure, "its mana value" is the departed permanent's
+        // last-known mana value (0 if it was face down), never the card as it
+        // now sits in its new zone.
+        if let Some(
+            event @ GameEvent::ZoneChanged {
+                from: Some(Zone::Battlefield),
+                ..
+            },
+        ) = state.current_trigger_event.as_ref()
+        {
+            match crate::types::game_state::battlefield_departure_trigger_source_context(event) {
+                BattlefieldDepartureSourceContext::Present(context) => {
+                    return Some(i32::try_from(context.lki.mana_value).unwrap_or(i32::MAX));
+                }
+                BattlefieldDepartureSourceContext::Malformed => return Some(0),
+                BattlefieldDepartureSourceContext::Absent => {}
+            }
+        }
         if let Some(spell_id) = state
             .current_trigger_event
             .as_ref()
@@ -1722,7 +1838,8 @@ fn condition_names_referent_zone_change(condition: &DelayedTriggerCondition) -> 
     match condition {
         // Phase-based: the referent is expected wherever it was at creation.
         DelayedTriggerCondition::AtNextPhase { .. }
-        | DelayedTriggerCondition::AtNextPhaseForPlayer { .. } => false,
+        | DelayedTriggerCondition::AtNextPhaseForPlayer { .. }
+        | DelayedTriggerCondition::AtBeginningOfAddedPhase { .. } => false,
 
         // The condition IS the referent's zone change when it is filtered on the
         // referent; filtered on `SelfRef` it is the SOURCE's zone change.
@@ -1762,11 +1879,12 @@ mod tests {
     use crate::game::game_object::GameObject;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, BounceSelection, DamageKindFilter, DelayedTriggerCondition,
-        Effect, ManaProduction, ObjectScope, PtValue, QuantityExpr, QuantityRef, TriggerDefinition,
+        Effect, ExtraPhaseAnchor, ExtraPhaseRecipient, ManaProduction, ObjectScope, PtValue,
+        QuantityExpr, QuantityRef, TriggerDefinition,
     };
-    use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
+    use crate::types::identifiers::{CardId, ExtraPhaseId, ObjectId, TrackedSetId};
     use crate::types::mana::ManaCost;
-    use crate::types::phase::Phase;
+    use crate::types::phase::{Phase, PhaseGroup, TurnSegment};
     use crate::types::player::PlayerId;
     use crate::types::triggers::{PlaneswalkRole, TriggerMode};
 
@@ -2058,6 +2176,93 @@ mod tests {
     }
 
     #[test]
+    fn only_phase_delayed_departures_stamp_creation_lookback() {
+        let departure_event = crate::types::events::GameEvent::ZoneChanged {
+            object_id: ObjectId(9),
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            record: Box::new(crate::types::game_state::ZoneChangeRecord::test_minimal(
+                ObjectId(9),
+                Some(Zone::Battlefield),
+                Zone::Graveyard,
+            )),
+        };
+        let non_departure_event = crate::types::events::GameEvent::CardsDrawn {
+            player_id: PlayerId(0),
+            count: 1,
+        };
+
+        let trigger = || Box::new(TriggerDefinition::new(TriggerMode::ChangesZone));
+        let cases = [
+            (
+                DelayedTriggerCondition::WhenDies {
+                    filter: TargetFilter::Any,
+                },
+                Some(departure_event.clone()),
+                false,
+                "WhenDies under a departure",
+            ),
+            (
+                DelayedTriggerCondition::WhenNextEvent {
+                    trigger: trigger(),
+                    or_trigger: None,
+                    lifetime: Default::default(),
+                },
+                Some(departure_event.clone()),
+                false,
+                "WhenNextEvent under a departure",
+            ),
+            (
+                DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                Some(departure_event.clone()),
+                true,
+                "AtNextPhase under a departure",
+            ),
+            (
+                DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                Some(non_departure_event),
+                false,
+                "AtNextPhase under a non-departure event",
+            ),
+        ];
+
+        for (condition, current_event, should_stamp, label) in cases {
+            let mut state = GameState::new_two_player(42);
+            state.current_trigger_event = current_event;
+            let effect_def = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            );
+            let ability = ResolvedAbility::new(
+                Effect::CreateDelayedTrigger {
+                    condition,
+                    effect: Box::new(effect_def),
+                    uses_tracked_set: false,
+                },
+                vec![],
+                ObjectId(5),
+                PlayerId(0),
+            );
+            let mut events = Vec::new();
+
+            resolve(&mut state, &ability, &mut events).expect("CreateDelayedTrigger resolves");
+
+            assert_eq!(
+                state.delayed_triggers[0]
+                    .ability
+                    .context
+                    .creation_lookback_event
+                    .is_some(),
+                should_stamp,
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
     fn only_phase_delayed_conditions_use_creation_time_provenance() {
         let trigger = || Box::new(TriggerDefinition::new(TriggerMode::Taps));
         assert!(condition_uses_creation_time_provenance(
@@ -2069,6 +2274,12 @@ mod tests {
                 player: PlayerId(0),
                 gate: Default::default(),
                 binding: Default::default(),
+            }
+        ));
+        assert!(condition_uses_creation_time_provenance(
+            &DelayedTriggerCondition::AtBeginningOfAddedPhase {
+                phase: Phase::BeginCombat,
+                entry: Some(ExtraPhaseId(1)),
             }
         ));
         for condition in [
@@ -2099,6 +2310,272 @@ mod tests {
         ] {
             assert!(!condition_uses_creation_time_provenance(&condition));
         }
+    }
+
+    /// "At the beginning of that combat, draw a card" as the sibling of `add`,
+    /// the way the parser chains World at War's and Moraug's two sentences.
+    fn add_then_that_combat(add: Effect, controller: PlayerId) -> ResolvedAbility {
+        ResolvedAbility::new(add, vec![], ObjectId(100), controller)
+            .sub_ability(that_combat_draw(controller))
+    }
+
+    /// A lone anaphoric "at the beginning of that combat, draw a card".
+    fn that_combat_draw(controller: PlayerId) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtBeginningOfAddedPhase {
+                    phase: Phase::BeginCombat,
+                    entry: None,
+                },
+                effect: Box::new(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                )),
+                uses_tracked_set: false,
+            },
+            vec![],
+            ObjectId(100),
+            controller,
+        )
+    }
+
+    fn add_combat(recipient: ExtraPhaseRecipient, after: ExtraPhaseAnchor, count: i32) -> Effect {
+        Effect::AdditionalPhase {
+            recipient,
+            segment: TurnSegment::Phase(PhaseGroup::Combat),
+            after,
+            followed_by: vec![],
+            count: QuantityExpr::Fixed { value: count },
+            attacker_restriction: None,
+        }
+    }
+
+    fn resolved_create_delayed(events: &[GameEvent]) -> bool {
+        events.iter().any(|event| {
+            matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::CreateDelayedTrigger,
+                    ..
+                }
+            )
+        })
+    }
+
+    /// Player 0's precombat main phase, the phase Moraug's landfall and World
+    /// at War resolve in.
+    fn precombat_main() -> GameState {
+        let mut state = GameState::new_two_player(42);
+        state.phase = Phase::PreCombatMain;
+        state.steps_started_this_turn.record(Phase::PreCombatMain);
+        state
+    }
+
+    /// R-U7a. CR 603.7a + CR 500.8: the delayed trigger is bound, at its
+    /// creation, to the combat the preceding instruction of the same resolution
+    /// added, by that entry's id.
+    ///
+    /// DISCRIMINATION: drop the binder and the trigger keeps `entry: None`.
+    #[test]
+    fn that_combat_binds_to_the_combat_added_by_the_same_resolution() {
+        let mut state = precombat_main();
+        let chain = add_then_that_combat(
+            add_combat(
+                ExtraPhaseRecipient::NoPlayer,
+                ExtraPhaseAnchor::ThisPhase { named: None },
+                1,
+            ),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(&mut state, &chain, &mut events, 0)
+            .expect("the chain resolves");
+
+        assert_eq!(state.extra_phases.len(), 1, "reach: one combat was added");
+        assert_eq!(
+            state.delayed_triggers.len(),
+            1,
+            "reach: exactly one delayed trigger was installed"
+        );
+        assert_eq!(
+            state.delayed_triggers[0].condition,
+            DelayedTriggerCondition::AtBeginningOfAddedPhase {
+                phase: Phase::BeginCombat,
+                entry: Some(state.extra_phases[0].id),
+            }
+        );
+    }
+
+    /// R-U7b. CR 603.7a: when the preceding instruction added no phase, "that
+    /// combat" names nothing and no delayed trigger is created. Three ways to add
+    /// nothing, each a production refusal in `additional_phase::resolve`, plus
+    /// two phases added, which the singular anaphor does not name.
+    ///
+    /// DISCRIMINATION: bind to `last_added_phase_ids.first()` (or leave `None`
+    /// and install) and every case installs a trigger.
+    #[test]
+    fn that_combat_creates_nothing_unless_exactly_one_phase_was_added() {
+        // CR 505.1b: World at War resolving in the second main phase, after the
+        // first postcombat main phase has already ended.
+        let mut late = GameState::new_two_player(42);
+        late.phase = Phase::PostCombatMain;
+        late.steps_started_this_turn.record(Phase::PostCombatMain);
+        late.steps_started_this_turn.record(Phase::PostCombatMain);
+        // CR 500.10a: a combat "you get" on an opponent's turn is not added.
+        let mut opponents_turn = precombat_main();
+        opponents_turn.active_player = PlayerId(1);
+        let cases = [
+            (
+                "first-of-turn phase already ended",
+                late,
+                add_combat(
+                    ExtraPhaseRecipient::Controller,
+                    ExtraPhaseAnchor::FirstOfTurn(PhaseGroup::PostcombatMain),
+                    1,
+                ),
+            ),
+            (
+                "granted phase on an opponent's turn",
+                opponents_turn,
+                add_combat(
+                    ExtraPhaseRecipient::Controller,
+                    ExtraPhaseAnchor::ThisPhase { named: None },
+                    1,
+                ),
+            ),
+            (
+                "this main phase outside a main phase",
+                {
+                    let mut state = GameState::new_two_player(42);
+                    state.phase = Phase::Upkeep;
+                    state
+                },
+                add_combat(
+                    ExtraPhaseRecipient::NoPlayer,
+                    ExtraPhaseAnchor::this_main_phase(),
+                    1,
+                ),
+            ),
+            (
+                "two combats added",
+                precombat_main(),
+                add_combat(
+                    ExtraPhaseRecipient::NoPlayer,
+                    ExtraPhaseAnchor::ThisPhase { named: None },
+                    2,
+                ),
+            ),
+        ];
+        for (label, mut state, add) in cases {
+            let mut events = Vec::new();
+            crate::game::effects::resolve_ability_chain(
+                &mut state,
+                &add_then_that_combat(add, PlayerId(0)),
+                &mut events,
+                0,
+            )
+            .expect("the chain resolves");
+            assert!(
+                resolved_create_delayed(&events),
+                "{label}: reach: the delayed-trigger resolver ran"
+            );
+            assert!(
+                state.delayed_triggers.is_empty(),
+                "{label}: no delayed trigger is created"
+            );
+        }
+    }
+
+    /// R-U7c. CR 603.7a + CR 608.2c: "that combat" reads only what the current
+    /// resolution added. A combat an earlier resolution added, or an earlier
+    /// instruction of this resolution added before a later one added nothing, is
+    /// not "that combat".
+    ///
+    /// DISCRIMINATION: drop the depth-0 clear in `resolve_ability_chain` and the
+    /// first case installs a trigger; drop the clear at the top of
+    /// `additional_phase::resolve` and the second does.
+    #[test]
+    fn that_combat_does_not_read_a_stale_publish() {
+        // Across resolutions: one chain adds a combat, a later one says "that combat".
+        let mut state = precombat_main();
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(
+            &mut state,
+            &ResolvedAbility::new(
+                add_combat(
+                    ExtraPhaseRecipient::NoPlayer,
+                    ExtraPhaseAnchor::ThisPhase { named: None },
+                    1,
+                ),
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            ),
+            &mut events,
+            0,
+        )
+        .expect("the first chain resolves");
+        assert_ne!(
+            state.extra_phases.first().map(|entry| entry.id),
+            None,
+            "reach: the first chain added a combat"
+        );
+        crate::game::effects::resolve_ability_chain(
+            &mut state,
+            &that_combat_draw(PlayerId(0)),
+            &mut events,
+            0,
+        )
+        .expect("the second chain resolves");
+        assert!(resolved_create_delayed(&events), "reach: the binder ran");
+        assert!(
+            state.delayed_triggers.is_empty(),
+            "a combat another resolution added is not \"that combat\""
+        );
+
+        // Within one resolution: a combat is added, then a second instruction adds
+        // none (a count of zero, as Obeka's "that many" can resolve to), then
+        // "that combat".
+        let mut state = precombat_main();
+        let mut events = Vec::new();
+        let chain = ResolvedAbility::new(
+            add_combat(
+                ExtraPhaseRecipient::NoPlayer,
+                ExtraPhaseAnchor::ThisPhase { named: None },
+                1,
+            ),
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(
+            ResolvedAbility::new(
+                add_combat(
+                    ExtraPhaseRecipient::NoPlayer,
+                    ExtraPhaseAnchor::ThisPhase { named: None },
+                    0,
+                ),
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            )
+            .sub_ability(that_combat_draw(PlayerId(0))),
+        );
+        crate::game::effects::resolve_ability_chain(&mut state, &chain, &mut events, 0)
+            .expect("the chain resolves");
+        assert_eq!(
+            state.extra_phases.len(),
+            1,
+            "reach: the first instruction added a combat"
+        );
+        assert!(resolved_create_delayed(&events), "reach: the binder ran");
+        assert!(
+            state.delayed_triggers.is_empty(),
+            "\"that combat\" follows the instruction that added nothing"
+        );
     }
 
     /// CR 603.7c + CR 608.2k: an event-delayed TriggeringSource reads the
@@ -2315,6 +2792,48 @@ mod tests {
         assert_eq!(
             state.delayed_triggers[0].ability.targets,
             vec![TargetRef::Object(dead_creature)]
+        );
+    }
+
+    /// CR 603.7c + CR 509.1 + CR 608.2c: When a blocking creature's trigger creates
+    /// a delayed trigger targeting `ParentTarget` ("destroy that creature at end of combat"),
+    /// `parent_target_snapshot` must snapshot the blocked attacking creature, not the
+    /// trigger source (the blocker itself).
+    #[test]
+    fn parent_target_snapshots_blocked_attacker_object() {
+        let mut state = GameState::new_two_player(42);
+        let blocker_asp = ObjectId(5);
+        let attacking_bear = ObjectId(10);
+        state.current_trigger_event = Some(GameEvent::BlockersDeclared {
+            assignments: vec![(blocker_asp, attacking_bear)],
+        });
+
+        let effect_def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Destroy {
+                target: TargetFilter::ParentTarget,
+                cant_regenerate: false,
+            },
+        );
+        let ability = ResolvedAbility::new(
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhase {
+                    phase: Phase::EndCombat,
+                },
+                effect: Box::new(effect_def),
+                uses_tracked_set: false,
+            },
+            vec![],
+            blocker_asp,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.delayed_triggers[0].ability.targets,
+            vec![TargetRef::Object(attacking_bear)]
         );
     }
 
@@ -4653,6 +5172,103 @@ mod tests {
             state.battlefield.contains(&second_token),
             "the later, unrelated token must survive — the snapshot did not drift to it"
         );
+    }
+
+    /// Two just-created tokens for a delayed "sacrifice them" snapshot, plus the
+    /// `CreateDelayedTrigger` ability that names them through `LastCreated`.
+    fn last_created_sacrifice_fixture(
+        condition: DelayedTriggerCondition,
+    ) -> (GameState, ResolvedAbility, Vec<ObjectId>) {
+        let mut state = GameState::new_two_player(42);
+        let mut tokens = Vec::new();
+        for (i, name) in ["Copy A", "Copy B"].into_iter().enumerate() {
+            let id = crate::game::zones::create_object(
+                &mut state,
+                CardId(i as u64 + 1),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            state.objects.get_mut(&id).unwrap().card_types.core_types =
+                vec![crate::types::card_type::CoreType::Creature];
+            tokens.push(id);
+        }
+        state.last_created_token_ids = tokens.clone();
+        let inner = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Sacrifice {
+                target: crate::types::ability::TargetFilter::LastCreated,
+                count: QuantityExpr::Fixed { value: 1 },
+                min_count: 0,
+            },
+        );
+        let create = ResolvedAbility::new(
+            Effect::CreateDelayedTrigger {
+                condition,
+                effect: Box::new(inner),
+                uses_tracked_set: false,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        (state, create, tokens)
+    }
+
+    /// CR 603.7c + CR 400.7: the `LastCreated` snapshot records the incarnation of
+    /// each referent, so a token that has left the battlefield by the time the
+    /// delayed ability resolves is recognised as gone instead of the ability
+    /// re-reading the live `last_created_token_ids`.
+    #[test]
+    fn delayed_last_created_snapshot_pins_each_referent_incarnation() {
+        let (mut state, create, tokens) =
+            last_created_sacrifice_fixture(DelayedTriggerCondition::AtNextPhase {
+                phase: Phase::End,
+            });
+
+        let mut events = Vec::new();
+        resolve(&mut state, &create, &mut events).expect("CreateDelayedTrigger resolves");
+
+        let stored = &state.delayed_triggers[0].ability;
+        assert_eq!(
+            stored.targets,
+            tokens
+                .iter()
+                .map(|&id| crate::types::ability::TargetRef::Object(id))
+                .collect::<Vec<_>>()
+        );
+        let expected: Vec<_> = tokens
+            .iter()
+            .map(|id| {
+                crate::types::identifiers::ObjectIncarnationRef::from_object(&state.objects[id])
+            })
+            .collect();
+        assert_eq!(stored.target_incarnations, expected);
+    }
+
+    /// CR 603.7c: a delayed trigger whose own condition is the referents' zone
+    /// change expects them to have moved, so the snapshot must not pin them
+    /// (pinning would make it inert at every firing).
+    #[test]
+    fn delayed_last_created_snapshot_is_unpinned_when_the_condition_is_the_referents_zone_change() {
+        let (mut state, create, tokens) =
+            last_created_sacrifice_fixture(DelayedTriggerCondition::WhenDies {
+                filter: TargetFilter::ParentTarget,
+            });
+
+        let mut events = Vec::new();
+        resolve(&mut state, &create, &mut events).expect("CreateDelayedTrigger resolves");
+
+        let stored = &state.delayed_triggers[0].ability;
+        assert_eq!(
+            stored.targets,
+            tokens
+                .iter()
+                .map(|&id| crate::types::ability::TargetRef::Object(id))
+                .collect::<Vec<_>>(),
+            "reach guard: the snapshot still names the just-created tokens"
+        );
+        assert!(stored.target_incarnations.is_empty());
     }
 
     /// CR 603.7c + CR 608.2c (issue #5972): plural "those tokens" delayed exile

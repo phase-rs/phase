@@ -102,6 +102,13 @@ pub fn object_has_sticker_kind(obj: &GameObject, kind: StickerKind) -> bool {
     obj.stickers.iter().any(|sticker| sticker.kind() == kind)
 }
 
+/// CR 123.3b: A player can't put a sticker on an object they don't own; an
+/// effect that would cause them to does nothing for that part. The single
+/// predicate the PutSticker resolver and `apply_selected_sticker` share.
+pub(crate) fn may_put_sticker_on(object: &GameObject, player: PlayerId) -> bool {
+    object.owner == player
+}
+
 pub fn rebuild_public_zone_stickers(obj: &mut GameObject) {
     obj.revert_layered_characteristics_to_base();
     apply_name_stickers_from_base(obj);
@@ -363,9 +370,13 @@ pub fn apply_selected_sticker(
     pay_ticket: bool,
     events: &mut Vec<GameEvent>,
 ) {
-    let Some(_) = state.objects.get(&target_id) else {
+    let Some(target) = state.objects.get(&target_id) else {
         return;
     };
+    // CR 123.3b: refused before any ticket is paid (CR 123.3c: the owner pays).
+    if !may_put_sticker_on(target, player) {
+        return;
+    }
 
     let ticket_cost = match &sticker {
         AppliedSticker::Ability { ticket_cost, .. }
@@ -420,6 +431,8 @@ pub fn apply_selected_sticker(
     } else if zone_retains_stickers(obj.zone) {
         rebuild_public_zone_stickers(obj);
     }
+    // CR 608.2c: latch "that sticker" for the rest of this resolution.
+    state.placed_sticker_this_resolution = Some(sticker.clone());
 
     events.push(GameEvent::StickerPlaced {
         player_id: player,

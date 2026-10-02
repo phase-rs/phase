@@ -120,10 +120,9 @@ mod tests {
 
     #[test]
     fn stop_native_engine_is_idempotent_with_two_exact_null_serializations() {
-        let first = tauri::async_runtime::block_on(stop_native_engine()).unwrap();
-        let second = tauri::async_runtime::block_on(stop_native_engine()).unwrap();
-        assert_eq!(exact_json(&first), "null");
-        assert_eq!(exact_json(&second), "null");
+        let stop = || tauri::async_runtime::block_on(stop_native_engine()).unwrap();
+        assert_eq!(exact_json(&stop()), "null");
+        assert_eq!(exact_json(&stop()), "null");
     }
 
     #[test]

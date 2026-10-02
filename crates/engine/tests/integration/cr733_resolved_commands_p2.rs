@@ -7,18 +7,217 @@ use engine::types::counter::CounterType;
 use engine::types::game_state::GameState;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaColor;
+use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerCounterKind;
 use engine::types::resolved_commands::{
     ResolvedLedgerEdit, ResolvedLedgerEditReplayInvariantError, ResolvedManaReplayInvariantError,
-    ResolvedObjectCounterReplayInvariantError, ResolvedObjectStatusReplayInvariantError,
-    ResolvedPlayerEdit, ResolvedPlayerEditCommand, ResolvedPlayerEditReplayInvariantError,
-    ResolvedRulesCommand, RulesExecutionNodeRef,
+    ResolvedObjectCounterEdit, ResolvedObjectCounterReplayInvariantError,
+    ResolvedObjectStatusReplayInvariantError, ResolvedPlayerEdit, ResolvedPlayerEditCommand,
+    ResolvedPlayerEditReplayInvariantError, ResolvedRulesCommand, RulesExecutionNodeRef,
 };
 
 const DIMIR_SIGNET_ORACLE: &str = "{1}, {T}: Add {U}{B}.";
 const STONY_STRENGTH_ORACLE: &str =
     "Put a +1/+1 counter on target creature you control. Untap that creature.";
+const SHIELD_BROKER_ORACLE: &str = "When this creature enters, put a shield counter on target noncommander creature you don't control. You gain control of that creature for as long as it has a shield counter on it. (If it would be dealt damage or destroyed, remove a shield counter from it instead.)";
+const SHOCK_ORACLE: &str = "Shock deals 2 damage to any target.";
+const BOON_OF_SAFETY_ORACLE: &str = "Put a shield counter on target creature. (If it would be dealt damage or destroyed, remove a shield counter from it instead.)\nScry 1.";
+const GIANT_GROWTH_ORACLE: &str = "Target creature gets +3/+3 until end of turn.";
+
+#[test]
+fn shield_broker_expiry_replays_before_later_growth_install() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let victim = scenario.add_vanilla(P1, 4, 4);
+    let broker = scenario
+        .add_creature_to_hand_from_oracle(P0, "Shield Broker", 3, 4, SHIELD_BROKER_ORACLE)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let shock = scenario
+        .add_spell_to_hand_from_oracle(P0, "Shock", true, SHOCK_ORACLE)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let boon = scenario
+        .add_spell_to_hand_from_oracle(P0, "Boon of Safety", true, BOON_OF_SAFETY_ORACLE)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let growth = scenario
+        .add_spell_to_hand_from_oracle(P0, "Giant Growth", true, GIANT_GROWTH_ORACLE)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(broker).target_object(victim).resolve();
+    assert_eq!(
+        runner.state().objects[&victim]
+            .counters
+            .get(&CounterType::Shield),
+        Some(&1)
+    );
+    assert_eq!(runner.state().objects[&victim].controller, P0);
+    assert_eq!(runner.state().transient_continuous_effects.len(), 1);
+    let control_effect_id = runner.state().transient_continuous_effects[0].id;
+
+    // The replay prefix begins after the trigger's counter and control install.
+    let pre_removal = runner.state().clone();
+    let journal_start = pre_removal.resolved_rules_journal.entries().len();
+
+    // With a second shield already present, damage leaves the duration true.
+    let mut remaining_shield = GameRunner::from_state(pre_removal.clone());
+    remaining_shield.cast(boon).target_object(victim).resolve();
+    assert_eq!(
+        remaining_shield.state().objects[&victim]
+            .counters
+            .get(&CounterType::Shield),
+        Some(&2)
+    );
+    remaining_shield.cast(shock).target_object(victim).resolve();
+    assert_eq!(
+        remaining_shield.state().objects[&victim]
+            .counters
+            .get(&CounterType::Shield),
+        Some(&1)
+    );
+    assert_eq!(remaining_shield.state().objects[&victim].controller, P0);
+    assert!(remaining_shield
+        .state()
+        .transient_continuous_effects
+        .iter()
+        .any(|effect| effect.id == control_effect_id));
+
+    runner.cast(shock).target_object(victim).resolve();
+    let after_damage = runner.state().clone();
+    runner.cast(boon).target_object(victim).resolve();
+    let before_growth = runner.state().clone();
+    runner.cast(growth).target_object(victim).resolve();
+    let live = runner.state();
+    let suffix: Vec<_> = live
+        .resolved_rules_journal
+        .entries()
+        .iter()
+        .skip(journal_start)
+        .filter_map(|entry| entry.command.clone())
+        .collect();
+    let shield_removals: Vec<_> = suffix
+        .iter()
+        .enumerate()
+        .filter_map(|(index, command)| match command {
+            ResolvedRulesCommand::ObjectCounter(edit)
+                if edit.object.object_id == victim
+                    && edit.counter_type == CounterType::Shield
+                    && matches!(edit.edit, ResolvedObjectCounterEdit::Remove { count: 1 }) =>
+            {
+                Some((index, command.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    let shield_additions: Vec<_> = suffix
+        .iter()
+        .enumerate()
+        .filter_map(|(index, command)| match command {
+            ResolvedRulesCommand::ObjectCounter(edit)
+                if edit.object.object_id == victim
+                    && edit.counter_type == CounterType::Shield
+                    && matches!(edit.edit, ResolvedObjectCounterEdit::Add { count: 1, .. }) =>
+            {
+                Some((index, command.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    let growth_installs: Vec<_> = suffix
+        .iter()
+        .enumerate()
+        .filter_map(|(index, command)| match command {
+            ResolvedRulesCommand::ContinuousEffectInstall(install)
+                if install.effect.source_name == "Giant Growth" =>
+            {
+                Some((index, command.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        shield_removals.len(),
+        1,
+        "damage consumes exactly one journaled shield removal"
+    );
+    assert_eq!(
+        shield_additions.len(),
+        1,
+        "Boon delivers exactly one journaled shield addition"
+    );
+    assert_eq!(
+        growth_installs.len(),
+        1,
+        "Growth delivers exactly one journaled TCE install"
+    );
+    assert!(
+        shield_removals[0].0 < shield_additions[0].0
+            && shield_additions[0].0 < growth_installs[0].0
+    );
+    let ResolvedRulesCommand::ContinuousEffectInstall(growth_install) = &growth_installs[0].1
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        growth_install.expected_installed_count, 0,
+        "the recorded Growth install position must reflect permanent retirement"
+    );
+    assert_eq!(
+        after_damage.objects[&victim]
+            .counters
+            .get(&CounterType::Shield),
+        None
+    );
+    assert_eq!(after_damage.objects[&victim].controller, P1);
+    assert!(after_damage
+        .transient_continuous_effects
+        .iter()
+        .all(|effect| effect.id != control_effect_id));
+    assert_eq!(
+        before_growth.objects[&victim]
+            .counters
+            .get(&CounterType::Shield),
+        Some(&1)
+    );
+    assert_eq!(
+        before_growth.objects[&victim].controller, P1,
+        "a later shield cannot revive Shield Broker's old control effect"
+    );
+    assert!(
+        before_growth.transient_continuous_effects.is_empty(),
+        "the old id is retired before Growth installs"
+    );
+
+    let mut replay = pre_removal;
+    apply_semantic_command(&mut replay, &shield_removals[0].1);
+    assert!(
+        replay.transient_continuous_effects.is_empty(),
+        "replaying the exact removal retires the same id"
+    );
+    assert!(
+        matches!(&shield_removals[0].1, ResolvedRulesCommand::ObjectCounter(edit) if engine::game::effects::counters::apply_resolved_counter_edit(&mut replay.clone(), edit).is_err()),
+        "replaying the same removal twice must fail its old-count precondition"
+    );
+    apply_semantic_command(&mut replay, &shield_additions[0].1);
+    assert!(replay.transient_continuous_effects.is_empty());
+    apply_semantic_command(&mut replay, &growth_installs[0].1);
+    engine::game::layers::evaluate_layers(&mut replay);
+    assert_eq!(
+        replay.objects[&victim].counters,
+        live.objects[&victim].counters
+    );
+    assert_eq!(
+        replay.objects[&victim].controller,
+        live.objects[&victim].controller
+    );
+    assert_eq!(
+        replay.transient_continuous_effects,
+        live.transient_continuous_effects
+    );
+}
 
 fn make_artifact(runner: &mut GameRunner, id: ObjectId) {
     let object = runner.state_mut().objects.get_mut(&id).unwrap();

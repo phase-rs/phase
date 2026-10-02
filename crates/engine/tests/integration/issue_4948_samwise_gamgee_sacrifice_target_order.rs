@@ -22,8 +22,8 @@
 //! at each non-self Sacrifice/Discard/Exile cost-payment site). Samwise
 //! sacrifices THREE Foods, so only one of the three was ever excluded — the
 //! other two remained legal. The fix generalizes this to a
-//! `Vec<ObjectId>` (`cost_paid_object_ids`, via the new
-//! `ResolvedAbility::add_cost_paid_object_ids_recursive`), populated
+//! `Vec<CostPaidObjectSnapshot>` (`cost_paid_objects`, via
+//! `ResolvedAbility::add_cost_paid_objects_recursive`), populated
 //! alongside the existing singular stamp at all three non-self cost-payment
 //! sites (`handle_sacrifice_for_cost`, `handle_discard_for_cost`,
 //! `finish_exile_selection_for_cost`), so the ONE shared exclusion filter —
@@ -100,7 +100,7 @@ fn samwise_gamgee_sacrifice_excludes_just_sacrificed_foods_from_own_target() {
     // single-legal-target auto-resolve behavior at
     // `casting_costs.rs`'s `deferred target selection: TWO legal damage
     // targets so ... genuinely pauses` test sentinel) — with the
-    // cost_paid_object_ids fix correctly excluding all three just-
+    // cost_paid_objects fix correctly excluding all three just-
     // sacrificed Foods, a single pre-existing graveyard card would leave
     // exactly one legal target and never pause at all.
     let old_relic = scenario

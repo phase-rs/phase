@@ -90,6 +90,10 @@ fn cemetery_prowler_counts_only_shared_types_from_its_own_linked_exile() {
             }),
         }
 
+        let saved = serde_json::to_string(runner.state()).expect("Prowler state serializes");
+        *runner.state_mut() =
+            serde_json::from_str(&saved).expect("shared-card-type quantity survives state restore");
+
         let outcome = runner.cast(spell).resolve();
         outcome.assert_zone(
             &[spell],

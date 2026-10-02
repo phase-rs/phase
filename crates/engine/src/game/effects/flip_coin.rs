@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use rand::Rng;
 
-use crate::game::quantity::resolve_quantity;
+use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
     AbilityDefinition, CoinFlipResult, Effect, EffectError, EffectKind, ResolvedAbility, TargetRef,
@@ -250,8 +250,7 @@ pub fn resolve_flip_coins(
     let flipper = super::resolve_player_for_context_ref(state, ability, flipper);
 
     // CR 107.1: resolve `count` in the ability's context; clamp at zero.
-    let n =
-        resolve_quantity(state, count_expr, ability.controller, ability.source_id).max(0) as u32;
+    let n = resolve_quantity_with_targets(state, count_expr, ability).max(0) as u32;
 
     // CR 705.1 + CR 614.1a: Flip each coin through the replacement pipeline (so
     // Krark's Thumb can double it), routing each outcome through the appropriate

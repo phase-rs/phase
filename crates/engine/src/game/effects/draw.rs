@@ -519,10 +519,18 @@ fn start_draw_sequence_with_origin_outcome(
     // could apply to an instruction, the consult is skipped and the frame owes
     // the full count at once.
     if count == 0 || !replacement::draw_instruction_may_be_replaced(state) {
-        let frame_id = state.push_draw_sequence_with_origin(player, count, applied, origin);
+        let Some(frame_id) =
+            state.try_push_draw_sequence_with_origin(player, count, applied, origin)
+        else {
+            return DrawSequenceOutcome::Parked(ReplacementResult::Prevented);
+        };
         return resume_draw_sequence_outcome(state, frame_id, events);
     }
-    let frame_id = state.push_draw_sequence_with_origin(player, 0, applied.clone(), origin);
+    let Some(frame_id) =
+        state.try_push_draw_sequence_with_origin(player, 0, applied.clone(), origin)
+    else {
+        return DrawSequenceOutcome::Parked(ReplacementResult::Prevented);
+    };
     let result = draw_through_replacement_with_applied(
         state,
         player,
@@ -609,6 +617,23 @@ pub(crate) fn resume_draw_sequence(
     events: &mut Vec<GameEvent>,
 ) -> replacement::ReplacementResult {
     resume_draw_sequence_outcome(state, frame_id, events).into_replacement_result()
+}
+
+fn credit_completed_draw_child_result(
+    state: &mut GameState,
+    frame: &crate::types::game_state::DrawSequenceFrame,
+) -> bool {
+    let Some(owner_id) = frame.delivery_owner else {
+        return true;
+    };
+    let Some(owner) = state.draw_sequence_frame_mut(owner_id) else {
+        return false;
+    };
+    if owner.player != frame.player {
+        return false;
+    }
+    owner.accumulated += frame.accumulated;
+    true
 }
 
 fn resume_draw_sequence_outcome(
@@ -713,6 +738,9 @@ fn resume_draw_sequence_outcome(
         debug_assert!(false, "draw frame {frame_id:?} vanished before completion");
         return DrawSequenceOutcome::Parked(ReplacementResult::Prevented);
     };
+    if !credit_completed_draw_child_result(state, &frame) {
+        return DrawSequenceOutcome::Parked(ReplacementResult::Prevented);
+    }
     state.last_effect_count = Some(frame.accumulated as i32);
     // Record the drawing player exactly once per
     // settled draw INSTRUCTION — the emission granularity is the whole draw, not
@@ -724,8 +752,9 @@ fn resume_draw_sequence_outcome(
     // replaced away) records nothing because that player did not draw. The generic
     // post-effect scan in `effects/mod.rs` folds this
     // event into `player_actions_this_way` (a set — dedups the drawer for a
-    // multi-card draw) and `player_actions_this_turn` (a Vec — now one entry per
-    // draw event, not per card).
+    // multi-card draw). This completion site records `player_actions_this_turn`
+    // once per emitted instruction event, so `PlayerActionsThisTurn { Draw }`
+    // counts completed instructions rather than cards.
     if frame.accumulated > 0 {
         events.push(GameEvent::PlayerPerformedAction {
             player_id: frame.player,
@@ -734,6 +763,7 @@ fn resume_draw_sequence_outcome(
             scry_bottom_count: None,
             scry_top_count: None,
         });
+        super::record_player_action_this_turn(state, frame.player, PlayerActionKind::Draw);
     }
     match frame.origin {
         DrawSequenceOrigin::Plain => {
@@ -752,11 +782,11 @@ fn resume_draw_sequence_outcome(
         }
     }
 
-    // CR 615.5: A `Draw` with a chained follow-up leaves that follow-up in the
-    // normal pending-continuation slot. Keep this paused drain resident until
-    // that chain runs: its `PostReplacementSourceController` read still needs
-    // the prevented-event context. A draw without a parked follow-up is the
-    // terminal action of this dispatch and can retire the exact top entry now.
+    // CR 608.2c + CR 121.6b: A `Draw` with a chained follow-up leaves that
+    // follow-up in the normal pending-continuation slot. Keep this paused drain
+    // resident until that chain runs: its `PostReplacementSourceController` read
+    // still needs the prevented-event context. A draw without a parked follow-up
+    // is the terminal action of this dispatch and can retire the exact top entry now.
     // Nested replacement dispatches retain their own stack entries, so this
     // never pops an outer paused event context.
     if state.active_ability_continuation().is_none() {
@@ -1138,6 +1168,78 @@ mod tests {
 
         assert!(state.players[0].hand.contains(&c1));
         assert!(state.players[0].hand.contains(&c2));
+    }
+
+    #[test]
+    fn mismatched_child_cannot_consume_pending_delivery_owner() {
+        let mut state = GameState::new_two_player(43);
+        let owner = state.push_draw_sequence_with_origin(
+            PlayerId(0),
+            1,
+            HashSet::new(),
+            crate::types::game_state::DrawSequenceOrigin::Plain,
+        );
+        state
+            .active_draw_sequence_mut()
+            .expect("owner frame is active")
+            .capture_next_child_delivery = true;
+
+        let child = state.try_push_draw_sequence_with_origin(
+            PlayerId(1),
+            1,
+            HashSet::new(),
+            crate::types::game_state::DrawSequenceOrigin::Plain,
+        );
+        assert_eq!(child, None);
+        assert_eq!(
+            state.active_draw_sequence().map(|frame| frame.frame_id),
+            Some(owner)
+        );
+        assert!(
+            !state
+                .active_draw_sequence()
+                .unwrap()
+                .capture_next_child_delivery
+        );
+        assert!(state
+            .active_multi_draw_frame()
+            .unwrap()
+            .draw_sequences
+            .validate()
+            .is_ok());
+    }
+
+    #[test]
+    fn cross_player_child_result_is_not_credited_to_parent() {
+        let mut state = GameState::new_two_player(44);
+        let owner = state.push_draw_sequence_with_origin(
+            PlayerId(0),
+            1,
+            HashSet::new(),
+            crate::types::game_state::DrawSequenceOrigin::Plain,
+        );
+        let child = state.push_draw_sequence_with_origin(
+            PlayerId(1),
+            1,
+            HashSet::new(),
+            crate::types::game_state::DrawSequenceOrigin::Plain,
+        );
+        let child_frame = state
+            .draw_sequence_frame_mut(child)
+            .expect("child frame is live");
+        child_frame.delivery_owner = Some(owner);
+        child_frame.accumulated = 1;
+        let completed = state
+            .pop_active_draw_sequence(child)
+            .expect("the child frame completes");
+
+        assert!(!credit_completed_draw_child_result(&mut state, &completed));
+        assert_eq!(
+            state
+                .draw_sequence_frame_mut(owner)
+                .map(|frame| frame.accumulated),
+            Some(0)
+        );
     }
 
     #[test]

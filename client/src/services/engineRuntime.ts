@@ -387,6 +387,7 @@ export type TokenCategory =
   | "Vehicle"
   | "Enchantment"
   | "Land"
+  | "Planeswalker"
   | "Artifact";
 
 export type PresetFidelity = "Full" | "PartialMissingAbilities";

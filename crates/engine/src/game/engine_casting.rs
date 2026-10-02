@@ -86,12 +86,14 @@ pub(super) fn handle_optional_cost_choice(
     casting_costs::handle_decide_additional_cost(state, player, pending_cast, cost, pay, events)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn handle_defiler_payment(
     state: &mut GameState,
     player: PlayerId,
     pending_cast: PendingCast,
     life_cost: u32,
     mana_reduction: &crate::types::mana::ManaCost,
+    reach: crate::types::statics::CostReductionReach,
     pay: bool,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
@@ -101,7 +103,54 @@ pub(super) fn handle_defiler_payment(
         pending_cast,
         life_cost,
         mana_reduction,
+        reach,
         pay,
+        events,
+    )
+}
+
+/// CR 601.2f + CR 602.2b: Apply the caster's elected reduction order to an
+/// ACTIVATION. The order is validated as a strict permutation of the prompt's
+/// reductions (a malformed election is `InvalidAction` with the prompt left
+/// live); a valid one either continues the activation or reverses it.
+pub(super) fn resume_activation_cost_election(
+    state: &mut GameState,
+    player: PlayerId,
+    pending_cast: &PendingCast,
+    reductions: &[crate::types::casting_costs::CostReductionEntry],
+    order: &[usize],
+    hybrid_announcement: &[crate::types::mana::ManaCostShard],
+    events: &mut Vec<GameEvent>,
+) -> Result<casting::ActivationElectionResume, EngineError> {
+    // An activation cost has no hybrid symbol any reduction could announce
+    // (CR 118.7a: its reductions are generic-only), so the announcement axis is
+    // empty and only the order is elected.
+    casting::validate_cost_reduction_election(order, hybrid_announcement, reductions, &[])
+        .map_err(EngineError::InvalidAction)?;
+    let order = order
+        .iter()
+        .map(|&index| reductions[index].provenance)
+        .collect();
+    casting::resume_activation_after_cost_election(state, player, pending_cast, order, events)
+}
+
+/// CR 601.2b + CR 601.2f: Apply the caster's elected cost-determination choices.
+pub(super) fn handle_order_cost_reductions(
+    state: &mut GameState,
+    player: PlayerId,
+    pending_cast: PendingCast,
+    reductions: &[crate::types::casting_costs::CostReductionEntry],
+    order: &[usize],
+    hybrid_announcement: &[crate::types::mana::ManaCostShard],
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    casting_costs::handle_order_cost_reductions(
+        state,
+        player,
+        pending_cast,
+        reductions,
+        order,
+        hybrid_announcement,
         events,
     )
 }
@@ -474,6 +523,7 @@ pub(super) fn handle_harmonize_tap_choice(
     }
 
     let base_cost = pending.base_cost.clone();
+    let lock = casting_costs::CostLockInput::from_pending(&pending);
     casting_costs::pay_and_push_adventure(
         state,
         player,
@@ -488,6 +538,7 @@ pub(super) fn handle_harmonize_tap_choice(
         pending.distribute,
         pending.origin_zone,
         pending.payment_mode,
+        lock,
         events,
     )
 }

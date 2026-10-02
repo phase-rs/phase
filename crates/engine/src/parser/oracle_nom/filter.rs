@@ -7,8 +7,8 @@
 use nom::branch::alt;
 use nom::bytes::complete::tag;
 use nom::character::complete::{alphanumeric1, space1};
-use nom::combinator::{map, not, opt, value};
-use nom::sequence::preceded;
+use nom::combinator::{map, not, opt, peek, value};
+use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::error::OracleResult;
@@ -17,8 +17,8 @@ use super::primitives::{
 };
 use super::quantity::{parse_quantity_expr_number, parse_quantity_ref};
 use crate::types::ability::{
-    AggregateFunction, Comparator, ControllerRef, FilterProp, ObjectProperty, PtStat, PtValueScope,
-    QuantityExpr, SourceExclusion,
+    AggregateFunction, AttackerBlockStatus, Comparator, ControllerRef, FilterProp, ObjectProperty,
+    PtStat, PtValueScope, QuantityExpr, SourceExclusion,
 };
 use crate::types::card_type::CoreType;
 #[cfg(test)]
@@ -27,6 +27,40 @@ use crate::types::counter::{parse_counter_type, CounterMatch};
 use crate::types::mana::ManaColor;
 use crate::types::zones::Zone;
 
+/// CR 201.2 + CR 201.2a: "not named <name>" — a NAME predicate, lowered to
+/// `Not(Named)`. It's never a self-exclusion (`Another`): a different object
+/// with the excluded name is excluded too, and an object with no name is "not
+/// named" anything, so it passes.
+///
+/// The name span ends at the shared named-filter clause boundary
+/// (`oracle_target::named_filter_name_end`), so comma-bearing names survive
+/// ("Ebondeath, Dracolich"). Any text after that boundary is returned as the
+/// remainder, and a caller that requires the whole subject to be consumed can
+/// fail closed on it. The input is the lowercase shadow, so the name is stored
+/// lowercase and compared case-insensitively at evaluation.
+///
+/// Fails on an empty name, and on a name carrying the `~` self-reference token
+/// (CR 201.5). `Named{"~"}` would match no object, so its negation would accept
+/// every object.
+pub(crate) fn parse_not_named_suffix(input: &str) -> OracleResult<'_, FilterProp> {
+    let (name_text, _) = tag("not named ").parse(input)?;
+    let name_end = crate::parser::oracle_target::named_filter_name_end(name_text);
+    let name = name_text[..name_end].trim();
+    if name.is_empty() || name.contains('~') {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
+    Ok((
+        &name_text[name_end..],
+        FilterProp::Not {
+            prop: Box::new(FilterProp::Named {
+                name: name.to_string(),
+            }),
+        },
+    ))
+}
 /// Parse a zone filter phrase from Oracle text.
 ///
 /// Matches "on the battlefield", "in your graveyard", "in your hand",
@@ -165,7 +199,23 @@ pub fn parse_property_filter(input: &str) -> OracleResult<'_, FilterProp> {
         value(FilterProp::FaceDown, tag("face down")),
         // CR 701.27g: "transformed permanent"/"transformed creature" selector.
         value(FilterProp::Transformed, tag("transformed")),
-        value(FilterProp::Unblocked, tag("unblocked")),
+        value(
+            FilterProp::BlockStatus {
+                status: AttackerBlockStatus::Unblocked,
+            },
+            tag("unblocked"),
+        ),
+        // CR 509.1h: "blocked" as a prefix adjective; postfix "blocked by"/"blocked this
+        // turn" are handled elsewhere and must not be consumed here.
+        value(
+            FilterProp::BlockStatus {
+                status: AttackerBlockStatus::Blocked,
+            },
+            terminated(
+                tag("blocked"),
+                peek(preceded(tag(" "), not(alt((tag("by"), tag("this turn")))))),
+            ),
+        ),
         value(FilterProp::Suspected, tag("suspected")),
         value(FilterProp::Renowned, tag("renowned")),
         // CR 701.15b/c: standalone "goaded" designation property token.

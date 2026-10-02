@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::time::Duration;
 
 use draft_core::pack_source::PackSource;
 use draft_core::types::{
@@ -18,7 +17,7 @@ use crate::deck_resolve::deck_data_from_payload;
 use crate::persist::{PersistedDraftSession, PersistedLobbyMeta};
 use crate::protocol::DeckData;
 use crate::reconnect::ReconnectManager;
-use crate::session::{generate_player_token, SessionManager};
+use crate::session::{generate_player_token, SessionManager, HOST_AWAY_REFUSAL};
 
 /// Server-side draft session, mirroring `GameSession` for game play.
 /// Wraps `draft_core::types::DraftSession` (the pure reducer state) with
@@ -308,6 +307,9 @@ impl DraftSessionManager {
         if session.session.status != DraftStatus::Lobby {
             return Err("Draft has already started".to_string());
         }
+        if !session.connected[DRAFT_HOST_SEAT] {
+            return Err(HOST_AWAY_REFUSAL.to_string());
+        }
 
         let seat = session
             .first_open_seat()
@@ -503,14 +505,102 @@ impl DraftSessionManager {
     pub fn restore_persisted_session(&mut self, ps: PersistedDraftSession) -> Result<(), String> {
         let session = DraftSession::try_from_persisted(ps)?;
         let draft_code = session.draft_code.clone();
-        for token in &session.player_tokens {
+        let mut claimed = Vec::new();
+        for (seat, token) in session.player_tokens.iter().enumerate() {
             if !token.is_empty() {
                 self.token_to_draft
                     .insert(token.clone(), draft_code.clone());
+                claimed.push(PlayerId(seat as u8));
             }
         }
-        self.sessions.insert(draft_code, session);
+        self.sessions.insert(draft_code.clone(), session);
+        // A restored seat starts disconnected, so its grace starts now.
+        let grace = self.reconnect.grace_period;
+        for player in claimed {
+            self.reconnect.record_disconnect(&draft_code, player, grace);
+        }
         Ok(())
+    }
+
+    /// Whether an unstarted pod's host is connected or inside reconnect grace.
+    pub fn is_live_lobby_pod(&self, draft_code: &str) -> bool {
+        self.sessions.get(draft_code).is_some_and(|session| {
+            session.session.status == DraftStatus::Lobby
+                && (session.connected[DRAFT_HOST_SEAT]
+                    || self
+                        .reconnect
+                        .is_disconnected(draft_code, PlayerId(DRAFT_HOST_SEAT as u8)))
+        })
+    }
+
+    /// Acts on every lapsed seat: a `Lobby` host's pod is removed, a `Lobby`
+    /// guest's seat is freed, a `Drafting` seat is auto-picked. Consumes each
+    /// lapse in the critical section that acts on it.
+    pub fn sweep_expired_seats(&mut self) -> DraftSeatSweep {
+        let mut sweep = DraftSeatSweep::default();
+        for (draft_code, player) in self.reconnect.check_expired_with_players() {
+            let seat = usize::from(player.0);
+            if !sweep.affected.contains(&draft_code) {
+                sweep.affected.push(draft_code.clone());
+            }
+            let Some(session) = self.sessions.get(&draft_code) else {
+                continue;
+            };
+            if session.connected[seat] {
+                continue;
+            }
+            match session.session.status {
+                DraftStatus::Drafting => {
+                    match self.pick_random_for_seat(&draft_code, player.0, None) {
+                        Ok(()) => {
+                            info!(draft = %draft_code, seat, "auto-picked for disconnected seat (grace expired)");
+                        }
+                        Err(error) => {
+                            warn!(draft = %draft_code, seat, %error, "auto-pick on grace expiry failed");
+                        }
+                    }
+                }
+                DraftStatus::Lobby if seat == DRAFT_HOST_SEAT => {
+                    if let Some(removed) = self.remove_draft(&draft_code) {
+                        info!(draft = %draft_code, "reaped a lobby pod whose host's grace expired");
+                        sweep.reaped.push((draft_code, removed));
+                    }
+                }
+                DraftStatus::Lobby => {
+                    self.free_seat(&draft_code, seat);
+                    if !sweep.freed.contains(&draft_code) {
+                        sweep.freed.push(draft_code);
+                    }
+                }
+                DraftStatus::Deckbuilding
+                | DraftStatus::Pairing
+                | DraftStatus::MatchInProgress
+                | DraftStatus::RoundComplete
+                | DraftStatus::Paused
+                | DraftStatus::Complete
+                | DraftStatus::Abandoned => {}
+            }
+        }
+        sweep
+            .affected
+            .retain(|code| self.sessions.contains_key(code));
+        sweep.freed.retain(|code| self.sessions.contains_key(code));
+        sweep
+    }
+
+    /// Releases an unstarted pod's guest seat so its token no longer resolves.
+    fn free_seat(&mut self, draft_code: &str, seat: usize) {
+        let Some(session) = self.sessions.get_mut(draft_code) else {
+            return;
+        };
+        let token = std::mem::take(&mut session.player_tokens[seat]);
+        self.token_to_draft.remove(&token);
+        session.display_names[seat].clear();
+        session.session.seats[seat] = DraftSeat::Human {
+            player_id: PlayerId(seat as u8),
+            display_name: String::new(),
+        };
+        info!(draft = %draft_code, seat, "freed a lobby seat whose grace expired");
     }
 
     /// Auto-pick a random card for a disconnected seat whose grace period expired.
@@ -730,20 +820,21 @@ impl DraftSessionManager {
                 match_config,
                 Some(format_config.clone()),
             )?;
-            let (_token1, _) = game_mgr.join_game_with_name_and_reservation(
-                &game_code,
-                decks[1].clone(),
-                Some(choice1),
-                name1,
-                None,
-            )?;
-
-            game_mgr
-                .sessions
-                .get_mut(&game_code)
-                .ok_or_else(|| format!("spawned game missing: {game_code}"))?
-                .start_game(db)
-                .map_err(|e| format!("start_game failed for {game_code}: {e:?}"))?;
+            // The manager created this game two statements ago and nothing has
+            // handed out a handle, so the synchronous exclusive accessor is the
+            // right one — `server-core` stays free of `async`.
+            let token1 = {
+                let session = game_mgr
+                    .session_exclusive(&game_code)
+                    .ok_or_else(|| format!("spawned game missing: {game_code}"))?;
+                let (token, _) =
+                    session.join_with_reservation(decks[1].clone(), Some(choice1), name1, None)?;
+                session
+                    .start_game(db)
+                    .map_err(|e| format!("start_game failed for {game_code}: {e:?}"))?;
+                token
+            };
+            game_mgr.index_token(token1, &game_code);
 
             session
                 .active_matches
@@ -796,8 +887,20 @@ impl DraftSessionManager {
                 self.token_to_draft.remove(token);
             }
         }
+        self.reconnect.remove_game(draft_code);
         Some(session)
     }
+}
+
+/// What one [`DraftSessionManager::sweep_expired_seats`] call did, by pod.
+#[derive(Default)]
+pub struct DraftSeatSweep {
+    /// Resident pods with a lapsed seat, whose views and rows are now stale.
+    pub affected: Vec<String>,
+    /// Resident pods that freed a guest seat, whose listed count is now stale.
+    pub freed: Vec<String>,
+    /// Pods removed because their host lapsed, owed the shell's teardown.
+    pub reaped: Vec<(String, DraftSession)>,
 }
 
 /// A spawned draft match game session.
@@ -867,30 +970,8 @@ pub fn generate_draft_code() -> String {
         .collect()
 }
 
-/// Returns the appropriate reconnect grace period for the given draft phase.
-///
-/// Longer than the 10s game reconnect because tournaments span hours.
-/// - Lobby: 30 min (gathering players)
-/// - Drafting: 5 min (picks in progress, auto-pick kicks in after)
-/// - Deckbuilding: 15 min (building takes time)
-/// - MatchInProgress / BetweenRounds: 10 min
-/// - Complete / Abandoned: 1 min (draft is over)
-/// - Paused / Pairing / RoundComplete: 10 min (transient states)
-pub fn draft_grace_period(status: &DraftStatus) -> Duration {
-    match status {
-        DraftStatus::Lobby => Duration::from_secs(1800),
-        DraftStatus::Drafting => Duration::from_secs(300),
-        DraftStatus::Deckbuilding => Duration::from_secs(900),
-        DraftStatus::MatchInProgress => Duration::from_secs(600),
-        DraftStatus::RoundComplete => Duration::from_secs(600),
-        DraftStatus::Paused => Duration::from_secs(600),
-        DraftStatus::Pairing => Duration::from_secs(600),
-        DraftStatus::Complete | DraftStatus::Abandoned => Duration::from_secs(60),
-    }
-}
-
 /// The draft host occupies seat 0 (`create_draft` assigns the creator seat 0).
-const DRAFT_HOST_SEAT: usize = 0;
+pub const DRAFT_HOST_SEAT: usize = 0;
 
 /// Authorize a client-originated draft action against the authenticated seat.
 ///
@@ -1640,7 +1721,7 @@ mod tests {
             .expect("missing deck submissions should skip only the incomplete pairing");
 
         assert!(spawns.is_empty());
-        assert!(game_mgr.sessions.is_empty());
+        assert_eq!(game_mgr.game_count(), 0);
     }
 
     #[test]
@@ -1800,26 +1881,120 @@ mod tests {
     }
 
     #[test]
-    fn draft_grace_period_returns_correct_durations() {
+    fn join_draft_is_refused_while_the_host_is_away() {
+        let mut mgr = DraftSessionManager::new();
+        let (code, host_token, _) = mgr.create_draft(test_config(), "Alice".to_string());
+        mgr.handle_disconnect(&code, DRAFT_HOST_SEAT);
+        let tokens = mgr.sessions[&code].player_tokens.clone();
+        let connected = mgr.sessions[&code].connected.clone();
+        let indexed = mgr.token_to_draft.len();
+
         assert_eq!(
-            draft_grace_period(&DraftStatus::Lobby),
-            Duration::from_secs(1800)
+            mgr.join_draft(&code, "Bob".to_string(), None).map(|_| ()),
+            Err(HOST_AWAY_REFUSAL.to_string())
         );
+        assert_eq!(mgr.sessions[&code].player_tokens, tokens);
+        assert_eq!(mgr.sessions[&code].connected, connected);
+        assert_eq!(mgr.token_to_draft.len(), indexed);
+
+        mgr.handle_reconnect(&code, &host_token)
+            .expect("host returns");
+        let (_, seat, _) = mgr
+            .join_draft(&code, "Bob".to_string(), None)
+            .expect("admitted once the host is back");
+        assert_eq!(seat, 1);
+    }
+
+    #[test]
+    fn a_lobby_pod_is_live_while_its_host_is_connected_or_in_grace() {
+        let mut mgr = DraftSessionManager::new();
+        let (code, host_token, _) = mgr.create_draft(test_config(), "Alice".to_string());
+        assert!(mgr.is_live_lobby_pod(&code));
+        mgr.handle_disconnect(&code, DRAFT_HOST_SEAT);
+        assert!(mgr.is_live_lobby_pod(&code));
+
+        mgr.handle_reconnect(&code, &host_token)
+            .expect("host returns");
+        mgr.reconnect.grace_period = std::time::Duration::ZERO;
+        mgr.handle_disconnect(&code, DRAFT_HOST_SEAT);
+        std::thread::sleep(std::time::Duration::from_millis(2));
         assert_eq!(
-            draft_grace_period(&DraftStatus::Drafting),
-            Duration::from_secs(300)
+            mgr.reconnect.check_expired_with_players(),
+            vec![(code.clone(), PlayerId(0))]
         );
+        assert!(!mgr.is_live_lobby_pod(&code));
+
+        let drafting = start_pod(&mut mgr, test_config());
+        assert!(!mgr.is_live_lobby_pod(&drafting));
+    }
+
+    #[test]
+    fn sweep_expired_seats_reaps_frees_and_auto_picks_by_status() {
+        let mut mgr = DraftSessionManager::new();
+        let (reaped, _, _) = mgr.create_draft(test_config(), "Alice".to_string());
+        mgr.join_draft(&reaped, "Bob".to_string(), None).unwrap();
+        let (freed, _, _) = mgr.create_draft(test_config(), "Carol".to_string());
+        let (lapsed_guest, _, _) = mgr.join_draft(&freed, "Dan".to_string(), None).unwrap();
+        let (waiting, _, _) = mgr.create_draft(test_config(), "Erin".to_string());
+        let (waiting_guest, _, _) = mgr.join_draft(&waiting, "Finn".to_string(), None).unwrap();
+        let drafting = start_pod(&mut mgr, test_config());
+
+        mgr.handle_disconnect(&reaped, 1);
+        mgr.handle_disconnect(&waiting, 1);
+        mgr.reconnect.grace_period = std::time::Duration::ZERO;
+        mgr.handle_disconnect(&reaped, DRAFT_HOST_SEAT);
+        mgr.handle_disconnect(&freed, 1);
+        mgr.handle_disconnect(&drafting, DRAFT_HOST_SEAT);
+        let pool_before = mgr.sessions[&drafting].session.pools[0].len();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+
+        let sweep = mgr.sweep_expired_seats();
+
+        let reaped_codes: Vec<&str> = sweep.reaped.iter().map(|(c, _)| c.as_str()).collect();
+        assert_eq!(reaped_codes, [reaped.as_str()]);
+        assert!(!mgr.sessions.contains_key(&reaped));
+        assert!(!mgr.reconnect.is_disconnected(&reaped, PlayerId(1)));
+
+        assert_eq!(sweep.freed, [freed.as_str()]);
+        let pod = &mgr.sessions[&freed];
+        assert_eq!(pod.first_open_seat(), Some(1));
+        assert!(pod.display_names[1].is_empty());
+        assert_eq!(mgr.draft_for_token(&lapsed_guest), None);
+
         assert_eq!(
-            draft_grace_period(&DraftStatus::Deckbuilding),
-            Duration::from_secs(900)
+            mgr.sessions[&waiting].seat_for_token(&waiting_guest),
+            Some(1)
         );
+        assert!(mgr.reconnect.is_disconnected(&waiting, PlayerId(1)));
+
+        assert!(mgr.sessions.contains_key(&drafting));
         assert_eq!(
-            draft_grace_period(&DraftStatus::MatchInProgress),
-            Duration::from_secs(600)
+            mgr.sessions[&drafting].session.pools[0].len(),
+            pool_before + 1
         );
+        assert!(sweep.affected.contains(&drafting));
+        assert!(sweep.affected.contains(&freed));
+        assert!(!sweep.affected.contains(&reaped));
+    }
+
+    #[test]
+    fn restore_persisted_session_records_every_claimed_seat() {
+        let mut mgr = DraftSessionManager::new();
+        let (code, _, _) = mgr.create_draft(test_config(), "Alice".to_string());
+        for i in 1..4 {
+            mgr.join_draft(&code, format!("Player {i}"), None).unwrap();
+        }
+        let persisted = mgr.sessions[&code].to_persisted();
+
+        let mut restored = DraftSessionManager::new();
+        restored.restore_persisted_session(persisted).unwrap();
+
+        let recorded: Vec<bool> = (0..8u8)
+            .map(|seat| restored.reconnect.is_disconnected(&code, PlayerId(seat)))
+            .collect();
         assert_eq!(
-            draft_grace_period(&DraftStatus::Complete),
-            Duration::from_secs(60)
+            recorded,
+            [true, true, true, true, false, false, false, false]
         );
     }
 

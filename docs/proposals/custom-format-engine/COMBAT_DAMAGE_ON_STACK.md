@@ -622,12 +622,16 @@ parameterizes an existing axis rather than adding a sibling predicate.
 
 ### 3.6 Match sites
 
-**The audit rule for Phase 3a.** Every `match`, `matches!`, `if let` and
-`let … else` on `StackEntryKind`, every reader of `StackEntry::ability()` that
-treats `None` as a particular kind, and (with D9) every reader of
-`StackEntry.controller` gets an explicit decision. This applies across
-`engine`, `phase-ai`, `server-core`, `phase-server`, `engine-wasm` and
-`manabrew-compat`.
+**The audit rule for Phase 3a — classification only.** Every `match`,
+`matches!`, `if let` and `let … else` on `StackEntryKind`, and every reader of
+`StackEntry::ability()` that treats `None` as a particular kind, gets an
+explicit decision. This applies across `engine`, `phase-ai`, `server-core`,
+`phase-server`, `engine-wasm` and `manabrew-compat`.
+
+**`StackEntry.controller` readers are NOT part of this audit.** They belong to
+Phase 3a-II together with the rest of the D9 work, so the two phases keep the
+disjoint break sets the split exists to create. 3a does not read, write, or
+re-type that field.
 
 ```bash
 git grep -n "StackEntryKind::" -- 'crates/*/src/**' ':!*tests*'   # 87 files at pin
@@ -644,7 +648,6 @@ authoritative):
 | `game_state.rs:16042` `StackResolutionEntryProvenance` | new provenance |
 | `game_state.rs:16946` `stack_ability_kind` | replaced by D5 |
 | `game_state.rs:25101` yield scopes | waits for it like any entry |
-| `stack.rs:1033`; `elimination.rs:970-984`; `filter.rs:2998,3019` | `controller: None` (D9) |
 | `stack.rs:1372` / `:1424` | resolver arm / `unreachable!` |
 | `stack.rs:5031,5086,5102` | never grouped |
 | `resolved_commands.rs:1139-1142` (journaled stack-kind rewrite) | not rewritable; journaled (§3.10) |
@@ -819,17 +822,58 @@ fn damage_source_view(state: &GameState, src: DamageSourceRef) -> Option<DamageS
 ## 4. Serialization and protocol
 
 Changes by phase:
-- **3a:** the new `StackEntryKind` variant, `AssignedCombatDamage`, and
-  `StackEntry.controller: Option<PlayerId>`.
+- **3a:** the new `StackEntryKind` variant and `AssignedCombatDamage` /
+  `AssignedDamageRecipient`. **No protocol bump** — see below.
+- **3a-II:** `StackEntry.controller: Option<PlayerId>` and
+  `StackEntryDisplay.controller`.
 - **3b:** `DamageSourceRef` in damage events, `ProposedEvent` and
   `DamageContext`; the chosen-source filter shape; `LKISnapshot.is_commander`.
 - **3c:** `PendingCombatLifelink.origin`.
 
-**Each phase that changes serialized state bumps `lobby-broker`
-`PROTOCOL_VERSION`** (71 at pin, `crates/lobby-broker/src/protocol.rs:519`),
-with its changelog line, value pins and client mirror (precedent #8870). A
-reviewer may instead approve shipping phases in one release with a single bump,
-but that must be decided explicitly in the phase plan.
+**A phase bumps `lobby-broker` `PROTOCOL_VERSION`** (with its changelog line,
+value pins and client mirror, precedent #8870) **when a peer can actually
+receive the new shape** — not merely when a type gains a variant.
+
+**Phase 3a is the exception, decided during its implementation and recorded
+here so a missing bump reads as a decision rather than an oversight.** Adding
+`StackEntryKind::CombatDamage` changes no existing variant's shape, and 3a adds
+no push authority, so nothing can ever serialize one. Three supports:
+1. **Precedent.** `StackEntryKind::KeywordAction` — the closest analogue, an
+   engine-built entry with a typed payload — was added by `df34aa647`
+   (2026-04-17) with no protocol bump; the only `PROTOCOL_VERSION` change in
+   that file's history is `3bbf2a59e` (2026-06-18), unrelated.
+2. **The hazard needs an emitter.** Every variant-driven changelog entry in
+   `protocol.rs` (69's "one-way variant contract", 66's unknown-variant error,
+   and the file's "no serde default can rescue an unknown variant") bumps
+   because a peer can *receive* the tag.
+3. **CI does not force it.** `scripts/check-protocol-version.mjs` enforces that
+   the Rust and TS constants AGREE, not that they were incremented — stated in
+   the v64 changelog entry.
+
+Had 3a bumped, it would have had to move five surfaces — lobby broker,
+server-core (whose pinning test embeds the numeral in its *function name*), the
+client adapter, the P2P `WIRE_PROTOCOL_VERSION`, and the checker's expectations
+— for a tag nothing can emit.
+
+### Wire-emission matrix — each bump assigned exactly once
+
+The rule above ("bump when a peer can receive the shape") decides ownership.
+This matrix is the single authority for which phase performs which bump; no
+phase section may claim a bump that is not listed here.
+
+| Phase | Serialized shape it introduces | Can a peer receive it in this phase? | Bump |
+|---|---|---|---|
+| **3a** | `StackEntryKind::CombatDamage`, `AssignedCombatDamage`, `AssignedDamageRecipient` | **No** — no push authority exists, so nothing serializes one | **None** |
+| **3a-II** | `StackEntry.controller: Option<PlayerId>`, `StackEntryDisplay.controller` | **Yes** — the controller field is on every existing entry, so every peer receives the changed shape immediately | **Bump #1** |
+| **3b** | `DamageSourceRef` in damage events / `ProposedEvent` / `DamageContext`; chosen-source filter; `LKISnapshot.is_commander` + `is_token` | **Yes** — damage events are emitted by every game | **Bump #2** |
+| **3c** | `PendingCombatLifelink.origin`; the first pushes of the 3a variant | **Yes** — both | **Bump #3** |
+| **3d** | none (gate flip + preset data) | — | **None** |
+
+Each phase performs exactly the bump on its own row, with that bump's changelog
+line, value pins and client mirror. A phase whose row says **None** must not
+touch `PROTOCOL_VERSION`, and its section says so explicitly.
+
+Rules that hold for every bump above:
 - Additive fields take `#[serde(default)]`.
 - `LOBBY_PROTOCOL_VERSION` doesn't move.
 - `size_of::<StackEntry>() <= 768` (`game_state_size.rs:66`) is re-checked in 3a.
@@ -837,7 +881,8 @@ but that must be decided explicitly in the phase plan.
 ## 5. Frontend — display only
 
 - **Types:** hand-written in `client/src/adapter/types.ts`. Update:
-  - the `StackEntryKind` union (`:1855`) and `StackEntry.controller` (3a);
+  - the `StackEntryKind` union (`:1855`) (3a);
+  - `StackEntry.controller` and `StackEntryDisplay.controller` (3a-II);
   - the damage-event mirrors whose source shape changes (3b). These are consumed
     by animation components (`AnimationOverlay`, `CardSlamAnimation`), which
     must read the id from the new shape and derive nothing.
@@ -915,7 +960,9 @@ and abilities.
 
 ## 9. Implementation phases
 
-Each phase is its own PR: plan → plan review → implement → impl review.
+**Five phases** — 3a, 3a-II, 3b, 3c, 3d. Each is its own PR: plan → plan
+review → implement → impl review. 3a-II was split out of 3a during 3a's plan
+review; see its own section for why.
 `LegacyAxis::CombatDamageTiming` stays out of `IMPLEMENTED_LEGACY_AXES`
 (`types/custom_format.rs:698`) until Phase 3d. Before then, `OnStack` is
 reachable only through `FormatConfig::for_custom_rules` in tests.
@@ -923,24 +970,66 @@ reachable only through `FormatConfig::for_custom_rules` in tests.
 Tests are paired with an accepted/Modern control on the same board, and proven
 sharp by mutating the fix and pasting the failure.
 
-### Phase 3a — Stack object, classification, controller (no behavior)
+### Phase 3a — Stack object + classification (no behavior)
 
 - **Scope:**
   - `StackEntryKind::CombatDamage` and `AssignedCombatDamage` /
     `AssignedDamageRecipient`;
-  - `StackObjectClass` (D5);
-  - the private controller carried by `StackObjectClass` (D9), every §3.6 decision,
-    display label and lines, TS types;
-  - protocol bump;
-  - fix the `CombatDamageTiming` doc comment.
+  - `StackObjectClass` (D5) — **without** the controller, which moves to 3a-II;
+  - every §3.6 decision, the display label, TS types;
+  - fix the `CombatDamageTiming` doc comment;
+  - **no protocol bump** — 3a's row in §4's wire-emission matrix is **None**,
+    and this phase must not touch `PROTOCOL_VERSION`.
 - **Tests:**
-  1. A hand-pushed entry isn't a legal target for "target spell", "target
-     activated ability", "target triggered ability" or "target spell or
-     ability". Control: a real spell and ability are.
-  2. Eliminating the active player leaves the entry on the stack. Control: that
-     player's triggered ability is removed.
-  3. Serde round trip.
-  4. `kind_label` comes from the engine.
+  1. No ability-filter effect can target it — decided by `class()`, so the
+     `class()`-revert mutation must turn it red. Control: real activated and
+     triggered abilities are offered in the same legal set.
+  2. No spell-filter effect can target it. **Structural**, not class-decided
+     (a combat-damage entry has no `GameObject`), so this row claims no
+     mutation and carries a reach-guard instead.
+  3. Serde round trip, including a legacy bare-`ObjectId` incarnation payload.
+  4. `kind_label` comes from the engine, for both sub-steps.
+  5. Entries never coalesce in the stack display; identical triggers still do.
+  6. The resolution fence captures the new kind.
+  7. Never priority-yielded (CR 117.3d), with a stored yield proving the
+     instrument fires on the control.
+  8. Storm count ignores it.
+
+### Phase 3a-II — Controller privatization
+
+Split out of 3a during 3a's plan review. **Why it is a separate phase:** 3a adds
+no push authority, so no entry can lack a controller until 3c; the two changes
+have disjoint break sets (the variant breaks ~26 exhaustive `match` arms, while
+privatizing the field breaks every `StackEntry { … }` literal — E0451 — plus
+every controller read, ~495 literals across ~137 files); and bundling them makes
+one reviewable diff out of two unrelated mechanical sweeps. The plan review
+confirmed no foreclosure: `class()`'s consumer surface after 3a is three sites,
+so adding the controller to the projection later is a three-site edit.
+
+- **Scope:**
+  - `StackEntry.controller` becomes a private `Option<PlayerId>`;
+  - the D9 enforcement decision — `class()` as the only public controller
+    reader, versus a plain accessor with that claim dropped;
+  - the constructor signature that keeps ~495 literals from each spelling
+    `Some(..)`;
+  - `stack_object_controller`'s signature and its four non-test callers;
+  - `apply_resolved_stack_push`'s `UnknownController` invariant, **kind-gated**
+    so only `CombatDamage` may be controllerless;
+  - the CR 901.10b planechase write, the CR 800.4a elimination sweep;
+  - `StackEntryDisplay.controller` optionality, its TS mirror, and
+    `StackEntry.tsx`'s fallback chain — `PlayerId::default()` is a real seat, so
+    a missing value must not render as seat 0;
+  - the AI planner's transposition hash and the manabrew encode;
+  - **Bump #1** per §4's wire-emission matrix — the controller field rides every
+    existing entry, so every peer receives the changed shape at once.
+- **Tests:**
+  1. **The phase's rules claim:** a controllerless entry survives a player
+     leaving the game (2009 CR 600.4a: "A player leaving the game doesn't affect
+     combat damage on the stack"; current CR 800.4a). Control: that player's own
+     triggered ability *is* removed by the same sweep.
+  2. No seat is attributed to a controllerless entry in `DerivedViews`.
+  3. Journal replay accepts a controllerless push and still rejects an unseated
+     `Some(..)`.
 
 ### Phase 3b — Damage-source identity (no behavior)
 
@@ -956,7 +1045,8 @@ sharp by mutating the fix and pasting the failure.
   - `LKISnapshot.is_commander` and `is_token`;
   - the stamping rule, and the legacy-payload compat deserializer;
   - the client event-type mirrors;
-  - protocol bump.
+  - **Bump #2** per §4's wire-emission matrix (damage events are emitted by
+    every game).
 - **Tests (building block):**
   1. `damage_source_view` returns `Live` for the same incarnation and `Lki` for
      a departed one.
@@ -985,7 +1075,8 @@ sharp by mutating the fix and pasting the failure.
   - the D6 widening;
   - journaling (§3.10);
   - `combat_damage_timing.rs`;
-  - the protocol bump for `origin`;
+  - **Bump #3** per §4's wire-emission matrix — `PendingCombatLifelink.origin`
+    and the first pushes of the 3a variant, which land together here;
   - R1–R10 traced.
 - **Tests:**
   1. *Window exists:* Priority with exactly one `CombatDamage` entry. Modern

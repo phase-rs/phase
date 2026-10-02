@@ -8,11 +8,10 @@ import {
 /**
  * Parse import text into a `GameState`, or return a human-readable error string.
  *
- * Accepts a bare `GameState`, the full debug-export wrapper
- * (`{ gameState, waitingFor, ... }`), or a trusted persistence envelope
- * (`{ state, ... }`) produced by `gameStateExport.ts`. The presence of
- * `waiting_for` on the resolved public state is the structural marker that
- * distinguishes a game state from arbitrary JSON.
+ * Accepts a bare authoritative `GameState` or the trusted persistence envelope
+ * (`{ state, ... }`) produced by `gameStateExport.ts`. A debug-export wrapper
+ * (`{ gameState, waitingFor, ... }`) is deliberately rejected: it contains the
+ * rendered client view, not the private engine runtime needed for restoration.
  */
 export function gameStateFromImportText(importText: string): PersistedGameState | string {
   let parsed: unknown;
@@ -22,13 +21,13 @@ export function gameStateFromImportText(importText: string): PersistedGameState 
     return "Invalid JSON";
   }
 
-  // The debug export nests a raw state under `gameState`; a trusted persistence
-  // envelope must stay intact so the engine can restore its private runtime.
-  const persistedState = (
-    parsed && typeof parsed === "object" && "gameState" in parsed
-      ? (parsed as { gameState: PersistedGameState }).gameState
-      : parsed
-  ) as PersistedGameState;
+  if (parsed && typeof parsed === "object" && "gameState" in parsed) {
+    return "This is a display snapshot, not a restorable game state. Export an Authoritative Game State from the Debug Panel instead.";
+  }
+
+  // Keep the trusted envelope intact so the engine can restore its private
+  // runtime rather than attempting to rebuild it from a rendered view.
+  const persistedState = parsed as PersistedGameState;
   if (!persistedState || typeof persistedState !== "object") {
     return "JSON does not look like a GameState (missing waiting_for or players)";
   }
@@ -48,8 +47,8 @@ export function gameStateFromImportText(importText: string): PersistedGameState 
 
 /**
  * Read import text from a user-selected file. Plain `.json`/`.txt` files are
- * read directly; `.zip` archives (the format `exportGameStateDebugZip` writes)
- * are unzipped and the first contained JSON/text entry is returned.
+ * read directly; `.zip` archives are unzipped and the first contained
+ * JSON/text entry is returned.
  */
 export async function readImportFile(file: File): Promise<string> {
   if (!file.name.toLowerCase().endsWith(".zip")) {

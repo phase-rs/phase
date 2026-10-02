@@ -8,6 +8,7 @@ import type {
   ViewerInteraction,
 } from "../../../adapter/generated/interaction";
 import { dispatchAction, dispatchInteraction } from "../../../game/dispatch.ts";
+import { useAnimationStore } from "../../../stores/animationStore.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../../stores/preferencesStore.ts";
 import { useUiStore } from "../../../stores/uiStore.ts";
@@ -130,6 +131,7 @@ function renderPermanent(
     <BoardInteractionContext.Provider
       value={{
         activatableObjectIds,
+        blockableAttackerIds: new Set(),
         boardChoiceObjectIds,
         committedAttackerIds: new Set(),
         incomingAttackerCounts: new Map(),
@@ -1472,10 +1474,7 @@ describe("PermanentCard", () => {
         11: exiledTwo,
       },
       exile: [10, 11],
-      exile_links: [
-        { exiled_id: 10, source_id: 1, kind: "TrackedBySource" },
-        { exiled_id: 11, source_id: 1, kind: "TrackedBySource" },
-      ],
+      derived: { linked_exile_ids: { "1": [10, 11] } },
     };
     useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
 
@@ -1795,6 +1794,16 @@ describe("PermanentCard", () => {
     expect(container.querySelector('[data-summoning-sickness-underwater="true"]')).toBeTruthy();
   });
 
+  it("marks an attacker with an arrow pointing at the defending side, and nothing else", () => {
+    const { container, unmount } = renderPermanent();
+    expect(container.querySelector("[data-attack-arrow]")).toBeNull();
+    unmount();
+
+    useUiStore.setState({ combatMode: "attackers", selectedAttackers: [1] });
+    const selected = renderPermanent();
+    expect(selected.container.querySelector("[data-attack-arrow]")?.getAttribute("data-attack-arrow")).toBe("up");
+  });
+
   it("does not render a selected attacker as tapped until the engine marks it tapped", () => {
     useUiStore.setState({
       combatMode: "attackers",
@@ -1902,6 +1911,7 @@ describe("PermanentCard", () => {
       <BoardInteractionContext.Provider
         value={{
           activatableObjectIds: new Set([39]),
+          blockableAttackerIds: new Set(),
           boardChoiceObjectIds: new Set(),
           committedAttackerIds: new Set(),
           incomingAttackerCounts: new Map(),
@@ -2011,6 +2021,7 @@ describe("PermanentCard", () => {
       <BoardInteractionContext.Provider
         value={{
           activatableObjectIds: new Set(),
+          blockableAttackerIds: new Set(),
           boardChoiceObjectIds: new Set(),
           committedAttackerIds: new Set(),
           incomingAttackerCounts: new Map(),
@@ -2072,6 +2083,7 @@ describe("PermanentCard", () => {
       <BoardInteractionContext.Provider
         value={{
           activatableObjectIds: new Set(),
+          blockableAttackerIds: new Set(),
           boardChoiceObjectIds: new Set(),
           committedAttackerIds: new Set(),
           incomingAttackerCounts: new Map(),
@@ -2123,6 +2135,7 @@ describe("PermanentCard", () => {
       <BoardInteractionContext.Provider
         value={{
           activatableObjectIds: new Set(),
+          blockableAttackerIds: new Set(),
           boardChoiceObjectIds: new Set(),
           committedAttackerIds: new Set(),
           incomingAttackerCounts: new Map(),
@@ -2209,6 +2222,7 @@ describe("PermanentCard", () => {
       <BoardInteractionContext.Provider
         value={{
           activatableObjectIds: new Set(),
+          blockableAttackerIds: new Set(),
           boardChoiceObjectIds: new Set(),
           committedAttackerIds: new Set(),
           incomingAttackerCounts: new Map(),
@@ -2270,6 +2284,7 @@ describe("PermanentCard", () => {
       <BoardInteractionContext.Provider
         value={{
           activatableObjectIds: new Set([80]),
+          blockableAttackerIds: new Set(),
           boardChoiceObjectIds: new Set(),
           committedAttackerIds: new Set(),
           incomingAttackerCounts: new Map(),
@@ -2333,6 +2348,7 @@ describe("PermanentCard", () => {
       <BoardInteractionContext.Provider
         value={{
           activatableObjectIds: new Set([81]),
+          blockableAttackerIds: new Set(),
           boardChoiceObjectIds: new Set(),
           committedAttackerIds: new Set(),
           incomingAttackerCounts: new Map(),
@@ -2466,5 +2482,63 @@ describe("PermanentCard", () => {
       screen.getByText(/\{T\}, Sacrifice Test Creature: Destroy target land\./),
     ).toBeInTheDocument();
     expect(document.body.textContent).not.toContain("~");
+  });
+
+  describe("flight veil", () => {
+    const permanentNode = () =>
+      document.querySelector<HTMLElement>('[data-permanent-card="1"]');
+
+    beforeEach(() => {
+      useAnimationStore.getState().clearQueue();
+    });
+
+    afterEach(() => {
+      useAnimationStore.getState().clearQueue();
+    });
+
+    it("hides the permanent while its object is flight-veiled", () => {
+      useAnimationStore.getState().veilFlight(1);
+
+      renderPermanent();
+
+      expect(permanentNode()!.style.visibility).toBe("hidden");
+    });
+
+    it("introduces no entrance when unveiled", () => {
+      renderPermanent();
+
+      expect(permanentNode()!.style.visibility).toBe("");
+      expect(permanentNode()!.style.opacity).toBe("");
+      expect(permanentNode()!.style.transform).toBe("");
+    });
+
+    it("shows once the flight releases it", () => {
+      useAnimationStore.getState().veilFlight(1);
+      renderPermanent();
+
+      act(() => useAnimationStore.getState().unveilFlight(1));
+
+      expect(permanentNode()!.style.visibility).toBe("");
+    });
+
+    it("stays hidden while either the step veil or the flight veil holds it", () => {
+      useAnimationStore.getState().veilObjects([1]);
+      useAnimationStore.getState().veilFlight(1);
+      renderPermanent();
+
+      act(() => useAnimationStore.getState().advanceStep());
+      expect(permanentNode()!.style.visibility).toBe("hidden");
+
+      act(() => useAnimationStore.getState().unveilFlight(1));
+      expect(permanentNode()!.style.visibility).toBe("");
+    });
+
+    it("still hides for the step veil alone", () => {
+      useAnimationStore.getState().veilObjects([1]);
+
+      renderPermanent();
+
+      expect(permanentNode()!.style.visibility).toBe("hidden");
+    });
   });
 });

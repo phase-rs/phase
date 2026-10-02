@@ -3,8 +3,8 @@ use rand::seq::SliceRandom;
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, LibraryPosition, ResolvedAbility, RevealUntilDisposition,
-    TargetFilter, TargetRef,
+    DigRestOrder, Effect, EffectError, EffectKind, LibraryPosition, ParentTargetMissingReason,
+    ResolvedAbility, RevealUntilDisposition, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{BatchCompletion, GameState, WaitingFor};
@@ -22,10 +22,40 @@ use crate::types::zones::{EtbTapState, Zone};
 /// All revealed cards are marked as publicly revealed and a `CardsRevealed`
 /// event is emitted. If the library is exhausted without finding a match, all
 /// revealed cards go to `rest_destination`.
+///
+/// CR 603.12 + CR 608.2c: after this instance's own moves have run (or paused),
+/// its outcome is published on the one-hop parent->child hand-off slot, so the
+/// immediate child — including a `WhenYouDo` "when you reveal a <filter> card
+/// this way" reflexive — reads THIS reveal's verdict and never an unrelated
+/// event that a nested replacement effect pushed into the same event slice.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    let mut matched = false;
+    let result = resolve_reveal(state, ability, events, &mut matched);
+    if result.is_ok() {
+        publish_reveal_until_verdict(state, matched);
+    }
+    result
+}
+
+/// CR 701.20a + CR 603.12: Publish whether this reveal-until revealed any card
+/// matching its until-filter. A whiff records
+/// `ParentTargetMissingReason::RevealUntil`; a hit clears the slot, because this
+/// instance is the immediate parent of the next hand-off and no stale reason
+/// from an earlier or nested producer may reach its child.
+fn publish_reveal_until_verdict(state: &mut GameState, matched: bool) {
+    state.last_parent_target_missing_reason =
+        (!matched).then_some(ParentTargetMissingReason::RevealUntil);
+}
+
+fn resolve_reveal(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    matched: &mut bool,
 ) -> Result<(), EffectError> {
     let (
         player_filter,
@@ -34,6 +64,7 @@ pub fn resolve(
         matched_disposition,
         kept_destination,
         rest_destination,
+        rest_order,
         enter_tapped,
         enters_attacking,
         kept_optional_to,
@@ -47,6 +78,7 @@ pub fn resolve(
             matched_disposition,
             kept_destination,
             rest_destination,
+            rest_order,
             enter_tapped,
             enters_attacking,
             kept_optional_to,
@@ -59,6 +91,7 @@ pub fn resolve(
             *matched_disposition,
             *kept_destination,
             *rest_destination,
+            *rest_order,
             *enter_tapped,
             *enters_attacking,
             *kept_optional_to,
@@ -117,8 +150,10 @@ pub fn resolve(
             target_match_count,
             kept_destination,
             rest_destination,
+            rest_order,
             enter_tapped,
             events,
+            matched,
         );
     }
 
@@ -137,6 +172,16 @@ pub fn resolve(
             }
         }
     }
+    *matched = !hit_cards.is_empty();
+
+    // CR 608.2c: when exactly one card was hit by the until condition, snapshot
+    // it before moving to its destination so chained instructions (e.g. Erratic
+    // Mutation's pump reading "that card's mana value") bind to it.
+    let hit_snapshot = if hit_cards.len() == 1 {
+        state.capture_event_object_snapshot(hit_cards[0])
+    } else {
+        None
+    };
 
     // Build the full list of revealed card IDs for the event.
     let mut all_revealed: Vec<ObjectId> = revealed_misses.clone();
@@ -179,7 +224,7 @@ pub fn resolve(
     });
 
     // Store revealed IDs for downstream reference.
-    state.last_revealed_ids = all_revealed;
+    state.last_revealed_ids = all_revealed.clone();
 
     // CR 701.20b: reveal-only until-loop — cards stay in their zones (Sanar's
     // Vivid draws nothing to hand before per-color exile from the library).
@@ -187,7 +232,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::RevealUntil,
             source_id: ability.source_id,
-            subject: None,
+            subject: hit_snapshot.map(Box::new),
         });
         return Ok(());
     }
@@ -201,7 +246,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::RevealUntil,
             source_id: ability.source_id,
-            subject: None,
+            subject: hit_snapshot.map(Box::new),
         });
         state.waiting_for = WaitingFor::RevealUntilKeptChoice {
             player: revealing_player,
@@ -213,7 +258,76 @@ pub fn resolve(
             enters_attacking,
             revealed_misses,
             rest_destination,
+            rest_order,
         };
+        return Ok(());
+    }
+
+    // CR 701.20a + CR 608.2d: When all revealed cards are put on the bottom of the library
+    // (kept_destination == Library && rest_destination == Library), handle the entire
+    // revealed pile together. If "in any order" (PlayerChoice) is specified and 2+ cards
+    // were revealed, pause for the controller to announce their chosen bottom order.
+    if kept_destination == Zone::Library && rest_destination == Zone::Library {
+        let clear_markers = all_revealed.clone();
+        if rest_order == DigRestOrder::PlayerChoice && all_revealed.len() >= 2 {
+            state.waiting_for = WaitingFor::RevealUntilBottomOrder {
+                player: revealing_player,
+                source_id: ability.source_id,
+                cards: all_revealed,
+                clear_markers,
+                emit_reveal_until_resolved: Some(ability.source_id),
+                reveal_until_hit_snapshot: hit_snapshot.map(Box::new),
+            };
+            return Ok(());
+        }
+        match move_rest_then(
+            state,
+            &all_revealed,
+            Zone::Library,
+            rest_order,
+            None,
+            events,
+        ) {
+            zone_pipeline::BatchMoveResult::Done => {}
+            zone_pipeline::BatchMoveResult::NeedsChoice => {
+                zone_pipeline::defer_completion_on_pause(
+                    state,
+                    BatchCompletion::RevealRestPile {
+                        delivery_stage: crate::types::game_state::DigDeliveryStage::Rest,
+                        player: revealing_player,
+                        source_id: Some(ability.source_id),
+                        rest_cards: Vec::new(),
+                        rest_destination: Zone::Library,
+                        rest_order,
+                        rest_split_top_count: None,
+                        clear_markers,
+                        publish_tracked_set: None,
+                        publish_tracked_set_cause: None,
+                        emit_reveal_until_resolved: Some(ability.source_id),
+                        reveal_until_hit_snapshot: hit_snapshot.map(Box::new),
+                        manifested_for_continuation: None,
+                        kept_delivery: Default::default(),
+                        continuation_targets: Vec::new(),
+                        rest_delivery: Default::default(),
+                    },
+                );
+                return Ok(());
+            }
+        }
+        state
+            .resolve_and_apply_information(
+                &clear_markers,
+                ResolvedInformationAudience::Controller(ability.controller),
+                ResolvedInformationLifetime::UntilActionBoundary,
+                ResolvedInformationEdit::Hide,
+            )
+            .expect("reveal-until cleanup must reference live card occurrences");
+
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::RevealUntil,
+            source_id: ability.source_id,
+            subject: hit_snapshot.map(Box::new),
+        });
         return Ok(());
     }
 
@@ -275,11 +389,13 @@ pub fn resolve(
                                     source_id: Some(ability.source_id),
                                     rest_cards: revealed_misses,
                                     rest_destination,
-                                    rest_order: crate::types::ability::DigRestOrder::Preserve,
+                                    rest_order,
+                                    rest_split_top_count: None,
                                     clear_markers,
                                     publish_tracked_set: None,
                                     publish_tracked_set_cause: None,
                                     emit_reveal_until_resolved: Some(ability.source_id),
+                                    reveal_until_hit_snapshot: hit_snapshot.map(Box::new),
                                     manifested_for_continuation: None,
                                     kept_delivery: Default::default(),
                                     continuation_targets: Vec::new(),
@@ -333,11 +449,13 @@ pub fn resolve(
                                     source_id: Some(ability.source_id),
                                     rest_cards: revealed_misses,
                                     rest_destination,
-                                    rest_order: crate::types::ability::DigRestOrder::Preserve,
+                                    rest_order,
+                                    rest_split_top_count: None,
                                     clear_markers,
                                     publish_tracked_set: None,
                                     publish_tracked_set_cause: None,
                                     emit_reveal_until_resolved: Some(ability.source_id),
+                                    reveal_until_hit_snapshot: hit_snapshot.map(Box::new),
                                     manifested_for_continuation: None,
                                     kept_delivery: Default::default(),
                                     continuation_targets: Vec::new(),
@@ -374,11 +492,13 @@ pub fn resolve(
                                     source_id: Some(ability.source_id),
                                     rest_cards: revealed_misses,
                                     rest_destination,
-                                    rest_order: crate::types::ability::DigRestOrder::Preserve,
+                                    rest_order,
+                                    rest_split_top_count: None,
                                     clear_markers,
                                     publish_tracked_set: None,
                                     publish_tracked_set_cause: None,
                                     emit_reveal_until_resolved: Some(ability.source_id),
+                                    reveal_until_hit_snapshot: hit_snapshot.map(Box::new),
                                     manifested_for_continuation: None,
                                     kept_delivery: Default::default(),
                                     continuation_targets: Vec::new(),
@@ -410,7 +530,28 @@ pub fn resolve(
     // over the parked prompt.
     let mut clear_markers = revealed_misses.clone();
     clear_markers.extend(&hit_cards);
-    match move_rest_then(state, &revealed_misses, rest_destination, None, events) {
+    if rest_destination == Zone::Library
+        && rest_order == DigRestOrder::PlayerChoice
+        && revealed_misses.len() >= 2
+    {
+        state.waiting_for = WaitingFor::RevealUntilBottomOrder {
+            player: revealing_player,
+            source_id: ability.source_id,
+            cards: revealed_misses,
+            clear_markers,
+            emit_reveal_until_resolved: Some(ability.source_id),
+            reveal_until_hit_snapshot: hit_snapshot.map(Box::new),
+        };
+        return Ok(());
+    }
+    match move_rest_then(
+        state,
+        &revealed_misses,
+        rest_destination,
+        rest_order,
+        None,
+        events,
+    ) {
         zone_pipeline::BatchMoveResult::Done => {}
         zone_pipeline::BatchMoveResult::NeedsChoice => {
             zone_pipeline::defer_completion_on_pause(
@@ -421,11 +562,13 @@ pub fn resolve(
                     source_id: Some(ability.source_id),
                     rest_cards: Vec::new(),
                     rest_destination,
-                    rest_order: crate::types::ability::DigRestOrder::Preserve,
+                    rest_order,
+                    rest_split_top_count: None,
                     clear_markers,
                     publish_tracked_set: None,
                     publish_tracked_set_cause: None,
                     emit_reveal_until_resolved: Some(ability.source_id),
+                    reveal_until_hit_snapshot: hit_snapshot.map(Box::new),
                     manifested_for_continuation: None,
                     kept_delivery: Default::default(),
                     continuation_targets: Vec::new(),
@@ -451,7 +594,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::RevealUntil,
         source_id: ability.source_id,
-        subject: None,
+        subject: hit_snapshot.map(Box::new),
     });
 
     Ok(())
@@ -487,8 +630,10 @@ fn resolve_choose_any_number(
     target_match_count: usize,
     kept_destination: Zone,
     rest_destination: Zone,
+    rest_order: DigRestOrder,
     enter_tapped: EtbTapState,
     events: &mut Vec<GameEvent>,
+    any_matched: &mut bool,
 ) -> Result<(), EffectError> {
     let mut revealed: Vec<ObjectId> = Vec::new();
     let mut matched: Vec<ObjectId> = Vec::new();
@@ -506,6 +651,7 @@ fn resolve_choose_any_number(
             }
         }
     }
+    *any_matched = !matched.is_empty();
 
     state
         .resolve_and_apply_information(
@@ -561,7 +707,8 @@ fn resolve_choose_any_number(
         selectable_cards: matched,
         kept_destination: Some(kept_destination),
         rest_destination: Some(rest_destination),
-        rest_order: crate::types::ability::DigRestOrder::Preserve,
+        rest_order,
+        rest_split_top_count: None,
         source_id: Some(ability.source_id),
         enter_tapped: enter_tapped.is_tapped(),
         enters_attacking: false,
@@ -622,23 +769,29 @@ fn resolve_revealing_player(
 /// completion is carried with an empty `rest_cards` so it does NOT re-move the
 /// pile (the pile IS this batch — the completion is cleanup-only here).
 ///
-/// A `Zone::Library` rest pile randomizes the request order first, then delivers
-/// every card through the placement-aware pipeline arm with
-/// `LibraryPosition::Bottom`. This preserves the effect instruction's random
-/// bottom placement while keeping `Moved(destination = Library)` replacement
-/// consultation centralized in `zone_pipeline::move_object`.
+/// A `Zone::Library` rest pile randomizes the request order first (when
+/// `rest_order == DigRestOrder::Random`) or preserves encounter order (when
+/// `rest_order == DigRestOrder::Preserve`), then delivers every card through the
+/// placement-aware pipeline arm with `LibraryPosition::Bottom`. This preserves
+/// the effect instruction's ordering while keeping `Moved(destination = Library)`
+/// replacement consultation centralized in `zone_pipeline::move_object`.
 pub(crate) fn move_rest_then(
     state: &mut GameState,
     cards: &[ObjectId],
     rest_destination: Zone,
+    rest_order: DigRestOrder,
     completion: Option<BatchCompletion>,
     events: &mut Vec<GameEvent>,
 ) -> zone_pipeline::BatchMoveResult {
     match rest_destination {
         Zone::Library => {
-            // Random-order bottom placement is the effect instruction; CR 701.20a
-            // keeps the cards revealed until this rest-pile work completes.
-            let reqs = library_bottom_requests_in_random_order(state, cards);
+            // CR 701.20a keeps the cards revealed until this rest-pile work completes.
+            let reqs = match rest_order {
+                DigRestOrder::Random => library_bottom_requests_in_random_order(state, cards),
+                DigRestOrder::Preserve | DigRestOrder::PlayerChoice => {
+                    library_bottom_requests_in_preserve_order(cards)
+                }
+            };
             zone_pipeline::move_objects_simultaneously_then(state, reqs, completion, events)
         }
         dest => {
@@ -651,6 +804,17 @@ pub(crate) fn move_rest_then(
             zone_pipeline::move_objects_simultaneously_then(state, reqs, completion, events)
         }
     }
+}
+
+/// Build bottom-placement requests preserving the encounter order.
+fn library_bottom_requests_in_preserve_order(cards: &[ObjectId]) -> Vec<ZoneMoveRequest> {
+    cards
+        .iter()
+        .map(|&card_id| {
+            ZoneMoveRequest::effect(card_id, Zone::Library, card_id)
+                .at_library_position(LibraryPosition::Bottom)
+        })
+        .collect()
 }
 
 /// Build bottom-placement requests in random order.
@@ -731,6 +895,54 @@ mod tests {
         install_destination_to_exile_redirect(state, Zone::Library, "Library Exile Redirect")
     }
 
+    fn library_card(state: &mut GameState, card: CardId, name: &str, core: CoreType) -> ObjectId {
+        let id = create_object(state, card, PlayerId(0), name.to_string(), Zone::Library);
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(core);
+        id
+    }
+
+    /// CR 603.12 + CR 701.20a: the reveal publishes ITS OWN verdict after its
+    /// moves. A hit clears a stale reason (e.g. one a nested producer left
+    /// behind), and a whiff records `RevealUntil`, whatever was there before.
+    #[test]
+    fn verdict_is_this_reveals_own_outcome_regardless_of_the_prior_slot() {
+        let creature_filter = TargetFilter::Typed(crate::types::ability::TypedFilter::creature());
+
+        let mut hit_state = GameState::new_two_player(42);
+        library_card(&mut hit_state, CardId(1), "Forest", CoreType::Land);
+        library_card(&mut hit_state, CardId(2), "Bear", CoreType::Creature);
+        hit_state.last_parent_target_missing_reason = Some(ParentTargetMissingReason::RevealUntil);
+        let ability = make_reveal_until_ability(
+            PlayerId(0),
+            creature_filter.clone(),
+            Zone::Hand,
+            Zone::Library,
+        );
+        resolve(&mut hit_state, &ability, &mut Vec::new()).unwrap();
+        assert!(
+            !hit_state.players[0].hand.is_empty(),
+            "reach guard: the reveal hit"
+        );
+        assert_eq!(hit_state.last_parent_target_missing_reason, None);
+
+        let mut whiff_state = GameState::new_two_player(42);
+        library_card(&mut whiff_state, CardId(1), "Forest", CoreType::Land);
+        library_card(&mut whiff_state, CardId(2), "Island", CoreType::Land);
+        whiff_state.last_parent_target_missing_reason = Some(ParentTargetMissingReason::Dig);
+        resolve(&mut whiff_state, &ability, &mut Vec::new()).unwrap();
+        assert_eq!(whiff_state.last_revealed_ids.len(), 2, "reach guard: whiff");
+        assert_eq!(
+            whiff_state.last_parent_target_missing_reason,
+            Some(ParentTargetMissingReason::RevealUntil)
+        );
+    }
+
     fn install_hand_to_exile_redirect(state: &mut GameState) -> ObjectId {
         install_destination_to_exile_redirect(state, Zone::Hand, "Hand Exile Redirect")
     }
@@ -749,6 +961,7 @@ mod tests {
                 matched_disposition: RevealUntilDisposition::KeepEach,
                 kept_destination,
                 rest_destination,
+                rest_order: DigRestOrder::Preserve,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 kept_optional_to: None,
@@ -777,6 +990,7 @@ mod tests {
                 matched_disposition: RevealUntilDisposition::KeepEach,
                 kept_destination,
                 rest_destination,
+                rest_order: DigRestOrder::Preserve,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 kept_optional_to: None,
@@ -846,6 +1060,7 @@ mod tests {
                 matched_disposition: RevealUntilDisposition::KeepEach,
                 kept_destination: Zone::Battlefield,
                 rest_destination: Zone::Library,
+                rest_order: DigRestOrder::Preserve,
                 enter_tapped: crate::types::zones::EtbTapState::Tapped,
                 enters_attacking: false,
                 kept_optional_to: None,
@@ -1417,6 +1632,7 @@ mod tests {
                     matched_disposition: RevealUntilDisposition::KeepEach,
                     kept_destination: Zone::Hand,
                     rest_destination: Zone::Library,
+                    rest_order: DigRestOrder::Preserve,
                     enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     enters_attacking: false,
                     kept_optional_to: Some(Zone::Battlefield),
@@ -1538,6 +1754,7 @@ mod tests {
                 matched_disposition: RevealUntilDisposition::KeepEach,
                 kept_destination: Zone::Hand,
                 rest_destination: Zone::Library,
+                rest_order: DigRestOrder::Preserve,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 kept_optional_to: Some(Zone::Library),
@@ -1613,6 +1830,7 @@ mod tests {
                 matched_disposition: RevealUntilDisposition::KeepEach,
                 kept_destination: Zone::Hand,
                 rest_destination: Zone::Library,
+                rest_order: DigRestOrder::Preserve,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 kept_optional_to: Some(Zone::Battlefield),

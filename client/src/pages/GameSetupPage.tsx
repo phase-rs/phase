@@ -32,6 +32,7 @@ import {
   loadSavedDeckBracket,
   touchDeckPlayed,
 } from "../constants/storage";
+import { withSavedDeckLibraryOrSkip } from "../services/savedDeckTransaction";
 import { useCardImage } from "../hooks/useCardImage";
 import { BRACKET_LABEL } from "../types/bracket";
 import { effectiveAiDifficulty, isDeckCedhLegal } from "../services/cedhLock";
@@ -180,7 +181,7 @@ export function GameSetupPage() {
     // active deck is not required to start.
     const suppliesDeck = formatSuppliesDeck(formatConfig.format);
     if (!activeDeckName && !suppliesDeck) return;
-    if (activeDeckName && !isRandomDeckSelection(activeDeckName)) touchDeckPlayed(activeDeckName);
+    if (activeDeckName && !isRandomDeckSelection(activeDeckName)) void withSavedDeckLibraryOrSkip((txn) => touchDeckPlayed(txn, activeDeckName), "run-unguarded");
     const gameId = crypto.randomUUID();
     // Snapshot the per-seat AI config from preferences into the active-game
     // record. `AiOpponentConfig`'s `ensureAiSeatCount` effect normally syncs
@@ -497,6 +498,24 @@ export function GameSetupPage() {
                         setFormatConfig({ ...formatConfig, starting_life })
                       }
                       className="w-16 rounded-lg border border-gray-700 bg-gray-800/60 px-2 py-1 text-right text-sm text-white"
+                    />
+                  </label>
+
+                  <label
+                    className="flex items-center justify-between"
+                    title={t("gameSetup.config.experimentalDungeonsHelp")}
+                  >
+                    <span className="text-xs text-slate-400">{t("gameSetup.config.experimentalDungeons")}</span>
+                    <input
+                      type="checkbox"
+                      checked={formatConfig.allow_experimental_dungeons}
+                      onChange={(e) =>
+                        setFormatConfig({
+                          ...formatConfig,
+                          allow_experimental_dungeons: e.target.checked,
+                        })
+                      }
+                      className="h-4 w-4 accent-sky-500"
                     />
                   </label>
 

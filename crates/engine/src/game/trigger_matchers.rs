@@ -987,7 +987,7 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::Milled { object_id, .. }
         | GameEvent::SpellCast { object_id, .. }
         | GameEvent::TokenCreated { object_id, .. }
-        | GameEvent::CreatureDestroyed { object_id }
+        | GameEvent::CreatureDestroyed { object_id, .. }
         | GameEvent::Evolved { object_id }
         | GameEvent::PermanentSacrificed { object_id, .. }
         | GameEvent::ControllerChanged { object_id, .. }
@@ -999,6 +999,8 @@ fn count_matching_trigger_event_subjects(
         // Unstable Host/Augment combine also makes the surviving Host permanent
         // the observable subject for generic object-scoped event helpers.
         GameEvent::Augmented { merged_id, .. } => count_one(*merged_id),
+        // CR 701.42a: the melded permanent is the event's subject.
+        GameEvent::Melded { object_id, .. } => count_one(*object_id),
         GameEvent::ContraptionAssembled { object_id, .. } => count_one(*object_id),
         GameEvent::ContraptionCranked { contraption_id, .. } => count_one(*contraption_id),
         // Object target events yield the affected object as subject. Player
@@ -1111,6 +1113,9 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::CityBlessingGained { .. }
         | GameEvent::EnduringStoryGained { .. }
         | GameEvent::DieRolled { .. }
+        // CR 706.6: an ignored (dropped) die carries no object subject and is
+        // never a rules roll.
+        | GameEvent::DieRollIgnored { .. }
         | GameEvent::CoinFlipped { .. }
         | GameEvent::RingTemptsYou { .. }
         | GameEvent::RoomEntered { .. }
@@ -2157,6 +2162,8 @@ pub(super) fn matching_block_events(
 ) -> Vec<GameEvent> {
     let source_id = source_event_subject_id(source_context);
     if let GameEvent::BlockersDeclared { assignments } = event {
+        let attacker_filter = combat_filter(trigger);
+        let mut emitted_blockers: Vec<ObjectId> = Vec::new();
         assignments
             .iter()
             .filter_map(|(blocker, attacker)| {
@@ -2173,13 +2180,25 @@ pub(super) fn matching_block_events(
                 // `combat_filter` excludes a spurious `TargetFilter::Player`
                 // surfaced by the effect-text lowering, which is never a real
                 // CR 509 attacker filter.
-                let attacker_matches = match combat_filter(trigger) {
+                let attacker_matches = match attacker_filter {
                     Some(filter) => {
                         target_filter_matches_object(state, *attacker, filter, source_context)
                     }
                     None => true,
                 };
-                attacker_matches.then_some(GameEvent::BlockersDeclared {
+                if !attacker_matches {
+                    return None;
+                }
+                // CR 509.3a: bare blocking triggers once for each blocker,
+                // even when that blocker is assigned multiple attackers.
+                if attacker_filter.is_none() {
+                    if emitted_blockers.contains(blocker) {
+                        return None;
+                    }
+                    emitted_blockers.push(*blocker);
+                }
+                // CR 509.3b: qualified blocking retains each attacker binding.
+                Some(GameEvent::BlockersDeclared {
                     assignments: vec![(*blocker, *attacker)],
                 })
             })
@@ -2531,7 +2550,10 @@ pub(super) fn match_life_gained(
     source_context: &TriggerSourceContext,
     state: &GameState,
 ) -> bool {
-    if let GameEvent::LifeChanged { player_id, amount } = event {
+    if let GameEvent::LifeChanged {
+        player_id, amount, ..
+    } = event
+    {
         if *amount <= 0 {
             return false;
         }
@@ -2562,7 +2584,10 @@ pub(super) fn match_life_lost(
     source_context: &TriggerSourceContext,
     state: &GameState,
 ) -> bool {
-    if let GameEvent::LifeChanged { player_id, amount } = event {
+    if let GameEvent::LifeChanged {
+        player_id, amount, ..
+    } = event
+    {
         if *amount >= 0 {
             return false;
         }
@@ -2583,7 +2608,10 @@ pub(super) fn match_life_changed(
     source_context: &TriggerSourceContext,
     state: &GameState,
 ) -> bool {
-    if let GameEvent::LifeChanged { player_id, amount } = event {
+    if let GameEvent::LifeChanged {
+        player_id, amount, ..
+    } = event
+    {
         if *amount == 0 {
             return false;
         }
@@ -2710,7 +2738,37 @@ pub(super) fn match_sacrificed(
     // already be in the graveyard with its granted characteristics pruned (CR 400.7), or
     // — for a token (CR 111.7) — have ceased to exist and been removed from
     // `state.objects` by a prior SBA pass.
-    valid_card_matches_with_lki(trigger, state, *object_id, source_context)
+    if valid_card_matches_with_lki(trigger, state, *object_id, source_context) {
+        return true;
+    }
+    // CR 603.10a + CR 400.7: the sacrificed permanent's OWN "when you sacrifice
+    // ~" trigger (Carrot Cake). The source context is the departed battlefield
+    // incarnation, while the live object is already a new graveyard object, so a
+    // `SelfRef` filter answered against the live object can never hold. When the
+    // trigger's source IS the sacrificed object, answer the filter against its
+    // battlefield departure record — the same look-back authority the ceased
+    // (token) arm of `subject_filter_matches_with_lki` uses.
+    if source_event_subject_id(source_context) != *object_id {
+        return false;
+    }
+    // Bind to the departure row of THIS incarnation (the one the source context
+    // was latched from), not merely the latest move of the id: the graveyard card
+    // may already have moved again within the same batch.
+    let Some(filter) = trigger.valid_card.as_ref() else {
+        return false;
+    };
+    let Some(record) = state.zone_changes_this_turn.iter().rev().find(|change| {
+        change.object_id == *object_id
+            && change.from_zone == Some(Zone::Battlefield)
+            && change
+                .trigger_source_context
+                .as_ref()
+                .is_some_and(|ctx| ctx.identity.reference == source_context.identity.reference)
+    }) else {
+        return false;
+    };
+    let ctx = super::filter::FilterContext::from_trigger_source(source_context);
+    super::filter::matches_target_filter_on_zone_change_record(state, record, filter, &ctx)
 }
 
 pub(super) fn match_destroyed(
@@ -2719,7 +2777,7 @@ pub(super) fn match_destroyed(
     source_context: &TriggerSourceContext,
     state: &GameState,
 ) -> bool {
-    if let GameEvent::CreatureDestroyed { object_id } = event {
+    if let GameEvent::CreatureDestroyed { object_id, .. } = event {
         valid_card_matches(trigger, state, *object_id, source_context)
     } else {
         false
@@ -4344,8 +4402,11 @@ pub(super) fn matching_you_attack_pairs(
     if attacker_ids.is_empty() {
         return Vec::new();
     }
-    // CR 506.2: the active player is the attacking player; all attackers in
-    // a single AttackersDeclared batch share one controller.
+    // CR 506.2: the active player is the attacking player. Under shared team
+    // turns one combined declaration can hold several attacking players'
+    // creatures (CR 805.10a + CR 805.10b); the player-scoped gates below read
+    // the first attacker's controller, while the `Player` pass-through admits
+    // every attacking player.
     let Some(attacking_player) = attacker_ids
         .iter()
         .find_map(|id| state.objects.get(id).map(|o| o.controller))
@@ -4359,7 +4420,9 @@ pub(super) fn matching_you_attack_pairs(
         // attacking-player pass-through (any attacking player) and carries NO
         // attack-target narrowing — that lives solely in `attack_target_filter`.
         // Used by attachment-relation triggers ("enchanted by an Aura you control
-        // attack") whose enchanted/equipped attacker may be opponent-controlled.
+        // attack") whose enchanted/equipped attacker may be opponent-controlled,
+        // and (CR 603.2 + CR 506.2) by unscoped subject-led triggers ("whenever one
+        // or more creatures attack") that watch every attacking player.
         Some(TargetFilter::Player) => true,
         Some(_) => valid_player_matches(trigger, state, attacking_player, source_context),
         None => attacking_player == source_context.source_read(state).controller(),
@@ -10588,6 +10651,7 @@ mod tests {
         let event = GameEvent::LifeChanged {
             player_id: PlayerId(0),
             amount: 3,
+            new_total: crate::types::events::LifeTotalReading::default(),
         };
         assert!(match_life_gained(
             &event,
@@ -10599,6 +10663,7 @@ mod tests {
         let loss_event = GameEvent::LifeChanged {
             player_id: PlayerId(0),
             amount: -3,
+            new_total: crate::types::events::LifeTotalReading::default(),
         };
         assert!(!match_life_gained(
             &loss_event,
@@ -10615,6 +10680,7 @@ mod tests {
         let event = GameEvent::LifeChanged {
             player_id: PlayerId(0),
             amount: -3,
+            new_total: crate::types::events::LifeTotalReading::default(),
         };
         assert!(match_life_lost(
             &event,
@@ -10626,6 +10692,7 @@ mod tests {
         let gain_event = GameEvent::LifeChanged {
             player_id: PlayerId(0),
             amount: 3,
+            new_total: crate::types::events::LifeTotalReading::default(),
         };
         assert!(!match_life_lost(
             &gain_event,
@@ -10646,6 +10713,7 @@ mod tests {
         let loss_one = GameEvent::LifeChanged {
             player_id: PlayerId(0),
             amount: -1,
+            new_total: crate::types::events::LifeTotalReading::default(),
         };
         assert!(match_life_lost(
             &loss_one,
@@ -10657,6 +10725,7 @@ mod tests {
         let loss_two = GameEvent::LifeChanged {
             player_id: PlayerId(0),
             amount: -2,
+            new_total: crate::types::events::LifeTotalReading::default(),
         };
         assert!(!match_life_lost(
             &loss_two,
@@ -10676,6 +10745,7 @@ mod tests {
         let loss_two = GameEvent::LifeChanged {
             player_id: PlayerId(0),
             amount: -2,
+            new_total: crate::types::events::LifeTotalReading::default(),
         };
         assert!(!match_life_lost(
             &loss_two,
@@ -10687,6 +10757,7 @@ mod tests {
         let loss_four = GameEvent::LifeChanged {
             player_id: PlayerId(0),
             amount: -4,
+            new_total: crate::types::events::LifeTotalReading::default(),
         };
         assert!(match_life_lost(
             &loss_four,
@@ -10762,7 +10833,16 @@ mod tests {
             "Second Attacker".to_string(),
             Zone::Battlefield,
         );
-        let trigger = make_trigger(TriggerMode::Blocks).valid_card(TargetFilter::SelfRef);
+        for attacker in [first_attacker, second_attacker] {
+            state
+                .objects
+                .get_mut(&attacker)
+                .unwrap()
+                .card_types
+                .core_types = vec![CoreType::Creature];
+        }
+        let mut trigger = make_trigger(TriggerMode::Blocks).valid_card(TargetFilter::SelfRef);
+        trigger.valid_target = Some(TargetFilter::Typed(TypedFilter::creature()));
         let event = GameEvent::BlockersDeclared {
             assignments: vec![(blocker, first_attacker), (blocker, second_attacker)],
         };
@@ -10786,6 +10866,54 @@ mod tests {
                 },
             ]
         );
+    }
+
+    // CR 509.3a: each blocker triggers once, preserving its first assignment.
+    #[test]
+    fn bare_block_events_preserve_first_assignment_order_and_object_identity() {
+        let mut state = setup();
+        let ids: Vec<_> = (1..=4)
+            .map(|n| {
+                create_object(
+                    &mut state,
+                    CardId(n),
+                    PlayerId(0),
+                    "Same name".to_string(),
+                    Zone::Battlefield,
+                )
+            })
+            .collect();
+        let trigger = make_trigger(TriggerMode::Blocks);
+        let context = test_trigger_source_context(&state, ids[0]);
+        let mut all_blockers = trigger.clone();
+        all_blockers.valid_card = Some(TargetFilter::Any);
+        let assignments = vec![
+            (ids[0], ids[2]),
+            (ids[1], ids[3]),
+            (ids[0], ids[3]),
+            (ids[1], ids[2]),
+        ];
+        for ordered in [assignments.clone(), assignments.into_iter().rev().collect()] {
+            let expected = vec![
+                GameEvent::BlockersDeclared {
+                    assignments: vec![ordered[0]],
+                },
+                GameEvent::BlockersDeclared {
+                    assignments: vec![ordered[1]],
+                },
+            ];
+            assert_eq!(
+                matching_block_events(
+                    &GameEvent::BlockersDeclared {
+                        assignments: ordered
+                    },
+                    &all_blockers,
+                    &context,
+                    &state,
+                ),
+                expected
+            );
+        }
     }
 
     #[test]
@@ -10978,8 +11106,15 @@ mod tests {
             "Attacker".to_string(),
             Zone::Battlefield,
         );
+        let second_attacker = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Second attacker".to_string(),
+            Zone::Battlefield,
+        );
         let event = GameEvent::BlockersDeclared {
-            assignments: vec![(blocker, attacker)],
+            assignments: vec![(blocker, attacker), (blocker, second_attacker)],
         };
         let no_filter = make_trigger(TriggerMode::Blocks).valid_card(TargetFilter::SelfRef);
         let mut player_filter = make_trigger(TriggerMode::Blocks).valid_card(TargetFilter::SelfRef);
@@ -10991,6 +11126,7 @@ mod tests {
             &test_trigger_source_context(&state, blocker),
             &state,
         );
+        assert_eq!(baseline.len(), 1);
         // Reach guard: the block event genuinely matches for the no-filter case.
         assert!(
             !baseline.is_empty(),
@@ -17200,6 +17336,7 @@ mod tests {
             .expect("the fixture's real battlefield departure emits a record");
         GameEvent::CreatureExploited {
             exploiter,
+            exploiter_incarnation: None,
             sacrificed,
             record,
         }
@@ -17522,6 +17659,7 @@ mod tests {
             .expect("the self-sacrifice fixture emits a departure record");
         let event = GameEvent::CreatureExploited {
             exploiter: source,
+            exploiter_incarnation: None,
             sacrificed: source,
             record,
         };
@@ -17608,6 +17746,7 @@ mod tests {
             .expect("the token self-sacrifice fixture emits a departure record");
         let event = GameEvent::CreatureExploited {
             exploiter: token,
+            exploiter_incarnation: None,
             sacrificed: token,
             record,
         };

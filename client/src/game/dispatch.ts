@@ -127,6 +127,12 @@ let inFlightLocalAction: {
   waitingFor: WaitingFor | null;
 } | null = null;
 
+/** The post-event state the normalizer reads spell announcements from, when a
+ *  card-flight layer will present them. */
+function announcementStateFor(state: GameState): GameState | null {
+  return useAnimationStore.getState().cardVfxReady ? state : null;
+}
+
 function isCurrentDispatchGeneration(generation: number): boolean {
   return generation === dispatchGeneration;
 }
@@ -547,7 +553,7 @@ async function processAction(
 
   // 6. Normalize events into animation steps
   const pacingMultipliers = usePreferencesStore.getState().pacingMultipliers;
-  const steps = normalizeEvents(events, { pacingMultipliers });
+  const steps = normalizeEvents(events, { pacingMultipliers, announcementState: announcementStateFor(newState) });
 
   // 7. Play animations (unless instant — multiplier === 0). Fold in stack
   //    pressure so per-resolution timing collapses under depth OR recent churn —
@@ -559,7 +565,7 @@ async function processAction(
 
   if (steps.length > 0 && multiplier > 0) {
     useAnimationStore.getState().setAnimationNewState(newState);
-    useAnimationStore.getState().enqueueSteps(steps);
+    useAnimationStore.getState().enqueueSteps(steps, snapshotResult.seq);
 
     // Schedule SFX synced with each step's visual timing
     scheduleSfxForSteps(steps, multiplier);
@@ -907,14 +913,14 @@ async function processRemoteUpdateInner(
 
   // 3. Normalize events into animation steps
   const pacingMultipliers = usePreferencesStore.getState().pacingMultipliers;
-  const steps = normalizeEvents(events, { pacingMultipliers });
+  const steps = normalizeEvents(events, { pacingMultipliers, announcementState: announcementStateFor(state) });
 
   // 4. Play animations (unless instant — multiplier === 0)
   const multiplier = usePreferencesStore.getState().animationSpeedMultiplier;
 
   if (steps.length > 0 && multiplier > 0) {
     useAnimationStore.getState().setAnimationNewState(state);
-    useAnimationStore.getState().enqueueSteps(steps);
+    useAnimationStore.getState().enqueueSteps(steps, snapshot.seq);
     scheduleSfxForSteps(steps, multiplier);
 
     const totalDuration = steps.reduce(

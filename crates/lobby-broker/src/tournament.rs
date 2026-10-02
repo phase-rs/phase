@@ -36,7 +36,7 @@
 //! tiebreakers, byes, drops, retention) is not CR-governed game logic.
 
 use std::cmp::Ordering;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -737,6 +737,52 @@ pub enum ReportGate {
     /// Server-assigned forfeit, from [`TournamentManager::drop_player`]'s
     /// auto-settlement. Permanent once assigned.
     Forfeit,
+    /// The pairing is being played on a server-hosted, server-authoritative
+    /// table (see [`TournamentMeta::hosted`]). A client `ReportMatchResult` is
+    /// **refused** — the only writer is the server's own game-over handoff via
+    /// [`TournamentManager::report_result_system`], because a seated player must
+    /// not be able to assert a hosted outcome (a UI that merely hides the report
+    /// button is not an authorization control). Viewer-independent like every
+    /// other arm: the wire `PairingView` carries it, so the client knows to
+    /// expect an auto-launched game and hide manual reporting.
+    Hosted,
+}
+
+/// Who is asking [`TournamentManager::report_result`] to write an outcome.
+///
+/// The gate itself ([`TournamentMeta::report_gate`]) stays viewer-independent —
+/// it answers "is this pairing reportable?", not "may this caller report?". This
+/// enum is the one WHO-dependent conjunct, and it exists so a
+/// [`ReportGate::Hosted`] pairing can admit the server while refusing every
+/// client: `System` is chosen only by the server's own code path and is not
+/// constructible from a wire frame, so an RPC can never present it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReportAuthority {
+    /// A seated player's `ReportMatchResult` RPC (the client path). Refused on a
+    /// `Hosted` pairing.
+    SeatedPlayer,
+    /// The server's own hosted-game terminal handoff. Admitted on a `Hosted`
+    /// pairing; the only writer of a hosted outcome.
+    System,
+}
+
+/// Durable per-pairing hosting authority (see [`TournamentMeta::hosted`]).
+///
+/// Presence in the map marks a pairing as server-hosted (driving
+/// [`ReportGate::Hosted`]) and is **durable provenance — never removed once
+/// set**: a server-hosted pairing stays `Hosted` for the life of the tournament,
+/// so a client can never overwrite the server's verified result even after the
+/// game is torn down. The `generation` is a monotonic epoch bumped on every
+/// (re)host, so a stale terminal from a superseded game can be fenced out by the
+/// server before it publishes (the "current-game fence"); because the marker is
+/// never reset, the generation cannot repeat. This core only *stores* the
+/// generation; the atomic validate→publish and the receipt that carries it
+/// across a restart are the server layer's responsibility (as is freeing the
+/// live game) — the core never touches `GameState` or a `game_code`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostedMatch {
+    /// Monotonic host epoch, incremented on each (re)host of this pairing.
+    pub generation: u32,
 }
 
 /// Which bracket shape the same [`TournamentManager`] runs for a tournament.
@@ -1008,6 +1054,14 @@ pub struct TournamentMeta {
     /// Durable pairing history — the single source of truth every derived
     /// view reads fresh.
     pub pairings: Vec<TournamentPairing>,
+    /// Server-hosted pairings, keyed by [`PairingId`]. Presence marks a pairing
+    /// as being played on a server-authoritative table ([`ReportGate::Hosted`]);
+    /// the [`HostedMatch`] carries the current host generation. Empty for a
+    /// manual (self-reported) tournament, and for every pairing not currently
+    /// hosted. A [`BTreeMap`] for deterministic serialization. `#[serde(default)]`
+    /// so a tournament persisted before hosting existed deserializes cleanly.
+    #[serde(default)]
+    pub hosted: BTreeMap<PairingId, HostedMatch>,
     /// Unix seconds, matching [`crate::lobby::LobbyManager`]'s own convention.
     pub created_at: u64,
     /// Bumped on every mutation *and* on every status transition, so it
@@ -1146,6 +1200,21 @@ impl TournamentMeta {
     /// **`Open`**, not refused: `report_result` is a single `outcome` write and
     /// every derived view recomputes from the corrected history, so
     /// re-reporting is how a correction is made.
+    /// Is this pairing eligible to be served on a server-authoritative hosted
+    /// table? The hosted vertical is scoped to **Swiss + head-to-head + Bo3** —
+    /// the one configuration whose every terminal is representable and covered by
+    /// an existing trusted primitive (a Bo3 match forfeit for a disconnect; a
+    /// legal [`PodOutcome::Draw`] for a drawn game). Single-elimination, pods, and
+    /// Bo1 head-to-head are excluded (later chains). A bye (one seat) is never
+    /// hostable. Whether both seats are *ready* (decks submitted) is a separate
+    /// server-layer gate, not checked here.
+    pub fn is_hosted_eligible(&self, pairing: &TournamentPairing) -> bool {
+        self.bracket == BracketShape::Swiss
+            && self.arity == MatchArity::HEAD_TO_HEAD
+            && self.match_type == MatchType::Bo3
+            && pairing.players.len() == 2
+    }
+
     pub fn report_gate(&self, pairing: &TournamentPairing) -> ReportGate {
         if self.status.is_terminal() {
             return ReportGate::TournamentNotRunning;
@@ -1153,7 +1222,18 @@ impl TournamentMeta {
         match pairing.outcome {
             Some(PairingOutcome::Bye) => ReportGate::Bye,
             Some(PairingOutcome::Forfeit { .. }) => ReportGate::Forfeit,
-            Some(PairingOutcome::Reported(_)) | None => ReportGate::Open,
+            // A hosted pairing (pending or already server-reported) stays
+            // `Hosted`, so a client report is refused and a re-report is only
+            // ever the server's own correction. Bye/Forfeit still win — the
+            // hosting layer never spawns a game for a pre-resolved pairing, but
+            // were one somehow marked hosted, it remains unreportable.
+            Some(PairingOutcome::Reported(_)) | None => {
+                if self.hosted.contains_key(&pairing.id) {
+                    ReportGate::Hosted
+                } else {
+                    ReportGate::Open
+                }
+            }
         }
     }
 }
@@ -2154,6 +2234,7 @@ impl TournamentManager {
                 status: TournamentStatus::Registration,
                 players: Vec::new(),
                 pairings: Vec::new(),
+                hosted: BTreeMap::new(),
                 created_at: now,
                 last_activity_at: now,
             },
@@ -2421,7 +2502,8 @@ impl TournamentManager {
         Ok(ids)
     }
 
-    /// Records a reported result for one pairing.
+    /// Records a **seated player's** reported result — the client
+    /// `ReportMatchResult` path.
     ///
     /// Replay-safe by construction: this is a single `outcome` write, so a
     /// correction simply overwrites the prior value and every derived view
@@ -2430,12 +2512,52 @@ impl TournamentManager {
     /// no-op rather than an error.
     ///
     /// A [`PairingOutcome::Bye`] or [`PairingOutcome::Forfeit`] is
-    /// server-assigned and permanent: a client report cannot overwrite one.
+    /// server-assigned and permanent: a client report cannot overwrite one. A
+    /// [`ReportGate::Hosted`] pairing is likewise refused here — its result is
+    /// written only by [`Self::report_result_system`].
     pub fn report_result(
         &mut self,
         code: &str,
         pairing_id: PairingId,
         outcome: PodOutcome,
+        env: &impl BrokerEnv,
+    ) -> Result<(), String> {
+        self.report_result_with_authority(
+            code,
+            pairing_id,
+            outcome,
+            ReportAuthority::SeatedPlayer,
+            env,
+        )
+    }
+
+    /// Records the **server's** verified outcome for a hosted pairing — the
+    /// game-over handoff. This is the only writer admitted through
+    /// [`ReportGate::Hosted`]; [`ReportAuthority::System`] is not
+    /// wire-constructible, so no client `ReportMatchResult` can reach it.
+    /// Otherwise identical to [`Self::report_result`]: same validation, same
+    /// replay-safe single write (a re-report is the server's own correction),
+    /// same single-elimination draw rule.
+    pub fn report_result_system(
+        &mut self,
+        code: &str,
+        pairing_id: PairingId,
+        outcome: PodOutcome,
+        env: &impl BrokerEnv,
+    ) -> Result<(), String> {
+        self.report_result_with_authority(code, pairing_id, outcome, ReportAuthority::System, env)
+    }
+
+    /// Shared body of [`Self::report_result`] / [`Self::report_result_system`].
+    /// The gate ([`TournamentMeta::report_gate`]) is WHO-independent; the one
+    /// WHO-dependent conjunct is the `Hosted` arm, which admits `System` and
+    /// refuses `SeatedPlayer`.
+    fn report_result_with_authority(
+        &mut self,
+        code: &str,
+        pairing_id: PairingId,
+        outcome: PodOutcome,
+        authority: ReportAuthority,
         env: &impl BrokerEnv,
     ) -> Result<(), String> {
         let now = env.now_ms() / 1000;
@@ -2458,8 +2580,30 @@ impl TournamentManager {
         // "pairing not found" rather than "no longer running". Every id a
         // terminal tournament actually holds still answers the latter, because
         // pairings are never pruned.
+        // The gate is WHO-independent; authority is the one WHO-dependent
+        // conjunct, and it partitions the two reportable gates exactly: a seated
+        // player (`SeatedPlayer`) may write only a non-hosted (`Open`) pairing,
+        // and the server (`System`) may write only a `Hosted` one. Cross pairs
+        // are refused — a client cannot assert a hosted outcome (hiding its
+        // report button is a display choice, not an authorization control), and
+        // a mistaken `System` handoff cannot write a manual pairing.
         match meta.report_gate(&meta.pairings[index]) {
-            ReportGate::Open => {}
+            ReportGate::Open => {
+                if authority == ReportAuthority::System {
+                    return Err(format!(
+                        "Pairing {pairing_id} is not server-hosted; a system report applies only \
+                         to a hosted pairing"
+                    ));
+                }
+            }
+            ReportGate::Hosted => {
+                if authority == ReportAuthority::SeatedPlayer {
+                    return Err(format!(
+                        "Pairing {pairing_id} is server-hosted; its result is reported by the \
+                         server when the game ends, not by a client"
+                    ));
+                }
+            }
             ReportGate::TournamentNotRunning => {
                 return Err(format!(
                     "Tournament {code} is no longer running (status {:?})",
@@ -2500,6 +2644,83 @@ impl TournamentManager {
         meta.pairings[index].outcome = Some(PairingOutcome::Reported(outcome));
         meta.last_activity_at = now;
         Ok(())
+    }
+
+    /// Marks `pairing_id` as server-hosted and returns its new host generation,
+    /// bumping the generation on a re-host. Refuses a pairing that is not
+    /// [`TournamentMeta::is_hosted_eligible`] (wrong bracket/arity/match-type, or
+    /// a bye). The server calls this when it spawns (or re-spawns) the pairing's
+    /// game; the returned generation is the fence a later, possibly stale,
+    /// terminal is checked against. Pure bookkeeping — no `GameState`, no
+    /// `game_code` crosses into this core.
+    pub fn begin_hosting(
+        &mut self,
+        code: &str,
+        pairing_id: PairingId,
+        env: &impl BrokerEnv,
+    ) -> Result<u32, String> {
+        let now = env.now_ms() / 1000;
+        let meta = self.meta_mut(code)?;
+        let pairing = meta
+            .pairings
+            .iter()
+            .find(|p| p.id == pairing_id)
+            .ok_or_else(|| format!("Pairing {pairing_id} not found in {code}"))?;
+        if !meta.is_hosted_eligible(pairing) {
+            return Err(format!(
+                "Pairing {pairing_id} is not eligible for hosted play \
+                 (hosted v1 is Swiss + head-to-head + Bo3)"
+            ));
+        }
+        // Only a reportable pairing may be hosted: reuse the same gate a report
+        // goes through, so a bye/forfeit pairing — or any pairing in a terminal
+        // tournament — cannot be marked hosted (which would also bump
+        // `last_activity_at` and extend a finished event's retention). `Open` is
+        // a first host; `Hosted` is a re-host that bumps the generation below.
+        match meta.report_gate(pairing) {
+            ReportGate::Open | ReportGate::Hosted => {}
+            ReportGate::TournamentNotRunning => {
+                return Err(format!(
+                    "Tournament {code} is no longer running (status {:?})",
+                    meta.status
+                ))
+            }
+            ReportGate::Bye => {
+                return Err(format!(
+                    "Pairing {pairing_id} is a bye and cannot be hosted"
+                ))
+            }
+            ReportGate::Forfeit => {
+                return Err(format!(
+                    "Pairing {pairing_id} was resolved by forfeit and cannot be hosted"
+                ))
+            }
+        }
+        // The hosted marker is durable provenance — never removed once set. A
+        // pairing that is (or has been) server-hosted stays `ReportGate::Hosted`
+        // for the life of the tournament, so a client can never overwrite the
+        // server's verified result even after the game is torn down, and the
+        // generation is monotonic across re-hosts: there is no teardown that
+        // could reset it and let a stale terminal from an earlier game match a
+        // later host. Freeing the live game is the server layer's concern (its
+        // own `active_matches`), separate from this provenance.
+        let generation = meta
+            .hosted
+            .get(&pairing_id)
+            .map_or(1, |h| h.generation.saturating_add(1));
+        meta.hosted.insert(pairing_id, HostedMatch { generation });
+        meta.last_activity_at = now;
+        Ok(generation)
+    }
+
+    /// The current host generation for `pairing_id`, or `None` if it is not
+    /// hosted. The server compares a terminal's generation against this to fence
+    /// out a stale game (the current-game fence).
+    pub fn hosting_generation(&self, code: &str, pairing_id: PairingId) -> Option<u32> {
+        self.tournaments
+            .get(code)
+            .and_then(|meta| meta.hosted.get(&pairing_id))
+            .map(|h| h.generation)
     }
 
     /// Marks a player dropped and auto-settles any pending pairing the drop
@@ -3619,6 +3840,247 @@ mod tests {
             None
         );
         assert_eq!(head_to_head_pairing("a", "b").winner(), None);
+    }
+
+    // -- unit 6b: hosted-match core ------------------------------------------
+
+    /// `report_gate` is `Hosted` for a pairing carrying hosting authority and
+    /// `Open` otherwise — viewer-independent, so the wire value a client reads
+    /// and the write-path refusal cannot disagree. A hosted pairing that has
+    /// already been (server-)reported stays `Hosted`, so a client can never
+    /// report or overwrite it.
+    #[test]
+    fn report_gate_returns_hosted_for_a_hosted_pairing() {
+        let mut meta = meta_in(TournamentStatus::InProgress);
+        let pairing = meta.pairings[0].clone();
+        assert_eq!(meta.report_gate(&pairing), ReportGate::Open);
+
+        meta.hosted
+            .insert(pairing.id, HostedMatch { generation: 1 });
+        assert_eq!(meta.report_gate(&pairing), ReportGate::Hosted);
+
+        let mut reported = pairing.clone();
+        reported.outcome = Some(PairingOutcome::Reported(PodOutcome::Draw));
+        assert_eq!(meta.report_gate(&reported), ReportGate::Hosted);
+    }
+
+    /// A client `ReportMatchResult` is refused on a hosted pairing (CWE-863:
+    /// hiding the report button is not an authorization control); only the
+    /// server's `report_result_system` may write it, and a re-report is the
+    /// server's own correction.
+    #[test]
+    fn a_hosted_pairing_refuses_a_client_report_but_the_server_writes() {
+        let env = FakeEnv::new();
+        let mut mgr = swiss(2, 2, &env);
+        mgr.generate_pairings("T", &env).expect("round 1");
+        let id = mgr.get("T").expect("t").pairings[0].id;
+        assert_eq!(mgr.begin_hosting("T", id, &env).expect("host"), 1);
+
+        let bo3 = || PodOutcome::Decisive {
+            winner: key(0),
+            game_wins: HashMap::from([(key(0), 2), (key(1), 1)]),
+        };
+        // Seated-player (client) path: refused, no outcome written.
+        assert!(mgr.report_result("T", id, bo3(), &env).is_err());
+        assert_eq!(
+            mgr.get("T").expect("t").pairing(id).expect("p").outcome,
+            None
+        );
+        // System (server) path: writes the verified outcome.
+        mgr.report_result_system("T", id, bo3(), &env)
+            .expect("system report");
+        assert_eq!(
+            mgr.get("T").expect("t").pairing(id).expect("p").outcome,
+            Some(PairingOutcome::Reported(bo3()))
+        );
+    }
+
+    /// `begin_hosting` returns a monotonic generation that bumps on re-host and
+    /// never resets — the marker is durable provenance, so a stale terminal from
+    /// an earlier game can never match a later host's generation.
+    #[test]
+    fn begin_hosting_generation_is_monotonic_and_durable() {
+        let env = FakeEnv::new();
+        let mut mgr = swiss(2, 2, &env);
+        mgr.generate_pairings("T", &env).expect("round 1");
+        let id = mgr.get("T").expect("t").pairings[0].id;
+
+        assert_eq!(mgr.hosting_generation("T", id), None);
+        assert_eq!(mgr.begin_hosting("T", id, &env).expect("host"), 1);
+        assert_eq!(mgr.hosting_generation("T", id), Some(1));
+        assert_eq!(mgr.begin_hosting("T", id, &env).expect("rehost"), 2);
+        assert_eq!(mgr.begin_hosting("T", id, &env).expect("rehost"), 3);
+        assert_eq!(mgr.hosting_generation("T", id), Some(3));
+    }
+
+    /// Server provenance is permanent: once a hosted pairing has a server-written
+    /// result, a client report still cannot overwrite it — the marker is not
+    /// torn down, so `report_gate` stays `Hosted`. (HIGH regression: a teardown
+    /// that reverted the gate to `Open` would let a seated player replace the
+    /// server result.)
+    #[test]
+    fn a_server_reported_hosted_pairing_stays_locked_against_clients() {
+        let env = FakeEnv::new();
+        let mut mgr = swiss(2, 2, &env);
+        mgr.generate_pairings("T", &env).expect("round 1");
+        let id = mgr.get("T").expect("t").pairings[0].id;
+        mgr.begin_hosting("T", id, &env).expect("host");
+
+        let server = PodOutcome::Decisive {
+            winner: key(0),
+            game_wins: HashMap::from([(key(0), 2), (key(1), 1)]),
+        };
+        mgr.report_result_system("T", id, server.clone(), &env)
+            .expect("system report");
+        let meta = mgr.get("T").expect("t");
+        assert_eq!(
+            meta.report_gate(meta.pairing(id).expect("p")),
+            ReportGate::Hosted
+        );
+
+        // A seated player cannot overwrite the server's verified result.
+        let forged = PodOutcome::Decisive {
+            winner: key(1),
+            game_wins: HashMap::from([(key(1), 2), (key(0), 0)]),
+        };
+        assert!(mgr.report_result("T", id, forged, &env).is_err());
+        assert_eq!(
+            mgr.get("T").expect("t").pairing(id).expect("p").outcome,
+            Some(PairingOutcome::Reported(server))
+        );
+    }
+
+    /// A `System` report is admitted ONLY on a hosted pairing: reporting to an
+    /// unhosted (manual) pairing through the server path is rejected, so a
+    /// mistaken future handoff cannot write a manual result.
+    #[test]
+    fn report_result_system_rejects_an_unhosted_pairing() {
+        let env = FakeEnv::new();
+        let mut mgr = swiss(2, 2, &env);
+        mgr.generate_pairings("T", &env).expect("round 1");
+        let id = mgr.get("T").expect("t").pairings[0].id;
+        // Not hosted → the server path is refused.
+        assert!(mgr
+            .report_result_system("T", id, PodOutcome::Draw, &env)
+            .is_err());
+        assert_eq!(
+            mgr.get("T").expect("t").pairing(id).expect("p").outcome,
+            None
+        );
+    }
+
+    /// `begin_hosting` reuses `report_gate`: a forfeited pairing and a terminal
+    /// tournament are both refused (the latter would otherwise bump
+    /// `last_activity_at` and extend a finished event's retention).
+    #[test]
+    fn begin_hosting_refuses_forfeit_and_terminal_pairings() {
+        let env = FakeEnv::new();
+        let mut mgr = swiss(2, 2, &env);
+        mgr.generate_pairings("T", &env).expect("round 1");
+        let id = mgr.get("T").expect("t").pairings[0].id;
+
+        // Drop one seat → the pairing auto-settles as a forfeit → not hostable.
+        mgr.drop_player("T", &key(0), &env).expect("drop");
+        assert!(mgr.begin_hosting("T", id, &env).is_err());
+
+        // A terminal tournament refuses hosting, and does not touch retention.
+        let mut done = swiss(2, 2, &env);
+        done.generate_pairings("T", &env).expect("round 1");
+        let done_id = done.get("T").expect("t").pairings[0].id;
+        done.report_result(
+            "T",
+            done_id,
+            PodOutcome::Decisive {
+                winner: key(0),
+                game_wins: HashMap::from([(key(0), 2), (key(1), 1)]),
+            },
+            &env,
+        )
+        .expect("report round 1");
+        done.complete_tournament("T", &env).expect("complete");
+        let before = done.get("T").expect("t").last_activity_at;
+        assert!(done.begin_hosting("T", done_id, &env).is_err());
+        assert_eq!(done.get("T").expect("t").last_activity_at, before);
+    }
+
+    /// Hosting admission is scoped to Swiss + head-to-head + Bo3. A pod, a
+    /// *Bo1* head-to-head event, a single-elimination bracket, and a bye are all
+    /// refused — the Bo1 case closes the gap where "Swiss H2H" alone would still
+    /// admit an organizer-selected Bo1.
+    #[test]
+    fn begin_hosting_refuses_ineligible_pairings() {
+        let env = FakeEnv::new();
+
+        // Pod (arity 4) — not head-to-head.
+        let mut pods = swiss(4, 4, &env);
+        pods.generate_pairings("T", &env).expect("pod round");
+        let pod_id = pods.get("T").expect("t").pairings[0].id;
+        assert!(pods.begin_hosting("T", pod_id, &env).is_err());
+
+        // Bo1 head-to-head — organizer-selected Bo1, unsupported by the vertical.
+        let mut bo1 = TournamentManager::new();
+        bo1.create_tournament(
+            "B",
+            CreateTournamentRequest {
+                name: "Bo1".into(),
+                arity: arity(2),
+                scoring: ScoringPolicy::default_for_arity(arity(2)),
+                bracket: BracketShape::Swiss,
+                total_rounds: None,
+                plus_rounds: None,
+                format: None,
+                match_type: Some(MatchType::Bo1),
+            },
+            &env,
+        )
+        .expect("create bo1");
+        join_n(&mut bo1, "B", 2, &env);
+        bo1.generate_pairings("B", &env).expect("bo1 round");
+        let bo1_id = bo1.get("B").expect("t").pairings[0].id;
+        assert!(bo1.begin_hosting("B", bo1_id, &env).is_err());
+
+        // Single-elimination — excluded from the vertical.
+        let mut se = TournamentManager::new();
+        create(
+            &mut se,
+            "S",
+            arity(2),
+            BracketShape::SingleElimination,
+            &env,
+        );
+        join_n(&mut se, "S", 2, &env);
+        se.generate_pairings("S", &env).expect("se round");
+        let se_id = se.get("S").expect("t").pairings[0].id;
+        assert!(se.begin_hosting("S", se_id, &env).is_err());
+
+        // A bye (one seat) is never hostable; a real 2-seat Swiss/H2H/Bo3
+        // pairing is.
+        let meta = meta_in(TournamentStatus::InProgress);
+        let bye = TournamentPairing {
+            id: 7,
+            round: 1,
+            players: vec!["a".into()],
+            outcome: None,
+        };
+        assert!(!meta.is_hosted_eligible(&bye));
+        assert!(meta.is_hosted_eligible(&meta.pairings[0]));
+    }
+
+    /// A drawn hosted game (the engine's `winner: None`) is reportable by the
+    /// server for Swiss — `PodOutcome::Draw` is legal there.
+    #[test]
+    fn a_hosted_swiss_draw_is_reportable_by_the_server() {
+        let env = FakeEnv::new();
+        let mut mgr = swiss(2, 2, &env);
+        mgr.generate_pairings("T", &env).expect("round 1");
+        let id = mgr.get("T").expect("t").pairings[0].id;
+        mgr.begin_hosting("T", id, &env).expect("host");
+        mgr.report_result_system("T", id, PodOutcome::Draw, &env)
+            .expect("draw");
+        assert_eq!(
+            mgr.get("T").expect("t").pairing(id).expect("p").outcome,
+            Some(PairingOutcome::Reported(PodOutcome::Draw))
+        );
     }
 
     // -- unit 7: drops --------------------------------------------------------
@@ -5296,6 +5758,7 @@ mod tests {
             status,
             players: undropped(&["a", "b"]),
             pairings: vec![head_to_head_pairing("a", "b")],
+            hosted: BTreeMap::new(),
             created_at: 1_000,
             last_activity_at: 1_000,
         }

@@ -54,6 +54,7 @@ vi.mock("../../../adapter/wasm-adapter", () => ({
       sideboard_policy: { type: "Limited", data: 15 },
       default_deck_copy_limit: { type: "UpTo", data: 4 },
       allow_debug_actions: false,
+      allow_experimental_dungeons: false,
       custom_rules: {
         id: 0,
         structural: {
@@ -105,9 +106,13 @@ import {
   DEFAULT_MULTIPLAYER_SERVER_URL,
   OFFICIAL_MULTIPLAYER_SERVER_URL,
 } from "../../../config/multiplayerServer";
+import { refuseRealWebSockets } from "../../../test/helpers/refusingWebSocket";
 
 describe("HostSetup", () => {
+  let socketUrls: string[] = [];
+
   beforeEach(() => {
+    socketUrls = refuseRealWebSockets();
     vi.spyOn(serverDirectory, "refreshServerDirectory").mockResolvedValue(undefined);
     vi.spyOn(useMultiplayerStore.getState(), "ensureSubscriptionSocket").mockResolvedValue(null);
     localStorageItems.clear();
@@ -481,9 +486,12 @@ describe("HostSetup", () => {
   });
 
   afterEach(async () => {
+    const opened = [...socketUrls];
     cleanup();
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
     await i18n.changeLanguage("en");
+    expect(opened).toEqual([]);
   });
 
   it("keeps P2P usable through discovery, disconnect and recovery without switching back automatically", async () => {
@@ -584,7 +592,7 @@ describe("HostSetup", () => {
   });
 
   describe.each(["server", "p2p"] as const)("accessible hosting options (%s mode)", (connectionMode) => {
-    it("names every visible switch and associates only the sandbox help", () => {
+    it("names every visible switch and associates only the sandbox and experimental-dungeons help", () => {
       render(<HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode={connectionMode} onConnectionModeChange={vi.fn()} />);
 
       // "List in lobby" is present in BOTH modes: a P2P room brokered by a
@@ -594,6 +602,7 @@ describe("HostSetup", () => {
         "List in lobby",
         "Start when full",
         "Sandbox Mode — allow debug actions",
+        "Experimental Dungeons",
         "Set password",
       ];
 
@@ -602,11 +611,23 @@ describe("HostSetup", () => {
         const control = screen.getByRole("switch", { name });
         if (name === "Sandbox Mode — allow debug actions") {
           expect(control).toHaveAccessibleDescription(enMultiplayer.hostSetup.sandboxModeHelp);
+        } else if (name === "Experimental Dungeons") {
+          expect(control).toHaveAccessibleDescription(enMultiplayer.hostSetup.experimentalDungeonsHelp);
         } else {
           expect(control).not.toHaveAttribute("aria-describedby");
           expect(control).not.toHaveAccessibleDescription();
         }
       }
+    });
+
+    it("gives the password field an accessible name", async () => {
+      const user = userEvent.setup();
+      render(<HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode={connectionMode} onConnectionModeChange={vi.fn()} />);
+
+      await user.click(screen.getByRole("switch", { name: "Set password" }));
+
+      const passwordInput = screen.getByLabelText("Game password");
+      expect(passwordInput).toHaveAttribute("type", "password");
     });
 
     it("keeps the compact track inside a non-shrinking touch target", async () => {
@@ -656,6 +677,15 @@ describe("HostSetup", () => {
       expect(sandboxSwitch).not.toBeChecked();
       await user.keyboard("{Enter}");
       expect(sandboxSwitch).toBeChecked();
+
+      const experimentalSwitch = screen.getByRole("switch", { name: "Experimental Dungeons" });
+      await user.tab();
+      expect(experimentalSwitch).toHaveFocus();
+      expect(experimentalSwitch).not.toBeChecked();
+      await user.keyboard(" ");
+      expect(experimentalSwitch).toBeChecked();
+      await user.keyboard(" ");
+      expect(experimentalSwitch).not.toBeChecked();
 
       const passwordSwitch = screen.getByRole("switch", { name: "Set password" });
       await user.tab();
@@ -980,6 +1010,7 @@ describe("HostSetup", () => {
         sideboard_policy: { type: "Limited" as const, data: 15 },
         default_deck_copy_limit: { type: "UpTo" as const, data: 4 },
         allow_debug_actions: false,
+        allow_experimental_dungeons: false,
       };
 
       it("mounts and seeds the form from the format's own resolved config", () => {
@@ -1346,5 +1377,179 @@ describe("HostSetup", () => {
       }),
       null,
     );
+  });
+
+  describe("Discord link seed", () => {
+    const standardRemembered = {
+      format: "Standard" as const,
+      formatConfig: FORMAT_DEFAULTS.Standard,
+      savedCustomFormatId: null,
+      playerCount: 2,
+      matchType: "Bo1" as const,
+      // Remembered values no other seed rule overrides, so the submission
+      // below shows whether the remembered config was read at all.
+      loopDetection: { type: "Interactive" as const },
+      isPublic: true,
+      startWhenFull: false,
+      ranked: false,
+      aiSeats: [{ seatIndex: 1, difficulty: "Hard" as const, deckName: null }],
+    };
+    const p2pSeed = {
+      code: "AB12CD",
+      format: "Commander",
+      playerCount: 4,
+      roomName: "Friday",
+      serverUrl: null,
+    };
+
+    it("fixes a P2P Discord game's settings and submits the requested code", async () => {
+      const user = userEvent.setup();
+      const onHost = vi.fn().mockResolvedValue(false);
+      useMultiplayerStore.setState({ lastHostConfig: standardRemembered });
+
+      render(
+        <HostSetup
+          onHost={onHost}
+          onBack={vi.fn()}
+          connectionMode="server"
+          onConnectionModeChange={vi.fn()}
+          seed={p2pSeed}
+        />,
+      );
+
+      expect(
+        screen.getByText(i18n.t("multiplayer:hostSetup.botGameNotice", { code: "AB12CD" })),
+      ).toBeInTheDocument();
+      expect(screen.queryByText(enMultiplayer.hostSetup.botSeedIgnored)).not.toBeInTheDocument();
+      // The Discord post lists the game, so the copy omits the lobby sentence.
+      expect(screen.getByText(enMultiplayer.hostSetup.botP2PNotice)).toBeInTheDocument();
+      expect(screen.queryByText(enMultiplayer.hostSetup.p2pNotice)).not.toBeInTheDocument();
+      // Mode, listing and password are fixed by the Discord post.
+      expect(screen.queryByRole("button", { name: "Dedicated server" })).not.toBeInTheDocument();
+      expect(screen.queryByText("List in lobby")).not.toBeInTheDocument();
+      expect(screen.queryByText("Set password")).not.toBeInTheDocument();
+      // No AI seats: the seats belong to the Discord players.
+      expect(screen.queryByRole("button", { name: "Human" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "AI" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "AI difficulty" })).not.toBeInTheDocument();
+
+      await user.click(screen.getByRole("button", { name: "Host P2P Game" }));
+
+      expect(onHost).toHaveBeenCalledWith(
+        expect.objectContaining({
+          requestedCode: "AB12CD",
+          public: false,
+          password: "",
+          formatConfig: expect.objectContaining({ format: "Commander", max_players: 4 }),
+          roomName: "Friday",
+          aiSeats: [],
+          loopDetection: { type: "Off" },
+          startWhenFull: true,
+        }),
+        null,
+      );
+      // A Discord game's settings do not become the remembered defaults.
+      expect(useMultiplayerStore.getState().lastHostConfig).toEqual(standardRemembered);
+    });
+
+    it("offers AI seats for the same unseeded P2P Commander table", () => {
+      useMultiplayerStore.setState({
+        lastHostConfig: {
+          ...standardRemembered,
+          format: "Commander",
+          formatConfig: FORMAT_DEFAULTS.Commander,
+          playerCount: 4,
+          aiSeats: [],
+        },
+      });
+
+      render(
+        <HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode="p2p" onConnectionModeChange={vi.fn()} />,
+      );
+
+      // Reach guard for the seeded case: Commander at 4 seats over P2P does
+      // support AI seats, so their absence there comes from the seed.
+      expect(screen.getAllByRole("button", { name: "Human" })).toHaveLength(3);
+      // Likewise the unseeded copy keeps the lobby sentence.
+      expect(screen.getByText(enMultiplayer.hostSetup.p2pNotice)).toBeInTheDocument();
+    });
+
+    it("submits the seeded dedicated server over a better-scored candidate", async () => {
+      const user = userEvent.setup();
+      const onHost = vi.fn().mockResolvedValue(false);
+      seedCandidates();
+
+      render(
+        <HostSetup
+          onHost={onHost}
+          onBack={vi.fn()}
+          connectionMode="server"
+          onConnectionModeChange={vi.fn()}
+          seed={{ ...p2pSeed, serverUrl: "wss://seed.example/ws" }}
+        />,
+      );
+
+      expect(screen.queryByText("Host on")).not.toBeInTheDocument();
+      expect(screen.getByText(enMultiplayer.hostSetup.botServerNotice)).toBeInTheDocument();
+      expect(screen.queryByText(enMultiplayer.hostSetup.hostServerHelp)).not.toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "Host Game" }));
+
+      expect(onHost).toHaveBeenCalledWith(
+        expect.objectContaining({ requestedCode: "AB12CD" }),
+        "wss://seed.example/ws",
+      );
+    });
+
+    it("falls back to the default format when the seed names an unknown one", async () => {
+      const user = userEvent.setup();
+      const onHost = vi.fn().mockResolvedValue(false);
+      useMultiplayerStore.setState({ formatConfig: FORMAT_DEFAULTS.Standard });
+
+      render(
+        <HostSetup
+          onHost={onHost}
+          onBack={vi.fn()}
+          connectionMode="p2p"
+          onConnectionModeChange={vi.fn()}
+          seed={{ ...p2pSeed, format: "Nope", playerCount: null }}
+        />,
+      );
+
+      expect(screen.getByText(enMultiplayer.hostSetup.botSeedIgnored)).toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "Host P2P Game" }));
+      expect(onHost).toHaveBeenCalledWith(
+        expect.objectContaining({
+          formatConfig: expect.objectContaining({ format: "Standard" }),
+        }),
+        null,
+      );
+    });
+
+    it("drops a seat count the seeded format cannot hold", async () => {
+      const user = userEvent.setup();
+      const onHost = vi.fn().mockResolvedValue(false);
+
+      render(
+        <HostSetup
+          onHost={onHost}
+          onBack={vi.fn()}
+          connectionMode="p2p"
+          onConnectionModeChange={vi.fn()}
+          seed={{ ...p2pSeed, playerCount: 8 }}
+        />,
+      );
+
+      expect(screen.getByText(enMultiplayer.hostSetup.botSeedIgnored)).toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "Host P2P Game" }));
+      expect(onHost).toHaveBeenCalledWith(
+        expect.objectContaining({
+          formatConfig: expect.objectContaining({
+            format: "Commander",
+            max_players: FORMAT_DEFAULTS.Commander.min_players,
+          }),
+        }),
+        null,
+      );
+    });
   });
 });

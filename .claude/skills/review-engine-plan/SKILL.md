@@ -7,17 +7,18 @@ description: Review phase.rs engine, parser, AI, frontend, or rules implementati
 
 Review the plan as an architectural gate. Reject the plan if any required dimension is missing, superficial, or contradicted by code evidence.
 
-## Probe policy — you MAY and SHOULD run code
+## Probe policy — answer a concrete design uncertainty
 
 **You are not a read-only reviewer.** Building and running throwaway probes is an expected part of this
 review, and it is the only instrument that can refute a plan whose prose is internally consistent but
 whose runtime behaviour differs. Static review structurally cannot catch a predicate that reads
 correctly and answers wrongly on a real board.
 
-Use an isolated `CARGO_TARGET_DIR` and the worktree's absolute path; never build in a checkout another
-process (e.g. Tilt) owns; serialize probe activity behind any active implementation executor. That
-isolation is why no brief needs to withhold builds from you — if one says "do not run cargo", use your
-own target dir and note it in your report.
+Prefer existing tests, fixtures, commands or supported tool APIs. Small probes may answer a disputed premise; they do not authorize a separate driver, seeding service or verification framework. Honor the caller's execution constraints, including a no-build constraint, and report unavailable evidence rather than bypassing it.
+
+In every engine-implementer mode, use the supplied original task and scope/attempt history and follow its [task scope](../engine-implementer/SKILL.md#task-scope-and-verification-work) and [run limits](../engine-implementer/SKILL.md#run-limits). Machinery, before or after measurement, needs the orchestrator's accepted expansion case. A reviewer can identify a missing check, but returns it to the orchestrator instead of independently expanding or repairing tooling. Required correctness evidence remains required.
+
+When execution is permitted, use an isolated `CARGO_TARGET_DIR` and the worktree's absolute path; never build in a checkout another process (e.g. Tilt) owns; serialize probe activity behind any active implementation executor.
 
 ## Required Checks
 
@@ -60,6 +61,7 @@ own target dir and note it in your report.
 3. **Trace verification**
    - The plan must name an analogous existing feature and list the file path trace followed end to end.
    - Reject plans that did not trace an existing feature.
+   - When the plan adds another instance of an existing pattern (a second adapter, another caller of a shared bring-up, a new arm beside existing arms), `rg` the existing instances and list each obligation they carry that none of the plan's steps covers. An omitted behavior makes no claim, so no other check collides with it.
 
 4. **Abstraction layer correctness**
    - Parser logic belongs in `parser/`.
@@ -96,6 +98,12 @@ own target dir and note it in your report.
    - Reject negative-only test plans without a paired positive reach-guard: a planned assertion like `!detector(...)` or "X is NOT applied" must also prove the input got past upstream short-circuits (parse succeeded, zero `Effect::Unimplemented`), or an early-return makes it pass vacuously.
    - Cast-pipeline runtime tests must be planned via the `/card-test` recipe with the card's verbatim Oracle text, not a paraphrase.
    - If the plan adds a field to an existing enum variant or struct, require an enumeration of every construction/consumption site of that variant and how each threads the new field (resume/continuation paths, single-vs-multi-pick branches, and adapter payload constructors are the recurring drop points).
+
+9a. **Reference readings**
+   - Find every parity, preservation or copied-route row in the Verification Matrix, including rows the plan did not list under Reference Readings. A row missing from that list is itself a finding.
+   - For each row, derive the expected value yourself from the card's verbatim Oracle text and the CR, then compare it with both the plan's derivation and the measured reference.
+   - Reject a plan that asserts parity with, or preservation of, a reading nobody derived. Reject one whose derivation disagrees with its measured reference but does not take the [defective-reference route](../engine-implementer/SKILL.md#defective-reference-route).
+   - Tag the finding `behavior`.
 
 10. **Identity / provenance contract**
    - For any "this way", "that source", "chosen", "cast using", "from among them", selected target/mode, duration-bound effect, replacement predicate, or controller/owner-relative text, require the plan to name the source phrase/rules concept, selected authority type and id/value, binding time/event, live vs snapshotted/latched semantics, storage location, consumption point, invalidation/expiration behavior, and a multi-authority hostile fixture.
@@ -144,8 +152,14 @@ Check **only** Sizing consistency against the plan body (check 12's substance, n
 
 ## Review Loop
 
-Return every gap to the planner. Require a revised full plan, then re-review the entire revised plan with fresh context. Repeat until a full round returns clean or the caller stops the process.
+Return every gap to the caller. Standalone, require a revised full plan and re-review the entire revised plan with fresh context until a round returns no behavior gap. A round whose gaps are all wording or other text fixes, each with its replacement text, is closed by applying them, with no further review. In the engine-implementer pipeline, return each result to the orchestrator, whose [run limits](../engine-implementer/SKILL.md#run-limits) decide what happens next from your tags; switching modes or phases does not reset that history.
 
 ## Output
 
 Lead with blockers and material gaps. For each issue, include evidence and the required revision. If the plan is clean, say that no blocking gaps were found and name any residual assumptions.
+
+Tag every blocking finding `behavior`, `text` or `machinery` as the orchestrator's [run limits](../engine-implementer/SKILL.md#run-limits) define them; when in doubt, `behavior`. In charter mode, classify as decision revision, review-only revision or correction instead.
+
+- A `text` finding quotes the old text at its coordinate and gives the replacement.
+- A finding that names a pattern gives the predicate, the command, and every matching site with its disposition. That list is the fix's scope; a sample leaves the rest of the class live.
+- On a round after the first, read what changed since the last reviewed plan first, and check each sentence added beyond the prior findings' supplied text. The least-reviewed sentence in a revision is the one nobody asked for.

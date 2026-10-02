@@ -55,7 +55,10 @@ fn resolve_forward_result_search_attach_host(
         return None;
     }
     let sub = ability.sub_ability.as_ref()?;
-    let Effect::Attach { attachment, target } = &sub.effect else {
+    let Effect::Attach {
+        attachment, target, ..
+    } = &sub.effect
+    else {
         return None;
     };
     if !matches!(attachment, TargetFilter::SelfRef) {
@@ -546,11 +549,21 @@ pub(crate) fn anticipated_zone_change_delivery(
     object_id: ObjectId,
     destination: Zone,
     source_id: ObjectId,
+    face_down_in_exile: crate::types::ability::ExileConcealment,
 ) -> Option<PendingZoneChangeDelivery> {
     let object = state.objects.get(&object_id)?;
+    let mut expected_event =
+        ProposedEvent::zone_change(object_id, object.zone, destination, Some(source_id));
+    if let ProposedEvent::ZoneChange {
+        face_down_in_exile: conceal,
+        ..
+    } = &mut expected_event
+    {
+        *conceal = face_down_in_exile;
+    }
     Some(PendingZoneChangeDelivery::new(
         ObjectIncarnationRef::from_object(object),
-        ProposedEvent::zone_change(object_id, object.zone, destination, Some(source_id)),
+        expected_event,
     ))
 }
 
@@ -599,6 +612,36 @@ fn capture_devour_snapshot_before_single_entry(
 }
 
 /// Move target objects between zones.
+/// CR 610.3 + CR 610.3b: True when the "until" event bounding THIS node's own
+/// zone change (`ResolvedAbility::bounded_zone_change_event`) already occurred —
+/// latched on this node after the ability triggered, or emitted earlier in this
+/// same resolution. The initial one-shot move then does not happen. Shared by
+/// the single-object and mass resolvers so each bounded node refuses on its own
+/// latch.
+pub(crate) fn until_event_already_occurred(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    events: &[GameEvent],
+) -> bool {
+    let Some(duration_event) = ability.bounded_zone_change_event() else {
+        return false;
+    };
+    ability.context.duration_events.contains(&duration_event)
+        || events.iter().any(|event| {
+            crate::game::engine::duration_event_matches(
+                state,
+                ability.source_id,
+                ability
+                    .trigger_source
+                    .as_ref()
+                    .map(|source| source.identity.reference),
+                ability.controller,
+                duration_event,
+                event,
+            )
+        })
+}
+
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -684,34 +727,13 @@ pub fn resolve(
     // CR 610.3b: If the specified event occurred after this triggered ability
     // triggered but before its initial one-shot zone change, the object does
     // not move.
-    if let Some(duration_event) = ability
-        .duration
-        .as_ref()
-        .and_then(Duration::zone_change_event)
-    {
-        let occurred_before_this_resolution =
-            ability.context.duration_events.contains(&duration_event);
-        let occurred_earlier_this_resolution = events.iter().any(|event| {
-            crate::game::engine::duration_event_matches(
-                state,
-                ability.source_id,
-                ability
-                    .trigger_source
-                    .as_ref()
-                    .map(|source| source.identity.reference),
-                ability.controller,
-                duration_event,
-                event,
-            )
+    if until_event_already_occurred(state, ability, events) {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+            subject: None,
         });
-        if occurred_before_this_resolution || occurred_earlier_this_resolution {
-            events.push(GameEvent::EffectResolved {
-                kind: EffectKind::from(&ability.effect),
-                source_id: ability.source_id,
-                subject: None,
-            });
-            return Ok(completed_result(0));
-        }
+        return Ok(completed_result(0));
     }
 
     let mut origin = origin;
@@ -1065,9 +1087,12 @@ pub fn resolve(
                 enters_under_player,
                 &per_obj_enter_counters,
                 face_down_profile.as_ref(),
+                ability.context.face_down_in_exile,
                 track_exiled_by_source,
                 None,
                 None,
+                Some(ability.controller),
+                // CR 608.2c: the controller follows the instruction, so it performs the move.
                 Some(ability.controller),
                 events,
             ) {
@@ -1151,9 +1176,12 @@ pub fn resolve(
                 enters_under_player,
                 &per_obj_enter_counters,
                 face_down_profile.as_ref(),
+                ability.context.face_down_in_exile,
                 track_exiled_by_source,
                 None,
                 None,
+                Some(ability.controller),
+                // CR 608.2c: the controller follows the instruction, so it performs the move.
                 Some(ability.controller),
                 events,
             ) {
@@ -1218,6 +1246,7 @@ pub fn resolve(
             enters_attacking: effect_enters_attacking,
             owner_library,
             track_exiled_by_source,
+            face_down_in_exile: ability.context.face_down_in_exile,
             // CR 708.2a + CR 708.3: carry the face-down profile across the
             // interactive `EffectZoneChoice` round-trip so a "return it face
             // down" selection resumes face down (not face up) when the player
@@ -1257,6 +1286,7 @@ pub fn resolve(
         conditional_enter_with_counters: effect_conditional_enter_with_counters.clone(),
         duration: ability.duration.clone(),
         track_exiled_by_source,
+        face_down_in_exile: ability.context.face_down_in_exile,
         face_down_profile: face_down_profile.clone(),
         library_placement: None,
         enters_modified_if: effect_enters_modified_if,
@@ -1337,6 +1367,7 @@ pub fn resolve(
             *obj_id,
             per_obj_ctx.destination,
             per_obj_ctx.source_id,
+            per_obj_ctx.face_down_in_exile,
         );
         let delivery_start = events.len();
         let stack_depth_before_zone_move = state.resolution_stack.capture_child_boundary();
@@ -1361,6 +1392,7 @@ pub fn resolve(
                 .expect("paused ChangeZone retains its explicit delivery prefix");
                 state.push_change_zone_iteration(
                     crate::types::game_state::PendingChangeZoneIteration {
+                        pending_return_result_producer: None,
                         logical_zone_change_group,
                         paused_current: anticipated_pause.map(|mut boundary| {
                             boundary.append_delivery_events(&events[delivery_start..]);
@@ -1382,6 +1414,7 @@ pub fn resolve(
                             .clone(),
                         duration: ctx.duration.clone(),
                         track_exiled_by_source: ctx.track_exiled_by_source,
+                        face_down_in_exile: ctx.face_down_in_exile,
                         // CR 608.2c: carry the running count so the drain stamps
                         // `last_effect_count` with the full targeted-move total
                         // when the resumed iteration completes.
@@ -1414,6 +1447,7 @@ pub fn resolve(
                 .expect("paused ChangeZone retains its explicit delivery prefix");
                 state.push_change_zone_iteration_after_child(
                     crate::types::game_state::PendingChangeZoneIteration {
+                        pending_return_result_producer: None,
                         logical_zone_change_group,
                         paused_current: Some(
                             state
@@ -1441,6 +1475,7 @@ pub fn resolve(
                             .clone(),
                         duration: ctx.duration.clone(),
                         track_exiled_by_source: ctx.track_exiled_by_source,
+                        face_down_in_exile: ctx.face_down_in_exile,
                         // CR 608.2c: carry the running count so the drain stamps
                         // `last_effect_count` with the full targeted-move total
                         // when the resumed iteration completes.
@@ -1614,6 +1649,8 @@ pub(crate) struct ChangeZoneIterationCtx {
     pub conditional_enter_with_counters: Vec<(TargetFilter, CounterType, QuantityExpr)>,
     pub duration: Option<Duration>,
     pub track_exiled_by_source: bool,
+    /// Typed SearchLibrary intent carried through multi-object and pause/resume paths.
+    pub face_down_in_exile: crate::types::ability::ExileConcealment,
     /// CR 708.2a + CR 708.3: `Some` turns the object face down before it enters
     /// the battlefield with these characteristics ("return it face down ... It's
     /// a Forest land" — Yedora). `None` = normal face-up entry.
@@ -1751,9 +1788,12 @@ pub(crate) fn process_one_zone_move_with_terminal(
         ctx.enters_under_player,
         &ctx.enter_with_counters,
         ctx.face_down_profile.as_ref(),
+        ctx.face_down_in_exile,
         ctx.track_exiled_by_source,
         ctx.library_placement.clone(),
         ctx.enter_attached_to,
+        Some(ctx.controller),
+        // CR 608.2c: the controller follows the instruction, so it performs the move.
         Some(ctx.controller),
         events,
     );
@@ -1808,6 +1848,7 @@ fn mass_library_order_effect_zone_choice(
         enters_attacking: false,
         owner_library: false,
         track_exiled_by_source,
+        face_down_in_exile: crate::types::ability::ExileConcealment::Public,
         face_down_profile: None,
         enter_with_counters: vec![],
         conditional_enter_with_counters: vec![],
@@ -1886,6 +1927,21 @@ pub fn resolve_all(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    // CR 610.3b: an "until" event that already occurred before this mass
+    // move's initial zone change means nothing moves and no return link is
+    // installed. That refusal is non-performance for this node's own "if you
+    // do" rider (CR 118.12); `resolve_ability_chain` derives it from this same
+    // predicate over the call's own event window, so no resolution-wide flag
+    // is written here.
+    if until_event_already_occurred(state, ability, events) {
+        state.last_effect_count = Some(0);
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+            subject: None,
+        });
+        return Ok(());
+    }
     // CR 400.3 + CR 701.23: When the target filter encodes multiple zones via
     // `InAnyZone`, scan their union; otherwise fall back to the explicit `origin`
     // (or `Battlefield`). Single-zone filters (`InZone` alone) preserve legacy
@@ -2176,8 +2232,8 @@ pub fn resolve_all(
             .map(|(owner, cards)| snapshot_mass_library_order_batch(state, owner, cards))
             .collect();
         if !remaining_batches.is_empty() {
-            state.pending_mass_library_order_choice =
-                Some(crate::types::game_state::PendingMassLibraryOrderChoice {
+            state.pending_mass_library_order_choice = Some(Box::new(
+                crate::types::game_state::PendingMassLibraryOrderChoice {
                     source_id: ability.source_id,
                     library_position: effect_library_position
                         .clone()
@@ -2188,7 +2244,8 @@ pub fn resolve_all(
                         crate::types::game_state::PendingMassLibraryOrderBatches::Typed(
                             remaining_batches,
                         ),
-                });
+                },
+            ));
         }
         state.waiting_for = mass_library_order_effect_zone_choice(
             snapshot_mass_library_order_batch(state, first_owner, first_cards),
@@ -2233,8 +2290,13 @@ pub fn resolve_all(
         // control" effects.
         // CR 122.1 + CR 122.1h: each object enters with the resolved counters
         // (e.g. a finality counter on Shilgengar's mass return).
-        let anticipated_pause =
-            anticipated_zone_change_delivery(state, obj_id, dest_zone, ability.source_id);
+        let anticipated_pause = anticipated_zone_change_delivery(
+            state,
+            obj_id,
+            dest_zone,
+            ability.source_id,
+            ability.context.face_down_in_exile,
+        );
         let delivery_start = events.len();
         let stack_depth_before_zone_move = state.resolution_stack.capture_child_boundary();
         match crate::game::zone_pipeline::execute_zone_move_with_terminal_and_controller(
@@ -2250,9 +2312,12 @@ pub fn resolve_all(
             enters_under_player,
             &enter_with_counters,
             face_down_profile.as_ref(),
+            ability.context.face_down_in_exile,
             track_exiled_by_source,
             member_library_placement.clone(),
             None,
+            Some(ability.controller),
+            // CR 608.2c: the controller follows the instruction, so it performs the move.
             Some(ability.controller),
             events,
         ) {
@@ -2300,6 +2365,7 @@ pub fn resolve_all(
                 .expect("paused ChangeZoneAll retains its explicit delivery prefix");
                 state.push_change_zone_iteration_after_child(
                     crate::types::game_state::PendingChangeZoneIteration {
+                        pending_return_result_producer: None,
                         logical_zone_change_group,
                         paused_current: (!entry_target_choice).then(|| {
                             state
@@ -2327,6 +2393,7 @@ pub fn resolve_all(
                         conditional_enter_with_counters: vec![],
                         duration: ability.duration.clone(),
                         track_exiled_by_source,
+                        face_down_in_exile: ability.context.face_down_in_exile,
                         moved_count: Some(moved_count + i32::from(entry_target_choice)),
                         face_down_profile: face_down_profile.clone(),
                         library_placement: member_library_placement.clone(),
@@ -2362,6 +2429,7 @@ pub fn resolve_all(
                 .expect("paused ChangeZoneAll retains its explicit delivery prefix");
                 state.push_change_zone_iteration(
                     crate::types::game_state::PendingChangeZoneIteration {
+                        pending_return_result_producer: None,
                         logical_zone_change_group,
                         paused_current: anticipated_pause.map(|mut boundary| {
                             boundary.append_delivery_events(&events[delivery_start..]);
@@ -2383,6 +2451,7 @@ pub fn resolve_all(
                         conditional_enter_with_counters: vec![],
                         duration: ability.duration.clone(),
                         track_exiled_by_source,
+                        face_down_in_exile: ability.context.face_down_in_exile,
                         moved_count: Some(moved_count + 1),
                         // CR 708.2a + CR 708.3: preserve the face-down profile so
                         // resumed members of a paused face-down mass return enter
@@ -6910,6 +6979,7 @@ mod tests {
         let logical_zone_change_group =
             crate::game::triggers::allocate_logical_zone_change_group(&mut state, &[hero, soldier]);
         state.push_change_zone_iteration(crate::types::game_state::PendingChangeZoneIteration {
+            pending_return_result_producer: None,
             logical_zone_change_group,
             paused_current: None,
             remaining: vec![hero, soldier],
@@ -6925,6 +6995,7 @@ mod tests {
             conditional_enter_with_counters: conditional,
             duration: None,
             track_exiled_by_source: false,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             moved_count: None,
             face_down_profile: None,
             library_placement: None,
@@ -8929,6 +9000,132 @@ mod tests {
         assert_eq!(obj.card_types.core_types, vec![CoreType::Creature]);
     }
 
+    #[test]
+    fn change_zone_single_eligible_preserves_face_down_exile_intent() {
+        let mut state = GameState::new_two_player(42);
+        let card = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Hidden Exile Card".to_string(),
+            Zone::Graveyard,
+        );
+        let mut ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Exile,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.context.face_down_in_exile = crate::types::ability::ExileConcealment::FaceDown;
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(state.objects[&card].face_down);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged { object_id, to: Zone::Exile, record, .. }
+                if *object_id == card
+                    && record
+                        .trigger_source_context()
+                        .is_some_and(|context| context.face_down)
+        )));
+    }
+
+    #[test]
+    fn effect_zone_choice_resume_preserves_face_down_exile_intent() {
+        let mut state = GameState::new_two_player(42);
+        let first = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Choice Exile A".to_string(),
+            Zone::Graveyard,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Choice Exile B".to_string(),
+            Zone::Graveyard,
+        );
+        let mut ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Exile,
+                target: TargetFilter::Typed(TypedFilter::card().properties(vec![
+                    FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    },
+                ])),
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: true,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+            vec![],
+            ObjectId(101),
+            PlayerId(0),
+        );
+        ability.multi_target = Some(MultiTargetSpec::unlimited(0));
+        ability.target_choice_timing = TargetChoiceTiming::Resolution;
+        ability.context.face_down_in_exile = crate::types::ability::ExileConcealment::FaceDown;
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::EffectZoneChoice {
+                face_down_in_exile: crate::types::ability::ExileConcealment::FaceDown,
+                ..
+            }
+        ));
+        let resumed = apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![first, second],
+            },
+        )
+        .unwrap();
+        events.extend(resumed.events);
+
+        assert!(state.objects[&first].face_down);
+        assert!(state.objects[&second].face_down);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    GameEvent::ZoneChanged { object_id, to: Zone::Exile, record, .. }
+                        if (*object_id == first || *object_id == second)
+                            && record
+                                .trigger_source_context()
+                                .is_some_and(|context| context.face_down)
+                ))
+                .count(),
+            2
+        );
+    }
+
     /// CR 614.12b + CR 614.1c + CR 614.13: when a multi-target ChangeZone
     /// resolution moves two or more objects to the battlefield simultaneously
     /// and each has a per-permanent replacement choice (shock-land "pay 2
@@ -10353,6 +10550,7 @@ mod tests {
             enters_attacking: false,
             owner_library: false,
             track_exiled_by_source: false,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             face_down_profile: None,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],

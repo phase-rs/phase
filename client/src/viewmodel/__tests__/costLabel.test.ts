@@ -105,6 +105,19 @@ describe("abilityChoiceLabel per-variant formatting", () => {
     expect(formatCost({ type: "ReturnToHand", count: 1 })).toBe("Return 1 permanent");
   });
 
+  it("labels Reveal costs formatted with count, card filter and zone", () => {
+    expect(
+      formatCost({
+        type: "Reveal",
+        count: 1,
+        filter: {
+          type: "Typed",
+          type_filters: [{ Subtype: "Elf" }],
+        },
+      }),
+    ).toBe("Reveal 1 Elf card from your hand");
+  });
+
   it("labels an ActivateAbility with its serialized cost", () => {
     const object = makeObject({
       name: "Llanowar Elves",

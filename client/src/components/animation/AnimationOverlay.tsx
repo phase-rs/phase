@@ -1,10 +1,14 @@
-import { AnimatePresence, motion } from "framer-motion";
+import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { type RefObject, useCallback, useEffect, useRef, useState } from "react";
 
+import type { TargetRef } from "../../adapter/types.ts";
 import {
+  CARD_SLAM_FLIGHT_MS,
   DAMAGE_FLURRY_SOURCE_SAMPLE_LIMIT,
   impactDelayMsForAnimationEvent,
   isPlayerDamageAnimationEvent,
+  lifeChangeImpactDelayMs,
+  MELD_FORGE_PHASES,
   type StepEffect,
 } from "../../animation/types.ts";
 import { getCardColors } from "../../animation/wubrgColors.ts";
@@ -13,16 +17,18 @@ import { useAnimationStore } from "../../stores/animationStore.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { audioManager } from "../../audio/AudioManager.ts";
-import { hexToRgb } from "./particleEffects.ts";
+import { FORGE_YELLOW, hexToRgb } from "./particleEffects.ts";
 import { CardRevealBurst } from "./CardRevealBurst.tsx";
-import { applyCardSlam } from "./CardSlamAnimation.tsx";
+import { applyCardKnockback, applyCardSlam } from "./CardSlamAnimation.tsx";
 import { CastArcAnimation } from "./CastArcAnimation.tsx";
 import { DamageVignette } from "./DamageVignette.tsx";
 import { DeathShatter } from "./DeathShatter.tsx";
 import { FloatingNumber } from "./FloatingNumber.tsx";
+import { MeldForgeAnimation, type MeldForgePiece } from "./MeldForgeAnimation.tsx";
 import { MillRevealAnimation } from "./MillRevealAnimation.tsx";
 import type { MillCard } from "./MillRevealAnimation.tsx";
 import { RippleRevealAnimation } from "./RippleRevealAnimation.tsx";
+import { revealFanCards } from "./revealFanCards.ts";
 import { ParticleCanvas } from "./ParticleCanvas.tsx";
 import type { ParticleCanvasHandle } from "./ParticleCanvas.tsx";
 import {
@@ -31,6 +37,14 @@ import {
   visibleAnimationImageSnapshot,
 } from "./ResolvedAnimationImage.tsx";
 import { applyScreenShake } from "./ScreenShake.tsx";
+import { CardVfxLayer, type CardVfxLayerHandle, cardVfxSupported } from "./cardVfx/CardVfxLayer.tsx";
+import { castAnnounced } from "./cardVfx/cardFlightSpecs.ts";
+import {
+  cardVfxSpecFor,
+  type DamageBlowSpec,
+  type DamageKnockbackSpec,
+  damageCauseState,
+} from "./cardVfx/cardVfxSpecs.ts";
 
 
 interface ActiveFloat {
@@ -69,8 +83,19 @@ interface ActiveCastArc {
 interface ActiveMillReveal {
   id: number;
   cards: MillCard[];
+  startIndex: number;
   from: { x: number; y: number };
   to: { x: number; y: number };
+}
+
+interface ActiveMeldForge {
+  id: number;
+  center: { x: number; y: number };
+  cardSize: { width: number; height: number };
+  source: MeldForgePiece;
+  partner: MeldForgePiece;
+  result: AnimationImageSnapshot | null;
+  durationMs: number;
 }
 
 interface ActiveRippleReveal {
@@ -102,6 +127,10 @@ let deathCloneIdCounter = 0;
 let castArcIdCounter = 0;
 let millRevealIdCounter = 0;
 let rippleRevealIdCounter = 0;
+let meldForgeIdCounter = 0;
+
+/** Card size used when neither meld card has a measured board position. */
+const MELD_FALLBACK_CARD_SIZE = { width: 80, height: 112 };
 
 const DEATH_IMAGE_READY_MAX_MS = 250;
 
@@ -109,6 +138,10 @@ function visiblePreEventSnapshot(objectId: number): AnimationImageSnapshot | nul
   return visibleAnimationImageSnapshot(
     useGameStore.getState().gameState?.objects[objectId],
   );
+}
+
+function rectCenter(rect: DOMRect): { x: number; y: number } {
+  return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
 }
 
 function visiblePostEventSnapshot(objectId: number): AnimationImageSnapshot | null {
@@ -174,6 +207,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
   const advanceStep = useAnimationStore((s) => s.advanceStep);
   const getPosition = useAnimationStore((s) => s.getPosition);
   const particleRef = useRef<ParticleCanvasHandle>(null);
+  const cardVfxRef = useRef<CardVfxLayerHandle>(null);
   const stepTimeoutsRef = useRef<ReturnType<typeof setTimeout>[]>([]);
   const [activeFloats, setActiveFloats] = useState<ActiveFloat[]>([]);
   const [activeDeathClones, setActiveDeathClones] = useState<DeathClone[]>([]);
@@ -187,23 +221,38 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
   const [activeCastArcs, setActiveCastArcs] = useState<ActiveCastArc[]>([]);
   const [activeMillReveals, setActiveMillReveals] = useState<ActiveMillReveal[]>([]);
   const [activeRippleReveals, setActiveRippleReveals] = useState<ActiveRippleReveal[]>([]);
+  const [activeMeldForges, setActiveMeldForges] = useState<ActiveMeldForge[]>([]);
 
   const vfxQuality = usePreferencesStore((s) => s.vfxQuality);
   const speedMultiplier = usePreferencesStore((s) => s.animationSpeedMultiplier);
+  const reduceMotion = useReducedMotion();
+  const cardAnimationStyle = usePreferencesStore((s) => s.cardAnimationStyle);
+  // Style Classic, tier minimal, reduced motion and no WebGL 2 mount no layer,
+  // so every effect takes the Classic path and no three.js is loaded.
+  const cardVfxMounted =
+    cardAnimationStyle === "webgl" &&
+    vfxQuality !== "minimal" &&
+    !reduceMotion &&
+    cardVfxSupported();
 
-  const getObjectPosition = useCallback(
-    (objectId: number): { x: number; y: number } | null => {
+  const getObjectRect = useCallback(
+    (objectId: number): DOMRect | null =>
       // Fallback chain: pre-dispatch snapshot, then live registry, then the
       // group representative for a collapsed swarm member that has no node of
       // its own (resolved live via data-grouped-ids — see findCardElement).
-      const rect =
-        currentSnapshot.get(objectId) ??
-        getPosition(objectId) ??
-        findCardElement(objectId)?.getBoundingClientRect();
-      if (!rect) return null;
-      return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
-    },
+      currentSnapshot.get(objectId) ??
+      getPosition(objectId) ??
+      findCardElement(objectId)?.getBoundingClientRect() ??
+      null,
     [getPosition],
+  );
+
+  const getObjectPosition = useCallback(
+    (objectId: number): { x: number; y: number } | null => {
+      const rect = getObjectRect(objectId);
+      return rect ? rectCenter(rect) : null;
+    },
+    [getObjectRect],
   );
 
   /** Query the actual DOM position of a player's HUD element. */
@@ -282,7 +331,59 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
     setPendingDeaths(current);
   }, [activeGeneration]);
 
-  const processEffect = useCallback(
+  /** A damage hit landing: its sound, number and shake, and for a player the
+   *  vignette. The presenter adds its own particles. */
+  const landDamageHit = useCallback(
+    (position: { x: number; y: number }, amount: number, isPlayerTarget: boolean) => {
+      audioManager.playSfx("DamageDealt");
+      const id = ++floatIdCounter;
+      setActiveFloats((prev) => [...prev, { id, value: -amount, position, color: "#ef4444" }]);
+
+      if (vfxQuality === "full" && containerRef.current) {
+        const intensity = amount >= 7 ? "heavy" : amount >= 4 ? "medium" : "light";
+        applyScreenShake(containerRef.current, intensity, speedMultiplier);
+      }
+
+      if (isPlayerTarget) {
+        setActiveVignette({ damageAmount: amount });
+        setTimeout(() => setActiveVignette(null), 500 * speedMultiplier);
+      }
+    },
+    [containerRef, speedMultiplier, vfxQuality],
+  );
+
+  /** Where a damage event's target is on screen. */
+  const damageTargetPosition = useCallback(
+    (target: TargetRef): { x: number; y: number } =>
+      "Player" in target
+        ? getPlayerHudPosition(target.Player)
+        : (getObjectPosition(target.Object) ?? { x: window.innerWidth / 2, y: window.innerHeight / 2 }),
+    [getObjectPosition, getPlayerHudPosition],
+  );
+
+  /** Something a slam's impact lands under the New style: the layer's dust
+   *  and ring, or the struck card's knockback. Presented as the slam starts;
+   *  returns what runs as the slam lands, which runs `classic` if the layer
+   *  could not present it. A layer that gives up after the impact runs it then. */
+  const presentBlow = useCallback(
+    (spec: DamageBlowSpec | DamageKnockbackSpec, classic: () => void): (() => void) => {
+      const layer = cardVfxRef.current;
+      if (!layer) return classic;
+      let fellBack = false;
+      let landed = false;
+      layer.present(spec, () => {
+        fellBack = true;
+        if (landed) classic();
+      });
+      return () => {
+        landed = true;
+        if (fellBack) classic();
+      };
+    },
+    [],
+  );
+
+  const processClassicEffect = useCallback(
     (effect: StepEffect, stepEffects: StepEffect[], owningStepMs: number) => {
       const { event } = effect;
 
@@ -296,9 +397,22 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
             .filter((position): position is { x: number; y: number } => position != null);
           const origins = fromPoints.length > 0 ? fromPoints : [to];
           const impactDelay = impactDelayMsForAnimationEvent(event) * speedMultiplier;
+          let landBlow = () => particleRef.current?.playerDamage(to.x, to.y, total_damage);
 
           if (vfxQuality !== "minimal") {
             particleRef.current?.damageFlurry(origins, to, hit_count, total_damage, impactDelay);
+            landBlow = presentBlow(
+              {
+                kind: "blow",
+                sourceId: null,
+                target: { Player: player_id },
+                amount: total_damage,
+                pace: speedMultiplier,
+                startMs: performance.now(),
+                impactDelayMs: impactDelay,
+              },
+              landBlow,
+            );
           }
 
           scheduleStepTimeout(() => {
@@ -310,7 +424,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
             ]);
 
             if (vfxQuality !== "minimal") {
-              particleRef.current?.playerDamage(to.x, to.y, total_damage);
+              landBlow();
               setActiveVignette({ damageAmount: total_damage });
               scheduleStepTimeout(() => setActiveVignette(null), 500 * speedMultiplier);
             }
@@ -325,16 +439,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
 
         case "DamageDealt": {
           const { source_id, target, amount } = event.data;
-          let pos = { x: window.innerWidth / 2, y: window.innerHeight / 2 };
-          let isPlayerTarget = false;
-
-          if ("Object" in target) {
-            const objPos = getObjectPosition(target.Object);
-            if (objPos) pos = objPos;
-          } else if ("Player" in target) {
-            isPlayerTarget = true;
-            pos = getPlayerHudPosition(target.Player);
-          }
+          const pos = damageTargetPosition(target);
 
           // Creature-on-creature: slam the actual card element (Arena-style)
           if ("Object" in target && vfxQuality !== "minimal") {
@@ -352,24 +457,43 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
             // Resolve via the group representative when this attacker is a
             // non-rendered member of a collapsed swarm (findCardElement).
             const sourceEl = isPairedReturn ? null : findCardElement(source_id);
+            const sourceAt = sourceEl && rectCenter(sourceEl.getBoundingClientRect());
+            // Under the New style the struck card rocks back from the blow.
+            const struckEl = cardVfxRef.current ? findCardElement(target.Object) : null;
+            let landBlow = () => particleRef.current?.slamImpact(pos.x, pos.y, amount);
+            let knockBack = () => {
+              if (struckEl && sourceAt) {
+                applyCardKnockback(struckEl, pos.x - sourceAt.x, pos.y - sourceAt.y, amount, speedMultiplier);
+              }
+            };
+            // One start for the slam and its blow, so both land on one frame.
+            const slamStartMs = performance.now();
             const slammed = sourceEl
               ? applyCardSlam(sourceEl, pos.x, pos.y, speedMultiplier, () => {
                   // Impact effects: SFX, shockwave, floating number, screen shake
-                  audioManager.playSfx("DamageDealt");
-                  particleRef.current?.slamImpact(pos.x, pos.y, amount);
-
-                  const id = ++floatIdCounter;
-                  setActiveFloats((prev) => [
-                    ...prev,
-                    { id, value: -amount, position: pos, color: "#ef4444" },
-                  ]);
-
-                  if (vfxQuality === "full" && containerRef.current) {
-                    const intensity = amount >= 7 ? "heavy" : amount >= 4 ? "medium" : "light";
-                    applyScreenShake(containerRef.current, intensity, speedMultiplier);
-                  }
-                })
+                  landBlow();
+                  knockBack();
+                  landDamageHit(pos, amount, false);
+                }, slamStartMs)
               : false;
+            if (slammed) {
+              const impactDelayMs = CARD_SLAM_FLIGHT_MS * speedMultiplier;
+              const slam = { amount, pace: speedMultiplier, startMs: slamStartMs, impactDelayMs };
+              landBlow = presentBlow({ kind: "blow", sourceId: source_id, target, ...slam }, landBlow);
+              if (struckEl) {
+                knockBack = presentBlow(
+                  {
+                    kind: "knockback",
+                    objectId: target.Object,
+                    face: visiblePreEventSnapshot(target.Object),
+                    sourceId: source_id,
+                    owningStepMs,
+                    ...slam,
+                  },
+                  knockBack,
+                );
+              }
+            }
 
             if (!slammed) {
               // Paired return, missing source element, or representative already
@@ -388,28 +512,28 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
           {
             // Resolve via the group representative for a collapsed swarm member.
             const sourceEl = vfxQuality !== "minimal" ? findCardElement(source_id) : null;
+            let landBlow = () => particleRef.current?.playerDamage(pos.x, pos.y, amount);
+            const slamStartMs = performance.now();
             const slammed = sourceEl
               ? applyCardSlam(sourceEl, pos.x, pos.y, speedMultiplier, () => {
-                  audioManager.playSfx("DamageDealt");
-                  particleRef.current?.playerDamage(pos.x, pos.y, amount);
-
-                  const fid = ++floatIdCounter;
-                  setActiveFloats((prev) => [
-                    ...prev,
-                    { id: fid, value: -amount, position: pos, color: "#ef4444" },
-                  ]);
-
-                  if (vfxQuality === "full" && containerRef.current) {
-                    const intensity = amount >= 7 ? "heavy" : amount >= 4 ? "medium" : "light";
-                    applyScreenShake(containerRef.current, intensity, speedMultiplier);
-                  }
-
-                  if (isPlayerTarget) {
-                    setActiveVignette({ damageAmount: amount });
-                    setTimeout(() => setActiveVignette(null), 500 * speedMultiplier);
-                  }
-                })
+                  landBlow();
+                  landDamageHit(pos, amount, "Player" in target);
+                }, slamStartMs)
               : false;
+            if (slammed) {
+              landBlow = presentBlow(
+                {
+                  kind: "blow",
+                  sourceId: source_id,
+                  target,
+                  amount,
+                  pace: speedMultiplier,
+                  startMs: slamStartMs,
+                  impactDelayMs: CARD_SLAM_FLIGHT_MS * speedMultiplier,
+                },
+                landBlow,
+              );
+            }
 
             if (!slammed) {
               audioManager.playSfx("DamageDealt");
@@ -424,7 +548,24 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
         }
 
         case "LifeChanged": {
-          const { player_id, amount } = event.data;
+          const { player_id, amount, new_total } = event.data;
+
+          // Tick every life readout the moment this hit lands, rather than
+          // leaving them on the pre-action snapshot until the whole step queue
+          // has drained. The engine supplies the resulting total, so nothing is
+          // derived here; an event from a peer that predates the field has none,
+          // and those readouts keep their snapshot value as before.
+          if (new_total !== undefined) {
+            const impactEpoch = useGameStore.getState().engineCommitEpoch;
+            scheduleStepTimeout(
+              () => useAnimationStore.getState().recordDisplayedLife(
+                player_id,
+                new_total,
+                impactEpoch,
+              ),
+              lifeChangeImpactDelayMs(effect, stepEffects, player_id, damageCauseState()) * speedMultiplier,
+            );
+          }
 
           // Skip floating number when DamageDealt already covers this player
           // in the same step (avoids duplicate floating numbers)
@@ -444,8 +585,19 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
               ]);
             }
 
-            if (amount > 0 && vfxQuality !== "minimal") {
-              particleRef.current?.healEffect(x, y, amount);
+            const heal = () => {
+              if (amount > 0 && vfxQuality !== "minimal") particleRef.current?.healEffect(x, y, amount);
+            };
+            // Under the New style the layer shows the change, unless damage
+            // this step already shows the loss it causes (CR 120.3a: damage
+            // to a player makes them lose that much life). A gain is never
+            // damage's, so it always shows.
+            const layer = cardVfxRef.current;
+            const lossShownByDamage = amount < 0 && (hasDamageDealt || groupedDamageEvent !== undefined);
+            if (layer && !lossShownByDamage) {
+              layer.present({ kind: "life", playerId: player_id, amount, pace: speedMultiplier }, heal);
+            } else {
+              heal();
             }
           };
 
@@ -516,14 +668,21 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
             const snapshot = visiblePostEventSnapshot(object_id);
             const colors = snapshot ? newObject?.color ?? [] : [];
             const burstColor = getCardColors(colors)[0] ?? "#06b6d4";
+            // Under the New style a spell announced in an earlier batch
+            // already flew to the stack; only the burst marks its cast.
+            const flown =
+              useAnimationStore.getState().cardVfxReady &&
+              castAnnounced(object_id, useGameStore.getState().gameState);
             if (vfxQuality !== "minimal") {
               particleRef.current?.spellImpact(pos.x, pos.y, hexToRgb(burstColor));
-              const stackPos = { x: window.innerWidth * 0.75, y: window.innerHeight * 0.4 };
-              const id = ++castArcIdCounter;
-              setActiveCastArcs((previous) => [
-                ...previous,
-                { id, from: pos, to: stackPos, snapshot, mode: "cast" },
-              ]);
+              if (!flown) {
+                const stackPos = { x: window.innerWidth * 0.75, y: window.innerHeight * 0.4 };
+                const id = ++castArcIdCounter;
+                setActiveCastArcs((previous) => [
+                  ...previous,
+                  { id, from: pos, to: stackPos, snapshot, mode: "cast" },
+                ]);
+              }
             }
           }
           break;
@@ -581,44 +740,127 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
               ]);
             }
           } else if (fromZone === "Library" && toZone === "Graveyard") {
+            // CR 701.17a: each milled card goes from its owner's library to
+            // their graveyard. Every event presents its own card, leaving in
+            // its place in the step's order, so a card whose flight presents
+            // it is never shown twice and one that falls back is never dropped.
             if (vfxQuality !== "minimal") {
-              const newState = useAnimationStore.getState().animationNewState;
-              const millCards: MillCard[] = [];
-              for (const e of stepEffects) {
-                if (e.event.type !== "ZoneChanged") continue;
-                const d = e.event.data;
-                if (d.from !== "Library" || d.to !== "Graveyard") continue;
-                const object = newState?.objects[d.object_id];
-                const snapshot = visibleAnimationImageSnapshot(object);
-                millCards.push({
-                  objectId: d.object_id,
-                  snapshot,
-                  colors: snapshot ? getCardColors(object?.color ?? []) : [],
-                });
-              }
-
-              // Deduplicate: only process once per step (first Library→Graveyard event triggers the batch)
-              if (object_id === millCards[0]?.objectId && millCards.length > 0) {
-                const obj = newState?.objects[object_id];
-                const ownerId = obj?.owner ?? 0;
-
-                const libEl = document.querySelector(`[data-library-pile="${ownerId}"]`);
-                const gyEl = document.querySelector(`[data-graveyard-pile="${ownerId}"]`);
-                const libRect = libEl?.getBoundingClientRect();
-                const gyRect = gyEl?.getBoundingClientRect();
-
-                const hudFallback = getPlayerHudPosition(ownerId);
-                const fromPos = libRect
-                  ? { x: libRect.x + libRect.width / 2, y: libRect.y + libRect.height / 2 }
-                  : hudFallback;
-                const toPos = gyRect
-                  ? { x: gyRect.x + gyRect.width / 2, y: gyRect.y + gyRect.height / 2 }
-                  : hudFallback;
-
-                const id = ++millRevealIdCounter;
-                setActiveMillReveals((prev) => [...prev, { id, cards: millCards, from: fromPos, to: toPos }]);
-              }
+              const object = useAnimationStore.getState().animationNewState?.objects[object_id];
+              const snapshot = visibleAnimationImageSnapshot(object);
+              const card: MillCard = {
+                objectId: object_id,
+                snapshot,
+                colors: snapshot ? getCardColors(object?.color ?? []) : [],
+              };
+              const startIndex = stepEffects
+                .filter(
+                  ({ event: other }) =>
+                    other.type === "ZoneChanged" && other.data.from === "Library" && other.data.to === "Graveyard",
+                )
+                .indexOf(effect);
+              const ownerId = object?.owner ?? 0;
+              const libRect = document.querySelector(`[data-library-pile="${ownerId}"]`)?.getBoundingClientRect();
+              const gyRect = document.querySelector(`[data-graveyard-pile="${ownerId}"]`)?.getBoundingClientRect();
+              const hudFallback = getPlayerHudPosition(ownerId);
+              const id = ++millRevealIdCounter;
+              setActiveMillReveals((prev) => [
+                ...prev,
+                {
+                  id,
+                  cards: [card],
+                  startIndex: Math.max(startIndex, 0),
+                  from: libRect ? rectCenter(libRect) : hudFallback,
+                  to: gyRect ? rectCenter(gyRect) : hudFallback,
+                },
+              ]);
             }
+          }
+          break;
+        }
+
+        case "Melded": {
+          // CR 701.42a: forge the pair on the board, then turn the fused blank
+          // over to the melded permanent's combined face.
+          if (owningStepMs <= 0) break;
+          const { object_id, partner_id } = event.data;
+          const sourceRect = getObjectRect(object_id);
+          const partnerRect = getObjectRect(partner_id);
+          const measured = [sourceRect, partnerRect].filter((rect): rect is DOMRect => rect != null);
+          const centers = measured.map(rectCenter);
+          const center = centers.length > 0
+            ? {
+                x: centers.reduce((sum, point) => sum + point.x, 0) / centers.length,
+                y: centers.reduce((sum, point) => sum + point.y, 0) / centers.length,
+              }
+            : { x: window.innerWidth / 2, y: window.innerHeight / 2 };
+          // A tapped card's rect is landscape; the forge works in portrait.
+          const cardSize = measured.length > 0
+            ? {
+                width: Math.min(measured[0].width, measured[0].height),
+                height: Math.max(measured[0].width, measured[0].height),
+              }
+            : MELD_FALLBACK_CARD_SIZE;
+          const piece = (objectId: number, rect: DOMRect | null, side: -1 | 1): MeldForgePiece => {
+            const at = rect ? rectCenter(rect) : null;
+            return {
+              snapshot: visiblePreEventSnapshot(objectId),
+              offset: at
+                ? { x: at.x - center.x, y: at.y - center.y }
+                : { x: side * cardSize.width * 1.5, y: 0 },
+            };
+          };
+          // The forge lifts both cards off the board, so their board cards hide
+          // for the rest of this step.
+          useAnimationStore.getState().veilObjects([object_id, partner_id]);
+          const id = ++meldForgeIdCounter;
+          setActiveMeldForges((previous) => [
+            ...previous,
+            {
+              id,
+              center,
+              cardSize,
+              source: piece(object_id, sourceRect, -1),
+              partner: piece(partner_id, partnerRect, 1),
+              result: visiblePostEventSnapshot(object_id),
+              durationMs: owningStepMs,
+            },
+          ]);
+
+          // The hammer blows always ring. Particles and screen shake move the
+          // board, so they honor reduced motion as well as the VFX quality —
+          // as the forge itself does by cross-fading instead.
+          const animatesVfx = vfxQuality !== "minimal" && !reduceMotion;
+          const at = (fraction: number) => fraction * owningStepMs;
+          if (animatesVfx) {
+            scheduleStepTimeout(
+              () => particleRef.current?.forgeHeat(
+                center.x,
+                center.y,
+                at(MELD_FORGE_PHASES.fused - MELD_FORGE_PHASES.gathered),
+              ),
+              at(MELD_FORGE_PHASES.gathered),
+            );
+          }
+          MELD_FORGE_PHASES.strikes.forEach((strikeAt, blow) => {
+            const isFinalBlow = blow === MELD_FORGE_PHASES.strikes.length - 1;
+            scheduleStepTimeout(() => {
+              audioManager.playSfx("DamageDealt", isFinalBlow ? 1 : 0.7);
+              if (!animatesVfx) return;
+              particleRef.current?.forgeStrike(
+                center.x,
+                center.y,
+                (blow + 1) / MELD_FORGE_PHASES.strikes.length,
+              );
+              if (vfxQuality === "full" && containerRef.current) {
+                applyScreenShake(containerRef.current, isFinalBlow ? "medium" : "light", speedMultiplier);
+              }
+            }, at(strikeAt));
+          });
+          if (animatesVfx) {
+            scheduleStepTimeout(
+              () => particleRef.current?.summonBurst(center.x, center.y, FORGE_YELLOW),
+              at(MELD_FORGE_PHASES.flipped),
+            );
           }
           break;
         }
@@ -644,18 +886,10 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
           // CR 702.60a + CR 701.20b: Ripple (and other "reveal the top N")
           // effects publish their pile without moving it. Fan the revealed
           // cards out of the revealing player's library for every seat to read.
-          const { player, card_ids: cardIds } = event.data;
-          if (vfxQuality === "minimal" || !cardIds || cardIds.length === 0) break;
+          const { player, card_ids: cardIds = [], card_names: cardNames } = event.data;
+          if (vfxQuality === "minimal" || cardNames.length === 0) break;
           const newState = useAnimationStore.getState().animationNewState;
-          const revealCards: MillCard[] = cardIds.map((id) => {
-            const object = newState?.objects[id];
-            const snapshot = visibleAnimationImageSnapshot(object);
-            return {
-              objectId: id,
-              snapshot,
-              colors: snapshot ? getCardColors(object?.color ?? []) : [],
-            };
-          });
+          const revealCards: MillCard[] = revealFanCards(cardIds, cardNames, newState?.objects);
           const libEl = document.querySelector(`[data-library-pile="${player}"]`);
           const libRect = libEl?.getBoundingClientRect();
           const fromPos = libRect
@@ -673,13 +907,45 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
     [
       getPosition,
       getObjectPosition,
+      getObjectRect,
       getPlayerHudPosition,
       vfxQuality,
       speedMultiplier,
+      reduceMotion,
       containerRef,
       scheduleStepTimeout,
       addPendingDeath,
+      damageTargetPosition,
+      landDamageHit,
+      presentBlow,
     ],
+  );
+
+  // Under the New style a mounted layer presents the event's card VFX, or runs
+  // the Classic effect instead; never both, never neither.
+  const processEffect = useCallback(
+    (effect: StepEffect, stepEffects: StepEffect[], owningStepMs: number, snapshotSeq: number) => {
+      const classic = () => processClassicEffect(effect, stepEffects, owningStepMs);
+      const layer = cardVfxRef.current;
+      const spec = layer
+        ? cardVfxSpecFor(effect.event, {
+            pre: useGameStore.getState().gameState,
+            post: useAnimationStore.getState().animationNewState,
+            pace: speedMultiplier,
+            owningStepMs,
+            snapshotSeq,
+            stepEvents: stepEffects.map((stepEffect) => stepEffect.event),
+          })
+        : null;
+      const { event } = effect;
+      const onImpact =
+        event.type === "DamageDealt"
+          ? () => landDamageHit(damageTargetPosition(event.data.target), event.data.amount, "Player" in event.data.target)
+          : undefined;
+      if (layer && spec) layer.present(spec, classic, onImpact);
+      else classic();
+    },
+    [damageTargetPosition, landDamageHit, processClassicEffect, speedMultiplier],
   );
 
   // Process effects when activeStep changes, then advance after its duration
@@ -691,6 +957,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
         effect,
         activeStep.effects,
         activeStep.duration * speedMultiplier,
+        activeStep.snapshotSeq,
       );
     }
 
@@ -729,6 +996,10 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
 
   const handleRippleRevealComplete = useCallback((id: number) => {
     setActiveRippleReveals((prev) => prev.filter((m) => m.id !== id));
+  }, []);
+
+  const handleMeldForgeComplete = useCallback((id: number) => {
+    setActiveMeldForges((prev) => prev.filter((m) => m.id !== id));
   }, []);
 
   return (
@@ -810,11 +1081,15 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
         />
       ))}
 
+      {/* Card flights (z-45), the New style's shared WebGL overlay */}
+      {cardVfxMounted && <CardVfxLayer ref={cardVfxRef} tier={vfxQuality} />}
+
       {/* Mill reveal animations (z-45) */}
       {activeMillReveals.map((mill) => (
         <MillRevealAnimation
           key={`mill-${mill.id}`}
           cards={mill.cards}
+          startIndex={mill.startIndex}
           from={mill.from}
           to={mill.to}
           onComplete={() => handleMillRevealComplete(mill.id)}
@@ -828,6 +1103,20 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
           cards={ripple.cards}
           from={ripple.from}
           onComplete={() => handleRippleRevealComplete(ripple.id)}
+        />
+      ))}
+
+      {/* Meld forge-and-flip animations (z-50, beneath the particle sparks) */}
+      {activeMeldForges.map((forge) => (
+        <MeldForgeAnimation
+          key={`meld-${forge.id}`}
+          center={forge.center}
+          cardSize={forge.cardSize}
+          source={forge.source}
+          partner={forge.partner}
+          result={forge.result}
+          durationMs={forge.durationMs}
+          onComplete={() => handleMeldForgeComplete(forge.id)}
         />
       ))}
 

@@ -53,6 +53,7 @@ fn reduce_your_spells(amount: u32, mode: CostModifyMode) -> StaticDefinition {
         amount: generic(amount),
         spell_filter: None,
         dynamic_count: None,
+        reach: engine::types::statics::CostReductionReach::SpillsToGeneric,
     });
     def.affected = Some(TargetFilter::Typed(TypedFilter {
         controller: Some(ControllerRef::You),
@@ -323,6 +324,7 @@ fn self_cost_reduction_is_not_a_deployment_engine() {
         amount: generic(1),
         spell_filter: None,
         dynamic_count: None,
+        reach: engine::types::statics::CostReductionReach::SpillsToGeneric,
     });
     def.affected = Some(TargetFilter::SelfRef);
     let (obj, card) = hand_card(&mut st, "Self Discount", CoreType::Artifact, 4, vec![def]);
@@ -457,6 +459,7 @@ fn typed_reducer_in_hand(
             ..Default::default()
         })),
         dynamic_count: None,
+        reach: engine::types::statics::CostReductionReach::SpillsToGeneric,
     });
     def.affected = Some(TargetFilter::Typed(TypedFilter {
         controller: Some(ControllerRef::You),

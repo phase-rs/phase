@@ -116,10 +116,15 @@ jobs:
         run: python3 scripts/release_dispatch_guard_tests.py
 
       - name: Preview data wait tests
-        # preview-server.yml signs the preview manifest only after this script
-        # sees its data URLs served; the tests drive the script against a local
-        # HTTP server and check the publish job waits on every manifest data URL.
+        # The manifest is signed only after this script sees its data URLs
+        # served, so the tests drive it against a local HTTP server. They also
+        # run the publish step's own shell over a stubbed checkout, holding
+        # packaging/desktop-platforms.txt to the binaries that step uploads: a
+        # listed triple it does not publish leaves that desktop with no preview.
         run: python3 scripts/preview_data_wait_tests.py
+
+      - name: Localized card image fallback tests
+        run: python3 scripts/lib/localized_image_fallback_tests.py
 
       - name: Action pin checker unit tests
         # Exercises the checker against throwaway repositories only; it does
@@ -158,23 +163,23 @@ jobs:
         # while only the .deb side was current.
         run: python3 scripts/check_media_plugin_packaging.py
 
-      - name: Desktop platform mapping checker unit tests
+      - name: Desktop platform matrix checker unit tests
         # Exercises the checker against throwaway trees only; it does not read
         # this repository's own files. The direction that matters is refusal: an
-        # unreadable matrix reads as an empty published set, and the empty set is
-        # a subset of any mapping, so a checker that understood nothing would
-        # report a clean pass.
-        run: python3 scripts/check_shell_platform_mapping_tests.py
+        # unreadable list must raise, not read as an empty list.
+        run: python3 scripts/check_desktop_platform_matrix_tests.py
 
-      - name: Desktop platform mapping coverage
-        # Two directions across three files. Every platform shell-release.yml's
-        # build-shell matrix publishes must be a native_engine.rs ServerPlatform
-        # variant, or that desktop ships unable to fetch an engine; and every
-        # triple that enum resolves must reach release.yml signed, with both the
-        # binary and its signature attached, or the desktop's download 404s on
-        # whichever half is missing. The Rust-side test pins the pairs it expects
-        # and cannot see either set grow past them.
-        run: python3 scripts/check_shell_platform_mapping.py
+      - name: Desktop platform matrix coverage
+        # packaging/desktop-platforms.txt is the published desktop platform set.
+        # A platform shell-release.yml's build-shell matrix builds with no row
+        # there ships a desktop whose ServerPlatform resolves no triple, so it can
+        # never fetch an engine; preview-server.yml's build and release.yml's
+        # build-server triples are held to the same file by equality, so a triple
+        # published for no listed desktop is an error, not a harmless extra. The
+        # enum half is native_engine.rs's own test, which runs at tag time in
+        # shell-release.yml's shell-preflight — tauri-check is disabled here, so
+        # no PR-time job compiles it.
+        run: python3 scripts/check_desktop_platform_matrix.py
 
       - name: Resolution-frame boundary guard
         # Full-tree guard: legacy resolution keys are reader/fixture-only, and
@@ -1009,6 +1014,27 @@ jobs:
           npm ci
           pnpm test
 
+  card-bot-test:
+    name: Card bot (bun test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # The tests never touch git; don't leave the token in .git/config.
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          # Tracks deploy/card-bot.Dockerfile's oven/bun:1.3 runtime.
+          bun-version: 1.3.x
+
+      # Dependency-free: the tests import client modules by relative path and
+      # read the pinned client/Tauri/workflow/crate files, none of which need
+      # client/node_modules.
+      - name: Test
+        run: bun test scripts/card-bot
+
   frontend:
     name: Frontend (lint, type-check, test)
     runs-on: ubuntu-latest
@@ -1037,3 +1063,49 @@ jobs:
 
       - name: Run tests with coverage
         run: cd client && pnpm test -- --run --coverage
+
+  draft-match-wasm-proof:
+    name: Draft match proof (real WASM)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        with:
+          target: wasm32-unknown-unknown
+          cache-shared-key: rust-wasm
+          rustflags: ""
+
+      - uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2.87.20
+        with:
+          tool: wasm-bindgen-cli@0.2.121
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+        with:
+          version: 9
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: client/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: cd client && pnpm install --frozen-lockfile
+
+      - name: Build both WASM engines
+        run: ./scripts/build-wasm.sh wasm-dev
+
+      - name: Require generated bindings
+        run: |
+          test -s client/src/wasm/draft_wasm.js
+          test -s client/src/wasm/draft_wasm_bg.wasm
+          test -s client/src/wasm/engine_wasm.js
+          test -s client/src/wasm/engine_wasm_bg.wasm
+
+      - name: Run isolated draft match proofs
+        run: pnpm exec vitest run --config vitest.integration.config.ts --pool=forks --isolate --coverage.enabled=false --reporter=verbose src/adapter/__tests__/setDraftMatchProof.integration.test.ts src/adapter/__tests__/cubeDraftMatchProof.integration.test.ts
+        working-directory: client

@@ -260,6 +260,9 @@ fn complete_cost_payment(
         scry_bottom_count: None,
         scry_top_count: None,
     });
+    // CR 701.59a: this event is published after the choice, outside any chain
+    // window, so record it here.
+    super::record_player_action_this_turn(state, player, PlayerActionKind::CollectEvidence);
 
     match resume {
         CollectEvidenceResume::Casting {
@@ -276,14 +279,24 @@ fn complete_cost_payment(
             // any remaining (non-interactive) cost — collect evidence is a no-op
             // there — and pushes the ability. Detected by the activation index
             // carried on the pending; spell casts (bestow Detective's Phoenix)
-            // have `None` and fall through to `pay_and_push`.
+            // have `None` and fall through to `pay_and_push_with_lock`.
             if pending.activation_ability_index.is_some() {
                 return super::super::casting_costs::finish_activated_ability_at_payment_boundary(
                     state, player, pending, events,
                 );
             }
+            // CR 601.2f + CR 601.2h: collect evidence paid as a compound
+            // alternative cost's residual leaves the cast's other committed
+            // costs on the pending (an imposed tax for a spell targeting Terror
+            // of the Peaks); continue through the pending so they are paid.
+            if super::super::casting_costs::pending_carries_unpaid_committed_costs(&pending) {
+                return super::super::casting_costs::finish_pending_cost_or_cast(
+                    state, player, pending, events,
+                );
+            }
             let base_cost = pending.base_cost.clone();
-            super::super::casting_costs::pay_and_push(
+            let lock = super::super::casting_costs::CostLockInput::from_pending(&pending);
+            super::super::casting_costs::pay_and_push_with_lock(
                 state,
                 player,
                 pending.object_id,
@@ -297,6 +310,7 @@ fn complete_cost_payment(
                 pending.distribute,
                 pending.origin_zone,
                 pending.payment_mode,
+                lock,
                 events,
             )
         }
@@ -624,7 +638,7 @@ mod tests {
             chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
-            chosen_counter_count: None,
+            chosen_counter_counts: Vec::new(),
             chosen_x: None,
             collected_evidence: Vec::new(),
             chosen_exiled: Vec::new(),

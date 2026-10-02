@@ -247,7 +247,14 @@ pub(crate) fn parse_spells_have_keyword_for_test(text: &str) -> Option<StaticDef
 ///     Replicate functions end-to-end with no engine change.
 fn parse_granted_self_cost_keyword(keyword_str: &str) -> Option<Keyword> {
     [
-        ("blitz", Keyword::Blitz as fn(ManaCost) -> Keyword),
+        // CR 702.152a: Blitz's cost enum (`BlitzCost`) admits a non-mana residual
+        // (Sabin/Underdog), but a *granted* self-referential blitz is always pure
+        // mana ("equal to its mana cost"), so the grant binds `BlitzCost::Mana`.
+        (
+            "blitz",
+            (|c| Keyword::Blitz(crate::types::keywords::BlitzCost::Mana(c)))
+                as fn(ManaCost) -> Keyword,
+        ),
         ("replicate", Keyword::Replicate as fn(ManaCost) -> Keyword),
     ]
     .into_iter()
@@ -1081,11 +1088,23 @@ fn grant_source_noun_phrase(input: &str) -> OracleResult<'_, crate::types::abili
             ])),
             tag("all artifact cards in your graveyard"),
         ),
-        // CR 613.1f + CR 611.2c: "the last chosen card" (Koh, the Face Stealer) —
-        // the single card most recently recorded on the host via
-        // `Effect::RememberCard` (`ChosenAttribute::Card`). Resolved live each
-        // layer pass by `TargetFilter::ChosenCard`.
-        value(TargetFilter::ChosenCard, tag("the last chosen card")),
+        // CR 607.2a + CR 607.2d: "the last chosen card" (Koh, the Face Stealer) —
+        // the card most recently recorded on the host via `Effect::RememberCard`
+        // (`ChosenAttribute::Card`, CR 608.2c) AND still in the exile zone. The
+        // CR 607.2a exile pinning of the linked reference is composed here so
+        // the shared `ChosenCard` reader stays zone-agnostic (CR 607.2d).
+        value(
+            TargetFilter::And {
+                filters: vec![
+                    TargetFilter::ChosenCard,
+                    TargetFilter::Typed(
+                        TypedFilter::default()
+                            .properties(vec![FilterProp::InZone { zone: Zone::Exile }]),
+                    ),
+                ],
+            },
+            tag("the last chosen card"),
+        ),
     ))
     .parse(input)
 }

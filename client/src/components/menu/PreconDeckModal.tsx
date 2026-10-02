@@ -3,13 +3,16 @@ import { useTranslation } from "react-i18next";
 
 import { isCommanderPreconDeck, useDecks, type DeckEntry } from "../../hooks/useDecks";
 import { preconExists, savePreconDeck } from "../../services/preconDecks";
+import { attemptSavedDeckWrite, notifySavedDeckChanged } from "../../services/savedDeckWriteFailure";
+import { captureSavedDeck } from "../../constants/storage";
 import { menuButtonClass } from "./buttonStyles";
 import { MenuSelect } from "../ui/MenuSelect";
+import { useImportSession, type ImportSession } from "./importSession";
 
 interface PreconDeckModalProps {
   open: boolean;
   onClose: () => void;
-  onImported: (name: string) => void;
+  onImported: (name: string, session: ImportSession) => void;
 }
 
 /** Cap on rendered rows. Prevents 1000+ node lists becoming a perf cliff;
@@ -48,6 +51,7 @@ export function PreconDeckModal({ open, onClose, onImported }: PreconDeckModalPr
   // filtered list reordering as the user types — a deck stays selected even
   // when the search query temporarily hides it.
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
+  const importSession = useImportSession(open);
 
   // Esc-to-close, bound only while the modal is open.
   useEffect(() => {
@@ -117,14 +121,37 @@ export function PreconDeckModal({ open, onClose, onImported }: PreconDeckModalPr
 
   if (!open) return null;
 
-  const handlePick = (deck: DeckEntry) => {
+  const handlePick = async (deck: DeckEntry) => {
+    const started = importSession.begin();
     const suggested = `${deck.name} (${deck.code})`;
     const chosen = prompt(t("precon.savePrompt"), suggested);
     if (!chosen) return;
-    if (preconExists(chosen) && !confirm(t("precon.overwriteConfirm", { name: chosen }))) return;
-    savePreconDeck(chosen, deck);
-    onImported(chosen);
-    onClose();
+    // Captured at this same confirm click: what "replace" below must still find to proceed.
+    const existing = captureSavedDeck(chosen);
+    if (existing.raw !== null && !confirm(t("precon.overwriteConfirm", { name: chosen }))) return;
+    let saved = await attemptSavedDeckWrite("save", () =>
+      savePreconDeck(chosen, deck, existing.raw !== null ? { type: "replace", expected: existing } : { type: "keep" }),
+    );
+    if (saved.ok && saved.value === "kept-existing") {
+      // The name was claimed, or its content changed, while this save waited. Only ask
+      // again if the session that started this pick is still open.
+      if (importSession.stateOf(started) !== "open") return;
+      if (!confirm(t("precon.overwriteConfirm", { name: chosen }))) return;
+      const reconfirmed = captureSavedDeck(chosen);
+      saved = await attemptSavedDeckWrite("save", () =>
+        savePreconDeck(chosen, deck, reconfirmed.raw !== null ? { type: "replace", expected: reconfirmed } : { type: "keep" }),
+      );
+      if (saved.ok && saved.value === "kept-existing") {
+        // The name changed again during the re-confirmed save — the user's second confirm no
+        // longer matches what's stored, so this import must not silently claim success.
+        notifySavedDeckChanged("save");
+        return;
+      }
+    }
+    if (!saved.ok) return;
+    const session = importSession.stateOf(started);
+    onImported(chosen, session);
+    if (session === "open") onClose();
   };
 
   const toggleSelected = (id: string) => {
@@ -143,46 +170,72 @@ export function PreconDeckModal({ open, onClose, onImported }: PreconDeckModalPr
   // confirm, and fires `onImported` exactly once at the end with the last
   // imported name so the parent's deck-list refresh + select-mode auto-pick
   // run as a single transition rather than per-deck.
-  const handleImportSelected = () => {
+  const handleImportSelected = async () => {
     if (!decks || selectedIds.size === 0) return;
-    const picks: Array<{ savedName: string; deck: DeckEntry }> = [];
+    const started = importSession.begin();
+    const picks: Array<{ id: string; savedName: string; deck: DeckEntry }> = [];
     for (const id of selectedIds) {
       const deck = decks[id];
       if (!deck) continue;
-      picks.push({ savedName: `${deck.name} (${deck.code})`, deck });
+      picks.push({ id, savedName: `${deck.name} (${deck.code})`, deck });
     }
     if (picks.length === 0) return;
 
     const conflicts = picks.filter((p) => preconExists(p.savedName));
-    let overwrite = true;
-    if (conflicts.length > 0) {
-      const msg =
+    const overwrite =
+      conflicts.length > 0 &&
+      confirm(
         conflicts.length === picks.length
           ? t("precon.overwriteAllConfirm", { count: picks.length })
-          : t("precon.overwriteSomeConfirm", { conflicts: conflicts.length, total: picks.length });
-      overwrite = confirm(msg);
-    }
+          : t("precon.overwriteSomeConfirm", { conflicts: conflicts.length, total: picks.length }),
+      );
+    // Captured at this same confirm click, per conflicting name, before any of this batch's
+    // saves waits for the lock: what "replace" below must still find to proceed for that name.
+    const expectedByName = new Map(
+      overwrite ? conflicts.map((p) => [p.savedName, captureSavedDeck(p.savedName)] as const) : [],
+    );
 
     let lastImported: string | null = null;
     let imported = 0;
     let skipped = 0;
-    for (const { savedName, deck } of picks) {
-      if (preconExists(savedName) && !overwrite) {
+    let refused = false;
+    const importedIds = new Set<string>();
+    for (const { id, savedName, deck } of picks) {
+      const expected = expectedByName.get(savedName);
+      const saved = await attemptSavedDeckWrite("save", () =>
+        savePreconDeck(savedName, deck, expected ? { type: "replace", expected } : { type: "keep" }),
+      );
+      if (!saved.ok) {
+        refused = true;
+        break;
+      }
+      if (saved.value === "kept-existing") {
         skipped++;
         continue;
       }
-      savePreconDeck(savedName, deck);
+      importedIds.add(id);
       lastImported = savedName;
       imported++;
     }
 
-    if (lastImported) onImported(lastImported);
-    clearSelection();
-    onClose();
+    const session = importSession.stateOf(started);
+    if (lastImported) onImported(lastImported, session);
+    if (refused) return;
+    if (session === "open") {
+      // The modal that started this batch is still the one on screen.
+      clearSelection();
+      onClose();
+    } else {
+      // The modal was dismissed (and possibly reopened) while this batch ran.
+      setSelectedIds((cur) => {
+        const next = new Set(cur);
+        for (const id of importedIds) next.delete(id);
+        return next;
+      });
+    }
     if (skipped > 0) {
       // No toast system in this surface — a single alert keeps the user
-      // informed without ambiguity. Fires AFTER onClose so the dialog tears
-      // down first and the alert lands in the deck-list view.
+      // informed without ambiguity.
       alert(t("precon.importedSkipped", { count: imported, skipped }));
     }
   };

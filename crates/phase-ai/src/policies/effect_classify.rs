@@ -362,6 +362,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::EachDealsDamageEqualToPower { .. }
         | Effect::EachPlayerCopyChosen { .. }
         | Effect::EachSourceDealsDamage { .. }
+        | Effect::EmpowerJace { .. }
         | Effect::Encore
         | Effect::EndCombatPhase
         | Effect::EndTheTurn
@@ -501,7 +502,6 @@ pub(crate) fn extract_target_filter(effect: &Effect) -> Option<&TargetFilter> {
         | Effect::DoublePTAll { target, .. }
         | Effect::Regenerate { target, .. }
         | Effect::RemoveAllDamage { target, .. }
-        | Effect::PreventDamage { target, .. }
         // Harmful effects
         | Effect::Destroy { target, .. }
         | Effect::DealDamage { target, .. }
@@ -529,6 +529,13 @@ pub(crate) fn extract_target_filter(effect: &Effect) -> Option<&TargetFilter> {
         // which fell through to `None`).
         Effect::SetTapState {
             scope: EffectScope::Single,
+            target,
+            ..
+        } => Some(target),
+        // CR 115.1a + CR 115.10a: only a declared prevention recipient exposes a
+        // selectable target; the mass (`All`) scope is an untargeted population.
+        Effect::PreventDamage {
+            recipient_scope: EffectScope::Single,
             target,
             ..
         } => Some(target),
@@ -1888,6 +1895,7 @@ mod lethality_tests {
 #[cfg(test)]
 mod suspect_scope_tests {
     use super::*;
+    use engine::types::ability::{PreventionAmount, PreventionScope, TypedFilter};
 
     // CR 701.60a: mass un-designation ("all suspected creatures are no longer
     // suspected", Absolving Lammasu) is a non-targeting population effect. The
@@ -1912,6 +1920,29 @@ mod suspect_scope_tests {
         assert!(
             extract_target_filter(&all_suspect).is_none(),
             "mass Suspect{{All}} is a population effect, not target-filtered"
+        );
+    }
+
+    // CR 115.10a: a mass prevention recipient is an untargeted population; the
+    // AI's target-filter extraction must mirror the engine's `target_filter()`.
+    #[test]
+    fn extract_target_filter_only_for_single_scope_prevent_damage() {
+        let prevent = |recipient_scope| Effect::PreventDamage {
+            amount: PreventionAmount::All,
+            amount_dynamic: None,
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            recipient_scope,
+            scope: PreventionScope::AllDamage,
+            damage_source_filter: None,
+            prevention_duration: None,
+        };
+        assert!(
+            extract_target_filter(&prevent(EffectScope::Single)).is_some(),
+            "declared-recipient PreventDamage must expose a selectable target"
+        );
+        assert!(
+            extract_target_filter(&prevent(EffectScope::All)).is_none(),
+            "mass PreventDamage{{All}} is a population effect, not target-filtered"
         );
     }
 

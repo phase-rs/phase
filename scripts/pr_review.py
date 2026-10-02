@@ -2165,7 +2165,7 @@ def architecture_scope_profile(
         "the `quality` label, prior praise, and frontend permission do not waive "
         "this gate. Open a fresh PR from current `main` only after one of those "
         "authorizations exists, and rerun `/engine-implementer`, the final "
-        "`review-impl`, and Gate A against its committed head."
+        "`review-engine-impl`, and Gate A against its committed head."
     )
     return {
         "mode": mode,
@@ -3029,7 +3029,7 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
                 "**Closed without implementation-diff review.** Required current-head "
                 f"admission artifacts failed for `{head}`: {failures}. Open a fresh "
                 "PR from current `main`, rerun `/engine-implementer`, complete and "
-                "address a final `review-impl`, then rerun Gate A against that exact "
+                "address a final `review-engine-impl`, then rerun Gate A against that exact "
                 "committed head. Merely including the required headings or PASS text "
                 "is not validation; their content and SHA must match the current head."
             )

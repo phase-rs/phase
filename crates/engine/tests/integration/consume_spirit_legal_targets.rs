@@ -373,6 +373,7 @@ fn consume_spirit_with_generic_cost_reduction() {
             amount: ManaCost::generic(2),
             spell_filter: None,
             dynamic_count: None,
+            reach: engine::types::statics::CostReductionReach::SpillsToGeneric,
         }));
 
     let mut pool = black_pool(1);
@@ -415,6 +416,7 @@ fn consume_spirit_with_colored_cost_reduction() {
             },
             spell_filter: None,
             dynamic_count: None,
+            reach: engine::types::statics::CostReductionReach::SpillsToGeneric,
         }));
 
     let mut pool = black_pool(2);
@@ -718,6 +720,7 @@ fn consume_spirit_with_colored_reduction_spillover() {
             },
             spell_filter: None,
             dynamic_count: None,
+            reach: engine::types::statics::CostReductionReach::SpillsToGeneric,
         }));
 
     let mut pool = black_pool(1);
@@ -760,6 +763,7 @@ fn consume_spirit_with_variant_gated_reduction() {
                 amount: ManaCost::generic(2),
                 spell_filter: None,
                 dynamic_count: None,
+                reach: engine::types::statics::CostReductionReach::SpillsToGeneric,
             })
             .condition(StaticCondition::CastingAsVariant {
                 variant: CastingVariant::Flashback,
@@ -833,6 +837,7 @@ fn consume_spirit_with_cost_increase_tax_payable_with_unrestricted_mana() {
             amount: ManaCost::generic(1),
             spell_filter: None,
             dynamic_count: None,
+            reach: engine::types::statics::CostReductionReach::SpillsToGeneric,
         }));
 
     let outcome = runner.cast(spell).x(1).target_player(P1).resolve();
@@ -878,6 +883,7 @@ fn consume_spirit_with_cost_floor_min_3_payable_with_unrestricted_mana() {
             amount: ManaCost::generic(3),
             spell_filter: None,
             dynamic_count: None,
+            reach: engine::types::statics::CostReductionReach::SpillsToGeneric,
         }));
 
     let outcome = runner.cast(spell).x(0).target_player(P1).resolve();
@@ -923,6 +929,7 @@ fn consume_spirit_with_cost_floor_min_3_with_x1() {
             amount: ManaCost::generic(3),
             spell_filter: None,
             dynamic_count: None,
+            reach: engine::types::statics::CostReductionReach::SpillsToGeneric,
         }));
 
     let outcome = runner.cast(spell).x(1).target_player(P1).resolve();

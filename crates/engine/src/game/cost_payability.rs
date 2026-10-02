@@ -20,9 +20,9 @@
 //! the enumerations.
 
 use crate::types::ability::{
-    is_variable_remove_counter_cost_count, AbilityCost, Comparator, CounterCostSelection,
-    FilterProp, PlayerFilter, QuantityExpr, QuantityRef, TapCreaturesAggregateStat,
-    TapCreaturesRequirement, TargetFilter, TypedFilter, EXILE_COST_X,
+    is_variable_remove_counter_cost_count, AbilityCost, CardSelectionMode, Comparator,
+    CounterCostSelection, DiscardSelfScope, FilterProp, PlayerFilter, QuantityExpr, QuantityRef,
+    TapCreaturesAggregateStat, TapCreaturesRequirement, TargetFilter, TypedFilter, EXILE_COST_X,
 };
 use crate::types::card_type::CoreType;
 use crate::types::identifiers::ObjectId;
@@ -313,6 +313,110 @@ pub(crate) fn cost_filter_before_x_announcement(
     })
 }
 
+/// CR 118.3 + CR 601.2h + CR 701.9a: Joint payability of a cost's chosen
+/// hand-discard legs ("discard an Island card and another card"). A per-leg
+/// "enough eligible cards" check lets one physical card satisfy two legs, so
+/// the cost is offered and then dead-ends mid-payment.
+///
+/// The engine pays legs in printed order (CR 601.2h permits any order), and the
+/// player freely chooses which eligible cards each leg discards. The cost is
+/// therefore jointly payable only when EVERY possible sequence of choices leaves
+/// every later leg payable, so this fails closed for an order that lets an early,
+/// less-restrictive leg take a card a later, more-restrictive leg needs
+/// (`[Any, Island]` over hand `[Island, Forest]` is not payable;
+/// `[Island, Any]` is). Only `Fixed` positive-count `Chosen` `FromHand` legs are
+/// modeled; every other leg kind is ignored here and keeps its own per-leg gate.
+pub(crate) fn discard_legs_jointly_payable(
+    state: &GameState,
+    player: PlayerId,
+    source: ObjectId,
+    costs: &[AbilityCost],
+) -> bool {
+    let Some(player_state) = state.players.get(player.0 as usize) else {
+        return true;
+    };
+    let ctx = FilterContext::from_source(state, source);
+    let legs: Vec<(usize, Vec<ObjectId>)> = costs
+        .iter()
+        .filter_map(|cost| match cost {
+            AbilityCost::Discard {
+                count: QuantityExpr::Fixed { value },
+                filter,
+                selection: CardSelectionMode::Chosen,
+                self_scope: DiscardSelfScope::FromHand,
+            } if *value > 0 => {
+                let effective_filter = cost_filter_before_x_announcement(filter.as_ref());
+                let eligible = player_state
+                    .hand
+                    .iter()
+                    .copied()
+                    .filter(|&id| {
+                        id != source
+                            && effective_filter
+                                .as_ref()
+                                .is_none_or(|f| matches_target_filter(state, id, f, &ctx))
+                    })
+                    .collect();
+                Some((*value as usize, eligible))
+            }
+            _ => None,
+        })
+        .collect();
+    discard_legs_payable_for_every_choice(&legs, &[])
+}
+
+/// Every choice of `count` cards for the first leg (from those not already
+/// `used`) must leave the remaining legs payable.
+fn discard_legs_payable_for_every_choice(
+    legs: &[(usize, Vec<ObjectId>)],
+    used: &[ObjectId],
+) -> bool {
+    let Some(((count, eligible), later)) = legs.split_first() else {
+        return true;
+    };
+    let available: Vec<ObjectId> = eligible
+        .iter()
+        .copied()
+        .filter(|id| !used.contains(id))
+        .collect();
+    if available.len() < *count {
+        return false;
+    }
+    let mut picked = Vec::with_capacity(*count);
+    every_combination_leaves_later_payable(&available, *count, 0, &mut picked, later, used)
+}
+
+fn every_combination_leaves_later_payable(
+    available: &[ObjectId],
+    count: usize,
+    from: usize,
+    picked: &mut Vec<ObjectId>,
+    later: &[(usize, Vec<ObjectId>)],
+    used: &[ObjectId],
+) -> bool {
+    if picked.len() == count {
+        let mut now_used = used.to_vec();
+        now_used.extend_from_slice(picked);
+        return discard_legs_payable_for_every_choice(later, &now_used);
+    }
+    for index in from..available.len() {
+        picked.push(available[index]);
+        let ok = every_combination_leaves_later_payable(
+            available,
+            count,
+            index + 1,
+            picked,
+            later,
+            used,
+        );
+        picked.pop();
+        if !ok {
+            return false;
+        }
+    }
+    true
+}
+
 impl AbilityCost {
     /// CR 605.3a + CR 602.2b + CR 601.2g-h: Payability gate for ACTIVATED
     /// MANA ABILITIES specifically. Unlike [`is_payable`] (which defers mana
@@ -390,6 +494,31 @@ impl AbilityCost {
             }
             // Same {T}+TapCreatures source-exclusion logic as `is_payable`'s
             // Composite arm, but Mana sub-costs use the mana-specific check.
+            //
+            // EXCLUSION (fail closed): the mana-ability payment path resolves a
+            // chosen hand-discard through `find_non_self_discard`, which returns
+            // only the FIRST such leg, so a composite holding two or more of them
+            // would pay one discard and silently drop the rest (CR 601.2h forbids
+            // partial payment). Such a mana ability is therefore never offered;
+            // supporting it needs a multi-leg discard prompt in `mana_abilities`.
+            AbilityCost::Composite { costs }
+                if costs
+                    .iter()
+                    .filter(|c| {
+                        matches!(
+                            c,
+                            AbilityCost::Discard {
+                                selection: CardSelectionMode::Chosen,
+                                self_scope: DiscardSelfScope::FromHand,
+                                ..
+                            }
+                        )
+                    })
+                    .count()
+                    >= 2 =>
+            {
+                false
+            }
             AbilityCost::Composite { costs } => {
                 let has_tap = costs.iter().any(|c| matches!(c, AbilityCost::Tap));
                 costs.iter().all(|c| match c {
@@ -772,22 +901,13 @@ impl AbilityCost {
             // CR 601.2b: Reveal N matching cards requires them to exist in hand.
             // Filter-less reveal (self-reveal) is always payable — you can always
             // reveal the source spell you're casting.
-            AbilityCost::Reveal { count, filter } => {
-                let Some(p) = state.players.get(player.0 as usize) else {
-                    return false;
-                };
-                match filter {
-                    None => true,
-                    Some(f) => {
-                        let ctx = FilterContext::from_source(state, source);
-                        p.hand
-                            .iter()
-                            .filter(|&&id| matches_target_filter(state, id, f, &ctx))
-                            .count()
-                            >= *count as usize
-                    }
+            AbilityCost::Reveal { count, filter } => match filter {
+                None => true,
+                Some(f) => {
+                    super::casting::find_eligible_reveal_targets(state, player, source, f).len()
+                        >= *count as usize
                 }
-            }
+            },
             AbilityCost::Behold {
                 count,
                 filter,
@@ -821,7 +941,7 @@ impl AbilityCost {
                         has_enough_tap_creatures(state, player, source, requirement, filter, true)
                     }
                     other => other.is_payable_for_activation(state, player, source, ability_index),
-                })
+                }) && discard_legs_jointly_payable(state, player, source, costs)
             }
             // CR 118.12a: Disjunctive — payable if **any** sub-cost is
             // payable. The interactive choice is surfaced at resolution via
@@ -1115,7 +1235,11 @@ fn counter_on_object(
         return 0;
     };
     match kind {
-        crate::types::counter::CounterMatch::Any => obj.counters.values().copied().sum(),
+        // CR 122.1: exact total clamped to u32. The count feeds only "can remove
+        // at least N" availability checks, so clamping preserves every such answer.
+        crate::types::counter::CounterMatch::Any => {
+            u32::try_from(kind.count_in(&obj.counters)).unwrap_or(u32::MAX)
+        }
         crate::types::counter::CounterMatch::OfType(t) => obj.counters.get(t).copied().unwrap_or(0),
     }
 }
@@ -1501,6 +1625,132 @@ mod tests {
         // the single chosen creature, so one controlled creature suffices.
         assert!(AbilityCost::Blight { count: 2 }.is_payable(&scenario.state, P0, ObjectId(0)));
         assert!(AbilityCost::Blight { count: 3 }.is_payable(&scenario.state, P0, ObjectId(0)));
+    }
+
+    fn chosen_hand_discard(filter: Option<TargetFilter>) -> AbilityCost {
+        AbilityCost::Discard {
+            count: QuantityExpr::Fixed { value: 1 },
+            filter,
+            selection: CardSelectionMode::Chosen,
+            self_scope: DiscardSelfScope::FromHand,
+        }
+    }
+
+    fn island_filter() -> TargetFilter {
+        TargetFilter::Typed(TypedFilter::default().subtype("Island".to_string()))
+    }
+
+    /// Hand of (name, is_island) cards for `P0`, plus the source card id.
+    fn joint_discard_state(hand: &[bool]) -> (GameState, ObjectId) {
+        let mut scenario = GameScenario::new();
+        let source = scenario.add_card_to_hand(P0, "Source Spell");
+        for (i, &is_island) in hand.iter().enumerate() {
+            let id = scenario.add_card_to_hand(P0, &format!("Hand Card {i}"));
+            if is_island {
+                scenario
+                    .state
+                    .objects
+                    .get_mut(&id)
+                    .unwrap()
+                    .card_types
+                    .subtypes
+                    .push("Island".to_string());
+            }
+        }
+        (scenario.state, source)
+    }
+
+    /// CR 118.3 + CR 601.2h: one physical card cannot satisfy two discard legs.
+    #[test]
+    fn joint_discard_legs_need_distinct_cards() {
+        let legs = [
+            chosen_hand_discard(Some(island_filter())),
+            chosen_hand_discard(None),
+        ];
+        // Reach guard: an Island plus any other card pays both legs.
+        let (state, source) = joint_discard_state(&[true, false]);
+        assert!(discard_legs_jointly_payable(&state, P0, source, &legs));
+        // Hostile: the lone Island would have to serve both legs.
+        let (state, source) = joint_discard_state(&[true]);
+        assert!(!discard_legs_jointly_payable(&state, P0, source, &legs));
+        // Hostile: no Island at all.
+        let (state, source) = joint_discard_state(&[false, false]);
+        assert!(!discard_legs_jointly_payable(&state, P0, source, &legs));
+        // The source spell never counts as a card to discard.
+        let (state, source) = joint_discard_state(&[]);
+        assert!(!discard_legs_jointly_payable(&state, P0, source, &legs));
+    }
+
+    /// Payment is in printed order with free choice, so a less-restrictive leg
+    /// before a more-restrictive one fails closed (B3).
+    #[test]
+    fn joint_discard_legs_fail_closed_for_unsafe_order() {
+        let (state, source) = joint_discard_state(&[true, false]);
+        let typed_first = [
+            chosen_hand_discard(Some(island_filter())),
+            chosen_hand_discard(None),
+        ];
+        let any_first = [
+            chosen_hand_discard(None),
+            chosen_hand_discard(Some(island_filter())),
+        ];
+        assert!(discard_legs_jointly_payable(
+            &state,
+            P0,
+            source,
+            &typed_first
+        ));
+        assert!(!discard_legs_jointly_payable(
+            &state, P0, source, &any_first
+        ));
+        // With two Islands every choice sequence works in either order.
+        let (state, source) = joint_discard_state(&[true, true]);
+        assert!(discard_legs_jointly_payable(&state, P0, source, &any_first));
+    }
+
+    /// Legs the helper does not model (and a lone leg) keep their per-leg gate.
+    #[test]
+    fn joint_discard_helper_ignores_unmodeled_legs() {
+        let (state, source) = joint_discard_state(&[false]);
+        let random = AbilityCost::Discard {
+            count: QuantityExpr::Fixed { value: 1 },
+            filter: None,
+            selection: CardSelectionMode::Random,
+            self_scope: DiscardSelfScope::FromHand,
+        };
+        let legs = [random, chosen_hand_discard(None)];
+        assert!(discard_legs_jointly_payable(&state, P0, source, &legs));
+        assert!(discard_legs_jointly_payable(
+            &state,
+            P0,
+            source,
+            &[chosen_hand_discard(None)]
+        ));
+    }
+
+    /// Mana-ability exclusion (fail closed): the mana-ability payment path pays
+    /// only the first chosen hand-discard leg, so a composite with two such legs
+    /// is never offered, even when the hand could cover both.
+    ///
+    /// Reverting the exclusion arm flips the two-leg assertion to `true`.
+    #[test]
+    fn mana_ability_composite_with_two_discard_legs_is_not_offered() {
+        // Hand of three cards: every per-leg and joint check would pass.
+        let (state, source) = joint_discard_state(&[true, false, false]);
+        let two_legs = AbilityCost::Composite {
+            costs: vec![
+                chosen_hand_discard(Some(island_filter())),
+                chosen_hand_discard(None),
+            ],
+        };
+        let one_leg = AbilityCost::Composite {
+            costs: vec![chosen_hand_discard(Some(island_filter()))],
+        };
+        // Positive reach guard: a single chosen-discard leg is still offered.
+        assert!(one_leg.is_payable_for_mana_ability(&state, P0, source, 0));
+        assert!(!two_legs.is_payable_for_mana_ability(&state, P0, source, 0));
+        // The ordinary gate is unaffected by the mana-ability exclusion.
+        assert!(two_legs.is_payable(&state, P0, source));
     }
 
     #[test]

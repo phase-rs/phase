@@ -27,6 +27,11 @@ pub const MAX_PASSWORD_LEN: usize = 128;
 /// Max game-code length, in bytes. Codes are short server-issued handles; this
 /// is a generous ceiling that still rejects multi-kilobyte junk.
 pub const MAX_GAME_CODE_LEN: usize = 64;
+/// Exact length of every minted room code (`server_core::generate_game_code`,
+/// broker-wasm `WorkerEnv::new_game_code`, `generate_draft_code`) and hence of
+/// every caller-requested one. Distinct from [`MAX_GAME_CODE_LEN`], which is
+/// only a size ceiling on any inbound code field.
+pub const MINTED_GAME_CODE_LEN: usize = 6;
 /// Max length, in bytes, of opaque token/identifier fields (reservation tokens,
 /// host peer id, build commit, version strings).
 pub const MAX_TOKEN_LEN: usize = 128;
@@ -106,6 +111,27 @@ pub fn validate_optional_token(field: &str, value: Option<&str>, max: usize) -> 
     }
 }
 
+/// Validate a caller-requested room code against the minted shape: exactly
+/// [`MINTED_GAME_CODE_LEN`] characters of `A-Z` or `0-9`.
+///
+/// `""` is rejected on purpose, unlike [`validate_token`]'s empty-means-absent
+/// convention: a requested code is a claim, and silently minting a random code
+/// for an empty one would hide a client bug. A caller that wants no claim sends
+/// `None`.
+pub fn validate_requested_game_code(code: &str) -> Result<(), String> {
+    if code.len() == MINTED_GAME_CODE_LEN
+        && code
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "requested_code must be {MINTED_GAME_CODE_LEN} characters of A-Z or 0-9"
+        ))
+    }
+}
+
 pub struct CreateGameSettingsFields<'a> {
     pub display_name: &'a str,
     pub password: Option<&'a str>,
@@ -114,6 +140,7 @@ pub struct CreateGameSettingsFields<'a> {
     pub room_name: Option<&'a str>,
     pub host_peer_id: Option<&'a str>,
     pub draft_metadata: Option<&'a DraftLobbyMetadata>,
+    pub requested_code: Option<&'a str>,
 }
 
 pub fn validate_create_game_settings_fields(
@@ -123,6 +150,9 @@ pub fn validate_create_game_settings_fields(
     validate_optional_label("room_name", fields.room_name, MAX_ROOM_NAME_LEN)?;
     validate_optional_token("password", fields.password, MAX_PASSWORD_LEN)?;
     validate_optional_token("host_peer_id", fields.host_peer_id, MAX_TOKEN_LEN)?;
+    if let Some(code) = fields.requested_code {
+        validate_requested_game_code(code)?;
+    }
     if fields.player_count == 0 || fields.player_count > MAX_PLAYER_COUNT {
         return Err(format!(
             "player_count must be between 1 and {MAX_PLAYER_COUNT}"
@@ -417,6 +447,7 @@ pub fn validate_lobby_message(msg: &crate::protocol::LobbyClientMessage) -> Resu
             room_name,
             host_peer_id,
             draft_metadata,
+            requested_code,
             ..
         } => {
             validate_create_game_settings_fields(CreateGameSettingsFields {
@@ -427,6 +458,7 @@ pub fn validate_lobby_message(msg: &crate::protocol::LobbyClientMessage) -> Resu
                 room_name: room_name.as_deref(),
                 host_peer_id: host_peer_id.as_deref(),
                 draft_metadata: draft_metadata.as_ref(),
+                requested_code: requested_code.as_deref(),
             })?;
         }
         M::JoinGameWithPassword {
@@ -586,7 +618,7 @@ mod tests {
         serde_json::from_str(r#"{"main_deck":[]}"#).expect("deck fixture")
     }
 
-    fn create_with(display_name: &str) -> M {
+    fn create_with(display_name: &str, requested_code: Option<&str>) -> M {
         M::CreateGameWithSettings {
             deck: empty_deck(),
             display_name: display_name.to_string(),
@@ -601,6 +633,7 @@ mod tests {
             draft_metadata: None,
             start_when_full: true,
             ranked: false,
+            requested_code: requested_code.map(str::to_string),
         }
     }
 
@@ -651,17 +684,37 @@ mod tests {
 
     #[test]
     fn create_game_accepts_valid() {
-        assert!(validate_lobby_message(&create_with("Alice")).is_ok());
+        assert!(validate_lobby_message(&create_with("Alice", None)).is_ok());
+    }
+
+    #[test]
+    fn create_game_accepts_well_formed_requested_code() {
+        assert!(validate_lobby_message(&create_with("Alice", Some("AB12CD"))).is_ok());
+        assert!(validate_lobby_message(&create_with("Alice", None)).is_ok());
+    }
+
+    #[test]
+    fn create_game_rejects_malformed_requested_code() {
+        for bad in [
+            "ab12cd", "AB12C", "AB12CDE", "AB 12C", "AB-12C", "ÀB12CD", "",
+        ] {
+            let error = validate_lobby_message(&create_with("Alice", Some(bad)))
+                .expect_err(&format!("{bad:?} must be rejected"));
+            assert!(
+                error.contains("requested_code"),
+                "{bad:?}: refusal names the field: {error}"
+            );
+        }
     }
 
     #[test]
     fn create_game_rejects_oversized_display_name() {
-        assert!(validate_lobby_message(&create_with(&"a".repeat(21))).is_err());
+        assert!(validate_lobby_message(&create_with(&"a".repeat(21), None)).is_err());
     }
 
     #[test]
     fn create_game_rejects_oversized_password() {
-        let mut msg = create_with("Alice");
+        let mut msg = create_with("Alice", None);
         if let M::CreateGameWithSettings { password, .. } = &mut msg {
             *password = Some("p".repeat(MAX_PASSWORD_LEN + 1));
         }
@@ -670,7 +723,7 @@ mod tests {
 
     #[test]
     fn create_game_rejects_out_of_range_timer() {
-        let mut msg = create_with("Alice");
+        let mut msg = create_with("Alice", None);
         if let M::CreateGameWithSettings { timer_seconds, .. } = &mut msg {
             *timer_seconds = Some(MAX_TIMER_SECONDS + 1);
         }
@@ -679,7 +732,7 @@ mod tests {
 
     #[test]
     fn create_game_rejects_out_of_range_player_count() {
-        let mut msg = create_with("Alice");
+        let mut msg = create_with("Alice", None);
         if let M::CreateGameWithSettings { player_count, .. } = &mut msg {
             *player_count = MAX_PLAYER_COUNT + 1;
         }
@@ -688,7 +741,7 @@ mod tests {
 
     #[test]
     fn create_game_rejects_oversized_draft_metadata() {
-        let mut msg = create_with("Alice");
+        let mut msg = create_with("Alice", None);
         if let M::CreateGameWithSettings { draft_metadata, .. } = &mut msg {
             *draft_metadata = Some(DraftLobbyMetadata {
                 set_code: "a".repeat(MAX_DRAFT_SET_LABEL_LEN + 1),
@@ -762,7 +815,7 @@ mod tests {
 
     #[test]
     fn guard_rejects_oversized_main_deck() {
-        let mut msg = create_with("Alice");
+        let mut msg = create_with("Alice", None);
         if let M::CreateGameWithSettings { deck, .. } = &mut msg {
             deck.main_deck = vec!["Card".to_string(); MAX_MAIN_DECK_ENTRIES + 1];
         }
@@ -771,7 +824,7 @@ mod tests {
 
     #[test]
     fn guard_rejects_oversized_card_name_in_deck() {
-        let mut msg = create_with("Alice");
+        let mut msg = create_with("Alice", None);
         if let M::CreateGameWithSettings { deck, .. } = &mut msg {
             deck.main_deck = vec!["x".repeat(MAX_DECK_CARD_NAME_LEN + 1)];
         }
@@ -789,7 +842,7 @@ mod tests {
 
     #[test]
     fn guard_rejects_oversized_planar_deck() {
-        let mut msg = create_with("Alice");
+        let mut msg = create_with("Alice", None);
         if let M::CreateGameWithSettings { deck, .. } = &mut msg {
             deck.planar_deck = vec!["Plane".to_string(); MAX_PLANAR_DECK_ENTRIES + 1];
         }
@@ -809,7 +862,7 @@ mod tests {
 
     #[test]
     fn guard_rejects_oversized_scheme_deck() {
-        let mut msg = create_with("Alice");
+        let mut msg = create_with("Alice", None);
         if let M::CreateGameWithSettings { deck, .. } = &mut msg {
             deck.scheme_deck = vec!["Scheme".to_string(); MAX_SCHEME_DECK_ENTRIES + 1];
         }

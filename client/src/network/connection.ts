@@ -1,7 +1,7 @@
-import Peer from "peerjs";
 import { diagnosticIdFor, recordDiagnostic } from "../services/troubleshooting";
 import type { ConnectionDiagnosticError, ConnectionFailureSnapshot, PeerDiagnosticError, TurnCredentialFailure } from "../services/troubleshooting";
-import type { DataConnection, PeerConnectOption } from "peerjs";
+import { createPeer, peerTransportFactory } from "./transport";
+import type { PeerTransportFactory, TransportConnectOptions, TransportConnection, TransportPeer } from "./transport";
 
 /** Unambiguous characters -- no 0/O, 1/I/L confusion */
 const CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
@@ -62,7 +62,7 @@ export function stripPeerIdPrefix(peerId: string): string {
  * The options live on `PeerConnectOption`, not `PeerOptions`; the host adopts
  * whatever the dialing guest declares (verified at `peerjs/bundler.mjs:1597`).
  */
-export const PEER_CONNECT_OPTIONS: PeerConnectOption = {
+export const PEER_CONNECT_OPTIONS: TransportConnectOptions = {
   serialization: "binary",
   reliable: true,
 };
@@ -105,7 +105,8 @@ export const RECONNECT_DIAL_TIMEOUT_MS = 15_000;
 // Worker's /turn-credentials endpoint rather than hardcoded in the bundle —
 // previously static Metered credentials shipped in plaintext and could be
 // extracted to burn the relay quota.
-const TURN_CREDENTIALS_URL = "https://lobby.phase-rs.dev/turn-credentials";
+/** Build-time override for operators who mint TURN credentials themselves. */
+export const TURN_CREDENTIALS_URL = __TURN_CREDENTIALS_URL__;
 
 // Used when the credentials endpoint is unreachable or unconfigured. STUN-only:
 // direct and STUN-assisted connections still work; symmetric-NAT/CGNAT peers
@@ -197,20 +198,25 @@ export function safeConnectionError(error: unknown): ConnectionDiagnosticError {
   }
 }
 
-export function connectionFailureSnapshot(conn: DataConnection): ConnectionFailureSnapshot {
+export function connectionFailureSnapshot(conn: TransportConnection): ConnectionFailureSnapshot {
   return { connectionState: conn.peerConnection?.connectionState ?? null,
     iceState: conn.peerConnection?.iceConnectionState ?? null, channelState: conn.dataChannel?.readyState ?? null };
 }
 
 /** Observe the public emitter before registration, including failed registration. */
-function createObservedPeer(side: "Host" | "Guest", config: RTCConfiguration, id?: string): Peer {
+function createObservedPeer(
+  side: "Host" | "Guest",
+  config: RTCConfiguration,
+  id?: string,
+  transportFactory: PeerTransportFactory = peerTransportFactory,
+): TransportPeer {
   const identity = {};
   let peerDiagnosticId = diagnosticIdFor(identity);
   const record = (event: "created" | "open" | "disconnected" | "close" | "timeout" | "error" | "constructor-error", error?: PeerDiagnosticError) => {
     recordDiagnostic({ kind: "signaling", peerDiagnosticId, observedAt: Date.now(), side, event, ...(error ? { error } : {}) });
   };
-  let peer: Peer;
-  try { peer = id ? new Peer(id, { config }) : new Peer({ config }); }
+  let peer: TransportPeer;
+  try { peer = createPeer(id, { config }, transportFactory); }
   catch (error) { record("constructor-error", safePeerError(error)); throw error; }
   peerDiagnosticId = diagnosticIdFor(peer);
   record("created");
@@ -224,7 +230,7 @@ function createObservedPeer(side: "Host" | "Guest", config: RTCConfiguration, id
   return peer;
 }
 
-function observeConnectionAttempt(conn: DataConnection, direction: "incoming" | "outgoing", timeoutMs: number, peer: Peer, signal?: AbortSignal): void {
+function observeConnectionAttempt(conn: TransportConnection, direction: "incoming" | "outgoing", timeoutMs: number, peer: TransportPeer, signal?: AbortSignal): void {
   const diagnosticId = diagnosticIdFor(conn);
   const peerDiagnosticId = diagnosticIdFor(peer);
   const record = (event: "started" | "open" | "close" | "error" | "timeout" | "aborted", error?: ConnectionDiagnosticError) => recordDiagnostic({ kind: "connection-attempt", diagnosticId, peerDiagnosticId, observedAt: Date.now(), direction, event, ...(error ? { error } : {}), state: connectionFailureSnapshot(conn) });
@@ -256,7 +262,7 @@ function observeConnectionAttempt(conn: DataConnection, direction: "incoming" | 
 }
 
 /** Every outgoing connection uses the same ordering and serialization contract. */
-export function dialPeer(peer: Peer, peerId: string, timeoutMs: number, signal?: AbortSignal): DataConnection {
+export function dialPeer(peer: TransportPeer, peerId: string, timeoutMs: number, signal?: AbortSignal): TransportConnection {
   try {
     const conn = peer.connect(peerId, PEER_CONNECT_OPTIONS);
     if (!conn) throw new Error("Peer connection could not be created");
@@ -275,7 +281,7 @@ function traceP2P(side: "Host" | "Guest", event: string, data?: Record<string, u
 /** Restore signaling without tearing down established WebRTC connections.
  * PeerJS retains those connections on `disconnected`; `destroy()` does not.
  * Use its reconnect API with bounded backoff until recovery or owner teardown. */
-function maintainSignaling(peer: Peer): void {
+function maintainSignaling(peer: TransportPeer): void {
   let retryTimer: ReturnType<typeof setTimeout> | null = null;
   let retryDelay = 1000;
   const clearRetry = () => {
@@ -325,7 +331,7 @@ interface IceCandidateStats {
 // Minimal DataConnection surface we need — tests can supply mocks without
 // reconstructing the full RTCPeerConnection/DataConnection type hierarchy.
 export interface IceStatsSource {
-  peerConnection?: Pick<RTCPeerConnection, "getStats"> | undefined;
+  peerConnection?: Pick<RTCPeerConnection, "getStats"> | null | undefined;
 }
 
 export async function logSelectedIceCandidate(
@@ -374,7 +380,7 @@ export interface HostResult {
    * guest's PlayerId in scope at wrap time. Most callers should prefer
    * `onGuestConnected` instead — the `Peer` reference is for advanced cases.
    */
-  peer: Peer;
+  peer: TransportPeer;
   /**
    * Subscribe to incoming guest connections. Multi-fire: handler is called for
    * every new guest after their `DataConnection.open` event. Returns an
@@ -384,7 +390,7 @@ export interface HostResult {
    * responsible for wrapping it in a `PeerSession` (with its own
    * `onSessionEnd` callback) and tracking the per-guest lifecycle.
    */
-  onGuestConnected: (handler: (conn: DataConnection) => void) => () => void;
+  onGuestConnected: (handler: (conn: TransportConnection) => void) => () => void;
   /**
    * Tear down the shared `Peer`. Sole authoritative cleanup site for the
    * underlying signaling-server connection. Per-session disconnects must NOT
@@ -394,8 +400,8 @@ export interface HostResult {
 }
 
 export interface JoinResult {
-  conn: DataConnection;
-  peer: Peer;
+  conn: TransportConnection;
+  peer: TransportPeer;
   /** Close only the current `DataConnection` (e.g., user-initiated leave of one room while rejoining another). */
   closeConn: () => void;
   /** Tear down the entire `Peer`. Sole authoritative cleanup. Auto-reconnect must NOT call this. */
@@ -438,6 +444,8 @@ export interface HostRoomOptions {
    * token.
    */
   preferredRoomCode?: string;
+  /** Transport construction dependency for this host session. */
+  transportFactory?: PeerTransportFactory;
 }
 
 const UNAVAILABLE_ID_RETRY_BACKOFF_MS = [3_000, 3_000, 3_000];
@@ -457,7 +465,8 @@ async function openHostPeer(
   roomCode: string,
   allowUnavailableIdRetry: boolean,
   signal?: AbortSignal,
-): Promise<Peer> {
+  transportFactory: PeerTransportFactory = peerTransportFactory,
+): Promise<TransportPeer> {
   const maxAttempts = allowUnavailableIdRetry
     ? UNAVAILABLE_ID_RETRY_BACKOFF_MS.length + 1
     : 1;
@@ -469,7 +478,7 @@ async function openHostPeer(
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
 
-    const peer = createObservedPeer("Host", config, peerId);
+    const peer = createObservedPeer("Host", config, peerId, transportFactory);
     traceP2P("Host", "create-peer", { roomCode, peerId, attempt });
 
     try {
@@ -554,7 +563,7 @@ export async function hostRoom(
   const isResume = options.preferredRoomCode !== undefined;
 
   let destroyed = false;
-  const guestHandlers = new Set<(conn: DataConnection) => void>();
+  const guestHandlers = new Set<(conn: TransportConnection) => void>();
   // Connections that arrived after `peer.open` but before the adapter
   // subscribed via `onGuestConnected`. The adapter's construction is
   // interleaved with `await broker.registerHost()` + `await wasm.initialize()`
@@ -562,14 +571,14 @@ export async function hostRoom(
   // or a broker-lobby click) can open its `DataConnection` before any
   // handler exists. We hold those opened conns here and flush them on the
   // first subscribe so no inbound guest is silently dropped.
-  const pendingConns: DataConnection[] = [];
+  const pendingConns: TransportConnection[] = [];
 
   // Open the Peer, retrying on `unavailable-id` when resuming: the PeerJS
   // signaling server may still hold the previous registration for a few
   // seconds after the prior host's TCP drops. Only resume gets the retry
   // — fresh hosts generate random codes so the collision would be
   // unrecoverable anyway.
-  const peer = await openHostPeer(peerId, roomCode, isResume, signal);
+  const peer = await openHostPeer(peerId, roomCode, isResume, signal, options.transportFactory);
   maintainSignaling(peer);
   traceP2P("Host", "peer-open-final", { peerId, roomCode });
 
@@ -654,6 +663,7 @@ export async function joinRoom(
   code: string,
   signal?: AbortSignal,
   timeoutMs = JOIN_CONNECT_TIMEOUT_MS,
+  transportFactory: PeerTransportFactory = peerTransportFactory,
 ): Promise<JoinResult> {
   if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
   const config = await getPeerConfig();
@@ -662,7 +672,7 @@ export async function joinRoom(
       reject(new DOMException("Aborted", "AbortError"));
       return;
     }
-    const peer = createObservedPeer("Guest", config);
+    const peer = createObservedPeer("Guest", config, undefined, transportFactory);
     const peerId = PEER_ID_PREFIX + code;
     let opened = false;
     traceP2P("Guest", "create-peer", { code, peerId });

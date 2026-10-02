@@ -2,7 +2,9 @@ use crate::types::ability::{
     ControllerRef, FilterProp, ResolvedAbility, TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, StackEntry, StackEntryKind, TriggerSourceContext};
+use crate::types::game_state::{
+    DepartedStackSpell, GameState, StackEntry, StackEntryKind, TriggerSourceContext,
+};
 use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::keywords::{HexproofFilter, Keyword};
 use crate::types::player::PlayerId;
@@ -646,6 +648,63 @@ pub(crate) fn object_could_be_targeted_by_triggering_spell(
     })
 }
 
+/// CR 608.2h + CR 400.7: What a spell-cast trigger's "that spell" / self-cast
+/// "this spell" currently names, per [`triggering_spell`]. `Gone` is distinct
+/// from "no spell-cast event at all" (that case is `None` on the function's
+/// own return type) — it means the event names a spell with neither a live
+/// stack entry nor a departed-spell record.
+pub(crate) enum TriggeringSpell<'a> {
+    OnStack(&'a StackEntry),
+    Departed(&'a DepartedStackSpell),
+    Gone,
+}
+
+/// CR 608.2h + CR 400.7 + CR 601.2i: What a spell-cast trigger's "that spell"
+/// / self-cast "this spell" now names. `None` unless
+/// `state.current_trigger_event` is `GameEvent::SpellCast`; every consumer
+/// falls back to its own non-spell-cast path in that case. Layered like
+/// `triggering_spell_resolved_ability` beside it: live stack entry (at the
+/// pinned incarnation, when a pin exists) → the pinned or newest departed
+/// record → `Gone`.
+pub(crate) fn triggering_spell(state: &GameState) -> Option<TriggeringSpell<'_>> {
+    let GameEvent::SpellCast { object_id, .. } = state.current_trigger_event.as_ref()? else {
+        return None;
+    };
+    let object_id = *object_id;
+    // CR 601.2i: the pin bound when this trigger was put on the stack
+    // (`triggers.rs::triggering_spell_pin`), read from the resolving carrier
+    // — a flip branch (Krark) builds a fresh executing ability that does not
+    // itself carry the pin — and used only while it still names this event's
+    // spell.
+    let pin = state
+        .resolving_stack_entry
+        .as_ref()
+        .and_then(|entry| entry.ability())
+        .and_then(|ability| ability.context.triggering_spell)
+        .filter(|pin| pin.object_id == object_id);
+
+    let on_stack = state.objects.get(&object_id).is_some_and(|obj| {
+        obj.zone == Zone::Stack && pin.is_none_or(|pin| pin.incarnation == obj.incarnation)
+    });
+    if on_stack {
+        if let Some(entry) = state.stack.iter().rev().find(|entry| {
+            entry.id == object_id && matches!(entry.kind, StackEntryKind::Spell { .. })
+        }) {
+            return Some(TriggeringSpell::OnStack(entry));
+        }
+    }
+
+    let records = state.departed_stack_spells.get(&object_id);
+    let key = match pin {
+        Some(pin) => Some(pin.incarnation),
+        None => records.and_then(|records| records.keys().max().copied()),
+    };
+    match key.and_then(|key| records.and_then(|records| records.get(&key))) {
+        Some(record) => Some(TriggeringSpell::Departed(record)),
+        None => Some(TriggeringSpell::Gone),
+    }
+}
+
 /// CR 707.10a: Resolve the triggering spell's `ResolvedAbility` for legality
 /// checks. Prefer the live stack entry; fall back to `resolving_stack_entry`
 /// (spell mid-resolution) or reconstruct from the spell object when the stack
@@ -1003,13 +1062,13 @@ pub fn resolved_targets(
     {
         return ability.live_object_targets(state);
     }
-    // CR 608.2c: ParentTargetSlot needs the accumulated targets from the entire
-    // chain, not just the current ability's targets. During normal resolution
-    // the root stack entry has already been popped and is exposed through
-    // `resolving_stack_entry`; the live stack lookup covers target resolution
-    // before the entry is popped.
+    // CR 608.2c: ParentTargetSlot needs the accumulated targets from the slot
+    // base (`parent_slot_base`), not just the current ability's targets. During
+    // normal resolution the root stack entry has already been popped and is
+    // exposed through `resolving_stack_entry`; the live stack lookup covers
+    // target resolution before the entry is popped.
     if matches!(target_filter, TargetFilter::ParentTargetSlot { .. }) {
-        return parent_chain_targets_from_root(state, ability);
+        return super::ability_utils::declared_targets_in_chain(parent_slot_base(state, ability));
     }
     // CR 601.2c + CR 608.2b: Pre-selected targets take precedence over
     // event-context resolution when the player chose targets at activation/
@@ -1097,20 +1156,12 @@ fn chain_declares_chooseable_target_slots(ability: &ResolvedAbility) -> bool {
             .is_some_and(chain_declares_chooseable_target_slots)
 }
 
-/// CR 608.2c: The full flattened target chain from the resolving root stack
-/// entry, so a `ParentTargetSlot { index }` anaphor can index a specific earlier
-/// declared slot even after the current node's local `targets` were replaced by
-/// chain propagation (`resolve_chain_body`'s most-recent-parent clone). This is
-/// the single authority for the root-entry lookup — previously inlined in
-/// `resolved_targets` — reused by the counter resolver so the stack walk is not
-/// duplicated. During normal resolution the root stack entry has already been
-/// popped and is exposed through `resolving_stack_entry`; the live `stack`
-/// lookup covers target resolution before the entry is popped.
+/// CR 608.2c: Every declared target of the resolving chain, in slot order, for chain-wide readers.
 pub(crate) fn parent_chain_targets_from_root(
     state: &GameState,
     ability: &ResolvedAbility,
 ) -> Vec<TargetRef> {
-    super::ability_utils::flatten_targets_in_chain(resolving_root_ability(state, ability))
+    super::ability_utils::declared_targets_in_chain(resolving_root_ability(state, ability))
 }
 
 /// CR 608.2c: The root `ResolvedAbility` of the currently-resolving stack
@@ -1134,6 +1185,22 @@ pub(crate) fn resolving_root_ability<'a>(
         .unwrap_or(ability)
 }
 
+/// CR 700.2 + CR 700.2c + CR 608.2c: the node a `ParentTargetSlot` index counts from — the root of
+/// the mode now resolving (the parser numbers slots within one mode's text), else the chain root.
+fn parent_slot_base<'a>(state: &'a GameState, ability: &'a ResolvedAbility) -> &'a ResolvedAbility {
+    let root = resolving_root_ability(state, ability);
+    // `resolving_modal_instruction` outlives its resolution, so it names a mode only of the carrier's chain.
+    let Some(ordinal) = state
+        .resolving_modal_instruction
+        .filter(|_| resolution_carrier_entry(state, ability).is_some())
+    else {
+        return root;
+    };
+    std::iter::successors(Some(root), |node| node.sub_ability.as_deref())
+        .find(|node| node.modal_instruction_ordinal == Some(ordinal))
+        .unwrap_or(root)
+}
+
 /// Whether `entry` is the stack entry `ability` (a node of its chain) belongs to.
 fn entry_carries_ability(entry: &StackEntry, ability: &ResolvedAbility) -> bool {
     entry.id == ability.source_id || entry.source_id == ability.source_id
@@ -1150,7 +1217,7 @@ fn resolution_carrier_entry<'a>(
         .filter(|entry| entry_carries_ability(entry, ability))
 }
 
-/// CR 608.2c: The DECLARED target of slot `index` in the flattened chain root,
+/// CR 608.2c: The DECLARED target of slot `index`, counted from `parent_slot_base`,
 /// with no legality or pin check. `None` when the index is out of range. Only
 /// for reading the chain's declared shape (the dual-fighter recovery in
 /// `effects::fight`); a consumer that AFFECTS or MATCHES the referent must use
@@ -1160,13 +1227,13 @@ pub(crate) fn resolve_parent_slot_from_root(
     ability: &ResolvedAbility,
     index: usize,
 ) -> Option<TargetRef> {
-    parent_chain_targets_from_root(state, ability)
+    super::ability_utils::declared_targets_in_chain(parent_slot_base(state, ability))
         .into_iter()
         .nth(index)
 }
 
 /// CR 608.2c + CR 608.2b + CR 400.7 + CR 603.7c: Resolve the declared slot
-/// `index` from the flattened chain root, then drop it when
+/// `index`, counted from `parent_slot_base`, then drop it when
 /// - its target failed the legality check made as the chain began to resolve
 ///   (CR 608.2b: "Illegal targets, if any, won't be affected by parts of a
 ///   resolving spell's effect for which they're illegal"), read from the
@@ -1187,7 +1254,7 @@ pub(crate) fn resolve_parent_slot_from_root(
 /// `effects::resolve_player_for_context_ref`), slot conditions, filter
 /// matching, and every effect subject resolved by
 /// `effects::resolved_effect_object_ids`. Callers that still read
-/// `resolved_targets`' whole-chain return for a `ParentTargetSlot` filter
+/// `resolved_targets`' return for a `ParentTargetSlot` filter
 /// (first object or whole list) bypass it: destroy, bounce, sacrifice, counter,
 /// put-on-top-or-bottom, exchange control, pair with, change targets, the
 /// damage-replacement filters, gain control's give, and the
@@ -1201,7 +1268,15 @@ pub(crate) fn resolve_live_parent_slot_from_root(
 ) -> Option<TargetRef> {
     let illegal_at_resolution = resolution_carrier_entry(state, ability)
         .and_then(StackEntry::ability)
-        .is_some_and(|root| root.illegal_target_slots.contains(&index));
+        .is_some_and(|root| {
+            let base = parent_slot_base(state, ability);
+            // CR 608.2b: illegal targets won't be affected by parts of the effect for which they're illegal.
+            // The stamp, this offset and the slot reader all count declared
+            // slots (`declared_targets_in_chain` numbering), so an inheriting
+            // rider's carried snapshot never shifts a later slot.
+            let ahead = super::ability_utils::declared_slots_ahead_of(root, base);
+            root.illegal_target_slots.contains(&(ahead + index))
+        });
     if illegal_at_resolution {
         return None;
     }
@@ -1374,10 +1449,21 @@ pub(crate) fn resolved_object_ids_for_filter_with_context(
         }
         TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. } => {
             let effective_filter = resolve_tracked_set_sentinel(state, filter.clone());
-            state
-                .battlefield
-                .iter()
-                .copied()
+            let target_ids: Vec<ObjectId> = match &effective_filter {
+                TargetFilter::TrackedSet { id } => state
+                    .tracked_object_sets
+                    .get(id)
+                    .cloned()
+                    .unwrap_or_default(),
+                TargetFilter::TrackedSetFiltered { id, .. } => state
+                    .tracked_object_sets
+                    .get(id)
+                    .cloned()
+                    .unwrap_or_default(),
+                _ => state.battlefield.iter().copied().collect(),
+            };
+            target_ids
+                .into_iter()
                 .filter(|id| {
                     super::filter::matches_target_filter(state, *id, &effective_filter, ctx)
                 })
@@ -1605,15 +1691,26 @@ pub(crate) fn resolve_event_context_target_for_event_or_state(
             let controller = state.objects.get(&source_obj_id)?.controller;
             Some(TargetRef::Player(controller))
         }
-        // CR 108.3 + CR 608.2c: `ParentTargetOwner` mirrors `ParentTargetController`
-        // but returns the *owner* of the resolved object. When no trigger event
-        // supplies a source object (Enslave's phase trigger), fall back to the
-        // ability source's AttachedTo host — the Aura/Equipment context where
-        // "its owner" anaphorically refers to the equipped/enchanted permanent.
+        // CR 108.3 + CR 603.10a + CR 608.2c + CR 608.2h: `ParentTargetOwner`
+        // mirrors `ParentTargetController` but returns the *owner* of the
+        // resolved object. Zone-change triggers prefer the record/LKI owner,
+        // because the departing object may already be a new object by the time
+        // the ability resolves. When no trigger event supplies a source object
+        // (Enslave's phase trigger), fall back to the ability source's
+        // AttachedTo host — the Aura/Equipment context where "its owner"
+        // anaphorically refers to the equipped/enchanted permanent.
         TargetFilter::ParentTargetOwner => {
+            if let Some(GameEvent::ZoneChanged { record, .. }) = event {
+                return Some(TargetRef::Player(record.owner));
+            }
             if let Some(event) = event {
                 if let Some(source_obj_id) = extract_source_from_event(event) {
-                    if let Some(owner) = state.objects.get(&source_obj_id).map(|o| o.owner) {
+                    if let Some(owner) = state
+                        .objects
+                        .get(&source_obj_id)
+                        .map(|o| o.owner)
+                        .or_else(|| state.lki_cache.get(&source_obj_id).map(|lki| lki.owner))
+                    {
                         return Some(TargetRef::Player(owner));
                     }
                 }
@@ -1949,7 +2046,7 @@ pub(crate) fn extract_source_from_event(
         GameEvent::Evolved { object_id } => Some(*object_id),
         GameEvent::CounterRemoved { object_id, .. } => Some(*object_id),
         GameEvent::TokenCreated { object_id, .. } => Some(*object_id),
-        GameEvent::CreatureDestroyed { object_id } => Some(*object_id),
+        GameEvent::CreatureDestroyed { object_id, .. } => Some(*object_id),
         GameEvent::PermanentSacrificed { object_id, .. } => Some(*object_id),
         GameEvent::Unattached {
             old_target: TargetRef::Object(object_id),
@@ -2064,6 +2161,7 @@ pub(crate) fn extract_target_object_from_event(
         | GameEvent::SpellCast { .. }
         | GameEvent::Mutated { .. }
         | GameEvent::Augmented { .. }
+        | GameEvent::Melded { .. }
         | GameEvent::SpellCopied { .. }
         | GameEvent::XValueChosen { .. }
         | GameEvent::AbilityActivated { .. }
@@ -2149,6 +2247,7 @@ pub(crate) fn extract_target_object_from_event(
         | GameEvent::CityBlessingGained { .. }
         | GameEvent::EnduringStoryGained { .. }
         | GameEvent::DieRolled { .. }
+        | GameEvent::DieRollIgnored { .. }
         | GameEvent::StartingPlayerContest { .. }
         | GameEvent::CoinFlipped { .. }
         | GameEvent::RingTemptsYou { .. }
@@ -2400,6 +2499,14 @@ fn stack_entry_matches_filter_with_context(
             filter_targets_stack_abilities(filter)
                 && stack_ability_matches_filter(entry, filter, source_controller)
         }
+        // CR 112.1 + CR 113.3b: combat damage on the stack is neither a spell
+        // nor an ability, so no filter can name it — not as a target and not as
+        // a member of a non-targeting sweep. This arm is what forecloses the
+        // CR 608.2b mass-counter path (`effects::counter::resolve_all` reaches
+        // it through `stack_entry_matches_filter`), which has no other guard:
+        // that sweep's object lookup answers `false` for an entry with no
+        // `GameObject` rather than skipping it.
+        StackEntryKind::CombatDamage { .. } => false,
     }
 }
 
@@ -3223,6 +3330,7 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{Comparator, ContinuousModification, Duration, QuantityExpr};
     use crate::types::card_type::CoreType;
+    use crate::types::format::FormatConfig;
     use crate::types::game_state::{
         CastingVariant, DrainStatus, PostReplacementDrain, ResidentDrainPolicy,
     };
@@ -3594,6 +3702,34 @@ mod tests {
             ObjectId(999),
         );
         assert_eq!(result, Some(TargetRef::Player(PlayerId(1))));
+    }
+
+    #[test]
+    fn parent_target_owner_prefers_zone_change_record_owner() {
+        // CR 108.3 + CR 603.10a + CR 608.2h: leaves-the-battlefield owner
+        // anaphors read the zone-change record/LKI authority. The live object
+        // row is absent here on purpose; falling back to live object state (or
+        // to the ability controller) would return None or P1 instead of P0.
+        let mut state = GameState::new(FormatConfig::standard(), 3, 0);
+        let moved = ObjectId(77);
+        state.current_trigger_event = Some(GameEvent::ZoneChanged {
+            object_id: moved,
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            record: Box::new(crate::types::game_state::ZoneChangeRecord {
+                owner: PlayerId(0),
+                controller: PlayerId(1),
+                ..crate::types::game_state::ZoneChangeRecord::test_minimal(
+                    moved,
+                    Some(Zone::Battlefield),
+                    Zone::Graveyard,
+                )
+            }),
+        });
+
+        let result =
+            resolve_event_context_target(&state, &TargetFilter::ParentTargetOwner, ObjectId(999));
+        assert_eq!(result, Some(TargetRef::Player(PlayerId(0))));
     }
 
     #[test]
@@ -6860,6 +6996,149 @@ mod tests {
             resolve_live_parent_slot_from_root(&state, &body, 0),
             Some(first),
             "a stamp on a non-resolving stack entry is not a legality check"
+        );
+    }
+
+    /// CR 700.2c + CR 608.2c: while a chosen mode resolves, a slot index counts
+    /// from that mode's root; the legality stamp keeps whole-chain numbering.
+    #[test]
+    fn parent_slots_count_from_the_resolving_mode() {
+        let mut state = GameState::new_two_player(42);
+        let source = ObjectId(99);
+        let creature = TargetRef::Object(ObjectId(1));
+        let player = TargetRef::Player(PlayerId(1));
+        let target_only = |target: TargetRef, ordinal: Option<usize>| {
+            let mut node = ResolvedAbility::new(
+                crate::types::ability::Effect::TargetOnly {
+                    target: TargetFilter::Any,
+                },
+                vec![target],
+                source,
+                PlayerId(0),
+            );
+            node.modal_instruction_ordinal = ordinal;
+            node
+        };
+        let root = target_only(creature.clone(), Some(0))
+            .sub_ability(target_only(player.clone(), Some(1)));
+        let body = target_only(player.clone(), None);
+        state.resolving_stack_entry = Some(StackEntry {
+            id: ObjectId(500),
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: Box::new(root),
+            },
+        });
+
+        assert_eq!(
+            resolve_parent_slot_from_root(&state, &body, 0),
+            Some(creature.clone()),
+            "no mode resolving: slots count from the chain root"
+        );
+
+        state.resolving_modal_instruction = Some(1);
+        assert_eq!(
+            resolve_parent_slot_from_root(&state, &body, 0),
+            Some(player.clone())
+        );
+        assert_eq!(
+            resolved_targets(&body, &TargetFilter::ParentTargetSlot { index: 0 }, &state),
+            vec![player.clone()]
+        );
+
+        let set_illegal = |state: &mut GameState, slots: Vec<usize>| {
+            state
+                .resolving_stack_entry
+                .as_mut()
+                .and_then(StackEntry::ability_mut)
+                .unwrap()
+                .illegal_target_slots = slots;
+        };
+        set_illegal(&mut state, vec![0]);
+        assert_eq!(
+            resolve_live_parent_slot_from_root(&state, &body, 0),
+            Some(player.clone()),
+            "an illegal earlier mode's slot does not drop this mode's slot 0"
+        );
+        set_illegal(&mut state, vec![1]);
+        assert_eq!(
+            resolve_live_parent_slot_from_root(&state, &body, 0),
+            None,
+            "whole-chain slot 1 is this mode's slot 0"
+        );
+
+        let entry = state.resolving_stack_entry.take().unwrap();
+        state.stack.push_back(entry);
+        assert_eq!(
+            resolve_parent_slot_from_root(&state, &body, 0),
+            Some(creature),
+            "a leftover ordinal does not renumber a chain that is not resolving"
+        );
+    }
+
+    /// CR 608.2b: an earlier mode's else-branch targets are numbered after the
+    /// resolving mode's in the stamp, so they do not shift its slots.
+    #[test]
+    fn earlier_mode_else_targets_do_not_shift_the_resolving_mode_slots() {
+        let mut state = GameState::new_two_player(42);
+        let source = ObjectId(99);
+        let creature = TargetRef::Object(ObjectId(1));
+        let other = TargetRef::Object(ObjectId(3));
+        let player = TargetRef::Player(PlayerId(1));
+        let target_only = |target: TargetRef, ordinal: Option<usize>| {
+            let mut node = ResolvedAbility::new(
+                crate::types::ability::Effect::TargetOnly {
+                    target: TargetFilter::Any,
+                },
+                vec![target],
+                source,
+                PlayerId(0),
+            );
+            node.modal_instruction_ordinal = ordinal;
+            node
+        };
+        // Stamp numbering: [creature, player, other].
+        let root = target_only(creature, Some(0))
+            .else_ability(target_only(other, None))
+            .sub_ability(target_only(player.clone(), Some(1)));
+        let body = target_only(player.clone(), None);
+        state.resolving_stack_entry = Some(StackEntry {
+            id: ObjectId(500),
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: Box::new(root),
+            },
+        });
+        state.resolving_modal_instruction = Some(1);
+        assert_eq!(
+            resolve_parent_slot_from_root(&state, &body, 0),
+            Some(player.clone()),
+            "reach guard: this mode's declared slot 0 is the player"
+        );
+
+        let set_illegal = |state: &mut GameState, slots: Vec<usize>| {
+            state
+                .resolving_stack_entry
+                .as_mut()
+                .and_then(StackEntry::ability_mut)
+                .unwrap()
+                .illegal_target_slots = slots;
+        };
+        set_illegal(&mut state, vec![2]);
+        assert_eq!(
+            resolve_live_parent_slot_from_root(&state, &body, 0),
+            Some(player),
+            "an illegal else-branch target does not drop this mode's slot 0"
+        );
+        set_illegal(&mut state, vec![1]);
+        assert_eq!(
+            resolve_live_parent_slot_from_root(&state, &body, 0),
+            None,
+            "whole-chain slot 1 is this mode's slot 0"
         );
     }
 

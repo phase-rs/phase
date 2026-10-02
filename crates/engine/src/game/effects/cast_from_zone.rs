@@ -445,6 +445,7 @@ fn open_private_zone_cast_selection(
         enters_attacking: false,
         owner_library: false,
         track_exiled_by_source: false,
+        face_down_in_exile: crate::types::ability::ExileConcealment::Public,
         // CR 708.2a: cast-from-zone selection is not a face-down entry.
         face_down_profile: None,
         enter_with_counters: vec![],
@@ -904,15 +905,15 @@ pub fn resolve(
     // (Bring to Light, `target != source` but in the controller's own exile)
     // must reach this path.
     //
-    // FOLLOW-UP (#1520 twin): Rebound (CR 702.88a) is still a
-    // `LingeringPermission` driver because its recast permission legitimately
-    // needs `duration: Some(UntilEndOfTurn)` to prune on decline (see the
-    // `consuming_vapors_rebound` suite). A rebounding SORCERY recast at upkeep
-    // therefore still passes through the lingering path; whether it hits the
-    // sorcery-speed gate is tracked separately. Routing Rebound through
-    // `DuringResolution` would regress that durational-prune contract, so it is
-    // intentionally left on the permission path under the explicit `driver`
-    // signal rather than forced through during-resolution here.
+    // CR 702.88a + CR 608.2g: Rebound's next-upkeep recast offer (issue
+    // #6461) is a `DuringResolution` driver like Suspend's last-counter
+    // cast — the "you may cast this card from exile" instruction names no
+    // duration, so it executes AS the delayed trigger resolves. The
+    // `UntilEndOfTurn` lingering permission this used to grant let the
+    // recast happen at any later priority window, and left rebounding
+    // SORCERY recasts to face the sorcery-speed gate at upkeep; both are
+    // fixed by routing through this path (the CR 608.2g timing bypass is
+    // armed by the resolution-cast cleanup marker).
     //
     // Nashi/Jeleva-style "you may cast [other] exiled cards" (target != source,
     // `ExiledBySource` filter, or an `alt_ability_cost`) are also
@@ -2159,6 +2160,7 @@ fn record_lingering_permissions(
         constraint,
         duration,
         mana_spend_permission,
+        cast_cost_modifier,
     ) = match &ability.effect {
         Effect::CastFromZone {
             mode,
@@ -2168,6 +2170,7 @@ fn record_lingering_permissions(
             constraint,
             duration,
             mana_spend_permission,
+            cast_cost_modifier,
             ..
         } => (
             *mode,
@@ -2177,6 +2180,7 @@ fn record_lingering_permissions(
             constraint.clone(),
             duration.clone(),
             *mana_spend_permission,
+            cast_cost_modifier.clone(),
         ),
         _ => return Err(EffectError::MissingParam("CastFromZone".to_string())),
     };
@@ -2286,6 +2290,10 @@ fn record_lingering_permissions(
                     // unenforceable (Nashi, Moon Sage's Scion — the card that
                     // reaches this variant today).
                     source_id: Some(ability.source_id),
+                    // CR 601.2f + CR 118.9d: "Spells you cast this way cost {N}
+                    // less/more to cast" applies to the total cost even when
+                    // that total is built from a non-mana alternative cost.
+                    cast_cost_modifier: cast_cost_modifier.clone(),
                 }
             } else {
                 let cost = if without_paying {
@@ -2309,10 +2317,9 @@ fn record_lingering_permissions(
                     granted_to,
                     resolution_cleanup: None,
                     // CR 611.2a: continuous-effect duration plumbing.
-                    // CR 702.88a: Rebound's upkeep recast permission expires.
                     // Forward `duration` from the `Effect::CastFromZone` so
-                    // durational grants (Rebound's `UntilEndOfTurn` upkeep
-                    // recast offer) are pruned at the correct boundary.
+                    // durational grants (Emry-class "you may cast that card
+                    // this turn" offers) are pruned at the correct boundary.
                     // `None` (the common case) preserves the standing
                     // semantics used by Discover, Suspend, Nashi, etc., whose
                     // cards are exiled and stay castable until they leave exile
@@ -2340,8 +2347,14 @@ fn record_lingering_permissions(
                     // that spell" (Quistis Trepe, Tinybones the Pickpocket) onto
                     // the grant so the concession is scoped to this specific
                     // cast, read at payment by
-                    // `player_can_spend_as_any_color_for_optional_spell`.
+                    // `player_mana_spend_permission_for_optional_spell`.
                     mana_spend_permission,
+                    // CR 601.2f: "Spells you cast this way cost {N} less to
+                    // cast" (Urianger Augurelt) — stamped onto the CAST
+                    // authority this grant creates, so the elected permission
+                    // prices the cast. CR 305.1 keeps it off the land-play
+                    // companion built below.
+                    cast_cost_modifier: cast_cost_modifier.clone(),
                 }
             };
             // CR 611.2b: a host-bound lifetime must be evaluated once now —
@@ -2396,7 +2409,13 @@ fn record_lingering_permissions(
                     card_filter: None,
                     single_use_group: None,
                     single_use: false,
-                    cast_cost_raise: None,
+                    // CR 305.1: a land is played as a special action and "is
+                    // never a spell", so the "Spells you cast this way cost {N}
+                    // less to cast" rider carried by this same `CastFromZone`
+                    // must NOT reach the land-play half of the grant. Held at
+                    // `None` deliberately, not by omission — the cast half above
+                    // is the only carrier.
+                    cast_cost_modifier: None,
                     alt_ability_cost: None,
                     land_enter_tapped: EtbTapState::Unspecified,
                 };
@@ -2645,6 +2664,7 @@ mod tests {
                     driver: CastFromZoneDriver::LingeringPermission,
                     mana_spend_permission: None,
                     additional_cost: None,
+                    cast_cost_modifier: None,
                 },
                 vec![],
                 source,
@@ -2860,6 +2880,7 @@ mod tests {
                 driver: CastFromZoneDriver::DuringResolution,
                 mana_spend_permission: None,
                 additional_cost: None,
+                cast_cost_modifier: None,
             },
             vec![],
             source,
@@ -2901,6 +2922,7 @@ mod tests {
                 driver: CastFromZoneDriver::DuringResolution,
                 mana_spend_permission: None,
                 additional_cost: None,
+                cast_cost_modifier: None,
             },
             vec![],
             source,
@@ -3158,6 +3180,7 @@ mod tests {
                 driver: CastFromZoneDriver::LingeringPermission,
                 mana_spend_permission: None,
                 additional_cost: None,
+                cast_cost_modifier: None,
             },
             vec![],
             source,
@@ -3265,6 +3288,7 @@ mod tests {
                 driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
                 mana_spend_permission: None,
                 additional_cost: None,
+                cast_cost_modifier: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(999),
@@ -3327,6 +3351,7 @@ mod tests {
                 driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
                 mana_spend_permission: None,
                 additional_cost: None,
+                cast_cost_modifier: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(999),
@@ -3375,6 +3400,7 @@ mod tests {
                 driver: CastFromZoneDriver::LingeringPermission,
                 mana_spend_permission: None,
                 additional_cost: None,
+                cast_cost_modifier: None,
             },
             vec![],
             ObjectId(999),
@@ -3481,6 +3507,7 @@ mod tests {
                 driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
                 mana_spend_permission: None,
                 additional_cost: None,
+                cast_cost_modifier: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(999),
@@ -3534,6 +3561,7 @@ mod tests {
                 driver: CastFromZoneDriver::LingeringPermission,
                 mana_spend_permission: None,
                 additional_cost: None,
+                cast_cost_modifier: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(999),
@@ -3609,6 +3637,7 @@ mod tests {
                 driver: CastFromZoneDriver::LingeringPermission,
                 mana_spend_permission: None,
                 additional_cost: None,
+                cast_cost_modifier: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(999),
@@ -3686,6 +3715,7 @@ mod tests {
                 driver: crate::types::ability::CastFromZoneDriver::DuringResolution,
                 mana_spend_permission: None,
                 additional_cost: None,
+                cast_cost_modifier: None,
             },
             vec![TargetRef::Object(suspended)],
             suspended,
@@ -3797,6 +3827,7 @@ mod tests {
                 driver: CastFromZoneDriver::DuringResolution,
                 mana_spend_permission: None,
                 additional_cost: None,
+                cast_cost_modifier: None,
             },
             vec![TargetRef::Object(copy_id)],
             scepter_id,
@@ -3909,6 +3940,7 @@ mod tests {
                 driver: CastFromZoneDriver::DuringResolution,
                 mana_spend_permission: None,
                 additional_cost: None,
+                cast_cost_modifier: None,
             },
             vec![TargetRef::Object(copy_id)],
             ObjectId(68_656),
@@ -3995,6 +4027,7 @@ mod tests {
                 driver: CastFromZoneDriver::DuringResolution,
                 mana_spend_permission: None,
                 additional_cost: None,
+                cast_cost_modifier: None,
             },
             vec![], // empty — the bug: source is the card to cast, not a named target
             siege_id,
@@ -4067,6 +4100,7 @@ mod tests {
                 driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
                 mana_spend_permission: None,
                 additional_cost: None,
+                cast_cost_modifier: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(999),
@@ -4110,6 +4144,7 @@ mod tests {
                 driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
                 mana_spend_permission: None,
                 additional_cost: None,
+                cast_cost_modifier: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(999),
@@ -4145,6 +4180,7 @@ mod tests {
                 driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
                 mana_spend_permission: None,
                 additional_cost: None,
+                cast_cost_modifier: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(999),
@@ -4216,6 +4252,7 @@ mod tests {
                 driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
                 mana_spend_permission: None,
                 additional_cost: None,
+                cast_cost_modifier: None,
             },
             vec![],
             source,
@@ -4280,6 +4317,7 @@ mod tests {
                 },
                 mana_spend_permission: None,
                 additional_cost: None,
+                cast_cost_modifier: None,
             },
             vec![TargetRef::Object(stale), TargetRef::Object(current)],
             source,
@@ -4354,6 +4392,7 @@ mod tests {
                 driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
                 mana_spend_permission: None,
                 additional_cost: None,
+                cast_cost_modifier: None,
             },
             vec![],
             source,
@@ -4569,6 +4608,7 @@ mod tests {
                 driver: CastFromZoneDriver::DuringResolution,
                 mana_spend_permission: None,
                 additional_cost: None,
+                cast_cost_modifier: None,
             },
             vec![],
             ObjectId(999),
@@ -4654,6 +4694,7 @@ mod tests {
                 driver: CastFromZoneDriver::DuringResolution,
                 mana_spend_permission: None,
                 additional_cost: None,
+                cast_cost_modifier: None,
             },
             vec![],
             ObjectId(999),
@@ -4886,6 +4927,7 @@ mod tests {
                 driver: CastFromZoneDriver::LingeringPermission,
                 mana_spend_permission: None,
                 additional_cost: None,
+                cast_cost_modifier: None,
             },
             vec![],
             ObjectId(999),
@@ -4948,6 +4990,7 @@ mod tests {
                 driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
                 mana_spend_permission: None,
                 additional_cost: None,
+                cast_cost_modifier: None,
             },
             vec![],
             ObjectId(999),
@@ -4989,6 +5032,7 @@ mod tests {
                 driver: CastFromZoneDriver::LingeringPermission,
                 mana_spend_permission: None,
                 additional_cost: None,
+                cast_cost_modifier: None,
             },
             vec![TargetRef::Object(instant)],
             ObjectId(999),
@@ -5054,6 +5098,7 @@ mod tests {
                 driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
                 mana_spend_permission: None,
                 additional_cost: None,
+                cast_cost_modifier: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(999),

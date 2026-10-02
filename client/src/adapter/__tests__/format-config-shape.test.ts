@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   isCustomFormatRulesShape,
   isFormatConfigShape,
+  rehydrateExperimentalDungeons,
 } from "../format-config-shape";
 import type { CustomFormatRules, FormatConfig } from "../types";
 
@@ -30,6 +31,7 @@ function builtInConfig(): FormatConfig {
     sideboard_policy: { type: "Forbidden" },
     default_deck_copy_limit: { type: "UpTo", data: 1 },
     allow_debug_actions: false,
+    allow_experimental_dungeons: false,
   };
 }
 
@@ -85,6 +87,7 @@ function customConfig(id = 0): FormatConfig {
     sideboard_policy: { type: "Limited", data: 15 },
     default_deck_copy_limit: { type: "UpTo", data: 4 },
     allow_debug_actions: false,
+    allow_experimental_dungeons: false,
     custom_rules: customRules(id),
   };
 }
@@ -263,6 +266,26 @@ describe("isCustomFormatRulesShape", () => {
     ).toBe(false);
   });
 
+  it("accepts an Enabled command zone with FreeformAnyCastableCard", () => {
+    // Paired with the "Bogus" rejection above so each is non-vacuous: this
+    // asserts an accept where that one asserts a reject for the same shape.
+    const rules = customRules();
+    expect(
+      isCustomFormatRulesShape({
+        ...rules,
+        structural: {
+          ...rules.structural,
+          command_zone_mode: {
+            Enabled: {
+              commander_damage_threshold: 21,
+              eligibility_rule: "FreeformAnyCastableCard",
+            },
+          },
+        },
+      }),
+    ).toBe(true);
+  });
+
   it("distinguishes a null legal_sets from a missing one", () => {
     const rules = customRules();
     // `null` means unrestricted — legal, and NOT the same claim as [].
@@ -365,5 +388,39 @@ describe("isCustomFormatRulesShape", () => {
         },
       }),
     ).toBe(false);
+  });
+});
+
+describe("rehydrateExperimentalDungeons", () => {
+  it("passes current payloads through by reference", () => {
+    const config = builtInConfig();
+    expect(rehydrateExperimentalDungeons(config)).toBe(config);
+  });
+
+  it("fills a missing flag with false", () => {
+    const { allow_experimental_dungeons: _dropped, ...legacy } =
+      builtInConfig();
+    expect(legacy).not.toHaveProperty("allow_experimental_dungeons");
+    const filled = rehydrateExperimentalDungeons(legacy);
+    expect(filled).toEqual(
+      expect.objectContaining({ allow_experimental_dungeons: false }),
+    );
+    // ...which is exactly what the shape guard needs to accept it.
+    expect(isFormatConfigShape(filled)).toBe(true);
+  });
+
+  it("resets a corrupt flag to false rather than passing it through", () => {
+    const filled = rehydrateExperimentalDungeons({
+      ...builtInConfig(),
+      allow_experimental_dungeons: "yes",
+    });
+    expect(filled).toEqual(
+      expect.objectContaining({ allow_experimental_dungeons: false }),
+    );
+  });
+
+  it("leaves non-records untouched", () => {
+    expect(rehydrateExperimentalDungeons(null)).toBeNull();
+    expect(rehydrateExperimentalDungeons(42)).toBe(42);
   });
 });

@@ -307,7 +307,7 @@ fn combine_card_with_host(
         zones::absorb_component(state, augment_id, Some(zone));
     }
 
-    let Some((values, display_source, printed_ref, token_image_ref)) =
+    let Some((values, display_source, printed_ref, token_image_ref, token_art)) =
         merged_copiable_values(state, augment_id, host_id)
     else {
         return;
@@ -339,6 +339,7 @@ fn combine_card_with_host(
         display_source,
         printed_ref,
         token_image_ref,
+        token_art,
     );
     events.push(GameEvent::Augmented {
         merged_id: host_id,
@@ -347,6 +348,7 @@ fn combine_card_with_host(
     });
 }
 
+#[allow(clippy::type_complexity)]
 fn merged_copiable_values(
     state: &GameState,
     augment_id: ObjectId,
@@ -356,6 +358,7 @@ fn merged_copiable_values(
     DisplaySource,
     Option<PrintedCardRef>,
     Option<TokenImageRef>,
+    Option<crate::types::card::TokenArtDescriptor>,
 )> {
     let augment = state.objects.get(&augment_id)?;
     let host = state.objects.get(&host_id)?;
@@ -410,6 +413,7 @@ fn merged_copiable_values(
         host.display_source,
         host.printed_ref.clone(),
         host.token_image_ref.clone(),
+        host.token_art.clone(),
     ))
 }
 

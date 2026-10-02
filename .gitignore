@@ -31,6 +31,7 @@ client/src/wasm/*.wasm.d.ts
 # Build output
 client/dist/
 client/bootstrap/dist/
+client/storybook-static/
 
 # Locally-generated SSL certs (./scripts/setup-ssl.sh) — per-machine, never committed.
 certs/
@@ -139,5 +140,3 @@ triage/dashboard.md
 # Changelog backfill drafts — review staging only, never committed. The
 # canonical changelog lives at client/public/changelog.json.
 scripts/changelog/backfill-drafts.json
-
-graphify-out/

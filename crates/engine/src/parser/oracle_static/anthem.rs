@@ -481,10 +481,9 @@ pub(crate) fn parse_subject_additive_type_static(text: &str) -> Option<StaticDef
     if let Some((before_cond, after_cond)) = predicate_tp.split_around(" as long as ") {
         let modifications = parse_additive_type_clause_modifications(before_cond.original)?;
         let condition_text = after_cond.original.trim().trim_end_matches('.');
-        let condition =
-            parse_static_condition(condition_text).unwrap_or(StaticCondition::Unrecognized {
-                text: condition_text.to_string(),
-            });
+        let condition = parse_static_condition(condition_text).unwrap_or_else(|| {
+            unparsed_gate_condition(condition_text, ConditionGatePolarity::Positive)
+        });
         return Some(
             StaticDefinition::continuous()
                 .affected(affected)
@@ -668,10 +667,9 @@ pub(crate) fn parse_conditional_static(text: &str) -> Option<StaticDefinition> {
     let conditional = text.strip_prefix("As long as ")?; // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
     let (condition_text, remainder) = conditional.split_once(", ")?; // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
 
-    let condition =
-        parse_static_condition(condition_text).unwrap_or(StaticCondition::Unrecognized {
-            text: condition_text.to_string(),
-        });
+    let condition = parse_static_condition(condition_text).unwrap_or_else(|| {
+        unparsed_gate_condition(condition_text, ConditionGatePolarity::Positive)
+    });
 
     let mut def = parse_static_line(remainder.trim())?;
     // CR 611.3a + CR 118.12a: When the inner static already carries a typed
@@ -891,7 +889,8 @@ pub(crate) fn parse_typed_you_control_subject_filter(
 ///    enchanted/equipped creature) the pronoun is not the source.
 /// 2. Only the bare source-STATE predicates that `~ is …` already resolves to a
 ///    typed condition are rewritten. The list below is the WHOLE list and must
-///    stay in lockstep with the `matches!` arms in the body:
+///    stay in lockstep with the `tag`s in `parse_self_pronoun_rewrite` below,
+///    which is the single combinator implementing every arm:
 ///    "tapped" / "untapped", their combat-state siblings "attacking" /
 ///    "blocking" / "blocked" and the compound "attacking or blocking" (which
 ///    `~ is …` lowers to `Or([SourceIsAttacking, SourceIsBlocking])`)
@@ -906,6 +905,8 @@ pub(crate) fn parse_typed_you_control_subject_filter(
 ///    left untouched. The match is EXACT, so "it's attacking alone" keeps its
 ///    trailing word and falls through to `SourceAttackingAlone` rather than
 ///    collapsing to `SourceIsAttacking`.
+///    The same exact-tail treatment covers the combat-history form "it attacked
+///    this turn" (CR 508.1a, Agent Frank Horrigan) handled below.
 ///
 /// STANDING CONSTRAINT on guard #1. Its premise ("the caller only applies this
 /// when the affected subject is SelfRef, therefore `it` names the source") has
@@ -919,48 +920,86 @@ pub(crate) fn parse_typed_you_control_subject_filter(
 /// census of SelfRef-affected statics whose description begins
 /// "Enchanted|Equipped creature".
 ///
-/// Returns the condition unchanged when neither guard matches.
+/// Returns the condition unchanged when no arm of `parse_self_pronoun_rewrite`
+/// matches.
 pub(crate) fn rewrite_self_pronoun_subject(condition: &str) -> String {
     let lower = condition.to_lowercase();
-    if let Some(rest) =
-        nom_tag_lower(&lower, &lower, "it's ").or_else(|| nom_tag_lower(&lower, &lower, "it is "))
-    {
+    // The combinator reads the lowercase text and emits only canonical
+    // lowercase templating, so no original-case remainder has to be mapped back.
+    nom_parse_lower(&lower, parse_self_pronoun_rewrite).unwrap_or_else(|| condition.to_string())
+}
+
+/// The EXACT-tail contract shared by every arm of `parse_self_pronoun_rewrite`,
+/// as a combinator: the tag must consume the whole remaining condition, so a
+/// trailing word survives instead of being silently dropped ("it's attacking
+/// alone" keeps "alone" and falls through to `SourceAttackingAlone`; "it's
+/// enchanted by two Auras" and "it's modified creature" never reach the arm).
+/// `space0` before `eof` preserves the tolerance the previous `rest.trim()`
+/// had; both production callers already hand this function trimmed, single-line
+/// text. Anchoring each tag individually (rather than wrapping the `alt`) is
+/// what makes the alternatives order-independent, since nom does not backtrack
+/// into an `alt` once a following combinator in the same sequence fails.
+fn exact_tail<'a>(tail: &'static str) -> impl FnMut(&'a str) -> OracleResult<'a, &'a str> {
+    move |input| terminated(tag(tail), (space0, eof)).parse(input)
+}
+
+/// CR 611.3a: the ONE combinator behind `rewrite_self_pronoun_subject` — the
+/// whole closed list of bound-pronoun subjects, in the three grammatical forms
+/// the doc comment on that function enumerates. Runs on lowercase text and
+/// emits the canonical `~ …` templating the context-free grammar
+/// (`oracle_nom::condition`) already types.
+fn parse_self_pronoun_rewrite(input: &str) -> OracleResult<'_, String> {
+    alt((
         // CR 508.1k / CR 509.1g / CR 509.1h: combat-state pronoun siblings of the
         // tapped/untapped rewrite. CR 700.9: "modified" is the self-state sibling
         // for "it's modified" (Obstinate Gargoyle, Skyward Spider). CR 301.5a:
         // "equipped"; CR 303.4b: "enchanted" — self-state predicates for SelfRef
         // statics (Merry "as long as it's equipped"; Fledgling Osprey "as long as
-        // it's enchanted"). Exact-match only — "attacking alone" keeps its trailing
-        // word and is left for SourceAttackingAlone; "modified creature" and
-        // "enchanted by N Auras" keep their trailing words and never hit this arm.
-        if matches!(
-            rest.trim(),
-            "tapped"
-                | "untapped"
-                | "attacking"
-                | "blocking"
-                | "blocked"
-                | "attacking or blocking"
-                | "modified"
-                | "equipped"
-                | "enchanted"
-        ) {
-            return format!("~ is {}", rest.trim());
-        }
-    }
-    // CR 400.7: the non-contraction "it <verb>" self-state form — "it entered
-    // this turn" / "it entered the battlefield this turn" (Crew Captain's
-    // indestructible gate, Drownyard Behemoth's / Thrasta's / Zurgo and
-    // Ojutai's hexproof gate). Strip the bound-pronoun subject and re-emit the
-    // canonical "~ entered …" templating the context-free grammar resolves to
-    // SourceEnteredThisTurn. Exact match on the tail; only reached on the
-    // SelfRef path, so the attached-subject "it" stays an honest gap.
-    if let Some(rest) = nom_tag_lower(&lower, &lower, "it entered ") {
-        if matches!(rest.trim(), "this turn" | "the battlefield this turn") {
-            return format!("~ entered {}", rest.trim());
-        }
-    }
-    condition.to_string()
+        // it's enchanted").
+        map(
+            preceded(
+                (alt((tag("it's "), tag("it is "))), space0),
+                alt((
+                    exact_tail("tapped"),
+                    exact_tail("untapped"),
+                    exact_tail("attacking"),
+                    exact_tail("blocking"),
+                    exact_tail("blocked"),
+                    exact_tail("attacking or blocking"),
+                    exact_tail("modified"),
+                    exact_tail("equipped"),
+                    exact_tail("enchanted"),
+                )),
+            ),
+            |state: &str| format!("~ is {state}"),
+        ),
+        // CR 400.7: the non-contraction "it <verb>" self-state form — "it entered
+        // this turn" / "it entered the battlefield this turn" (Crew Captain's
+        // indestructible gate, Drownyard Behemoth's / Thrasta's / Zurgo and
+        // Ojutai's hexproof gate). Strip the bound-pronoun subject and re-emit the
+        // canonical "~ entered …" the grammar resolves to SourceEnteredThisTurn.
+        map(
+            preceded(
+                (tag("it entered "), space0),
+                alt((
+                    exact_tail("this turn"),
+                    exact_tail("the battlefield this turn"),
+                )),
+            ),
+            |tail: &str| format!("~ entered {tail}"),
+        ),
+        // CR 508.1a: "it attacked this turn" — the combat-history sibling of the
+        // "it entered …" arm above (Agent Frank Horrigan's indestructible gate,
+        // The Lunar Whale's play-from-top gate). Same SelfRef-only bound-pronoun
+        // contract: re-emit the canonical "~ attacked this turn" the grammar types
+        // as `SourceMatchesFilter(AttackedThisTurn)`. "this combat" is not modeled
+        // (no combat-scoped tracking), and the `eof` anchor is what refuses it.
+        map(
+            preceded((tag("it attacked "), space0), exact_tail("this turn")),
+            |tail: &str| format!("~ attacked {tail}"),
+        ),
+    ))
+    .parse(input)
 }
 
 pub(crate) fn parse_continuous_gets_has(
@@ -990,8 +1029,8 @@ pub(crate) fn parse_continuous_gets_has(
             // decision has ONE authority — `parse_affected_scoped_static_condition`
             // (shared.rs) — shared with the "as long as"/"unless"/"if" gate parsers.
             let typed = parse_affected_scoped_static_condition(condition_text, Some(&affected));
-            let condition = typed.unwrap_or(StaticCondition::Unrecognized {
-                text: condition_text.to_string(),
+            let condition = typed.unwrap_or_else(|| {
+                unparsed_gate_condition(condition_text, ConditionGatePolarity::Positive)
             });
             def.condition = Some(condition);
             return Some(def);
@@ -1612,5 +1651,127 @@ mod l02_bb5_leading_condition_peel_tests {
             parse_compound_turn_counter_animation(&kaito.to_lowercase(), kaito).is_some(),
             "parse_compound_turn_counter_animation must still handle Kaito's animation"
         );
+    }
+}
+
+#[cfg(test)]
+mod rewrite_self_pronoun_subject_tests {
+    use super::*;
+
+    /// The whole closed list the function's doc comment enumerates, pinned arm by
+    /// arm so the single `parse_self_pronoun_rewrite` combinator cannot silently
+    /// widen or narrow it. Every entry here was accepted by the three literal-tail
+    /// `matches!` arms this combinator replaced, and the outputs are byte-identical.
+    #[test]
+    fn rewrite_self_pronoun_accepts_every_closed_list_arm() {
+        // CR 508.1k / 509.1g / 509.1h / 700.9 / 301.5a / 303.4b: the nine bare
+        // source-STATE predicates, in both the contraction and the "it is" form.
+        for state in [
+            "tapped",
+            "untapped",
+            "attacking",
+            "blocking",
+            "blocked",
+            "attacking or blocking",
+            "modified",
+            "equipped",
+            "enchanted",
+        ] {
+            let expected = format!("~ is {state}");
+            for subject in ["it's", "it is"] {
+                let input = format!("{subject} {state}");
+                assert_eq!(
+                    rewrite_self_pronoun_subject(&input),
+                    expected,
+                    "{input:?} must normalize to the canonical source-state form"
+                );
+            }
+            // Same phrase with an uppercase printed subject: the rewrite reads
+            // lowercase and emits canonical lowercase templating.
+            assert_eq!(
+                rewrite_self_pronoun_subject(&format!("It's {state}")),
+                expected
+            );
+        }
+        // CR 400.7: both "it entered …" tails.
+        assert_eq!(
+            rewrite_self_pronoun_subject("it entered this turn"),
+            "~ entered this turn"
+        );
+        assert_eq!(
+            rewrite_self_pronoun_subject("it entered the battlefield this turn"),
+            "~ entered the battlefield this turn"
+        );
+        // CR 508.1a: the combat-history arm.
+        assert_eq!(
+            rewrite_self_pronoun_subject("it attacked this turn"),
+            "~ attacked this turn"
+        );
+    }
+
+    /// The `terminated(tag(..), eof)` anchor is the whole exact-tail contract: a
+    /// trailing word must survive for a later parse path instead of collapsing
+    /// into the canonical form, and an off-list predicate must pass through
+    /// untouched (the Hobble standing constraint in the doc comment).
+    #[test]
+    fn rewrite_self_pronoun_leaves_inexact_tails_alone() {
+        // Positive reach guard: the rewrite itself is live, so the identity
+        // assertions below cannot pass because the function stopped rewriting.
+        assert_eq!(rewrite_self_pronoun_subject("it's tapped"), "~ is tapped");
+        for untouched in [
+            // Trailing words that belong to other parse paths.
+            "it's attacking alone",
+            "it's blocking a creature",
+            "it's modified creature",
+            "it's enchanted by two Auras",
+            "it's equipped by an Equipment",
+            "it's tapped and attacking",
+            "it entered the battlefield",
+            "it entered",
+            "it entered this turn and attacked",
+            "it attacked this combat",
+            "it attacked",
+            // Off-list predicates: characteristics, types, and the impersonal
+            // "it's your turn" turn reference.
+            "it's black",
+            "it's a Wall",
+            "it's legendary",
+            "it's your turn",
+            // A trailing sentence period defeats the exact match by contract —
+            // callers strip it before the rewrite (shared.rs).
+            "it's enchanted.",
+            // Not the bound-pronoun subject at all.
+            "enchanted creature is tapped",
+        ] {
+            assert_eq!(
+                rewrite_self_pronoun_subject(untouched),
+                untouched,
+                "{untouched:?} is outside the closed list and must pass through unchanged"
+            );
+        }
+    }
+
+    /// CR 508.1a (P6): the bound-pronoun rewrite normalizes "it attacked this
+    /// turn" to the canonical "~ attacked this turn" the context-free grammar
+    /// types as `SourceMatchesFilter(AttackedThisTurn)`. Callers reach it only
+    /// on the SelfRef path (`shared.rs` `parse_affected_scoped_static_condition`,
+    /// `dispatch.rs`), so an attached-subject "it" is never rewritten here.
+    ///
+    /// The match is EXACT on the tail: "it attacked this combat" has no engine
+    /// tracking and "it attacked" is not a turn-scoped gate, so both must pass
+    /// through unchanged and stay honest gaps.
+    #[test]
+    fn rewrite_self_pronoun_it_attacked_this_turn() {
+        assert_eq!(
+            rewrite_self_pronoun_subject("it attacked this turn"),
+            "~ attacked this turn"
+        );
+        for untouched in ["it attacked this combat", "it attacked"] {
+            assert_eq!(
+                rewrite_self_pronoun_subject(untouched),
+                untouched,
+                "{untouched:?} has no turn-scoped runtime fact and must stay unrewritten"
+            );
+        }
     }
 }

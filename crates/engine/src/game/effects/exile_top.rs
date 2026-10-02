@@ -1,7 +1,8 @@
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::zone_pipeline::{self, ZoneMoveRequest};
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, LibraryPosition, ParentTargetMissingReason, ResolvedAbility,
+    Effect, EffectError, EffectKind, LibraryInstructionActor, LibraryPosition,
+    ParentTargetMissingReason, ResolvedAbility,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -12,12 +13,13 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (count, player_filter, position, face_down) = match &ability.effect {
+    let (count, player_filter, position, face_down, actor) = match &ability.effect {
         Effect::ExileTop {
             count,
             player,
             position,
             face_down,
+            actor,
         } => (
             // Use resolve_quantity_with_targets so that TargetZoneCardCount (and
             // DivideRounded wrapping it) can resolve against the targeted player.
@@ -29,6 +31,7 @@ pub fn resolve(
             player.clone(),
             position,
             *face_down,
+            *actor,
         ),
         _ => return Err(EffectError::MissingParam("ExileTop count".to_string())),
     };
@@ -38,6 +41,18 @@ pub fn resolve(
     // sub-ability's "exile the top N cards of your library" would inherit the
     // parent's Player target and exile from the wrong library.
     let target_player = super::resolve_player_for_context_ref(state, ability, &player_filter);
+    // CR 608.2c: the player performing this exile — the controller unless the
+    // instruction names its subject ("that player exiles that card"), who is
+    // the player whose library it is. Rides each move request so the delivery
+    // that settles a card in exile records who followed the instruction (CR 608.2c).
+    // Under a distributive fan-out (player_scope), `ability.controller` rebinds to the
+    // iterating seat while `ability.original_controller` retains the printed controller (CR 109.5).
+    let actor = match actor {
+        LibraryInstructionActor::Controller => {
+            ability.original_controller.unwrap_or(ability.controller)
+        }
+        LibraryInstructionActor::LibraryPlayer => target_player,
+    };
 
     // CR 701.17b: A player can't mill/exile more cards than are in their library;
     // exile as many as possible.
@@ -94,7 +109,8 @@ pub fn resolve(
         // surface an ordering choice mid-loop; park the prompt (mirrors
         // `exile_from_top_until`'s NeedsChoice arm) and return rather than
         // continuing to mutate/classify the remaining cards past a parked prompt.
-        let mut request = ZoneMoveRequest::effect(object_id, Zone::Exile, ability.source_id);
+        let mut request =
+            ZoneMoveRequest::effect(object_id, Zone::Exile, ability.source_id).performed_by(actor);
         if track_exiled_by_source {
             request = request.track_exiled_by_source();
         }
@@ -160,6 +176,7 @@ mod tests {
                 },
                 position,
                 face_down: false,
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
             },
             vec![],
             ObjectId(100),
@@ -235,6 +252,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 position: LibraryPosition::Top,
                 face_down: false,
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
             },
             vec![],
             source,
@@ -288,6 +306,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 position: LibraryPosition::Top,
                 face_down: false,
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
             },
             vec![],
             ObjectId(100),
@@ -427,6 +446,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 position: LibraryPosition::Top,
                 face_down: false,
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
             },
             vec![TargetRef::Player(PlayerId(1))], // inherited parent target
             ObjectId(100),
@@ -552,6 +572,7 @@ mod tests {
                 },
                 position: LibraryPosition::Top,
                 face_down: false,
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
             },
             vec![],
             source,
@@ -763,6 +784,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 position: LibraryPosition::Top,
                 face_down: true,
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
             },
             vec![],
             ObjectId(100),
@@ -894,6 +916,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 position: LibraryPosition::Top,
                 face_down: false,
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
             },
             vec![],
             ObjectId(100),
@@ -978,6 +1001,7 @@ mod tests {
                 count,
                 position: LibraryPosition::Top,
                 face_down: false,
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
             },
             vec![],
             ObjectId(100),
@@ -990,6 +1014,99 @@ mod tests {
             state.players[0].library.len(),
             2,
             "CR 107.1b: a negative exile-top count must exile 0, not the whole library"
+        );
+    }
+
+    /// Resolve an `ExileTop` of P1's library (bound as the scoped "that
+    /// player"), controlled by P0, with the given actor; return the exiled
+    /// card's recorded exiling player.
+    fn exiling_player_for_actor(actor: LibraryInstructionActor) -> Option<PlayerId> {
+        let mut state = GameState::new_two_player(42);
+        let top = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Top".to_string(),
+            Zone::Library,
+        );
+        let mut ability = ResolvedAbility::new(
+            Effect::ExileTop {
+                player: TargetFilter::ScopedPlayer,
+                count: QuantityExpr::Fixed { value: 1 },
+                position: LibraryPosition::Top,
+                face_down: false,
+                actor,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.scoped_player = Some(PlayerId(1));
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.objects[&top].zone, Zone::Exile);
+        state.objects[&top].exiled_by
+    }
+
+    /// CR 608.2c: a controller-worded exile ("exile the top card of
+    /// that player's library") is performed by the controller, even when a
+    /// different affected player is scoped.
+    #[test]
+    fn exile_top_records_controller_for_controller_worded_instruction() {
+        assert_eq!(
+            exiling_player_for_actor(LibraryInstructionActor::Controller),
+            Some(PlayerId(0))
+        );
+    }
+
+    /// CR 608.2c: a subject-worded exile ("that player exiles the top
+    /// card of their library") is performed by the player whose library it is.
+    #[test]
+    fn exile_top_records_library_player_for_subject_worded_instruction() {
+        assert_eq!(
+            exiling_player_for_actor(LibraryInstructionActor::LibraryPlayer),
+            Some(PlayerId(1))
+        );
+    }
+
+    /// CR 608.2c + CR 109.5: during distributive fan-out across opponents, the iterating
+    /// seat rebinds `ability.controller` to each opponent in turn, but `original_controller`
+    /// preserves the printed controller (CR 109.5). A controller-worded instruction must
+    /// record the original controller as the exiling player, not the rebound opponent.
+    #[test]
+    fn exile_top_records_original_controller_during_distributive_fanout() {
+        let mut state = GameState::new_two_player(42);
+        let top = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Top".to_string(),
+            Zone::Library,
+        );
+        let mut ability = ResolvedAbility::new(
+            Effect::ExileTop {
+                player: TargetFilter::Controller,
+                count: QuantityExpr::Fixed { value: 1 },
+                position: LibraryPosition::Top,
+                face_down: false,
+                actor: LibraryInstructionActor::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(1), // rebound to opponent
+        );
+        ability.original_controller = Some(PlayerId(0)); // printed controller
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.objects[&top].zone, Zone::Exile);
+        assert_eq!(
+            state.objects[&top].exiled_by,
+            Some(PlayerId(0)),
+            "exiled_by must be original_controller (P0), not rebound controller (P1)"
         );
     }
 }

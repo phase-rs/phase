@@ -780,6 +780,7 @@ fn cast_effect(
         driver,
         mana_spend_permission,
         additional_cost: None,
+        cast_cost_modifier: None,
     }
 }
 

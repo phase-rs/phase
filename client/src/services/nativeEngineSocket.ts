@@ -188,8 +188,14 @@ export class NativeEngineSocket {
     if (this.readyState === NativeEngineSocket.CLOSED) {
       return;
     }
-    this.onerror?.(new Event("error"));
-    this.finishClose(1006, "Native engine bridge failed");
+    // The close is what `withReconnect` recovers from, so it must survive a
+    // throwing error handler: `ws-adapter`'s `emit()` does not catch. Same
+    // guard `gzipEnvelopeSocket` applies on this seam.
+    try {
+      this.onerror?.(new Event("error"));
+    } finally {
+      this.finishClose(1006, "Native engine bridge failed");
+    }
   }
 
   private finishClose(code: number, reason: string): void {
@@ -202,11 +208,16 @@ export class NativeEngineSocket {
       reason,
       wasClean: code === 1000,
     });
-    this.onclose?.(event);
-    for (const [listener, once] of this.closeListeners) {
-      listener(event);
-      if (once) {
-        this.closeListeners.delete(listener);
+    // The loop is cleanup and must not be skipped by a throwing `onclose`:
+    // `withReconnect` recovers through a close LISTENER, not through `onclose`.
+    try {
+      this.onclose?.(event);
+    } finally {
+      for (const [listener, once] of this.closeListeners) {
+        listener(event);
+        if (once) {
+          this.closeListeners.delete(listener);
+        }
       }
     }
   }

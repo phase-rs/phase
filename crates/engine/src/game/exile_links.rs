@@ -1,10 +1,14 @@
 use serde::Serialize;
 
-use crate::types::ability::{Duration, ResolvedAbility};
+use crate::game::game_object::LinkedAbilitySource;
+use crate::types::ability::{AbilityProvenance, Duration, ResolvedAbility};
 use crate::types::game_state::{
-    ExileLink, ExileLinkKind, ExiledStopInput, GameState, RepeatUntilStopWitness,
+    ExileLink, ExileLinkKind, ExiledStopInput, GameState, LibrarySearchDeliveryResume, LookGrant,
+    RepeatUntilStopWitness, StackEntryKind,
 };
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
+use crate::types::player::PlayerId;
+use crate::types::zones::Zone;
 
 const LINKED_EXILE_CONSUMER_TAGS: &[&str] = &[
     "ExiledBySource",
@@ -72,6 +76,183 @@ pub(crate) fn push_tracked_by_source(
     push_with_kind(state, exiled_id, source_id, ExileLinkKind::TrackedBySource);
 }
 
+/// CR 406.3 + CR 702.75a: the player `grant` admits now to look at a card
+/// exiled by `source_id`.
+pub(crate) fn look_grant_admits(
+    state: &GameState,
+    source_id: ObjectId,
+    grant: LookGrant,
+    source_incarnation: u64,
+) -> Option<PlayerId> {
+    match grant {
+        LookGrant::SourceController => state
+            .objects
+            .get(&source_id)
+            .filter(|src| src.zone == Zone::Battlefield && src.incarnation == source_incarnation)
+            .map(|src| src.controller),
+        LookGrant::Player { .. } => None,
+    }
+}
+
+/// CR 406.3: Link a card just exiled face down to `source_id` with a look
+/// grant; the `instructed` player and whoever `grant` admits now may look.
+pub(crate) fn push_look_link(
+    state: &mut GameState,
+    exiled_id: ObjectId,
+    source_id: ObjectId,
+    grant: LookGrant,
+    instructed: PlayerId,
+) {
+    let source_incarnation = state
+        .objects
+        .get(&source_id)
+        .map_or(0, |src| src.incarnation);
+    let lookers = std::iter::once(instructed)
+        .chain(look_grant_admits(
+            state,
+            source_id,
+            grant,
+            source_incarnation,
+        ))
+        .collect();
+    push_with_kind(
+        state,
+        exiled_id,
+        source_id,
+        ExileLinkKind::HideawayLookable {
+            grant,
+            lookers,
+            source_incarnation,
+        },
+    );
+}
+
+/// CR 406.3 + CR 701.23a: the searcher looked at the card before exiling it
+/// face down, so they may keep looking at it.
+pub(crate) fn link_search_look(
+    state: &mut GameState,
+    exiled_id: ObjectId,
+    source_id: Option<ObjectId>,
+) {
+    // A scoped search names a set of searchers, not the one player a fixed grant needs.
+    let searcher = match &state.pending_library_search_delivery {
+        Some(LibrarySearchDeliveryResume::Standard { searcher, .. }) => Some(*searcher),
+        Some(LibrarySearchDeliveryResume::Scoped { .. }) | None => None,
+    };
+    let (Some(searcher), Some(source_id)) = (searcher, source_id) else {
+        return;
+    };
+    if !state
+        .objects
+        .get(&exiled_id)
+        .is_some_and(|obj| obj.zone == Zone::Exile && obj.face_down)
+    {
+        return;
+    }
+    push_look_link(
+        state,
+        exiled_id,
+        source_id,
+        LookGrant::Player { player: searcher },
+        searcher,
+    );
+}
+
+/// CR 400.7 + CR 607.2a: `source_id`'s links, skipping a look link made by an
+/// earlier incarnation of that object.
+pub(crate) fn live_links_for_source(
+    state: &GameState,
+    source_id: ObjectId,
+) -> impl Iterator<Item = &ExileLink> {
+    state.exile_links.iter().filter(move |link| {
+        link.source_id == source_id
+            && match &link.kind {
+                ExileLinkKind::HideawayLookable {
+                    source_incarnation, ..
+                } => state
+                    .objects
+                    .get(&source_id)
+                    .is_some_and(|src| src.incarnation == *source_incarnation),
+                // CR 400.7d + CR 400.7j: the object these links were made for may
+                // be a later incarnation of the one that made them.
+                ExileLinkKind::UntilSourceLeaves { .. }
+                | ExileLinkKind::UntilOpponentBecomesMonarch { .. }
+                | ExileLinkKind::TrackedBySource
+                | ExileLinkKind::ParadigmSource { .. }
+                | ExileLinkKind::Cipher
+                | ExileLinkKind::Haunt
+                | ExileLinkKind::CraftMaterial => true,
+            }
+    })
+}
+
+/// CR 406.3 + CR 613.1b: a source-controller look link latches its source's new
+/// controller, since a player once allowed to look may keep looking.
+pub(crate) fn latch_new_controllers(
+    state: &mut GameState,
+    prev_controllers: &[(ObjectId, PlayerId)],
+) {
+    let admitted: Vec<(usize, PlayerId)> = state
+        .exile_links
+        .iter()
+        .enumerate()
+        .filter_map(|(index, link)| {
+            let ExileLinkKind::HideawayLookable {
+                grant,
+                lookers,
+                source_incarnation,
+            } = &link.kind
+            else {
+                return None;
+            };
+            let (_, prev) = prev_controllers
+                .iter()
+                .find(|(id, _)| *id == link.source_id)?;
+            look_grant_admits(state, link.source_id, *grant, *source_incarnation)
+                .filter(|player| player != prev && !lookers.contains(player))
+                .map(|player| (index, player))
+        })
+        .collect();
+    for (index, player) in admitted {
+        if let ExileLinkKind::HideawayLookable { lookers, .. } = &mut state.exile_links[index].kind
+        {
+            lookers.insert(player);
+        }
+    }
+}
+
+/// CR 406.3 + CR 701.24a: a card that becomes part of a shuffled pile may be
+/// looked at only by whom its link's live rule admits now.
+pub(crate) fn reset_look_latches(state: &mut GameState, pile: &[ObjectId]) {
+    let resets: Vec<(usize, Option<PlayerId>)> = state
+        .exile_links
+        .iter()
+        .enumerate()
+        .filter_map(|(index, link)| {
+            let ExileLinkKind::HideawayLookable {
+                grant,
+                source_incarnation,
+                ..
+            } = &link.kind
+            else {
+                return None;
+            };
+            pile.contains(&link.exiled_id).then(|| {
+                (
+                    index,
+                    look_grant_admits(state, link.source_id, *grant, *source_incarnation),
+                )
+            })
+        })
+        .collect();
+    for (index, admitted) in resets {
+        if let ExileLinkKind::HideawayLookable { lookers, .. } = &mut state.exile_links[index].kind
+        {
+            *lookers = admitted.into_iter().collect();
+        }
+    }
+}
+
 /// CR 607.2a + CR 406.6: Record an exiled→source link with an explicit
 /// `ExileLinkKind`, deduped on the `(exiled_id, source_id)` pair (mirrors
 /// `push_tracked_by_source`, which delegates here for the plain tracked kind).
@@ -79,14 +260,31 @@ pub(crate) fn push_tracked_by_source(
 /// this is required when automatic linked-exile detection runs before a
 /// mechanic-specific continuation such as Hideaway concealment.
 /// Used by Hideaway (`ExileLinkKind::HideawayLookable`, CR 702.75a) to mark the
-/// exiled card as look-permitted for the source's controller while keeping it
+/// exiled card as look-permitted for the link's lookers while keeping it
 /// discoverable by the kind-agnostic `ExiledBySource` companion-ability filter.
+/// A newly recorded link is also mirrored to every command-zone emblem the
+/// source created that consumes its exiles, when the exile was made by the
+/// ability set that emblem is paired with (CR 607.1d, `mirror_link_to_linked_emblems`).
 pub(crate) fn push_with_kind(
     state: &mut GameState,
     exiled_id: ObjectId,
     source_id: ObjectId,
     kind: ExileLinkKind,
 ) {
+    if record_link(state, exiled_id, source_id, kind) {
+        mirror_link_to_linked_emblems(state, exiled_id, source_id);
+    }
+}
+
+/// The dedupe/upgrade body of [`push_with_kind`]. Returns `true` only when a
+/// new `(exiled_id, source_id)` link was pushed; an existing link (upgraded or
+/// not) returns `false`.
+fn record_link(
+    state: &mut GameState,
+    exiled_id: ObjectId,
+    source_id: ObjectId,
+    kind: ExileLinkKind,
+) -> bool {
     if let Some(existing) = state
         .exile_links
         .iter_mut()
@@ -97,7 +295,7 @@ pub(crate) fn push_with_kind(
         {
             existing.kind = kind;
         }
-        return;
+        return false;
     }
     state.exile_links.push(ExileLink {
         exiled_id,
@@ -105,6 +303,77 @@ pub(crate) fn push_with_kind(
         kind,
     });
     push_exiled_with_source_this_turn(state, exiled_id, source_id);
+    true
+}
+
+/// CR 607.1 + CR 607.2a + CR 607.5 + CR 113.7a: the pairing identity of the
+/// ability of `source_id` whose instruction is performing the exile being
+/// linked now — the incarnation that put it on the stack and the copiable
+/// set it is characteristic of. `None` when no activated or triggered ability
+/// of `source_id` is resolving (a replacement redirect, a state-based action,
+/// another object's effect, a spell), or when that ability is granted or its
+/// provenance is not attributable: such an exile pairs with no emblem.
+fn resolving_exile_supplier(state: &GameState, source_id: ObjectId) -> Option<LinkedAbilitySource> {
+    let entry = state
+        .resolving_stack_entry
+        .as_ref()
+        .filter(|entry| entry.source_id == source_id)?;
+    let ability = match &entry.kind {
+        StackEntryKind::ActivatedAbility { ability, .. }
+        | StackEntryKind::TriggeredAbility { ability, .. } => ability,
+        StackEntryKind::Spell { .. }
+        | StackEntryKind::KeywordAction { .. }
+        | StackEntryKind::CombatDamage { .. } => return None,
+    };
+    let AbilityProvenance::Characteristic(characteristic_set) =
+        ability.source_ability_provenance()?
+    else {
+        return None;
+    };
+    // CR 400.7 + CR 113.7a: the push-time capture names the object that put
+    // the ability on the stack even after it changed zones.
+    let incarnation = ability.source_incarnation.or_else(|| {
+        state
+            .objects
+            .get(&source_id)
+            .map(|object| object.incarnation)
+    })?;
+    Some(LinkedAbilitySource {
+        creator: ObjectIncarnationRef::of(source_id, incarnation),
+        characteristic_set,
+    })
+}
+
+/// CR 607.1d + CR 607.2a + CR 114.4: a card exiled by an object is also
+/// "exiled with" that object for every command-zone emblem that object
+/// created and whose abilities refer to cards exiled with it. The mirror
+/// link is keyed to the emblem — neither a card nor a permanent (CR 114.5),
+/// its abilities function in the command zone (CR 114.4) — so it survives the
+/// creator leaving the battlefield. Only an exile made by one of the
+/// creator's characteristic activated or triggered abilities of the emblem's
+/// copiable set is mirrored (CR 607.1: "and not by any other ability"; CR
+/// 607.5; CR 607.2a); a replacement-effect supplier (CR 607.2b) is not
+/// attributed and fails closed — no card pairs one with an emblem.
+fn mirror_link_to_linked_emblems(state: &mut GameState, exiled_id: ObjectId, source_id: ObjectId) {
+    let Some(supplier) = resolving_exile_supplier(state, source_id) else {
+        return;
+    };
+    let emblems: Vec<ObjectId> = state
+        .command_zone
+        .iter()
+        .copied()
+        .filter(|id| {
+            state.objects.get(id).is_some_and(|obj| {
+                obj.is_emblem
+                    && obj.linked_ability_source == Some(supplier)
+                    && source_contains_linked_exile_consumer(obj)
+            })
+        })
+        .collect();
+    for emblem_id in emblems {
+        // `record_link`, not `push_with_kind`: a mirror link never mirrors again.
+        record_link(state, exiled_id, emblem_id, ExileLinkKind::TrackedBySource);
+    }
 }
 
 /// CR 601.2a + CR 113.6b: Record an `exiled_id` as exiled "with" `source_id`
@@ -145,6 +414,20 @@ pub(crate) fn push_exiled_with_source_this_turn(
         .entry(source_id)
         .or_default();
     entry.push(exiled_id);
+}
+
+/// CR 406.6 + CR 607.2b + CR 608.2c: Record the player who performed the exile
+/// that put `exiled_id` into exile — the resolving instruction's acting player
+/// (its "that player" / "each player" subject when one is bound, otherwise the
+/// ability's controller). This is who "cards *they* exiled with ~" refers to,
+/// independent of who owns the card. A card that did not settle in exile (a
+/// replacement redirected it) gets no record.
+pub(crate) fn record_exiling_player(state: &mut GameState, exiled_id: ObjectId, player: PlayerId) {
+    if let Some(obj) = state.objects.get_mut(&exiled_id) {
+        if obj.zone == Zone::Exile {
+            obj.exiled_by = Some(player);
+        }
+    }
 }
 
 // CR 611.2a + CR 607.2a: Source-linked durations expire when that same source
@@ -338,6 +621,7 @@ fn contains_linked_exile_consumer_value(value: &serde_json::Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ability::CharacteristicSetRef;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, CastingPermission, Effect, ManaProduction, PlayerFilter,
         QuantityExpr, QuantityRef, TargetFilter,
@@ -424,6 +708,7 @@ mod tests {
                 enters_with_counter: None,
                 enters_with_modifications: Vec::new(),
                 mana_spend_permission: None,
+                cast_cost_modifier: None,
             },
         );
         let play_grant = exiled(
@@ -441,7 +726,7 @@ mod tests {
                 card_filter: None,
                 single_use_group: None,
                 single_use: false,
-                cast_cost_raise: None,
+                cast_cost_modifier: None,
                 alt_ability_cost: None,
                 land_enter_tapped: EtbTapState::Unspecified,
             },
@@ -456,6 +741,7 @@ mod tests {
                 granted_to: Some(PlayerId(0)),
                 duration: Some(Duration::UntilSourceExilesAnotherCard),
                 source_id: Some(source),
+                cast_cost_modifier: None,
             },
         );
         let foreign = exiled(
@@ -473,6 +759,7 @@ mod tests {
                 enters_with_counter: None,
                 enters_with_modifications: Vec::new(),
                 mana_spend_permission: None,
+                cast_cost_modifier: None,
             },
         );
 
@@ -616,7 +903,7 @@ mod tests {
             card_filter: None,
             single_use_group: None,
             single_use: false,
-            cast_cost_raise: None,
+            cast_cost_modifier: None,
             alt_ability_cost: None,
             land_enter_tapped: EtbTapState::Unspecified,
             invalidation: None,
@@ -786,6 +1073,7 @@ mod tests {
                 driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
                 mana_spend_permission: None,
                 additional_cost: None,
+                cast_cost_modifier: None,
             },
             vec![],
             ObjectId(1),
@@ -856,13 +1144,24 @@ mod tests {
         let source = ObjectId(20);
 
         push_with_kind(&mut state, exiled, source, ExileLinkKind::TrackedBySource);
-        push_with_kind(&mut state, exiled, source, ExileLinkKind::HideawayLookable);
+        push_with_kind(
+            &mut state,
+            exiled,
+            source,
+            ExileLinkKind::HideawayLookable {
+                grant: LookGrant::Player {
+                    player: PlayerId(0),
+                },
+                lookers: [PlayerId(0)].into(),
+                source_incarnation: 0,
+            },
+        );
         push_with_kind(&mut state, exiled, source, ExileLinkKind::TrackedBySource);
 
         assert_eq!(state.exile_links.len(), 1);
         assert!(matches!(
             state.exile_links[0].kind,
-            ExileLinkKind::HideawayLookable
+            ExileLinkKind::HideawayLookable { .. }
         ));
     }
 
@@ -1302,5 +1601,406 @@ mod tests {
             !source_is_linked_exile_consumer(&state, unrelated),
             "an object with no ExiledBySource reference must not be a linked-exile consumer"
         );
+    }
+
+    // ── CR 607.1d emblem↔creator mirror ─────────────────────────────────
+
+    /// A creator object `S` (incarnation 4) on the battlefield and one
+    /// command-zone emblem owned by P0 whose static is (or is not) a
+    /// linked-exile consumer, latched to `(S, 4 + creator_incarnation_offset)`
+    /// and the copiable set `emblem_set`.
+    fn mirror_fixture(
+        consumer: bool,
+        creator_incarnation_offset: u64,
+        emblem_set: CharacteristicSetRef,
+    ) -> (crate::types::game_state::GameState, ObjectId, ObjectId) {
+        use crate::game::effects::create_emblem::grant_emblem;
+        use crate::game::zones::create_object;
+        use crate::types::ability::{CardPlayMode, StaticDefinition};
+        use crate::types::game_state::GameState;
+        use crate::types::identifiers::CardId;
+        use crate::types::statics::{
+            ExileCardPool, ExileCastCost, ExileCastGrantee, ExileCastTiming, StaticMode,
+        };
+
+        let mut state = GameState::new_two_player(7);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Creator".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&source).unwrap().incarnation = 4;
+        let mode = if consumer {
+            StaticMode::ExileCastPermission {
+                frequency: CastFrequency::Unlimited,
+                play_mode: CardPlayMode::Play,
+                cost: ExileCastCost::PayNormalCost,
+                pool: ExileCardPool::Persistent,
+                timing: ExileCastTiming::AnyTime,
+                mana_spend_permission: None,
+                grants_flash: false,
+                extra_cost: None,
+                enters_with_counter: None,
+                grantee: ExileCastGrantee::SourceController,
+            }
+        } else {
+            StaticMode::CantLoseTheGame
+        };
+        let emblem = grant_emblem(
+            &mut state,
+            PlayerId(0),
+            vec![StaticDefinition::new(mode).affected(TargetFilter::Any)],
+            Vec::new(),
+            Vec::new(),
+        );
+        state
+            .objects
+            .get_mut(&emblem)
+            .unwrap()
+            .linked_ability_source = Some(LinkedAbilitySource {
+            creator: ObjectIncarnationRef::of(source, 4 + creator_incarnation_offset),
+            characteristic_set: emblem_set,
+        });
+        (state, source, emblem)
+    }
+
+    /// Which kind of stack entry of the source is resolving.
+    #[derive(Clone, Copy)]
+    enum ResolvingKind {
+        Activated,
+        Triggered,
+        Spell,
+    }
+
+    /// Make an entry of `source` (pushed while it had incarnation 4) the
+    /// resolving stack entry; `set_up` shapes its ability's provenance.
+    fn resolving_as(
+        state: &mut crate::types::game_state::GameState,
+        source: ObjectId,
+        kind: ResolvingKind,
+        set_up: impl FnOnce(&mut ResolvedAbility),
+    ) {
+        use crate::types::game_state::{StackEntry, StackEntryKind};
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        ability.source_incarnation = Some(4);
+        set_up(&mut ability);
+        let kind = match kind {
+            ResolvingKind::Activated => StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: Box::new(ability),
+            },
+            ResolvingKind::Triggered => StackEntryKind::TriggeredAbility {
+                source_id: source,
+                ability: Box::new(ability),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: String::new(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+            ResolvingKind::Spell => StackEntryKind::Spell {
+                card_id: crate::types::identifiers::CardId(1),
+                ability: Some(Box::new(ability)),
+                casting_variant: Default::default(),
+                actual_mana_spent: 0,
+            },
+        };
+        state.resolving_stack_entry = Some(StackEntry {
+            id: ObjectId(900),
+            source_id: source,
+            controller: PlayerId(0),
+            kind,
+        });
+    }
+
+    /// An activated ability of the source, characteristic of `set`, is resolving.
+    fn resolving_characteristic(
+        state: &mut crate::types::game_state::GameState,
+        source: ObjectId,
+        set: CharacteristicSetRef,
+    ) {
+        resolving_as(state, source, ResolvingKind::Activated, |ability| {
+            ability.set_source_ability_provenance_recursive(Some(
+                AbilityProvenance::Characteristic(set),
+            ));
+        });
+    }
+
+    fn copy_set(continuous_effect_id: u64) -> CharacteristicSetRef {
+        CharacteristicSetRef::Copied(crate::types::ability::CopyEffectInstanceRef {
+            continuous_effect_id,
+            modification_index: 0,
+        })
+    }
+
+    fn exile_card(state: &mut crate::types::game_state::GameState) -> ObjectId {
+        crate::game::zones::create_object(
+            state,
+            crate::types::identifiers::CardId(9),
+            PlayerId(1),
+            "Exiled Card".to_string(),
+            Zone::Exile,
+        )
+    }
+
+    fn has_link(
+        state: &crate::types::game_state::GameState,
+        exiled: ObjectId,
+        source: ObjectId,
+    ) -> bool {
+        state
+            .exile_links
+            .iter()
+            .any(|link| link.exiled_id == exiled && link.source_id == source)
+    }
+
+    /// CR 607.1d + CR 607.2a: a card exiled by a characteristic activated
+    /// ability of the creator is mirrored to the creator's consumer emblem when
+    /// the incarnation and the copiable set match.
+    #[test]
+    fn mirror_links_exile_to_matching_creator_emblem() {
+        let (mut state, source, emblem) = mirror_fixture(true, 0, CharacteristicSetRef::Own);
+        resolving_characteristic(&mut state, source, CharacteristicSetRef::Own);
+        let card = exile_card(&mut state);
+        push_tracked_by_source(&mut state, card, source);
+        assert!(has_link(&state, card, source));
+        assert!(has_link(&state, card, emblem), "mirrored to the emblem");
+        assert_eq!(
+            state.exile_links.len(),
+            2,
+            "one source link plus exactly one mirror (no recursion)"
+        );
+    }
+
+    /// CR 607.1 + CR 613.1f: an exile made by an ability the creator gained in
+    /// layer 6 is not made by the paired ability; no mirror.
+    #[test]
+    fn mirror_skips_granted_supplier() {
+        let (mut state, source, emblem) = mirror_fixture(true, 0, CharacteristicSetRef::Own);
+        resolving_as(&mut state, source, ResolvingKind::Activated, |ability| {
+            ability.set_source_ability_provenance_recursive(Some(AbilityProvenance::Granted));
+        });
+        let card = exile_card(&mut state);
+        push_tracked_by_source(&mut state, card, source);
+        assert!(has_link(&state, card, source), "reach: the source link");
+        assert!(!has_link(&state, card, emblem), "granted supplier");
+    }
+
+    /// CR 607.1: an ability with no attributable provenance (a fixture that
+    /// skipped announcement, a delayed trigger) fails closed.
+    #[test]
+    fn mirror_skips_unattributed_supplier() {
+        let (mut state, source, emblem) = mirror_fixture(true, 0, CharacteristicSetRef::Own);
+        resolving_as(&mut state, source, ResolvingKind::Activated, |_| {});
+        let card = exile_card(&mut state);
+        push_tracked_by_source(&mut state, card, source);
+        assert!(has_link(&state, card, source), "reach: the source link");
+        assert!(!has_link(&state, card, emblem), "unattributed supplier");
+    }
+
+    /// CR 607.2a + CR 607.2b: only an activated or triggered ability of the
+    /// creator that is resolving supplies the pair — not an exile with no
+    /// resolving entry (a replacement redirect, an SBA), not one while another
+    /// object's ability resolves, and not a spell.
+    #[test]
+    fn mirror_skips_without_resolving_entry_of_source() {
+        // No resolving entry at all.
+        let (mut state, source, emblem) = mirror_fixture(true, 0, CharacteristicSetRef::Own);
+        let card = exile_card(&mut state);
+        push_tracked_by_source(&mut state, card, source);
+        assert!(has_link(&state, card, source), "reach: the source link");
+        assert!(!has_link(&state, card, emblem), "no resolving entry");
+
+        // Another object's characteristic ability is resolving.
+        let (mut state, source, emblem) = mirror_fixture(true, 0, CharacteristicSetRef::Own);
+        let other = crate::game::zones::create_object(
+            &mut state,
+            crate::types::identifiers::CardId(2),
+            PlayerId(0),
+            "Other".to_string(),
+            Zone::Battlefield,
+        );
+        resolving_characteristic(&mut state, other, CharacteristicSetRef::Own);
+        let card = exile_card(&mut state);
+        push_tracked_by_source(&mut state, card, source);
+        assert!(has_link(&state, card, source), "reach: the source link");
+        assert!(!has_link(&state, card, emblem), "another object's entry");
+
+        // A spell of the source is resolving, even one carrying a provenance.
+        let (mut state, source, emblem) = mirror_fixture(true, 0, CharacteristicSetRef::Own);
+        resolving_as(&mut state, source, ResolvingKind::Spell, |ability| {
+            ability.set_source_ability_provenance_recursive(Some(
+                AbilityProvenance::Characteristic(CharacteristicSetRef::Own),
+            ));
+        });
+        let card = exile_card(&mut state);
+        push_tracked_by_source(&mut state, card, source);
+        assert!(has_link(&state, card, source), "reach: the source link");
+        assert!(!has_link(&state, card, emblem), "a spell entry");
+    }
+
+    /// CR 607.5: abilities acquired from one copy effect pair only with one
+    /// another — the supplier's copiable set must equal the emblem's.
+    #[test]
+    fn mirror_requires_matching_copiable_set() {
+        for (emblem_set, supplier_set, mirrored) in [
+            (copy_set(7), copy_set(7), true),
+            (copy_set(7), copy_set(8), false),
+            (copy_set(7), CharacteristicSetRef::Own, false),
+            (CharacteristicSetRef::Own, copy_set(7), false),
+        ] {
+            let (mut state, source, emblem) = mirror_fixture(true, 0, emblem_set);
+            resolving_characteristic(&mut state, source, supplier_set);
+            let card = exile_card(&mut state);
+            push_tracked_by_source(&mut state, card, source);
+            assert!(has_link(&state, card, source), "reach: the source link");
+            assert_eq!(
+                has_link(&state, card, emblem),
+                mirrored,
+                "emblem {emblem_set:?} / supplier {supplier_set:?}"
+            );
+        }
+    }
+
+    /// CR 607.1 + CR 607.5: a triggered supplier carries no context latch; its
+    /// trigger occurrence answers — printed pairs with `Own`, a copied value
+    /// with its copy effect's set, a grant or a retained copy never.
+    #[test]
+    fn mirror_trigger_occurrence_provenance() {
+        use crate::types::ability::{
+            CopyEffectInstanceRef, TriggerBaseSetInstanceRef, TriggerDefinitionOccurrenceRef,
+            TriggerDefinitionRef, TriggerGrantInstanceRef,
+        };
+
+        let copy = CopyEffectInstanceRef {
+            continuous_effect_id: 7,
+            modification_index: 0,
+        };
+        for (emblem_set, occurrence, mirrored) in [
+            (
+                CharacteristicSetRef::Own,
+                TriggerDefinitionOccurrenceRef::Printed {
+                    base_set: TriggerBaseSetInstanceRef::INITIAL,
+                    printed_index: 0,
+                },
+                true,
+            ),
+            (
+                CharacteristicSetRef::Copied(copy),
+                TriggerDefinitionOccurrenceRef::CopiedValue {
+                    copy_effect: copy,
+                    copied_slot: 0,
+                    printed_origin: None,
+                },
+                true,
+            ),
+            (
+                CharacteristicSetRef::Own,
+                TriggerDefinitionOccurrenceRef::Granted {
+                    grant_instance: TriggerGrantInstanceRef(1),
+                },
+                false,
+            ),
+            (
+                CharacteristicSetRef::Own,
+                TriggerDefinitionOccurrenceRef::CopyRetained {
+                    grant_instance: TriggerGrantInstanceRef(1),
+                    source_base_set: TriggerBaseSetInstanceRef::INITIAL,
+                    source_printed_index: 0,
+                },
+                false,
+            ),
+        ] {
+            let (mut state, source, emblem) = mirror_fixture(true, 0, emblem_set);
+            let definition_source = ObjectIncarnationRef::of(source, 4);
+            resolving_as(&mut state, source, ResolvingKind::Triggered, |ability| {
+                assert_eq!(ability.context, Default::default(), "no context latch");
+                ability.trigger_definition_ref = Some(TriggerDefinitionRef {
+                    source: definition_source,
+                    occurrence: occurrence.clone(),
+                });
+            });
+            let card = exile_card(&mut state);
+            push_tracked_by_source(&mut state, card, source);
+            assert!(has_link(&state, card, source), "reach: the source link");
+            assert_eq!(has_link(&state, card, emblem), mirrored, "{occurrence:?}");
+        }
+    }
+
+    /// CR 400.7: an emblem created by an earlier or later object of the same
+    /// storage id is a different creator; no mirror.
+    #[test]
+    fn mirror_skips_emblem_of_other_incarnation() {
+        let (mut state, source, emblem) = mirror_fixture(true, 1, CharacteristicSetRef::Own);
+        resolving_characteristic(&mut state, source, CharacteristicSetRef::Own);
+        let card = exile_card(&mut state);
+        push_tracked_by_source(&mut state, card, source);
+        assert!(has_link(&state, card, source), "reach: the source link");
+        assert!(!has_link(&state, card, emblem), "no mirror on mismatch");
+    }
+
+    /// CR 607.1d: only an emblem whose abilities refer to cards exiled with its
+    /// creator receives the mirror.
+    #[test]
+    fn mirror_skips_non_consumer_emblem() {
+        let (mut state, source, emblem) = mirror_fixture(false, 0, CharacteristicSetRef::Own);
+        resolving_characteristic(&mut state, source, CharacteristicSetRef::Own);
+        let card = exile_card(&mut state);
+        push_tracked_by_source(&mut state, card, source);
+        assert!(has_link(&state, card, source), "reach: the source link");
+        assert!(!has_link(&state, card, emblem), "non-consumer emblem");
+
+        // Consumer twin: the same shape with the permission static mirrors.
+        let (mut twin, twin_source, twin_emblem) =
+            mirror_fixture(true, 0, CharacteristicSetRef::Own);
+        resolving_characteristic(&mut twin, twin_source, CharacteristicSetRef::Own);
+        let twin_card = exile_card(&mut twin);
+        push_tracked_by_source(&mut twin, twin_card, twin_source);
+        assert!(has_link(&twin, twin_card, twin_emblem));
+    }
+
+    /// CR 113.7a + CR 400.7: while an ability of the source resolves, its
+    /// push-time incarnation capture names the exiling object even after the
+    /// source changed zones; without a capture the live object answers.
+    #[test]
+    fn resolving_exile_supplier_uses_push_time_incarnation() {
+        let (mut state, source, _) = mirror_fixture(true, 0, CharacteristicSetRef::Own);
+        resolving_characteristic(&mut state, source, CharacteristicSetRef::Own);
+        state.objects.get_mut(&source).unwrap().incarnation = 5;
+        assert_eq!(
+            resolving_exile_supplier(&state, source),
+            Some(LinkedAbilitySource {
+                creator: ObjectIncarnationRef::of(source, 4),
+                characteristic_set: CharacteristicSetRef::Own,
+            })
+        );
+        resolving_as(&mut state, source, ResolvingKind::Activated, |ability| {
+            ability.source_incarnation = None;
+            ability.set_source_ability_provenance_recursive(Some(
+                AbilityProvenance::Characteristic(CharacteristicSetRef::Own),
+            ));
+        });
+        assert_eq!(
+            resolving_exile_supplier(&state, source),
+            Some(LinkedAbilitySource {
+                creator: ObjectIncarnationRef::of(source, 5),
+                characteristic_set: CharacteristicSetRef::Own,
+            })
+        );
+        state.resolving_stack_entry = None;
+        assert_eq!(resolving_exile_supplier(&state, source), None);
     }
 }

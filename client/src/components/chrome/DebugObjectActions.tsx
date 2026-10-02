@@ -71,6 +71,7 @@ function MoveToZoneForm({ onDispatch }: Props) {
   const [objectId, setObjectId] = useState<ObjectId | null>(null);
   const [toZone, setToZone] = useState<Zone>("Battlefield");
   const [libraryPosition, setLibraryPosition] = useState<LibraryEndPosition>("Bottom");
+  const { t } = useTranslation("game");
   const [simulate, setSimulate] = useState(false);
 
   return (
@@ -91,7 +92,7 @@ function MoveToZoneForm({ onDispatch }: Props) {
       <CheckboxInput
         checked={simulate}
         onChange={setSimulate}
-        label="Simulate (run triggers + SBAs)"
+        label={t("debugMove.simulate")}
       />
       <SubmitButton
         disabled={objectId == null}

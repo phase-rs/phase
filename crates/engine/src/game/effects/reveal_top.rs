@@ -65,6 +65,7 @@ pub fn resolve(
         }
         // CR 108.3 + CR 608.2c: the full ordered set drives owner-keyed per-player
         // binding and the OtherRevealedCard by-exclusion cross-loss.
+        super::publish_fresh_tracked_set(state, accumulated.clone());
         state.last_revealed_ids = accumulated;
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::Reveal,
@@ -100,6 +101,7 @@ pub fn resolve(
     }
 
     // Store revealed IDs for sub_ability condition/target injection
+    super::publish_fresh_tracked_set(state, revealed_ids.clone());
     state.last_revealed_ids = revealed_ids.clone();
 
     // Emit event with card names

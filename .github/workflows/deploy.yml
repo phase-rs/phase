@@ -425,7 +425,7 @@ jobs:
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: client/public/scryfall-images.v2.*.json
-          key: mtgjson-locale-images-v2-${{ steps.mtgjson-key.outputs.suffix }}-${{ steps.cache-keys.outputs.day }}-${{ hashFiles('scripts/gen-scryfall-locale-images.sh') }}
+          key: mtgjson-locale-images-v2-${{ steps.mtgjson-key.outputs.suffix }}-${{ steps.cache-keys.outputs.day }}-${{ hashFiles('scripts/gen-scryfall-locale-images.sh', 'scripts/lib/localized-image-fallback.py') }}
 
       # Separate from the Scryfall step: this reads MTGJSON set files, not the
       # Scryfall bulk exports, so it is not covered by the data/scryfall cache.
@@ -445,7 +445,7 @@ jobs:
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: client/public/scryfall-images.v2.*.json
-          key: mtgjson-locale-images-v2-${{ steps.mtgjson-key.outputs.suffix }}-${{ steps.cache-keys.outputs.day }}-${{ hashFiles('scripts/gen-scryfall-locale-images.sh') }}
+          key: mtgjson-locale-images-v2-${{ steps.mtgjson-key.outputs.suffix }}-${{ steps.cache-keys.outputs.day }}-${{ hashFiles('scripts/gen-scryfall-locale-images.sh', 'scripts/lib/localized-image-fallback.py') }}
 
       - name: Save Scryfall bulk data
         # data/scryfall is complete once the four generators have run. Banking

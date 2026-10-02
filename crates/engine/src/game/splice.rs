@@ -7,7 +7,8 @@
 //! at the same pre-target seam that Emerge and Casualty use. When the caster
 //! reveals a splice card:
 //!
-//! * its splice cost is folded into the host spell's mana cost (CR 702.47b);
+//! * its splice cost is added to the host spell's total cost as an additional
+//!   cost (CR 702.47a);
 //! * its text-box spell ability is cloned and appended to the host spell's
 //!   resolved-ability chain (CR 702.47c) so it resolves as part of that spell;
 //! * the card is revealed and **stays in the caster's hand** (CR 702.47a).
@@ -112,7 +113,7 @@ pub(crate) fn begin_offer(
 /// CR 702.47b–e: Resolve the caster's response to a splice offer.
 ///
 /// * `Some(card)` — splice `card` onto the host spell: fold its splice cost into
-///   the host's total cost (CR 702.47b), clone its text-box spell ability onto
+///   the host's total cost (CR 702.47a), clone its text-box spell ability onto
 ///   the host's resolved-ability chain (CR 702.47c), reveal it (it stays in
 ///   hand, CR 702.47a), then re-offer the remaining eligible cards (CR 702.47e).
 /// * `None` — the caster is done splicing: proceed to target selection for the
@@ -148,7 +149,7 @@ pub(crate) fn resolve_offer(
     })?;
     let card_name = obj.name.clone();
 
-    // CR 702.47b + CR 601.2f: the splice cost is an additional cost. Preserve
+    // CR 702.47a + CR 601.2f: the splice cost is an additional cost. Preserve
     // the host spell's tax-inclusive base and record splice mana as a declared
     // addition so later total-cost recomputes apply reductions to base + splice.
     pending.declared_mana_additions.push(splice_cost.clone());

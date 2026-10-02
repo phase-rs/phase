@@ -7,6 +7,7 @@ import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
 import { useInspectHoverProps } from "../../hooks/useInspectHoverProps.ts";
 import { useCanActForWaitingState, usePlayerId } from "../../hooks/usePlayerId.ts";
 import { objectImageProps } from "../../services/cardImageLookup.ts";
+import { useAnimationStore } from "../../stores/animationStore.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { CASTABLE_AFFORDANCE_IDLE } from "../../viewmodel/castableAffordance.ts";
@@ -85,6 +86,11 @@ export function LibraryPile({ playerId, size, onView }: LibraryPileProps) {
     // library[0] = top of library (engine convention from zones.rs)
     return lib[0];
   });
+  // A card flight is presenting the top card itself, so the pile shows a back
+  // in its place.
+  const topInFlight = useAnimationStore(
+    (s) => topObjectId != null && s.flightVeiledObjectIds.has(topObjectId),
+  );
   const isRevealed = useGameStore((s) => {
     if (topObjectId == null) return false;
     return s.gameState?.revealed_cards?.includes(topObjectId) ?? false;
@@ -204,8 +210,8 @@ export function LibraryPile({ playerId, size, onView }: LibraryPileProps) {
                 : "border-gray-600 cursor-default"
         }`}
       >
-        {visibleTopObject ? (
-          <VisibleTopCard object={visibleTopObject!} />
+        {visibleTopObject && !topInFlight ? (
+          <VisibleTopCard object={visibleTopObject} />
         ) : (
           <HiddenTopCard />
         )}

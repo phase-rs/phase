@@ -171,6 +171,20 @@ pub(crate) fn apply_zone_exit_cleanup(
     to: Zone,
     attachments: Vec<crate::types::game_state::AttachmentSnapshot>,
 ) {
+    // CR 608.2h + CR 707.2: record the spell's stack entry and object before
+    // any of this function's own reverts (`cast_occurrence` clear below,
+    // modal/face-down face swap further down) erase what "that spell" looked
+    // like while it was on the stack.
+    if from == Zone::Stack && to != Zone::Stack {
+        let departed_entry = state
+            .stack
+            .iter()
+            .find(|entry| entry.id == object_id)
+            .cloned();
+        if let Some(entry) = departed_entry {
+            super::stack::record_departed_stack_spell(state, &entry);
+        }
+    }
     // CR 400.7: An object that changes zones becomes a new object with no
     // memory of its previous existence. The information authority receives the
     // pre-move occurrence so the future Zone command can apply this same clear
@@ -374,6 +388,9 @@ pub(crate) fn apply_zone_exit_cleanup(
             // while it remains in exile. Once it changes zones, the new object
             // is no longer a foretold card.
             obj_mut.foretold = false;
+            // CR 400.7 + CR 406.6: which player exiled this card is a fact
+            // about its stay in exile; the new object has no such history.
+            obj_mut.exiled_by = None;
             // CR 708.4: a spell CAST face down (morph/disguise via an exile
             // permission) is turned face down as part of the cast and keeps
             // that status on the stack. Only the exile-zone face-down
@@ -672,6 +689,8 @@ pub(crate) fn apply_zone_exit_cleanup(
         // source self-exiles mid-activation and returns with the same ObjectId,
         // so the material links must survive its battlefield exit for the
         // returned permanent to still read what it was crafted with.
+        // CR 406.3: `HideawayLookable` links are preserved because a look outlives
+        // its source; their live rule stops admitting once the source is gone.
         // CR 607.2a + CR 400.7: `TrackedBySource` links are preserved when the
         // source leaves the battlefield TO EXILE. A source that self-exiles
         // (typically as its own activation cost — Mechtitan Core: "Exile this
@@ -692,6 +711,7 @@ pub(crate) fn apply_zone_exit_cleanup(
                         | crate::types::game_state::ExileLinkKind::UntilOpponentBecomesMonarch { .. }
                         | crate::types::game_state::ExileLinkKind::Haunt
                         | crate::types::game_state::ExileLinkKind::CraftMaterial
+                        | crate::types::game_state::ExileLinkKind::HideawayLookable { .. }
                 )
                 || (source_exits_to_exile
                     && matches!(
@@ -1131,6 +1151,13 @@ pub fn apply_resolved_zone_change(
     // double-applied; the returned ids are dropped because replay reproduces
     // state, not events (the live transition already emitted them).
     let _ = sever_battlefield_attachment_graph_on_exit(state, command.object.object_id);
+    // CR 400.7 + CR 701.20a: replay bypasses `apply_zone_exit_cleanup`, so it
+    // must reproduce that cleanup's stack-bound reveal drop for the departing
+    // occurrence (validated above), or a lease the live move ended survives as a
+    // stale row in replay. A same-zone reorder is not a new object and keeps it.
+    if command.from != command.to {
+        state.drop_stack_bound_reveals_for_occurrence(command.object);
+    }
     remove_from_zone(state, command.object.object_id, command.from, command.owner);
     add_to_zone(state, command.object.object_id, command.to, command.owner);
 
@@ -1292,6 +1319,11 @@ pub(crate) fn move_to_zone_with_entry_flags(
                         *attack_target
                     }
                     crate::types::game_state::LiminalEntryKind::Token => None,
+                    // Never reached at delivery: `TransformedEntry` projections
+                    // are released before the caller delivers the move (see
+                    // `replacement::release_transformed_entry_projection`).
+                    // This arm exists for exhaustiveness only.
+                    crate::types::game_state::LiminalEntryKind::TransformedEntry => None,
                 })
         })
         .flatten();
@@ -1875,6 +1907,61 @@ pub fn mark_simultaneous_departure_records(
     }
 }
 
+/// Marks a settled SearchLibrary move into Exile as face down at event time.
+///
+/// The move's physical destination is already authoritative when this helper
+/// runs. Updating the object, emitted record, and per-turn ledger together
+/// keeps state and event projections on the same event-time privacy fact.
+pub(crate) fn mark_face_down_in_exile(
+    state: &mut GameState,
+    events: &mut [GameEvent],
+    object_id: ObjectId,
+) {
+    if state
+        .objects
+        .get(&object_id)
+        .is_some_and(|object| object.zone == Zone::Exile)
+    {
+        if let Some(object) = state.objects.get_mut(&object_id) {
+            object.face_down = true;
+        }
+    }
+
+    let exact_ledger_entry = events.iter_mut().rev().find_map(|event| {
+        let GameEvent::ZoneChanged {
+            object_id: event_object_id,
+            to: Zone::Exile,
+            record,
+            ..
+        } = event
+        else {
+            return None;
+        };
+        if *event_object_id != object_id || record.object_id != object_id {
+            return None;
+        }
+        if let Some(context) = record.trigger_source_context.as_mut() {
+            context.face_down = true;
+        }
+        Some((record.turn_zone_change_index, record.recorded_turn_number))
+    });
+
+    // The event record carries the exact occurrence assigned by
+    // `record_zone_change`. Never search the ledger by object/destination:
+    // repeated Exile entries for one object are distinct incarnations.
+    if let Some((index, recorded_turn)) = exact_ledger_entry {
+        if recorded_turn == state.turn_number {
+            if let Some(record) = state.zone_changes_this_turn.get_mut(index) {
+                if record.object_id == object_id && record.to_zone == Zone::Exile {
+                    if let Some(context) = record.trigger_source_context.as_mut() {
+                        context.face_down = true;
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// CR 603.10a + CR 704.5d/e: where an object stands relative to the battlefield,
 /// for producers and observers that must decide whether it *left*.
 ///
@@ -1982,7 +2069,8 @@ pub fn stamp_simultaneous_from_slice(state: &GameState, slice: &mut [GameEvent])
 /// is_some()` branch). Every `ExileLinkKind` is kind-agnostically readable via
 /// `ExiledBySource` (`HideawayLookable`'s and `CraftMaterial`'s own doc
 /// comments say so explicitly) and the LIVE lookup
-/// (`players::linked_exile_cards_for_source`) does not filter by kind either —
+/// (`players::linked_exile_cards_for_source`) reads the same
+/// `exile_links::live_links_for_source` accessor —
 /// this snapshot must match that surface exactly, or a card whose "play the
 /// exiled card" clause resolves via a TRIGGERED ability (Fight Rigging's
 /// begin-of-combat trigger, as opposed to Windbrisk Heights' activated
@@ -1997,10 +2085,7 @@ pub(crate) fn capture_linked_exile_snapshot(
         return Vec::new();
     }
 
-    state
-        .exile_links
-        .iter()
-        .filter(|link| link.source_id == source_id)
+    crate::game::exile_links::live_links_for_source(state, source_id)
         .filter_map(|link| {
             state.objects.get(&link.exiled_id).and_then(|obj| {
                 (obj.zone == Zone::Exile).then(|| crate::types::game_state::LinkedExileSnapshot {
@@ -3388,6 +3473,39 @@ mod tests {
         assert!(!state.players[0].library.contains(&id));
         assert!(state.players[0].hand.contains(&id));
         assert_eq!(state.objects[&id].zone, Zone::Hand);
+    }
+
+    #[test]
+    fn face_down_exile_marks_the_exact_ledger_occurrence() {
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(9),
+            PlayerId(0),
+            "Repeated Exile".to_string(),
+            Zone::Hand,
+        );
+        let mut events = Vec::new();
+
+        move_to_zone(&mut state, id, Zone::Exile, &mut events);
+        move_to_zone(&mut state, id, Zone::Hand, &mut events);
+        let second_exile_start = events.len();
+        move_to_zone(&mut state, id, Zone::Exile, &mut events);
+        mark_face_down_in_exile(&mut state, &mut events[second_exile_start..], id);
+
+        assert_eq!(state.zone_changes_this_turn.len(), 3);
+        assert!(
+            !state.zone_changes_this_turn[0]
+                .trigger_source_context()
+                .expect("first Exile record carries source context")
+                .face_down
+        );
+        assert!(
+            state.zone_changes_this_turn[2]
+                .trigger_source_context()
+                .expect("second Exile record carries source context")
+                .face_down
+        );
     }
 
     /// CR 122.2 + CR 400.7: Counters cease to exist when an object changes

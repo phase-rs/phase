@@ -35,11 +35,64 @@ pub struct FormatMetadata {
     /// One-line human description suitable for a card or tooltip.
     pub description: &'static str,
     pub group: FormatGroup,
+    /// `GameFormat::legality_key` of `format`: the key the engine's legality
+    /// maps record this format's legality table under, or `None` when the card
+    /// data records no table for it.
+    pub legality_key: Option<&'static str>,
     pub default_config: FormatConfig,
 }
 
 /// Supported game formats.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `GameFormat::iter()` yields exactly the **built-in** formats, in declaration
+/// order: `Custom(CustomFormatId)` is `#[strum(disabled)]` because it is not a
+/// member of a fixed set and cannot be enumerated.
+///
+/// What this iterator is the authority for, at the width it actually holds.
+/// Not every test that calls `GameFormat::iter()` is coupled to this exact
+/// membership — a test that loops it to assert a per-format property is
+/// coupled only to that property.
+/// `grep -rn 'GameFormat::iter()' crates/engine/` finds every call site
+/// (filter out doc-comment mentions like this one) — that search, not a
+/// hand-copied list here, is what enumerates them.
+///
+/// THREE KINDS of neighbouring guard do NOT work that way, and the difference
+/// matters if this comment is read as a promise. The exhaustive `match`
+/// statements over the format set — in this file, in `types/custom_format.rs`,
+/// in `game/deck_validation.rs` and in `crates/engine-wasm/src/lib.rs` — are
+/// held by the COMPILER: a new variant reds them with `E0004`, not against this
+/// iterator and not with an assertion name. And
+/// the client's `FORMAT_SHAPES` table in
+/// `client/src/services/__tests__/deckUrlImport.test.ts` is keyed by
+/// `BuiltInGameFormat`, so the TypeScript compiler is what forces its key set;
+/// it reaches this iterator only transitively, through
+/// `tests::client_builtin_game_format_union_matches_the_engine`. And
+/// `tests::client_format_registry_matches_the_engine_registry` compares the
+/// client mirror against `registry()`, not against this iterator; it reaches
+/// this iterator only transitively, through
+/// `tests::registry_lists_every_builtin_format`.
+///
+/// Exhaustiveness comes from `EnumIter`, not from the length of a hand-written
+/// array, which is why no `BUILTINS` constant exists here to drift from the
+/// declaration below. The in-crate precedents for an `EnumIter` derive are
+/// `parser/oracle_ir/feature.rs` and `parser/oracle_ir/diagnostic.rs`;
+/// `types/keywords.rs` and `types/statics.rs` carry the same IDIOM — a derived
+/// figure rather than a hand-maintained one — but through `strum::EnumCount`,
+/// not `EnumIter`.
+///
+/// Two things are worth knowing before editing this derive. A second
+/// payload-carrying variant left without `#[strum(disabled)]` is a COMPILE
+/// ERROR only if ITS OWN payload type does not implement `Default` — true of
+/// `CustomFormatId` today (a newtype over `u16`, one `#[derive(Default)]` away
+/// from no longer gating anything), but the gate is the new variant's payload,
+/// not `CustomFormatId` itself. When the payload DOES implement `Default`,
+/// `iter()` instead SILENTLY gains a default-valued member — the same failure
+/// shape as `#[strum(disabled)]` on a UNIT variant removing it from `iter()`
+/// SILENTLY. Both silent cases are caught by
+/// `tests::registry_lists_every_builtin_format`, which compares `iter()` to
+/// the hand-written `registry()` below (mutation-tested: `#[strum(disabled)]`
+/// on `Momir` reds it; `grep -rn 'GameFormat::iter()' crates/engine/`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::EnumIter)]
 pub enum GameFormat {
     Standard,
     Limited,
@@ -77,11 +130,25 @@ pub enum GameFormat {
     /// maximum (f(1)) and no singleton restriction on the drafted pool (f(2)).
     /// CR 903.13g delegates all game rules to CR 903.6-903.11.
     CommanderDraft,
+    /// Casual 1v1 constructed variant: every set is in the pool, no ban list,
+    /// no copy limit and no main-deck minimum. It keeps CR 100.4a's
+    /// fifteen-card sideboard.
+    Freeform,
+    /// Casual multiplayer command-zone variant. Any card that can be CAST may
+    /// be designated as its commander — a departure from CR 903.3's legendary
+    /// creature / Vehicle / Spacecraft requirement — but a land may not: a
+    /// commander is cast from the command zone under an additional cost
+    /// (CR 903.8) and a land is played as a special action rather than cast
+    /// (CR 305.1), so the tax has nothing to attach to. Every set is in the
+    /// pool, there is no ban list, no copy limit and no main-deck minimum.
+    /// Two commanders only where partner families admit the pair.
+    FreeformCommander,
     /// An engine-validated custom format. Resolves via
     /// `FormatConfig.custom_rules` (see `types::custom_format`) — a bare
     /// `GameFormat::Custom(id)` alone cannot fully answer several of this
     /// enum's methods; see each method's doc comment for how it handles
     /// `Custom`.
+    #[strum(disabled)]
     Custom(CustomFormatId),
 }
 
@@ -132,6 +199,8 @@ impl std::str::FromStr for GameFormat {
             "Planechase" => Ok(GameFormat::Planechase),
             "Momir" => Ok(GameFormat::Momir),
             "CommanderDraft" => Ok(GameFormat::CommanderDraft),
+            "Freeform" => Ok(GameFormat::Freeform),
+            "FreeformCommander" => Ok(GameFormat::FreeformCommander),
             other => Err(GameFormatParseError(format!(
                 "unknown GameFormat: {other:?}"
             ))),
@@ -166,6 +235,8 @@ impl std::fmt::Display for GameFormat {
             GameFormat::Planechase => write!(f, "Planechase"),
             GameFormat::Momir => write!(f, "Momir"),
             GameFormat::CommanderDraft => write!(f, "CommanderDraft"),
+            GameFormat::Freeform => write!(f, "Freeform"),
+            GameFormat::FreeformCommander => write!(f, "FreeformCommander"),
         }
     }
 }
@@ -380,6 +451,90 @@ impl DeckSizeAuthority {
     }
 }
 
+/// Which authority decides whether a card is in a format's deck-construction
+/// card pool.
+///
+/// CR 100.6 is why this is an engine axis rather than a Comprehensive Rules
+/// one: ban and restricted lists live in the tournament rules, not the CR
+/// ("These rules may limit the use of some cards, including barring all cards
+/// from some older sets"). A format declaring that nothing is restricted is
+/// making a statement the CR permits, not overriding one it makes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CardPool {
+    /// The engine's legality table for this `LegalityFormat` answers each card.
+    LegalityTable(LegalityFormat),
+    /// No legality table answers this format's pool, and the engine makes no
+    /// claim that nothing is restricted — that is the whole distinction from
+    /// `Unrestricted`. No `CardPoolAuthority` built from this variant ever
+    /// refuses a card on pool grounds, but a format may still restrict its
+    /// own deck by a construction rule that lives outside `CardPool`
+    /// entirely, as `evaluate_momir` does for Momir's five snow basics.
+    NoEngineAuthority,
+    /// The format's own rules positively declare that no card is restricted.
+    /// Silence is not such a declaration: a multiplayer variant that states no
+    /// deck-construction rule at all is `NoEngineAuthority`. This variant is
+    /// what lets a Constructed-group format decline a legality table without
+    /// the registry invariant reading it as an unplaced default.
+    Unrestricted,
+    /// `GameFormat::Custom` only: the authority is the format's own declared
+    /// `LegalityRules`, which a bare `GameFormat` cannot see. The declaration
+    /// names the authority, never the answer.
+    DeclaredRules,
+}
+
+/// CR 702.124a: partner abilities "modify the rules for deck construction in
+/// the Commander variant," so whether a format honors them is a per-format
+/// deck-construction fact, not a card fact. CR 702.124g caps any partner
+/// combination at two.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommanderPairing {
+    /// No commander is designated from the decklist.
+    NoCommander,
+    /// Exactly one commander; CR 702.124's partner families are not consulted.
+    Solo,
+    /// One commander, or two when CR 702.124's partner families permit.
+    PartnerFamilies,
+}
+
+impl CommanderPairing {
+    /// How many designated commanders this rule admits — the single
+    /// authority for the ADMISSION decision. Callers deciding admission must
+    /// not re-derive it with `is_empty()`, `> 2` or `!= 1`.
+    ///
+    /// Other `commander.len()` comparisons in the validators are not
+    /// admission checks. They guard later slot access and arity branches.
+    pub fn admits_count(self, count: usize) -> bool {
+        match self {
+            CommanderPairing::NoCommander => count == 0,
+            CommanderPairing::Solo => count == 1,
+            // CR 702.124g: no partner combination exceeds two.
+            CommanderPairing::PartnerFamilies => (1..=2).contains(&count),
+        }
+    }
+}
+
+/// CR 100.2a / CR 903.5a: which pile a format's `DeckSizeRule` measures.
+///
+/// CR 903.5a fixes Commander's 100 "including its commander"; CR 100.2a's
+/// constructed 60 has no commander to include. The magnitude alone cannot say
+/// which, and `command_zone_holds_decklist_commander()` cannot either — it
+/// answers `true` for Oathbreaker, whose subject additionally includes the
+/// signature spell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeckSizeSubject {
+    /// The main deck alone. The sideboard is a group of ADDITIONAL cards
+    /// (CR 100.4) and so is never in this count; its own cap is
+    /// `sideboard_policy` (CR 100.4a). No command-zone card is counted.
+    MainDeck,
+    /// CR 903.5a ("including its commander"): the main deck plus the
+    /// designated commanders, netting a commander also listed in the main deck
+    /// down to the one physical card it is.
+    MainDeckAndCommanders,
+    /// Oathbreaker RC: the main deck plus the oathbreaker AND the signature
+    /// spell, each netted the same way.
+    MainDeckAndCommandZone,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TurnStructure {
     IndividualTurns,
@@ -530,6 +685,15 @@ pub struct FormatConfig {
     /// Immutable for the life of the session.
     #[serde(default)]
     pub allow_debug_actions: bool,
+    /// Capability flag: when true, the experimental dungeon pool is offered —
+    /// Baldur's Gate Wilderness joins the AFR trio on a normal venture
+    /// (CR 701.49a), and taking the initiative (CR 726.2) offers the
+    /// Wilderness as an alternative to Undercity instead of auto-entering
+    /// the Undercity. Off by default. Orthogonal to format — a game with
+    /// experimental dungeons plays exactly like a normal game with one
+    /// additional choice. Immutable for the life of the session.
+    #[serde(default)]
+    pub allow_experimental_dungeons: bool,
     /// Present only when `format == GameFormat::Custom(id)` (and then `id`
     /// must equal `custom_rules.id` — see
     /// `custom_format::validate_custom_rules_consistency`). `None` for every
@@ -674,7 +838,7 @@ pub fn validate_starting_life_bounds(config: &FormatConfig) -> Result<(), String
 /// and the seat count no CR fixes (CR 100.1a / CR 100.1b / CR 800.1 fix only
 /// that a game begins with two players or with more than two). Re-derive the
 /// authoritative config with `FormatConfig::for_format` and check every one
-/// of this struct's 17 fields against it under one of six verdicts:
+/// of this struct's 18 fields against it under one of six verdicts:
 ///
 /// - Locked: must equal the registry value exactly.
 /// - NoLooserThan: must be no more permissive than the registry value,
@@ -1011,6 +1175,9 @@ fn built_in_axes_no_looser_than_rules(config: &FormatConfig) -> Result<(), Strin
     // allow_debug_actions: HostChoice — session capability, orthogonal to
     // format. Free.
 
+    // allow_experimental_dungeons: HostChoice — session capability,
+    // orthogonal to format. Free.
+
     // custom_rules: Locked (None) — the built-in arm is defined by
     // custom_rules == None; the biconditional is established upstream by
     // validate_custom_rules_consistency.
@@ -1054,11 +1221,14 @@ impl<'de> Deserialize<'de> for FormatConfig {
                     ));
                 }
                 let mut expected = FormatConfig::for_custom_rules(rules);
-                // `allow_debug_actions` is the one field the resolver cannot
-                // derive: it is a session capability (sandbox debug actions),
-                // orthogonal to format, chosen per game rather than declared
-                // by the ruleset. Every other field must match exactly.
+                // `allow_debug_actions` and `allow_experimental_dungeons` are
+                // the two fields the resolver cannot derive: they are session
+                // capabilities (sandbox debug actions; the experimental
+                // dungeon pool), orthogonal to format, chosen per game rather
+                // than declared by the ruleset. Every other field must match
+                // exactly.
                 expected.allow_debug_actions = config.allow_debug_actions;
+                expected.allow_experimental_dungeons = config.allow_experimental_dungeons;
                 if config != expected {
                     // Reports the derived target values rather than dumping
                     // both whole structs: `custom_rules.legality`'s
@@ -1067,7 +1237,8 @@ impl<'de> Deserialize<'de> for FormatConfig {
                     return Err(serde::de::Error::custom(format!(
                         "FormatConfig for {} contradicts its own custom_rules.structural — every \
                          runtime field must be exactly what FormatConfig::for_custom_rules \
-                         derives from the declared rules (allow_debug_actions excepted). Derived: \
+                         derives from the declared rules (allow_debug_actions and \
+                         allow_experimental_dungeons excepted). Derived: \
                          starting_life {}, players {}-{}, deck_size {:?}, singleton {}, \
                          command_zone {}, commander_damage_threshold {:?}, uses_commander {}, \
                          team_based {}, archenemy_player {:?}, supplies_fixed_deck {}, \
@@ -1107,9 +1278,9 @@ impl<'de> Deserialize<'de> for FormatConfig {
             // NoLooserThan, Derived, HostChoice, ShapeLocked, and
             // HostChoiceWithin). `built_in_axes_no_looser_than_rules`
             // re-derives the authoritative config via `FormatConfig::for_format`
-            // and checks every one of this struct's 17 fields against it —
+            // and checks every one of this struct's 18 fields against it —
             // absorbing what was previously a single ad hoc
-            // `default_deck_copy_limit` check as one of its 17 rows, rather
+            // `default_deck_copy_limit` check as one of its 18 rows, rather
             // than adding a parallel second check. `range_of_influence`'s row
             // is a documented `Deferred` non-check (see that function's own
             // comment on the field), not an omission.
@@ -1229,41 +1400,137 @@ impl<'de> Deserialize<'de> for SelectedFormat {
 }
 
 impl GameFormat {
-    /// Maps a playable game format to its corresponding legality format for card pool validation.
-    /// Returns `None` for formats that don't restrict card pools (FreeForAll, TwoHeadedGiant).
-    pub fn legality_format(self) -> Option<LegalityFormat> {
+    /// Which authority decides this format's deck-construction card pool —
+    /// the single authority: [`Self::legality_format`] is a projection of
+    /// this, not a second list.
+    pub fn card_pool(self) -> CardPool {
         match self {
-            GameFormat::Standard => Some(LegalityFormat::Standard),
-            GameFormat::Commander => Some(LegalityFormat::Commander),
-            GameFormat::Pioneer => Some(LegalityFormat::Pioneer),
-            GameFormat::Modern => Some(LegalityFormat::Modern),
-            GameFormat::Premodern => Some(LegalityFormat::Premodern),
-            GameFormat::Legacy => Some(LegalityFormat::Legacy),
-            GameFormat::Vintage => Some(LegalityFormat::Vintage),
-            GameFormat::Historic => Some(LegalityFormat::Historic),
-            GameFormat::Timeless => Some(LegalityFormat::Timeless),
-            GameFormat::Pauper => Some(LegalityFormat::Pauper),
-            GameFormat::PauperCommander => Some(LegalityFormat::PauperCommander),
-            GameFormat::DuelCommander => Some(LegalityFormat::DuelCommander),
-            GameFormat::Brawl => Some(LegalityFormat::StandardBrawl),
-            GameFormat::HistoricBrawl => Some(LegalityFormat::Brawl),
+            GameFormat::Standard => CardPool::LegalityTable(LegalityFormat::Standard),
+            GameFormat::Commander => CardPool::LegalityTable(LegalityFormat::Commander),
+            GameFormat::Pioneer => CardPool::LegalityTable(LegalityFormat::Pioneer),
+            GameFormat::Modern => CardPool::LegalityTable(LegalityFormat::Modern),
+            GameFormat::Premodern => CardPool::LegalityTable(LegalityFormat::Premodern),
+            GameFormat::Legacy => CardPool::LegalityTable(LegalityFormat::Legacy),
+            GameFormat::Vintage => CardPool::LegalityTable(LegalityFormat::Vintage),
+            GameFormat::Historic => CardPool::LegalityTable(LegalityFormat::Historic),
+            GameFormat::Timeless => CardPool::LegalityTable(LegalityFormat::Timeless),
+            GameFormat::Pauper => CardPool::LegalityTable(LegalityFormat::Pauper),
+            GameFormat::PauperCommander => {
+                CardPool::LegalityTable(LegalityFormat::PauperCommander)
+            }
+            GameFormat::DuelCommander => CardPool::LegalityTable(LegalityFormat::DuelCommander),
+            GameFormat::Brawl => CardPool::LegalityTable(LegalityFormat::StandardBrawl),
+            GameFormat::HistoricBrawl => CardPool::LegalityTable(LegalityFormat::Brawl),
+            // Freeform's own rules positively restrict nothing, which is what
+            // separates this variant from the silence `NoEngineAuthority`
+            // names. (The CR 100.6 rationale for the axis existing at all is
+            // on `CardPool` itself; do not restate it here.)
+            GameFormat::Freeform => CardPool::Unrestricted,
+            // Freeform Commander's own rules make the same positive
+            // declaration Freeform's does; it is a separate arm rather than
+            // joining Freeform's so a later editor does not merge them and
+            // put Freeform's comment over a second format it does not name.
+            GameFormat::FreeformCommander => CardPool::Unrestricted,
             GameFormat::TinyLeaders
             | GameFormat::Oathbreaker
+            // These state no main-deck card-pool rule at all, so the engine
+            // holds no answer — which is not the positive "nothing is
+            // restricted" claim `Unrestricted` makes.
             | GameFormat::FreeForAll
             | GameFormat::TwoHeadedGiant
             | GameFormat::Archenemy
             | GameFormat::Planechase
-            // Momir's pool is the entire creature corpus — no legality restriction.
-            | GameFormat::Momir
             // CR 903.13e: the drafted cards become the card pool, so no
             // constructed legality table applies — as for Limited.
             | GameFormat::CommanderDraft
-            | GameFormat::Limited => None,
+            | GameFormat::Limited => CardPool::NoEngineAuthority,
+            // Momir's main deck is fixed by the format's own rule, not by a
+            // legality table: `evaluate_momir` enforces exactly 12 copies
+            // each of the five CR 305.6 snow basic land types.
+            GameFormat::Momir => CardPool::NoEngineAuthority,
             // A custom format's legality is entirely governed by its own
             // `LegalityRules` (legal_sets/legal_cards/banned/restricted), never by the
             // built-in `LegalityFormat` table.
-            GameFormat::Custom(_) => None,
+            GameFormat::Custom(_) => CardPool::DeclaredRules,
         }
+    }
+
+    /// The legality table that answers this format's card pool, if the engine
+    /// holds one. A projection of [`Self::card_pool`], which is the single
+    /// authority: the three pool kinds that answer `None` here are not the
+    /// same fact, and only `card_pool` distinguishes them.
+    pub fn legality_format(self) -> Option<LegalityFormat> {
+        match self.card_pool() {
+            CardPool::LegalityTable(format) => Some(format),
+            CardPool::NoEngineAuthority | CardPool::Unrestricted | CardPool::DeclaredRules => None,
+        }
+    }
+
+    /// The legality table the card data records for this format, if any —
+    /// whether or not this format's deck validation consults it, which is
+    /// `card_pool`'s question.
+    pub fn recorded_legality_table(self) -> Option<LegalityFormat> {
+        LegalityFormat::ALL
+            .into_iter()
+            .find(|table| legality_table_format(*table) == self)
+    }
+
+    /// [`Self::recorded_legality_table`]'s key in the engine's legality maps.
+    pub fn legality_key(self) -> Option<&'static str> {
+        self.recorded_legality_table().map(LegalityFormat::as_key)
+    }
+
+    /// How many commanders this format's decklist may designate. Whether a
+    /// specific count is admitted is `CommanderPairing::admits_count`'s call
+    /// — the single authority for that decision. Callers must not re-derive
+    /// admission itself.
+    ///
+    /// `Custom(_)` answers `NoCommander`: reachable via both custom
+    /// evaluators (`evaluate_custom_format`, `quick_custom_format_check`),
+    /// and correct on either because every command-zone custom format is
+    /// already refused upstream by `custom_format_pool`'s
+    /// `CUSTOM_FORMAT_COMMAND_ZONE_UNSUPPORTED` gate.
+    pub fn commander_pairing(self) -> CommanderPairing {
+        match self {
+            GameFormat::Commander
+            | GameFormat::DuelCommander
+            | GameFormat::PauperCommander
+            | GameFormat::CommanderDraft
+            | GameFormat::TinyLeaders
+            // This format widens WHO may be a
+            // commander.
+            | GameFormat::FreeformCommander => CommanderPairing::PartnerFamilies,
+            GameFormat::Brawl | GameFormat::HistoricBrawl | GameFormat::Oathbreaker => {
+                CommanderPairing::Solo
+            }
+            GameFormat::Standard
+            | GameFormat::Limited
+            | GameFormat::Pioneer
+            | GameFormat::Modern
+            | GameFormat::Premodern
+            | GameFormat::Legacy
+            | GameFormat::Vintage
+            | GameFormat::Historic
+            | GameFormat::Timeless
+            | GameFormat::Pauper
+            | GameFormat::FreeForAll
+            | GameFormat::TwoHeadedGiant
+            | GameFormat::Archenemy
+            | GameFormat::Planechase
+            | GameFormat::Momir
+            | GameFormat::Freeform
+            | GameFormat::Custom(_) => CommanderPairing::NoCommander,
+        }
+    }
+
+    /// Whether a card in this game could be an Arena-only card. The
+    /// classification keys off the built-in `LegalityFormat` table; a format
+    /// outside that table — `Custom(_)` included, whose pool lives in
+    /// `custom_rules.legality` — is not classified here and so is not
+    /// restricted here.
+    pub fn admits_digital_only_cards(self) -> bool {
+        self.legality_format()
+            .is_none_or(LegalityFormat::admits_digital_only_cards)
     }
 
     /// CR 100.4a: Per-format sideboard policy.
@@ -1281,7 +1548,8 @@ impl GameFormat {
             | GameFormat::Vintage
             | GameFormat::Historic
             | GameFormat::Timeless
-            | GameFormat::Pauper => SideboardPolicy::Limited(15),
+            | GameFormat::Pauper
+            | GameFormat::Freeform => SideboardPolicy::Limited(15),
             GameFormat::Commander
             | GameFormat::PauperCommander
             | GameFormat::DuelCommander
@@ -1292,7 +1560,17 @@ impl GameFormat {
             // CR 903.13f routes deck construction through CR 903.5, and the
             // Commander family has no sideboard.
             | GameFormat::CommanderDraft
-            | GameFormat::HistoricBrawl => SideboardPolicy::Forbidden,
+            | GameFormat::HistoricBrawl
+            // No deck-compatibility verdict distinguishes this format's
+            // sideboard value at all: `request_without_sideboard` strips the
+            // sideboard before every commander check. `Forbidden` is the
+            // only value under which the engine stays consistent for this
+            // format with no edit anywhere else (`load_deck_into_state`'s
+            // `drop_sideboard` keys on `Forbidden` alone), and this format
+            // has no best-of-three shape for a real sideboard to serve
+            // (`evaluate_deck_compatibility` derives `bo3_ready` false for
+            // any deck that designates a commander).
+            | GameFormat::FreeformCommander => SideboardPolicy::Forbidden,
             GameFormat::TinyLeaders => SideboardPolicy::Limited(10),
             GameFormat::FreeForAll
             | GameFormat::TwoHeadedGiant
@@ -1360,6 +1638,16 @@ impl GameFormat {
             // does not join the `UpTo(1)` Commander group.
             | GameFormat::CommanderDraft
             | GameFormat::Momir => DeckCopyLimit::Unlimited,
+            // Freeform's own rules lift CR 100.2a's four-card limit outright.
+            // A card's PRINTED deck-construction limit still binds underneath
+            // this default -- see `effective_copy_limit`.
+            GameFormat::Freeform => DeckCopyLimit::Unlimited,
+            // Freeform Commander's own rules lift CR 100.2a's four-card limit
+            // outright, the same as Freeform's — a separate arm for the same
+            // reason `card_pool`'s is: a card's PRINTED deck-construction
+            // limit still binds underneath this default (MEASURED: 2 copies
+            // of a card with a printed singleton limit are refused).
+            GameFormat::FreeformCommander => DeckCopyLimit::Unlimited,
             // Phase 1a: disclosed, temporary, bare-GameFormat-context
             // fallback — not this custom format's real declared limit.
             // UpTo(1) (the same value already used for command-zone
@@ -1376,10 +1664,8 @@ impl GameFormat {
     /// `Minimum`/`Exactly` discriminant is always rules-fixed — see
     /// [`DeckSizeAuthority`], which cannot express one.
     ///
-    /// `RulesFixed` for every sanctioned format: CR 100.2a's 60-card
-    /// constructed minimum, CR 100.2b's 40-card limited minimum, CR 903.5a's
-    /// exact 100, and the supplementary-deck formats that build a constructed
-    /// deck (CR 100.2d).
+    /// `RulesFixed` — the magnitude each format's own rules already fix,
+    /// whatever that magnitude is.
     ///
     /// `HostChoiceAmong(&[60, 40])` for Free-for-All alone. CR 806
     /// ("Free-for-All Variant") specifies seating, attack options and range of
@@ -1415,7 +1701,9 @@ impl GameFormat {
             | GameFormat::Archenemy
             | GameFormat::Planechase
             | GameFormat::Momir
-            | GameFormat::CommanderDraft => DeckSizeAuthority::RulesFixed,
+            | GameFormat::CommanderDraft
+            | GameFormat::Freeform
+            | GameFormat::FreeformCommander => DeckSizeAuthority::RulesFixed,
             // R6 (review round 3): exhaustive, no wildcard. Unreachable by
             // construction from the admission gate: `for_format` returns Err
             // for Custom before any verdict row runs, and a Custom payload is
@@ -1423,6 +1711,46 @@ impl GameFormat {
             // `FormatConfig::for_custom_rules`. `RulesFixed` is the
             // total-function answer for other callers, not a policy choice.
             GameFormat::Custom(_) => DeckSizeAuthority::RulesFixed,
+        }
+    }
+
+    /// Which pile this format's `DeckSizeRule` measures — the single
+    /// authority.
+    ///
+    /// `Custom(_)` answers `MainDeck`, disclosed fail-closed: both custom
+    /// evaluators (`evaluate_custom_format`, `quick_custom_format_check`) are
+    /// constructed-shaped only.
+    pub fn deck_size_subject(self) -> DeckSizeSubject {
+        match self {
+            GameFormat::Commander
+            | GameFormat::DuelCommander
+            | GameFormat::PauperCommander
+            | GameFormat::CommanderDraft
+            | GameFormat::Brawl
+            | GameFormat::HistoricBrawl
+            | GameFormat::TinyLeaders
+            // This format's own rules state no deck-size requirement, so
+            // the declaration is a pinned property rather than a magnitude
+            // any verdict reads.
+            | GameFormat::FreeformCommander => DeckSizeSubject::MainDeckAndCommanders,
+            GameFormat::Oathbreaker => DeckSizeSubject::MainDeckAndCommandZone,
+            GameFormat::Standard
+            | GameFormat::Limited
+            | GameFormat::Pioneer
+            | GameFormat::Modern
+            | GameFormat::Premodern
+            | GameFormat::Legacy
+            | GameFormat::Vintage
+            | GameFormat::Historic
+            | GameFormat::Timeless
+            | GameFormat::Pauper
+            | GameFormat::FreeForAll
+            | GameFormat::TwoHeadedGiant
+            | GameFormat::Archenemy
+            | GameFormat::Planechase
+            | GameFormat::Momir
+            | GameFormat::Freeform
+            | GameFormat::Custom(_) => DeckSizeSubject::MainDeck,
         }
     }
 
@@ -1434,15 +1762,44 @@ impl GameFormat {
     /// Multiplayer games (3+ seats) always get the free first mulligan per
     /// CR 103.5c regardless of format; this predicate is the *duel* override.
     pub fn grants_free_first_mulligan(self) -> bool {
-        matches!(
-            self,
+        match self {
             GameFormat::Commander
-                | GameFormat::PauperCommander
-                | GameFormat::DuelCommander
-                | GameFormat::Oathbreaker
-                | GameFormat::Brawl
-                | GameFormat::HistoricBrawl,
-        )
+            | GameFormat::PauperCommander
+            | GameFormat::DuelCommander
+            | GameFormat::Oathbreaker
+            | GameFormat::Brawl
+            | GameFormat::HistoricBrawl
+            // Freeform Commander grants the free first mulligan, matching
+            // every other Commander-style duel above.
+            | GameFormat::FreeformCommander => true,
+            GameFormat::Standard
+            | GameFormat::Limited
+            | GameFormat::Pioneer
+            | GameFormat::Modern
+            | GameFormat::Premodern
+            | GameFormat::Legacy
+            | GameFormat::Vintage
+            | GameFormat::Historic
+            | GameFormat::Timeless
+            | GameFormat::Pauper
+            | GameFormat::TinyLeaders
+            | GameFormat::FreeForAll
+            | GameFormat::TwoHeadedGiant
+            | GameFormat::Archenemy
+            | GameFormat::Planechase
+            | GameFormat::Momir
+            | GameFormat::CommanderDraft
+            // Plain Freeform is an unrestricted constructed format, not a
+            // Commander-style or Brawl variant, so it gets neither
+            // CR 103.5c's Brawl clause nor the Commander Rules Committee's
+            // supplementary rule.
+            | GameFormat::Freeform => false,
+            // Exhaustive rather than `matches!`, matching `supplies_fixed_deck`'s
+            // and `has_unrepresentable_auxiliary_deck_component`'s style: a
+            // future built-in must force a deliberate `true`/`false` choice
+            // here.
+            GameFormat::Custom(_) => false,
+        }
     }
 
     /// Whether this format uses a commander card and the commander-damage
@@ -1470,6 +1827,10 @@ impl GameFormat {
             | GameFormat::PauperCommander
             | GameFormat::Brawl
             | GameFormat::HistoricBrawl
+            // `command_zone: true` and
+            // `commander_damage_threshold: Some(21)` travel together for this
+            // format — `Derived` in `built_in_axes_no_looser_than_rules`.
+            | GameFormat::FreeformCommander
             // CR 903.13g: Commander Draft games follow the same rules as
             // Commander games, so CR 903.10a's commander-damage SBA applies.
             | GameFormat::CommanderDraft => Ok(true),
@@ -1489,7 +1850,8 @@ impl GameFormat {
             | GameFormat::TwoHeadedGiant
             | GameFormat::Archenemy
             | GameFormat::Planechase
-            | GameFormat::Momir => Ok(false),
+            | GameFormat::Momir
+            | GameFormat::Freeform => Ok(false),
             GameFormat::Custom(id) => Err(FormatConfigError(format!(
                 "uses_commander cannot resolve ad-hoc Custom format {} — read \
                  FormatConfig.uses_commander from the resolved config instead",
@@ -1553,6 +1915,7 @@ impl GameFormat {
             | GameFormat::Brawl
             | GameFormat::HistoricBrawl
             | GameFormat::CommanderDraft
+            | GameFormat::FreeformCommander
             // Tiny Leaders and Oathbreaker seat a decklist card in the command
             // zone without a commander-damage threshold, which is precisely the
             // case `uses_commander` cannot express.
@@ -1577,7 +1940,8 @@ impl GameFormat {
             | GameFormat::Pauper
             | GameFormat::FreeForAll
             | GameFormat::TwoHeadedGiant
-            | GameFormat::Planechase => Ok(false),
+            | GameFormat::Planechase
+            | GameFormat::Freeform => Ok(false),
             GameFormat::Custom(id) => Err(FormatConfigError(format!(
                 "command_zone_holds_decklist_commander cannot resolve ad-hoc Custom format {} — \
                  a bare GameFormat carries no CustomFormatRules; decide from the resolved \
@@ -1617,6 +1981,8 @@ impl GameFormat {
             | GameFormat::FreeForAll
             | GameFormat::TwoHeadedGiant
             | GameFormat::Archenemy
+            | GameFormat::Freeform
+            | GameFormat::FreeformCommander
             // CR 903.13e: the drafted cards become the player's card pool and
             // they build a deck from it, so the engine supplies nothing.
             | GameFormat::CommanderDraft
@@ -1669,7 +2035,9 @@ impl GameFormat {
             | GameFormat::HistoricBrawl
             | GameFormat::FreeForAll
             | GameFormat::TwoHeadedGiant
-            | GameFormat::CommanderDraft => false,
+            | GameFormat::CommanderDraft
+            | GameFormat::Freeform
+            | GameFormat::FreeformCommander => false,
             // Exhaustive rather than `matches!`, matching `supplies_fixed_deck`'s
             // style: a future built-in that grants its own deck_loading.rs
             // auxiliary component must force a deliberate `true`/`false` choice
@@ -1712,6 +2080,8 @@ impl GameFormat {
             GameFormat::Planechase => Cow::Borrowed("Planechase"),
             GameFormat::Momir => Cow::Borrowed("Momir's Madness"),
             GameFormat::CommanderDraft => Cow::Borrowed("Commander Draft"),
+            GameFormat::Freeform => Cow::Borrowed("Freeform"),
+            GameFormat::FreeformCommander => Cow::Borrowed("Freeform Commander"),
             GameFormat::Custom(id) => custom_format_registry()
                 .into_iter()
                 .find(|def| def.rules.id == id)
@@ -1733,6 +2103,7 @@ impl GameFormat {
                 short_label: "STD",
                 description: "Rotating card pool",
                 group: FormatGroup::Constructed,
+                legality_key: GameFormat::Standard.legality_key(),
                 default_config: FormatConfig::standard(),
             },
             FormatMetadata {
@@ -1741,6 +2112,7 @@ impl GameFormat {
                 short_label: "PIO",
                 description: "Non-rotating from 2012",
                 group: FormatGroup::Constructed,
+                legality_key: GameFormat::Pioneer.legality_key(),
                 default_config: FormatConfig::pioneer(),
             },
             FormatMetadata {
@@ -1749,6 +2121,7 @@ impl GameFormat {
                 short_label: "MOD",
                 description: "Non-rotating from Mirrodin onward",
                 group: FormatGroup::Constructed,
+                legality_key: GameFormat::Modern.legality_key(),
                 default_config: FormatConfig::modern(),
             },
             FormatMetadata {
@@ -1757,6 +2130,7 @@ impl GameFormat {
                 short_label: "PRE",
                 description: "Old-frame constructed through Scourge",
                 group: FormatGroup::Constructed,
+                legality_key: GameFormat::Premodern.legality_key(),
                 default_config: FormatConfig::premodern(),
             },
             FormatMetadata {
@@ -1765,6 +2139,7 @@ impl GameFormat {
                 short_label: "LEG",
                 description: "Eternal format, all sets legal",
                 group: FormatGroup::Constructed,
+                legality_key: GameFormat::Legacy.legality_key(),
                 default_config: FormatConfig::legacy(),
             },
             FormatMetadata {
@@ -1773,6 +2148,7 @@ impl GameFormat {
                 short_label: "VIN",
                 description: "Broadest pool, Power Nine restricted",
                 group: FormatGroup::Constructed,
+                legality_key: GameFormat::Vintage.legality_key(),
                 default_config: FormatConfig::vintage(),
             },
             FormatMetadata {
@@ -1781,6 +2157,7 @@ impl GameFormat {
                 short_label: "HIS",
                 description: "Arena's eternal format",
                 group: FormatGroup::Constructed,
+                legality_key: GameFormat::Historic.legality_key(),
                 default_config: FormatConfig::historic(),
             },
             FormatMetadata {
@@ -1789,6 +2166,7 @@ impl GameFormat {
                 short_label: "TML",
                 description: "Arena's eternal non-rotating format",
                 group: FormatGroup::Constructed,
+                legality_key: GameFormat::Timeless.legality_key(),
                 default_config: FormatConfig::timeless(),
             },
             FormatMetadata {
@@ -1797,7 +2175,17 @@ impl GameFormat {
                 short_label: "PAU",
                 description: "Commons only",
                 group: FormatGroup::Constructed,
+                legality_key: GameFormat::Pauper.legality_key(),
                 default_config: FormatConfig::pauper(),
+            },
+            FormatMetadata {
+                format: GameFormat::Freeform,
+                label: "Freeform",
+                short_label: "FRF",
+                description: "Every set, no bans, no copy limit, no deck minimum",
+                group: FormatGroup::Constructed,
+                legality_key: GameFormat::Freeform.legality_key(),
+                default_config: FormatConfig::freeform(),
             },
             FormatMetadata {
                 format: GameFormat::Commander,
@@ -1805,6 +2193,7 @@ impl GameFormat {
                 short_label: "CMD",
                 description: "100-card singleton, 2\u{2013}4 players",
                 group: FormatGroup::Commander,
+                legality_key: GameFormat::Commander.legality_key(),
                 default_config: FormatConfig::commander(),
             },
             FormatMetadata {
@@ -1813,6 +2202,7 @@ impl GameFormat {
                 short_label: "DUC",
                 description: "Tournament 1v1 Commander, 30 life",
                 group: FormatGroup::Commander,
+                legality_key: GameFormat::DuelCommander.legality_key(),
                 default_config: FormatConfig::duel_commander(),
             },
             FormatMetadata {
@@ -1821,6 +2211,7 @@ impl GameFormat {
                 short_label: "PDH",
                 description: "Commons-only singleton Commander",
                 group: FormatGroup::Commander,
+                legality_key: GameFormat::PauperCommander.legality_key(),
                 default_config: FormatConfig::pauper_commander(),
             },
             FormatMetadata {
@@ -1829,6 +2220,7 @@ impl GameFormat {
                 short_label: "TLR",
                 description: "50-card Tiny singleton",
                 group: FormatGroup::Commander,
+                legality_key: GameFormat::TinyLeaders.legality_key(),
                 default_config: FormatConfig::tiny_leaders(),
             },
             FormatMetadata {
@@ -1837,6 +2229,7 @@ impl GameFormat {
                 short_label: "OBK",
                 description: "60-card singleton, Planeswalker + signature spell",
                 group: FormatGroup::Commander,
+                legality_key: GameFormat::Oathbreaker.legality_key(),
                 default_config: FormatConfig::oathbreaker(),
             },
             FormatMetadata {
@@ -1845,6 +2238,7 @@ impl GameFormat {
                 short_label: "BRL",
                 description: "60-card Standard singleton",
                 group: FormatGroup::Commander,
+                legality_key: GameFormat::Brawl.legality_key(),
                 default_config: FormatConfig::brawl(),
             },
             FormatMetadata {
@@ -1853,6 +2247,7 @@ impl GameFormat {
                 short_label: "HBR",
                 description: "100-card eternal singleton",
                 group: FormatGroup::Commander,
+                legality_key: GameFormat::HistoricBrawl.legality_key(),
                 default_config: FormatConfig::historic_brawl(),
             },
             FormatMetadata {
@@ -1861,7 +2256,17 @@ impl GameFormat {
                 short_label: "CDR",
                 description: "Drafted 60-card minimum Commander, 3\u{2013}8 players",
                 group: FormatGroup::Commander,
+                legality_key: GameFormat::CommanderDraft.legality_key(),
                 default_config: FormatConfig::commander_draft(),
+            },
+            FormatMetadata {
+                format: GameFormat::FreeformCommander,
+                label: "Freeform Commander",
+                short_label: "FFC",
+                description: "Any castable card as your commander, every set, no deck minimum",
+                group: FormatGroup::Commander,
+                legality_key: GameFormat::FreeformCommander.legality_key(),
+                default_config: FormatConfig::freeform_commander(),
             },
             FormatMetadata {
                 format: GameFormat::FreeForAll,
@@ -1869,6 +2274,7 @@ impl GameFormat {
                 short_label: "FFA",
                 description: "3\u{2013}6 player battle royale",
                 group: FormatGroup::Multiplayer,
+                legality_key: GameFormat::FreeForAll.legality_key(),
                 default_config: FormatConfig::free_for_all(),
             },
             FormatMetadata {
@@ -1877,6 +2283,7 @@ impl GameFormat {
                 short_label: "2HG",
                 description: "4 players, two teams of two",
                 group: FormatGroup::Multiplayer,
+                legality_key: GameFormat::TwoHeadedGiant.legality_key(),
                 default_config: FormatConfig::two_headed_giant(),
             },
             FormatMetadata {
@@ -1885,6 +2292,7 @@ impl GameFormat {
                 short_label: "ARC",
                 description: "One archenemy against a team of heroes",
                 group: FormatGroup::Multiplayer,
+                legality_key: GameFormat::Archenemy.legality_key(),
                 default_config: FormatConfig::archenemy(),
             },
             FormatMetadata {
@@ -1893,6 +2301,7 @@ impl GameFormat {
                 short_label: "PLC",
                 description: "60-card multiplayer with a communal planar deck",
                 group: FormatGroup::Multiplayer,
+                legality_key: GameFormat::Planechase.legality_key(),
                 default_config: FormatConfig::planechase(),
             },
             FormatMetadata {
@@ -1901,6 +2310,7 @@ impl GameFormat {
                 short_label: "LIM",
                 description: "Draft or sealed, 40-card deck",
                 group: FormatGroup::Limited,
+                legality_key: GameFormat::Limited.legality_key(),
                 default_config: FormatConfig::limited(),
             },
             FormatMetadata {
@@ -1909,9 +2319,32 @@ impl GameFormat {
                 short_label: "MOM",
                 description: "60 snow basic lands, random creature tokens",
                 group: FormatGroup::Multiplayer,
+                legality_key: GameFormat::Momir.legality_key(),
                 default_config: FormatConfig::momir(),
             },
         ]
+    }
+}
+
+/// The built-in format each legality table records. Exhaustive, so a new
+/// table cannot compile until it names its format.
+fn legality_table_format(table: LegalityFormat) -> GameFormat {
+    match table {
+        LegalityFormat::Standard => GameFormat::Standard,
+        LegalityFormat::Commander => GameFormat::Commander,
+        LegalityFormat::Modern => GameFormat::Modern,
+        LegalityFormat::Premodern => GameFormat::Premodern,
+        LegalityFormat::Pioneer => GameFormat::Pioneer,
+        LegalityFormat::Legacy => GameFormat::Legacy,
+        LegalityFormat::Vintage => GameFormat::Vintage,
+        LegalityFormat::Pauper => GameFormat::Pauper,
+        LegalityFormat::Historic => GameFormat::Historic,
+        LegalityFormat::Brawl => GameFormat::HistoricBrawl,
+        LegalityFormat::StandardBrawl => GameFormat::Brawl,
+        LegalityFormat::Timeless => GameFormat::Timeless,
+        LegalityFormat::PauperCommander => GameFormat::PauperCommander,
+        LegalityFormat::DuelCommander => GameFormat::DuelCommander,
+        LegalityFormat::Oathbreaker => GameFormat::Oathbreaker,
     }
 }
 
@@ -1966,6 +2399,20 @@ impl FormatConfig {
                     20
                 }
             }
+        }
+    }
+
+    /// CR 103.4 + CR 810.4 + CR 904.5: Starting-life quantities read the
+    /// format's rules baseline for the referenced player. Individual formats
+    /// use the configured total; FixedTeams use the configured shared team
+    /// total; OneVsMany uses the selected seat's individual total (40 for the
+    /// archenemy, 20 for each hero in default Archenemy).
+    pub fn starting_life_total_for_player(&self, player: PlayerId) -> i32 {
+        match self.topology() {
+            FormatTopology::IndividualSeats | FormatTopology::FixedTeams { .. } => {
+                self.starting_life
+            }
+            FormatTopology::OneVsMany { .. } => self.starting_life_for_player(player),
         }
     }
 
@@ -2194,6 +2641,7 @@ impl FormatConfig {
             default_deck_copy_limit: GameFormat::Standard.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            allow_experimental_dungeons: false,
             custom_rules: None,
         }
     }
@@ -2216,6 +2664,7 @@ impl FormatConfig {
             default_deck_copy_limit: GameFormat::Commander.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            allow_experimental_dungeons: false,
             custom_rules: None,
         }
     }
@@ -2255,6 +2704,7 @@ impl FormatConfig {
             default_deck_copy_limit: GameFormat::CommanderDraft.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            allow_experimental_dungeons: false,
             custom_rules: None,
         }
     }
@@ -2349,6 +2799,7 @@ impl FormatConfig {
             default_deck_copy_limit: GameFormat::TinyLeaders.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            allow_experimental_dungeons: false,
             custom_rules: None,
         }
     }
@@ -2375,6 +2826,7 @@ impl FormatConfig {
             default_deck_copy_limit: GameFormat::Oathbreaker.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            allow_experimental_dungeons: false,
             custom_rules: None,
         }
     }
@@ -2391,6 +2843,53 @@ impl FormatConfig {
         FormatConfig {
             format: GameFormat::Pauper,
             ..Self::standard()
+        }
+    }
+
+    /// Freeform: no main-deck minimum, no copy limit, an unrestricted pool, and
+    /// CR 100.4a's fifteen-card sideboard. `DeckSizeRule::Minimum(0)` is the
+    /// deck-size rule's own parameter at its smallest value, not a second
+    /// shape; `built_in_axes_no_looser_than_rules` locks a payload to exactly
+    /// this. `sideboard_policy` and `default_deck_copy_limit` are named
+    /// rather than inherited because `standard()` fills them from
+    /// `GameFormat::Standard`'s own predicates.
+    pub fn freeform() -> Self {
+        FormatConfig {
+            format: GameFormat::Freeform,
+            deck_size: DeckSizeRule::Minimum(0),
+            sideboard_policy: GameFormat::Freeform.sideboard_policy(),
+            default_deck_copy_limit: GameFormat::Freeform.default_deck_copy_limit(),
+            ..Self::standard()
+        }
+    }
+
+    /// Freeform Commander: a Commander-shaped casual variant. CR 903.7 fixes
+    /// the Commander variant's starting life at 40, which this format
+    /// declares as its default; the host adjusts it in the lobby.
+    pub fn freeform_commander() -> Self {
+        FormatConfig {
+            format: GameFormat::FreeformCommander,
+            // CR 903.7: each player sets their life total to 40.
+            starting_life: 40,
+            min_players: 2,
+            max_players: 4,
+            // No main-deck floor: the deck-size MAGNITUDE rule at its
+            // degenerate end, not a new shape.
+            deck_size: DeckSizeRule::Minimum(0),
+            singleton: false,
+            command_zone: true,
+            // CR 903.10a: 21 combat damage from one commander.
+            commander_damage_threshold: Some(21),
+            range_of_influence: None,
+            team_based: false,
+            archenemy_player: None,
+            uses_commander: true,
+            sideboard_policy: GameFormat::FreeformCommander.sideboard_policy(),
+            default_deck_copy_limit: GameFormat::FreeformCommander.default_deck_copy_limit(),
+            supplies_fixed_deck: false,
+            allow_debug_actions: false,
+            allow_experimental_dungeons: false,
+            custom_rules: None,
         }
     }
 
@@ -2414,6 +2913,7 @@ impl FormatConfig {
             default_deck_copy_limit: GameFormat::Brawl.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            allow_experimental_dungeons: false,
             custom_rules: None,
         }
     }
@@ -2447,6 +2947,7 @@ impl FormatConfig {
             default_deck_copy_limit: GameFormat::FreeForAll.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            allow_experimental_dungeons: false,
             custom_rules: None,
         }
     }
@@ -2471,6 +2972,7 @@ impl FormatConfig {
             default_deck_copy_limit: GameFormat::Limited.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            allow_experimental_dungeons: false,
             custom_rules: None,
         }
     }
@@ -2498,6 +3000,7 @@ impl FormatConfig {
             default_deck_copy_limit: GameFormat::Momir.default_deck_copy_limit(),
             supplies_fixed_deck: true,
             allow_debug_actions: false,
+            allow_experimental_dungeons: false,
             custom_rules: None,
         }
     }
@@ -2520,6 +3023,7 @@ impl FormatConfig {
             default_deck_copy_limit: GameFormat::TwoHeadedGiant.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            allow_experimental_dungeons: false,
             custom_rules: None,
         }
     }
@@ -2545,6 +3049,7 @@ impl FormatConfig {
             default_deck_copy_limit: GameFormat::Planechase.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            allow_experimental_dungeons: false,
             custom_rules: None,
         }
     }
@@ -2569,6 +3074,7 @@ impl FormatConfig {
             default_deck_copy_limit: GameFormat::Archenemy.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            allow_experimental_dungeons: false,
             custom_rules: None,
         }
     }
@@ -2660,6 +3166,8 @@ impl FormatConfig {
             GameFormat::Planechase => Self::planechase(),
             GameFormat::Momir => Self::momir(),
             GameFormat::CommanderDraft => Self::commander_draft(),
+            GameFormat::Freeform => Self::freeform(),
+            GameFormat::FreeformCommander => Self::freeform_commander(),
             GameFormat::Custom(id) => {
                 return Err(FormatConfigError(format!(
                     "for_format cannot resolve ad-hoc Custom format {} structural rules — read custom_rules from the resolved FormatConfig/CustomFormatRules instead",
@@ -2733,6 +3241,7 @@ impl FormatConfig {
             sideboard_policy: structural.sideboard_policy,
             default_deck_copy_limit: structural.default_deck_copy_limit,
             allow_debug_actions: false,
+            allow_experimental_dungeons: false,
             custom_rules: Some(Box::new(rules.clone())),
         }
     }
@@ -2856,6 +3365,7 @@ mod tests {
             sideboard_policy: _,
             default_deck_copy_limit: _,
             allow_debug_actions: _,
+            allow_experimental_dungeons: _,
             custom_rules: _,
         } = config;
     }
@@ -3143,6 +3653,32 @@ mod tests {
     fn starting_life_for_seat_preserves_non_team_formats() {
         assert_eq!(FormatConfig::standard().starting_life_for_seat(), 20);
         assert_eq!(FormatConfig::commander().starting_life_for_seat(), 40);
+    }
+
+    #[test]
+    fn starting_life_total_for_player_follows_topology() {
+        let standard = FormatConfig::standard();
+        assert_eq!(standard.starting_life_total_for_player(PlayerId(0)), 20);
+
+        let two_headed_giant = FormatConfig::two_headed_giant();
+        assert_eq!(
+            two_headed_giant.starting_life_total_for_player(PlayerId(0)),
+            30,
+            "FixedTeams uses the shared team starting total, not the per-seat half"
+        );
+
+        let mut archenemy = FormatConfig::archenemy();
+        archenemy.archenemy_player = Some(PlayerId(2));
+        assert_eq!(
+            archenemy.starting_life_total_for_player(PlayerId(2)),
+            40,
+            "OneVsMany uses the selected archenemy's rules total"
+        );
+        assert_eq!(
+            archenemy.starting_life_total_for_player(PlayerId(0)),
+            20,
+            "OneVsMany uses a hero's rules total rather than the archenemy's"
+        );
     }
 
     #[test]
@@ -3547,6 +4083,51 @@ mod tests {
         assert_eq!(GameFormat::Limited.legality_format(), None);
     }
 
+    /// The digital-only partition. `LegalityFormat::ALL` is a hand-written array;
+    /// what forces a new variant to be classified is `admits_digital_only_cards`'s
+    /// wildcard-free match. A game format outside that table enforces no built-in
+    /// pool and is therefore unrestricted.
+    #[test]
+    fn digital_only_admission_partitions_every_legality_format() {
+        let admitting: Vec<LegalityFormat> = LegalityFormat::ALL
+            .into_iter()
+            .filter(|f| f.admits_digital_only_cards())
+            .collect();
+        assert_eq!(
+            admitting,
+            vec![
+                LegalityFormat::Historic,
+                LegalityFormat::Brawl,
+                LegalityFormat::Timeless
+            ],
+            "only the Arena pools admit digital-only cards"
+        );
+
+        assert!(GameFormat::Historic.admits_digital_only_cards());
+        assert!(GameFormat::Timeless.admits_digital_only_cards());
+        assert!(GameFormat::HistoricBrawl.admits_digital_only_cards());
+        assert!(!GameFormat::Standard.admits_digital_only_cards());
+        assert!(!GameFormat::Commander.admits_digital_only_cards());
+        // `GameFormat::Brawl` maps to the Standard-legal pool.
+        assert!(!GameFormat::Brawl.admits_digital_only_cards());
+
+        // No enforced pool ⇒ open, including `Oathbreaker`, whose `GameFormat`
+        // maps to `None` even though a `LegalityFormat::Oathbreaker` exists.
+        for format in [
+            GameFormat::FreeForAll,
+            GameFormat::Oathbreaker,
+            GameFormat::Limited,
+            GameFormat::Momir,
+            GameFormat::Custom(CustomFormatId(0)),
+        ] {
+            assert_eq!(format.legality_format(), None);
+            assert!(
+                format.admits_digital_only_cards(),
+                "{format:?} enforces no built-in pool, so it must stay open"
+            );
+        }
+    }
+
     #[test]
     fn limited_sideboard_policy_is_unlimited() {
         assert_eq!(
@@ -3558,6 +4139,16 @@ mod tests {
     #[test]
     fn limited_no_free_first_mulligan() {
         assert!(!GameFormat::Limited.grants_free_first_mulligan());
+    }
+
+    #[test]
+    fn freeform_commander_grants_free_first_mulligan() {
+        assert!(GameFormat::FreeformCommander.grants_free_first_mulligan());
+    }
+
+    #[test]
+    fn freeform_no_free_first_mulligan() {
+        assert!(!GameFormat::Freeform.grants_free_first_mulligan());
     }
 
     #[test]
@@ -3896,6 +4487,264 @@ mod tests {
         }
     }
 
+    /// `GameFormat::registry()` must carry an entry for every built-in format,
+    /// exactly once, with no entry the enum does not carry.
+    ///
+    /// Compared as SORTED sets, deliberately: `registry()`'s row order is a
+    /// separate contract, pinned by
+    /// `client_format_registry_matches_the_engine_registry` (mutation-tested:
+    /// swapping two `registry()` rows reds that test, not this one).
+    /// `premodern_registry_entry_is_ordered_with_constructed_formats`
+    /// additionally pins the Modern→Premodern→Legacy run specifically. This
+    /// test must not duplicate or contradict either. Sorted-vector equality
+    /// still catches a duplicate, because a duplicate changes the length.
+    ///
+    /// Also the independent authority on `#[strum(disabled)]`: a built-in
+    /// disabled out of `iter()` while `registry()` still lists it unbalances
+    /// the two sorted sets and reds here (mutation-tested alongside the
+    /// enum's own doc comment above).
+    #[test]
+    fn registry_lists_every_builtin_format() {
+        use strum::IntoEnumIterator;
+
+        let mut listed: Vec<String> = GameFormat::registry()
+            .iter()
+            .map(|meta| meta.format.to_string())
+            .collect();
+        let mut expected: Vec<String> = GameFormat::iter().map(|f| f.to_string()).collect();
+        listed.sort();
+        expected.sort();
+        assert_eq!(
+            listed, expected,
+            "GameFormat::registry() must list every built-in format exactly once"
+        );
+    }
+
+    /// Built-in format names carried on the CODE half of each line in `region`
+    /// that begins with `prefix`, taking the first double-quoted token.
+    ///
+    /// `source_census::code` is this repository's single authority on which
+    /// part of a line is code; TypeScript's `//` is lexically the same as
+    /// Rust's for that purpose, so it is reused per `source_census`'s
+    /// single-authority rule rather than re-invented. Mutation-tested:
+    /// bypassing both call sites here leaves both callers below green
+    /// against the current file contents — no line depends on it today.
+    ///
+    /// `region` is a parameter because `types.ts` carries `| "…"` lines
+    /// belonging to unions other than `BuiltInGameFormat`, so that union's own
+    /// region must be isolated; `formatRegistry.ts` needs no region because
+    /// every `format: "…"` line in it is an entry field.
+    fn client_format_names(region: &str, prefix: &str) -> Vec<String> {
+        region
+            .lines()
+            .map(crate::source_census::code)
+            .filter_map(|line| line.trim().strip_prefix(prefix))
+            .filter_map(|rest| rest.split('"').nth(1).map(str::to_owned))
+            .collect()
+    }
+
+    /// `client/src/adapter/types.ts`'s `BuiltInGameFormat` union must name
+    /// exactly the engine's built-in formats.
+    ///
+    /// This runs in the lane — CI job `rust-test`
+    /// step "Run tests", Tilt `test-engine` — and needs no WASM artifact. The
+    /// client-side assertion that binds the mirror through the real WASM export
+    /// lives in `client/src/data/__tests__/formatRegistry.integration.test.ts`,
+    /// which `client/vitest.config.ts` excludes from the default run and which
+    /// no workflow, Tiltfile target or verify.sh path invokes. An assertion no
+    /// lane executes guards nothing; this one does.
+    ///
+    /// `include_str!` rather than `read_to_string`: a moved or deleted client
+    /// file is then a COMPILE error, not a silently skipped test. Same idiom as
+    /// `tests/integration/interaction_contract.rs`.
+    ///
+    /// SORTED, deliberately: measured, the union's declaration order is neither
+    /// the engine's declaration order nor `registry()`'s, and pinning an order
+    /// nothing owns would be a test of formatting.
+    ///
+    /// No separate non-vacuity premise is needed. The comparison is against a
+    /// non-empty right side, so an extraction that finds nothing FAILS rather
+    /// than passing.
+    #[test]
+    fn client_builtin_game_format_union_matches_the_engine() {
+        use strum::IntoEnumIterator;
+
+        const TYPES_TS: &str = include_str!("../../../../client/src/adapter/types.ts");
+
+        // The union's own span: from its declaration header to the first
+        // subsequent line whose code half ends in `;`.
+        let mut lines = TYPES_TS
+            .lines()
+            .skip_while(|line| !line.starts_with("export type BuiltInGameFormat ="));
+        let _header = lines
+            .next()
+            .expect("client/src/adapter/types.ts must declare `export type BuiltInGameFormat =`");
+        let mut region = String::new();
+        for line in lines {
+            region.push_str(line);
+            region.push('\n');
+            if crate::source_census::code(line).trim_end().ends_with(';') {
+                break;
+            }
+        }
+
+        let mut found = client_format_names(&region, "| ");
+        let mut expected: Vec<String> = GameFormat::iter().map(|f| f.to_string()).collect();
+        found.sort();
+        expected.sort();
+        assert_eq!(
+            found, expected,
+            "client/src/adapter/types.ts's BuiltInGameFormat union must name \
+             exactly the engine's built-in formats"
+        );
+    }
+
+    /// `client/src/data/formatRegistry.ts`'s `FORMAT_REGISTRY` must mirror
+    /// `GameFormat::registry()` — the same formats, in the same order, with no
+    /// duplicated or half-written entry.
+    ///
+    /// Each entry writes `format: "X"` TWICE (the entry's own key and its
+    /// `default_config.format`), so the entry SEQUENCE is recovered by
+    /// collapsing CONSECUTIVE duplicates rather than by matching an
+    /// indentation the next reformat would move.
+    ///
+    /// The collapse alone is NOT enough, and this was measured rather than
+    /// reasoned. An adjacent duplicated entry and an entry missing one of its
+    /// two `format:` lines both still produce the exact expected sequence with
+    /// only the collapse; the multiplicity check below is what reds those two.
+    /// An entry whose `default_config.format` disagrees with its own key is
+    /// caught by the sequence check itself in the general case; it only
+    /// survives the sequence check when the disagreeing value happens to
+    /// equal the following entry's own name (the collapse then swallows the
+    /// run into that name), and the multiplicity check is what reds that
+    /// narrower case. The multiplicity check requires every entry to write
+    /// `format:` the same number of times, rather than hardcoding an
+    /// assertion that it equals two, so a uniform change to how many times
+    /// every entry writes `format:` continues to pass.
+    #[test]
+    fn client_format_registry_matches_the_engine_registry() {
+        const REGISTRY_TS: &str = include_str!("../../../../client/src/data/formatRegistry.ts");
+
+        let raw = client_format_names(REGISTRY_TS, "format: ");
+
+        let mut entries: Vec<String> = Vec::new();
+        for name in &raw {
+            if entries.last() != Some(name) {
+                entries.push(name.clone());
+            }
+        }
+        let expected: Vec<String> = GameFormat::registry()
+            .iter()
+            .map(|meta| meta.format.to_string())
+            .collect();
+        assert_eq!(
+            entries, expected,
+            "client/src/data/formatRegistry.ts must mirror GameFormat::registry(), \
+             in the same order"
+        );
+
+        let mut counts: Vec<(String, usize)> = expected
+            .iter()
+            .map(|name| (name.clone(), raw.iter().filter(|n| *n == name).count()))
+            .collect();
+        counts.sort_by_key(|(_, n)| *n);
+        let (lowest, highest) = (counts.first().unwrap(), counts.last().unwrap());
+        assert_eq!(
+            lowest.1, highest.1,
+            "every FORMAT_REGISTRY entry must write `format:` the same number of \
+             times; {} writes it {} and {} writes it {}. A duplicated entry, a \
+             half-written entry, or a default_config.format that disagrees with \
+             its own key all look like this — and all of them survive the \
+             sequence check above",
+            lowest.0, lowest.1, highest.0, highest.1
+        );
+    }
+
+    #[test]
+    fn recorded_legality_table_agrees_with_every_table_backed_card_pool() {
+        use strum::IntoEnumIterator;
+
+        let mut saw_table_backed = false;
+        let mut saw_unrestricted = false;
+        for format in GameFormat::iter() {
+            match format.card_pool() {
+                CardPool::LegalityTable(t) => {
+                    saw_table_backed = true;
+                    assert_eq!(format.recorded_legality_table(), Some(t));
+                }
+                CardPool::Unrestricted => {
+                    saw_unrestricted = true;
+                    assert_eq!(format.recorded_legality_table(), None);
+                }
+                CardPool::NoEngineAuthority | CardPool::DeclaredRules => {}
+            }
+        }
+        assert!(saw_table_backed, "the set must not be empty");
+        assert!(saw_unrestricted, "the set must not be empty");
+    }
+
+    #[test]
+    fn every_legality_table_records_exactly_one_registry_format() {
+        let registry = GameFormat::registry();
+        for t in LegalityFormat::ALL {
+            let format = legality_table_format(t);
+            assert!(registry.iter().any(|meta| meta.format == format));
+            assert_eq!(format.recorded_legality_table(), Some(t));
+        }
+    }
+
+    #[test]
+    fn registry_entries_publish_their_own_formats_legality_key() {
+        for meta in GameFormat::registry() {
+            assert_eq!(
+                meta.legality_key,
+                meta.format.legality_key(),
+                "{:?}",
+                meta.format
+            );
+        }
+    }
+
+    /// `client/src/data/formatRegistry.ts`'s `legality_key` lines must equal
+    /// the engine's, entry by entry. The client names its deck-browser
+    /// legality lens from them.
+    #[test]
+    fn client_format_registry_legality_keys_match_the_engine() {
+        const REGISTRY_TS: &str = include_str!("../../../../client/src/data/formatRegistry.ts");
+
+        let found: Vec<Option<String>> = REGISTRY_TS
+            .lines()
+            .map(crate::source_census::code)
+            .filter_map(|line| {
+                let trimmed = line.trim();
+                trimmed.strip_prefix("legality_key: ")
+            })
+            .map(|rest| {
+                let rest = rest.trim().strip_suffix(',').unwrap_or(rest.trim());
+                if rest == "null" {
+                    None
+                } else if let Some(token) = rest.strip_prefix('"').and_then(|s| s.strip_suffix('"'))
+                {
+                    Some(token.to_owned())
+                } else {
+                    panic!("unrecognized legality_key line: {rest:?}");
+                }
+            })
+            .collect();
+
+        let expected: Vec<Option<String>> = GameFormat::registry()
+            .iter()
+            .map(|meta| meta.legality_key.map(str::to_owned))
+            .collect();
+
+        assert!(!expected.is_empty());
+        assert_eq!(
+            found, expected,
+            "client/src/data/formatRegistry.ts's legality_key lines must equal \
+             the engine's, entry by entry"
+        );
+    }
+
     #[test]
     fn limited_in_registry() {
         let registry = GameFormat::registry();
@@ -3949,15 +4798,201 @@ mod tests {
     }
 
     #[test]
-    fn registry_constructed_formats_have_legality_mapping() {
+    fn registry_constructed_formats_declare_a_deck_construction_pool() {
+        use strum::IntoEnumIterator;
+
+        // Clause 1: a constructed format may decline a table only by
+        // positively declaring that its rules restrict nothing; it may never
+        // simply lack an authority.
         for meta in GameFormat::registry()
             .into_iter()
             .filter(|meta| meta.group == FormatGroup::Constructed)
         {
             assert!(
-                meta.format.legality_format().is_some(),
-                "{:?} is constructed but has no legality mapping",
+                matches!(
+                    meta.format.card_pool(),
+                    CardPool::LegalityTable(_) | CardPool::Unrestricted
+                ),
+                "{:?} is constructed but declares no deck-construction pool",
                 meta.format
+            );
+        }
+
+        // Clause 2: no two built-in formats declare the same legality table.
+        let mut seen = std::collections::HashSet::new();
+        for format in GameFormat::iter() {
+            if let CardPool::LegalityTable(table) = format.card_pool() {
+                assert!(
+                    seen.insert(table),
+                    "{format:?} declares {table:?}, already declared by another built-in"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn legality_format_is_the_card_pool_projection() {
+        use strum::IntoEnumIterator;
+
+        for format in
+            GameFormat::iter().chain(std::iter::once(GameFormat::Custom(CustomFormatId(0))))
+        {
+            let projected = match format.card_pool() {
+                CardPool::LegalityTable(table) => Some(table),
+                CardPool::NoEngineAuthority | CardPool::Unrestricted | CardPool::DeclaredRules => {
+                    None
+                }
+            };
+            assert_eq!(
+                format.legality_format(),
+                projected,
+                "{format:?}: legality_format() disagrees with the card_pool() projection"
+            );
+        }
+    }
+
+    /// Every group here pins declared behavior, not a validator literal.
+    /// Production admission reads `pairing.admits_count(request.commander.len())`
+    /// alone at every call site, and
+    /// `no_caller_reintroduces_a_commander_count_literal` in
+    /// `format_axis_census.rs` asserts zero surviving per-format
+    /// commander-count literals. One group per `CommanderPairing`
+    /// variant: `partner_families` admits iff count is 1 or 2 (CR 702.124g),
+    /// `solo` admits iff count == 1, and `no_commander_per_count` — every
+    /// built-in that never designates a commander — admits iff count == 0.
+    /// `no_commander_per_count` also gets the cross-check against the
+    /// command-zone axis (`command_zone_holds_decklist_commander() ==
+    /// Ok(false)`), a genuine second authority on the same claim rather than
+    /// a restatement of the per-count curve.
+    #[test]
+    fn commander_pairing_admits_exactly_todays_counts() {
+        use strum::IntoEnumIterator;
+
+        let partner_families = [
+            GameFormat::Commander,
+            GameFormat::PauperCommander,
+            GameFormat::DuelCommander,
+            GameFormat::CommanderDraft,
+            GameFormat::TinyLeaders,
+            GameFormat::FreeformCommander,
+        ];
+        let solo = [
+            GameFormat::Brawl,
+            GameFormat::HistoricBrawl,
+            GameFormat::Oathbreaker,
+        ];
+        let no_commander_per_count = [
+            GameFormat::Standard,
+            GameFormat::Pioneer,
+            GameFormat::Modern,
+            GameFormat::Premodern,
+            GameFormat::Legacy,
+            GameFormat::Vintage,
+            GameFormat::Historic,
+            GameFormat::Timeless,
+            GameFormat::Pauper,
+            GameFormat::Planechase,
+            GameFormat::Archenemy,
+            GameFormat::Momir,
+            GameFormat::FreeForAll,
+            GameFormat::TwoHeadedGiant,
+            GameFormat::Limited,
+            GameFormat::Freeform,
+        ];
+
+        for count in 0usize..=3 {
+            for format in partner_families {
+                // Pinned expected admission per CR 702.124g: iff count is 1 or 2.
+                let expected_admits = (1..=2).contains(&count);
+                assert_eq!(
+                    format.commander_pairing().admits_count(count),
+                    expected_admits,
+                    "{format:?} at count {count}"
+                );
+            }
+            for format in solo {
+                // Pinned expected admission: iff count == 1.
+                let expected_admits = count == 1;
+                assert_eq!(
+                    format.commander_pairing().admits_count(count),
+                    expected_admits,
+                    "{format:?} at count {count}"
+                );
+            }
+            for format in no_commander_per_count {
+                // Pinned expected admission: iff count == 0.
+                let expected_admits = count == 0;
+                assert_eq!(
+                    format.commander_pairing().admits_count(count),
+                    expected_admits,
+                    "{format:?} at count {count}"
+                );
+            }
+        }
+
+        for format in no_commander_per_count {
+            assert_eq!(format.command_zone_holds_decklist_commander(), Ok(false));
+        }
+
+        // Every built-in appears in exactly one of the groups above.
+        let mut all: Vec<GameFormat> = partner_families.to_vec();
+        all.extend(solo);
+        all.extend(no_commander_per_count);
+        let mut all_strings: Vec<String> = all.iter().map(GameFormat::to_string).collect();
+        let mut expected: Vec<String> = GameFormat::iter().map(|f| f.to_string()).collect();
+        all_strings.sort();
+        expected.sort();
+        assert_eq!(
+            all_strings, expected,
+            "every built-in format must appear in exactly one group"
+        );
+    }
+
+    /// Cross-checks `commander_pairing()`'s placement against an existing,
+    /// already-pinned axis. Cannot distinguish `Solo` from `PartnerFamilies` —
+    /// only what `command_zone_holds_decklist_commander` answers — so it
+    /// catches a placement typo the per-count test above would also catch,
+    /// from an independent authority.
+    #[test]
+    fn commander_pairing_agrees_with_the_command_zone_axis() {
+        use strum::IntoEnumIterator;
+
+        for format in GameFormat::iter() {
+            // Custom answers `Err` here by design; excluded, as its own doc
+            // states.
+            let Ok(holds_decklist_commander) = format.command_zone_holds_decklist_commander()
+            else {
+                continue;
+            };
+            assert_eq!(
+                format.commander_pairing() == CommanderPairing::NoCommander,
+                !holds_decklist_commander,
+                "{format:?}: commander_pairing() disagrees with \
+                 command_zone_holds_decklist_commander()"
+            );
+        }
+    }
+
+    /// Cross-checks `deck_size_subject()`'s placement against the same
+    /// existing axis. Deliberately partial: it cannot separate
+    /// `MainDeckAndCommanders` from `MainDeckAndCommandZone` — no existing
+    /// method can make that distinction — so it only catches a format placed
+    /// at `MainDeck` for which `command_zone_holds_decklist_commander` is
+    /// `Ok(true)`, or vice versa.
+    #[test]
+    fn deck_size_subject_agrees_with_the_command_zone_axis() {
+        use strum::IntoEnumIterator;
+
+        for format in GameFormat::iter() {
+            let Ok(holds_decklist_commander) = format.command_zone_holds_decklist_commander()
+            else {
+                continue;
+            };
+            assert_eq!(
+                format.deck_size_subject() == DeckSizeSubject::MainDeck,
+                !holds_decklist_commander,
+                "{format:?}: deck_size_subject() disagrees with \
+                 command_zone_holds_decklist_commander()"
             );
         }
     }

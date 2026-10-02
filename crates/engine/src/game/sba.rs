@@ -97,6 +97,20 @@ fn mid_resolution_entry_pauses_sba(state: &GameState) -> bool {
 /// CR 704.3: Run state-based actions in a fixpoint loop until no more actions are performed,
 /// capped at MAX_SBA_ITERATIONS.
 pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    check_state_based_actions_with_waiting_triggers(state, events, &[]);
+}
+
+/// CR 704.3 + CR 704.5v + CR 510.3a: run state-based actions in a fixpoint loop
+/// until no more actions are performed, capped at MAX_SBA_ITERATIONS, for a
+/// caller that holds abilities that have triggered but are not yet on the
+/// stack (e.g. a CR 510.3a combat-damage batch still being collected). Those
+/// abilities are visible to the CR 704.5v Siege deferral in `check_zero_defense`
+/// as if they were already on the stack.
+pub(crate) fn check_state_based_actions_with_waiting_triggers(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    waiting: &[crate::game::triggers::PendingTriggerContext],
+) {
     // CR 604.2: Re-evaluate layers so computed P/T reflects current static abilities.
     if state.layers_dirty.is_dirty() {
         // Snapshot P/T before layer re-evaluation for delta logging.
@@ -268,7 +282,13 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
             // ability that has triggered but not yet left the stack is put into its
             // owner's graveyard. CR 704.5w + CR 310.8: a non-Siege battle with defense 0
             // is put into its owner's graveyard with no such deferral.
-            check_zero_defense(state, events, &mut any_performed, &battlefield_snapshot);
+            check_zero_defense(
+                state,
+                events,
+                &mut any_performed,
+                &battlefield_snapshot,
+                waiting,
+            );
             if mid_resolution_entry_pauses_sba(state) {
                 return;
             }
@@ -1047,7 +1067,11 @@ fn perform_creature_deaths(
                     }
                 }
                 if destroyed {
-                    events.push(GameEvent::CreatureDestroyed { object_id });
+                    // CR 704.5g / CR 704.5h: a state-based destruction has no destroying source.
+                    events.push(GameEvent::CreatureDestroyed {
+                        object_id,
+                        source_id: None,
+                    });
                 }
                 performed_ids.push(object_id);
             }
@@ -1177,7 +1201,11 @@ fn perform_creature_deaths(
                             return;
                         }
                     }
-                    events.push(GameEvent::CreatureDestroyed { object_id });
+                    // CR 704.5g / CR 704.5h: a state-based destruction has no destroying source.
+                    events.push(GameEvent::CreatureDestroyed {
+                        object_id,
+                        source_id: None,
+                    });
                     performed_ids.push(object_id);
                 }
                 *any_performed = true;
@@ -1908,6 +1936,28 @@ fn check_zero_loyalty(
     zones::mark_simultaneous_departures(events, &zones::departed_subset(state, &performed_ids));
 }
 
+/// CR 704.5v + CR 603.3 + CR 704.3: is `source` the source of an ability that
+/// has triggered but not yet left the stack (on the stack or in the caller's
+/// waiting batch)? SBAs are performed before waiting triggered abilities are
+/// put on the stack, so an ability that has triggered may still be waiting in
+/// the batch the caller is about to place (CR 510.3a combat damage). Only the
+/// stack and that batch are consulted.
+fn is_source_of_ability_not_yet_left_stack(
+    state: &GameState,
+    waiting: &[crate::game::triggers::PendingTriggerContext],
+    source: ObjectId,
+) -> bool {
+    use crate::types::game_state::StackEntryKind;
+
+    let ability_on_stack = state.stack.iter().any(|entry| {
+        matches!(
+            &entry.kind,
+            StackEntryKind::TriggeredAbility { source_id, .. } if *source_id == source
+        )
+    });
+    ability_on_stack || waiting.iter().any(|ctx| ctx.pending.source_id == source)
+}
+
 /// CR 704.5v + CR 704.5w: a battle with defense 0 is put into its owner's
 /// graveyard. The rule is split across two sub-rules by battle type, and only
 /// the Siege half carries a trigger-on-stack deferral:
@@ -1925,15 +1975,15 @@ fn check_zero_loyalty(
 /// still on the battlefield when it resolves. A battle with any other battle
 /// type has no such intrinsic, so CR 704.5w grants it no deferral — it is put
 /// into its owner's graveyard immediately, even with one of its own triggered
-/// abilities still on the stack.
+/// abilities still on the stack. The Siege deferral consults both the stack
+/// and the caller's waiting batch (`is_source_of_ability_not_yet_left_stack`).
 fn check_zero_defense(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
     any_performed: &mut bool,
     battlefield_snapshot: &[ObjectId],
+    waiting: &[crate::game::triggers::PendingTriggerContext],
 ) {
-    use crate::types::game_state::StackEntryKind;
-
     let to_destroy: Vec<_> = battlefield_snapshot
         .iter()
         .copied()
@@ -1954,15 +2004,10 @@ fn check_zero_defense(
                 return true;
             }
             // CR 704.5v: a Siege is spared while one of its own abilities has
-            // triggered but not yet left the stack (mirrors the CR 714.4 Saga
-            // deferral), so its CR 310.12b victory trigger can resolve.
-            let ability_on_stack = state.stack.iter().any(|entry| {
-                matches!(
-                    &entry.kind,
-                    StackEntryKind::TriggeredAbility { source_id, .. } if *source_id == *id
-                )
-            });
-            !ability_on_stack
+            // triggered but not yet left the stack (on the stack or in the
+            // caller's waiting batch; mirrors the CR 714.4 Saga deferral), so
+            // its CR 310.12b victory trigger can resolve.
+            !is_source_of_ability_not_yet_left_stack(state, waiting, *id)
         })
         .collect();
 
@@ -2557,8 +2602,8 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, Effect, ReplacementDefinition, ResolvedAbility,
-        TargetFilter,
+        AbilityDefinition, AbilityKind, ChosenAttribute, Effect, ReplacementDefinition,
+        ResolvedAbility, TargetFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::format::FormatConfig;
@@ -2569,6 +2614,146 @@ mod tests {
 
     fn setup() -> GameState {
         GameState::new_two_player(42)
+    }
+
+    /// Convert a fresh battlefield object into a zero-defense battle for the
+    /// CR 704.5v/w waiting-batch tests below. `siege` selects whether it gets
+    /// the Siege battle type.
+    fn make_zero_defense_battle(
+        state: &mut GameState,
+        id: ObjectId,
+        protector: PlayerId,
+        siege: bool,
+    ) {
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.clear();
+        obj.card_types.core_types.push(CoreType::Battle);
+        if siege {
+            obj.card_types.subtypes = vec!["Siege".to_string()];
+            obj.chosen_attributes
+                .push(ChosenAttribute::Player(protector));
+        }
+        obj.defense = Some(0);
+        obj.base_defense = Some(0);
+        obj.counters.insert(CounterType::Defense, 0);
+    }
+
+    fn waiting_batch_for(
+        source: ObjectId,
+        controller: PlayerId,
+    ) -> Vec<crate::game::triggers::PendingTriggerContext> {
+        let ability = ResolvedAbility::new(
+            Effect::unimplemented("battle trigger", "this battle's own trigger"),
+            vec![],
+            source,
+            controller,
+        );
+        vec![crate::game::triggers::PendingTriggerContext::single(
+            crate::game::triggers::PendingTrigger::ordinary(
+                source,
+                controller,
+                None,
+                Box::new(ability),
+                0,
+            ),
+        )]
+    }
+
+    /// CR 704.5v: a Siege with defense 0 is spared while its own victory
+    /// trigger has triggered but not yet left the stack, even when that
+    /// trigger is only waiting in the caller's batch (CR 510.3a combat
+    /// damage) and not yet placed on the stack (CR 603.3).
+    #[test]
+    fn zero_defense_siege_survives_its_own_waiting_trigger() {
+        let mut state = setup();
+        let controller = PlayerId(0);
+        let id = create_object(
+            &mut state,
+            CardId(9001),
+            controller,
+            "Test Siege".to_string(),
+            Zone::Battlefield,
+        );
+        make_zero_defense_battle(&mut state, id, PlayerId(1), true);
+        let waiting = waiting_batch_for(id, controller);
+
+        let mut events = Vec::new();
+        check_state_based_actions_with_waiting_triggers(&mut state, &mut events, &waiting);
+
+        assert_eq!(
+            state.objects[&id].zone,
+            Zone::Battlefield,
+            "CR 704.5v: a Siege with defense 0 is spared while its own ability \
+             has triggered but not yet left the stack (on the stack or in the \
+             caller's waiting batch)"
+        );
+    }
+
+    /// CR 704.5w: a non-Siege battle with defense 0 has no trigger-on-stack
+    /// deferral — it dies even while an ability of its own waits in the
+    /// caller's batch.
+    #[test]
+    fn zero_defense_non_siege_battle_dies_with_its_own_waiting_trigger() {
+        let mut state = setup();
+        let controller = PlayerId(0);
+        let id = create_object(
+            &mut state,
+            CardId(9002),
+            controller,
+            "Test Battle".to_string(),
+            Zone::Battlefield,
+        );
+        make_zero_defense_battle(&mut state, id, PlayerId(1), false);
+        let waiting = waiting_batch_for(id, controller);
+
+        let mut events = Vec::new();
+        check_state_based_actions_with_waiting_triggers(&mut state, &mut events, &waiting);
+
+        assert_eq!(
+            state.objects[&id].zone,
+            Zone::Graveyard,
+            "CR 704.5w: a non-Siege battle has no trigger-on-stack deferral"
+        );
+    }
+
+    /// CR 704.5v: a waiting trigger from a different source does not spare a
+    /// Siege — the deferral is keyed by the triggered ability's source
+    /// `ObjectId`, not by incarnation or battle type alone.
+    #[test]
+    fn zero_defense_siege_dies_with_another_sources_waiting_trigger() {
+        let mut state = setup();
+        let controller = PlayerId(0);
+        let id = create_object(
+            &mut state,
+            CardId(9003),
+            controller,
+            "Test Siege".to_string(),
+            Zone::Battlefield,
+        );
+        make_zero_defense_battle(&mut state, id, PlayerId(1), true);
+        let other_source = create_object(
+            &mut state,
+            CardId(9004),
+            controller,
+            "Other Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&other_source).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+        }
+        let waiting = waiting_batch_for(other_source, controller);
+
+        let mut events = Vec::new();
+        check_state_based_actions_with_waiting_triggers(&mut state, &mut events, &waiting);
+
+        assert_eq!(
+            state.objects[&id].zone,
+            Zone::Graveyard,
+            "CR 704.5v: only the Siege's own waiting ability defers its death"
+        );
     }
 
     /// CR 704.4 + CR 903.9a: the player-loss safety net runs SBAs while a
@@ -2615,15 +2800,18 @@ mod tests {
                 },
             },
             None,
-        );
+        )
+        .expect("the fixture begins with no carrier installed");
         state.push_optional_effect_frame(OptionalEffectFrame {
             ability: Box::new(ability),
             trigger_event: None,
             trigger_events: Vec::new(),
             trigger_match_count: None,
+            return_result_occurrence: None,
         });
         let paused_prompt = WaitingFor::OptionalEffectChoice {
             player: PlayerId(2),
+            decision_subject_id: None,
             source_id: source,
             description: None,
             may_trigger_key: None,
@@ -6790,7 +6978,7 @@ mod tests {
 
         assert_eq!(zone_changed_for(&events, stale), 0);
         assert!(!events.iter().any(
-            |event| matches!(event, GameEvent::CreatureDestroyed { object_id } if *object_id == stale)
+            |event| matches!(event, GameEvent::CreatureDestroyed { object_id, .. } if *object_id == stale)
         ));
         assert!(zone_changed_for(&events, live) > 0);
         assert!(
@@ -6976,9 +7164,29 @@ mod tests {
         check_state_based_actions(&mut state, &mut events);
 
         assert!(state.players[0].graveyard.contains(&creature));
-        assert!(events.iter().any(
-            |event| matches!(event, GameEvent::CreatureDestroyed { object_id } if *object_id == creature)
-        ));
+        // CR 704.5h: a state-based destruction names no destroying source.
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::CreatureDestroyed { object_id, source_id: None } if *object_id == creature
+        )));
+    }
+
+    /// CR 704.5g: lethal damage destroys the creature, and the destruction names
+    /// no destroying source.
+    #[test]
+    fn sba_lethal_damage_destruction_has_no_source() {
+        let mut state = setup();
+        let creature = create_creature(&mut state, CardId(9910), PlayerId(0), "Burned", 2, 2);
+        state.objects.get_mut(&creature).unwrap().damage_marked = 2;
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(state.players[0].graveyard.contains(&creature));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::CreatureDestroyed { object_id, source_id: None } if *object_id == creature
+        )));
     }
 
     #[test]
@@ -7017,7 +7225,7 @@ mod tests {
         assert!(state.battlefield.contains(&zero));
         assert!(state.battlefield.contains(&negative));
         assert!(!events.iter().any(
-            |event| matches!(event, GameEvent::CreatureDestroyed { object_id } if *object_id == zero || *object_id == negative)
+            |event| matches!(event, GameEvent::CreatureDestroyed { object_id, .. } if *object_id == zero || *object_id == negative)
         ));
     }
 
@@ -7039,7 +7247,7 @@ mod tests {
 
         assert_eq!(zone_changed_for(&events, stale), 0);
         assert!(!events.iter().any(
-            |event| matches!(event, GameEvent::CreatureDestroyed { object_id } if *object_id == stale)
+            |event| matches!(event, GameEvent::CreatureDestroyed { object_id, .. } if *object_id == stale)
         ));
         assert!(state.players[0].graveyard.contains(&live));
     }

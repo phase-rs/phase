@@ -3,8 +3,8 @@
 Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
 
 - **Canonical root causes:** 29
-- **Distinct cards implicated:** 4591
-- **Total card appearances across root causes:** 4624 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Distinct cards implicated:** 4565
+- **Total card appearances across root causes:** 4598 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
 
 > Counting method: both figures count the per-root-cause card bullets only — the
 > three metadata bullets above are excluded — and are the source of truth.
@@ -15,20 +15,20 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 | # | Root cause | # cards | Fix hint (where it likely lives) |
 |---|------------|--------:|----------------------------------|
-| 1 | Relative-clause / filter restriction on target dropped | 736 | oracle_target.rs / game/filter.rs — extend TargetFilter property extraction for trailing relative clauses |
-| 2 | Dropped intervening-if / gating condition (condition: null) | 584 | oracle_nom/condition.rs parse_inner_condition — trigger/static parsers must delegate condition extraction here |
-| 3 | Anaphor bound to wrong referent | 403 | oracle_quantity.rs context-ref resolution + game/ability_utils.rs forward_result wiring |
-| 4 | Conjoined / chained second effect clause dropped | 386 | oracle.rs effect-chain composition — split on 'and'/'then'/sentence boundaries and build sub_ability chain |
+| 1 | Relative-clause / filter restriction on target dropped | 735 | oracle_target.rs / game/filter.rs — extend TargetFilter property extraction for trailing relative clauses |
+| 2 | Dropped intervening-if / gating condition (condition: null) | 575 | oracle_nom/condition.rs parse_inner_condition — trigger/static parsers must delegate condition extraction here |
+| 3 | Anaphor bound to wrong referent | 402 | oracle_quantity.rs context-ref resolution + game/ability_utils.rs forward_result wiring |
+| 4 | Conjoined / chained second effect clause dropped | 383 | oracle.rs effect-chain composition — split on 'and'/'then'/sentence boundaries and build sub_ability chain |
 | 5 | Dropped 'for each' / dynamic count collapsed to Fixed | 332 | oracle_quantity.rs parse_for_each_clause / parse_quantity_ref — thread ForEach/ObjectCount into the effect count field |
 | 6 | Disjunctive (or-list) collapsed to first branch | 226 | oracle_nom/filter.rs + oracle_target.rs — build TargetFilter::Or across all alt() branches |
-| 8 | Additional / alternative casting cost dropped | 210 | oracle_cost.rs — parse additional/alternative cost clauses into Spell.cost / AdditionalCost |
-| 7 | Wrong / dropped zone parameters on zone-change effect | 209 | game/zones.rs + oracle parser zone routing — derive correct origin/destination/owner from Oracle |
+| 7 | Wrong / dropped zone parameters on zone-change effect | 208 | game/zones.rs + oracle parser zone routing — derive correct origin/destination/owner from Oracle |
+| 8 | Additional / alternative casting cost dropped | 208 | oracle_cost.rs — parse additional/alternative cost clauses into Spell.cost / AdditionalCost |
 | 9 | Wrong player/controller scope (You where Opponent/Scoped/Target/Defending needed) | 182 | oracle parser ControllerRef binding — resolve scoped/defending/iterated player refs instead of defaulting to You |
 | 10 | Trigger event/mode unrecognized → Unknown | 167 | oracle_trigger.rs — add typed TriggerMode variants for the unrecognized event classes |
 | 11 | Replacement / prevention / 'instead' effect mis-modeled | 152 | add-replacement-effect: route 'would … instead' into replacements[]; preserve damage_source/target filters |
-| 12 | Modal 'choose one/N' parsed as independent abilities | 138 | oracle.rs modal dispatch — detect 'Choose one —' header, wrap modes in Effect::ChooseOneOf |
-| 13 | State/game-state condition → StaticCondition::Unrecognized | 131 | oracle_nom/condition.rs parse_inner_condition — add typed variant for the predicate class |
-| 14 | Granted/quoted ability or continuous modification dropped | 95 | oracle_static.rs continuous-modification extraction — emit all conjuncts incl. GrantAbility/GrantKeyword |
+| 12 | Modal 'choose one/N' parsed as independent abilities | 132 | oracle.rs modal dispatch — detect 'Choose one —' header, wrap modes in Effect::ChooseOneOf |
+| 13 | State/game-state condition → StaticCondition::Unrecognized | 129 | oracle_nom/condition.rs parse_inner_condition — add typed variant for the predicate class |
+| 14 | Granted/quoted ability or continuous modification dropped | 94 | oracle_static.rs continuous-modification extraction — emit all conjuncts incl. GrantAbility/GrantKeyword |
 | 15 | Multi-target / 'up to N' optionality or count dropped | 83 | oracle_target.rs strip_optional_target_prefix — preserve MultiTargetSpec and optional_targeting |
 | 16 | Keyword payload / multiplicity / mis-tokenization | 83 | game/keywords.rs + oracle keyword parsing — use typed discriminants and guard ability-word labels |
 | 17 | Copy 'except' / additional-modification clause dropped | 81 | oracle parser copy handling — populate BecomeCopy/CopyTokenOf additional_modifications from the except-list (CR 707.2) |
@@ -45,11 +45,11 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | 30 | Token/named-card name corrupted by normalization or overrun | 7 | oracle_util.rs SELF_REF normalization + Named-filter parsing — guard literal 'named X' spans |
 | 31 | Other / uncategorized misparse | 4 | manual triage |
 
-> The top **5** root causes cover 2441/4624 ≈ 53% of all misparse appearances; the top 10 cover 3435/4624 ≈ 74%. Fix these first.
+> The top **5** root causes cover 2427/4598 ≈ 53% of all misparse appearances; the top 10 cover 3418/4598 ≈ 74%. Fix these first.
 
 ## Full card lists per root cause
 
-### 1. Relative-clause / filter restriction on target dropped  (736 cards)
+### 1. Relative-clause / filter restriction on target dropped  (735 cards)
 
 **Signature.** TargetFilter/affected emitted with empty or missing properties; a trailing restrictive clause (type, subtype, color, mana value, zone, combat/temporal/control predicate, exclusion) is silently dropped, over-broadening the filter.
 
@@ -711,7 +711,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Trove Warden
 - Turn to Slag
 - Twisted Riddlekeeper
-- Tyrant's Familiar
 - Tzaangor Shaman
 - Ulalek, Fused Atrocity
 - Ultimecia, Time Sorceress
@@ -796,7 +795,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 2. Dropped intervening-if / gating condition (condition: null)  (584 cards)
+### 2. Dropped intervening-if / gating condition (condition: null)  (575 cards)
 
 **Signature.** Trigger/static/replacement/spell condition left null though Oracle has an 'if/while/as long as/unless' game-state gate; the effect resolves unconditionally (CR 603.4 / 608.2c).
 
@@ -867,12 +866,10 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Brackish Blunder
 - Brain Pry
 - Breath of the Sleepless
-- Breathless Knight
 - Brimstone Vandal
 - Bronze Horse
 - Bull-Rush Bruiser
 - Bulwark Ox
-- Burning-Eye Zubera
 - Cache Grab
 - Calamity of the Titans
 - Call to Arms
@@ -1090,11 +1087,9 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Kyren Legate
 - Kytheon, Hero of Akros
 - Laboratory Drudge
-- Lairwatch Giant
 - Lashwhip Predator
 - Latchkey Faerie
 - Lava Burst
-- Leader's Talent
 - Lethal Throwdown
 - Liberating Combustion
 - Liberator, Urza's Battlethopter
@@ -1151,7 +1146,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Nefarox, Overlord of Grixis
 - Negative Zone Portal
 - Nightshade Assassin
-- Nikara, Lair Scavenger
 - Nimbus Champion
 - Nine-Lives Familiar
 - No Quarter
@@ -1176,7 +1170,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Pathway Arrows
 - Patient Turtle
 - Peer Pressure
-- Pelt Collector
 - Pentarch Paladin
 - Perennial Gravewarden
 - Phelia, Exuberant Shepherd
@@ -1196,7 +1189,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Promising Stairs
 - Prompto Argentum
 - Prowling Geistcatcher
-- Pugnacious Hammerskull
 - Pulse of the Hunter Maze
 - Qasali Ambusher
 - Quest for the Nihil Stone
@@ -1209,7 +1201,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Ran and Shaw
 - Raphael, the Muscle
 - Rapid Fire
-- Rashka the Slayer
 - Raven Clan War-Axe
 - Rayne, Academy Chancellor
 - Reaper of Night
@@ -1234,7 +1225,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Routeway Moose
 - Rowdy Crew
 - Rubblebelt Braggart
-- Rushing-Tide Zubera
 - Rushwood Legate
 - Saffi Eriksdotter
 - Sahagin
@@ -1391,7 +1381,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 3. Anaphor bound to wrong referent  (403 cards)
+### 3. Anaphor bound to wrong referent  (402 cards)
 
 **Signature.** A pronoun/demonstrative ('it', 'that creature/player', 'them', 'they') resolves to the wrong slot (Self/Source/Controller/Any/ParentTarget) instead of the bound parent target, forwarded result, or triggering player (CR 608.2k). Includes the runtime half of the same defect class, where the referent slot is bound correctly but resolves to a STALE prior answer.
 
@@ -1642,7 +1632,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Numbing Dose
 - Ob Nixilis, Unshackled
 - Oblation
-- Oft-Nabbed Goat
 - Ondu Rising
 - Opal Gargoyle
 - Opal Titan
@@ -1805,7 +1794,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 4. Conjoined / chained second effect clause dropped  (386 cards)
+### 4. Conjoined / chained second effect clause dropped  (383 cards)
 
 **Signature.** A multi-clause effect ('X and Y' / 'then Z') emits only the first conjunct; sub_ability is null and the trailing imperative/effect chain is omitted.
 
@@ -1820,7 +1809,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Akroma, Angel of Wrath Avatar
 - Alien Symbiosis
 - All Shall Smolder in My Wake
-- Ambitious Augmenter
 - Amnesia
 - An-Havva Inn
 - Anavolver
@@ -2076,7 +2064,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Rootwater Shaman
 - Rothga, Bonded Engulfer
 - Rout
-- Rufus Shinra
 - Rune-Brand Juggler
 - Ryan Sinclair
 - Rysorian Badger
@@ -2151,7 +2138,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Thought Gorger
 - Thoughtcutter Agent
 - Throw from the Saddle
-- Thunderfoot Baloth
 - Tidus, Yuna's Guardian
 - Tilonalli's Summoner
 - Timely Ward
@@ -2551,6 +2537,8 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 **Fix hint.** oracle_nom/filter.rs + oracle_target.rs — build TargetFilter::Or across all alt() branches
 
+**Known unsupported case.** Old Man Willow's "another creature or a token" has a property-only token alternative. The sacrifice parser keeps the complete phrase explicitly unsupported instead of emitting a truncated creature-only sacrifice. Token-RHS support and its reflexive follow-up remain deferred.
+
 <details><summary>Cards</summary>
 
 - A-Brinebound Gift
@@ -2647,7 +2635,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Golem Artisan
 - Greater Gargadon
 - Guru Pathik
-- Gut, True Soul Zealot
 - HYDRA Assault Robot
 - Hand of Vecna
 - Harsh Mentor
@@ -2695,6 +2682,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Neyith of the Dire Hunt
 - Nicol Bolas, God-Pharaoh
 - Oglor, Devoted Assistant
+- Old Man Willow
 - Omen of Fire
 - One with the Multiverse
 - Ornery Goblin
@@ -2782,7 +2770,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 7. Wrong / dropped zone parameters on zone-change effect  (209 cards)
+### 7. Wrong / dropped zone parameters on zone-change effect  (208 cards)
 
 **Signature.** ChangeZone/ChangeZoneAll/Dig uses the wrong origin/destination zone, drops a count, inverts hand↔library, defaults origin to Exile, or omits a graveyard/owner-library routing.
 
@@ -2840,7 +2828,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Enlistment Officer
 - Eon Frolicker
 - Erratic Explosion
-- Erratic Mutation
 - Estrid, the Masked
 - Every Hope Shall Vanish
 - Explore the Vastlands
@@ -3002,7 +2989,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 8. Additional / alternative casting cost dropped  (210 cards)
+### 8. Additional / alternative casting cost dropped  (208 cards)
 
 **Signature.** Spell ability cost is null; an 'As an additional cost' / 'rather than pay its mana cost' / pitch / disjunctive cost clause is not parsed onto the ability.
 
@@ -3116,7 +3103,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Louisoix's Sacrifice
 - Lunar Hatchling
 - Lys Alana Dignitary
-- Maestros Ascendancy
 - Magma Burst
 - Magma Rift
 - Magmatic Insight
@@ -3214,7 +3200,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Whipgrass Entangler
 - Whiplash Trap
 - Wicked Reward
-- Wickerfolk Indomitable
 - Wild Unraveling
 - Winter, Cursed Rider
 - Withering Boon
@@ -3757,9 +3742,30 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 12. Modal 'choose one/N' parsed as independent abilities  (138 cards)
+### 12. Modal 'choose one/N' parsed as independent abilities  (132 cards)
 
 **Signature.** Modal header (Choose one/two/one-or-both) not detected; bullet modes emitted as flat independent Spell abilities with no ChooseOneOf/Modal wrapper, so all modes resolve.
+
+> **The stated signature above is unreliable — do not re-open this category on it (measured 2026-09-13).**
+> A spell-level modal is wrapped by the sibling card-level `modal` field, NOT by
+> anything inside `abilities`, so the clustering pass that produced this category
+> read only `abilities` and mislabelled correct parses as "flat independent
+> abilities". `oracle_modal.rs` is 5293 lines (measured) and already carries
+> `ConditionalMaxChoices`, `mode_costs`, `allow_repeat_modes`,
+> `selection: TargetSelectionMode::Random` and `dynamic_max_choices`. This is
+> NOT a claim that the category is fixed: the residue is real, but it is OTHER
+> shapes wearing this label. The "gets <P/T> or <P/T>" resolution-time P/T
+> disjunction was one such shape — a choice offered by a resolving ability
+> (CR 608.2d), not a modal spell header. Its SIX listed cards (Brightling,
+> Shorecrasher Elemental, Multiform Wonder, Pemmin's Aura, Shaper Parasite and
+> Liliana of the Dark Realms) were removed from the list below on 2026-09-13; the
+> two other cards that print the same clause, Endling and Greater Morphling,
+> appeared nowhere in this file (verified by grep over the whole file,
+> 2026-09-13). Liliana was found only by RE-SCANNING the corpus with an X-AWARE
+> P/T token (`[+-]?[0-9X]+/[+-]?[0-9X]+`): her "+X/+X or -X/-X" is invisible to a
+> digit-only token, and she is the EIGHTH member of the class, not the seventh. Re-triage the remaining
+> entries by reading the whole parsed card, `modal` field included, before
+> treating any of them as a modal-dispatch defect.
 
 **Fix hint.** oracle.rs modal dispatch — detect 'Choose one —' header, wrap modes in Effect::ChooseOneOf
 
@@ -3782,7 +3788,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Azula Always Lies
 - Blood on the Snow
 - Branching Bolt
-- Brightling
 - Buccaneer's Bravado
 - Butcher of the Horde
 - Casualties of War
@@ -3838,18 +3843,15 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Let's Play a Game
 - Library of Lat-Nam
 - Lich's Mastery
-- Liliana of the Dark Realms
 - Lonely End
 - Lunar Avenger
 - Mercurial Transformation
 - Molten Collapse
-- Multiform Wonder
 - Nasty End
 - Nature's Blessing
 - Ojutai's Command
 - Ooze Flux
 - Pawpatch Formation
-- Pemmin's Aura
 - Pharika's Libation
 - Plow Through
 - Profane Command
@@ -3872,9 +3874,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Season of Gathering
 - See Double
 - Settle Beyond Reality
-- Shaper Parasite
 - Shifting Ceratops
-- Shorecrasher Elemental
 - Sigil Blessing
 - Sigurd, Jarl of Ravensthorpe
 - Skullscorch
@@ -3906,7 +3906,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 13. State/game-state condition → StaticCondition::Unrecognized  (131 cards)
+### 13. State/game-state condition → StaticCondition::Unrecognized  (129 cards)
 
 **Signature.** A parseable game-state predicate falls to StaticCondition::Unrecognized (evaluates permissively true) instead of a typed presence/combat/counter/comparison condition.
 
@@ -3914,7 +3914,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 <details><summary>Cards</summary>
 
-- Agent Frank Horrigan
 - Arcades Sabboth
 - Artifact Possession
 - Atomwheel Acrobats
@@ -4037,7 +4036,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Temur Elevator
 - Territorial Hellkite
 - Tezzeret's Reckoning
-- The Lunar Whale
 - Thorned Moloch
 - Tidal Influence
 - Tide Shaper
@@ -4048,7 +4046,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 14. Granted/quoted ability or continuous modification dropped  (95 cards)
+### 14. Granted/quoted ability or continuous modification dropped  (94 cards)
 
 **Signature.** A static-grant modification list omits a granted activated/triggered ability, keyword, color, subtype, or P/T conjunct that the Oracle conjoins ('is a … with "<ability>"', 'and has flying').
 
@@ -4069,7 +4067,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Cloud, Midgar Mercenary
 - Concerted Effort
 - Conspicuous Snoop
-- Convergence of Dominion
 - Dan Lewis
 - Deadeye Navigator
 - Disciple of Kangee

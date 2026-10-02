@@ -1243,6 +1243,41 @@ jobs:
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Verify the release assets are the ones desktops download
+        env:
+          RELEASE_FILES: ${{ steps.release-assets.outputs.files }}
+        run: |
+          set -euo pipefail
+          # fail_on_unmatched_files only ever sees the list above, so it cannot
+          # know a platform is missing from it: add a build target, forget this
+          # file, and every desktop on it 404s with all gates green. Immutable
+          # releases take no late upload, so this has to fail before the create.
+          status=0
+          # No nullglob: an absent or empty artifacts/ iterates this literally, failing the grep.
+          for binary in artifacts/phase-server-slim-*/*; do
+            case "$binary" in *.minisig) continue ;; esac
+            for asset in "$binary" "$binary.minisig"; do
+              printf '%s\n' "$RELEASE_FILES" | grep -qxF "$asset" ||
+                { echo "::error::built $asset is missing from the release asset list"; status=1; }
+            done
+          done
+          # Both sides above are publisher-side spellings: rename a pair in the
+          # build and in the list, they still agree, and the desktop's download
+          # 404s. native_engine.rs asks for phase-server-slim-<triple>, and for
+          # that name plus .minisig, with .exe on windows; the contract's os and
+          # triple columns are where CI already holds that naming.
+          canonical=$(awk '{sub(/#.*/, ""); if (NF) print "phase-server-slim-" $3 ($1 == "windows" ? ".exe" : "")}' packaging/desktop-platforms.txt)
+          [ -n "$canonical" ] || { echo "::error::packaging/desktop-platforms.txt named no desktop platform"; exit 1; }
+          printf 'desktop download names: %s\n' "${canonical//$'\n'/ }"
+          published=$(printf '%s\n' "$RELEASE_FILES" | sed 's|.*/||')
+          while read -r binary; do
+            for asset in "$binary" "$binary.minisig"; do
+              printf '%s\n' "$published" | grep -qxF "$asset" ||
+                { echo "::error::no release asset is published as $asset, which the desktop shell downloads by that exact name"; status=1; }
+            done
+          done <<<"$canonical"
+          exit $status
+
       - name: Create release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:

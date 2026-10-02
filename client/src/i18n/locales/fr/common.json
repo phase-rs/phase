@@ -6,6 +6,7 @@
     "closeNamed": "Fermer {{name}}"
   },
   "debug": {
+    "copyDisplaySnapshot": "Copier l’instantané d’affichage (non restaurable)",
     "exportAuthoritative": "Exporter l’état de jeu faisant autorité",
     "exportAuthoritativeTitle": "Télécharge l’état détenu par le moteur, utilisé pour diagnostiquer et restaurer cette partie"
   },
@@ -302,7 +303,8 @@
     "lostCoinFlip": "{{name}} a perdu le pile ou face",
     "turnOrder": "Ordre des tours",
     "turnOrderItem": "Tour {{turn}} : {{name}}",
-    "youTakeTurn": "Vous jouez au tour {{turn}}"
+    "youTakeTurn": "Vous jouez au tour {{turn}}",
+    "ignoredDie": "Ignoré"
   },
   "chrome": {
     "back": "Retour",
@@ -422,5 +424,25 @@
       "no-turn": "Aucun relais TURN fourni",
       "aborted": "Requête annulée"
     }
+  },
+  "savedDeckLibraryBusy": {
+    "description": "Un autre onglet Phase est occupé. Fermez les autres onglets Phase et réessayez.",
+    "title": {
+      "save": "Impossible d'enregistrer le deck",
+      "clone": "Impossible de cloner le deck",
+      "import": "Impossible d'importer le deck",
+      "delete": "Impossible de supprimer le deck",
+      "organize": "Impossible de mettre à jour l'organisation des decks",
+      "updateFeeds": "Impossible de mettre à jour les flux de decks",
+      "restore": "Impossible de restaurer la sauvegarde",
+      "applyCloud": "Impossible d'appliquer les decks du cloud",
+      "autosaveDraft": "Impossible de sauvegarder automatiquement le deck de draft"
+    }
+  },
+  "savedDeckLibraryStorageFailure": {
+    "description": "Phase n'a pas pu accéder au stockage du navigateur. Réessayez dans un instant."
+  },
+  "savedDeckChanged": {
+    "description": "Ce deck a changé avant l'exécution de votre action, donc rien n'a été modifié. Vérifiez le deck et réessayez."
   }
 }

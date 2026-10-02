@@ -424,12 +424,22 @@ fn static_condition_to_restriction_condition(
         | StaticCondition::TopOfLibraryMatches { .. }
         | StaticCondition::SourceIsPaired
         | StaticCondition::AdditionalCostPaid
-        // CR 508.6: "a player attacked you during their last turn" is a real
-        // game-state predicate (Avenge's cost reduction), but it is not a
-        // cast/activation restriction and has no `ParsedCondition` counterpart —
-        // it is evaluated via `layers::evaluate_condition` on the self-spell cost
-        // path, so lowering here returns `None`.
-        | StaticCondition::AnyPlayerAttackedYouLastTurn
+        // CR 508.6 + CR 601.2: a real game-state predicate on both scopes, but
+        // neither is a cast/activation restriction, and `None` is right for
+        // DIFFERENT reasons.
+        //
+        // Default (`AnyPlayer`) scope: it is evaluated via
+        // `layers::evaluate_condition` on the self-spell cost path, not at a
+        // cast/activation gate; there is no `ParsedCondition` counterpart.
+        //
+        // Anchored (`AttackedPlayer`) scope: a cast/activation gate is evaluated
+        // OUTSIDE combat declaration entirely — no `declared_attack` is bound and
+        // the caster need not be an attacking creature — so the anchor can never
+        // resolve at this boundary. Approximating it with the existential form
+        // would be a PERMISSIVE lie (it would pass whenever ANY player attacked
+        // you), the same failure mode this match rejects for
+        // `TopOfLibraryMatches` above.
+        | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
         | StaticCondition::CastingAsVariant { .. } => None,
     }
 }

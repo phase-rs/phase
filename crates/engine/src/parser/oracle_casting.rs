@@ -1587,6 +1587,39 @@ Trample";
         }
     }
 
+    /// CR 107.3a + CR 601.2b: the X of an additional discard cost is announced
+    /// while casting, so the count stays symbolic (Firestorm, Devastating Dreams).
+    #[test]
+    fn parse_additional_cost_discard_x_cards_keeps_x() {
+        let x = QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        };
+        for (lower, raw, selection) in [
+            (
+                "as an additional cost to cast this spell, discard x cards.",
+                "As an additional cost to cast this spell, discard X cards.",
+                CardSelectionMode::Chosen,
+            ),
+            (
+                "as an additional cost to cast this spell, discard x cards at random.",
+                "As an additional cost to cast this spell, discard X cards at random.",
+                CardSelectionMode::Random,
+            ),
+        ] {
+            match parse_additional_cost_line(lower, raw) {
+                Some(AdditionalCost::Required(AbilityCost::Discard {
+                    count,
+                    filter: None,
+                    selection: parsed,
+                    ..
+                })) if count == x && parsed == selection => {}
+                other => panic!("Expected Required(Discard X) for {raw:?}, got {other:?}"),
+            }
+        }
+    }
+
     #[test]
     fn parse_additional_cost_pay_life() {
         let lower = "as an additional cost to cast this spell, pay 3 life.";
@@ -1844,6 +1877,52 @@ Trample";
             "an unmodeled gerund additional cost must decline the whole self-flash \
              option (honest coverage gap), not emit a cost-less flash grant: {option:?}"
         );
+    }
+
+    /// CR 601.2f + CR 702.8a: Tegwyll's Scouring — the self-flash rider's
+    /// additional cost is a single-component "tapping three untapped creatures
+    /// you control with flying" phrase, so the per-component split must leave it
+    /// byte-identical to the pre-split lowering and the option must still carry
+    /// `TapCreatures { count: 3, …flying… }`. Sibling regression guard for
+    /// `parse_gerund_cost`'s component split.
+    #[test]
+    fn tegwyll_self_flash_gerund_survives_component_split() {
+        let option = parse_spell_casting_option_line(
+            "You may cast this spell as though it had flash by tapping three untapped creatures you control with flying in addition to paying its other costs.",
+            "Tegwyll's Scouring",
+        )
+        .expect("Tegwyll's single-component flash rider must survive the component split");
+        match option {
+            SpellCastingOption {
+                kind: crate::types::ability::SpellCastingOptionKind::AsThoughHadFlash,
+                cost:
+                    Some(AbilityCost::TapCreatures {
+                        ref requirement,
+                        ref filter,
+                    }),
+                condition: None,
+            } => {
+                assert_eq!(
+                    requirement.fixed_count(),
+                    Some(3),
+                    "Tegwyll taps three creatures, got {requirement:?}"
+                );
+                let TargetFilter::Typed(typed) = filter else {
+                    panic!("expected a Typed creature filter, got {filter:?}");
+                };
+                assert!(
+                    typed.type_filters.contains(&TypeFilter::Creature),
+                    "expected a Creature filter, got {typed:?}"
+                );
+                assert!(
+                    typed.properties.contains(&FilterProp::WithKeyword {
+                        value: Keyword::Flying
+                    }),
+                    "the flying restriction must survive the split, got {typed:?}"
+                );
+            }
+            other => panic!("expected AsThoughHadFlash with a TapCreatures cost, got {other:?}"),
+        }
     }
 
     #[test]
@@ -2566,15 +2645,10 @@ Trample";
     /// can read must surface an honest `Unimplemented` cost, not vanish. The
     /// old tail answered `None` — "this spell has NO additional cost" — which
     /// erased a printed cost from the total cost and left the spell castable
-    /// without it. Three real corpus lines, one per unreadable shape.
+    /// without it. One line per unreadable shape.
     #[test]
     fn unreadable_required_additional_cost_is_surfaced_not_dropped() {
         for (lower, raw, expected_description) in [
-            (
-                "as an additional cost to cast this spell, discard x cards at random.",
-                "As an additional cost to cast this spell, discard X cards at random.",
-                "discard X cards at random",
-            ),
             (
                 "as an additional cost to cast this spell, gobble x.",
                 "As an additional cost to cast this spell, gobble X.",

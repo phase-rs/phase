@@ -183,6 +183,7 @@
     "packProgress": "Booster {{current}} z {{total}}",
     "openPack": "Otwórz booster",
     "openPackArt": "Otwórz grafikę boostera",
+    "openAllPacks": "Otwórz wszystkie boostery",
     "pulls": "Twoje karty",
     "nextPack": "Następny booster",
     "viewPool": "Zobacz swoją pulę",
@@ -485,6 +486,10 @@
     "upNext": "Następny — Mecz {{number}}",
     "nextMatch": "Następny mecz",
     "endRun": "Zakończ bieg",
+    "retryEndRun": "Ponów zakończenie biegu",
+    "retryResume": "Ponów wznawianie",
+    "startUnavailable": "Nie udało się rozpocząć meczu draftu.",
+    "resumeUnavailable": "Ten bieg draftu jest niedostępny. Zakończ go, aby zacząć od nowa.",
     "done": "Gotowe",
     "perfectRun": "Idealny bieg",
     "runComplete": "Bieg zakończony",
@@ -571,7 +576,20 @@
     "tabs": {
       "set": "Dodatek",
       "cube": "Cube"
-    }
+    },
+    "lobbyUnavailable": "Nie udało się połączyć z poczekalnią, aby wystawić ten pod. Wyłącz „$t(draft:podSetup.listInLobby)”, aby hostować za pomocą kodu pokoju.",
+    "listingHostNameTooLong": "Aby wystawić ten pod w poczekalni, użyj wyświetlanej nazwy o długości maksymalnie {{max}} znaków.",
+    "listingRoomNameTooLong": "Aby wystawić ten pod w poczekalni, użyj nazwy pokoju o długości maksymalnie {{max}} znaków.",
+    "listingCubeNameTooLong": "Aby wystawić ten pod w poczekalni, użyj nazwy Cube'a o długości maksymalnie {{max}} znaków.",
+    "listingPasswordTooLong": "Aby wystawić ten pod w poczekalni, użyj krótszego hasła.",
+    "listInLobby": "Wyświetl w poczekalni",
+    "listingSeatLimit": "Lista poczekalni obsługuje pody liczące do {{max}} graczy.",
+    "setPassword": "Ustaw hasło",
+    "passwordPlaceholder": "Hasło poda",
+    "roomName": "Nazwa pokoju",
+    "optional": "(opcjonalnie)",
+    "roomNameHelp": "Wyświetlana graczom przeglądającym poczekalnię.",
+    "roomNamePlaceholder": "np. Piątkowy wieczór Cube"
   },
   "podPhaseView": {
     "tournamentPairings": "Pary turniejowe",
@@ -654,6 +672,8 @@
     "takeAria": "Weź kupkę {{index}}",
     "decline": "Odrzuć",
     "declineAria": "Odrzuć kupkę {{index}}",
+    "spreadPile": "Rozłóż kupkę {{index}}",
+    "stackPile": "Spiętrz kupkę {{index}}",
     "refusal": {
       "PileNotActive": "Nie podejmujesz decyzji o tej kupce.",
       "PileEmpty": "Ta kupka jest pusta, nie ma czego brać.",
@@ -705,5 +725,15 @@
     "pools": "Pools (omniscient)",
     "poolSize": "{{count}} cards picked",
     "seat": "Seat {{index}}"
+  },
+  "deckAutosave": {
+    "deckName": "[Autozapis] {{format}}",
+    "slotQuick": "Szybki draft",
+    "slotSealed": "Sealed",
+    "slotCube": "Draft kostki",
+    "slotPremier": "Draft Premier",
+    "slotTraditional": "Draft tradycyjny",
+    "slotCommanderDraft": "Draft Commander",
+    "slotWinston": "Draft Winston"
   }
 }

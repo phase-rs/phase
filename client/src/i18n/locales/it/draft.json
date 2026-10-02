@@ -183,6 +183,7 @@
     "packProgress": "Busta {{current}} di {{total}}",
     "openPack": "Apri busta",
     "openPackArt": "Apri l’illustrazione della busta",
+    "openAllPacks": "Apri tutte le buste",
     "pulls": "Le tue carte",
     "nextPack": "Busta successiva",
     "viewPool": "Vedi il tuo pool",
@@ -485,6 +486,10 @@
     "upNext": "Prossima — Partita {{number}}",
     "nextMatch": "Partita successiva",
     "endRun": "Termina run",
+    "retryEndRun": "Riprova a terminare la run",
+    "retryResume": "Riprova a riprendere",
+    "startUnavailable": "Impossibile avviare questa partita Draft.",
+    "resumeUnavailable": "Questa run Draft non è disponibile. Terminala per iniziare di nuovo.",
     "done": "Fatto",
     "perfectRun": "Run perfetta",
     "runComplete": "Run completata",
@@ -571,7 +576,20 @@
     "tabs": {
       "set": "Espansione",
       "cube": "Cube"
-    }
+    },
+    "lobbyUnavailable": "Impossibile raggiungere la lobby per elencare questo pod. Disattiva “$t(draft:podSetup.listInLobby)” per ospitare tramite codice stanza.",
+    "listingHostNameTooLong": "Per elencare questo pod nella lobby, usa un nome visualizzato di al massimo {{max}} caratteri.",
+    "listingRoomNameTooLong": "Per elencare questo pod nella lobby, usa un nome stanza di al massimo {{max}} caratteri.",
+    "listingCubeNameTooLong": "Per elencare questo pod nella lobby, usa un nome Cube di al massimo {{max}} caratteri.",
+    "listingPasswordTooLong": "Per elencare questo pod nella lobby, usa una password più corta.",
+    "listInLobby": "Elenca nella lobby",
+    "listingSeatLimit": "L'elenco della lobby supporta pod fino a {{max}} giocatori.",
+    "setPassword": "Imposta password",
+    "passwordPlaceholder": "Password del pod",
+    "roomName": "Nome stanza",
+    "optional": "(facoltativo)",
+    "roomNameHelp": "Mostrato ai giocatori che sfogliano la lobby.",
+    "roomNamePlaceholder": "es. Cube del venerdì sera"
   },
   "podPhaseView": {
     "tournamentPairings": "Accoppiamenti torneo",
@@ -654,6 +672,8 @@
     "takeAria": "Prendi il mucchio {{index}}",
     "decline": "Rifiuta",
     "declineAria": "Rifiuta il mucchio {{index}}",
+    "spreadPile": "Distendi il mucchio {{index}}",
+    "stackPile": "Impila il mucchio {{index}}",
     "refusal": {
       "PileNotActive": "Non stai decidendo su questo mucchio.",
       "PileEmpty": "Questo mucchio è vuoto, non c'è nulla da prendere.",
@@ -705,5 +725,15 @@
     "pools": "Pools (omniscient)",
     "poolSize": "{{count}} cards picked",
     "seat": "Seat {{index}}"
+  },
+  "deckAutosave": {
+    "deckName": "[Salvataggio automatico] {{format}}",
+    "slotQuick": "Quick Draft",
+    "slotSealed": "Sealed",
+    "slotCube": "Cube Draft",
+    "slotPremier": "Draft Premier",
+    "slotTraditional": "Draft tradizionale",
+    "slotCommanderDraft": "Draft Commander",
+    "slotWinston": "Draft Winston"
   }
 }

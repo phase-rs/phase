@@ -8,6 +8,8 @@ import type {
   PersistedGameState,
   PlayerId,
 } from "../adapter/types";
+import { isCustomGameFormat } from "../adapter/types";
+import { formatMetadata } from "../data/formatRegistry";
 import type { SeatState } from "../multiplayer/seatTypes";
 import type { FullSessionKey } from "./multiplayerSession";
 import type { P2PSessionKey } from "./p2pSession";
@@ -130,6 +132,72 @@ export interface NativeP2PServerSession {
   playerTokens: Record<number, string>;
 }
 
+type LegacyDeckSizeType = "Minimum" | "Exactly";
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+/** Resolve the old numeric field's discriminant from engine-authored rules. */
+function legacyDeckSizeType(
+  formatConfig: Record<string, unknown>,
+): LegacyDeckSizeType | undefined {
+  const format = formatConfig.format;
+  if (typeof format !== "string") return undefined;
+
+  const builtInMetadata = formatMetadata(format as FormatConfig["format"]);
+  if (builtInMetadata) return builtInMetadata.default_config.deck_size.type;
+
+  if (!isCustomGameFormat(format)) return undefined;
+  const structural = asRecord(asRecord(formatConfig.custom_rules)?.structural);
+  const deckSize = asRecord(structural?.deck_size);
+  return deckSize?.type === "Minimum" || deckSize?.type === "Exactly"
+    ? deckSize.type
+    : undefined;
+}
+
+/**
+ * Convert the pre-Commander-Draft save spelling of FormatConfig.deck_size.
+ *
+ * Protocol v42 changed this field from a bare number to DeckSizeRule. Network
+ * peers are version-gated, but IndexedDB saves survive upgrades and have no
+ * protocol handshake to reject them. A legacy local save therefore reached
+ * Rust deserialization with e.g. `deck_size: 100` and was discarded by the
+ * resume fallback. The engine registry (for built-ins) or persisted engine
+ * custom rules supplies the discriminant; without either authority the old
+ * value is left untouched so engine restore fails closed rather than guessing.
+ */
+function normalizeLegacyDeckSizeRule(
+  formatConfig: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!Number.isInteger(formatConfig.deck_size)) return formatConfig;
+
+  const magnitude = formatConfig.deck_size as number;
+  const variant = legacyDeckSizeType(formatConfig);
+  if (!variant) return formatConfig;
+  return {
+    ...formatConfig,
+    deck_size: { type: variant, data: magnitude },
+  };
+}
+
+/** Normalize only the persisted state boundary; never mutate the IDB object. */
+export function migratePersistedGameState<T extends PersistedGameState>(state: T): T {
+  const envelope = "state" in state;
+  const gameState = (envelope ? state.state : state) as GameState;
+  const formatConfig = gameState.format_config;
+  if (!formatConfig || typeof formatConfig !== "object") return state;
+
+  const rawFormatConfig = formatConfig as unknown as Record<string, unknown>;
+  const normalized = normalizeLegacyDeckSizeRule(rawFormatConfig);
+  if (normalized === rawFormatConfig) return state;
+
+  const nextState = { ...gameState, format_config: normalized as unknown as FormatConfig };
+  return (envelope ? { ...state, state: nextState } : nextState) as T;
+}
+
 const P2P_HOST_KEY_PREFIX = "phase-p2p-host:";
 
 /**
@@ -201,20 +269,39 @@ export async function saveAuthoritativeGame(
   adapter: EngineAdapter,
   fallbackState: GameState,
 ): Promise<void> {
+  await saveGame(gameId, await authoritativePersistenceState(adapter, fallbackState));
+}
+
+/** Commit the engine-authored initial snapshot before a fresh game can start. */
+export async function saveAuthoritativeGameStrict(
+  gameId: string,
+  adapter: EngineAdapter,
+  fallbackState: GameState,
+): Promise<void> {
+  await saveResumableGameStrict(gameId, await authoritativePersistenceState(adapter, fallbackState));
+}
+
+async function authoritativePersistenceState(
+  adapter: EngineAdapter,
+  fallbackState: GameState,
+): Promise<PersistedGameState> {
   const trustedJson = await adapter.exportPersistenceState?.();
-  await saveGame(
-    gameId,
-    trustedJson ? JSON.parse(trustedJson) as PersistedGameState : fallbackState,
-  );
+  return trustedJson ? JSON.parse(trustedJson) as PersistedGameState : fallbackState;
 }
 
 export async function loadGame(gameId: string): Promise<PersistedGameState | null> {
   try {
     const state = await get<PersistedGameState>(GAME_KEY_PREFIX + gameId, getGameStore());
-    return state ?? null;
+    return state ? migratePersistedGameState(state) : null;
   } catch {
     return null;
   }
+}
+
+/** Read a saved game without interpreting an IndexedDB failure as absence. */
+export async function loadGameStrict(gameId: string): Promise<PersistedGameState | null> {
+  const state = await get<PersistedGameState>(GAME_KEY_PREFIX + gameId, getGameStore());
+  return state === undefined ? null : migratePersistedGameState(state);
 }
 
 export async function clearGame(gameId: string): Promise<void> {
@@ -226,6 +313,18 @@ export async function clearGame(gameId: string): Promise<void> {
     // would surface a game the engine has forgotten.
     await del(P2P_HOST_KEY_PREFIX + gameId, getGameStore());
   } catch { /* best effort */ }
+  const active = loadActiveGame();
+  if (active?.id === gameId) {
+    clearActiveGame();
+  }
+}
+
+/** Remove every game-scoped record before reusing a game ID for a fresh start. */
+export async function clearGameStrict(gameId: string): Promise<void> {
+  const store = getGameStore();
+  await del(GAME_CHECKPOINTS_PREFIX + gameId, store);
+  await del(P2P_HOST_KEY_PREFIX + gameId, store);
+  await del(GAME_KEY_PREFIX + gameId, store);
   const active = loadActiveGame();
   if (active?.id === gameId) {
     clearActiveGame();
@@ -277,7 +376,7 @@ export async function saveCheckpoints(gameId: string, checkpoints: GameState[]):
 export async function loadCheckpoints(gameId: string): Promise<GameState[]> {
   try {
     const checkpoints = await get<GameState[]>(GAME_CHECKPOINTS_PREFIX + gameId, getGameStore());
-    return checkpoints ?? [];
+    return checkpoints?.map((checkpoint) => migratePersistedGameState(checkpoint)) ?? [];
   } catch {
     return [];
   }

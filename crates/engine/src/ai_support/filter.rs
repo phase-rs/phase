@@ -413,9 +413,14 @@ fn structurally_valid_priority_cast_with_probe(
         return false;
     }
 
-    casting::effective_spell_cost(state, *player, *object_id).is_some_and(|cost| {
-        casting::can_pay_cost_after_auto_tap_with_probe(state, *player, *object_id, &cost, probe)
-    })
+    // CR 601.2a: a graveyard cast with several permissions has no single exact
+    // cost until one is announced; it is payable when some option is.
+    match casting::effective_spell_cost(state, *player, *object_id) {
+        Some(cost) => casting::can_pay_cost_after_auto_tap_with_probe(
+            state, *player, *object_id, &cost, probe,
+        ),
+        None => casting::graveyard_cast_payable_by_some_option(state, *player, *object_id, probe),
+    }
 }
 
 /// A pipeline of filters run in the order they're registered. Candidates pass
@@ -935,7 +940,7 @@ fn filterprop_reads_only_candidate_fp(p: &FilterProp) -> bool {
         | FilterProp::Blocking
         | FilterProp::BlockingSource
         | FilterProp::CombatRelation { .. }
-        | FilterProp::Unblocked
+        | FilterProp::BlockStatus { .. }
         | FilterProp::AttackingAlone
         | FilterProp::BlockingAlone
         | FilterProp::WasDealtDamageThisTurn

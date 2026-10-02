@@ -2,8 +2,8 @@ use std::collections::HashSet;
 
 use crate::ai_support::copy_target_mana_value_ceiling;
 use crate::types::ability::{
-    AbilityDefinition, CopyTargetPurpose, Effect, PostReplacementContinuation, ResolvedAbility,
-    TargetFilter, TargetRef,
+    AbilityDefinition, AttachCardinality, AttachSelection, CopyTargetPurpose, Effect,
+    PostReplacementContinuation, ResolvedAbility, TargetFilter, TargetRef,
 };
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
@@ -432,6 +432,11 @@ fn handle_replacement_choice_inner(
                                 &events[delivery_start..],
                             ),
                         );
+                        effects::settle_replaced_forwarded_zone_delivery(
+                            state,
+                            paused.member,
+                            &events[delivery_start..],
+                        );
                     }
                     if let Some(provenance) = parked_sacrifice_provenance {
                         if provenance.object_id == object_id {
@@ -700,7 +705,21 @@ fn handle_replacement_choice_inner(
                 }
                 // CR 701.22a: Scry accepted after replacement choice.
                 scry @ ProposedEvent::Scry { .. } => {
+                    let events_before = events.len();
                     apply_scry_after_replacement(state, scry, events);
+                    // CR 701.22d: an empty-library scry publishes its event from
+                    // this replacement-choice handler, where resolve_chain_body's
+                    // recording does not see it, so record it here.
+                    for event in &events[events_before..] {
+                        if let GameEvent::PlayerPerformedAction {
+                            player_id, action, ..
+                        } = event
+                        {
+                            crate::game::effects::record_player_action_this_turn(
+                                state, *player_id, *action,
+                            );
+                        }
+                    }
                 }
                 // CR 701.37a: Explore accepted after replacement choice — the
                 // explore resolver handles the actual explore logic; this is a no-op here.
@@ -1451,6 +1470,7 @@ fn handle_replacement_choice_inner(
                     &[],
                     crate::types::game_state::ZoneMoveCompletion::Prevented,
                 );
+                effects::settle_replaced_forwarded_zone_delivery(state, paused.member, &[]);
             }
             // CR 616.1f + CR 701.50a: a full-substitution applier (the Leader,
             // Super-Genius connive replacement) can park its OWN interactive
@@ -1777,7 +1797,7 @@ fn handle_persist_chosen_attribute_choice(
     )?;
     // CR 111.1 + CR 707.2: art routing follows the copy (token vs printed
     // source), captured alongside the values — NOT a copiable value itself.
-    let (display_source, printed_ref, token_image_ref) = state
+    let (display_source, printed_ref, token_image_ref, token_art) = state
         .objects
         .get(&donor_id)
         .map(|o| {
@@ -1785,6 +1805,7 @@ fn handle_persist_chosen_attribute_choice(
                 o.display_source,
                 o.printed_ref.clone(),
                 o.token_image_ref.clone(),
+                o.token_art.clone(),
             )
         })
         .unwrap_or_default();
@@ -1906,6 +1927,7 @@ fn handle_persist_chosen_attribute_choice(
         display_source,
         printed_ref,
         token_image_ref,
+        token_art,
         additional_modifications: Vec::new(),
         effect_kind: crate::types::ability::EffectKind::ChoosePermanent,
     };
@@ -2677,6 +2699,9 @@ fn finish_copy_target_choice_entry(
                     Effect::Attach {
                         attachment: TargetFilter::SelfRef,
                         target: TargetFilter::Any,
+                        selection: AttachSelection::AtResolution {
+                            count: AttachCardinality::One,
+                        },
                     },
                     Vec::new(),
                     source_id,
@@ -3033,6 +3058,18 @@ pub(super) fn apply_post_replacement_effect(
     };
     let mut resolved =
         build_resolved_from_def_with_targets(effect_def, source_id, controller, targets);
+    // CR 121.6b + CR 616.1g: a nested replacement may temporarily become the
+    // resident drain while this chain is suspended on its child draw. Capture
+    // this continuation's own event target on the chain now so a later sibling
+    // (for example, Alms Collector's "that player" draw) cannot read the nested
+    // child's event target when it resumes.
+    if ability_definition_uses_post_replacement_event_target(effect_def) {
+        if let Some(target) = state.post_replacement_event_target() {
+            if !resolved.targets.contains(target) {
+                resolved.targets.push(target.clone());
+            }
+        }
+    }
     // CR 109.5: "that player" / "its controller" — the player the replaced
     // event acted on, bound only when that is somebody other than "you" (see
     // `distinct_scoped_player` above). Applied to the whole chain so a rider
@@ -3043,6 +3080,37 @@ pub(super) fn apply_post_replacement_effect(
     }
     resolved.set_replacement_applied_recursive(replacement_applied);
     resolve_post_replacement_chain(state, &resolved, events)
+}
+
+fn ability_definition_uses_post_replacement_event_target(ability: &AbilityDefinition) -> bool {
+    fn filter_uses_event_target(filter: &TargetFilter) -> bool {
+        match filter {
+            TargetFilter::PostReplacementDamageTarget => true,
+            TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+                filters.iter().any(filter_uses_event_target)
+            }
+            TargetFilter::Not { filter } => filter_uses_event_target(filter),
+            _ => false,
+        }
+    }
+
+    ability
+        .effect
+        .target_filter()
+        .is_some_and(filter_uses_event_target)
+        || ability
+            .sub_ability
+            .as_deref()
+            .is_some_and(ability_definition_uses_post_replacement_event_target)
+        || ability
+            .else_ability
+            .as_deref()
+            .is_some_and(ability_definition_uses_post_replacement_event_target)
+        || matches!(
+            ability.effect.as_ref(),
+            Effect::ChooseOneOf { branches, .. }
+                if branches.iter().any(ability_definition_uses_post_replacement_event_target)
+        )
 }
 
 /// CR 608.2c: execute instructions in the order written.
@@ -5075,8 +5143,10 @@ mod tests {
             enter_transformed: false,
             enter_as_copy: None,
             discard_frame: None,
+            performed_by: None,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
         let mut events = Vec::new();
@@ -5111,6 +5181,7 @@ mod tests {
                 display_name: "Soldier".to_string(),
                 power: Some(2),
                 toughness: Some(2),
+                loyalty: None,
                 core_types: vec![CoreType::Creature],
                 subtypes: vec!["Soldier".to_string()],
                 supertypes: Vec::new(),
@@ -5236,6 +5307,7 @@ mod tests {
                 display_name: "Treasure".to_string(),
                 power: None,
                 toughness: None,
+                loyalty: None,
                 core_types: vec![CoreType::Artifact],
                 subtypes: vec!["Treasure".to_string()],
                 supertypes: Vec::new(),
@@ -5394,6 +5466,7 @@ mod tests {
                 display_name: "Treasure".to_string(),
                 power: None,
                 toughness: None,
+                loyalty: None,
                 core_types: vec![CoreType::Artifact],
                 subtypes: vec!["Treasure".to_string()],
                 supertypes: Vec::new(),
@@ -5569,6 +5642,7 @@ mod tests {
                 display_name: "Treasure".to_string(),
                 power: None,
                 toughness: None,
+                loyalty: None,
                 core_types: vec![CoreType::Artifact],
                 subtypes: vec!["Treasure".to_string()],
                 supertypes: Vec::new(),
@@ -5723,6 +5797,7 @@ mod tests {
                 display_name: "Dog".to_string(),
                 power: Some(2),
                 toughness: Some(2),
+                loyalty: None,
                 core_types: vec![CoreType::Creature],
                 subtypes: vec!["Dog".to_string()],
                 supertypes: Vec::new(),
@@ -5860,6 +5935,7 @@ mod tests {
                 display_name: "Treasure".to_string(),
                 power: None,
                 toughness: None,
+                loyalty: None,
                 core_types: vec![CoreType::Artifact],
                 subtypes: vec!["Treasure".to_string()],
                 supertypes: Vec::new(),
@@ -7399,8 +7475,10 @@ mod tests {
             enter_transformed: false,
             enter_as_copy: None,
             discard_frame: None,
+            performed_by: None,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
         let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
@@ -7606,8 +7684,10 @@ mod tests {
             enter_transformed: false,
             enter_as_copy: None,
             discard_frame: None,
+            performed_by: None,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
         let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
@@ -7729,8 +7809,10 @@ mod tests {
             enter_transformed: false,
             enter_as_copy: None,
             discard_frame: None,
+            performed_by: None,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
         let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
@@ -7907,6 +7989,7 @@ mod tests {
                 display_source: crate::game::game_object::DisplaySource::Token,
                 printed_ref: None,
                 token_image_ref: None,
+                token_art: None,
                 extra_keywords: Vec::new(),
                 additional_modifications: Vec::new(),
                 tapped: false,
@@ -8187,8 +8270,10 @@ mod tests {
             enter_transformed: false,
             enter_as_copy: None,
             discard_frame: None,
+            performed_by: None,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
         let result = replacement_mod::replace_event(&mut state, proposed, &mut events);

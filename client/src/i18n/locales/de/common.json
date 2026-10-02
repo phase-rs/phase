@@ -6,6 +6,7 @@
     "closeNamed": "{{name}} schließen"
   },
   "debug": {
+    "copyDisplaySnapshot": "Anzeigeschnappschuss kopieren (nicht wiederherstellbar)",
     "exportAuthoritative": "Autoritativen Spielzustand exportieren",
     "exportAuthoritativeTitle": "Lädt den engine-eigenen Zustand herunter, mit dem dieses Spiel diagnostiziert und wiederhergestellt wird"
   },
@@ -302,7 +303,8 @@
     "lostCoinFlip": "{{name}} hat den Münzwurf verloren",
     "turnOrder": "Zugreihenfolge",
     "turnOrderItem": "Zug {{turn}}: {{name}}",
-    "youTakeTurn": "Du bist in Zug {{turn}} dran"
+    "youTakeTurn": "Du bist in Zug {{turn}} dran",
+    "ignoredDie": "Ignoriert"
   },
   "chrome": {
     "back": "Zurück",
@@ -422,5 +424,25 @@
       "no-turn": "Kein TURN-Relay bereitgestellt",
       "aborted": "Anfrage abgebrochen"
     }
+  },
+  "savedDeckLibraryBusy": {
+    "description": "Ein anderer Phase-Tab ist gerade beschäftigt. Schließe andere Phase-Tabs und versuche es erneut.",
+    "title": {
+      "save": "Deck konnte nicht gespeichert werden",
+      "clone": "Deck konnte nicht geklont werden",
+      "import": "Deck konnte nicht importiert werden",
+      "delete": "Deck konnte nicht gelöscht werden",
+      "organize": "Deck-Organisation konnte nicht aktualisiert werden",
+      "updateFeeds": "Deck-Feeds konnten nicht aktualisiert werden",
+      "restore": "Sicherung konnte nicht wiederhergestellt werden",
+      "applyCloud": "Cloud-Decks konnten nicht übernommen werden",
+      "autosaveDraft": "Draft-Deck konnte nicht automatisch gespeichert werden"
+    }
+  },
+  "savedDeckLibraryStorageFailure": {
+    "description": "Phase konnte nicht auf den Browser-Speicher zugreifen. Versuche es gleich noch einmal."
+  },
+  "savedDeckChanged": {
+    "description": "Dieses Deck hat sich geändert, bevor deine Aktion ausgeführt wurde, daher wurde nichts geändert. Prüfe das Deck und versuche es erneut."
   }
 }

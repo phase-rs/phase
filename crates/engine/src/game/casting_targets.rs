@@ -2,6 +2,7 @@ use crate::types::ability::{
     AbilityCost, AbilityTag, AdditionalCost, Effect, ModalChoice, QuantityExpr, ResolvedAbility,
     TargetRef, TargetSelectionMode,
 };
+use crate::types::casting_costs::SettledTail;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     ActivationTargetSelection, GameState, PendingCast, TargetSelectionSlot, WaitingFor,
@@ -219,7 +220,7 @@ pub(crate) fn handle_select_modes(
             assign_targets_in_chain(state, &mut resolved, &targets)?;
             super::casting::emit_targeting_events(
                 state,
-                &super::ability_utils::flatten_targets_in_chain(&resolved),
+                &super::ability_utils::declared_targets_in_chain(&resolved),
                 pending.object_id,
                 controller,
                 events,
@@ -239,7 +240,7 @@ pub(crate) fn handle_select_modes(
             assign_targets_in_chain(state, &mut resolved, &targets)?;
             super::casting::emit_targeting_events(
                 state,
-                &super::ability_utils::flatten_targets_in_chain(&resolved),
+                &super::ability_utils::declared_targets_in_chain(&resolved),
                 pending.object_id,
                 controller,
                 events,
@@ -280,6 +281,7 @@ pub(crate) fn handle_select_modes(
             .unwrap_or(controller);
         pending_sel.activation_cost = pending.activation_cost;
         pending_sel.activation_ability_index = pending.activation_ability_index;
+        pending_sel.activation_cost_snapshot = pending.activation_cost_snapshot;
         pending_sel.pending_loyalty_activation_player = pending.pending_loyalty_activation_player;
         pending_sel.activation_residual = pending.activation_residual;
         pending_sel.activation_target_selection = pending.activation_target_selection;
@@ -386,7 +388,7 @@ pub(crate) fn handle_select_targets(
     let mut ability = pending.ability.clone();
     assign_targets_in_chain(state, &mut ability, &targets)?;
     let mut pending = pending;
-    let announced_targets = super::ability_utils::flatten_targets_in_chain(&ability);
+    let announced_targets = super::ability_utils::declared_targets_in_chain(&ability);
     pending.crime_candidate =
         super::casting::targets_commit_crime(state, &announced_targets, pending.ability.controller);
 
@@ -408,25 +410,14 @@ pub(crate) fn handle_select_targets(
 
     if pending.activation_ability_index.is_some() {
         pending.ability = ability;
-        pending.activation_target_selection = ActivationTargetSelection::Settled;
-        if !target_first_activation_defers_interactive_costs_to_payment_boundary(
-            &pending,
-            TargetFirstPaymentHandoff::BeforeManaPayment,
-        ) {
-            if let Some(waiting_for) =
-                super::casting_costs::surface_next_unpaid_interactive_activation_cost(
-                    state,
-                    player,
-                    &mut pending,
-                    events,
-                )?
-            {
-                return Ok(waiting_for);
-            }
-        }
-
-        return super::casting_costs::finish_target_selected_activated_ability_at_payment_boundary(
-            state, player, pending, events,
+        // CR 601.2c + CR 602.2b: targets are committed; lock the cost before any
+        // interactive cost is surfaced.
+        return super::casting::settle_activation_cost(
+            state,
+            player,
+            pending,
+            SettledTail::SurfaceThenBoundary,
+            events,
         );
     }
 
@@ -502,7 +493,7 @@ pub(crate) fn handle_choose_target(
             // inbound per-slot `player` (the opponent) would pay and stack the spell.
             let controller = pending.ability.controller;
             let mut pending = pending;
-            let announced_targets = super::ability_utils::flatten_targets_in_chain(&ability);
+            let announced_targets = super::ability_utils::declared_targets_in_chain(&ability);
             pending.crime_candidate =
                 super::casting::targets_commit_crime(state, &announced_targets, controller);
 
@@ -524,27 +515,15 @@ pub(crate) fn handle_choose_target(
 
             if pending.activation_ability_index.is_some() {
                 pending.ability = ability;
-                pending.activation_target_selection = ActivationTargetSelection::Settled;
-                if !target_first_activation_defers_interactive_costs_to_payment_boundary(
-                    &pending,
-                    TargetFirstPaymentHandoff::BeforeManaPayment,
-                ) {
-                    if let Some(waiting_for) =
-                        super::casting_costs::surface_next_unpaid_interactive_activation_cost(
-                            state,
-                            controller,
-                            &mut pending,
-                            events,
-                        )?
-                    {
-                        return Ok(waiting_for);
-                    }
-                }
-
-                let waiting_for =
-                    super::casting_costs::finish_target_selected_activated_ability_at_payment_boundary(
-                        state, controller, pending, events,
-                    )?;
+                // CR 601.2c + CR 602.2b: targets are committed; lock the cost
+                // before any interactive cost is surfaced.
+                let waiting_for = super::casting::settle_activation_cost(
+                    state,
+                    controller,
+                    pending,
+                    SettledTail::SurfaceThenBoundary,
+                    events,
+                )?;
                 return Ok(drain_deferred_triggers_after_stack_object_announcement(
                     state,
                     events,

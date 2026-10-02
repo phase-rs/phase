@@ -175,10 +175,12 @@ export function BetweenGamesSideboardModal({
           <div className="grid flex-1 grid-cols-1 gap-4 px-3 py-3 md:grid-cols-2 lg:px-5 lg:py-5">
             <MoveList
               section="main"
-              title={t("sideboardModal.main", {
-                count: mainTotal,
-                min: minMainDeckSize,
-              })}
+              title={
+                // A zero floor refuses no count, so it is not shown as a minimum.
+                minMainDeckSize === 0
+                  ? t("sideboardModal.mainNoMinimum", { count: mainTotal })
+                  : t("sideboardModal.main", { count: mainTotal, min: minMainDeckSize })
+              }
               entries={drafts.main}
               onMove={moveCard}
               alwaysShow

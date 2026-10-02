@@ -93,11 +93,16 @@ fn continuation_search_exile_then_shuffle() {
     let Some(change_zone) = def.sub_ability.as_ref() else {
         panic!("search should chain into the exile destination");
     };
+    assert!(
+        change_zone.face_down_in_exile.is_face_down(),
+        "face-down SearchLibrary exile must use the typed intent carrier"
+    );
     match &*change_zone.effect {
         Effect::ChangeZone {
             origin: Some(Zone::Library),
             destination: Zone::Exile,
             target: TargetFilter::Any,
+            face_down_profile: None,
             ..
         } => {}
         other => panic!("expected library-to-exile search destination, got {other:?}"),
@@ -1621,4 +1626,87 @@ fn named_choice_enumeration_does_not_misfire() {
         try_parse_named_choice("choose a creature type"),
         Some(ChoiceType::CreatureType { .. })
     ));
+}
+
+fn chain_effects(def: &AbilityDefinition) -> Vec<&Effect> {
+    std::iter::successors(Some(def), |def| def.sub_ability.as_deref())
+        .map(|def| def.effect.as_ref())
+        .collect()
+}
+
+fn chain_shuffle_target(def: &AbilityDefinition) -> &TargetFilter {
+    chain_effects(def)
+        .into_iter()
+        .find_map(|effect| match effect {
+            Effect::Shuffle { target } => Some(target),
+            _ => None,
+        })
+        .expect("chain carries a shuffle")
+}
+
+fn parse_card(
+    oracle: &str,
+    name: &str,
+    keywords: &[&str],
+    types: &[&str],
+) -> crate::parser::oracle::ParsedAbilities {
+    let owned = |items: &[&str]| {
+        items
+            .iter()
+            .map(|item| item.to_string())
+            .collect::<Vec<_>>()
+    };
+    crate::parser::oracle::parse_oracle_text(oracle, name, &owned(keywords), &owned(types), &[])
+}
+
+/// CR 608.2c + CR 701.24a: "that player shuffles" names the searched opponent.
+#[test]
+fn search_target_opponent_then_that_player_shuffles_binds_the_search_slot() {
+    let parsed = parse_card(
+        "Search target opponent's library for a card and exile it face down. Then that player shuffles. You may play that card for as long as it remains exiled.",
+        "Praetor's Grasp",
+        &[],
+        &["Sorcery"],
+    );
+    assert_eq!(
+        chain_shuffle_target(&parsed.abilities[0]),
+        &TargetFilter::ParentTargetSlot { index: 0 }
+    );
+}
+
+/// CR 608.2c + CR 701.24a: a trigger's "that player shuffles" names the searched opponent,
+/// not the triggering player.
+#[test]
+fn trigger_search_then_that_player_shuffles_binds_the_search_slot() {
+    let parsed = parse_card(
+        "Prowl {2}{B} (You may cast this for its prowl cost if you dealt combat damage to a player this turn with a Goblin or Rogue.)\nWhen this creature enters, if its prowl cost was paid, search target opponent's library for three cards and exile them. Then that player shuffles.",
+        "Earwig Squad",
+        &["Prowl"],
+        &["Creature"],
+    );
+    let execute = parsed.triggers[0].execute.as_deref().expect("trigger body");
+    assert_eq!(
+        chain_shuffle_target(execute),
+        &TargetFilter::ParentTargetSlot { index: 0 }
+    );
+}
+
+/// CR 608.2c: a search of a scoped player, not a declared target, keeps its shuffle on that player.
+#[test]
+fn scoped_player_search_then_shuffles_keeps_the_scoped_player() {
+    let parsed = parse_card(
+        "Players can't draw cards or gain life.\nAt the beginning of each player's draw step, that player loses 3 life, searches their library for a card, puts it into their hand, then shuffles.",
+        "Mornsong Aria",
+        &[],
+        &["Enchantment"],
+    );
+    let execute = parsed.triggers[0].execute.as_deref().expect("trigger body");
+    assert!(chain_effects(execute).into_iter().any(|effect| matches!(
+        effect,
+        Effect::SearchLibrary {
+            target_player: Some(TargetFilter::ScopedPlayer),
+            ..
+        }
+    )));
+    assert_eq!(chain_shuffle_target(execute), &TargetFilter::ScopedPlayer);
 }

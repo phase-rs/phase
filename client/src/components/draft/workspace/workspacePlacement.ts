@@ -1085,14 +1085,43 @@ export function resolveWorkspaceSortColumn(
 }
 
 /**
+ * Pool cards `workspace` holds no placement for — the ids `placeArrivingPoolCards`
+ * is meant to be given, asked BEFORE the reconcile that invents their defaults.
+ *
+ * Structural rather than a pool diff. A diff answers "which cards are new" only
+ * where there is an earlier pool to diff against, and the first view of a
+ * lifecycle — a reconnect, a resume, a restored session — has none. Both cases
+ * are the same question, because `reconcileWorkspaceState` is about to invent a
+ * default placement for exactly these ids and this is the list it will invent
+ * them for.
+ *
+ * A workspace carrying the player's own saved placements yields an empty list,
+ * so nothing they arranged is re-sorted.
+ *
+ * Pool cards only: a virtual basic lives in `virtualBasics` rather than `pool`,
+ * and `placeArrivingPoolCards` could not resolve a column for one anyway — it
+ * needs the `DraftCardInstance` the engine publishes.
+ */
+export function unplacedPoolIds(
+  workspace: DraftWorkspaceState,
+  pool: readonly DraftCardInstance[],
+): string[] {
+  return pool
+    .filter((card) => workspace.placements[card.instance_id] === undefined)
+    .map((card) => card.instance_id);
+}
+
+/**
  * Place cards that ARRIVED in the pool into the columns the board's sort means.
  *
- * The pick path resolves a placement before it dispatches, because it knows
- * which card it is picking. Two paths do not: a shared-stack `Take` collects a
- * whole pile the engine chose the contents of, and any view that arrives on its
- * own — the host deciding for a timed-out seat, a reconnect, a guest's
- * broadcast — carries cards the client never requested. `reconcileWorkspaceState`
- * gives those the default placement, which is column 0, so a sorted board
+ * A pick that resolves a placement before it dispatches does not need this,
+ * because it knows which card it is picking. Three paths do not resolve one:
+ * a shared-stack `Take` collects a whole pile the engine chose the contents of;
+ * any view that arrives on its own — the host deciding for a timed-out seat, a
+ * reconnect, a guest's broadcast — carries cards the client never requested;
+ * and `PackDisplay.request` dispatches `pickCard`, `pickCardStep` and
+ * `pickCardWithDraftEffect` with no hint at all. `reconcileWorkspaceState` gives
+ * all of those the default placement, which is column 0, so a sorted board
  * quietly stacks every new card in its first column no matter what the sort says.
  *
  * Threaded one card at a time rather than resolved in a batch: the column a card
