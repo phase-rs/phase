@@ -27812,12 +27812,12 @@ fn try_parse_emblem_creation(lower: &str, original: &str) -> Option<Effect> {
     let inner = promoted.trim().trim_end_matches('.').trim();
 
     if inner.is_empty() {
-        return None;
+        return Some(Effect::unimplemented("emblem_creation", original));
     }
 
     // CR 113.1c + CR 114.4: An emblem's ability may be a triggered ability
-    // ("Whenever ...", "At the beginning of ..."), a static ability, or the
-    // Unknown fallback. Try the triggered-ability parser first; fall through
+    // ("Whenever ...", "At the beginning of ...") or a static ability.
+    // Try the triggered-ability parser first; fall through
     // to the static-ability parser only if `parse_trigger_lines` does not
     // recognise a trigger phrase (returns `TriggerMode::Unknown`). Both
     // detectors ARE the parsers — no string heuristics.
@@ -27853,7 +27853,7 @@ fn try_parse_emblem_creation(lower: &str, original: &str) -> Option<Effect> {
     // and your opponents can't win the game" — Gideon of the Trials) defines
     // several statics at once; `parse_static_line_multi` emits them all and
     // internally falls back to the single-def parser for simple bodies. An
-    // empty result still routes to the honest `EmblemStatic` fallback below,
+    // empty result routes to an explicit `emblem_creation` failure below,
     // so an unparseable body stays a visible coverage gap.
     let mut static_defs = super::oracle_static::parse_static_line_multi(inner);
     if !static_defs.is_empty() {
@@ -27867,13 +27867,7 @@ fn try_parse_emblem_creation(lower: &str, original: &str) -> Option<Effect> {
             triggers: Vec::new(),
         })
     } else {
-        // Fallback: create an emblem with an unimplemented static.
-        Some(Effect::CreateEmblem {
-            statics: vec![
-                StaticDefinition::new(StaticMode::EmblemStatic).description(inner.to_string())
-            ],
-            triggers: Vec::new(),
-        })
+        Some(Effect::unimplemented("emblem_creation", original))
     }
 }
 
@@ -31446,13 +31440,14 @@ fn parse_imperative_effect_inner(tp: TextPair, ctx: &mut ParseContext) -> Parsed
         return clause;
     }
 
-    if let Some(ast) = parse_imperative_family_ast(tp.original, tp.lower, ctx) {
-        return lower_imperative_family_ast(ast);
-    }
-
-    // CR 114.1: "you get an emblem with "[static text]""
+    // CR 114.2: The creation clause owns the emblem's quoted ability; parse
+    // its envelope before broad imperative families can claim the body.
     if let Some(effect) = try_parse_emblem_creation(tp.lower, tp.original) {
         return parsed_clause(effect);
+    }
+
+    if let Some(ast) = parse_imperative_family_ast(tp.original, tp.lower, ctx) {
+        return lower_imperative_family_ast(ast);
     }
 
     // Duration-scoped "play the exiled card" grants permission to the object
@@ -47013,11 +47008,224 @@ mod additional_phase_recipient_subject_tests {
     use crate::game::scenario::{GameScenario, P0, P1};
     use crate::parser::oracle::parse_oracle_text;
     use crate::types::ability::{
-        AbilityCondition, AbilityDefinition, ControllerRef, Effect, ExtraPhaseRecipient,
-        QuantityExpr, QuantityRef, TargetFilter, TargetRef, TypedFilter,
+        AbilityCondition, AbilityCost, AbilityDefinition, ContinuousModification, ControllerRef,
+        Effect, ExtraPhaseAnchor, ExtraPhaseRecipient, QuantityExpr, QuantityRef, TargetFilter,
+        TargetRef, TypedFilter,
     };
     use crate::types::identifiers::ObjectId;
     use crate::types::phase::{Phase, PhaseGroup, TurnSegment};
+    use crate::types::statics::StaticMode;
+    use crate::types::triggers::TriggerMode;
+    use crate::types::zones::Zone;
+
+    #[test]
+    fn zariel_full_oracle_keeps_unsupported_timing_inside_emblem() {
+        let text = "+1: Creatures you control get +1/+0 and gain haste until end of turn.\n0: Create a 1/1 red Devil creature token with \"When this token dies, it deals 1 damage to any target.\"\n−6: You get an emblem with \"At the end of the first combat phase on your turn, untap target creature you control. After this phase, there is an additional combat phase.\"";
+        let parsed = parse_oracle_text(
+            text,
+            "Zariel, Archduke of Avernus",
+            &[],
+            &["Planeswalker".into()],
+            &["Zariel".into()],
+        );
+        assert_eq!(parsed.abilities.len(), 3);
+        let ultimate = parsed
+            .abilities
+            .iter()
+            .find(|def| def.cost == Some(AbilityCost::Loyalty { amount: -6 }))
+            .expect("the full Oracle text reaches the −6 loyalty activation");
+        assert_eq!(
+            *ultimate.effect,
+            Effect::unimplemented(
+                "emblem_creation",
+                "You get an emblem with \"At the end of the first combat phase on your turn, untap target creature you control. After this phase, there is an additional combat phase.\"",
+            ),
+        );
+        assert!(ultimate.sub_ability.is_none() && ultimate.else_ability.is_none());
+        assert!(parsed.triggers.is_empty());
+    }
+
+    #[test]
+    fn lightning_runner_full_oracle_keeps_payment_compound_unsupported() {
+        let text = "Double strike, haste\nWhenever this creature attacks, you get {E}{E} (two energy counters), then you may pay eight {E}. If you pay, untap all creatures you control, and after this phase, there is an additional combat phase.";
+        let parsed = parse_oracle_text(
+            text,
+            "Lightning Runner",
+            &[],
+            &["Creature".into()],
+            &["Human".into(), "Warrior".into()],
+        );
+        assert_eq!(parsed.triggers.len(), 1);
+        let execute = parsed.triggers[0]
+            .execute
+            .as_ref()
+            .expect("attack trigger body");
+        let mut pending = vec![execute.as_ref()];
+        let mut saw_gap = false;
+        while let Some(def) = pending.pop() {
+            assert!(
+                !matches!(
+                    *def.effect,
+                    Effect::AdditionalPhase { .. } | Effect::SetTapState { .. }
+                ),
+                "payment-gated semantics must not leak: {def:?}"
+            );
+            if matches!(&*def.effect, Effect::Unimplemented { name, .. } if name == "additional_phase")
+            {
+                saw_gap = true;
+            }
+            pending.extend(
+                [def.sub_ability.as_deref(), def.else_ability.as_deref()]
+                    .into_iter()
+                    .flatten(),
+            );
+        }
+        assert!(
+            saw_gap,
+            "the production trigger body reaches canonical additional_phase refusal"
+        );
+        assert!(parsed.abilities.is_empty());
+        assert_eq!(
+            recipients("Lightning Runner", "Creature", None, text),
+            vec![None]
+        );
+    }
+
+    #[test]
+    fn quoted_upkeep_emblem_owns_its_additional_phase_grant() {
+        let body = "At the beginning of your upkeep, after this phase, there is an additional combat phase.";
+        let text = format!("You get an emblem with \"{body}\"");
+        let parsed = parse_oracle_text(&text, "Probe", &[], &["Sorcery".into()], &[]);
+        assert_eq!(parsed.abilities.len(), 1);
+        let def = &parsed.abilities[0];
+        let Effect::CreateEmblem { statics, triggers } = &*def.effect else {
+            panic!("quoted phase grant must remain inside CreateEmblem: {def:?}");
+        };
+        assert!(statics.is_empty());
+        assert_eq!(triggers.len(), 1);
+        assert_eq!(triggers[0].mode, TriggerMode::Phase);
+        assert_eq!(triggers[0].phase, Some(Phase::Upkeep));
+        assert_eq!(triggers[0].trigger_zones, vec![Zone::Command]);
+        assert_eq!(
+            triggers[0].description.as_deref(),
+            Some(body.trim_end_matches('.'))
+        );
+        let execute = triggers[0].execute.as_ref().expect("upkeep trigger body");
+        assert_eq!(
+            *execute.effect,
+            Effect::AdditionalPhase {
+                recipient: ExtraPhaseRecipient::NoPlayer,
+                count: QuantityExpr::Fixed { value: 1 },
+                segment: TurnSegment::Phase(PhaseGroup::Combat),
+                after: ExtraPhaseAnchor::ThisPhase { named: None },
+                followed_by: vec![],
+                attacker_restriction: None,
+            }
+        );
+        assert!(execute.sub_ability.is_none() && execute.else_ability.is_none());
+        assert!(def.sub_ability.is_none() && def.else_ability.is_none());
+        assert!(parsed.triggers.is_empty());
+    }
+
+    #[test]
+    fn recognized_unparsed_and_empty_emblem_bodies_fail_explicitly() {
+        for head in ["You get an emblem with", "Get an emblem with"] {
+            for body in [
+                "Whenever the moon sings, draw a card.",
+                "Your destiny is written in starlight.",
+                "",
+            ] {
+                let text = format!("{head} \"{body}\"");
+                let parsed = parse_oracle_text(&text, "Probe", &[], &["Sorcery".into()], &[]);
+                assert_eq!(parsed.abilities.len(), 1, "{text:?}");
+                let def = &parsed.abilities[0];
+                assert_eq!(
+                    *def.effect,
+                    Effect::unimplemented("emblem_creation", &text),
+                    "{text:?}"
+                );
+                assert!(
+                    def.sub_ability.is_none() && def.else_ability.is_none(),
+                    "{text:?}"
+                );
+                assert!(
+                    parsed.triggers.is_empty() && parsed.static_abilities.is_empty(),
+                    "{text:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn quoted_creature_static_emblem_preserves_payload_and_outer_sibling() {
+        for tail in ["", " Draw a card."] {
+            let text = format!("You get an emblem with \"Creatures you control get +1/+1.\"{tail}");
+            let parsed = parse_oracle_text(&text, "Probe", &[], &["Sorcery".into()], &[]);
+            assert_eq!(parsed.abilities.len(), 1, "{text:?}");
+            let def = &parsed.abilities[0];
+            let Effect::CreateEmblem { statics, triggers } = &*def.effect else {
+                panic!("expected creature-static emblem: {def:?}");
+            };
+            assert!(triggers.is_empty());
+            assert_eq!(statics.len(), 1);
+            assert_eq!(statics[0].mode, StaticMode::Continuous);
+            assert_eq!(
+                statics[0].affected,
+                Some(TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::You)
+                ))
+            );
+            assert_eq!(
+                statics[0].modifications,
+                vec![
+                    ContinuousModification::AddPower { value: 1 },
+                    ContinuousModification::AddToughness { value: 1 }
+                ]
+            );
+            assert_eq!(
+                statics[0].description.as_deref(),
+                Some("Creatures you control get +1/+1")
+            );
+            if tail.is_empty() {
+                assert!(def.sub_ability.is_none());
+            } else {
+                let sibling = def
+                    .sub_ability
+                    .as_ref()
+                    .expect("draw remains an outer sibling");
+                assert!(matches!(*sibling.effect, Effect::Draw { .. }));
+                assert!(sibling.sub_ability.is_none() && sibling.else_ability.is_none());
+            }
+            assert!(def.else_ability.is_none());
+            assert!(parsed.triggers.is_empty() && parsed.static_abilities.is_empty());
+        }
+    }
+
+    #[test]
+    fn nested_emblem_quotes_preserve_granted_activated_ability_in_production() {
+        let text = "You get an emblem with \"Mountains you control have '{T}: This land deals 1 damage to any target.'\"";
+        let parsed = parse_oracle_text(text, "Probe", &[], &["Sorcery".into()], &[]);
+        assert_eq!(parsed.abilities.len(), 1);
+        let def = &parsed.abilities[0];
+        let Effect::CreateEmblem { statics, triggers } = &*def.effect else {
+            panic!("expected nested quoted emblem: {def:?}");
+        };
+        assert!(triggers.is_empty());
+        assert_eq!(statics.len(), 1);
+        assert_eq!(statics[0].mode, StaticMode::Continuous);
+        let grant = statics[0]
+            .modifications
+            .iter()
+            .find_map(|modification| match modification {
+                ContinuousModification::GrantAbility { definition } => Some(definition),
+                _ => None,
+            })
+            .expect("nested activated ability survives outer quote removal");
+        assert_eq!(grant.cost, Some(AbilityCost::Tap));
+        assert!(matches!(*grant.effect, Effect::DealDamage { .. }));
+        assert!(def.sub_ability.is_none() && def.else_ability.is_none());
+        assert!(parsed.triggers.is_empty() && parsed.static_abilities.is_empty());
+    }
 
     #[test]
     fn synthetic_unsplit_compound_grants_are_explicit_production_gaps() {
