@@ -22,6 +22,7 @@ use crate::types::resolved_commands::{
 };
 use crate::types::zones::Zone;
 
+use super::ability_utils::node_has_stack_target_declaration;
 use super::effects;
 use super::engine::EngineError;
 use super::turns;
@@ -30,6 +31,15 @@ use super::{
     casting, casting_costs, engine_priority, mana_abilities, payment_transaction, public_state,
     zone_pipeline,
 };
+
+/// CR 115.1a + CR 601.2c + CR 702.47d: Dig's selected result cannot replace
+/// an instruction's announced targets. Result-dependent instructions bind the
+/// settled selection, including clearing a previous result on an empty choice.
+fn bind_dig_continuation_targets(chain: &mut ResolvedAbility, selected: &[ObjectId]) {
+    if !node_has_stack_target_declaration(chain) {
+        chain.targets = selected.iter().copied().map(TargetRef::Object).collect();
+    }
+}
 
 /// A fresh mass library-order prompt is valid only for
 /// the exact member identities and origins frozen by its producer. Prompt cards
@@ -3480,6 +3490,7 @@ pub(super) fn handle_resolution_choice(
                                             crate::game::game_object::DisplaySource::Token,
                                         printed_ref: None,
                                         token_image_ref: None,
+                                        token_art: None,
                                         extra_keywords: vec![],
                                         additional_modifications: vec![],
                                         tapped: true,
@@ -3686,7 +3697,34 @@ pub(super) fn handle_resolution_choice(
                             } | WaitingFor::Priority { .. }
                         ) {
                             state.deferred_step_trigger_resume = None;
-                            crate::game::turns::auto_advance(state, events)
+                            // CR 500.1 + CR 500.8: the run can commit a leave that
+                            // ends the turn, and the next turn begins from a settled
+                            // Priority window (`turns::start_next_turn`). The answered
+                            // collapse prompt is spent, so the active player's
+                            // provisional window replaces it before the run; a
+                            // `Priority` an applier wrote is left as it stands.
+                            if matches!(
+                                state.waiting_for,
+                                WaitingFor::PayAmountChoice {
+                                    resource: PayableResource::LoopCollapse { .. },
+                                    ..
+                                }
+                            ) {
+                                public_state::sync_waiting_for(
+                                    state,
+                                    &WaitingFor::Priority {
+                                        player: state.active_player,
+                                    },
+                                );
+                            }
+                            // CR 502.3 + CR 500.8: the entered step can be an added
+                            // untap step whose leave ends the turn while a resolution
+                            // is live, so the interpreter stops with the untap done
+                            // and the waiting state from before the run standing.
+                            // CR 502.4: that is no window to hand a player in the
+                            // untap step, so the deferral is settled and retried as
+                            // after an untap-choice answer.
+                            super::engine::auto_advance_settling_deferral(state, events)
                         } else {
                             state.waiting_for.clone()
                         }
@@ -4789,8 +4827,7 @@ pub(super) fn handle_resolution_choice(
                 // CR 608.2c: ParentTarget continuations (Hideaway conceal, dig
                 // conditionals on the kept card) bind to the kept selection.
                 // Hand/bottom/exile tails route via TrackedSetFiltered instead.
-                frame.pending.chain.targets =
-                    kept.iter().map(|&id| TargetRef::Object(id)).collect();
+                bind_dig_continuation_targets(&mut frame.pending.chain, &kept);
                 frame.pending.chain.context.optional_effect_performed = !kept.is_empty();
             }
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
@@ -5819,7 +5856,10 @@ pub(super) fn handle_resolution_choice(
                 match turns::advance_phase_once(state, events) {
                     turns::AdvancePhaseOnce::Deferred => {}
                     turns::AdvancePhaseOnce::Entry(_) | turns::AdvancePhaseOnce::Skipped => {
-                        let advanced = turns::auto_advance(state, events);
+                        // CR 502.3 + CR 500.8: the run can enter an added untap step
+                        // whose leave ends the turn and defers; the deferral goes to
+                        // the settlement an untap-choice answer uses.
+                        let advanced = super::engine::auto_advance_settling_deferral(state, events);
                         public_state::sync_waiting_for(state, &advanced);
                     }
                 }
@@ -10026,10 +10066,7 @@ pub(crate) fn run_batch_completion(
                             .copied()
                             .collect()
                     };
-                    frame.pending.chain.targets = continuation
-                        .iter()
-                        .map(|&id| TargetRef::Object(id))
-                        .collect();
+                    bind_dig_continuation_targets(&mut frame.pending.chain, &continuation);
                     frame.pending.chain.context.optional_effect_performed =
                         !continuation.is_empty();
                 }
@@ -10387,11 +10424,14 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCondition, AbilityDefinition, AbilityKind, CastPermissionConstraint,
-        CastingPermission, Comparator, ControllerRef, Duration, FilterProp, ManaSpendPermission,
-        PermissionGrantee, QuantityExpr, ReplacementDefinition, ReplacementMode,
+        AbilityCondition, AbilityDefinition, AbilityKind, AttachCardinality, AttachSelection,
+        CastPermissionConstraint, CastingPermission, Comparator, ControllerRef, CopyRecipient,
+        CounterMoveSelection, CounterTransferMode, Duration, FilterProp, ManaProduction,
+        ManaSpendPermission, ManaTargetRole, MultiTargetSpec, PermissionGrantee, PreventionAmount,
+        PreventionScope, QuantityExpr, ReplacementDefinition, ReplacementMode,
         ReplacementPlayerScope, ResolutionCastFacePolicy, SearchSelectionConstraint,
-        StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
+        StaticDefinition, SubAbilityLink, TargetChoiceTiming, TargetFilter, TypeFilter,
+        TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
@@ -10400,6 +10440,508 @@ mod tests {
     use crate::types::replacements::ReplacementEvent;
     use crate::types::statics::{ProhibitionScope, StaticMode};
     use crate::types::zones::EtbTapState;
+
+    #[test]
+    fn dig_binding_preserves_declared_roles_and_forwards_context_results() {
+        let mut state = GameState::new_two_player(42);
+        let declared = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Declared".into(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&declared)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let selected = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Selected".into(),
+            Zone::Library,
+        );
+        let creature = TargetFilter::Typed(TypedFilter::creature());
+        let parent = TargetFilter::ParentTargetSlot { index: 0 };
+        let tracked = TargetFilter::TrackedSet {
+            id: TrackedSetId(0),
+        };
+        let mut cases = vec![
+            (
+                Effect::Fight {
+                    subject: parent.clone(),
+                    target: tracked.clone(),
+                },
+                false,
+                None,
+            ),
+            (
+                Effect::Fight {
+                    subject: creature.clone(),
+                    target: tracked.clone(),
+                },
+                true,
+                None,
+            ),
+            (
+                Effect::MoveCounters {
+                    source: creature.clone(),
+                    target: parent.clone(),
+                    counter_type: None,
+                    count: None,
+                    mode: CounterTransferMode::Move,
+                    selection: CounterMoveSelection::ResolutionDistributionAnyNumber,
+                },
+                true,
+                None,
+            ),
+            (
+                Effect::MoveCounters {
+                    source: parent.clone(),
+                    target: tracked,
+                    counter_type: None,
+                    count: None,
+                    mode: CounterTransferMode::Move,
+                    selection: CounterMoveSelection::ResolutionDistributionAnyNumber,
+                },
+                false,
+                None,
+            ),
+            (
+                Effect::EachDealsDamageEqualToPower {
+                    sources: creature.clone(),
+                    recipient: creature.clone(),
+                    extra_source: None,
+                },
+                true,
+                Some(MultiTargetSpec::fixed(0, 0)),
+            ),
+            (
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: creature.clone(),
+                },
+                true,
+                None,
+            ),
+            (
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: parent.clone(),
+                },
+                false,
+                None,
+            ),
+            (
+                Effect::Attach {
+                    attachment: creature.clone(),
+                    target: parent.clone(),
+                    selection: AttachSelection::Targeted,
+                },
+                true,
+                None,
+            ),
+            (
+                Effect::Attach {
+                    attachment: creature.clone(),
+                    target: parent,
+                    selection: AttachSelection::AtResolution {
+                        count: AttachCardinality::One,
+                    },
+                },
+                false,
+                None,
+            ),
+        ];
+        cases.extend([
+            (
+                Effect::ExchangeControl {
+                    target_a: TargetFilter::ParentTarget,
+                    target_b: TargetFilter::TrackedSet {
+                        id: TrackedSetId(0),
+                    },
+                },
+                false,
+                None,
+            ),
+            (
+                Effect::ExchangeControl {
+                    target_a: creature.clone(),
+                    target_b: TargetFilter::ParentTarget,
+                },
+                true,
+                None,
+            ),
+            (
+                Effect::Mana {
+                    produced: ManaProduction::Colorless {
+                        count: QuantityExpr::Fixed { value: 1 },
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: Some(ManaTargetRole::Both {
+                        recipient: TargetFilter::ScopedPlayer,
+                        count_source: TargetFilter::Controller,
+                    }),
+                },
+                false,
+                None,
+            ),
+            (
+                Effect::Mana {
+                    produced: ManaProduction::Colorless {
+                        count: QuantityExpr::Fixed { value: 1 },
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: Some(ManaTargetRole::Both {
+                        recipient: TargetFilter::ScopedPlayer,
+                        count_source: TargetFilter::Player,
+                    }),
+                },
+                true,
+                None,
+            ),
+            (
+                Effect::BecomeCopy {
+                    target: TargetFilter::ParentTarget,
+                    recipient: CopyRecipient::Source,
+                    duration: None,
+                    mana_value_limit: None,
+                    additional_modifications: vec![],
+                },
+                false,
+                None,
+            ),
+            (
+                Effect::BecomeCopy {
+                    target: TargetFilter::ParentTarget,
+                    recipient: CopyRecipient::Target(creature.clone()),
+                    duration: None,
+                    mana_value_limit: None,
+                    additional_modifications: vec![],
+                },
+                true,
+                None,
+            ),
+            (
+                Effect::PreventDamage {
+                    amount: PreventionAmount::All,
+                    amount_dynamic: None,
+                    target: TargetFilter::Any,
+                    recipient_scope: crate::types::ability::EffectScope::Single,
+                    scope: PreventionScope::AllDamage,
+                    damage_source_filter: Some(TargetFilter::And {
+                        filters: vec![
+                            TargetFilter::ParentTargetSlot { index: 0 },
+                            creature.clone(),
+                        ],
+                    }),
+                    prevention_duration: None,
+                },
+                true,
+                None,
+            ),
+            (
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Typed(
+                        TypedFilter::creature()
+                            .controller(ControllerRef::ChosenPlayer { index: 0 }),
+                    ),
+                },
+                false,
+                None,
+            ),
+        ]);
+        for (effect, owns, multi) in cases.drain(..) {
+            let mut chain = ResolvedAbility::new(
+                effect,
+                vec![TargetRef::Object(declared)],
+                declared,
+                PlayerId(0),
+            );
+            chain.optional_targeting = true;
+            chain.multi_target = multi;
+            chain.capture_target_incarnations_recursive(&state);
+            let slots = super::super::ability_utils::build_target_slots(&state, &chain).unwrap();
+            assert_eq!(
+                !slots.is_empty(),
+                owns,
+                "real announcement role reach guard"
+            );
+            let before = chain.clone();
+            bind_dig_continuation_targets(&mut chain, &[selected]);
+            assert_eq!(
+                chain.targets,
+                if owns {
+                    before.targets.clone()
+                } else {
+                    vec![TargetRef::Object(selected)]
+                }
+            );
+            assert_eq!(
+                chain.selected_target_incarnations,
+                before.selected_target_incarnations
+            );
+            assert_eq!(chain.target_incarnations, before.target_incarnations);
+            assert_eq!(chain.source_id, before.source_id);
+            assert_eq!(chain.controller, before.controller);
+            bind_dig_continuation_targets(&mut chain, &[]);
+            assert_eq!(chain.targets, if owns { before.targets } else { vec![] });
+        }
+    }
+
+    #[test]
+    fn dig_binding_keeps_multi_role_object_order_and_incarnation_pins() {
+        let mut state = GameState::new_two_player(42);
+        let objects: Vec<_> = (1..=4)
+            .map(|card| {
+                let object = create_object(
+                    &mut state,
+                    CardId(card),
+                    PlayerId(0),
+                    "Creature role".into(),
+                    Zone::Battlefield,
+                );
+                state
+                    .objects
+                    .get_mut(&object)
+                    .unwrap()
+                    .card_types
+                    .core_types
+                    .push(CoreType::Creature);
+                object
+            })
+            .collect();
+        let creature = TargetFilter::Typed(TypedFilter::creature());
+        let mut each = ResolvedAbility::new(
+            Effect::EachDealsDamageEqualToPower {
+                sources: creature.clone(),
+                recipient: creature.clone(),
+                extra_source: Some(creature.clone()),
+            },
+            objects.iter().copied().map(TargetRef::Object).collect(),
+            objects[0],
+            PlayerId(0),
+        );
+        each.multi_target = Some(MultiTargetSpec::fixed(0, 2));
+        assert_eq!(
+            super::super::ability_utils::build_target_slots(&state, &each)
+                .unwrap()
+                .len(),
+            4
+        );
+        for selection in [
+            CounterMoveSelection::StackTarget,
+            CounterMoveSelection::StackTargetAnyNumber,
+        ] {
+            let move_counters = ResolvedAbility::new(
+                Effect::MoveCounters {
+                    source: creature.clone(),
+                    target: creature.clone(),
+                    counter_type: None,
+                    count: None,
+                    mode: CounterTransferMode::Move,
+                    selection,
+                },
+                objects[..2]
+                    .iter()
+                    .copied()
+                    .map(TargetRef::Object)
+                    .collect(),
+                objects[0],
+                PlayerId(0),
+            );
+            for mut chain in [each.clone(), move_counters] {
+                chain.capture_target_incarnations_recursive(&state);
+                let before = chain.clone();
+                assert!(!chain.selected_target_incarnations.is_empty());
+                bind_dig_continuation_targets(&mut chain, &[objects[3]]);
+                assert_eq!(chain, before);
+                bind_dig_continuation_targets(&mut chain, &[]);
+                assert_eq!(chain, before);
+            }
+        }
+    }
+
+    #[test]
+    fn dig_binding_keeps_empty_optional_declarations_independent_of_legal_pool() {
+        let mut state = GameState::new_two_player(42);
+        let object = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Legal creature".into(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&object)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let creature = TargetFilter::Typed(TypedFilter::creature());
+        for effect in [
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: creature.clone(),
+            },
+            Effect::Attach {
+                attachment: creature.clone(),
+                target: TargetFilter::ParentTarget,
+                selection: AttachSelection::Targeted,
+            },
+            Effect::EachDealsDamageEqualToPower {
+                sources: creature.clone(),
+                recipient: creature.clone(),
+                extra_source: None,
+            },
+        ] {
+            let mut chain = ResolvedAbility::new(effect, vec![], object, PlayerId(0));
+            chain.optional_targeting = true;
+            assert!(
+                !super::super::ability_utils::build_target_slots(&state, &chain)
+                    .unwrap()
+                    .is_empty()
+            );
+            bind_dig_continuation_targets(&mut chain, &[object]);
+            assert!(
+                chain.targets.is_empty(),
+                "zero declared selections remain zero"
+            );
+            let mut empty_pool = state.clone();
+            empty_pool
+                .objects
+                .get_mut(&object)
+                .unwrap()
+                .card_types
+                .core_types
+                .clear();
+            let rebuilt = super::super::ability_utils::build_target_slots(&empty_pool, &chain);
+            if matches!(chain.effect, Effect::EachDealsDamageEqualToPower { .. }) {
+                assert!(
+                    rebuilt.is_err(),
+                    "the mandatory recipient has no legal option"
+                );
+            } else {
+                assert!(rebuilt
+                    .unwrap()
+                    .iter()
+                    .all(|slot| slot.legal_targets.is_empty()));
+            }
+            bind_dig_continuation_targets(&mut chain, &[object]);
+            assert!(
+                chain.targets.is_empty(),
+                "ownership is not a fresh legality query"
+            );
+            assert!(!node_has_stack_target_declaration(&ResolvedAbility {
+                target_choice_timing: TargetChoiceTiming::Resolution,
+                ..chain.clone()
+            }));
+            chain.target_choice_timing = TargetChoiceTiming::Resolution;
+            bind_dig_continuation_targets(&mut chain, &[object]);
+            assert_eq!(
+                chain.targets,
+                vec![TargetRef::Object(object)],
+                "resolution-owned sibling binds the current result"
+            );
+        }
+    }
+
+    #[test]
+    fn dig_binding_is_node_local_and_paid_instead_head_is_not_an_extra_declaration() {
+        let state = GameState::new_two_player(42);
+        let mut child = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Player,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(3),
+            PlayerId(1),
+        );
+        child.sub_link = SubAbilityLink::SequentialSibling;
+        assert_eq!(
+            super::super::ability_utils::build_target_slots(&state, &child)
+                .unwrap()
+                .len(),
+            1
+        );
+        let mut head = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                player: TargetFilter::Controller,
+            },
+            vec![TargetRef::Object(ObjectId(9))],
+            ObjectId(2),
+            PlayerId(0),
+        )
+        .sub_ability(child.clone());
+        for result in [vec![ObjectId(10)], vec![]] {
+            bind_dig_continuation_targets(&mut head, &result);
+            assert_eq!(
+                head.targets,
+                result
+                    .iter()
+                    .copied()
+                    .map(TargetRef::Object)
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(head.sub_ability.as_deref(), Some(&child));
+        }
+        let result_child = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::ParentTarget,
+            },
+            vec![],
+            ObjectId(3),
+            PlayerId(1),
+        );
+        let mut owning_head = child.clone().sub_ability(result_child);
+        let declared_chain = owning_head.clone();
+        for result in [vec![ObjectId(10)], vec![]] {
+            bind_dig_continuation_targets(&mut owning_head, &result);
+            assert_eq!(owning_head, declared_chain);
+        }
+        let mut delegated = child.clone();
+        delegated.condition = Some(AbilityCondition::AdditionalCostPaidInstead);
+        head = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Player,
+            },
+            delegated.targets.clone(),
+            ObjectId(2),
+            PlayerId(0),
+        )
+        .sub_ability(delegated.clone());
+        head.context.additional_cost_paid = true;
+        assert_eq!(
+            super::super::ability_utils::build_target_slots(&state, &head)
+                .unwrap()
+                .len(),
+            1
+        );
+        bind_dig_continuation_targets(&mut head, &[ObjectId(10)]);
+        assert_eq!(head.targets, vec![TargetRef::Object(ObjectId(10))]);
+        assert_eq!(head.sub_ability.as_deref(), Some(&delegated));
+        head.context.additional_cost_paid = false;
+        let declared = head.targets.clone();
+        bind_dig_continuation_targets(&mut head, &[]);
+        assert_eq!(
+            head.targets, declared,
+            "unpaid own-role sibling remains protected"
+        );
+    }
 
     /// CR 701.23a + CR 701.24a: A search whose continuation begins with a
     /// parent-target shuffle must retain the player target after replacing the

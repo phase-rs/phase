@@ -11715,11 +11715,53 @@ fn singular_battlefield_recall_delayed_keeps_parent_target_payload() {
     assert!(*uses_tracked_set);
 }
 
-/// B7 — positive, nearest-publisher axis: The Great Work's chapter III
-/// (verbatim) has an earlier targeted exile, but the NEAREST publisher before
-/// the recall is the self-exile, so the recall binds SelfRef.
+/// B7 — positive, nearest-publisher axis: an earlier targeted exile, but the
+/// NEAREST publisher before the recall is the self-exile, so the recall binds
+/// SelfRef.
 #[test]
 fn singular_battlefield_recall_nearest_publisher_self_move_binds_self() {
+    let def = parse_effect_chain(
+        "Exile target creature. Exile ~, then return it to the battlefield.",
+        AbilityKind::Spell,
+    );
+    let legs = chain_effects(&def);
+    assert_eq!(
+        legs.len(),
+        3,
+        "typed-exile/self-exile/return legs: {legs:?}"
+    );
+    assert!(
+        matches!(
+            &legs[0],
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::Typed(_),
+                ..
+            }
+        ),
+        "leg[0] must be the earlier chosen-target exile: {:?}",
+        legs[0]
+    );
+    assert!(
+        matches!(
+            &legs[2],
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ),
+        "nearest publisher is the self-exile, so the recall binds SelfRef: {:?}",
+        legs[2]
+    );
+}
+
+/// CR 601.3 + CR 611.2c + CR 400.7j: The Great Work's chapter III (verbatim).
+/// Its first two sentences lower to ONE graveyard cast permission (the "cast
+/// this way" exile rider rides inside it), so "Exile this Saga, then return it"
+/// is an ordinary two-link chain behind it, and the recall binds SelfRef.
+#[test]
+fn great_work_chapter_three_lowers_to_a_grant_then_a_self_flicker() {
     let parsed = parse_oracle_text(
         "(As this Saga enters and after your draw step, add a lore counter.)\n\
          I — This Saga deals 3 damage to target opponent and each creature they control.\n\
@@ -11740,22 +11782,27 @@ fn singular_battlefield_recall_nearest_publisher_self_move_binds_self() {
         .as_deref()
         .expect("chapter III trigger executes");
     let legs = chain_effects(execute);
-    assert_eq!(legs.len(), 4, "cast/exile/self-exile/return legs: {legs:?}");
+    assert_eq!(legs.len(), 3, "grant/self-exile/return legs: {legs:?}");
+    assert!(
+        crate::parser::oracle_ir::ast::is_graveyard_permission_grant(&legs[0]),
+        "leg[0] must be the graveyard cast permission: {:?}",
+        legs[0]
+    );
     assert!(
         matches!(
-            &legs[2],
+            &legs[1],
             Effect::ChangeZone {
                 destination: Zone::Exile,
                 target: TargetFilter::SelfRef,
                 ..
             }
         ),
-        "leg[2] must be the self-exile publisher: {:?}",
-        legs[2]
+        "leg[1] must be the self-exile publisher: {:?}",
+        legs[1]
     );
     assert!(
         matches!(
-            &legs[3],
+            &legs[2],
             Effect::ChangeZone {
                 destination: Zone::Battlefield,
                 target: TargetFilter::SelfRef,
@@ -11763,9 +11810,144 @@ fn singular_battlefield_recall_nearest_publisher_self_move_binds_self() {
             }
         ),
         "nearest publisher is the self-exile, so the recall binds SelfRef: {:?}",
-        legs[3]
+        legs[2]
     );
     assert!(!tree_has_unimplemented(execute));
+}
+
+/// The graveyard cast permission a class-wide grant lowers to, with the grant's
+/// window, or `None` when `effect` is not such a grant.
+fn graveyard_grant_parts(effect: &Effect) -> Option<(&StaticDefinition, &Option<Duration>)> {
+    let Effect::GenericEffect {
+        static_abilities,
+        duration,
+        ..
+    } = effect
+    else {
+        return None;
+    };
+    let [grant] = static_abilities.as_slice() else {
+        return None;
+    };
+    let [ContinuousModification::GrantStaticAbility { definition }] =
+        grant.modifications.as_slice()
+    else {
+        return None;
+    };
+    matches!(definition.mode, StaticMode::GraveyardCastPermission { .. })
+        .then_some((definition.as_ref(), duration))
+}
+
+/// CR 404.1 + CR 601.3 + CR 611.2c: "from any graveyard" lowers to an
+/// unlimited cast-only permission over EVERY player's graveyard, bound to the
+/// controller for the stated window, with no resolution-time "may" prompt.
+#[test]
+fn class_wide_graveyard_cast_grant_reaches_any_graveyard() {
+    let def = parse_effect_chain(
+        "Until end of turn, you may cast instant and sorcery spells from any graveyard.",
+        AbilityKind::Spell,
+    );
+    let (permission, window) =
+        graveyard_grant_parts(&def.effect).expect("a graveyard cast permission grant");
+    assert_eq!(*window, Some(Duration::UntilEndOfTurn));
+    assert!(
+        !def.optional,
+        "the \"may\" is the later cast, not a prompt now"
+    );
+    assert!(matches!(
+        permission.mode,
+        StaticMode::GraveyardCastPermission {
+            frequency: CastFrequency::Unlimited,
+            play_mode: CardPlayMode::Cast,
+            graveyard_destination_replacement: None,
+            pool: GraveyardPermissionPool::AnyGraveyard,
+            ..
+        }
+    ));
+    let Some(TargetFilter::Typed(filter)) = permission.affected.as_ref() else {
+        panic!("typed card filter, got {:?}", permission.affected);
+    };
+    assert_eq!(
+        filter.type_filters,
+        vec![TypeFilter::AnyOf(vec![
+            TypeFilter::Instant,
+            TypeFilter::Sorcery
+        ])]
+    );
+    assert_eq!(filter.controller, None, "any graveyard names no owner");
+    assert!(filter.properties.contains(&FilterProp::InZone {
+        zone: Zone::Graveyard
+    }));
+}
+
+/// CR 404.1 + CR 611.2a: "from your graveyard … this turn" — the caster's own
+/// graveyard, with the trailing window read by the grant itself (Liliana,
+/// Untouched by Death).
+#[test]
+fn class_wide_graveyard_cast_grant_own_graveyard_with_trailing_window() {
+    let def = parse_effect_chain(
+        "You may cast Zombie spells from your graveyard this turn.",
+        AbilityKind::Activated,
+    );
+    let (permission, window) =
+        graveyard_grant_parts(&def.effect).expect("a graveyard cast permission grant");
+    assert_eq!(*window, Some(Duration::UntilEndOfTurn));
+    assert!(matches!(
+        permission.mode,
+        StaticMode::GraveyardCastPermission {
+            pool: GraveyardPermissionPool::OwnGraveyard,
+            ..
+        }
+    ));
+    let Some(TargetFilter::Typed(filter)) = permission.affected.as_ref() else {
+        panic!("typed card filter, got {:?}", permission.affected);
+    };
+    assert_eq!(filter.controller, Some(ControllerRef::You));
+    // CR 601.3: the leading "You may" is the later cast, not a prompt now.
+    assert!(!def.optional);
+}
+
+/// CR 614.1a: "If a spell cast this way would be put into a graveyard, exile it
+/// instead" folds into the permission it scopes rather than trailing it.
+#[test]
+fn class_wide_graveyard_cast_grant_absorbs_the_cast_this_way_exile_rider() {
+    let def = parse_effect_chain(
+        "Until end of turn, you may cast instant and sorcery spells from any graveyard. \
+         If a spell cast this way would be put into a graveyard, exile it instead.",
+        AbilityKind::Spell,
+    );
+    let (permission, _) =
+        graveyard_grant_parts(&def.effect).expect("a graveyard cast permission grant");
+    assert!(matches!(
+        permission.mode,
+        StaticMode::GraveyardCastPermission {
+            graveyard_destination_replacement: Some(Zone::Exile),
+            ..
+        }
+    ));
+    assert!(
+        def.sub_ability.is_none(),
+        "the rider leaves no clause behind"
+    );
+}
+
+/// The class is the PLURAL grant. "A creature spell" grants one cast (Chainer,
+/// Nightmare Adept's ruling), and a clause with a further rider ("by foraging …")
+/// says more than the grant carries; both keep their previous lowering.
+#[test]
+fn class_wide_graveyard_cast_grant_excludes_singular_and_riders() {
+    for text in [
+        "You may cast a creature spell from your graveyard this turn.",
+        "Until end of turn, you may cast creature spells from your graveyard by foraging \
+         in addition to paying their other costs.",
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Activated);
+        assert!(
+            matches!(*def.effect, Effect::CastFromZone { .. }),
+            "{text:?} must keep its CastFromZone lowering, got {:?}",
+            def.effect
+        );
+    }
 }
 
 /// B7-negative — with a typed-target leg as the NEAREST publisher, the
@@ -42181,7 +42363,11 @@ fn leading_conditional_threads_condition_through_ast() {
         ),
         "expected Conditional with a lowered guard, got: {ast:?}"
     );
-    let clause = lower_clause_ast(ast, &mut ParseContext::default());
+    let clause = lower_clause_ast(
+        ast,
+        &mut ParseContext::default(),
+        "if it's your turn, draw a card",
+    );
     assert!(
         matches!(clause.condition, Some(AbilityCondition::IsYourTurn)),
         "expected IsYourTurn condition, got: {:?}",
@@ -42237,7 +42423,11 @@ fn leading_conditional_unrecognized_produces_none() {
         ),
         "expected an unlowered STATE guard, got: {ast:?}"
     );
-    let clause = lower_clause_ast(ast, &mut ParseContext::default());
+    let clause = lower_clause_ast(
+        ast,
+        &mut ParseContext::default(),
+        "if a random unrecognized condition, draw a card",
+    );
     assert!(
         clause.condition.is_none(),
         "expected None condition for unrecognized text, got: {:?}",
@@ -42291,7 +42481,11 @@ fn leading_conditional_lowers_through_the_ladder_not_the_nom_rung_alone() {
         })),
         "the ladder's lowered value, not merely that something lowered"
     );
-    let clause = lower_clause_ast(ast, &mut ParseContext::default());
+    let clause = lower_clause_ast(
+        ast,
+        &mut ParseContext::default(),
+        "if X is 1 or more, draw a card",
+    );
     assert!(
         matches!(clause.effect, Effect::Draw { .. }),
         "a lowered guard leaves its body intact, got: {:?}",
@@ -42386,7 +42580,11 @@ fn leading_conditional_accepts_the_then_if_connector() {
         ),
         "expected the connector-prefixed guard to lower, got: {ast:?}"
     );
-    let clause = lower_clause_ast(ast, &mut ParseContext::default());
+    let clause = lower_clause_ast(
+        ast,
+        &mut ParseContext::default(),
+        "then if it's your turn, draw a card",
+    );
     assert!(
         matches!(clause.effect, Effect::Draw { .. }),
         "expected the body intact, got: {:?}",
@@ -42560,7 +42758,11 @@ fn an_o1a_rider_shape_under_a_state_guard_is_not_an_ownership_candidate() {
         ConditionalGuard::Unlowered(GuardReading::State),
         "reach-guard: the fixture must carry the STATE reading, or the row proves nothing"
     );
-    let clause = lower_clause_ast(ast, &mut ParseContext::default());
+    let clause = lower_clause_ast(
+        ast,
+        &mut ParseContext::default(),
+        "if at least three mana of the same color was spent to cast it, exile it instead",
+    );
     // Reach-guard 2: the body really IS the O1a rider shape, so only the reading can refuse it.
     assert!(
         crate::game::effects::cast_from_zone::graveyard_destination_rider(&clause.effect).is_some(),
@@ -42638,7 +42840,7 @@ fn v17s_both_stacked_riders_are_ownership_candidates() {
             "{label} reach-guard: the clause must reach the seam with the EVENT reading"
         );
 
-        let clause = lower_clause_ast(ast, &mut ParseContext::default());
+        let clause = lower_clause_ast(ast, &mut ParseContext::default(), clause_text);
         // The claim: DEFERRED, not decided here.
         assert_eq!(
             clause.unlowered_guard.as_ref().map(|mark| mark.reading),

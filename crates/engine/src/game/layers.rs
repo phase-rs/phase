@@ -434,8 +434,12 @@ pub fn prune_until_next_upkeep_effects(state: &mut GameState, active_player: Pla
 pub(crate) enum PermissionSeam {
     /// CR 514.2: the cleanup step.
     Cleanup,
-    /// CR 500.4: the untap step of the turn beginning. (CR 502.3 is the untap
-    /// turn-based action itself; the expiry authority is CR 500.4.)
+    /// CR 611.2a: the start of a turn, as the untap step that begins it
+    /// begins. An untap step an effect adds (CR 500.8 + CR 500.9 +
+    /// CR 500.10) begins no turn and reaches only [`Self::UntapStep`].
+    TurnStart,
+    /// CR 500.4: every untap step, one an effect adds included. (CR 502.3 is
+    /// the untap turn-based action itself; the expiry authority is CR 500.4.)
     UntapStep,
     /// CR 503.1: the upkeep step.
     UpkeepStep,
@@ -571,15 +575,16 @@ fn permission_duration_expires_at(
         // of the combat phase." No casting-permission prune runs there, so
         // cleanup catches this defensively — unchanged behavior.
         Duration::UntilEndOfCombat => seam == PermissionSeam::Cleanup,
-        // CR 500.4: "As a step or phase begins, if there are effects that last
-        // until that step or phase, those effects expire." For "until your next
-        // turn" that instant is the keyed player's untap step.
+        // CR 611.2a: "until your next turn" ends as the keyed player's next
+        // turn begins — at the untap step that begins it, never at one an
+        // effect adds (CR 500.8 + CR 500.9 + CR 500.10 add phases and steps,
+        // not turns).
         Duration::UntilNextTurnOf { player } => {
-            seam == PermissionSeam::UntapStep
+            seam == PermissionSeam::TurnStart
                 && permission_scope_selects(player, keyed, active_player)
         }
         // CR 514.2: "until the end of your next turn" is ARMED at the untap
-        // step (rewritten to `UntilEndOfTurn` by
+        // step that begins the grantee's turn, never an added one (rewritten to `UntilEndOfTurn` by
         // `prune_untap_step_casting_permissions`) and ended by the cleanup arm
         // above. It never expires directly, at any seam.
         Duration::UntilEndOfNextTurnOf { .. } => false,
@@ -642,7 +647,7 @@ pub(crate) fn casting_permission_duration_is_enforceable(
         // a scope cannot be unselectable at the table and enforceable here.
         Duration::UntilNextTurnOf { player } => permission_scope_is_keyable(player),
         // CR 514.2: this shape is ARMED rather than expired — rewritten to
-        // `UntilEndOfTurn` at the untap step, which is why the expiry table
+        // `UntilEndOfTurn` at the untap step that begins a turn, which is why the expiry table
         // answers `false` for it at every seam. The arming in
         // `prune_untap_step_casting_permissions` matches
         // `PlayerScope::Controller` alone, so any other scope is never armed
@@ -738,21 +743,24 @@ pub fn prune_end_of_turn_casting_permissions(state: &mut GameState) {
         .retain(|group| live_single_use_groups.contains(group));
 }
 
-/// CR 500.4 + CR 514.2: the untap-step seam for casting permissions.
+/// CR 500.4 + CR 514.2 + CR 611.2a: the casting-permission seams of the untap
+/// step that begins a turn. An untap step an effect adds begins no turn; it
+/// runs [`prune_added_untap_step_casting_permissions`] instead.
 ///
-/// Two jobs at one seam, in order:
+/// Two jobs, in order:
 ///
 /// 1. **Arm** `UntilEndOfNextTurnOf { Controller }` grants keyed on
 ///    `active_player` by rewriting them to `UntilEndOfTurn`, so the cleanup
 ///    prune ends them at the end of THIS turn (CR 514.2) rather than at its
 ///    beginning.
-/// 2. **Expire** every permission whose duration ends at the untap step:
-///    `UntilNextTurnOf` ("until your next turn") and
-///    `UntilNextStepOf { step: Untap }` ("until the next untap step" / "until
-///    its controller's next untap step"). CR 500.4 is the authority for both —
-///    "As a step or phase begins, if there are effects that last until that
-///    step or phase, those effects expire." CR 502.3 describes the untap
-///    turn-based action and says nothing about effects ending.
+/// 2. **Expire** every permission whose duration ends here:
+///    `UntilNextTurnOf` ("until your next turn", `PermissionSeam::TurnStart`)
+///    and `UntilNextStepOf { step: Untap }` ("until the next untap step" /
+///    "until its controller's next untap step", `PermissionSeam::UntapStep`).
+///    CR 500.4 is the authority for the second — "As a step or phase begins,
+///    if there are effects that last until that step or phase, those effects
+///    expire." CR 502.3 describes the untap turn-based action and says nothing
+///    about effects ending.
 ///
 /// The second shape had no prune before: the parser emits it
 /// (`oracle_nom::duration::step_deadline_scope` pairs `ObjectController` with
@@ -782,6 +790,15 @@ pub fn prune_untap_step_casting_permissions(state: &mut GameState, active_player
             }
         }
     }
+    prune_casting_permissions_at(state, PermissionSeam::TurnStart, Some(active_player));
+    prune_casting_permissions_at(state, PermissionSeam::UntapStep, Some(active_player));
+}
+
+/// CR 500.4 + CR 500.8 + CR 500.9 + CR 500.10: the casting-permission seam
+/// of an untap step an effect adds. A permission that lasts until the untap step ends in it; one
+/// that lasts until a turn, or until the end of a turn, is neither ended nor
+/// armed, because no turn begins.
+pub fn prune_added_untap_step_casting_permissions(state: &mut GameState, active_player: PlayerId) {
     prune_casting_permissions_at(state, PermissionSeam::UntapStep, Some(active_player));
 }
 
@@ -813,8 +830,8 @@ pub fn prune_upkeep_step_casting_permissions(state: &mut GameState, active_playe
 }
 
 /// Remove transient `UntilNextTurnOf { Controller }` effects whose controller's
-/// turn is starting. Called at the start of the active player's turn (untap step)
-/// per CR 514.2.
+/// turn is starting. Called at the start of the active player's turn — the
+/// untap step that begins it, never one an effect adds — per CR 611.2a.
 ///
 /// Also clears `goaded_by` entries for the active player on all battlefield objects,
 /// per CR 701.15a: goad expires at the beginning of the goading player's next turn.
@@ -2126,6 +2143,7 @@ fn evaluate_condition_inner(
                         scoped_player: None,
                         damage_source: None,
                         event_amount: None,
+                        spell: None,
                     },
                 )
             };
@@ -2797,6 +2815,10 @@ fn derive_suspected_abilities(obj: &mut crate::game::game_object::GameObject) {
 /// (they are not part of the face-down CR 708.2a re-seed, which is why this is
 /// separable at all).
 fn seed_live_characteristics_from_base(obj: &mut crate::game::game_object::GameObject) {
+    // Capture BEFORE the reset below clears it: a set marker means the copy
+    // layer overwrote live `token_art` last pass, so the art baseline must
+    // be re-derived rather than reused.
+    let art_overwritten_by_copy = obj.layer1_copy_effect.is_some();
     obj.name = obj.base_name.clone();
     // CR 707.2 + CR 613.1a: the copied Room half data is layer-derived — it
     // survives only as long as a Layer-1a copy effect keeps re-applying it.
@@ -2867,6 +2889,21 @@ fn seed_live_characteristics_from_base(obj: &mut crate::game::game_object::GameO
     // while it is copying another object.
     if !obj.is_token {
         obj.token_image_ref = None;
+    }
+    // Intrinsic art body baseline. A nontoken carries no descriptor of its
+    // own: reset to `None` (a plain drop, never an allocation); a
+    // copy-of-token effect re-applies the source's descriptor below while
+    // active. A true token REUSES its live descriptor on ordinary passes —
+    // every authority that mutates the printed base restores eagerly, so
+    // live state is already coherent and no fresh keyword/subtype
+    // materialization happens here. Re-derive only when live cannot still
+    // be valid: absent (a pre-descriptor snapshot healing on its first
+    // pass), or overwritten by a copy last pass (the copy layer overwrites
+    // again below while still active).
+    if !obj.is_token {
+        obj.token_art = None;
+    } else if obj.token_art.is_none() || art_overwritten_by_copy {
+        obj.restore_token_art_baseline();
     }
 }
 
@@ -3739,6 +3776,7 @@ fn quantity_ref_reads_zone(qty: &QuantityRef, zone: Zone) -> bool {
         // three characteristics share the population axis, so they share this
         // classification.
         QuantityRef::DistinctCardTypes { source }
+        | QuantityRef::SharedCardTypes { source }
         | QuantityRef::DistinctSubtypes { source, .. }
         | QuantityRef::DistinctColorsAmong { source } => {
             characteristic_source_reads_zone(source, zone)
@@ -4066,6 +4104,7 @@ fn quantity_ref_reads_life(qty: &QuantityRef) -> bool {
         // population carries (`Objects { filter }` and the journal's optional
         // narrowing filter); the fixed-vocabulary set-sources carry none.
         QuantityRef::DistinctCardTypes { source }
+        | QuantityRef::SharedCardTypes { source }
         | QuantityRef::DistinctSubtypes { source, .. }
         | QuantityRef::DistinctColorsAmong { source } => {
             characteristic_source_reads_life_total(source)
@@ -8964,6 +9003,7 @@ fn apply_continuous_effect_filtered(
                 display_source,
                 printed_ref,
                 token_image_ref,
+                token_art,
             } => {
                 let copy_effect = crate::types::ability::CopyEffectInstanceRef {
                     continuous_effect_id: effect
@@ -8987,6 +9027,7 @@ fn apply_continuous_effect_filtered(
                 obj.display_source = *display_source;
                 obj.printed_ref = printed_ref.clone();
                 obj.token_image_ref = token_image_ref.clone();
+                obj.token_art = token_art.clone();
             }
             // CR 707.9b + CR 707.2: Name override is a copiable-value override
             // applied at Layer 1 after the base CopyValues (ordered by timestamp
@@ -10918,6 +10959,7 @@ mod tests {
                 display_source: crate::game::game_object::DisplaySource::Card,
                 printed_ref: None,
                 token_image_ref: None,
+                token_art: None,
             }],
             None,
         );
@@ -11386,6 +11428,7 @@ mod tests {
                 display_source: crate::game::game_object::DisplaySource::Card,
                 printed_ref: None,
                 token_image_ref: None,
+                token_art: None,
             },
         );
         install_until_end_of_turn(
@@ -20383,6 +20426,7 @@ mod tests {
             // First: no seam ends it, asked for every seam and every keying.
             for seam in [
                 PermissionSeam::Cleanup,
+                PermissionSeam::TurnStart,
                 PermissionSeam::UntapStep,
                 PermissionSeam::UpkeepStep,
                 PermissionSeam::EndStep,
@@ -21169,6 +21213,83 @@ mod tests {
             state.objects[&card_b].casting_permissions.len(),
             1,
             "P1's permission must survive P0's untap"
+        );
+    }
+
+    /// CR 500.4 + CR 500.10 + CR 611.2a: an untap step an effect adds ends a
+    /// permission that lasts until the untap step, and neither ends an "until
+    /// your next turn" permission nor arms an "until the end of your next
+    /// turn" one. Paired positive: the untap step that begins the turn does
+    /// both.
+    #[test]
+    fn an_added_untap_step_ends_only_untap_step_permissions() {
+        let board = || {
+            let mut state = setup();
+            let exiled = make_exiled_card(&mut state, PlayerId(0));
+            for duration in [
+                Duration::UntilNextTurnOf {
+                    player: PlayerScope::Controller,
+                },
+                Duration::UntilEndOfNextTurnOf {
+                    player: PlayerScope::Controller,
+                },
+                Duration::UntilNextStepOf {
+                    step: Phase::Untap,
+                    player: PlayerScope::Controller,
+                },
+            ] {
+                state
+                    .objects
+                    .get_mut(&exiled)
+                    .unwrap()
+                    .casting_permissions
+                    .push(CastingPermission::PlayFromExile {
+                        provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+                        mode: crate::types::ability::CardPlayMode::Play,
+                        duration,
+                        granted_to: PlayerId(0),
+                        frequency: crate::types::statics::CastFrequency::Unlimited,
+                        source_id: None,
+                        invalidation: None,
+                        exiled_by_ability_controller: None,
+                        mana_spend_permission: None,
+                        card_filter: None,
+                        single_use_group: None,
+                        single_use: false,
+                        cast_cost_modifier: None,
+                        alt_ability_cost: None,
+                        land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    });
+            }
+            (state, exiled)
+        };
+        let durations = |state: &GameState, exiled: ObjectId| -> Vec<Option<Duration>> {
+            state.objects[&exiled]
+                .casting_permissions
+                .iter()
+                .map(|p| p.lifetime().duration.cloned())
+                .collect()
+        };
+
+        let (mut state, exiled) = board();
+        prune_added_untap_step_casting_permissions(&mut state, PlayerId(0));
+        assert_eq!(
+            durations(&state, exiled),
+            vec![
+                Some(Duration::UntilNextTurnOf {
+                    player: PlayerScope::Controller,
+                }),
+                Some(Duration::UntilEndOfNextTurnOf {
+                    player: PlayerScope::Controller,
+                }),
+            ]
+        );
+
+        let (mut state, exiled) = board();
+        prune_untap_step_casting_permissions(&mut state, PlayerId(0));
+        assert_eq!(
+            durations(&state, exiled),
+            vec![Some(Duration::UntilEndOfTurn)]
         );
     }
 
@@ -23735,6 +23856,7 @@ mod tests {
                 display_source: crate::game::game_object::DisplaySource::Card,
                 printed_ref: None,
                 token_image_ref: None,
+                token_art: None,
             }],
             None,
         );
@@ -25019,6 +25141,7 @@ mod tests {
                 display_source: crate::game::game_object::DisplaySource::Card,
                 printed_ref: None,
                 token_image_ref: None,
+                token_art: None,
             }],
             None,
         );
@@ -25045,6 +25168,7 @@ mod tests {
                 display_source: crate::game::game_object::DisplaySource::Card,
                 printed_ref: None,
                 token_image_ref: None,
+                token_art: None,
             }],
             None,
         );
@@ -25938,6 +26062,7 @@ mod tests {
                 display_source: crate::game::game_object::DisplaySource::Card,
                 printed_ref: None,
                 token_image_ref: None,
+                token_art: None,
             }],
             None,
         );
@@ -26023,6 +26148,7 @@ mod tests {
                 display_source: crate::game::game_object::DisplaySource::Card,
                 printed_ref: None,
                 token_image_ref: None,
+                token_art: None,
             }],
             None,
         );
@@ -26112,6 +26238,7 @@ mod tests {
             display_source: crate::game::game_object::DisplaySource::Card,
             printed_ref: None,
             token_image_ref: None,
+            token_art: None,
         };
 
         // The whole `Layer::Copy` set: (modification, adds ANY generator, adds a
@@ -26280,6 +26407,7 @@ mod tests {
                     display_source: crate::game::game_object::DisplaySource::Card,
                     printed_ref: None,
                     token_image_ref: None,
+                    token_art: None,
                 }],
                 None,
             );
@@ -26375,6 +26503,7 @@ mod tests {
                     display_source: crate::game::game_object::DisplaySource::Card,
                     printed_ref: None,
                     token_image_ref: None,
+                    token_art: None,
                 }],
                 None,
             );
@@ -26512,6 +26641,7 @@ mod tests {
                 display_source: Default::default(),
                 printed_ref: None,
                 token_image_ref: None,
+                token_art: None,
             },
             ContinuousModification::CopyChosen,
             ContinuousModification::SetName {

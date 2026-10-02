@@ -14,14 +14,15 @@ use crate::types::ability::{
     CardTypeSetSource, CastFromZoneDriver, ChosenAttribute, CommanderOwnership,
     ContinuousModification, ControllerRef, CopyRetargetPermission, CostPaidObjectSnapshot,
     CounterKindDomain, DetachedRemainder, Duration, EachDamageRecipient, Effect, EffectError,
-    EffectKind, EffectOutcomeSignal, EffectResolutionResult, EffectScope, FilterProp,
-    ForEachCategoryAction, ForwardedResultContext, ManaProduction, MassLibraryShuffleMode,
-    NameStickerSet, ObjectSelectionCardinality, OpponentMayScope, PlayerFilter, PlayerRelation,
-    PlayerScope, PossessionAxis, PtValue, QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole,
-    RepeatContinuation, ResolvedAbility, RevealUntilDisposition, SacrificeCost,
-    SacrificeRequirement, SharedQuality, SharedQualityRelation, SiblingCondition, StaticDefinition,
-    SubAbilityLink, TapStateChange, TargetChoiceTiming, TargetDamageSourceBinding, TargetFilter,
-    TargetRef, ThisWayCause, TypedFilter, ZoneChoiceCandidateSource, ZoneChoiceChooser,
+    EffectKind, EffectOutcomeSignal, EffectResolutionResult, EffectScope, ExtraPhaseRecipient,
+    FilterProp, ForEachCategoryAction, ForwardedResultContext, ManaProduction,
+    MassLibraryShuffleMode, NameStickerSet, ObjectSelectionCardinality, OpponentMayScope,
+    PlayerFilter, PlayerRelation, PlayerScope, PossessionAxis, PtValue, QuantityExpr, QuantityRef,
+    ReciprocalZoneChoiceRole, RepeatContinuation, ResolvedAbility, RevealUntilDisposition,
+    SacrificeCost, SacrificeRequirement, SharedQuality, SharedQualityRelation, SiblingCondition,
+    StaticDefinition, SubAbilityLink, TapStateChange, TargetChoiceTiming,
+    TargetDamageSourceBinding, TargetFilter, TargetRef, ThisWayCause, TypedFilter,
+    ZoneChoiceCandidateSource, ZoneChoiceChooser,
 };
 #[cfg(test)]
 use crate::types::ability::{AttackSubject, CombatHistoryScope};
@@ -598,6 +599,7 @@ pub(crate) fn matches_player_scope(
                                         recipient: None,
                                         scoped_player: Some(p.id),
                                         damage_source: None,
+                                        spell: None,
                                         event_amount: None,
                                     },
                                 );
@@ -4133,11 +4135,12 @@ pub(crate) fn should_propagate_parent_targets(
             && sub.target_choice_timing == TargetChoiceTiming::Resolution)
 }
 
-/// Whether an empty-targeted child can inherit the parent's bound targets.
-/// Kept separate from the parent's current target population so structural
-/// continuation analysis can use the same authority as runtime propagation.
+/// CR 608.2b: whether an empty-targeted child can inherit the parent's bound targets.
+/// A node emptied by initial target validation carries local removal evidence;
+/// intentionally empty nodes retain the original inheritance rules.
 pub(crate) fn can_inherit_parent_targets(sub: &ResolvedAbility) -> bool {
     sub.targets.is_empty()
+        && sub.illegal_local_target_slots.is_empty()
         && sub.reads_chosen_group.is_none()
         && !has_resolution_owned_zone_choice(sub)
         && (sub.target_choice_timing != TargetChoiceTiming::Resolution
@@ -4930,6 +4933,7 @@ fn instruction_outlives_declined_gate(
         target_incarnations: _,
         selected_target_incarnations: _,
         illegal_target_slots: _,
+        illegal_local_target_slots: _,
         controller: _,
         original_controller: _,
         context: _,
@@ -5119,8 +5123,8 @@ fn audit_later_instruction(effect: &Effect) -> LaterInstructionAudit<'_> {
             },
         ),
         Effect::AdditionalPhase {
-            target,
-            phase: _,
+            recipient,
+            segment: _,
             after: _,
             followed_by: _,
             count: _,
@@ -5128,13 +5132,18 @@ fn audit_later_instruction(effect: &Effect) -> LaterInstructionAudit<'_> {
         } => (
             // CR 608.2c + CR 118.12: a declined "if you do" skips only a later
             // instruction whose referent the gated action supplies; "there is an
-            // additional … phase" (`TargetFilter::None`) names no player (CR 500.10a
-            // gates only "you get"), so the grant has no referent to audit.
+            // additional … phase" (`NoPlayer`) names no player (CR 500.10a gates
+            // only a player's grant), so the grant has no referent to audit.
             Some(
-                std::iter::once(target)
-                    .filter(|target| **target != TargetFilter::None)
-                    .chain(attacker_restriction.as_ref())
-                    .collect(),
+                match recipient {
+                    ExtraPhaseRecipient::NoPlayer => None,
+                    ExtraPhaseRecipient::Controller
+                    | ExtraPhaseRecipient::TriggeringPlayer
+                    | ExtraPhaseRecipient::TargetedPlayer(_) => Some(recipient.as_target_filter()),
+                }
+                .into_iter()
+                .chain(attacker_restriction.as_ref())
+                .collect(),
             ),
             ParentTargetHandling::NotAudited,
         ),
@@ -5786,6 +5795,7 @@ fn quantity_ref_counts_population_matching(
             filter_pred(source) || filter_pred(target)
         }
         QuantityRef::DistinctCardTypes { source }
+        | QuantityRef::SharedCardTypes { source }
         | QuantityRef::DistinctSubtypes { source, .. }
         | QuantityRef::DistinctColorsAmong { source } => {
             card_type_set_source_counts_population_matching(source, filter_pred)
@@ -6024,6 +6034,7 @@ fn condition_reads_filter_population(
         AbilityCondition::PreviousEffectAmount { rhs, .. } => has_quantity(rhs),
         // Leaves: nothing filter- or quantity-shaped to read.
         AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
+        | AbilityCondition::TriggerEventTargetExploitedBySource
         | AbilityCondition::AdditionalCostPaid { .. }
         | AbilityCondition::AdditionalCostPaidInstead
         | AbilityCondition::AlternativeManaCostPaid
@@ -6491,9 +6502,10 @@ fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> b
             // optional-decline branch selector — it reads the flip, not the
             // declined effect.
             | AbilityCondition::CoinFlipOutcome { .. }
-            // The frozen trigger-event damage read is independent of an
+            // The frozen trigger-event damage/exploit read is independent of an
             // optional-effect decision, so it cannot select a decline branch.
             | AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
+            | AbilityCondition::TriggerEventTargetExploitedBySource
             | AbilityCondition::WhenYouDo
             | AbilityCondition::WasCast { .. }
             | AbilityCondition::CastDuringPhase { .. }
@@ -8425,27 +8437,42 @@ fn effect_references_tracked_set(effect: &Effect) -> bool {
     false
 }
 
+/// CR 608.2c: Does a [`CardTypeSetSource`] population read the chain's tracked
+/// object set, at any depth of its `AnyOf` union?
+///
+/// The single authority for the tracked-set dependency on the population axis.
+/// A direct-only `TrackedSet { .. }` match misses a tracked set nested inside an
+/// `AnyOf` ("among cards exiled with ~ and creatures you control"), so the
+/// producer never publishes and the chained count resolves to 0. Uses the same
+/// bounded walker as every other union consumer; an incomplete walk is
+/// conservatively reported as a dependency so a truncated source still forces
+/// publication rather than silently under-counting.
+fn card_type_set_source_references_tracked_set(source: &CardTypeSetSource) -> bool {
+    let mut found = false;
+    let complete =
+        source.try_for_each_member(crate::types::ability::UNION_DEPTH_BUDGET, &mut |leaf| {
+            found |= matches!(leaf, CardTypeSetSource::TrackedSet { .. });
+        });
+    found || !complete
+}
+
 fn quantity_expr_references_tracked_set(qty: &QuantityExpr) -> bool {
     match qty {
         QuantityExpr::Fixed { .. } => false,
         QuantityExpr::Ref { qty } => match qty {
-            QuantityRef::TrackedSetSize
-            | QuantityRef::FilteredTrackedSetSize { .. }
-            | QuantityRef::DistinctCardTypes {
-                source: CardTypeSetSource::TrackedSet { .. },
+            QuantityRef::TrackedSetSize | QuantityRef::FilteredTrackedSetSize { .. } => true,
+            // CR 608.2c: the three characteristic-set quantities share the
+            // population axis, so a tracked set nested inside an `AnyOf` union
+            // must be detected too — a direct-only `TrackedSet` match would let
+            // the producer skip publication and the chained count resolve to 0.
+            QuantityRef::DistinctCardTypes { source }
+            | QuantityRef::SharedCardTypes { source }
+            | QuantityRef::DistinctSubtypes { source, .. }
+            | QuantityRef::DistinctColorsAmong { source } => {
+                card_type_set_source_references_tracked_set(source)
             }
-            | QuantityRef::DistinctSubtypes {
-                source: CardTypeSetSource::TrackedSet { .. },
-                ..
-            } => true,
             QuantityRef::PropertyAggregate(aggregate) => {
-                let mut found = false;
-                let complete = aggregate
-                    .source()
-                    .try_for_each_member(crate::types::ability::UNION_DEPTH_BUDGET, &mut |leaf| {
-                        found |= matches!(leaf, CardTypeSetSource::TrackedSet { .. })
-                    });
-                found || !complete
+                card_type_set_source_references_tracked_set(aggregate.source())
             }
             // CR 608.2c: a player-count whose filter is keyed on the chain's
             // tracked object set is a CONSUMER of that set — the preceding
@@ -12293,9 +12320,9 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&TargetFilter> {
         | Effect::SkipNextTurn { target, .. }
         | Effect::SkipNextStep { target, .. }
         | Effect::ControlNextTurn { target, .. }
-        | Effect::AdditionalPhase { target, .. }
         | Effect::Detain { target, .. }
         | Effect::TargetOnly { target } => target,
+        Effect::AdditionalPhase { recipient, .. } => recipient.as_target_filter(),
         // CR 701.26a/b + CR 603.7c: only the single-permanent tap/untap exposes
         // an event-context target. The mass (`All`) scope's `target` is a
         // population filter, not a per-event target ref — it must not be
@@ -13551,9 +13578,13 @@ fn emit_sacrifice_batch_follow_ups(
             continue;
         }
         match follow_up {
-            PendingPlayerScopeSacrificeFollowUp::Exploit { exploiter } => {
+            PendingPlayerScopeSacrificeFollowUp::Exploit {
+                exploiter,
+                exploiter_incarnation,
+            } => {
                 events.push(GameEvent::CreatureExploited {
                     exploiter,
+                    exploiter_incarnation,
                     sacrificed,
                     record,
                 });
@@ -18362,8 +18393,9 @@ fn resolve_chain_body(
             // object-target slot whose empty `sub.targets` means the slot was
             // legally declined (Cruel Revival's "Return up to one target Zombie
             // card from your graveyard ..." per CR 115.6). Player targets are
-            // shared across the chain (Paradigm's "that player" draw + lose-life;
-            // relative-controller change-zone) and are always inherited. Reflexive
+            // shared with context references (Paradigm's "that player" draw +
+            // lose-life; relative-controller change-zone), but an independent
+            // stack-time player slot never inherits another clause's target. Reflexive
             // gated subs ("When you discard a card this way, put a counter on target
             // Faerie") keep inheriting their selected target through the parent
             // chain; their condition decides whether the sub fires.
@@ -18700,10 +18732,13 @@ fn fails_shared_quality(state: &GameState, effective: &ResolvedAbility) -> bool 
     }
 }
 
-/// CR 115.6 + CR 608.2c: the parent targets an undeclared child inherits on the
-/// chain's ordinary descent: every player, and every object unless the child
-/// owns an independent object slot.
+/// CR 608.2b + CR 608.2c: an empty child with local initial-legality removal
+/// evidence inherits nothing. Other children retain players and objects unless
+/// the child owns an independent object slot.
 fn inherited_parent_targets(parent: &ResolvedAbility, sub: &ResolvedAbility) -> Vec<TargetRef> {
+    if sub.targets.is_empty() && !sub.illegal_local_target_slots.is_empty() {
+        return Vec::new();
+    }
     let has_independent_target_slot = sub_has_independent_object_target_slot(sub);
     parent
         .targets
@@ -19026,6 +19061,38 @@ pub(crate) fn evaluate_condition(
                         .source_incarnation
                         .is_none_or(|recorded| source_incarnation == Some(recorded))
                     && crate::game::triggers::damage_record_matches_dying_object(
+                        state,
+                        record,
+                        dying_object,
+                        state.current_trigger_event.as_ref(),
+                    )
+            })
+        }
+        // CR 702.110b + CR 608.2c: resolution-time check that the trigger's dying
+        // creature was exploited by this source this turn (Silumgar Scavenger).
+        AbilityCondition::TriggerEventTargetExploitedBySource => {
+            let Some(dying_object) =
+                state
+                    .current_trigger_event
+                    .as_ref()
+                    .and_then(|event| match event {
+                        GameEvent::CreatureDestroyed { object_id, .. }
+                        | GameEvent::ZoneChanged { object_id, .. } => Some(*object_id),
+                        GameEvent::CreatureExploited { sacrificed, .. } => Some(*sacrificed),
+                        _ => None,
+                    })
+            else {
+                return false;
+            };
+            let source_incarnation = ability
+                .trigger_source_incarnation()
+                .or(ability.source_incarnation);
+            state.creatures_exploited_this_turn.iter().any(|record| {
+                record.exploiter == ability.source_id
+                    && record
+                        .exploiter_incarnation
+                        .is_none_or(|recorded| source_incarnation == Some(recorded))
+                    && crate::game::triggers::exploit_record_matches_dying_object(
                         state,
                         record,
                         dying_object,
@@ -20448,6 +20515,73 @@ mod tests {
     use super::*;
     use crate::database::synthesis::synthesize_extort;
 
+    /// CR 608.2b: only an empty node carrying measured removal evidence refuses
+    /// parent-target inheritance; an intentionally empty node retains it.
+    #[test]
+    fn only_pruned_empty_target_slots_do_not_inherit_parent_targets() {
+        let parent = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Player,
+            },
+            vec![
+                TargetRef::Player(PlayerId(0)),
+                TargetRef::Object(ObjectId(2)),
+            ],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        for (expected_targets, effect) in [
+            (
+                vec![TargetRef::Player(PlayerId(0))],
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Player,
+                },
+            ),
+            (
+                vec![TargetRef::Player(PlayerId(0))],
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Any,
+                    damage_source: None,
+                    excess: None,
+                },
+            ),
+            (
+                vec![
+                    TargetRef::Player(PlayerId(0)),
+                    TargetRef::Object(ObjectId(2)),
+                ],
+                Effect::Destroy {
+                    target: TargetFilter::ParentTarget,
+                    cant_regenerate: false,
+                },
+            ),
+            (
+                vec![
+                    TargetRef::Player(PlayerId(0)),
+                    TargetRef::Object(ObjectId(2)),
+                ],
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Any,
+                },
+            ),
+        ] {
+            let mut child = ResolvedAbility::new(effect, Vec::new(), ObjectId(1), PlayerId(0));
+            assert!(can_inherit_parent_targets(&child));
+            assert!(should_propagate_parent_targets(&parent, &child));
+            assert!(!expected_targets.is_empty());
+            assert_eq!(inherited_parent_targets(&parent, &child), expected_targets);
+
+            child.illegal_local_target_slots = vec![0];
+            assert!(!can_inherit_parent_targets(&child));
+            assert!(!should_propagate_parent_targets(&parent, &child));
+            assert!(inherited_parent_targets(&parent, &child).is_empty());
+        }
+    }
+
     fn effect_from_json(json: &str) -> Effect {
         serde_json::from_str(json).expect("test effect shape must deserialize")
     }
@@ -20783,23 +20917,30 @@ mod tests {
                 r#""owner":{"type":"TriggeringPlayer"}"#
             )
         ));
-        // AdditionalPhase (Wyll): "there is" names no player (`None`); a grant
-        // to the controller ("you get") survives too; a grant to a player the
-        // trigger event names does not.
-        let phase = r#"{"type":"AdditionalPhase","target":{"type":"None"},"phase":"BeginCombat","after":{"type":"ThisPhase","data":{"named":["PrecombatMain","PostcombatMain"]}},"followed_by":["PostCombatMain"],"count":{"type":"Fixed","value":1}}"#;
+        // AdditionalPhase (Wyll): "there is" names no player (`NoPlayer`); a
+        // grant to the controller ("you get") or to a targeted player survives
+        // too; a grant to a player the trigger event names does not.
+        let phase = r#"{"type":"AdditionalPhase","recipient":{"type":"NoPlayer"},"segment":{"type":"Phase","data":"Combat"},"after":{"type":"ThisPhase","data":{"named":["PrecombatMain","PostcombatMain"]}},"followed_by":[{"type":"Phase","data":"PostcombatMain"}],"count":{"type":"Fixed","value":1}}"#;
         assert!(survives(DRAW, phase));
         assert!(survives(
             DRAW,
             &phase.replace(
-                r#""target":{"type":"None"}"#,
-                r#""target":{"type":"Controller"}"#
+                r#""recipient":{"type":"NoPlayer"}"#,
+                r#""recipient":{"type":"Controller"}"#
+            )
+        ));
+        assert!(survives(
+            DRAW,
+            &phase.replace(
+                r#""recipient":{"type":"NoPlayer"}"#,
+                r#""recipient":{"type":"TargetedPlayer","data":{"type":"Player"}}"#
             )
         ));
         assert!(!survives(
             DRAW,
             &phase.replace(
-                r#""target":{"type":"None"}"#,
-                r#""target":{"type":"TriggeringPlayer"}"#
+                r#""recipient":{"type":"NoPlayer"}"#,
+                r#""recipient":{"type":"TriggeringPlayer"}"#
             )
         ));
         // GainLife.
@@ -20916,6 +21057,43 @@ mod tests {
             by: None
         }));
         assert!(!static_mode_names_no_referent(&StaticMode::CantBeTargeted));
+    }
+
+    /// CR 608.2c + CR 118.12: the declined-"if you do" audit reads each
+    /// additional-phase recipient kind as the referent it names: none for
+    /// `NoPlayer`, and the kind's own filter for every player kind. A declined
+    /// gate's verdict cannot tell the controller or a targeted player from no
+    /// referent, since both exist whether or not the gated action happened, so
+    /// this reads the audit's referent list. Every kind is checked before the
+    /// assertion, so a failure names each kind that went wrong.
+    #[test]
+    fn the_declined_gate_audit_names_each_player_recipient_as_its_referent() {
+        let wrong: Vec<String> = [
+            (r#"{"type":"NoPlayer"}"#, None),
+            (r#"{"type":"Controller"}"#, Some(TargetFilter::Controller)),
+            (
+                r#"{"type":"TriggeringPlayer"}"#,
+                Some(TargetFilter::TriggeringPlayer),
+            ),
+            (
+                r#"{"type":"TargetedPlayer","data":{"type":"Player"}}"#,
+                Some(TargetFilter::Player),
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(recipient, referent)| {
+            let effect = effect_from_json(&format!(
+                r#"{{"type":"AdditionalPhase","recipient":{recipient},"segment":{{"type":"Phase","data":"Combat"}},"after":{{"type":"ThisPhase","data":{{"named":["PrecombatMain","PostcombatMain"]}}}},"count":{{"type":"Fixed","value":1}}}}"#
+            ));
+            let audited: Option<Vec<TargetFilter>> = audit_later_instruction(&effect)
+                .referents
+                .map(|referents| referents.into_iter().cloned().collect());
+            let expected = Some(referent.into_iter().collect::<Vec<_>>());
+            (audited != expected)
+                .then(|| format!("{recipient}: audited {audited:?}, expected {expected:?}"))
+        })
+        .collect();
+        assert!(wrong.is_empty(), "{}", wrong.join("; "));
     }
 
     /// Phase 7, J-3 (the building block): after a declined gate, each later
@@ -21338,7 +21516,10 @@ mod tests {
     ) -> PendingPlayerScopeSacrificeCompletion {
         PendingPlayerScopeSacrificeCompletion {
             announced: vec![victim],
-            follow_up: Some(PendingPlayerScopeSacrificeFollowUp::Exploit { exploiter }),
+            follow_up: Some(PendingPlayerScopeSacrificeFollowUp::Exploit {
+                exploiter,
+                exploiter_incarnation: None,
+            }),
             ..Default::default()
         }
     }
@@ -21364,6 +21545,7 @@ mod tests {
                     exploiter: event_exploiter,
                     sacrificed,
                     record,
+                    ..
                 } if *event_exploiter == exploiter
                     && *sacrificed == victim
                     && record == &expected_record
@@ -23740,6 +23922,102 @@ mod tests {
         assert!(
             ability_or_branch_references_tracked_set(&ability),
             "token P/T TrackedSetAggregate must publish the chain tracked set"
+        );
+    }
+
+    /// CR 608.2c: a tracked set nested inside an `AnyOf` population must mark
+    /// the quantity as a tracked-set consumer. A direct-only `TrackedSet { .. }`
+    /// match misses the union member, so the producer never publishes and the
+    /// chained count resolves to 0. `SharedCardTypes` shares the population axis
+    /// with `DistinctCardTypes`/`DistinctSubtypes`, so all three route through
+    /// the same bounded walk.
+    #[test]
+    fn shared_card_types_over_any_of_tracked_set_references_tracked_set() {
+        let qty = QuantityExpr::Ref {
+            qty: QuantityRef::SharedCardTypes {
+                source: crate::types::ability::CardTypeSetSource::AnyOf {
+                    sources: crate::types::ability::UnionSources::new(vec![
+                        crate::types::ability::CardTypeSetSource::TrackedSet {
+                            set: crate::types::ability::TrackedAnaphorSource::ChainSet,
+                            caused_by: None,
+                        },
+                        crate::types::ability::CardTypeSetSource::ExiledBySource,
+                    ])
+                    .expect("two-member union is valid"),
+                },
+            },
+        };
+        assert!(
+            quantity_expr_references_tracked_set(&qty),
+            "a SharedCardTypes population with a TrackedSet union member must reference the tracked set"
+        );
+
+        // Paired negative: a union with no tracked-set member reads no tracked set.
+        let qty_no_tracked = QuantityExpr::Ref {
+            qty: QuantityRef::SharedCardTypes {
+                source: crate::types::ability::CardTypeSetSource::AnyOf {
+                    sources: crate::types::ability::UnionSources::new(vec![
+                        crate::types::ability::CardTypeSetSource::ExiledBySource,
+                        crate::types::ability::CardTypeSetSource::Objects {
+                            filter: TargetFilter::Any,
+                        },
+                    ])
+                    .expect("two-member union is valid"),
+                },
+            },
+        };
+        assert!(
+            !quantity_expr_references_tracked_set(&qty_no_tracked),
+            "a union with no tracked-set member must NOT reference the tracked set"
+        );
+    }
+
+    /// CR 608.2c: `DistinctColorsAmong` uses the same characteristic-source
+    /// population axis as the other distinct-characteristic quantities. Its
+    /// direct and `AnyOf`-nested tracked-set sources must therefore publish the
+    /// chain set before the quantity is resolved.
+    #[test]
+    fn distinct_colors_among_tracked_set_sources_references_tracked_set() {
+        let direct = QuantityExpr::Ref {
+            qty: QuantityRef::DistinctColorsAmong {
+                source: crate::types::ability::CardTypeSetSource::TrackedSet {
+                    set: crate::types::ability::TrackedAnaphorSource::ChainSet,
+                    caused_by: None,
+                },
+            },
+        };
+        assert!(
+            quantity_expr_references_tracked_set(&direct),
+            "DistinctColorsAmong over a direct TrackedSet must publish the chain set"
+        );
+
+        let nested = QuantityExpr::Ref {
+            qty: QuantityRef::DistinctColorsAmong {
+                source: crate::types::ability::CardTypeSetSource::AnyOf {
+                    sources: crate::types::ability::UnionSources::new(vec![
+                        crate::types::ability::CardTypeSetSource::ExiledBySource,
+                        crate::types::ability::CardTypeSetSource::TrackedSet {
+                            set: crate::types::ability::TrackedAnaphorSource::ChainSet,
+                            caused_by: None,
+                        },
+                    ])
+                    .expect("two-member union is valid"),
+                },
+            },
+        };
+        assert!(
+            quantity_expr_references_tracked_set(&nested),
+            "DistinctColorsAmong over an AnyOf TrackedSet must publish the chain set"
+        );
+
+        let unrelated = QuantityExpr::Ref {
+            qty: QuantityRef::DistinctColorsAmong {
+                source: crate::types::ability::CardTypeSetSource::ExiledBySource,
+            },
+        };
+        assert!(
+            !quantity_expr_references_tracked_set(&unrelated),
+            "DistinctColorsAmong over ExiledBySource must not publish a tracked set"
         );
     }
 

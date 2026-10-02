@@ -3473,6 +3473,9 @@ fn redact_printed_identity(obj: &mut crate::game::game_object::GameObject) {
     obj.token_rules_text = None;
     obj.attraction_lights.clear();
     obj.token_image_ref = None;
+    // Redaction must not leak art metadata either: a hidden object renders
+    // no art, so no descriptor may survive alongside the cleared ref.
+    obj.token_art = None;
     obj.source_related_token_ids.clear();
     obj.spellbook.clear();
     obj.parse_warnings.clear();

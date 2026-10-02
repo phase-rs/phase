@@ -2254,6 +2254,7 @@ fn quantity_ref_contains_filter_prop(
             card_type_set_source_contains_filter_prop(aggregate.source(), predicate)
         }
         QuantityRef::DistinctCardTypes { source }
+        | QuantityRef::SharedCardTypes { source }
         | QuantityRef::DistinctSubtypes { source, .. }
         | QuantityRef::DistinctColorsAmong { source } => {
             card_type_set_source_contains_filter_prop(source, predicate)
@@ -2389,6 +2390,7 @@ pub(crate) fn retarget_chosen_card_type_to_creature_type(filter: &mut TargetFilt
     let mut complete = true;
     rewrite_filter_props(
         &mut rewritten,
+        &mut |_| {},
         &mut |prop| {
             if matches!(prop, FilterProp::IsChosenCardType) {
                 *prop = FilterProp::IsChosenCreatureType;
@@ -2402,31 +2404,89 @@ pub(crate) fn retarget_chosen_card_type_to_creature_type(filter: &mut TargetFilt
     complete
 }
 
-/// Rewrite every property reachable through `filter`, recording any incomplete
+/// Identifies the existing owner-relative controller encoding on a local Typed
+/// node. CR 108.4a + CR 400.1: hand, library and graveyard cards use ownership
+/// where no spell/permanent controller exists. Exile retains its LKI semantics.
+pub(crate) fn typed_filter_is_owner_scoped(filter: &TargetFilter) -> bool {
+    if !matches!(filter, TargetFilter::Typed(_)) {
+        return false;
+    }
+    let zones = filter.extract_zones();
+    !zones.is_empty() && zones.into_iter().all(is_owner_scoped_zone)
+}
+
+/// Binds declaring ownership before target-player enumeration substitutes a
+/// different filter controller.
+///
+/// CR 109.5: "you" and "your" refer to the spell or ability's controller.
+/// CR 108.3 + CR 110.2: ownership remains independent of permanent control.
+/// Original `Owned(You)` and owner-zone `Typed.controller = You` leaves change.
+/// CR 108.4a + CR 400.1 + CR 400.3: the local owner-zone encoding retains its
+/// existing ownership interpretation. An incomplete bounded population walk
+/// returns `false` and leaves the entire input unchanged.
+pub(crate) fn bind_declaring_owner_authority(
+    filter: &mut TargetFilter,
+    controller: PlayerId,
+) -> bool {
+    let mut rewritten = filter.clone();
+    let mut complete = true;
+    rewrite_filter_props(
+        &mut rewritten,
+        &mut |node| {
+            if typed_filter_is_owner_scoped(node) {
+                let TargetFilter::Typed(typed) = node else {
+                    unreachable!("owner-zone predicate accepts only Typed nodes")
+                };
+                if typed.controller == Some(ControllerRef::You) {
+                    typed.controller = Some(ControllerRef::SpecificPlayer { id: controller });
+                }
+            }
+        },
+        &mut |prop| {
+            if let FilterProp::Owned {
+                controller: ControllerRef::You,
+            } = prop
+            {
+                *prop = FilterProp::Owned {
+                    controller: ControllerRef::SpecificPlayer { id: controller },
+                };
+            }
+        },
+        &mut complete,
+    );
+    if complete {
+        *filter = rewritten;
+    }
+    complete
+}
+
+/// Rewrite every node and property reachable through `filter`, recording any incomplete
 /// bounded population walk in `complete` for the transactional caller.
 fn rewrite_filter_props(
     filter: &mut TargetFilter,
+    rewrite_node: &mut dyn FnMut(&mut TargetFilter),
     rewrite: &mut dyn FnMut(&mut FilterProp),
     complete: &mut bool,
 ) {
+    rewrite_node(filter);
     match filter {
         TargetFilter::And { filters } | TargetFilter::Or { filters } => filters
             .iter_mut()
-            .for_each(|inner| rewrite_filter_props(inner, rewrite, complete)),
+            .for_each(|inner| rewrite_filter_props(inner, rewrite_node, rewrite, complete)),
         TargetFilter::Not { filter } | TargetFilter::TrackedSetFiltered { filter, .. } => {
-            rewrite_filter_props(filter, rewrite, complete)
+            rewrite_filter_props(filter, rewrite_node, rewrite, complete)
         }
         TargetFilter::PlayerMatching { player } => {
-            rewrite_player_filter_props(player, rewrite, complete)
+            rewrite_player_filter_props(player, rewrite_node, rewrite, complete)
         }
         TargetFilter::ChosenDamageSource { filter } => filter
             .as_deref_mut()
             .into_iter()
-            .for_each(|inner| rewrite_filter_props(inner, rewrite, complete)),
+            .for_each(|inner| rewrite_filter_props(inner, rewrite_node, rewrite, complete)),
         TargetFilter::Typed(typed) => typed
             .properties
             .iter_mut()
-            .for_each(|prop| rewrite_filter_prop(prop, rewrite, complete)),
+            .for_each(|prop| rewrite_filter_prop(prop, rewrite_node, rewrite, complete)),
         TargetFilter::None
         | TargetFilter::Any
         | TargetFilter::Player
@@ -2483,38 +2543,43 @@ fn rewrite_filter_props(
 /// Rewrite one property and every nested filter-bearing payload it owns.
 fn rewrite_filter_prop(
     prop: &mut FilterProp,
+    rewrite_node: &mut dyn FnMut(&mut TargetFilter),
     rewrite: &mut dyn FnMut(&mut FilterProp),
     complete: &mut bool,
 ) {
     rewrite(prop);
     match prop {
-        FilterProp::CanEnchant { target } => rewrite_filter_props(target, rewrite, complete),
-        FilterProp::DifferentNameFrom { filter } => rewrite_filter_props(filter, rewrite, complete),
+        FilterProp::CanEnchant { target } => {
+            rewrite_filter_props(target, rewrite_node, rewrite, complete)
+        }
+        FilterProp::DifferentNameFrom { filter } => {
+            rewrite_filter_props(filter, rewrite_node, rewrite, complete)
+        }
         FilterProp::DistinctFrom { reference } => {
-            rewrite_filter_props(reference, rewrite, complete)
+            rewrite_filter_props(reference, rewrite_node, rewrite, complete)
         }
         FilterProp::SharesQuality { reference, .. } => reference
             .as_deref_mut()
             .into_iter()
-            .for_each(|inner| rewrite_filter_props(inner, rewrite, complete)),
+            .for_each(|inner| rewrite_filter_props(inner, rewrite_node, rewrite, complete)),
         FilterProp::Targets { filter } | FilterProp::TargetsOnly { filter } => {
-            rewrite_filter_props(filter, rewrite, complete)
+            rewrite_filter_props(filter, rewrite_node, rewrite, complete)
         }
-        FilterProp::Not { prop } => rewrite_filter_prop(prop, rewrite, complete),
+        FilterProp::Not { prop } => rewrite_filter_prop(prop, rewrite_node, rewrite, complete),
         FilterProp::AnyOf { props } => props
             .iter_mut()
-            .for_each(|inner| rewrite_filter_prop(inner, rewrite, complete)),
+            .for_each(|inner| rewrite_filter_prop(inner, rewrite_node, rewrite, complete)),
         FilterProp::ControllerMatches { player } => {
-            rewrite_player_filter_props(player, rewrite, complete)
+            rewrite_player_filter_props(player, rewrite_node, rewrite, complete)
         }
         FilterProp::DealtDamageThisTurn { recipient, .. } => recipient
             .as_mut()
             .into_iter()
-            .for_each(|scope| rewrite_player_filter_props(scope, rewrite, complete)),
+            .for_each(|scope| rewrite_player_filter_props(scope, rewrite_node, rewrite, complete)),
         FilterProp::Counters { count, .. }
         | FilterProp::Cmc { value: count, .. }
         | FilterProp::PtComparison { value: count, .. } => {
-            rewrite_quantity_expr_filter_props(count, rewrite, complete)
+            rewrite_quantity_expr_filter_props(count, rewrite_node, rewrite, complete)
         }
         FilterProp::Token
         | FilterProp::NonToken
@@ -2609,6 +2674,7 @@ fn rewrite_filter_prop(
 /// Rewrite nested property carriers in a player filter.
 fn rewrite_player_filter_props(
     filter: &mut PlayerFilter,
+    rewrite_node: &mut dyn FnMut(&mut TargetFilter),
     rewrite: &mut dyn FnMut(&mut FilterProp),
     complete: &mut bool,
 ) {
@@ -2616,20 +2682,20 @@ fn rewrite_player_filter_props(
         PlayerFilter::OpponentDealtDamage { source, .. } => source
             .as_deref_mut()
             .into_iter()
-            .for_each(|inner| rewrite_filter_props(inner, rewrite, complete)),
+            .for_each(|inner| rewrite_filter_props(inner, rewrite_node, rewrite, complete)),
         PlayerFilter::ControlsCount { filter, count, .. } => {
-            rewrite_filter_props(filter, rewrite, complete);
-            rewrite_quantity_expr_filter_props(count, rewrite, complete);
+            rewrite_filter_props(filter, rewrite_node, rewrite, complete);
+            rewrite_quantity_expr_filter_props(count, rewrite_node, rewrite, complete);
         }
         PlayerFilter::PlayerAttribute { attr, value, .. } => {
-            rewrite_quantity_ref_filter_props(attr, rewrite, complete);
-            rewrite_quantity_expr_filter_props(value, rewrite, complete);
+            rewrite_quantity_ref_filter_props(attr, rewrite_node, rewrite, complete);
+            rewrite_quantity_expr_filter_props(value, rewrite_node, rewrite, complete);
         }
         PlayerFilter::TrackedSetPossessor { filter, .. } => {
-            rewrite_filter_props(filter, rewrite, complete)
+            rewrite_filter_props(filter, rewrite_node, rewrite, complete)
         }
         PlayerFilter::AllExcept { exclude } => {
-            rewrite_player_filter_props(exclude, rewrite, complete)
+            rewrite_player_filter_props(exclude, rewrite_node, rewrite, complete)
         }
         PlayerFilter::Controller
         | PlayerFilter::Opponent
@@ -2660,11 +2726,14 @@ fn rewrite_player_filter_props(
 /// be found below a dynamic threshold without also being rewritten there.
 fn rewrite_quantity_expr_filter_props(
     expr: &mut QuantityExpr,
+    rewrite_node: &mut dyn FnMut(&mut TargetFilter),
     rewrite: &mut dyn FnMut(&mut FilterProp),
     complete: &mut bool,
 ) {
     match expr {
-        QuantityExpr::Ref { qty } => rewrite_quantity_ref_filter_props(qty, rewrite, complete),
+        QuantityExpr::Ref { qty } => {
+            rewrite_quantity_ref_filter_props(qty, rewrite_node, rewrite, complete)
+        }
         QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::Offset { inner, .. }
         | QuantityExpr::ClampMin { inner, .. }
@@ -2672,13 +2741,15 @@ fn rewrite_quantity_expr_filter_props(
         | QuantityExpr::UpTo { max: inner }
         | QuantityExpr::Power {
             exponent: inner, ..
-        } => rewrite_quantity_expr_filter_props(inner, rewrite, complete),
-        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => exprs
-            .iter_mut()
-            .for_each(|inner| rewrite_quantity_expr_filter_props(inner, rewrite, complete)),
+        } => rewrite_quantity_expr_filter_props(inner, rewrite_node, rewrite, complete),
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            exprs.iter_mut().for_each(|inner| {
+                rewrite_quantity_expr_filter_props(inner, rewrite_node, rewrite, complete)
+            })
+        }
         QuantityExpr::Difference { left, right } => {
-            rewrite_quantity_expr_filter_props(left, rewrite, complete);
-            rewrite_quantity_expr_filter_props(right, rewrite, complete);
+            rewrite_quantity_expr_filter_props(left, rewrite_node, rewrite, complete);
+            rewrite_quantity_expr_filter_props(right, rewrite_node, rewrite, complete);
         }
         QuantityExpr::Fixed { .. } => {}
     }
@@ -2688,6 +2759,7 @@ fn rewrite_quantity_expr_filter_props(
 /// [`quantity_ref_contains_filter_prop`].
 fn rewrite_quantity_ref_filter_props(
     qty: &mut QuantityRef,
+    rewrite_node: &mut dyn FnMut(&mut TargetFilter),
     rewrite: &mut dyn FnMut(&mut FilterProp),
     complete: &mut bool,
 ) {
@@ -2705,18 +2777,18 @@ fn rewrite_quantity_ref_filter_props(
         | QuantityRef::CounterAddedThisTurn { target: filter, .. }
         | QuantityRef::TokensCreatedThisTurn { filter, .. }
         | QuantityRef::DistinctCounterKindsAmong { filter } => {
-            rewrite_filter_props(filter, rewrite, complete)
+            rewrite_filter_props(filter, rewrite_node, rewrite, complete)
         }
         QuantityRef::TargetObjectManaValue { filter }
         | QuantityRef::FilteredTrackedSetSize { filter, .. } => {
-            rewrite_filter_props(filter, rewrite, complete)
+            rewrite_filter_props(filter, rewrite_node, rewrite, complete)
         }
         QuantityRef::PlayerCount { filter } | QuantityRef::EventContextPlayerCount { filter } => {
-            rewrite_player_filter_props(filter, rewrite, complete)
+            rewrite_player_filter_props(filter, rewrite_node, rewrite, complete)
         }
         QuantityRef::PropertyAggregate(aggregate) => {
             let mut source = aggregate.source().clone();
-            rewrite_card_type_set_source_filter_props(&mut source, rewrite, complete);
+            rewrite_card_type_set_source_filter_props(&mut source, rewrite_node, rewrite, complete);
             *aggregate = crate::types::ability::PropertyAggregate::new(
                 aggregate.function(),
                 aggregate.property(),
@@ -2725,9 +2797,10 @@ fn rewrite_quantity_ref_filter_props(
             .expect("rewriting a property aggregate filter preserves aggregate validity");
         }
         QuantityRef::DistinctCardTypes { source }
+        | QuantityRef::SharedCardTypes { source }
         | QuantityRef::DistinctSubtypes { source, .. }
         | QuantityRef::DistinctColorsAmong { source } => {
-            rewrite_card_type_set_source_filter_props(source, rewrite, complete)
+            rewrite_card_type_set_source_filter_props(source, rewrite_node, rewrite, complete)
         }
         QuantityRef::ZoneCardCount { filter, .. }
         | QuantityRef::SpellsCastThisTurn { filter, .. }
@@ -2736,14 +2809,14 @@ fn rewrite_quantity_ref_filter_props(
         | QuantityRef::SpellsCastThisGame { filter, .. } => filter
             .as_mut()
             .into_iter()
-            .for_each(|inner| rewrite_filter_props(inner, rewrite, complete)),
+            .for_each(|inner| rewrite_filter_props(inner, rewrite_node, rewrite, complete)),
         QuantityRef::DamageDealtThisTurn { source, target, .. } => {
-            rewrite_filter_props(source, rewrite, complete);
-            rewrite_filter_props(target, rewrite, complete);
+            rewrite_filter_props(source, rewrite_node, rewrite, complete);
+            rewrite_filter_props(target, rewrite_node, rewrite, complete);
         }
         QuantityRef::ManaSpentToCast { metric, .. } => match metric {
             CastManaSpentMetric::FromSource { source_filter } => {
-                rewrite_filter_props(source_filter, rewrite, complete)
+                rewrite_filter_props(source_filter, rewrite_node, rewrite, complete)
             }
             CastManaSpentMetric::Total
             | CastManaSpentMetric::DistinctColors
@@ -2820,20 +2893,25 @@ fn rewrite_quantity_ref_filter_props(
 /// incomplete bounded union walk instead of assuming it was exhaustive.
 fn rewrite_card_type_set_source_filter_props(
     source: &mut CardTypeSetSource,
+    rewrite_node: &mut dyn FnMut(&mut TargetFilter),
     rewrite: &mut dyn FnMut(&mut FilterProp),
     complete: &mut bool,
 ) {
     match source {
-        CardTypeSetSource::Objects { filter } => rewrite_filter_props(filter, rewrite, complete),
+        CardTypeSetSource::Objects { filter } => {
+            rewrite_filter_props(filter, rewrite_node, rewrite, complete)
+        }
         CardTypeSetSource::TurnJournal { filter, .. } => filter
             .as_mut()
             .into_iter()
-            .for_each(|inner| rewrite_filter_props(inner, rewrite, complete)),
+            .for_each(|inner| rewrite_filter_props(inner, rewrite_node, rewrite, complete)),
         CardTypeSetSource::AnyOf { .. } => {
-            let source_complete = source
-                .try_for_each_member_mut(crate::types::ability::UNION_DEPTH_BUDGET, &mut |leaf| {
-                    rewrite_card_type_set_source_filter_props(leaf, rewrite, complete)
-                });
+            let source_complete = source.try_for_each_member_mut(
+                crate::types::ability::UNION_DEPTH_BUDGET,
+                &mut |leaf| {
+                    rewrite_card_type_set_source_filter_props(leaf, rewrite_node, rewrite, complete)
+                },
+            );
             *complete &= source_complete;
         }
         CardTypeSetSource::Zone { .. }
@@ -3938,13 +4016,42 @@ pub fn matches_target_filter_on_lki_snapshot(
     filter: &TargetFilter,
     ctx: &FilterContext<'_>,
 ) -> bool {
-    matches_target_filter_on_lki_snapshot_with_incarnation(state, object_id, lki, filter, ctx, None)
+    matches_target_filter_on_lki_snapshot_with_incarnation(
+        state, object_id, lki, filter, ctx, None, None,
+    )
+}
+
+/// CR 113.7 + CR 113.7a + CR 400.7: Evaluate a target filter against the last known
+/// information of an object that LEFT THE BATTLEFIELD, as the object it was
+/// there. Differs from [`matches_target_filter_on_lki_snapshot`] only in that
+/// the synthesized record names the battlefield as the zone it departed, so a
+/// "<type> on the battlefield" (`FilterProp::InZone`) predicate — which on the
+/// record path reads the departed zone — holds. Callers must hold a snapshot
+/// taken as the object left the battlefield (`GameState::lki_cache`).
+pub fn matches_target_filter_on_departed_battlefield_lki(
+    state: &GameState,
+    object_id: ObjectId,
+    lki: &LKISnapshot,
+    filter: &TargetFilter,
+    ctx: &FilterContext<'_>,
+) -> bool {
+    matches_target_filter_on_lki_snapshot_with_incarnation(
+        state,
+        object_id,
+        lki,
+        filter,
+        ctx,
+        None,
+        Some(Zone::Battlefield),
+    )
 }
 
 /// CR 400.7 + CR 608.2h: Evaluate a target filter against LKI for a known
 /// incarnation. The synthesized record preserves the proven incarnation so
 /// record-side identity predicates such as `OtherThanTriggerObject` do not
 /// collapse a later object at the same storage id into the original object.
+/// `departed_from` is the zone the snapshot was taken leaving, when the caller
+/// knows it; `None` keeps the historical record shape.
 fn matches_target_filter_on_lki_snapshot_with_incarnation(
     state: &GameState,
     object_id: ObjectId,
@@ -3952,6 +4059,7 @@ fn matches_target_filter_on_lki_snapshot_with_incarnation(
     filter: &TargetFilter,
     ctx: &FilterContext<'_>,
     entered_incarnation: Option<u64>,
+    departed_from: Option<Zone>,
 ) -> bool {
     let record = ZoneChangeRecord {
         object_id,
@@ -3972,7 +4080,7 @@ fn matches_target_filter_on_lki_snapshot_with_incarnation(
         mana_value: lki.mana_value,
         controller: lki.controller,
         owner: lki.owner,
-        from_zone: None,
+        from_zone: departed_from,
         cast_from_zone: None,
         played_from_zone: None,
         to_zone: Zone::Battlefield,
@@ -4243,6 +4351,7 @@ pub fn matches_zone_change_event_object_filter(
                 filter,
                 ctx,
                 record.entered_incarnation,
+                None,
             )
         } else {
             // No exit LKI cached (defensive — a battlefield exit always caches
@@ -14343,6 +14452,388 @@ mod tests {
         ])));
     }
 
+    // CR 108.4a + CR 400.1: normalize only local nonempty all-owner-zone lists.
+    #[test]
+    fn explicit_you_ownership_zone_encoding_is_local_and_excludes_control_zones() {
+        let zoned = |zones: Vec<Zone>| {
+            TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::InAnyZone { zones }]),
+            )
+        };
+        for zones in [
+            vec![Zone::Hand],
+            vec![Zone::Library],
+            vec![Zone::Graveyard],
+            vec![Zone::Hand, Zone::Library, Zone::Graveyard],
+        ] {
+            let original = zoned(zones);
+            assert!(typed_filter_is_owner_scoped(&original));
+            let mut bound = original.clone();
+            assert!(bind_declaring_owner_authority(&mut bound, PlayerId(0)));
+            let TargetFilter::Typed(tf) = &bound else {
+                unreachable!()
+            };
+            assert_eq!(
+                tf.controller,
+                Some(ControllerRef::SpecificPlayer { id: PlayerId(0) })
+            );
+            assert_ne!(bound, original);
+        }
+        for zones in [
+            vec![],
+            vec![Zone::Battlefield],
+            vec![Zone::Stack],
+            vec![Zone::Exile],
+            vec![Zone::Graveyard, Zone::Battlefield],
+            vec![Zone::Hand, Zone::Exile],
+        ] {
+            let mut filter = zoned(zones);
+            let original = filter.clone();
+            assert!(!typed_filter_is_owner_scoped(&filter));
+            assert!(bind_declaring_owner_authority(&mut filter, PlayerId(0)));
+            assert_eq!(filter, original);
+        }
+        let mut no_zone =
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You));
+        let before = no_zone.clone();
+        assert!(!typed_filter_is_owner_scoped(&no_zone));
+        assert!(bind_declaring_owner_authority(&mut no_zone, PlayerId(0)));
+        assert_eq!(no_zone, before);
+        let mut branches = TargetFilter::Or {
+            filters: vec![zoned(vec![Zone::Graveyard]), no_zone.clone()],
+        };
+        assert!(
+            !typed_filter_is_owner_scoped(&branches),
+            "another branch cannot lend its zone"
+        );
+        assert!(bind_declaring_owner_authority(&mut branches, PlayerId(0)));
+        let TargetFilter::Or { filters } = branches else {
+            unreachable!()
+        };
+        let TargetFilter::Typed(tf) = &filters[0] else {
+            unreachable!()
+        };
+        assert_eq!(
+            tf.controller,
+            Some(ControllerRef::SpecificPlayer { id: PlayerId(0) })
+        );
+        assert_eq!(filters[1], no_zone);
+        // A zone in a quantity does not make its outer controller owner-relative.
+        let mut quantity_only = TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::Cmc {
+                    comparator: Comparator::GE,
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: zoned(vec![Zone::Graveyard]),
+                        },
+                    },
+                }]),
+        );
+        assert!(!typed_filter_is_owner_scoped(&quantity_only));
+        assert!(bind_declaring_owner_authority(
+            &mut quantity_only,
+            PlayerId(0)
+        ));
+        let TargetFilter::Typed(tf) = quantity_only else {
+            unreachable!()
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        let FilterProp::Cmc {
+            value:
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::ObjectCount {
+                            filter: TargetFilter::Typed(inner),
+                        },
+                },
+            ..
+        } = &tf.properties[0]
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            inner.controller,
+            Some(ControllerRef::SpecificPlayer { id: PlayerId(0) })
+        );
+    }
+
+    #[test]
+    fn explicit_you_ownership_callback_preserves_chosen_type_node_contract() {
+        let mut filter = TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![
+                    FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    },
+                    FilterProp::IsChosenCardType,
+                ]),
+        );
+        assert!(retarget_chosen_card_type_to_creature_type(&mut filter));
+        let TargetFilter::Typed(tf) = filter else {
+            unreachable!()
+        };
+        assert_eq!(
+            tf.controller,
+            Some(ControllerRef::You),
+            "chosen-type client uses no-op node callback"
+        );
+        assert_eq!(
+            tf.properties,
+            vec![
+                FilterProp::InZone {
+                    zone: Zone::Graveyard
+                },
+                FilterProp::IsChosenCreatureType
+            ]
+        );
+    }
+
+    // CR 109.5 + CR 108.3: bind only the declaring ability's explicit ownership reference.
+    #[test]
+    fn explicit_you_ownership_binding_preserves_every_nested_carrier_and_other_authority() {
+        use crate::types::ability::{PlayerRelation, SharedQuality, SharedQualityRelation};
+        use crate::types::identifiers::TrackedSetId;
+
+        let cases = |owner: ControllerRef, canonical: bool| {
+            let owned = || {
+                TargetFilter::Typed(
+                    TypedFilter::creature()
+                        .controller(if canonical {
+                            owner.clone()
+                        } else {
+                            ControllerRef::TargetPlayer
+                        })
+                        .properties(vec![
+                            FilterProp::Owned {
+                                controller: owner.clone(),
+                            },
+                            FilterProp::Owned {
+                                controller: ControllerRef::ScopedPlayer,
+                            },
+                            FilterProp::Owned {
+                                controller: ControllerRef::SourceChosenPlayer,
+                            },
+                            FilterProp::Owned {
+                                controller: ControllerRef::TargetOpponent,
+                            },
+                            FilterProp::InZone {
+                                zone: Zone::Graveyard,
+                            },
+                        ]),
+                )
+            };
+            let controls = |filter| PlayerFilter::ControlsCount {
+                relation: PlayerRelation::Controller,
+                filter,
+                comparator: Comparator::GE,
+                count: Box::new(QuantityExpr::Fixed { value: 1 }),
+            };
+            vec![
+                owned(),
+                TargetFilter::And {
+                    filters: vec![TargetFilter::Any, owned()],
+                },
+                TargetFilter::Or {
+                    filters: vec![TargetFilter::None, owned()],
+                },
+                TargetFilter::Not {
+                    filter: Box::new(owned()),
+                },
+                TargetFilter::TrackedSetFiltered {
+                    id: TrackedSetId(7),
+                    filter: Box::new(owned()),
+                    caused_by: None,
+                },
+                TargetFilter::ChosenDamageSource {
+                    filter: Some(Box::new(owned())),
+                },
+                TargetFilter::PlayerMatching {
+                    player: Box::new(controls(owned())),
+                },
+                TargetFilter::PlayerMatching {
+                    player: Box::new(PlayerFilter::TrackedSetPossessor {
+                        relation: PlayerRelation::Controller,
+                        possession: crate::types::ability::PossessionAxis::Controller,
+                        filter: owned(),
+                        caused_by: None,
+                    }),
+                },
+                TargetFilter::PlayerMatching {
+                    player: Box::new(PlayerFilter::AllExcept {
+                        exclude: Box::new(controls(owned())),
+                    }),
+                },
+                TargetFilter::Typed(
+                    TypedFilter::creature()
+                        .controller(ControllerRef::You)
+                        .properties(vec![
+                            FilterProp::CanEnchant {
+                                target: Box::new(owned()),
+                            },
+                            FilterProp::DifferentNameFrom {
+                                filter: Box::new(owned()),
+                            },
+                            FilterProp::DistinctFrom {
+                                reference: Box::new(owned()),
+                            },
+                            FilterProp::SharesQuality {
+                                quality: SharedQuality::Color,
+                                reference: Some(Box::new(owned())),
+                                relation: SharedQualityRelation::default(),
+                            },
+                            FilterProp::Targets {
+                                filter: Box::new(owned()),
+                            },
+                            FilterProp::TargetsOnly {
+                                filter: Box::new(owned()),
+                            },
+                            FilterProp::Not {
+                                prop: Box::new(FilterProp::Owned {
+                                    controller: owner.clone(),
+                                }),
+                            },
+                            FilterProp::AnyOf {
+                                props: vec![
+                                    FilterProp::Token,
+                                    FilterProp::Owned {
+                                        controller: owner.clone(),
+                                    },
+                                ],
+                            },
+                            FilterProp::ControllerMatches {
+                                player: Box::new(controls(owned())),
+                            },
+                            FilterProp::DealtDamageThisTurn {
+                                kind: DamageKindFilter::Any,
+                                recipient: Some(PlayerFilter::OpponentDealtDamage {
+                                    kind: DamageKindFilter::Any,
+                                    source: Some(Box::new(owned())),
+                                    min_sources: 1,
+                                }),
+                            },
+                        ]),
+                ),
+                TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Cmc {
+                    comparator: Comparator::GE,
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { filter: owned() },
+                    },
+                }])),
+                TargetFilter::PlayerMatching {
+                    player: Box::new(PlayerFilter::PlayerAttribute {
+                        relation: PlayerRelation::All,
+                        attr: Box::new(QuantityRef::ObjectCount { filter: owned() }),
+                        comparator: Comparator::GE,
+                        value: Box::new(QuantityExpr::Ref {
+                            qty: QuantityRef::ObjectCount { filter: owned() },
+                        }),
+                    }),
+                },
+            ]
+        };
+        for canonical in [false, true] {
+            let mut actual = cases(ControllerRef::You, canonical);
+            let expected = cases(ControllerRef::SpecificPlayer { id: PlayerId(0) }, canonical);
+            for (filter, expected) in actual.iter_mut().zip(expected) {
+                assert!(filter_contains_filter_prop(filter, &|prop| matches!(
+                    prop,
+                    FilterProp::Owned {
+                        controller: ControllerRef::You
+                    }
+                )));
+                assert!(bind_declaring_owner_authority(filter, PlayerId(0)));
+                assert_eq!(*filter, expected, "only original owner leaves change");
+                assert!(filter_contains_filter_prop(filter, &|prop| matches!(
+                    prop,
+                    FilterProp::Owned {
+                        controller: ControllerRef::SpecificPlayer { id: PlayerId(0) }
+                    }
+                )));
+                assert!(!filter_contains_filter_prop(filter, &|prop| matches!(
+                    prop,
+                    FilterProp::Owned {
+                        controller: ControllerRef::You
+                    }
+                )));
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_you_ownership_binding_is_transactional_at_population_budget() {
+        use crate::types::ability::{CardTypeSetSource, UNION_DEPTH_BUDGET};
+        let owned = |owner: ControllerRef| {
+            TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(owner.clone())
+                    .properties(vec![
+                        FilterProp::InAnyZone {
+                            zones: vec![Zone::Hand, Zone::Graveyard],
+                        },
+                        FilterProp::Owned { controller: owner },
+                    ]),
+            )
+        };
+        let population = |depth, owner: ControllerRef| {
+            let mut source = CardTypeSetSource::Objects {
+                filter: owned(owner.clone()),
+            };
+            for _ in 0..depth {
+                source = CardTypeSetSource::any_of(vec![
+                    source,
+                    CardTypeSetSource::Objects {
+                        filter: owned(owner.clone()),
+                    },
+                ])
+                .unwrap();
+            }
+            TargetFilter::And {
+                filters: vec![
+                    owned(owner),
+                    TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                        FilterProp::Cmc {
+                            comparator: Comparator::GE,
+                            value: QuantityExpr::Ref {
+                                qty: QuantityRef::DistinctCardTypes { source },
+                            },
+                        },
+                    ])),
+                ],
+            }
+        };
+        let mut within = population(2, ControllerRef::You);
+        assert!(bind_declaring_owner_authority(&mut within, PlayerId(0)));
+        assert_eq!(
+            within,
+            population(2, ControllerRef::SpecificPlayer { id: PlayerId(0) })
+        );
+        let mut rejected = population(UNION_DEPTH_BUDGET, ControllerRef::You);
+        let before = rejected.clone();
+        let TargetFilter::And { filters } = &rejected else {
+            unreachable!()
+        };
+        assert!(
+            filter_contains_filter_prop(&filters[0], &|prop| matches!(
+                prop,
+                FilterProp::Owned {
+                    controller: ControllerRef::You
+                }
+            )),
+            "visible rewritable sibling guards rejection reach"
+        );
+        assert!(!bind_declaring_owner_authority(&mut rejected, PlayerId(0)));
+        assert_eq!(rejected, before, "no reachable prefix is published");
+        let mut other = owned(ControllerRef::TargetPlayer);
+        let before = other.clone();
+        assert!(bind_declaring_owner_authority(&mut other, PlayerId(0)));
+        assert_eq!(other, before, "a complete unrelated owner stays untouched");
+    }
+
     /// The chosen-type relation rewrites a property wherever the typed filter
     /// grammar can nest it. Every positive is paired with a read before and
     /// after the rewrite, so an omitted target/property/player crossing cannot
@@ -16397,6 +16888,7 @@ mod tests {
                 &filter,
                 &ctx,
                 Some(3),
+                None,
             ),
             "the original triggering incarnation is not another object"
         );
@@ -16408,6 +16900,7 @@ mod tests {
                 &filter,
                 &ctx,
                 Some(4),
+                None,
             ),
             "a later incarnation at the same storage id is another object"
         );
@@ -18551,6 +19044,7 @@ mod tests {
                 display_source: crate::game::game_object::DisplaySource::Token,
                 printed_ref: None,
                 token_image_ref: None,
+                token_art: None,
                 extra_keywords: vec![],
                 additional_modifications: vec![],
                 tapped: false,

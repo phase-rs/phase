@@ -278,6 +278,8 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
             card_face.attraction_lights.clone()
         };
     }
+    // Face install rewrites the printed base: restore the derived art baseline.
+    obj.restore_token_art_baseline();
 }
 
 pub fn apply_card_face_to_back_face(back_face: &mut BackFaceData, card_face: &CardFace) {
@@ -379,6 +381,8 @@ pub fn apply_back_face_to_object(obj: &mut GameObject, back_face: BackFaceData) 
     // directions matter and both are this one line: a back face the parser could
     // not fully read starts gating here, and transforming back off it stops.
     obj.parse_warnings = back_face.parse_warnings;
+    // Face swap rewrites the printed base: restore the derived art baseline.
+    obj.restore_token_art_baseline();
 }
 
 /// CR 400.7 + CR 712.8a (#7565): swap the object's live face with its stored

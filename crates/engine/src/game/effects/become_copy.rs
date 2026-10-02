@@ -8,7 +8,7 @@ use crate::types::ability::{
     ContinuousModification, CopiableValues, CopyRecipient, Duration, Effect, EffectError,
     EffectKind, ResolvedAbility, StaticDefinition, TargetFilter, TargetRef,
 };
-use crate::types::card::{PrintedCardRef, PrintedLoyalty, TokenImageRef};
+use crate::types::card::{PrintedCardRef, PrintedLoyalty, TokenArtDescriptor, TokenImageRef};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     GameState, PendingCounterAddition, PendingEffectResolved, TransientContinuousEffectBindings,
@@ -77,17 +77,19 @@ pub fn resolve(
     // `display_source` + `token_image_ref` too, otherwise a copy-of-token (e.g.
     // Mockingbird copying a Rabbit token) is stranded on the real-card name path
     // for a name that has no real-card printing and renders blank.
-    let (source_display_source, source_printed_ref, source_token_image_ref) = state
-        .objects
-        .get(&target_id)
-        .map(|o| {
-            (
-                o.display_source,
-                o.printed_ref.clone(),
-                o.token_image_ref.clone(),
-            )
-        })
-        .unwrap_or_default();
+    let (source_display_source, source_printed_ref, source_token_image_ref, source_token_art) =
+        state
+            .objects
+            .get(&target_id)
+            .map(|o| {
+                (
+                    o.display_source,
+                    o.printed_ref.clone(),
+                    o.token_image_ref.clone(),
+                    o.token_art.clone(),
+                )
+            })
+            .unwrap_or_default();
 
     let copy = PrecomputedCopyValues {
         source_id: ability.source_id,
@@ -98,6 +100,7 @@ pub fn resolve(
         display_source: source_display_source,
         printed_ref: source_printed_ref,
         token_image_ref: source_token_image_ref,
+        token_art: source_token_art,
         additional_modifications,
         effect_kind: EffectKind::from(&ability.effect),
     };
@@ -119,6 +122,7 @@ pub(crate) struct PrecomputedCopyValues {
     pub display_source: DisplaySource,
     pub printed_ref: Option<PrintedCardRef>,
     pub token_image_ref: Option<TokenImageRef>,
+    pub token_art: Option<TokenArtDescriptor>,
     pub additional_modifications: Vec<ContinuousModification>,
     pub effect_kind: EffectKind,
 }
@@ -142,6 +146,7 @@ pub(crate) fn apply_precomputed_copy_values(
         display_source,
         printed_ref,
         token_image_ref,
+        token_art,
         additional_modifications,
         effect_kind,
     } = copy;
@@ -229,6 +234,7 @@ pub(crate) fn apply_precomputed_copy_values(
         display_source,
         printed_ref,
         token_image_ref,
+        token_art,
     }];
     if !folded {
         modifications.extend(legacy_layered_modifications.into_iter().cloned());
@@ -1209,6 +1215,58 @@ mod tests {
             "the copier's own printed identity is restored"
         );
         assert_eq!(reverted.name, "Mockingbird");
+    }
+
+    #[test]
+    fn copy_of_token_carries_source_art_descriptor_and_reverts() {
+        // Token-source analog of the Mockingbird row above for the
+        // ref-LESS case: the source token has no exact `token_image_ref`,
+        // so the copy must ride the source's intrinsic `token_art`
+        // descriptor (not its own stale/absent one) — and drop it when
+        // the copy expires.
+        let mut state = GameState::new_two_player(42);
+
+        let source_art = TokenArtDescriptor {
+            power: Some(2),
+            toughness: Some(2),
+            colors: vec![ManaColor::Green],
+            subtypes: vec!["Bear".to_string()],
+            keywords: vec![],
+            has_abilities: false,
+        };
+        let token_id = create_creature(&mut state, 1, PlayerId(0), "Bear", 2, 2);
+        {
+            let token = state.objects.get_mut(&token_id).unwrap();
+            token.is_token = true;
+            token.display_source = crate::game::game_object::DisplaySource::Token;
+            token.token_image_ref = None;
+            token.token_art = Some(source_art.clone());
+        }
+        let copier_id = create_creature(&mut state, 2, PlayerId(0), "Mockingbird", 1, 1);
+
+        let mut events = Vec::new();
+        let ability = make_copy_ability(
+            token_id,
+            copier_id,
+            PlayerId(0),
+            Some(Duration::UntilEndOfTurn),
+        );
+        resolve(&mut state, &ability, &mut events).unwrap();
+        evaluate_layers(&mut state);
+
+        let copy = &state.objects[&copier_id];
+        assert_eq!(
+            copy.token_art,
+            Some(source_art),
+            "the copy renders from the source token's intrinsic body"
+        );
+
+        execute_cleanup(&mut state, &mut events);
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects[&copier_id].token_art, None,
+            "a nontoken carries no art body of its own after revert"
+        );
     }
 
     #[test]

@@ -5003,13 +5003,14 @@ fn create_entry_copy_spec_for_replacement(
     else {
         return None;
     };
-    let (values, display_source, printed_ref, token_image_ref) =
+    let (values, display_source, printed_ref, token_image_ref, token_art) =
         if let Some(source) = state.objects.get(copy_source) {
             (
                 crate::game::layers::compute_current_copiable_values(state, *copy_source)?,
                 source.display_source,
                 source.printed_ref.clone(),
                 source.token_image_ref.clone(),
+                source.token_art.clone(),
             )
         } else {
             let values = state.lki_copiable_values.get(copy_source)?.clone();
@@ -5026,6 +5027,9 @@ fn create_entry_copy_spec_for_replacement(
                 },
                 None,
                 lki.and_then(|snapshot| snapshot.token_image_ref.clone()),
+                // `LKISnapshot` is filter-shaped and carries no descriptor;
+                // the recipient falls back to its live (copied) fields.
+                None,
             )
         };
     Some(CopyTokenSpec {
@@ -5033,6 +5037,7 @@ fn create_entry_copy_spec_for_replacement(
         display_source,
         printed_ref,
         token_image_ref,
+        token_art,
         extra_keywords: Vec::new(),
         additional_modifications: additional_modifications.clone(),
         tapped: false,
@@ -6450,6 +6455,7 @@ fn replacement_condition_quantity_ctx(
         scoped_player,
         damage_source: None,
         event_amount,
+        spell: None,
     }
 }
 
@@ -9251,6 +9257,7 @@ fn extract_etb_counters_from_effect(
                 scoped_player: None,
                 damage_source: None,
                 event_amount: None,
+                spell: None,
             };
             let n = match count {
                 QuantityExpr::Fixed { value } => (*value).max(0) as u32,
@@ -9289,6 +9296,7 @@ fn extract_etb_counters_from_effect(
                     scoped_player: None,
                     damage_source: None,
                     event_amount: None,
+                    spell: None,
                 };
                 let n =
                     crate::game::quantity::resolve_quantity_with_ctx(state, count, controller, ctx)

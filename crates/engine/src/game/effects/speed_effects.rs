@@ -336,6 +336,7 @@ pub(crate) fn players_for_filter(
                             recipient: None,
                             scoped_player: Some(player.id),
                             damage_source: None,
+                            spell: None,
                             event_amount: None,
                         },
                     );

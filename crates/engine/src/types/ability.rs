@@ -9,7 +9,7 @@ use serde::ser::SerializeStructVariant;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
-use super::card::{PrintedCardRef, PrintedLoyalty, TokenImageRef};
+use super::card::{PrintedCardRef, PrintedLoyalty, TokenArtDescriptor, TokenImageRef};
 use super::card_type::{CardType, CoreType, SubtypeSet, Supertype};
 use super::counter::{CounterMatch, CounterType};
 use super::events::BendingType;
@@ -24,7 +24,7 @@ use super::keywords::{Keyword, KeywordKind};
 use super::mana::{
     AbilityActivationScope, ManaColor, ManaCost, ManaType, SpellCostCriterion, ZoneSpend,
 };
-use super::phase::{Phase, PhaseGroup};
+use super::phase::{Phase, PhaseGroup, TurnSegment};
 use super::player::{PlayerCounterKind, PlayerId};
 use super::proposed_event::AppliedReplacementKey;
 use super::replacements::ReplacementEvent;
@@ -9211,6 +9211,14 @@ pub enum QuantityRef {
     /// source set. Covers zone cards, linked-exile cards, and matching objects
     /// without proliferating card-type-count siblings.
     DistinctCardTypes { source: CardTypeSetSource },
+    /// CR 205.2a + CR 607.2a: Count the distinct card types the SOURCE object
+    /// (for a cast-time cost modifier, the spell being cost-modified) shares
+    /// with the population named by `source`. Distinct from
+    /// [`QuantityRef::DistinctCardTypes`], which counts every distinct type in
+    /// the population regardless of the source's own types — this is the
+    /// intersection the "they share with" wording requires (Cemetery Prowler:
+    /// "for each card type they share with cards exiled with ~").
+    SharedCardTypes { source: CardTypeSetSource },
     /// CR 205.3: Count distinct subtype *values* across a
     /// parameterized source set (Subgoyf — "the number of different subtypes
     /// other than creature types among cards in all graveyards"). The subtype
@@ -9933,6 +9941,7 @@ impl QuantityRef {
             | QuantityRef::TargetZoneCardCount { .. }
             | QuantityRef::Devotion { .. }
             | QuantityRef::DistinctCardTypes { .. }
+            | QuantityRef::SharedCardTypes { .. }
             | QuantityRef::DistinctSubtypes { .. }
             | QuantityRef::CardsExiledBySource
             | QuantityRef::ExiledCardPower { .. }
@@ -15725,8 +15734,11 @@ impl StepSkipTarget {
 }
 
 /// CR 500.8 + CR 500.9 + CR 500.10: where an added phase or step is inserted.
-/// `ThisStep` and `ThisPhase` are resolved when the effect resolves, against
-/// the step it resolves in; `FirstOfTurn`, against the steps begun this turn.
+/// `ThisStep` and `ThisPhase` are resolved when the effect resolves:
+/// `ThisStep` against the step it resolves in, `ThisPhase` against the phase in
+/// progress, which the added-unit records decide (CR 500.9: an added step is
+/// part of its phase; CR 500.10: a created phase ends with its one step);
+/// `FirstOfTurn`, against the steps begun this turn.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum ExtraPhaseAnchor {
@@ -15758,6 +15770,42 @@ impl ExtraPhaseAnchor {
     pub fn this_main_phase() -> Self {
         Self::ThisPhase {
             named: Some(vec![PhaseGroup::PrecombatMain, PhaseGroup::PostcombatMain]),
+        }
+    }
+}
+
+/// CR 500.10a: who gets an added step or phase, one kind per way the text
+/// names it. The parser chooses the kind from the subject; the resolver's
+/// own-turn gate matches every kind by name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum ExtraPhaseRecipient {
+    /// "There is / are an additional …" names no player, so the step or phase
+    /// is added to the turn in progress.
+    NoPlayer,
+    /// "You get": the effect's controller.
+    Controller,
+    /// "That player gets" in a triggered ability (Paradox Haze): the player
+    /// the trigger event names.
+    TriggeringPlayer,
+    /// "Target player / target opponent gets": a player target announced with
+    /// the spell or ability (CR 115.1) and re-checked at resolution
+    /// (CR 608.2b). The filter is that target's.
+    TargetedPlayer(TargetFilter),
+}
+
+impl ExtraPhaseRecipient {
+    /// The `TargetFilter` that spells this recipient, for the walkers keyed on
+    /// `TargetFilter`: target-slot surfacing (`Effect::target_filter`),
+    /// event-context hydration, the declined-"if you do" referent audit, the
+    /// read/write and axis scans, and the coverage display. `NoPlayer` is
+    /// `TargetFilter::None`. The resolver never reads the recipient through it.
+    pub fn as_target_filter(&self) -> &TargetFilter {
+        match self {
+            Self::NoPlayer => &TargetFilter::None,
+            Self::Controller => &TargetFilter::Controller,
+            Self::TriggeringPlayer => &TargetFilter::TriggeringPlayer,
+            Self::TargetedPlayer(filter) => filter,
         }
     }
 }
@@ -19916,25 +19964,29 @@ pub enum Effect {
         #[serde(default)]
         scope: SkipScope,
     },
-    /// CR 500.8: Add an additional step or phase after the specified anchor phase.
+    /// CR 500.8 + CR 500.9 + CR 500.10: Add an additional step or phase after
+    /// the specified anchor. `segment` is what is added — a whole phase, a
+    /// phase created to hold one step, or a step added to the phase in
+    /// progress — as the text words it.
     /// Uses a LIFO stack on GameState.extra_phases. `followed_by` entries are pushed
-    /// before `phase`, so "additional combat followed by an additional main phase"
+    /// before `segment`, so "additional combat followed by an additional main phase"
     /// resolves in printed order while preserving CR 500.8 LIFO ordering.
-    /// CR 500.10a: Only adds steps/phases to the affected player's own turn.
+    /// CR 500.10a: `recipient` says who gets it; a player's grant adds only to
+    /// that player's own turn.
     /// `count` resolves at resolution time so dynamic quantities such as Obeka,
     /// Splitter of Seconds' "that many additional upkeep steps" thread the
     /// triggering event amount through `QuantityRef::EventContextAmount`. Legacy
     /// callers and explicit "an additional" wording deserialize to a Fixed 1.
     /// `after` is the CR 500.8/500.9/500.10 insertion point, resolved at
-    /// resolution time by `additional_phase::resolve`; `ThisStep`/`ThisPhase` are
-    /// relative to the step the effect resolves in.
+    /// resolution time by `additional_phase::resolve`; `ThisStep` is the step the
+    /// effect resolves in, and `ThisPhase` is the phase in progress
+    /// (`turns::final_step_of_phase_in_progress`).
     AdditionalPhase {
-        #[serde(default = "default_target_filter_controller")]
-        target: TargetFilter,
-        phase: Phase,
+        recipient: ExtraPhaseRecipient,
+        segment: TurnSegment,
         after: ExtraPhaseAnchor,
         #[serde(default)]
-        followed_by: Vec<Phase>,
+        followed_by: Vec<TurnSegment>,
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
         /// CR 508.1c + CR 611.2c: Optional attacker restriction for the combat
@@ -21975,7 +22027,6 @@ impl Effect {
             | Effect::GrantExtraLoyaltyActivations { target, .. }
             | Effect::SkipNextTurn { target, .. }
             | Effect::SkipNextStep { target, .. }
-            | Effect::AdditionalPhase { target, .. }
             | Effect::Double { target, .. }
             | Effect::SetLifeTotal { target, .. }
             | Effect::GiveControl { target, .. }
@@ -22006,6 +22057,11 @@ impl Effect {
                 recipient: EachDamageRecipient::Shared(filter),
                 ..
             } => Some(filter),
+
+            // CR 115.1 + CR 608.2b: a targeted-player recipient surfaces its
+            // target slot here; the other kinds surface a filter that claims
+            // no slot (`None`, `Controller`, `TriggeringPlayer`).
+            Effect::AdditionalPhase { recipient, .. } => Some(recipient.as_target_filter()),
 
             Effect::CombineHost { host, .. }
             | Effect::ChooseAugmentAndCombineWithHost { host, .. } => Some(host.as_ref()),
@@ -27086,6 +27142,10 @@ pub enum AbilityCondition {
     /// incarnation. Unlike an intervening-if, this is checked only while the
     /// effect resolves.
     TriggerEventTargetDamagedBySourceThisTurn,
+    /// CR 702.110b + CR 608.2c + CR 400.7: Resolution-time rider on a dies trigger:
+    /// the source creature exploited the triggering creature (the creature whose
+    /// death fired this trigger).
+    TriggerEventTargetExploitedBySource,
     /// CR 702.33d + CR 702.33f + CR 608.2c: An optional additional cost was paid
     /// during casting. Parameterized for kicker variant gating:
     ///
@@ -27685,6 +27745,7 @@ impl AbilityCondition {
                 .iter()
                 .any(|condition| matches!(condition, AbilityCondition::WhenYouDo)),
             AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
+            | AbilityCondition::TriggerEventTargetExploitedBySource
             | AbilityCondition::AdditionalCostPaidInstead
             | AbilityCondition::AlternativeManaCostPaid
             | AbilityCondition::EffectOutcome { .. }
@@ -27819,6 +27880,7 @@ impl AbilityCondition {
                     | EffectOutcomeSignal::RevealUntilMatched,
             } => false,
             AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
+            | AbilityCondition::TriggerEventTargetExploitedBySource
             | AbilityCondition::AdditionalCostPaidInstead
             | AbilityCondition::AlternativeManaCostPaid
             | AbilityCondition::EventOutcomeWon
@@ -32209,6 +32271,12 @@ pub enum ContinuousModification {
         /// `None` for printed-card sources.
         #[serde(default)]
         token_image_ref: Option<TokenImageRef>,
+        /// Intrinsic token-art body of the source, carried so a copy of a
+        /// token without an exact ref still renders from the source's shape
+        /// rather than the recipient's stale descriptor. `None` for
+        /// printed-card sources and pre-descriptor snapshots.
+        #[serde(default)]
+        token_art: Option<TokenArtDescriptor>,
     },
     /// CR 707.2c + CR 613.1a: Parse-time MARKER for the static ability
     /// "enchanted creature is a copy of the chosen creature" (Metamorphic
@@ -33048,6 +33116,13 @@ pub struct ResolvedAbility {
     /// overwrites it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub illegal_target_slots: Vec<usize>,
+    /// CR 608.2b: This node's target-vector indices removed by the initial
+    /// legality check for the current resolution. Unlike `illegal_target_slots`,
+    /// these are local pre-compaction indices, not declared-chain identities.
+    /// The resolution boundary overwrites this metadata before execution; target
+    /// propagation only uses its presence to avoid refilling an emptied node.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub illegal_local_target_slots: Vec<usize>,
     pub controller: PlayerId,
     /// CR 109.5: The controller of the spell or ability before any
     /// resolution-time player-scope iteration rebinds the acting player.
@@ -33432,6 +33507,7 @@ impl PartialEq for ResolvedAbility {
             activation_cost_reduction: a_activation_cost_reduction,
             activation_record: a_activation_record,
             illegal_target_slots: a_illegal_target_slots,
+            illegal_local_target_slots: a_illegal_local_target_slots,
             controller: a_controller,
             original_controller: a_original_controller,
             scoped_player: a_scoped_player,
@@ -33501,6 +33577,7 @@ impl PartialEq for ResolvedAbility {
             activation_cost_reduction: b_activation_cost_reduction,
             activation_record: b_activation_record,
             illegal_target_slots: b_illegal_target_slots,
+            illegal_local_target_slots: b_illegal_local_target_slots,
             controller: b_controller,
             original_controller: b_original_controller,
             scoped_player: b_scoped_player,
@@ -33570,6 +33647,7 @@ impl PartialEq for ResolvedAbility {
             && a_activation_cost_reduction == b_activation_cost_reduction
             && a_activation_record == b_activation_record
             && a_illegal_target_slots == b_illegal_target_slots
+            && a_illegal_local_target_slots == b_illegal_local_target_slots
             && a_controller == b_controller
             && a_original_controller == b_original_controller
             && a_scoped_player == b_scoped_player
@@ -33973,6 +34051,7 @@ impl ResolvedAbility {
             activation_cost_reduction: None,
             activation_record: None,
             illegal_target_slots: Vec::new(),
+            illegal_local_target_slots: Vec::new(),
             modal: None,
             mode_abilities: Vec::new(),
             parent_target_missing_reason: None,
@@ -38117,8 +38196,8 @@ mod tests {
         assert_eq!(ability, deserialized);
     }
 
-    /// CR 608.2b: a resolution carrier's illegal-slot stamp survives a
-    /// persist/restore round trip, and an unstamped ability omits the field.
+    /// CR 608.2b: resolution legality stamps survive a persist/restore round
+    /// trip, while unstamped abilities omit both fields.
     #[test]
     fn resolved_ability_illegal_target_slots_roundtrip() {
         let mut ability = ResolvedAbility::new(
@@ -38134,14 +38213,25 @@ mod tests {
         );
         let unstamped = serde_json::to_string(&ability).unwrap();
         assert!(
-            !unstamped.contains("illegal_target_slots"),
-            "an empty stamp is not serialized"
+            !unstamped.contains("illegal_target_slots")
+                && !unstamped.contains("illegal_local_target_slots"),
+            "empty stamps are not serialized"
         );
 
         ability.illegal_target_slots = vec![1];
+        let legacy_json = serde_json::to_string(&ability).unwrap();
+        let legacy: ResolvedAbility = serde_json::from_str(&legacy_json).unwrap();
+        assert_eq!(legacy.illegal_target_slots, vec![1]);
+        assert!(
+            legacy.illegal_local_target_slots.is_empty(),
+            "a legacy payload without the local stamp defaults empty"
+        );
+
+        ability.illegal_local_target_slots = vec![0];
         let json = serde_json::to_string(&ability).unwrap();
         let deserialized: ResolvedAbility = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.illegal_target_slots, vec![1]);
+        assert_eq!(deserialized.illegal_local_target_slots, vec![0]);
         assert_eq!(ability, deserialized);
     }
 

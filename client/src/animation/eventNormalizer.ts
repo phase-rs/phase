@@ -54,6 +54,15 @@ const NON_VISUAL_EVENTS = new Set([
   "CoinFlipped",
 ]);
 
+/** Whether an event produces no visual output. CR 605.3b: a mana ability's
+ *  activation is presented like the mana it adds (`ManaAdded` is non-visual),
+ *  so tapping a land plays no ability-activation step or sound. The `kind`
+ *  field is supplied by the engine. */
+function isNonVisualEvent(event: GameEvent): boolean {
+  return NON_VISUAL_EVENTS.has(event.type)
+    || (event.type === "AbilityActivated" && event.data.kind === "Mana");
+}
+
 /** Events that always begin a new step, regardless of context. */
 const OWN_STEP_TYPES = new Set([
   "SpellCast",
@@ -117,7 +126,7 @@ function destructionOfMove(events: GameEvent[], index: number): { type: Destruct
   if (!leavesBattlefield(move)) return null;
   for (let nextIndex = index + 1; nextIndex < events.length; nextIndex++) {
     const next = events[nextIndex];
-    if (NON_VISUAL_EVENTS.has(next.type) || (move.data.to === "Library" && libraryShuffle(next))) continue;
+    if (isNonVisualEvent(next) || (move.data.to === "Library" && libraryShuffle(next))) continue;
     if ((next.type === "CreatureDestroyed" || next.type === "PermanentSacrificed")
       && next.data.object_id === move.data.object_id) return { type: next.type, index: nextIndex };
     return null;
@@ -891,7 +900,7 @@ export function normalizeEvents(
 
     const event = events[index];
     const isAnnouncement = event.type === "StackPushed" && announcements.has(event.data.object_id);
-    if (NON_VISUAL_EVENTS.has(event.type) && !isAnnouncement) continue;
+    if (isNonVisualEvent(event) && !isAnnouncement) continue;
 
     const effect = toEffect(event, pacingMultipliers);
 

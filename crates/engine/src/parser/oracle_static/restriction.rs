@@ -2032,6 +2032,7 @@ pub(crate) fn try_parse_graveyard_cast_permission(
                 extra_cost: None,
                 enters_with_counter: None,
                 required_cast_keyword: None,
+                pool: GraveyardPermissionPool::OwnGraveyard,
             })
             .affected(affected)
             .condition(StaticCondition::DuringYourTurn)
@@ -2297,6 +2298,7 @@ pub(crate) fn try_parse_graveyard_cast_permission(
         extra_cost,
         enters_with_counter,
         required_cast_keyword,
+        pool: GraveyardPermissionPool::OwnGraveyard,
     })
     .affected(affected)
     .description(text.to_string());
@@ -2822,6 +2824,7 @@ fn try_parse_disjunctive_graveyard_cast_permission(
         extra_cost: None,
         enters_with_counter: None,
         required_cast_keyword: None,
+        pool: GraveyardPermissionPool::OwnGraveyard,
     })
     .affected(affected)
     .description(text.to_string());
@@ -2868,6 +2871,7 @@ fn try_parse_unlimited_combined_graveyard_permission(
             extra_cost: None,
             enters_with_counter: None,
             required_cast_keyword: None,
+            pool: GraveyardPermissionPool::OwnGraveyard,
         })
         .affected(affected)
         .description(text.to_string()),

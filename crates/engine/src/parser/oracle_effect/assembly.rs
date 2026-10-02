@@ -41,6 +41,7 @@ use super::lower::{
     attach_cast_cost_modifier_to_prior_cast_from_zone,
     attach_graveyard_redirect_rider_to_prior_cast_from_zone,
     attach_graveyard_redirect_rider_to_prior_free_cast_from_zones,
+    attach_graveyard_redirect_rider_to_prior_graveyard_cast_grant,
     attach_land_enters_tapped_to_previous_play_from_exile, cast_cost_modifier_rider,
     chain_references_chosen_card, clone_would_transplant_gated_referent,
     consolidate_die_and_coin_defs, definition_targets_self_source,
@@ -2689,6 +2690,10 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 .unwrap_or_default()
                 .to_lowercase(),
         ) {
+            if attach_graveyard_redirect_rider_to_prior_graveyard_cast_grant(&mut defs, &dest) {
+                prev_boundary = clause_ir.boundary;
+                continue;
+            }
             if attach_graveyard_redirect_rider_to_prior_free_cast_from_zones(
                 &mut defs,
                 dest.clone(),

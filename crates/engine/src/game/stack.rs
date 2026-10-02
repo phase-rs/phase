@@ -28,8 +28,8 @@ use crate::types::zones::Zone;
 use std::collections::BTreeMap;
 
 use super::ability_utils::{
-    build_target_slots, flatten_specified_targets_in_chain, flatten_targets_in_chain,
-    illegal_declared_target_slots, validate_targets_in_chain,
+    build_target_slots, clear_illegal_local_target_slots, flatten_specified_targets_in_chain,
+    flatten_targets_in_chain, illegal_declared_target_slots, validate_targets_in_chain,
 };
 use super::effects;
 use super::targeting;
@@ -97,7 +97,7 @@ pub(super) fn finish_resolving_stack_entry(
 /// reads here as a pruned slot. No printed card combines that re-seeding with
 /// a `ParentTargetSlot` consumer; writing the seeded copy back into the carrier
 /// would make the two agree.
-fn record_illegal_target_slots(state: &mut GameState, validated: Option<&ResolvedAbility>) {
+fn record_illegal_target_slots(state: &mut GameState, validated: Option<&mut ResolvedAbility>) {
     if let Some(root) = state
         .resolving_stack_entry
         .as_mut()
@@ -1828,7 +1828,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // Only run targeting validation and effect execution when an ability exists.
     // Permanent spells with no spell ability (ability is None) skip straight to
     // zone-change handling below.
-    if let Some(ref ability) = ability {
+    if let Some(ability) = ability.as_mut() {
         // CR 608.2b + CR 115.10a: count only the targets the spell SPECIFIED, not
         // anaphoric snapshots an inheriting rider carries — see
         // `flatten_specified_targets_in_chain`. BOTH sides use it: an all-anaphoric
@@ -1855,7 +1855,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             && !bestow_reverted_at_resolution
             && !mutate_reverted_at_resolution
         {
-            let validated = validate_targets_in_chain(state, ability);
+            let mut validated = validate_targets_in_chain(state, ability);
             let legal_targets = flatten_specified_targets_in_chain(&validated);
             if targeting::check_fizzle(&original_targets, &legal_targets) {
                 // CR 608.2b: Fizzle — all targets illegal, spell is countered on resolution.
@@ -1911,10 +1911,12 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 state.resolution_source_relatch = None;
                 return;
             }
-            record_illegal_target_slots(state, Some(&validated));
+            record_illegal_target_slots(state, Some(&mut validated));
+            let _ = illegal_declared_target_slots(ability, &mut validated);
             execute_effect(state, &validated, events);
         } else {
             record_illegal_target_slots(state, None);
+            clear_illegal_local_target_slots(ability);
             execute_effect(state, ability, events);
         }
     }
@@ -3823,6 +3825,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         activation_cost_reduction: _,
         activation_record: _,
         illegal_target_slots: _, // CR 608.2b resolution legality stamp; batch candidacy is shape-only
+        illegal_local_target_slots: _, // CR 608.2b node-local legality stamp; batch candidacy is shape-only
         controller: _,
         original_controller,
         scoped_player,
@@ -4066,6 +4069,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         activation_cost_reduction: _,
         activation_record: _,
         illegal_target_slots: _, // CR 608.2b resolution legality stamp; batch candidacy is shape-only
+        illegal_local_target_slots: _, // CR 608.2b node-local legality stamp; batch candidacy is shape-only
         controller: _,
         original_controller: _,
         scoped_player,
@@ -4289,6 +4293,7 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
         activation_cost_reduction: _,
         activation_record: _,
         illegal_target_slots: _, // CR 608.2b resolution legality stamp; batch candidacy is shape-only
+        illegal_local_target_slots: _, // CR 608.2b node-local legality stamp; batch candidacy is shape-only
         controller: _,
         original_controller: _,
         scoped_player,
@@ -4835,6 +4840,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         activation_cost_reduction: a_activation_cost_reduction,
         activation_record: a_activation_record,
         illegal_target_slots: a_illegal_target_slots,
+        illegal_local_target_slots: a_illegal_local_target_slots,
     } = a;
     let ResolvedAbility {
         effect: b_effect,
@@ -4916,6 +4922,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         activation_cost_reduction: b_activation_cost_reduction,
         activation_record: b_activation_record,
         illegal_target_slots: b_illegal_target_slots,
+        illegal_local_target_slots: b_illegal_local_target_slots,
     } = b;
 
     a_effect == b_effect
@@ -4936,6 +4943,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         && a_activation_cost_reduction == b_activation_cost_reduction
         && a_activation_record == b_activation_record
         && a_illegal_target_slots == b_illegal_target_slots
+        && a_illegal_local_target_slots == b_illegal_local_target_slots
         && a_controller == b_controller
         && a_scoped_player == b_scoped_player
         && a_kind == b_kind

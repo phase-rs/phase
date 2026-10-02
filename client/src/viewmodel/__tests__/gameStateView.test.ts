@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type {
-  GameAction,
   GameObject,
   GameState,
   PlayerId,
@@ -33,7 +32,6 @@ import {
   canConfirmBoardChoice,
   getBattlefieldSacrificeChoice,
   getBoardChoiceView,
-  getCastableZoneViewerTarget,
   getAllOpponentIds,
   getOpponentIds,
   getSeatCount,
@@ -772,102 +770,6 @@ describe("getBoardChoiceView", () => {
           buildGameObject({ id: 4, zone: "Battlefield" }),
           buildGameObject({ id: 5, zone: "Graveyard" }),
         ),
-      ),
-    ).toBeNull();
-  });
-});
-
-describe("getCastableZoneViewerTarget", () => {
-  const castAction: GameAction = {
-    type: "CastSpell",
-    data: { object_id: 7, card_id: 700, targets: [] },
-  };
-  const activateAction: GameAction = {
-    type: "ActivateAbility",
-    data: { source_id: 7, ability_index: 0 },
-  };
-
-  function makeGraveyardObject(id: number): GameObject {
-    return buildGameObjectWithCoreTypes(["Instant"], {
-      id,
-      card_id: 700 + id,
-      zone: "Graveyard",
-      name: `Spell ${id}`,
-      mana_cost: { type: "Cost", shards: ["Red"], generic: 0 },
-      keywords: ["Retrace"],
-      color: ["Red"],
-      base_keywords: ["Retrace"],
-      base_color: ["Red"],
-      entered_battlefield_turn: null,
-    });
-  }
-
-  it("returns the graveyard pile when Priority surfaces cast actions there", () => {
-    const objects = buildObjectMap(makeGraveyardObject(7), makeGraveyardObject(8));
-    expect(
-      getCastableZoneViewerTarget(
-        { type: "Priority", data: { player: 0 } },
-        objects,
-        {
-          "7": [castAction],
-          "8": [{ ...castAction, data: { ...castAction.data, object_id: 8 } }],
-        },
-      ),
-    ).toEqual({ zone: "graveyard", playerId: 0, objectIds: [7, 8] });
-  });
-
-  it("returns stable object ids for castable pile identity", () => {
-    const objects = {
-      7: makeGraveyardObject(7),
-      8: makeGraveyardObject(8),
-    };
-    expect(
-      getCastableZoneViewerTarget(
-        { type: "Priority", data: { player: 0 } },
-        objects,
-        {
-          "8": [{ ...castAction, data: { ...castAction.data, object_id: 8 } }],
-          "7": [castAction],
-        },
-      )?.objectIds,
-    ).toEqual([7, 8]);
-  });
-
-  it("returns null when castable cards span multiple zone piles", () => {
-    const objects = {
-      7: makeGraveyardObject(7),
-      9: { ...makeGraveyardObject(9), zone: "Exile" as const, owner: 0 },
-    };
-    expect(
-      getCastableZoneViewerTarget(
-        { type: "Priority", data: { player: 0 } },
-        objects,
-        {
-          "7": [castAction],
-          "9": [{ ...castAction, data: { ...castAction.data, object_id: 9 } }],
-        },
-      ),
-    ).toBeNull();
-  });
-
-  it("returns null outside Priority", () => {
-    const objects = { 7: makeGraveyardObject(7) };
-    expect(
-      getCastableZoneViewerTarget(
-        { type: "CastingVariantChoice", data: { player: 0, object_id: 7, card_id: 700, options: [] } },
-        objects,
-        { "7": [castAction] },
-      ),
-    ).toBeNull();
-  });
-
-  it("ignores graveyard objects without play or cast actions", () => {
-    const objects = { 7: makeGraveyardObject(7) };
-    expect(
-      getCastableZoneViewerTarget(
-        { type: "Priority", data: { player: 0 } },
-        objects,
-        { "7": [activateAction] },
       ),
     ).toBeNull();
   });

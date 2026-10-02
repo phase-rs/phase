@@ -1806,6 +1806,12 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 )
             }
         },
+        QuantityRef::SharedCardTypes { source } => {
+            format!(
+                "card types they share with {}",
+                fmt_characteristic_population_bounded(source)
+            )
+        }
         QuantityRef::DistinctSubtypes { source, exclude } => {
             let suffix = match exclude {
                 crate::types::ability::SubtypeExclusion::CreatureTypes => {
@@ -4164,15 +4170,15 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             }
         }
         Effect::AdditionalPhase {
-            target,
-            phase,
+            recipient,
+            segment,
             after,
             followed_by,
             count,
             attacker_restriction,
         } => {
-            d.push(("player".into(), fmt_target(target)));
-            d.push(("phase".into(), format!("{phase:?}")));
+            d.push(("player".into(), fmt_target(recipient.as_target_filter())));
+            d.push(("segment".into(), format!("{segment:?}")));
             d.push(("after".into(), format!("{after:?}")));
             if !followed_by.is_empty() {
                 d.push(("followed by".into(), format!("{followed_by:?}")));
@@ -4552,6 +4558,9 @@ fn fmt_ability_condition(cond: &AbilityCondition) -> String {
     match cond {
         AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn => {
             "trigger event target was damaged by source this turn".into()
+        }
+        AbilityCondition::TriggerEventTargetExploitedBySource => {
+            "trigger event target was exploited by source".into()
         }
         AbilityCondition::AdditionalCostPaid { .. } => "additional cost was paid".into(),
         AbilityCondition::AdditionalCostPaidInstead => "additional cost was paid (instead)".into(),
@@ -5252,6 +5261,21 @@ fn static_details(stat: &StaticDefinition) -> Vec<(String, String)> {
     let mut d = Vec::new();
     if let Some(affected) = &stat.affected {
         d.push(("affects".into(), fmt_target(affected)));
+    }
+    // CR 601.2f: a cost modifier's dynamic multiplier is parse-significant but
+    // invisible to the `StaticMode` Display label ("ReduceCost"), so a change
+    // from a bare population count to an intersection count (Cemetery Prowler's
+    // `SharedCardTypes` vs an `ObjectCount`, #6898) would otherwise surface as a
+    // false "no card-parse changes detected" in the coverage parse-diff. Both
+    // cost-modifier variants that carry the axis (`ModifyCost` and
+    // `ReduceAbilityCost`) share it, so both are surfaced here.
+    let dynamic_count = match &stat.mode {
+        StaticMode::ModifyCost { dynamic_count, .. }
+        | StaticMode::ReduceAbilityCost { dynamic_count, .. } => dynamic_count.as_ref(),
+        _ => None,
+    };
+    if let Some(dynamic_count) = dynamic_count {
+        d.push(("dynamic_count".into(), fmt_quantity_ref(dynamic_count)));
     }
     // Composable modifications (GrantTrigger / GrantAbility) are emitted as
     // children, so list only the simple ones here as a joined pill.
@@ -9676,6 +9700,9 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn => {
             ("TriggerEventTargetDamagedBySourceThisTurn", Handled)
         }
+        AbilityCondition::TriggerEventTargetExploitedBySource => {
+            ("TriggerEventTargetExploitedBySource", Handled)
+        }
         AbilityCondition::AdditionalCostPaid { .. } => ("AdditionalCostPaid", Handled),
         AbilityCondition::AdditionalCostPaidInstead => ("AdditionalCostPaidInstead", Handled),
         AbilityCondition::AlternativeManaCostPaid => ("AlternativeManaCostPaid", Handled),
@@ -10023,6 +10050,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::PropertyAggregate(_) => ("PropertyAggregate", Handled),
         QuantityRef::Devotion { .. } => ("Devotion", Handled),
         QuantityRef::DistinctCardTypes { .. } => ("DistinctCardTypes", Handled),
+        QuantityRef::SharedCardTypes { .. } => ("SharedCardTypes", Handled),
         QuantityRef::DistinctSubtypes { .. } => ("DistinctSubtypes", Handled),
         QuantityRef::CardsExiledBySource => ("CardsExiledBySource", Handled),
         QuantityRef::ExiledCardPower { .. } => ("ExiledCardPower", Handled),
@@ -13635,6 +13663,83 @@ mod tests {
         }
     }
 
+    /// CR 601.2f: a cost modifier's `dynamic_count` is parse-significant but
+    /// invisible to the `StaticMode` Display label ("ReduceCost"). The coverage
+    /// receipt must surface it, or a fix that changes Cemetery Prowler's bare
+    /// `ObjectCount` to the spell/exile `SharedCardTypes` intersection (#6898)
+    /// renders as a false "no card-parse changes detected" in the parse-diff.
+    ///
+    /// Discriminating by construction: the two counts render differently, and
+    /// the no-count form emits no `dynamic_count` detail at all.
+    #[test]
+    fn modify_cost_dynamic_count_is_surfaced_in_static_details() {
+        let with_shared = StaticDefinition::new(StaticMode::ModifyCost {
+            mode: CostModifyMode::Reduce,
+            amount: ManaCost::generic(1),
+            spell_filter: None,
+            reach: CostReductionReach::SpillsToGeneric,
+            dynamic_count: Some(QuantityRef::SharedCardTypes {
+                source: CardTypeSetSource::ExiledBySource,
+            }),
+        });
+        let with_object_count = StaticDefinition::new(StaticMode::ModifyCost {
+            mode: CostModifyMode::Reduce,
+            amount: ManaCost::generic(1),
+            spell_filter: None,
+            reach: CostReductionReach::SpillsToGeneric,
+            dynamic_count: Some(QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter::card()),
+            }),
+        });
+        let no_dynamic_count = StaticDefinition::new(StaticMode::ModifyCost {
+            mode: CostModifyMode::Reduce,
+            amount: ManaCost::generic(1),
+            spell_filter: None,
+            reach: CostReductionReach::SpillsToGeneric,
+            dynamic_count: None,
+        });
+        // CR 601.2f + CR 118.7: the ability-cost sibling carries the same axis.
+        let reduce_ability = StaticDefinition::new(StaticMode::ReduceAbilityCost {
+            mode: CostModifyMode::Reduce,
+            keyword: "activated".to_string(),
+            amount: 2,
+            minimum_mana: None,
+            dynamic_count: Some(QuantityRef::SharedCardTypes {
+                source: CardTypeSetSource::ExiledBySource,
+            }),
+            exemption: crate::types::statics::ActivationExemption::None,
+            activator: None,
+            targets: None,
+            frequency: None,
+        });
+
+        let dyn_shared = super::static_details(&with_shared)
+            .into_iter()
+            .find(|(k, _)| k == "dynamic_count")
+            .expect("SharedCardTypes dynamic_count must be surfaced");
+        let dyn_object = super::static_details(&with_object_count)
+            .into_iter()
+            .find(|(k, _)| k == "dynamic_count")
+            .expect("ObjectCount dynamic_count must be surfaced");
+        assert_ne!(
+            dyn_shared.1, dyn_object.1,
+            "SharedCardTypes and ObjectCount render identically — the parse-diff \
+             would miss the change between them"
+        );
+        assert!(
+            super::static_details(&no_dynamic_count)
+                .iter()
+                .all(|(k, _)| k != "dynamic_count"),
+            "a ModifyCost with no dynamic_count must not emit the field"
+        );
+        assert!(
+            super::static_details(&reduce_ability)
+                .iter()
+                .any(|(k, _)| k == "dynamic_count"),
+            "ReduceAbilityCost carries the same dynamic_count axis and must surface it too"
+        );
+    }
+
     /// Regression for PR #8012 (Bombur, Gentle Dreamer) — maintainer review
     /// rounds 2 and 3: `extract_cant_untap_condition` falls back to
     /// `Not(Unrecognized{..})` for an anaphor-scoped `unless` tail with no
@@ -15685,6 +15790,62 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             .expect("coverage should include test card")
     }
 
+    #[test]
+    fn parser_generated_unsupported_emblem_has_canonical_red_coverage() {
+        for (oracle, supported) in [
+            (
+                "You get an emblem with \"Whenever the moon sings, draw a card.\"",
+                false,
+            ),
+            (
+                "You get an emblem with \"Your destiny is written in starlight.\"",
+                false,
+            ),
+            ("You get an emblem with \"\"", false),
+            (
+                "You get an emblem with \"Creatures you control get +1/+1.\"",
+                true,
+            ),
+        ] {
+            let parsed = crate::parser::parse_oracle_text(
+                oracle,
+                "Coverage Emblem Probe",
+                &[],
+                &["Sorcery".to_string()],
+                &[],
+            );
+            assert_eq!(parsed.abilities.len(), 1, "{oracle:?}");
+            let mut face = make_face();
+            face.name = "Coverage Emblem Probe".to_string();
+            face.oracle_text = Some(oracle.to_string());
+            face.abilities = parsed.abilities;
+            face.triggers = parsed.triggers;
+            face.static_abilities = parsed.statics;
+            face.parse_warnings = parsed.parse_warnings;
+            let card = coverage_result_for_face(face);
+            assert_eq!(card.supported, supported, "{oracle:?}: {card:?}");
+            let item = card
+                .parse_details
+                .iter()
+                .find(|item| item.category == ParseCategory::Ability)
+                .expect("parser-generated ability reaches face/database coverage");
+            assert_eq!(item.supported, supported, "{oracle:?}");
+            if supported {
+                assert_eq!(item.label, "CreateEmblem");
+                assert!(card.gap_details.is_empty());
+                assert!(item
+                    .children
+                    .iter()
+                    .any(|child| child.category == ParseCategory::Static && child.supported));
+            } else {
+                assert_eq!(item.label, "emblem_creation");
+                assert_eq!(card.gap_details.len(), 1, "{oracle:?}");
+                assert_eq!(card.gap_details[0].handler, "Effect:emblem_creation");
+                assert!(item.children.is_empty());
+            }
+        }
+    }
+
     /// Build an `AtomicCard` for a FIN Tiered spell with its real MTGJSON
     /// keyword array, so the tests exercise the production MTGJSON→face path.
     fn tiered_atomic_card(name: &str, oracle: &str, keywords: &[&str]) -> AtomicCard {
@@ -16472,6 +16633,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             extra_cost: None,
             enters_with_counter: None,
             required_cast_keyword,
+            pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
         })
         .affected(TargetFilter::Typed(
             crate::types::ability::TypedFilter::creature(),

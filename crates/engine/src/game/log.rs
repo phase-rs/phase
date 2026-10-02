@@ -1164,6 +1164,14 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             card_seg(state, *object_id),
         ],
 
+        // CR 605.3b: a mana activation is presented like the mana it produces
+        // (`TappedForMana` / `ManaAbilityProduced` are not narrated either), so
+        // the log does not gain a line per land tap.
+        GameEvent::AbilityActivated {
+            kind: crate::types::events::ActivatedAbilityKind::Mana,
+            ..
+        } => vec![],
+
         GameEvent::AbilityActivated {
             player_id,
             source_id,
@@ -3897,6 +3905,8 @@ mod tests {
             player_id: PlayerId(0),
             source_id,
             kind: Default::default(),
+            departed_source_lki: None,
+            trigger_state: crate::types::events::ActivationTriggerState::Pending,
         };
         let keyword = |source_id| GameEvent::KeywordAbilityActivated {
             ability_tag: AbilityTag::Equip,
@@ -3910,5 +3920,16 @@ mod tests {
         assert_eq!(lines(&[generic(source), keyword(other_source)]), 2);
         assert_eq!(lines(&[keyword(source)]), 1);
         assert_eq!(lines(&[generic(source)]), 1);
+
+        // CR 605.3b: a mana activation is not narrated (like `TappedForMana`),
+        // while an ordinary activation of the same source is.
+        let mana = GameEvent::AbilityActivated {
+            player_id: PlayerId(0),
+            source_id: source,
+            kind: crate::types::events::ActivatedAbilityKind::Mana,
+            departed_source_lki: None,
+            trigger_state: crate::types::events::ActivationTriggerState::Pending,
+        };
+        assert_eq!(lines(&[mana]), 0);
     }
 }

@@ -1,7 +1,7 @@
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::character::complete::{alpha1, one_of, space1};
+use nom::character::complete::{alpha1, digit1, multispace0, one_of, space1};
 use nom::combinator::{
     all_consuming, consumed, eof, fail, map, not, opt, peek, recognize, rest, value,
 };
@@ -61,16 +61,16 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
     AdditionalCostOrigin, AdditionalCostPaymentSource, AggregateFunction, AttachmentKind,
     AttackersDeclaredCountSubject, CardSelectionMode, CardTypeSetSource, CastManaObjectScope,
-    CastManaSpentMetric, CastVariantPaid, CoinFlipResult, Comparator, ControllerRef, CountScope,
-    CounterTriggerFilter, DamageAmountScope, DamageAmountThreshold, DamageChannel,
-    DamageKindFilter, DelayedTriggerCondition, DestinationConstraint, DieResultFilter, Effect,
-    EffectScope, FilterProp, ManaAbilityProducedFilter, NameStickerSet, ObjectScope,
-    OriginConstraint, ParsedCondition, PlayerFilter, PlayerRelation, PlayerScope,
-    PropertyAggregate, PtStat, PtValueScope, QuantityExpr, QuantityRef, RenownSubject,
-    SacrificeAggregateStat, SacrificeCost, SacrificeRequirement, SharedQuality, StaticCondition,
-    SubAbilityLink, TapCreaturesRequirement, TapStateChange, TargetFilter, TriggerCondition,
-    TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
-    ZoneChangeClause,
+    CastManaSpentMetric, CastVariantPaid, CoinFlipResult, CombatRelation, CombatRelationSubject,
+    Comparator, ControllerRef, CountScope, CounterTriggerFilter, DamageAmountScope,
+    DamageAmountThreshold, DamageChannel, DamageKindFilter, DelayedTriggerCondition,
+    DestinationConstraint, DieResultFilter, Effect, EffectScope, FilterProp,
+    ManaAbilityProducedFilter, NameStickerSet, ObjectScope, OriginConstraint, ParsedCondition,
+    PlayerFilter, PlayerRelation, PlayerScope, PropertyAggregate, PtStat, PtValueScope,
+    QuantityExpr, QuantityRef, RenownSubject, SacrificeAggregateStat, SacrificeCost,
+    SacrificeRequirement, SharedQuality, StaticCondition, SubAbilityLink, TapCreaturesRequirement,
+    TapStateChange, TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition,
+    TypeFilter, TypedFilter, UnlessPayModifier, ZoneChangeClause,
 };
 use crate::types::card_type::{is_land_subtype, CoreType};
 use crate::types::counter::CounterType;
@@ -549,6 +549,7 @@ fn rewrite_cost_x_in_condition(cond: &mut crate::types::ability::AbilityConditio
         AbilityCondition::Not { condition } => rewrite_cost_x_in_condition(condition),
         // Carry no `QuantityExpr` and nest no condition — nothing to bind.
         AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
+        | AbilityCondition::TriggerEventTargetExploitedBySource
         | AbilityCondition::AdditionalCostPaid { .. }
         | AbilityCondition::AdditionalCostPaidInstead
         | AbilityCondition::AlternativeManaCostPaid
@@ -2449,6 +2450,26 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
                 *execute.effect = Effect::unimplemented(
                     "cost_x_sibling_slot",
                     "X in a target-selection slot was left unbound by the cost-X rewrite",
+                );
+            }
+        }
+    }
+
+    // CR 605.1b + CR 605.4a: an activation trigger that can observe a mana
+    // ability's activation (no "that isn't a mana ability" exclusion) and whose
+    // own untargeted resolution could add mana is a triggered mana ability: it
+    // must resolve immediately, without the stack. The engine does not route
+    // `AbilityActivated` triggers inline, so this shape stays honestly
+    // unsupported rather than silently waiting for priority.
+    if def.mode == TriggerMode::AbilityActivated
+        && !trigger_condition_excludes_mana_activations(def.condition.as_ref())
+    {
+        if let Some(execute) = def.execute.as_deref_mut() {
+            if crate::game::mana_abilities::could_be_triggered_mana_ability_body(execute) {
+                *execute.effect = Effect::unimplemented(
+                    "activation_triggered_mana_ability",
+                    "a mana-producing trigger on activating a mana ability resolves \
+                     immediately (CR 605.4a)",
                 );
             }
         }
@@ -9079,6 +9100,20 @@ fn try_parse_keyword_activation_trigger(lower: &str) -> Option<(TriggerMode, Tri
     None
 }
 
+/// CR 605.1a + CR 605.1b: Does this trigger condition exclude mana-ability
+/// activations ("that isn't a mana ability" / "if it isn't a mana ability")?
+/// Such a trigger can't trigger from a mana ability's activation, so its body is
+/// never a triggered mana ability.
+fn trigger_condition_excludes_mana_activations(condition: Option<&TriggerCondition>) -> bool {
+    match condition {
+        Some(TriggerCondition::ActivatedAbilityIsNonMana) => true,
+        Some(TriggerCondition::And { conditions }) => conditions
+            .iter()
+            .any(|condition| trigger_condition_excludes_mana_activations(Some(condition))),
+        _ => false,
+    }
+}
+
 /// CR 602.1 + CR 603.2 + CR 605.1a: Parse "Whenever <player_scope> activates
 /// an ability [that isn't a mana ability]" triggers — the generic activated-
 /// ability trigger class covering Burning-Tree Shaman ("a player"),
@@ -9092,29 +9127,45 @@ fn try_parse_keyword_activation_trigger(lower: &str) -> Option<(TriggerMode, Tri
 ///   the ability"). "a player" leaves `valid_target` unset so
 ///   `valid_player_matches` accepts every player (Burning-Tree Shaman).
 /// - **non-mana qualifier**: optional " that isn't a mana ability" (CR
-///   605.1a). Sets `TriggerCondition::ActivatedAbilityIsNonMana` so the
-///   qualifier is preserved in the AST even though `GameEvent::AbilityActivated`
-///   already excludes mana abilities (CR 605.3b).
+///   605.1a). Sets `TriggerCondition::ActivatedAbilityIsNonMana`, checked
+///   against the activation event's `kind` (mana abilities emit
+///   `GameEvent::AbilityActivated` too, CR 605.3).
 ///
 /// Nesting by prefix dispatch avoids enumerating the 6-way prefix × subject
 /// permutation as separate `tag` arms.
 fn try_parse_ability_activation_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
+    /// The grammatical person of the activating subject. Only a third-person
+    /// subject ("a player", "an opponent") is the antecedent of a later "they".
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum SubjectPerson {
+        Second,
+        Third,
+    }
+
     // Pair subject with its verb conjugation: third-person-singular subjects
     // ("a player", "an opponent") take "activates"; second-person ("you")
     // takes "activate". Each arm carries the typed `valid_target` filter so
     // the activating player is matched correctly via `valid_player_matches`.
-    fn parse_subject_and_verb(input: &str) -> OracleResult<'_, Option<TargetFilter>> {
+    fn parse_subject_and_verb(
+        input: &str,
+    ) -> OracleResult<'_, (Option<TargetFilter>, SubjectPerson)> {
         alt((
             // CR 602.2a: "a player" — leave `valid_target` unset so every
             // player's activation matches (Burning-Tree Shaman).
-            value(None, tag("a player activates ")),
+            value((None, SubjectPerson::Third), tag("a player activates ")),
             value(
-                Some(TargetFilter::Typed(
-                    TypedFilter::default().controller(ControllerRef::Opponent),
-                )),
+                (
+                    Some(TargetFilter::Typed(
+                        TypedFilter::default().controller(ControllerRef::Opponent),
+                    )),
+                    SubjectPerson::Third,
+                ),
                 tag("an opponent activates "),
             ),
-            value(Some(TargetFilter::Controller), tag("you activate ")),
+            value(
+                (Some(TargetFilter::Controller), SubjectPerson::Second),
+                tag("you activate "),
+            ),
         ))
         .parse(input)
     }
@@ -9123,24 +9174,42 @@ fn try_parse_ability_activation_trigger(lower: &str) -> Option<(TriggerMode, Tri
     // article + optional modifier + noun so the grammar accepts both "an
     // ability" and "an activated ability". An optional "of <source>" suffix
     // narrows the trigger to abilities whose source matches a type filter.
-    // The matcher already consults `def.valid_card` via `valid_card_matches`,
-    // so the source-object filter is propagated directly.
+    // The matcher consults `def.valid_card` for the activated source.
     // Cards: Crackdown Construct, Ashnod the Uncaring, Wizened Mentor,
-    // Runic Armasaur, Ceaseless Searblades.
-    fn parse_ability_object(input: &str) -> OracleResult<'_, Option<TargetFilter>> {
+    // Runic Armasaur, Ceaseless Searblades, Avalanche of Sector 7.
+    fn parse_ability_object(
+        input: &str,
+        person: SubjectPerson,
+    ) -> OracleResult<'_, Option<TargetFilter>> {
         let (rest, _) = (tag("an "), opt(tag("activated ")), tag("ability")).parse(input)?;
         // CR 602.1a + CR 113.7: Optional source-object filter narrows the
         // trigger to abilities whose source matches a type filter ("of an
         // artifact or creature", "of a creature or land", "of a permanent").
-        opt(preceded(
+        let (rest, source) = opt(preceded(
             tag(" of "),
-            terminated(
-                preceded(alt((tag("a "), tag("an "))), parse_source_type_disjunction),
-                opt(tag(" on the battlefield")),
-            ),
+            preceded(alt((tag("a "), tag("an "))), parse_source_type_disjunction),
         ))
-        .map(|filter| filter.map(source_object_filter))
-        .parse(rest)
+        .parse(rest)?;
+        let Some(type_filters) = source else {
+            return Ok((rest, None));
+        };
+        // CR 602.2a + CR 109.4: "<source> they control" — "they" is the
+        // activating player, so the source's controller is the triggering
+        // player (Avalanche of Sector 7). Only a third-person subject can be its
+        // antecedent.
+        let (rest, they_control) = if person == SubjectPerson::Third {
+            opt(value((), tag(" they control"))).parse(rest)?
+        } else {
+            (rest, None)
+        };
+        let (rest, _) = opt(tag(" on the battlefield")).parse(rest)?;
+        let mut filter = source_object_filter(type_filters);
+        if they_control.is_some() {
+            if let TargetFilter::Typed(typed) = &mut filter {
+                typed.controller = Some(ControllerRef::TriggeringPlayer);
+            }
+        }
+        Ok((rest, Some(filter)))
     }
 
     fn source_object_filter(type_filters: Vec<TypeFilter>) -> TargetFilter {
@@ -9208,14 +9277,22 @@ fn try_parse_ability_activation_trigger(lower: &str) -> Option<(TriggerMode, Tri
         .parse(input)
     }
 
-    let parse_line = preceded(
-        alt((tag("whenever "), tag("when "))),
+    fn parse_line(
+        input: &str,
+    ) -> OracleResult<
+        '_,
         (
-            parse_subject_and_verb,
-            parse_ability_object,
-            parse_qualifier,
+            Option<TargetFilter>,
+            Option<TargetFilter>,
+            Option<TriggerCondition>,
         ),
-    );
+    > {
+        let (rest, _) = alt((tag("whenever "), tag("when "))).parse(input)?;
+        let (rest, (subject, person)) = parse_subject_and_verb(rest)?;
+        let (rest, source_filter) = parse_ability_object(rest, person)?;
+        let (rest, qualifier) = parse_qualifier(rest)?;
+        Ok((rest, (subject, source_filter, qualifier)))
+    }
 
     if let Ok((_, (subject, source_filter, qualifier))) = all_consuming(parse_line).parse(lower) {
         let mut def = make_base();
@@ -14102,6 +14179,41 @@ fn try_parse_event(
     // "a <filter> creature" attacker-side qualifier so a filtered "blocks"
     // trigger fires only against a matching attacker.
     if let Ok((after_blocks, _)) = tag::<_, _, OracleError<'_>>("blocks").parse(rest) {
+        // CR 509.3e: a minimum blocked-creature count is part of the event,
+        // not the source's permission to block additional creatures.
+        // Keep recognized but unrepresentable counts terminally unsupported.
+        if peek(preceded(
+            space1,
+            preceded(
+                // The shared number authority also recognizes articles as one;
+                // those belong to the existing per-attacker grammar below.
+                not(alt((tag("a "), tag("an ")))),
+                alt((
+                    value((), nom_primitives::parse_number),
+                    value((), digit1),
+                    value((), tag("exactly ")),
+                )),
+            ),
+        ))
+        .parse(after_blocks)
+        .is_ok()
+        {
+            let parsed = preceded(space1, parse_count_qualified_block_filter).parse(after_blocks);
+            let Ok((_, (minimum, filter))) = parsed else {
+                return Some(unknown_trigger_definition(full_lower));
+            };
+            if !matches!(subject, TargetFilter::SelfRef) {
+                return Some(unknown_trigger_definition(full_lower));
+            }
+            let mut def = make_base();
+            def.mode = TriggerMode::Blocks;
+            def.valid_card = Some(subject.clone());
+            def.valid_target = None;
+            // CR 603.2c: one source-level trigger for this qualifying occurrence.
+            def.batched = true;
+            def.condition = Some(source_block_count_condition(filter, minimum));
+            return Some((TriggerMode::Blocks, def));
+        }
         let mut def = make_base();
         def.mode = TriggerMode::Blocks;
         def.valid_card = Some(subject.clone());
@@ -16549,6 +16661,48 @@ fn subject_attack_scope(subject_scope: Option<&ControllerRef>) -> Option<Subject
             | ControllerRef::ActivePlayer
             | ControllerRef::SpecificPlayer { .. },
         ) => None,
+    }
+}
+
+/// CR 509.3e + CR 509.3f: parse the full count and creature characteristics
+/// for a source's blocking event; unsupported comparators and tails fail closed.
+fn parse_count_qualified_block_filter(input: &str) -> OracleResult<'_, (i32, TargetFilter)> {
+    let (noun, (comparator, minimum)) = parse_event_amount_quantifier(input)?;
+    if !matches!(comparator, Comparator::GE) {
+        return Err(oracle_err(input));
+    }
+    let minimum = i32::try_from(minimum).map_err(|_| oracle_err(input))?;
+    let (filter, remainder) = parse_type_phrase_folding(noun);
+    let creature_filter = matches!(&filter, TargetFilter::Typed(typed)
+        if typed.type_filters.iter().any(|kind| matches!(kind, TypeFilter::Creature)));
+    if !creature_filter {
+        return Err(oracle_err(noun));
+    }
+    let (remainder, _) = all_consuming(multispace0).parse(remainder)?;
+    Ok((remainder, (minimum, filter)))
+}
+
+/// CR 509.3e + CR 509.3f: count matching attackers actually blocked by this
+/// source at the event. The attacking conjunct excludes the inverse relation.
+/// CR 603.4: this event qualifier is not an intervening-if and must not be
+/// rechecked when the ability resolves; EventTime is stripped when stacking.
+fn source_block_count_condition(filter: TargetFilter, minimum: i32) -> TriggerCondition {
+    let filter = add_property(filter, FilterProp::Attacking { defender: None });
+    let filter = add_property(
+        filter,
+        FilterProp::CombatRelation {
+            relation: CombatRelation::BlockingOrBlockedBy,
+            subject: CombatRelationSubject::Source,
+        },
+    );
+    TriggerCondition::EventTime {
+        condition: Box::new(TriggerCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { filter },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: minimum },
+        }),
     }
 }
 

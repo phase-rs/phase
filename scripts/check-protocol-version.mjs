@@ -35,6 +35,14 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // option's `authority`, the slot prompt's `permission`, the latched terms).
 // v91 retypes PendingManaAbility's required chosen-counter count (#9207).
 // v93 adds the SacrificedForCost reduction provenance.
+// v97 adds TargetReadOrigin instruction provenance.
+// v99 adds the GraveyardCastPermission pool.
+// v100 replaces `AdditionalPhase.phase` with a `TurnSegment` `segment`,
+// retypes `followed_by` to `TurnSegment`, and replaces
+// `AdditionalPhase.target` with an `ExtraPhaseRecipient` `recipient`.
+// v101 adds `ActivatedAbilityKind::Mana` (mana-ability activations now emit
+// `GameEvent::AbilityActivated`), the event's `departed_source_lki`, and
+// `AbilityActivationRecord.source_zone`.
 // Keep the measured base so a future merge cannot collapse independent wire
 // changes onto one number.
 const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
@@ -65,9 +73,12 @@ const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
 // +27: the v98 PerPlayerScope::Opponents value, the PerPlayerChoiceOrder and
 // SubstituteChooser chooser purposes, and the per-player frame's current and
 // nominee fields.
-// +28: the v99 FormatConfig.allow_experimental_dungeons removal — the
-// Baldur's Gate Wilderness pool is format-derived instead.
-const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 28;
+// +28: the v99 GraveyardCastPermission pool (from any graveyard).
+// +29: the v100 additional-phase segment and recipient parse bump.
+// +30: the v101 mana-ability activation kind and departed-source LKI.
+// +31: v102 adds the tagged SharedCardTypes quantity.
+// +32: v103 removes FormatConfig.allow_experimental_dungeons for the format-derived dungeon pool.
+const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 32;
 // The LOBBY message-set version, not derived from the full-game number above.
 // The classifier below refuses an expression only on the SOURCE constants; this
 // script never reads itself, so its own EXPECTED_* must stay literals.
@@ -118,8 +129,13 @@ const PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION = 54;
 // +25: wire 79 moves with full-game v97 for the serialized TargetReadOrigin.
 // +26: wire 80 moves with full-game v98 for per-player choice order and
 // PerPlayerScope::Opponents.
-// +27: wire 81 moves with full-game v99 for the format-derived dungeon pool.
-const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 27;
+// +27: wire 81 moves with full-game v99 for the graveyard permission pool.
+// +28: wire 82 moves with full-game v100 for the additional-phase segment and
+// recipient.
+// +29: wire 83 moves with full-game v101 for the mana-ability activation kind.
+// +30: wire 84 moves with full-game v102 for SharedCardTypes.
+// +31: wire 85 moves with full-game v103 for the format-derived dungeon pool.
+const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 31;
 // The P2P DRAFT wire version. A FIFTH independent surface, and the one this
 // script previously did not read at all: `DRAFT_PROTOCOL_VERSION` is an
 // EXACT-MATCH first-contact gate (p2p-draft-host.ts / p2p-draft-guest.ts refuse

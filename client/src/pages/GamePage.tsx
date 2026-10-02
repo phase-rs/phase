@@ -190,7 +190,6 @@ import {
 import { renderDescription } from "../utils/description.ts";
 import { LoyaltyBadge } from "../components/ui/LoyaltyBadge.tsx";
 import {
-  getCastableZoneViewerTarget,
   getBoardChoiceView,
   getOpponentIds,
   getSeatCount,
@@ -199,7 +198,6 @@ import {
   resolveMultiplayerBoardLayout,
   resolveFocusedOpponent,
   shouldRenderFocusedOpponentTopRow,
-  type ZoneViewerTarget,
 } from "../viewmodel/gameStateView.ts";
 import { gameButtonClass } from "../components/ui/buttonStyles.ts";
 import { GAME_Z_LAYER } from "../constants/ui.ts";
@@ -208,10 +206,6 @@ type ZoneRailStyle = CSSProperties & {
   "--card-w": string;
   "--card-h": string;
 };
-
-function castableZoneViewerAutoOpenKey(target: ZoneViewerTarget): string {
-  return `${target.zone}:${target.playerId}:${target.objectIds.join(",")}`;
-}
 
 function isDirectSoloRouteMode(rawMode: string | null): boolean {
   return ![
@@ -910,11 +904,9 @@ function GamePageContent({
   const draftMatchPairing = useMultiplayerDraftStore((s) => s.matchPairing);
   const submitIntergameCommand = useMultiplayerDraftStore((s) => s.submitIntergameCommand);
   const objects = useGameStore((s) => s.gameState?.objects);
-  const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
   const turnNumber = useGameStore((s) => s.gameState?.turn_number);
-  // Store `waitingFor`, not `gameState.waiting_for`: this is paired below with
-  // the store-slice `legalActionsByObject`, and only the store's own field is
-  // committed atomically with the legal actions.
+  // Store `waitingFor`, not `gameState.waiting_for`: only the store's own field is
+  // committed atomically with the waiting state.
   const engineWaitingFor = useGameStore((s) => s.waitingFor);
   const deckPools = useGameStore((s) => s.gameState?.deck_pools);
   const stackLength = useGameStore((s) => s.gameState?.stack.length ?? 0);
@@ -959,9 +951,7 @@ function GamePageContent({
   const [viewingZone, setViewingZone] = useState<{
     zone: "graveyard" | "exile" | "library";
     playerId: number;
-    autoOpenKey?: string;
   } | null>(null);
-  const dismissedCastableZoneViewerKeyRef = useRef<string | null>(null);
   const [preferencesOpen, setPreferencesOpen] = useState<
     null | { tab?: SettingsTabId; highlight?: SettingsHighlight }
   >(null);
@@ -1236,11 +1226,9 @@ function GamePageContent({
   }, []);
 
   // Auto-open graveyard/exile viewer when the engine is waiting for an object
-  // choice in that zone, or when Priority surfaces cast/play actions on cards
-  // in a single graveyard/exile pile (Retrace, Flashback, etc.).
+  // choice in that zone (e.g. SelectObjects for Reanimate / Regrowth).
   useEffect(() => {
     if (!objects) {
-      dismissedCastableZoneViewerKeyRef.current = null;
       return;
     }
     const wf = engineWaitingFor;
@@ -1263,39 +1251,14 @@ function GamePageContent({
     // Only auto-open when there's a single zone+owner to open. Otherwise the
     // zone control glow prompts the user to pick.
     if (groups.size === 1 && firstHit) {
-      dismissedCastableZoneViewerKeyRef.current = null;
       zoneViewerReturnFocusRef.current = gameMenuTriggerRef.current;
       setViewingZone(firstHit);
-      return;
     }
-
-    const castableTarget = getCastableZoneViewerTarget(
-      wf,
-      objects,
-      legalActionsByObject,
-    );
-    if (castableTarget) {
-      const autoOpenKey = castableZoneViewerAutoOpenKey(castableTarget);
-      if (dismissedCastableZoneViewerKeyRef.current !== autoOpenKey) {
-        zoneViewerReturnFocusRef.current = gameMenuTriggerRef.current;
-        setViewingZone({
-          zone: castableTarget.zone,
-          playerId: castableTarget.playerId,
-          autoOpenKey,
-        });
-      }
-      return;
-    }
-
-    dismissedCastableZoneViewerKeyRef.current = null;
-  }, [canActForWaitingState, engineWaitingFor, legalActionsByObject, objects]);
+  }, [canActForWaitingState, engineWaitingFor, objects]);
 
   const handleZoneViewerClose = useCallback(() => {
-    if (viewingZone?.autoOpenKey) {
-      dismissedCastableZoneViewerKeyRef.current = viewingZone.autoOpenKey;
-    }
     setViewingZone(null);
-  }, [viewingZone]);
+  }, []);
 
   const prepareZoneViewerActionClose = useCallback(() => {
     // A cast/play action can remove the final card only after its asynchronous

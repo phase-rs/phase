@@ -12,6 +12,7 @@ use crate::types::ability::{
     TargetReadOrigin,
 };
 use crate::types::counter::{CounterMatch, CounterType};
+use crate::types::phase::{PhaseGroup, TurnSegment};
 use crate::types::triggers::AttackTargetFilter;
 
 #[test]
@@ -12131,16 +12132,15 @@ fn full_throttle_parses_additional_combats_and_delayed_combat_trigger() {
 }
 
 /// CR 501.1 + CR 500.8: "there is an additional beginning phase after this
-/// phase" lowers to `Effect::AdditionalPhase { phase: Untap, .. }` (the
-/// beginning-phase marker), covering Temple of Atropos, Sphinx/Shadow of the
-/// Second Sun, and Cyclonus.
+/// phase" lowers to an added whole beginning phase, covering Temple of
+/// Atropos, Sphinx/Shadow of the Second Sun, and Cyclonus.
 #[test]
-fn additional_beginning_phase_parses_as_untap_phase_insert() {
+fn additional_beginning_phase_parses_as_beginning_phase_insert() {
     use crate::parser::oracle_effect::parse_effect;
     assert!(matches!(
         parse_effect("there is an additional beginning phase after this phase"),
         Effect::AdditionalPhase {
-            phase: Phase::Untap,
+            segment: TurnSegment::Phase(PhaseGroup::Beginning),
             ..
         }
     ));
@@ -12232,7 +12232,7 @@ fn temple_of_atropos_parses_with_zero_unimplemented() {
         matches!(
             phase_exec.effect.as_ref(),
             Effect::AdditionalPhase {
-                phase: Phase::Untap,
+                segment: TurnSegment::Phase(PhaseGroup::Beginning),
                 ..
             }
         ),
@@ -12296,7 +12296,7 @@ fn turn_order_and_additional_beginning_phase_cards_parse_claimed_signatures() {
         matches!(
             effect,
             Effect::AdditionalPhase {
-                phase: Phase::Untap,
+                segment: TurnSegment::Phase(PhaseGroup::Beginning),
                 ..
             }
         )
@@ -25589,6 +25589,40 @@ fn banner_of_kinship_composes_choose_and_chosen_dependent_counters() {
         } if name == "fellowship"
     ));
 }
+
+/// Production-parser regression for Cemetery Prowler #6898. The isolated
+/// static-line parser is insufficient: the generated card-data path must carry
+/// the shared-card-type quantity into the exported static definition too.
+#[test]
+fn cemetery_prowler_production_parse_exports_shared_card_types() {
+    let parsed = parse(
+        "Vigilance\nWhenever this creature enters or attacks, exile a card from a graveyard.\nSpells you cast cost {1} less to cast for each card type they share with cards exiled with this creature.",
+        "Cemetery Prowler",
+        &[Keyword::Vigilance],
+        &["Creature"],
+        &["Wolf"],
+    );
+    let static_def = parsed
+        .statics
+        .iter()
+        .find(|def| matches!(def.mode, StaticMode::ModifyCost { .. }))
+        .expect("Cemetery Prowler must export a cost modifier");
+    let StaticMode::ModifyCost {
+        dynamic_count: Some(QuantityRef::SharedCardTypes { source }),
+        ..
+    } = &static_def.mode
+    else {
+        panic!(
+            "production parser must export SharedCardTypes, got {:?}",
+            static_def.mode
+        );
+    };
+    assert!(matches!(
+        source,
+        crate::types::ability::CardTypeSetSource::ExiledBySource
+    ));
+}
+
 #[test]
 fn oubliette_host_bound_parse_structure() {
     let text = "When this enchantment enters, target creature phases out until this enchantment leaves the battlefield. Tap that creature as it phases in this way.";
@@ -28218,6 +28252,44 @@ fn bbfu10_ledger_variant_reaches_filter_prop_scan() {
     assert!(
         !super::quantity_ref_uses_filter_prop(&without_prop, &pred),
         "negative control: a prop-free ledger filter must still read false",
+    );
+}
+
+/// CR 109.4 + CR 608.2c: a persisted as-enters counter whose count is a
+/// `PlayerCount` must retain a chosen-property dependency nested in
+/// `PlayerFilter::ControlsCount`. The negative twin proves the relation is not
+/// reported for an otherwise identical prop-free player filter.
+#[test]
+fn chosen_etb_counter_player_count_reaches_nested_filter_prop_scan() {
+    use crate::types::ability::{
+        Comparator, FilterProp, PlayerFilter, PlayerRelation, QuantityExpr, QuantityRef,
+        TargetFilter, TypeFilter, TypedFilter,
+    };
+
+    let player_count = |properties| QuantityExpr::Ref {
+        qty: QuantityRef::PlayerCount {
+            filter: PlayerFilter::ControlsCount {
+                relation: PlayerRelation::All,
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: None,
+                    properties,
+                }),
+                comparator: Comparator::GE,
+                count: Box::new(QuantityExpr::Fixed { value: 1 }),
+            },
+        },
+    };
+
+    assert!(
+        super::quantity_expr_uses_chosen_filter(&player_count(vec![
+            FilterProp::IsChosenCreatureType,
+        ])),
+        "a persisted ETB counter count must see chosen properties nested in ControlsCount"
+    );
+    assert!(
+        !super::quantity_expr_uses_chosen_filter(&player_count(Vec::new())),
+        "a prop-free nested player filter must remain an independent negative case"
     );
 }
 

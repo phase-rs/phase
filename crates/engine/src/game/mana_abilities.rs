@@ -9,7 +9,7 @@ use crate::types::ability_visit::{
     visit_ability_def_costs_scoped, visit_ability_def_scoped, ResolutionScope,
 };
 use crate::types::counter::{CounterMatch, CounterType};
-use crate::types::events::{GameEvent, ManaTapState};
+use crate::types::events::{ActivatedAbilityKind, GameEvent, ManaTapState};
 use crate::types::game_state::{
     CostResume, GameState, ManaAbilityCostCursor, ManaAbilityCostParent,
     ManaAbilityCostParentLifecycle, ManaAbilityCostResolutionMode, ManaAbilityResume, ManaChoice,
@@ -289,10 +289,11 @@ pub fn is_renewable_mana_ability(ability_def: &AbilityDefinition) -> bool {
 /// which is exactly the event a `TapsForMana` triggered mana ability fires
 /// from. It also accepts `ManaAdded`, because CR 605.1b explicitly includes
 /// abilities that trigger from mana being added. CR 605.1b also admits
-/// "triggered from the activation/resolution of an activated mana ability" in
-/// general, but mana abilities bypass the stack and do not emit a
-/// distinguishable `AbilityActivated` event; widening (b) to that axis requires
-/// first emitting such an event. No real card exercises the gap today.
+/// "triggered from the activation/resolution of an activated mana ability";
+/// mana activations now emit `AbilityActivated { kind: Mana }`, but that axis is
+/// not widened here: the parser strict-fails an activation trigger whose
+/// untargeted body could add mana (`could_be_triggered_mana_ability_body`), so
+/// no supported trigger needs inline routing from it. No printed card uses it.
 pub fn is_triggered_mana_ability(
     ability: &ResolvedAbility,
     trigger_event: Option<&GameEvent>,
@@ -312,7 +313,7 @@ pub fn is_triggered_mana_ability(
     }
     // (b) CR 106.12a / CR 605.1b: triggered by a `{T}`-cost mana ability
     // resolving and producing mana, or by mana being added. See the doc comment
-    // above for the deliberately-not-yet-widened `AbilityActivated` axis.
+    // above for the deliberately-unwidened `AbilityActivated { kind: Mana }` axis.
     matches!(
         trigger_event,
         Some(
@@ -513,6 +514,36 @@ pub fn resolve_triggered_mana_ability_inline(
         state.current_triggered_mana_override = previous_mana_override;
         state.current_trigger_event = previous_trigger_event;
     });
+}
+
+/// CR 605.1b: could this triggered ability body — if its trigger observed an
+/// activated mana ability — be a triggered mana ability? True when its OWN
+/// resolution could add mana (any reachable `Effect::Mana`, whatever else the
+/// chain does or in whatever order) and it requires no target anywhere in that
+/// resolution (CR 115.6). Separately registered payloads (delayed, reflexive,
+/// replacement bodies) are not this ability's resolution and are not walked
+/// (`ResolutionScope::OwnResolutionOnly`). A static, parse-time classification:
+/// target slots are read through the same per-effect slot authority
+/// (`triggers::extract_target_filter_from_effect`) trigger announcement uses.
+pub(crate) fn could_be_triggered_mana_ability_body(def: &AbilityDefinition) -> bool {
+    let mut adds_mana = false;
+    let mut targets = false;
+    let _ = visit_ability_def_scoped(def, ResolutionScope::OwnResolutionOnly, &mut |effect| {
+        if let Effect::Mana { target, .. } = effect {
+            adds_mana = true;
+            if target
+                .as_ref()
+                .is_some_and(|role| role.declared_filters().next().is_some())
+            {
+                targets = true;
+            }
+        }
+        if super::triggers::extract_target_filter_from_effect(effect).is_some() {
+            targets = true;
+        }
+        ControlFlow::Continue(())
+    });
+    adds_mana && !targets
 }
 
 /// CR 605.2: Mana abilities don't use the stack — they can't be targeted, countered, or responded to.
@@ -1293,17 +1324,9 @@ pub fn handle_choose_mana_color(
         }
     };
 
-    let ability_def = state
-        .objects
-        .get(&pending.source_id)
-        .and_then(|obj| {
-            pending
-                .ability_index
-                .and_then(|index| obj.abilities.get(index))
-        })
-        .cloned()
-        .or_else(|| pending.ability_snapshot.clone())
-        .ok_or_else(|| EngineError::InvalidAction("Mana ability no longer exists".to_string()))?;
+    // CR 602.2a: the same announcement-bound definition production and the
+    // activation event used before the prompt.
+    let ability_def = mana_ability_definition(state, pending)?;
 
     let node = pending
         .rules_execution_node
@@ -2359,10 +2382,20 @@ enum ManaAbilityPaymentProgress {
     Paused,
 }
 
+/// CR 602.2a + CR 605.3b: the mana ability being activated, as bound when it was
+/// announced. The announcement snapshot is authoritative: once a cost moves the
+/// source (resetting its abilities) or a granted ability is removed, the live
+/// index may name a different ability, and production, completion and the
+/// activation's kind must all read the one definition the player activated.
+/// Only a pending restored from before the snapshot existed (`None`) falls back
+/// to the live index.
 fn mana_ability_definition(
     state: &GameState,
     pending: &PendingManaAbility,
 ) -> Result<AbilityDefinition, EngineError> {
+    if let Some(snapshot) = pending.ability_snapshot.as_ref() {
+        return Ok(snapshot.clone());
+    }
     state
         .objects
         .get(&pending.source_id)
@@ -2372,7 +2405,6 @@ fn mana_ability_definition(
                 .and_then(|index| obj.abilities.get(index))
         })
         .cloned()
-        .or_else(|| pending.ability_snapshot.clone())
         .ok_or_else(|| EngineError::InvalidAction("Mana ability no longer exists".to_string()))
 }
 
@@ -3169,6 +3201,27 @@ fn finish_mana_ability_cost_payment(
         .take()
         .filter(|parent| matches!(parent.lifecycle, ManaAbilityCostParentLifecycle::Suspended));
     let ability_def = mana_ability_definition(state, &pending)?;
+    // CR 602.2b + CR 601.2i + CR 605.3: every cost is paid, so the mana ability
+    // has become activated. Publish it here — before the colour prompt and
+    // before production — for every resolution mode (manual, auto-tap, nested
+    // sub-cost), and observe its triggers at this boundary (CR 603.10): the
+    // ability's own resolution may yet sacrifice or change its source.
+    // CR 605.1a: classified from the bound definition like every activation.
+    // This path is the mana-ability path, but an ability that fails a CR 605.1a
+    // criterion (Millikin's library-moving cost) can still be driven through
+    // it; it is then an ordinary activation, and "that isn't a mana ability"
+    // triggers must see it as one.
+    let activation_kind = ActivatedAbilityKind::of_definition(&ability_def);
+    let activation_event = super::casting_targets::emit_ability_activated(
+        state,
+        pending.player,
+        pending.source_id,
+        activation_kind,
+        ability_def.activation_zone.unwrap_or(Zone::Battlefield),
+        events,
+    );
+    super::triggers::collect_activation_event_at_boundary(state, events, activation_event)
+        .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
     if !resolves_automatically && pending.color_override.is_none() {
         let resolved_for_prompt = resolved_mana_ability_for_current_state(
             state,
@@ -10919,6 +10972,8 @@ mod tests {
             player_id: PlayerId(0),
             source_id: ObjectId(1),
             kind: crate::types::events::ActivatedAbilityKind::Normal,
+            departed_source_lki: None,
+            trigger_state: crate::types::events::ActivationTriggerState::Pending,
         };
         assert!(!is_triggered_mana_ability(&ability, Some(&ev)));
     }

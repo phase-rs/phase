@@ -210,12 +210,32 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
- * 99 — FormatConfig loses `allow_experimental_dungeons`: the per-session
+ * 103 — FormatConfig loses `allow_experimental_dungeons`: the per-session
  *      flag is gone and the Baldur's Gate Wilderness pool is format-derived
- *      (Freeform and Freeform Commander only). A v98 peer would parse the
+ *      (Freeform and Freeform Commander only). A v102 peer would parse the
  *      frame but fail the pool closed; the exact-match handshake refuses the
- *      pairing. P2P moves in lockstep (wire 81); lobby carriers move too
+ *      pairing. P2P moves in lockstep (wire 85); lobby carriers move too
  *      (LOBBY_PROTOCOL_VERSION 15).
+ * 102 — QuantityRef.SharedCardTypes adds a tagged quantity in serialized
+ *      ability definitions and saved state. Keep this version in lockstep
+ *      with the server and the preceding mana-activation schema.
+ * 101 — GameEvent.AbilityActivated's kind gains "Mana" (mana-ability
+ *      activations now emit it) and an optional departed_source_lki — see
+ *      PROTOCOL_VERSION's own `/// 101` entry in
+ *      crates/lobby-broker/src/protocol.rs. The exact-match version check at
+ *      connect refuses a v100 pairing.
+ * 100 — Effect.AdditionalPhase carries segment, a TurnSegment, in place of
+ *      phase, followed_by holds TurnSegments, and recipient, an
+ *      ExtraPhaseRecipient, replaces target — see PROTOCOL_VERSION's own
+ *      `/// 100` entry in crates/lobby-broker/src/protocol.rs. This client
+ *      hands server frames to JSON.parse, so a v99 client would take the new
+ *      shape with no decode error; the exact-match version check at connect
+ *      refuses the pairing instead.
+ * 99 — GraveyardCastPermission gains pool (GraveyardPermissionPool):
+ *      AnyGraveyard is "from any graveyard" (CR 404.1 + CR 601.3 — The Great
+ *      Work). A v98 peer would default it to the own graveyard and refuse a
+ *      cast the permission allows; the exact-match handshake refuses the
+ *      pairing. P2P moves in lockstep (wire 81); lobby messages are unchanged.
  * 98 — PerPlayerScope gains Opponents (CR 102.2 + CR 102.3), written inside
  *      ZoneOwner as {"Each":"Opponents"}; ZoneOpponentChooserPurpose gains
  *      PerPlayerChoiceOrder (CR 101.4c) and SubstituteChooser (CR 800.4g);
@@ -662,7 +682,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 99;
+export const PROTOCOL_VERSION = 103;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

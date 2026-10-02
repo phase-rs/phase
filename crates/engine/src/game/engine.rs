@@ -7742,6 +7742,7 @@ fn seed_representative_fodder(
             display_source: crate::game::game_object::DisplaySource::Token,
             printed_ref: None,
             token_image_ref: None,
+            token_art: None,
             extra_keywords: vec![],
             additional_modifications: vec![],
             tapped,
@@ -11026,6 +11027,112 @@ fn apply_action(
     )
 }
 
+/// CR 502.3: completes the untap step after an untap-choice or untap-subset
+/// answer, with the permanents chosen not to untap, and returns the waiting
+/// state that follows. A deferred leave (CR 500.1 + CR 500.8: the step is the
+/// final step of a unit added after the cleanup step, and leaving it ends the
+/// turn while a resolution is live) must not run the untap again. Like the
+/// deferred cleanup-discard answer, it settles a resolution that has finished
+/// (a completed resolution-cast marker, then the carrier) and retries the
+/// guarded leave once, returning the retry's own waiting state when the leave
+/// commits. A carrier it cannot settle keeps the provisional Priority window;
+/// the enclosing action's post-action pipeline then runs at that window, and
+/// the step is left when the players next pass priority. CR 502.4 gives no
+/// player priority during the untap step; this window is the handler's
+/// departure from it.
+fn untap_completion_waiting_for(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    chosen_not_to_untap: HashSet<ObjectId>,
+) -> WaitingFor {
+    // CR 500.1 + CR 500.8: the untap step's leave can end the turn, and the
+    // next turn begins from a settled Priority window
+    // (`turns::start_next_turn`), so the answered prompt is replaced by the
+    // active player's provisional window first. CR 502.4: that window is not
+    // handed to a player here. The subset prompt, or the waiting state of the
+    // run after a committed leave, replaces it; a deferred leave goes to
+    // `settle_deferred_phase_transition`, which synchronizes the same window
+    // and keeps it only for a carrier it cannot settle.
+    sync_waiting_for(
+        state,
+        &WaitingFor::Priority {
+            player: state.active_player,
+        },
+    );
+    match turns::begin_untap_or_subset_prompt(state, events, chosen_not_to_untap) {
+        turns::UntapCompletion::ChooseSubset(prompt) => *prompt,
+        // CR 500.8 + CR 500.9: a later step the interpreter reaches without
+        // priority (another added untap step, or the cleanup step after a
+        // step added after the end step) can defer its own transition. The
+        // waiting state standing then is this answered prompt, which must not
+        // be offered again, so that deferral is settled here too.
+        turns::UntapCompletion::Advanced => auto_advance_settling_deferral(state, events),
+        turns::UntapCompletion::LeaveDeferred => settle_deferred_phase_transition(state, events),
+    }
+}
+
+/// Settles a transition the turn interpreter deferred at an untap step's
+/// turn-ending leave or at the cleanup step's entry, and retries it once. Its
+/// callers are the untap-choice answers (see [`untap_completion_waiting_for`])
+/// and, through [`auto_advance_settling_deferral`], the loop-collapse and
+/// cleanup-discard answers in `engine_resolution_choices` and the resume a
+/// completed phase entry owes
+/// (`turns::resume_deferred_step_triggers`). A carrier it cannot settle keeps the
+/// provisional Priority window at the step where the transition deferred. In
+/// an untap step, that departs from CR 502.4. At the cleanup step's entry,
+/// before the step's actions, it departs from CR 514.3 ("Normally, no player
+/// receives priority during the cleanup step"); that is the window the
+/// priority reducer already leaves when a pass defers there.
+pub(super) fn settle_deferred_phase_transition(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> WaitingFor {
+    // The settlement calls below act only at a Priority boundary, so
+    // synchronize the provisional window first, as the cleanup-discard answer
+    // does. Unlike that answer, the handler runs no post-action pipeline
+    // before the retry: CR 502.4 holds the untap step's triggers, and CR 704.3
+    // checks state-based actions, only when a player would receive priority.
+    let provisional = WaitingFor::Priority {
+        player: state.active_player,
+    };
+    sync_waiting_for(state, &provisional);
+    // CR 608.2g + CR 502.4: retire a completed resolution-cast marker and its
+    // carrier, as the pipeline's settlement step would, but leave the triggers
+    // it parked held for the next time a player would receive priority.
+    engine_priority::settle_pending_resolution_completion(state);
+    // CR 608.2c: a carrier whose resolution has finished settles before the
+    // transition is retried.
+    settle_resolving_stack_entry_after_continuation_resume(state);
+    if state.stack.is_empty() && !turns::phase_transition_requires_settlement(state) {
+        // CR 514.1 + CR 514.2: a transition deferred as the cleanup step began
+        // came before the step's actions, so the interpreter resumes the step.
+        // Any other deferred step has performed its actions and is left.
+        if state.phase == Phase::Cleanup {
+            return turns::auto_advance(state, events);
+        }
+        match turns::advance_phase_once(state, events) {
+            turns::AdvancePhaseOnce::Deferred => {}
+            turns::AdvancePhaseOnce::Entry(_) | turns::AdvancePhaseOnce::Skipped => {
+                return turns::auto_advance(state, events);
+            }
+        }
+    }
+    provisional
+}
+
+/// Runs the turn interpreter and, when it defers a transition, settles and
+/// retries that transition through [`settle_deferred_phase_transition`]
+/// instead of returning the waiting state that was standing before the run.
+pub(super) fn auto_advance_settling_deferral(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> WaitingFor {
+    match turns::auto_advance_reporting_deferral(state, events) {
+        (waiting_for, false) => waiting_for,
+        (_, true) => settle_deferred_phase_transition(state, events),
+    }
+}
+
 fn apply_non_priority_pass_action(
     state: &mut GameState,
     actor: PlayerId,
@@ -11268,11 +11375,7 @@ fn apply_non_priority_pass_action(
                     && mana_sources::object_mana_ability_penalty(state, source_id, &ability_def)
                         .is_undoable()
                 {
-                    state
-                        .lands_tapped_for_mana
-                        .entry(*player)
-                        .or_default()
-                        .push(source_id);
+                    mana_sources::record_undoable_mana_tap(state, *player, source_id, &events);
                 }
                 // P7 v3 (CR 605.3b + CR 732.2a): this off-stack activation is the opener of a
                 // multi-activation loop period. The shared recorder also owns semantic
@@ -13910,14 +14013,9 @@ fn apply_non_priority_pass_action(
             } else {
                 // CR 502.3: Declines are recorded; now either surface the
                 // required bounded `ChooseUntapSubset` prompt (a MaxUntapPerType
-                // cap is over its limit after declines) or untap + advance. The
-                // bridge advances the phase itself when it untaps, so only
-                // resume `auto_advance` when no subset prompt was raised.
+                // cap is over its limit after declines) or untap + advance.
                 let skipped: std::collections::HashSet<ObjectId> = declined.into_iter().collect();
-                match turns::begin_untap_or_subset_prompt(state, &mut events, skipped) {
-                    Some(prompt) => prompt,
-                    None => turns::auto_advance(state, &mut events),
-                }
+                untap_completion_waiting_for(state, &mut events, skipped)
             }
         }
         // CR 502.3: The active player directly determines which permanents untap
@@ -13965,10 +14063,7 @@ fn apply_non_priority_pass_action(
                     skipped.insert(*id);
                 }
             }
-            match turns::begin_untap_or_subset_prompt(state, &mut events, skipped) {
-                Some(prompt) => prompt,
-                None => turns::auto_advance(state, &mut events),
-            }
+            untap_completion_waiting_for(state, &mut events, skipped)
         }
         // CR 508.1g + CR 701.43d: the active player decides whether to pay the
         // optional "exert as it attacks" cost for the prompted attacker, one
