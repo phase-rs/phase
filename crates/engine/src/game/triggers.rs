@@ -16818,19 +16818,22 @@ pub mod tests {
         AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost,
         AggregateFunction, AttackersDeclaredCountSubject, CardSelectionMode, ChoiceType,
         ChosenAttribute, ChosenSubtypeKind, CommanderOwnership, Comparator, ContinuousModification,
-        ControllerRef, DamageChannel, DamageKindFilter, DelayedTriggerCondition, DiscardSelfScope,
-        Duration, EachDamageRecipient, Effect, FilterProp, GuessSubject, KickerVariant,
-        ModalChoice, MultiTargetSpec, PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope,
-        QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode, ResolvedAbility,
-        SearchSelectionConstraint, SharedQuality, SharedQualityRelation, StaticCondition,
-        StaticDefinition, TargetFilter, TargetRef, TargetSelectionMode, TriggerCondition,
-        TriggerConstraint, TriggerDefinition, TriggerGrantInstanceRef, TypeFilter, TypedFilter,
+        ControllerRef, DamageChannel, DamageKindFilter, DelayedTriggerCondition,
+        DelayedTriggerLifetime, DiscardSelfScope, Duration, EachDamageRecipient, Effect,
+        FilterProp, GuessSubject, KickerVariant, ModalChoice, MultiTargetSpec, PlayerFilter,
+        PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
+        ReplacementDefinition, ReplacementMode, ResolvedAbility, SearchSelectionConstraint,
+        SharedQuality, SharedQualityRelation, StaticCondition, StaticDefinition, TargetFilter,
+        TargetRef, TargetSelectionMode, TriggerCondition, TriggerConstraint, TriggerDefinition,
+        TriggerGrantInstanceRef, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card::LayoutKind;
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
-    use crate::types::events::{GameEvent, ManaTapState};
+    use crate::types::events::{
+        ActivatedAbilityKind, ActivationObservers, ActivationTriggerState, GameEvent, ManaTapState,
+    };
     use crate::types::format::FormatConfig;
     use crate::types::game_state::{
         DamageRecord, DeferredLifeCostResume, DelayedTrigger, DistributionUnit, GameState,
@@ -16846,7 +16849,7 @@ pub mod tests {
     use crate::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
     use crate::types::phase::Phase;
     use crate::types::player::PlayerId;
-    use crate::types::triggers::AttackTargetFilter;
+    use crate::types::triggers::{AttackTargetFilter, TriggerMode};
     use crate::types::zones::Zone;
 
     fn setup() -> GameState {
@@ -24229,12 +24232,6 @@ pub mod tests {
     /// `Bound` decision and the false-gate leg records `Unbound` and undo.
     #[test]
     fn a_false_gated_delayed_watcher_consumed_by_a_mana_activation_binds_it() {
-        use crate::types::ability::DelayedTriggerLifetime;
-        use crate::types::events::{
-            ActivatedAbilityKind, ActivationObservers, ActivationTriggerState,
-        };
-        use crate::types::triggers::TriggerMode;
-
         #[derive(Clone, Copy, PartialEq)]
         enum Watcher {
             None,

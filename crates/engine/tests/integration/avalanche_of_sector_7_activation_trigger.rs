@@ -32,6 +32,7 @@ use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaType};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::statics::ActivationExemption;
 use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
 
@@ -1299,39 +1300,46 @@ fn mana_activation_allowed(
 
 #[test]
 fn cant_be_activated_kind_axis_reads_normal_as_non_loyalty() {
-    use engine::types::statics::ActivationExemption::{ManaAbilities, None as NoExemption};
     // `Some(Normal)` predates the Mana kind and means "non-loyalty".
     assert!(!mana_activation_allowed(
         Some(ActivatedAbilityKind::Normal),
-        NoExemption,
+        ActivationExemption::None,
         MANA
     ));
     assert!(mana_activation_allowed(
         Some(ActivatedAbilityKind::Normal),
-        ManaAbilities,
+        ActivationExemption::ManaAbilities,
         MANA
     ));
-    assert!(!mana_activation_allowed(None, NoExemption, MANA));
-    assert!(mana_activation_allowed(None, ManaAbilities, MANA));
+    assert!(!mana_activation_allowed(
+        None,
+        ActivationExemption::None,
+        MANA
+    ));
+    assert!(mana_activation_allowed(
+        None,
+        ActivationExemption::ManaAbilities,
+        MANA
+    ));
     assert!(mana_activation_allowed(
         Some(ActivatedAbilityKind::Loyalty),
-        NoExemption,
+        ActivationExemption::None,
         MANA
     ));
     assert!(!mana_activation_allowed(
         Some(ActivatedAbilityKind::Mana),
-        NoExemption,
+        ActivationExemption::None,
         MANA
     ));
     // `Some(Mana)` blocks only mana abilities; an ordinary ability is allowed.
     assert!(mana_activation_allowed(
         Some(ActivatedAbilityKind::Mana),
-        NoExemption,
+        ActivationExemption::None,
         DRAW
     ));
     assert!(!mana_activation_allowed(
         Some(ActivatedAbilityKind::Normal),
-        NoExemption,
+        ActivationExemption::None,
         DRAW
     ));
 }

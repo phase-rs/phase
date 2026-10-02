@@ -11,6 +11,7 @@ use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaCost;
 use crate::types::player::PlayerId;
+use crate::types::zones::Zone;
 
 use super::ability_utils::{
     ability_target_legality_needs_chosen_x, assign_selected_slots_in_chain,
@@ -700,7 +701,6 @@ pub(crate) fn emit_ability_activated(
     announced_zone: crate::types::zones::Zone,
     events: &mut Vec<GameEvent>,
 ) -> usize {
-    use crate::types::zones::Zone;
     let departed = announced_zone == Zone::Battlefield
         && state
             .objects
