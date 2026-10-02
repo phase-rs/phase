@@ -47071,7 +47071,7 @@ mod additional_phase_recipient_subject_tests {
         let parsed = parse_oracle_text(
             text,
             "Lightning Runner",
-            &[],
+            &["double strike".into(), "haste".into()],
             &["Creature".into()],
             &["Human".into(), "Warrior".into()],
         );
