@@ -598,6 +598,9 @@ enum TriggerCollectionOperation {
 struct TriggerCollectionSession {
     overlay: TriggerCollectionOverlay,
     operation_journal: Option<Vec<TriggerCollectionOperation>>,
+    /// How many matched triggers this session admitted (`record_match`),
+    /// counted before any context is pruned as an auto-inert no-op.
+    admitted_matches: usize,
 }
 
 impl TriggerCollectionSession {
@@ -605,6 +608,7 @@ impl TriggerCollectionSession {
         Self {
             overlay,
             operation_journal: None,
+            admitted_matches: 0,
         }
     }
 
@@ -616,6 +620,7 @@ impl TriggerCollectionSession {
         Self {
             overlay,
             operation_journal: Some(operation_journal),
+            admitted_matches: 0,
         }
     }
 
@@ -645,6 +650,7 @@ impl TriggerCollectionSession {
         if !matched_trigger_constraint_allows_admission(state, matched, event) {
             return false;
         }
+        self.admitted_matches += 1;
 
         let _ = self.apply(
             state,
@@ -6484,13 +6490,34 @@ pub(crate) fn events_would_queue_non_mana_trigger(
     events: &[GameEvent],
 ) -> bool {
     collect_pending_triggers(state, events)
-        .into_iter()
-        .any(|context| {
-            !super::mana_abilities::is_triggered_mana_ability(
-                &context.pending.ability,
-                context.pending.trigger_event.as_ref(),
-            )
-        })
+        .iter()
+        .any(context_is_non_mana_trigger)
+}
+
+/// CR 603.3 + CR 603.10: would a simulated action queue a non-mana trigger?
+/// `probe` is a clone the action was already applied to, whose deferred queue
+/// held `deferred_before` contexts before it. A mana activation observes its
+/// own triggers at its boundary during the simulation (and marks its event
+/// collected), so those contexts are counted from the queue; `events` covers
+/// whatever the action left for ordinary collection.
+pub(crate) fn simulated_action_would_queue_non_mana_trigger(
+    probe: &mut GameState,
+    deferred_before: usize,
+    events: &[GameEvent],
+) -> bool {
+    probe
+        .deferred_triggers
+        .iter()
+        .skip(deferred_before)
+        .any(context_is_non_mana_trigger)
+        || events_would_queue_non_mana_trigger(probe, events)
+}
+
+fn context_is_non_mana_trigger(context: &PendingTriggerContext) -> bool {
+    !super::mana_abilities::is_triggered_mana_ability(
+        &context.pending.ability,
+        context.pending.trigger_event.as_ref(),
+    )
 }
 
 fn filter_auto_inert_noop_triggers(
@@ -9824,21 +9851,29 @@ pub(crate) fn collect_mana_action_trigger_batch(
 /// a triggered mana ability (that parser shape is strict-failed, CR 605.1b),
 /// so nothing here resolves inline.
 ///
-/// The published event carries `ActivationTriggerState::CollectedAtActivation`,
-/// which every activation matcher refuses, so its ownership survives any later
-/// transfer into a payment ledger. The collection here matches a LOCAL
-/// `Pending` view of that event; the view never leaves this function.
+/// The event is published `Pending` and observed here, at its own boundary;
+/// this is the only place that marks it `CollectedAtActivation`. Every
+/// activation matcher refuses a collected event, so its ownership survives any
+/// later transfer into a payment ledger (CR 603.2c); only the queued trigger
+/// contexts keep the `Pending` form they matched.
+///
+/// The collected state records what observing bound (`ActivationObservers`):
+/// any admitted trigger, counted at match time — before an auto-inert context
+/// (a remembered decline) is pruned, since admission alone may have spent a
+/// "triggers only once each turn" limit. A bound observation revokes any undo
+/// already recorded for this source (CR 605.3b; a replacement-paused
+/// activation reaches this boundary only on resume), and
+/// `mana_sources::record_undoable_mana_tap` never records one for it.
 pub(crate) fn collect_activation_event_at_boundary(
     state: &mut GameState,
-    events: &[GameEvent],
+    events: &mut [GameEvent],
     event_index: usize,
 ) -> Result<(), ResolvedTriggerCollectionReplayInvariantError> {
     let GameEvent::AbilityActivated {
         player_id,
         source_id,
-        kind,
-        departed_source_lki,
         trigger_state,
+        ..
     } = &events[event_index]
     else {
         debug_assert!(
@@ -9847,26 +9882,37 @@ pub(crate) fn collect_activation_event_at_boundary(
         );
         return Ok(());
     };
-    debug_assert_eq!(
-        *trigger_state,
-        crate::types::events::ActivationTriggerState::CollectedAtActivation,
-        "a boundary-collected activation is published as already collected"
+    debug_assert!(
+        trigger_state.is_pending(),
+        "an activation is published pending and collected exactly once, here"
     );
-    let pending_view = GameEvent::AbilityActivated {
-        player_id: *player_id,
-        source_id: *source_id,
-        kind: *kind,
-        departed_source_lki: departed_source_lki.clone(),
-        trigger_state: crate::types::events::ActivationTriggerState::Pending,
-    };
-    let raw_batch = std::slice::from_ref(&pending_view);
-    let seed = collect_triggers_for_batch(state, raw_batch);
+    let (player, source) = (*player_id, *source_id);
+    let raw_batch = std::slice::from_ref(&events[event_index]);
+    let mut session = TriggerCollectionSession::new(TriggerCollectionOverlay::default());
+    let seed = collect_pending_triggers_with_collection(
+        state,
+        raw_batch,
+        LogicalZoneTriggerCollection::Ordinary,
+        &mut session,
+    );
     let collected = collect_pending_and_delayed_triggers_for_batch(
         state,
         seed,
         raw_batch,
         DelayedTriggerEventScope::Any,
     );
+    let observers = if session.admitted_matches > 0 || !collected.contexts.is_empty() {
+        crate::types::events::ActivationObservers::Bound
+    } else {
+        crate::types::events::ActivationObservers::Unbound
+    };
+    if let GameEvent::AbilityActivated { trigger_state, .. } = &mut events[event_index] {
+        *trigger_state =
+            crate::types::events::ActivationTriggerState::CollectedAtActivation { observers };
+    }
+    if observers == crate::types::events::ActivationObservers::Bound {
+        super::mana_sources::revoke_undoable_mana_tap(state, player, source);
+    }
     resolve_and_apply_trigger_collection(
         state,
         crate::types::resolved_commands::ResolvedTriggerCollection::DeferPending {

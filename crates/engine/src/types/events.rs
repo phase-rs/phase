@@ -107,21 +107,34 @@ impl ManaAbilityTriggerState {
 /// ability resolves (CR 603.10); the event then travels on through payment
 /// ledgers and the action's event list as already observed, so no later
 /// collector — live scan, durable cost ledger, or delayed-trigger match —
-/// observes it a second time.
+/// observes it a second time (CR 603.2c: an ability triggers only once each
+/// time its trigger event occurs).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ActivationTriggerState {
     /// Observed by the action's ordinary trigger collection (a stack-using or
-    /// loyalty activation).
+    /// loyalty activation), or a mana activation not yet at its boundary.
     #[default]
     Pending,
-    /// Already observed at the activation boundary.
-    CollectedAtActivation,
+    /// Already observed at the activation boundary, with the outcome of that
+    /// observation.
+    CollectedAtActivation { observers: ActivationObservers },
 }
 
 impl ActivationTriggerState {
     pub fn is_pending(&self) -> bool {
         matches!(self, Self::Pending)
     }
+}
+
+/// CR 603.2 + CR 603.5: What observing an activation at its boundary bound.
+/// `Bound` means at least one trigger was admitted for the event — whether its
+/// context was queued or then pruned (a remembered decline still spends a
+/// "triggers only once each turn" limit). A bound observation has consequences
+/// a mana-tap undo cannot reverse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ActivationObservers {
+    Unbound,
+    Bound,
 }
 
 /// CR 602.2 + CR 605.1a + CR 606.2: Discriminates which kind of activated
@@ -969,9 +982,10 @@ pub enum GameEvent {
         /// still where it was, or was activated from another zone.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         departed_source_lki: Option<Box<LKISnapshot>>,
-        /// CR 603.10: `CollectedAtActivation` for a mana ability's activation,
-        /// whose triggers were collected at its boundary; every later collector
-        /// skips it. Omitted on the wire when `Pending`.
+        /// CR 603.10 + CR 603.2c: `CollectedAtActivation` for a mana ability's
+        /// activation, whose triggers were collected at its boundary (with
+        /// what that observation bound); every later collector skips it.
+        /// Omitted on the wire when `Pending`.
         #[serde(default, skip_serializing_if = "ActivationTriggerState::is_pending")]
         trigger_state: ActivationTriggerState,
     },

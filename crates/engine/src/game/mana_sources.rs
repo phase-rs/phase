@@ -968,7 +968,6 @@ pub(crate) fn activate_mana_source_option_with_output(
             option.object_id,
             crate::types::events::ActivatedAbilityKind::Mana,
             crate::types::zones::Zone::Battlefield,
-            crate::types::events::ActivationTriggerState::CollectedAtActivation,
             events,
         );
         super::triggers::collect_activation_event_at_boundary(state, events, activation_event)
@@ -1006,7 +1005,7 @@ pub(crate) fn activate_mana_source_option_with_output(
     };
 
     if option.penalty.is_undoable() {
-        record_undoable_mana_tap(state, player, option.object_id);
+        record_undoable_mana_tap(state, player, option.object_id, events);
     }
     Ok(waiting_for)
 }
@@ -1014,17 +1013,34 @@ pub(crate) fn activate_mana_source_option_with_output(
 /// CR 605.3b: the single authority for offering an undo of a mana tap
 /// (`UntapLandForMana`). Undo is an engine convenience, not a rules action, so
 /// it is offered only when it can reverse everything the tap did: the mana and
-/// the tap itself. A tap whose activation produced trigger contexts — an
-/// activation trigger observed it (CR 603.10), queuing an ability and, for a
-/// "triggers only once each turn" ability, spending that frequency — has
-/// consequences undo does not reverse, so it is never offered. Callers decide
-/// the penalty axis (`ManaSourcePenalty::is_undoable`) first.
+/// the tap itself. It is recorded only for an activation that completed in
+/// `events` and whose boundary observation bound nothing
+/// (`ActivationObservers::Unbound`). An activation still paused mid-cost (a
+/// replacement choice) has not been observed yet, so it is never recorded;
+/// one an activation trigger observed (CR 603.10) queued an ability or spent
+/// a "triggers only once each turn" limit, which undo cannot reverse. Callers
+/// decide the penalty axis (`ManaSourcePenalty::is_undoable`) first.
 pub(crate) fn record_undoable_mana_tap(
     state: &mut GameState,
     player: PlayerId,
     source_id: ObjectId,
+    events: &[GameEvent],
 ) {
-    if mana_activation_was_observed(state, player, source_id) {
+    let completed_unobserved = events.iter().any(|event| {
+        matches!(
+            event,
+            GameEvent::AbilityActivated {
+                player_id,
+                source_id: activated,
+                kind: crate::types::events::ActivatedAbilityKind::Mana,
+                trigger_state: crate::types::events::ActivationTriggerState::CollectedAtActivation {
+                    observers: crate::types::events::ActivationObservers::Unbound,
+                },
+                ..
+            } if *player_id == player && *activated == source_id
+        )
+    });
+    if !completed_unobserved {
         return;
     }
     state
@@ -1034,24 +1050,16 @@ pub(crate) fn record_undoable_mana_tap(
         .push(source_id);
 }
 
-/// Did `player`'s mana activation of `source_id` in this action produce trigger
-/// contexts? A boundary-collected activation's contexts wait in the deferred
-/// queue until the action's release boundary (CR 603.3), which is after the
-/// undo record is written.
-fn mana_activation_was_observed(state: &GameState, player: PlayerId, source_id: ObjectId) -> bool {
-    state.deferred_triggers.iter().any(|context| {
-        context.trigger_events.iter().any(|event| {
-            matches!(
-                event,
-                GameEvent::AbilityActivated {
-                    player_id,
-                    source_id: activated,
-                    kind: crate::types::events::ActivatedAbilityKind::Mana,
-                    ..
-                } if *player_id == player && *activated == source_id
-            )
-        })
-    })
+/// CR 605.3b: withdraw any undo recorded for `player`'s tap of `source_id` once
+/// observing its activation bound a trigger.
+pub(crate) fn revoke_undoable_mana_tap(
+    state: &mut GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+) {
+    if let Some(tapped) = state.lands_tapped_for_mana.get_mut(&player) {
+        tapped.retain(|tapped_id| *tapped_id != source_id);
+    }
 }
 
 /// CR 605.3a-b: Revalidate and activate a generic mana capability. The caller

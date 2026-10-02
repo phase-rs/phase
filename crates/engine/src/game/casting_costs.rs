@@ -14075,7 +14075,6 @@ fn auto_tap_mana_sources_inner(
                     option.object_id,
                     crate::types::events::ActivatedAbilityKind::Mana,
                     crate::types::zones::Zone::Battlefield,
-                    crate::types::events::ActivationTriggerState::CollectedAtActivation,
                     events,
                 );
                 super::triggers::collect_activation_event_at_boundary(

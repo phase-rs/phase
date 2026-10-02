@@ -3218,7 +3218,6 @@ fn finish_mana_ability_cost_payment(
         pending.source_id,
         activation_kind,
         ability_def.activation_zone.unwrap_or(Zone::Battlefield),
-        crate::types::events::ActivationTriggerState::CollectedAtActivation,
         events,
     );
     super::triggers::collect_activation_event_at_boundary(state, events, activation_event)

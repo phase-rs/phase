@@ -25,7 +25,8 @@ use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::events::{ActivatedAbilityKind, ActivationTriggerState, GameEvent};
 use engine::types::game_state::{
-    ManaAbilityCostParentLifecycle, ManaChoice, PendingCostMoveResume, StackEntryKind, WaitingFor,
+    AutoMayChoice, ManaAbilityCostParentLifecycle, ManaChoice, MayTriggerAutoChoiceScope,
+    PendingCostMoveResume, StackEntryKind, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaType};
@@ -286,23 +287,55 @@ fn activation_triggered_mana_bodies_are_strict_failed() {
     }
 }
 
+/// The effect kinds a control chain is expected to hold, in order.
+#[derive(Debug, PartialEq)]
+enum Link {
+    Draw,
+    Mana,
+    DealDamage,
+    GainLife,
+}
+
+fn link_of(effect: &Effect) -> Option<Link> {
+    match effect {
+        Effect::Draw { .. } => Some(Link::Draw),
+        Effect::Mana { .. } => Some(Link::Mana),
+        Effect::DealDamage { .. } => Some(Link::DealDamage),
+        Effect::GainLife { .. } => Some(Link::GainLife),
+        _ => None,
+    }
+}
+
 /// Controls: a body that adds no mana, a targeted mana-producing body (not a
 /// mana ability, CR 605.1b), a non-mana mixed body, and a trigger that excludes
-/// mana activations all stay ordinary triggers — every link of the chain.
+/// mana activations all stay ordinary triggers — every link of the chain, each
+/// the expected effect.
 #[test]
 fn ordinary_activation_trigger_bodies_are_not_strict_failed() {
-    for text in [
-        "Whenever you activate an ability, draw a card.",
-        "Whenever you activate an ability, add {G}. This creature deals 1 damage to any target.",
-        "Whenever you activate an ability, you gain 1 life and draw a card.",
-        "Whenever you activate an ability that isn't a mana ability, add {G}.",
+    for (text, expected) in [
+        (
+            "Whenever you activate an ability, draw a card.",
+            vec![Link::Draw],
+        ),
+        (
+            "Whenever you activate an ability, add {G}. This creature deals 1 damage to any target.",
+            vec![Link::Mana, Link::DealDamage],
+        ),
+        (
+            "Whenever you activate an ability, you gain 1 life and draw a card.",
+            vec![Link::GainLife, Link::Draw],
+        ),
+        (
+            "Whenever you activate an ability that isn't a mana ability, add {G}.",
+            vec![Link::Mana],
+        ),
     ] {
         let effects = chain_effects(&activation_trigger_definition(text));
-        assert!(
-            effects
-                .iter()
-                .all(|effect| !matches!(effect, Effect::Unimplemented { .. })),
-            "{text:?} must stay an ordinary trigger in every link, got {effects:?}"
+        let links: Vec<Option<Link>> = effects.iter().map(link_of).collect();
+        assert_eq!(
+            links,
+            expected.into_iter().map(Some).collect::<Vec<_>>(),
+            "{text:?} must stay an ordinary trigger with the expected links, got {effects:?}"
         );
     }
 }
@@ -1416,7 +1449,7 @@ fn paused_mana_frames(runner: &GameRunner) -> (ObjectId, ObjectId, bool) {
         matches!(
             event,
             GameEvent::AbilityActivated {
-                trigger_state: ActivationTriggerState::CollectedAtActivation,
+                trigger_state: ActivationTriggerState::CollectedAtActivation { .. },
                 ..
             }
         )
@@ -1642,6 +1675,238 @@ fn an_unobserved_mana_tap_is_still_undoable() {
             .expect("undo accepted");
         assert!(!runner.state().objects[&land].tapped);
         assert_eq!(pool(&runner, P0), 0);
+    }
+}
+
+fn undo_tracked_for(runner: &GameRunner, player: PlayerId, land: ObjectId) -> bool {
+    runner
+        .state()
+        .lands_tapped_for_mana
+        .get(&player)
+        .is_some_and(|tapped| tapped.contains(&land))
+}
+
+/// Round 3, verifier board V3: an Elemental land's "{1}, {T}: Add {G}{G}" is
+/// paid with Lotus Petal, whose sacrifice pauses on a replacement choice. The
+/// activation is incomplete at the pause, so no undo is recorded there; on
+/// resume Searblades observes it, so none is recorded then either.
+/// `seed_stale_undo` plants an undo record for the land before the
+/// activation: observing the activation on resume must revoke it.
+fn paused_observed_activation(seed_stale_undo: bool) {
+    let mut scenario = pause_board();
+    let searblades = scenario
+        .add_creature(P1, "Ceaseless Searblades", 2, 4)
+        .from_oracle_text(SEARBLADES)
+        .id();
+    let land = scenario
+        .add_creature(P1, "Land Creature", 1, 1)
+        .as_land()
+        .as_creature()
+        .with_subtypes(vec!["Elemental"])
+        .from_oracle_text("{1}, {T}: Add {G}{G}.")
+        .id();
+    let petal = add_artifact(&mut scenario, P1, "Lotus Petal", PETAL);
+    let mut runner = scenario.build();
+    give_p1_priority(&mut runner);
+    if seed_stale_undo {
+        runner
+            .state_mut()
+            .lands_tapped_for_mana
+            .entry(P1)
+            .or_default()
+            .push(land);
+    }
+    let tap = tap_land_selection(&runner, land);
+    let mut events = runner.act(tap).expect("tap the land").events;
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "reach: the Petal's sacrifice paused"
+    );
+    let (child, parent, _) = paused_mana_frames(&runner);
+    assert_eq!(
+        (child, parent),
+        (petal, land),
+        "reach: Petal child, land parent"
+    );
+    assert_eq!(
+        undo_tracked_for(&runner, P1, land),
+        seed_stale_undo,
+        "an incomplete activation records no undo"
+    );
+    finish_payment(&mut runner, &mut events);
+    assert_eq!(runner.state().objects[&petal].zone, Zone::Exile, "reach");
+    assert_eq!(
+        runner.state().players[1]
+            .mana_pool
+            .count_color(ManaType::Green),
+        2,
+        "reach: the land produced {{G}}{{G}}"
+    );
+    settle_trigger_order(&mut runner);
+    assert_eq!(
+        triggers_on_stack_from(&runner, searblades),
+        1,
+        "reach: observed"
+    );
+    assert!(
+        !undo_tracked_for(&runner, P1, land),
+        "an observed activation is never undoable"
+    );
+    assert!(
+        runner
+            .act(GameAction::UntapLandForMana { object_id: land })
+            .is_err(),
+        "a submitted undo is refused"
+    );
+    resolve_stack(&mut runner);
+    assert_eq!(runner.state().objects[&searblades].power, Some(3));
+}
+
+#[test]
+fn a_replacement_paused_activation_is_not_undoable_once_observed() {
+    paused_observed_activation(false);
+}
+
+#[test]
+fn observing_a_resumed_activation_revokes_an_existing_undo_record() {
+    paused_observed_activation(true);
+}
+
+const ONCE_OPTIONAL: &str = "Whenever you activate an ability of a creature, you may draw a card. This ability triggers only once each turn.";
+
+/// Advance real turns until a later turn's precombat main, with P0 holding
+/// priority.
+fn next_main_with_p0_priority(runner: &mut GameRunner) {
+    let turn = runner.state().turn_number;
+    for _ in 0..80 {
+        if runner.state().turn_number != turn && runner.state().phase == Phase::PreCombatMain {
+            while !matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0)
+            {
+                runner.act(GameAction::PassPriority).expect("pass to P0");
+            }
+            return;
+        }
+        let action = match runner.state().waiting_for {
+            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            WaitingFor::DeclareAttackers { .. } => GameAction::DeclareAttackers {
+                attacks: vec![],
+                bands: vec![],
+            },
+            ref other => panic!("unexpected prompt advancing turns: {other:?}"),
+        };
+        runner.act(action).expect("advance the turn");
+    }
+    panic!("the next main phase was never reached");
+}
+
+/// Round 3, verifier board V4: a remembered decline prunes an optional
+/// once-per-turn trigger's context, but its admission still spent the limit
+/// (CR 603.2, CR 603.5). The observation is bound at match time, so the tap is
+/// not undoable even though no context is queued.
+#[test]
+fn a_pruned_once_per_turn_observation_still_refuses_undo() {
+    let mut scenario = main_phase();
+    let watcher = scenario
+        .add_creature(P0, "Once Watcher", 1, 3)
+        .from_oracle_text(ONCE_OPTIONAL)
+        .id();
+    let land = add_mana_land_creature(&mut scenario, "Elemental");
+    let bootstrap = scenario
+        .add_creature(P0, "Bootstrap", 1, 3)
+        .from_oracle_text("{0}: You gain 1 life.")
+        .id();
+    let mut runner = scenario.build();
+    // Remember a decline through the real optional prompt.
+    activate(&mut runner, bootstrap, 0);
+    for _ in 0..20 {
+        settle_trigger_order(&mut runner);
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalEffectChoice {
+                may_trigger_key: Some(_),
+                ..
+            }
+        ) {
+            break;
+        }
+        runner.act(GameAction::PassPriority).expect("resolve");
+    }
+    runner
+        .act(GameAction::DecideOptionalEffectAndRemember {
+            choice: AutoMayChoice::Decline,
+            scope: MayTriggerAutoChoiceScope::ExactInstance,
+        })
+        .expect("remember the decline");
+    resolve_stack(&mut runner);
+    next_main_with_p0_priority(&mut runner);
+    assert!(
+        runner.state().triggers_fired_this_turn.is_empty(),
+        "reach: a fresh turn"
+    );
+
+    let tap = tap_land_selection(&runner, land);
+    let events = runner.act(tap).expect("tap the land").events;
+    settle_trigger_order(&mut runner);
+    assert_eq!(pool(&runner, P0), 1, "reach: mana produced");
+    assert_eq!(activations_of_kind(&events, ActivatedAbilityKind::Mana), 1);
+    assert_eq!(
+        runner.state().triggers_fired_this_turn.len(),
+        1,
+        "reach: the once-per-turn limit is spent"
+    );
+    assert_eq!(
+        triggers_on_stack_from(&runner, watcher),
+        0,
+        "reach: the declined context was pruned"
+    );
+    assert!(runner.state().deferred_triggers.is_empty());
+    assert!(!undo_tracked(&runner, land), "undo is not offered");
+    assert!(
+        runner
+            .act(GameAction::UntapLandForMana { object_id: land })
+            .is_err(),
+        "a submitted undo is refused"
+    );
+}
+
+/// Round 3, verifier board V5: holding priority to tap an Elemental for mana
+/// queues Searblades' trigger (CR 117.1b, CR 603.3), so auto-pass is not
+/// recommended. The simulated activation observes its trigger at its own
+/// boundary; the probe counts that collected context. A non-Elemental source
+/// queues nothing and auto-pass stays recommended.
+#[test]
+fn auto_pass_holds_for_a_mana_activation_that_queues_an_activation_trigger() {
+    for (subtype, holds) in [("Elemental", true), ("Elf", false)] {
+        let mut scenario = main_phase();
+        let searblades = scenario
+            .add_creature(P0, "Ceaseless Searblades", 2, 4)
+            .from_oracle_text(SEARBLADES)
+            .id();
+        let land = add_mana_land_creature(&mut scenario, subtype);
+        let mut runner = scenario.build();
+        // Board staging: the opponent's main phase, P0 holding priority.
+        runner.state_mut().active_player = P1;
+        runner.state_mut().priority_player = P0;
+        runner.state_mut().waiting_for = WaitingFor::Priority { player: P0 };
+        let flat = engine::ai_support::flat_priority_actions(runner.state());
+        assert_eq!(
+            engine::ai_support::auto_pass_recommended(runner.state(), &flat),
+            !holds,
+            "{subtype}: auto-pass recommendation"
+        );
+        // Reach: the real tap queues exactly what the probe predicted.
+        let tap = tap_land_selection(&runner, land);
+        runner.act(tap).expect("tap the land");
+        settle_trigger_order(&mut runner);
+        assert_eq!(pool(&runner, P0), 1, "{subtype}: mana produced");
+        assert_eq!(
+            triggers_on_stack_from(&runner, searblades),
+            usize::from(holds),
+            "{subtype}: Searblades triggers"
+        );
     }
 }
 

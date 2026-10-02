@@ -5048,8 +5048,9 @@ pub(super) fn match_ability_activated(
     else {
         return false;
     };
-    // CR 603.10: a mana activation's triggers were collected at its boundary;
-    // every later collector (live scan, cost ledger, delayed match) refuses it.
+    // CR 603.10 + CR 603.2c: a mana activation's triggers were collected at its
+    // boundary, and an ability triggers only once per occurrence; every later
+    // collector (live scan, cost ledger, delayed match) refuses it.
     if !trigger_state.is_pending() {
         return false;
     }
@@ -7578,23 +7579,32 @@ mod tests {
             Zone::Battlefield,
         );
         let trigger = make_trigger(TriggerMode::AbilityActivated);
-        let collected = GameEvent::AbilityActivated {
-            player_id: PlayerId(0),
-            source_id: activated,
-            kind: crate::types::events::ActivatedAbilityKind::Mana,
-            departed_source_lki: None,
-            trigger_state: crate::types::events::ActivationTriggerState::CollectedAtActivation,
-        };
         let context = test_trigger_source_context(&state, source);
-        assert!(!match_ability_activated(
-            &collected, &trigger, &context, &state
-        ));
-        // The state survives a serialization round trip.
-        let restored: GameEvent =
-            serde_json::from_value(serde_json::to_value(&collected).unwrap()).unwrap();
-        assert!(!match_ability_activated(
-            &restored, &trigger, &context, &state
-        ));
+        for observers in [
+            crate::types::events::ActivationObservers::Unbound,
+            crate::types::events::ActivationObservers::Bound,
+        ] {
+            let collected = GameEvent::AbilityActivated {
+                player_id: PlayerId(0),
+                source_id: activated,
+                kind: crate::types::events::ActivatedAbilityKind::Mana,
+                departed_source_lki: None,
+                trigger_state:
+                    crate::types::events::ActivationTriggerState::CollectedAtActivation {
+                        observers,
+                    },
+            };
+            assert!(!match_ability_activated(
+                &collected, &trigger, &context, &state
+            ));
+            // The state survives a serialization round trip.
+            let restored: GameEvent =
+                serde_json::from_value(serde_json::to_value(&collected).unwrap()).unwrap();
+            assert_eq!(restored, collected);
+            assert!(!match_ability_activated(
+                &restored, &trigger, &context, &state
+            ));
+        }
         // A legacy event (no field) is Pending and matches.
         let legacy: GameEvent = serde_json::from_value(serde_json::json!({
             "type": "AbilityActivated",

@@ -681,10 +681,10 @@ pub(super) fn extract_distribution_total(
 /// CR 602.2b + CR 601.2i + CR 605.3: the single authority for publishing that an
 /// activated ability became activated (all costs paid), for every kind —
 /// stack-using, loyalty, and mana abilities. Returns the event's index in
-/// `events` so a caller that collects its triggers at this boundary can read
-/// the exact event it published. `trigger_state` names who observes it: the
-/// action's ordinary collection (`Pending`) or the caller, at the activation
-/// boundary (`CollectedAtActivation`, CR 603.10).
+/// `events`. The event is published `Pending`; a mana-ability caller then
+/// observes it at the activation boundary
+/// (`triggers::collect_activation_event_at_boundary`, CR 603.10), which marks
+/// it collected.
 ///
 /// `announced_zone` is the zone the source was in when the ability was
 /// announced. CR 113.7 + CR 113.7a: if the source was announced from the
@@ -698,7 +698,6 @@ pub(crate) fn emit_ability_activated(
     source_id: ObjectId,
     kind: crate::types::events::ActivatedAbilityKind,
     announced_zone: crate::types::zones::Zone,
-    trigger_state: crate::types::events::ActivationTriggerState,
     events: &mut Vec<GameEvent>,
 ) -> usize {
     use crate::types::zones::Zone;
@@ -715,7 +714,7 @@ pub(crate) fn emit_ability_activated(
         source_id,
         kind,
         departed_source_lki,
-        trigger_state,
+        trigger_state: crate::types::events::ActivationTriggerState::Pending,
     });
     events.len() - 1
 }
