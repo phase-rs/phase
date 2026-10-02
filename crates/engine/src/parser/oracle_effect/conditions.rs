@@ -2646,7 +2646,9 @@ fn parse_target_pt_threshold_condition(
     let (rest, stat) = alt((
         // "that creature's power is N…" (existing possessive form).
         delimited(tag("'s "), parse_reflexive_pt_stat, tag("is ")),
-        // CR 208.1 + CR 608.2c + CR 608.2h: present-tense possession "that creature has power N or greater" — the earlier instruction's target, read live at resolution.
+        // CR 208.1 + CR 608.2c + CR 608.2h: present-tense possession "that
+        // creature has power N or greater" — the earlier instruction's target,
+        // read live at resolution.
         // Kept beside the possessive form, not on the reflexive tense axis, so the
         // demonstrative-only subject keeps bare "it" (source-scoped) unclaimed.
         preceded(tag(" has "), parse_reflexive_pt_stat),
@@ -3407,10 +3409,10 @@ pub(super) fn strip_counter_conditional(
     // [source] deals N … instead" belongs to the target-gated *replacement*
     // class (Bring Low, Urdnan), whose counter gate is not a keyword, so
     // `strip_target_keyword_instead` fails it closed (see the CR 122.1b note
-    // there). Fixed-N P/T thresholds are claimed upstream by
-    // `parse_target_pt_threshold_condition`. Offering the demonstrative here would GATE OUT that
-    // owner and over-accept those cards into a false-green additive
-    // `DealDamage` sibling (the "instead" is a replacement, not additive).
+    // there). Offering the demonstrative here would GATE OUT that owner and
+    // over-accept those cards into a false-green additive `DealDamage` sibling
+    // (the "instead" is a replacement, not additive). Fixed-N P/T thresholds
+    // are claimed upstream by `parse_target_pt_threshold_condition`.
     // CR 115.1's demonstrative-as-target is honored only in the trailing form
     // below, where the leading-space needle can't collide with that class.
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("if it has ").parse(lower.as_str()) {
