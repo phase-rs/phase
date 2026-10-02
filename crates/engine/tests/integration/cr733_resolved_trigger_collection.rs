@@ -192,7 +192,7 @@ fn assert_mana_frame_claimed_exactly_its_own_event_prefix(
     events: &[GameEvent],
 ) -> usize {
     let expected = current_action_occurrences(events);
-    let claims: Vec<Vec<ConsumedTriggerEventOccurrence>> = state
+    let all_claims: Vec<Vec<ConsumedTriggerEventOccurrence>> = state
         .resolved_rules_journal
         .entries()
         .iter()
@@ -204,12 +204,37 @@ fn assert_mana_frame_claimed_exactly_its_own_event_prefix(
             _ => None,
         })
         .collect();
+    // CR 603.10 + CR 605.3: a mana ability's activation is observed at its own
+    // boundary, before the frame resolves, and claimed there as a one-occurrence
+    // claim of its own; the frame's claim is separate.
+    let is_activation_claim = |claim: &Vec<ConsumedTriggerEventOccurrence>| {
+        claim.len() == 1
+            && matches!(
+                claim[0].event,
+                GameEvent::AbilityActivated {
+                    kind: engine::types::events::ActivatedAbilityKind::Mana,
+                    ..
+                }
+            )
+    };
+    assert_eq!(
+        all_claims
+            .iter()
+            .filter(|claim| is_activation_claim(claim))
+            .count(),
+        1,
+        "the one mana activation is claimed at its boundary exactly once"
+    );
+    let claims: Vec<&Vec<ConsumedTriggerEventOccurrence>> = all_claims
+        .iter()
+        .filter(|claim| !is_activation_claim(claim))
+        .collect();
     assert_eq!(
         claims.len(),
         1,
         "one completed mana frame claims its live occurrences exactly once"
     );
-    let claimed = &claims[0];
+    let claimed = claims[0];
     assert!(
         !claimed.is_empty() && claimed.len() <= expected.len(),
         "the claim must be a non-empty prefix of the action's events"

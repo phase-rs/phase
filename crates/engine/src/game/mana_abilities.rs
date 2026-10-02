@@ -3206,12 +3206,12 @@ fn finish_mana_ability_cost_payment(
     // before production — for every resolution mode (manual, auto-tap, nested
     // sub-cost), and observe its triggers at this boundary (CR 603.10): the
     // ability's own resolution may yet sacrifice or change its source.
+    // CR 605.1a: classified from the bound definition like every activation.
+    // This path is the mana-ability path, but an ability that fails a CR 605.1a
+    // criterion (Millikin's library-moving cost) can still be driven through
+    // it; it is then an ordinary activation, and "that isn't a mana ability"
+    // triggers must see it as one.
     let activation_kind = ActivatedAbilityKind::of_definition(&ability_def);
-    debug_assert_eq!(
-        activation_kind,
-        ActivatedAbilityKind::Mana,
-        "only a mana ability reaches mana-ability cost settlement"
-    );
     let activation_event = super::casting_targets::emit_ability_activated(
         state,
         pending.player,
