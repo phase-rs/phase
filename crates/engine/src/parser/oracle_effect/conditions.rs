@@ -263,6 +263,33 @@ pub(crate) fn strip_leading_general_conditional(
     text: &str,
     ctx: &mut ParseContext,
 ) -> (Option<AbilityCondition>, String) {
+    let (routed, body) = strip_routed_leading_general_conditional(text, ctx);
+    (routed.map(|(condition, _)| condition), body)
+}
+
+/// Which recognizer family produced the gate a leading general conditional
+/// stripped, for a caller that must apply a family-specific binding guard to the
+/// clause it gates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum LeadingConditionRoute {
+    /// Any recognizer whose gate needs no route-specific binding guard.
+    General,
+    /// CR 115.1 + CR 608.2c: `parse_target_pt_threshold_condition` — "that
+    /// creature has power 4 or greater" / "that creature's power is 2 or less".
+    /// "That creature" names the earlier instruction's target, but the emitted
+    /// `TargetMatchesFilter { subject_slot: None }` reads the gated node's own
+    /// first object target at resolution, so it binds the antecedent only when
+    /// the gated instruction announces no target of its own.
+    TargetPtThreshold,
+}
+
+/// [`strip_leading_general_conditional`], also naming the recognizer family
+/// ([`LeadingConditionRoute`]) that produced the stripped gate. Same grammar and
+/// precedence: the route only labels which recognizer claimed the condition.
+pub(super) fn strip_routed_leading_general_conditional(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> (Option<(AbilityCondition, LeadingConditionRoute)>, String) {
     // CR 508.4 + CR 608.2c + CR 701.42: this condition contains an internal
     // comma before its second conjunct ("are attacking, and you both own and
     // control them"). Peel it through the shared condition production before
@@ -270,7 +297,7 @@ pub(crate) fn strip_leading_general_conditional(
     // normal effect-chain parser.
     if let Some((condition, _, _, partner, body)) = super::meld::strip_live_pair_conditional(text) {
         ctx.pending_meld_partner = Some(partner);
-        return (Some(condition), body);
+        return (Some((condition, LeadingConditionRoute::General)), body);
     }
     // CR 603.4: an inline `If` in an activated ability has its normal English
     // meaning. Parse the shared own/control pair grammar as an AbilityCondition;
@@ -279,7 +306,7 @@ pub(crate) fn strip_leading_general_conditional(
     if let Some((condition, _, _, partner, body)) = super::meld::strip_owned_pair_conditional(text)
     {
         ctx.pending_meld_partner = Some(partner);
-        return (Some(condition), body);
+        return (Some((condition, LeadingConditionRoute::General)), body);
     }
     if let Some((condition_fragment, body)) = split_leading_conditional(text) {
         let condition_lower = condition_fragment.to_lowercase();
@@ -312,17 +339,38 @@ pub(crate) fn strip_leading_general_conditional(
             .then(|| parse_effect_discard_instant_or_sorcery_condition(cond_text))
             .flatten();
 
-        if let Some(condition) = player_damage_scry
+        let general = |condition| (condition, LeadingConditionRoute::General);
+        if let Some(routed) = player_damage_scry
             .or(effect_discard_drain)
-            .or_else(|| try_nom_condition_as_ability_condition(cond_text, ctx))
-            .or_else(|| parse_condition_text_in(cond_text, ctx))
-            .or_else(|| parse_control_count_as_ability_condition(cond_text))
-            .or_else(|| parse_and_conjunction_condition(cond_text, ctx))
+            .map(general)
+            .or_else(|| {
+                try_nom_condition_as_ability_condition(cond_text, ctx).map(|condition| {
+                    let route = nom_condition_route(cond_text, &condition);
+                    (condition, route)
+                })
+            })
+            .or_else(|| parse_condition_text_in(cond_text, ctx).map(general))
+            .or_else(|| parse_control_count_as_ability_condition(cond_text).map(general))
+            .or_else(|| parse_and_conjunction_condition(cond_text, ctx).map(general))
         {
-            return (Some(condition), body);
+            return (Some(routed), body);
         }
     }
     (None, text.to_string())
+}
+
+/// Route of a gate `try_nom_condition_as_ability_condition` produced from
+/// `cond_text`: [`LeadingConditionRoute::TargetPtThreshold`] exactly when the
+/// target P/T threshold recognizer (one arm of that dispatcher) reads
+/// `cond_text` as this same gate. The recognizer is re-run rather than lifted
+/// out of the dispatcher, so the dispatcher's precedence is unchanged; equality
+/// pins the label to that recognizer's reading.
+fn nom_condition_route(cond_text: &str, condition: &AbilityCondition) -> LeadingConditionRoute {
+    if parse_target_pt_threshold_condition_text(cond_text).as_ref() == Some(condition) {
+        LeadingConditionRoute::TargetPtThreshold
+    } else {
+        LeadingConditionRoute::General
+    }
 }
 
 /// CR 608.2c: Parse a top-level `"<cond> and <cond> [and …]"` conjunction into

@@ -79,7 +79,18 @@ fn current_slot_legal_targets(runner: &GameRunner) -> Vec<TargetRef> {
 /// Drive a real board until the stack is empty: order triggers, declare `want`
 /// at the trigger's single target slot, and pass priority otherwise.
 fn drive_board(runner: &mut GameRunner, want: TargetRef, what: &str) {
-    let mut declared = false;
+    let declared = drive_board_declaring(runner, &[want], what);
+    assert_eq!(
+        declared, 1,
+        "{what}: the trigger has exactly one target slot"
+    );
+}
+
+/// [`drive_board`] for a trigger that may announce several targets: declares
+/// `wants` in order, one per target slot the engine asks about, and returns how
+/// many it declared. A `want` left over means the trigger asked for fewer slots.
+fn drive_board_declaring(runner: &mut GameRunner, wants: &[TargetRef], what: &str) -> usize {
+    let mut declared = 0;
     let mut observed = Vec::new();
     for _ in 0..60 {
         let waiting = runner.state().waiting_for.clone();
@@ -89,18 +100,23 @@ fn drive_board(runner: &mut GameRunner, want: TargetRef, what: &str) {
                 drain_order_triggers_with_identity(runner.state_mut());
             }
             WaitingFor::TriggerTargetSelection { .. } | WaitingFor::TargetSelection { .. } => {
+                let want = wants.get(declared).unwrap_or_else(|| {
+                    panic!("{what}: more target slots than wanted targets; observed {observed:#?}")
+                });
                 assert!(
-                    current_slot_legal_targets(runner).contains(&want),
+                    current_slot_legal_targets(runner).contains(want),
                     "{what}: the wanted target must be legal; observed {observed:#?}"
                 );
-                declared = true;
+                declared += 1;
                 runner
                     .act(GameAction::ChooseTarget {
                         target: Some(want.clone()),
                     })
                     .unwrap_or_else(|err| panic!("{what}: slot declaration rejected: {err:?}"));
             }
-            WaitingFor::Priority { .. } if runner.state().stack.is_empty() && declared => return,
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() && declared > 0 => {
+                return declared;
+            }
             WaitingFor::Priority { .. } => {
                 runner
                     .act(GameAction::PassPriority)
@@ -471,4 +487,126 @@ fn bloomsage_power_six_leaves_the_source_unprepared() {
         !is_prepared(&runner, bystander),
         "the bystander is not prepared"
     );
+}
+
+/// A synthetic rider in the class Strider prints, but whose gated instruction
+/// announces a target of its own. "That creature" is the counter's recipient;
+/// the rider's "target creature" is a different object.
+const OWN_TARGET_RIDER_ORACLE: &str = "Whenever a land you control enters, put a +1/+1 counter on target creature you control. Then if that creature has power 4 or greater, destroy target creature.";
+
+/// A creature carrying [`OWN_TARGET_RIDER_ORACLE`] on P0's battlefield, a P0
+/// counter recipient and a P1 destroy candidate of the given sizes, and a Forest
+/// in P0's hand. Plays the Forest and offers the recipient then the candidate
+/// for whatever target slots the landfall trigger announces, driving it to
+/// resolution. Returns `(runner, source, recipient, candidate)`.
+fn own_target_rider_landfall(
+    recipient_size: (i32, i32),
+    candidate_size: (i32, i32),
+) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature_from_oracle(P0, "Test Warden", 2, 2, OWN_TARGET_RIDER_ORACLE)
+        .id();
+    let recipient = scenario
+        .add_creature(P0, "Recipient", recipient_size.0, recipient_size.1)
+        .id();
+    let candidate = scenario
+        .add_creature(P1, "Candidate", candidate_size.0, candidate_size.1)
+        .id();
+    let forest = scenario
+        .add_land_to_hand(P0, "Forest")
+        .with_subtypes(vec!["Forest"])
+        .id();
+    let mut runner = scenario.build();
+    grant_priority(&mut runner, P0);
+    let card_id = runner.state().objects[&forest].card_id;
+    runner
+        .act(GameAction::PlayLand {
+            object_id: forest,
+            card_id,
+        })
+        .expect("the Forest must be playable");
+    drive_board_declaring(
+        &mut runner,
+        &[TargetRef::Object(recipient), TargetRef::Object(candidate)],
+        "own-target rider landfall",
+    );
+    (runner, source, recipient, candidate)
+}
+
+/// Asserts the counter landed on the recipient (reach guard) and that no
+/// creature left the battlefield or reached a graveyard.
+fn assert_rider_destroyed_nothing(
+    runner: &GameRunner,
+    source: ObjectId,
+    recipient: ObjectId,
+    candidate: ObjectId,
+) {
+    assert_eq!(
+        plus_one_counters(runner, recipient),
+        1,
+        "reach guard: the first instruction put its counter on the recipient"
+    );
+    let state = runner.state();
+    for id in [source, recipient, candidate] {
+        assert!(
+            state.battlefield.contains(&id),
+            "{}: nothing is destroyed",
+            state.objects[&id].name
+        );
+    }
+    for player in &state.players {
+        assert!(
+            player.graveyard.is_empty(),
+            "no creature reached a graveyard: {:?}",
+            player.graveyard
+        );
+    }
+}
+
+/// CR 115.1 + CR 608.2c: the gate's "that creature" is the counter's recipient,
+/// but its `TargetMatchesFilter { subject_slot: None }` is evaluated both
+/// against the announcing instruction and against the rider's own first object
+/// target, so without a guard it destroys only when BOTH objects qualify. The
+/// rider therefore fails closed. Here the recipient (3/3 → 4/4) qualifies and
+/// the candidate (2/2) does not: nothing is destroyed.
+#[test]
+fn own_target_rider_with_qualifying_recipient_destroys_nothing() {
+    let (runner, source, recipient, candidate) = own_target_rider_landfall((3, 3), (2, 2));
+    assert_eq!(
+        power(&runner, recipient),
+        Some(4),
+        "reach guard: the recipient qualifies for the gate"
+    );
+    assert_rider_destroyed_nothing(&runner, source, recipient, candidate);
+}
+
+/// CR 115.1 + CR 608.2c: the opposite pair — the recipient (1/1 → 2/2) fails
+/// "power 4 or greater" while the candidate (5/5) would pass it. The candidate's
+/// power never decides the outcome: nothing is destroyed.
+#[test]
+fn own_target_rider_with_qualifying_candidate_destroys_nothing() {
+    let (runner, source, recipient, candidate) = own_target_rider_landfall((1, 1), (5, 5));
+    assert_eq!(
+        power(&runner, recipient),
+        Some(2),
+        "reach guard: the recipient fails the gate"
+    );
+    assert_rider_destroyed_nothing(&runner, source, recipient, candidate);
+}
+
+/// CR 115.1 + CR 608.2c: both the recipient (3/3 → 4/4) and the candidate (5/5)
+/// meet "power 4 or greater". Without the guard the misbound gate passes on
+/// both reads and destroys the candidate; the fail-closed rider destroys
+/// nothing, so this is the fixture that proves the guard is taken.
+#[test]
+fn own_target_rider_with_both_qualifying_destroys_nothing() {
+    let (runner, source, recipient, candidate) = own_target_rider_landfall((3, 3), (5, 5));
+    assert_eq!(
+        power(&runner, recipient),
+        Some(4),
+        "reach guard: the recipient qualifies for the gate"
+    );
+    assert_rider_destroyed_nothing(&runner, source, recipient, candidate);
 }

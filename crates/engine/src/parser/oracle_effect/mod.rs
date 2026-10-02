@@ -40361,11 +40361,12 @@ fn parse_effect_chain_ir_body(
         // Runs only when no dedicated leading stripper matched. Handles patterns like
         // "if you control 3 or more creatures, draw a card".
         let (leading_cond, text) = if condition.is_none() {
-            strip_leading_general_conditional(&text, ctx)
+            strip_routed_leading_general_conditional(&text, ctx)
         } else {
             (None, text)
         };
-        let condition = condition.or(leading_cond);
+        let leading_route = leading_cond.as_ref().map(|(_, route)| *route);
+        let condition = condition.or(leading_cond.map(|(condition, _)| condition));
         // CR 608.2c + CR 708.7: a generic "if you can't" rider attached to a
         // preceding `TurnFaceUp` must read the performed-signal, not the
         // zone-change ledger (a successful turn-up changes no zone). See the
@@ -43398,6 +43399,26 @@ fn parse_effect_chain_ir_body(
                     ));
                 } else {
                     reader.target_reads = TargetReadOrigin::ParentAnnouncement;
+                }
+            }
+        }
+
+        // CR 115.1 + CR 608.2c: the target P/T threshold gate's "that creature"
+        // names the earlier instruction's target, but its `TargetMatchesFilter {
+        // subject_slot: None }` also reads this instruction's own first object
+        // target when the instruction resolves. An instruction that announces its
+        // own target ("…, destroy target creature") would have the gate test the
+        // rider's object as well as the antecedent, so that shape is refused
+        // rather than misbound.
+        if leading_route == Some(LeadingConditionRoute::TargetPtThreshold) {
+            if let Some(reader) = builder.last_mut() {
+                if clause_announces_own_target(reader) {
+                    reader.parsed = parsed_clause(Effect::unimplemented(
+                        "target_pt_threshold_rider_declares_target",
+                        normalized_text,
+                    ));
+                    // The misbinding gate does not survive on the strict-failure node.
+                    reader.condition = None;
                 }
             }
         }

@@ -26541,6 +26541,66 @@ fn target_has_pt_threshold_gate_lowers_to_target_filter() {
     }
 }
 
+/// CR 115.1 + CR 608.2c: the target P/T threshold gate's "that creature" names
+/// the earlier instruction's target, but `TargetMatchesFilter { subject_slot:
+/// None }` reads the gated node's own first object target. A rider that
+/// announces its own target ("…, destroy target creature") would have the gate
+/// test the rider's object, so it fails closed as
+/// `target_pt_threshold_rider_declares_target` — in both surface forms of the
+/// recognizer (present-tense "has power N" and possessive "'s power is N").
+#[test]
+fn target_pt_threshold_rider_declaring_its_own_target_fails_closed() {
+    fn has_target_matches_filter(def: &AbilityDefinition) -> bool {
+        matches!(
+            def.condition,
+            Some(AbilityCondition::TargetMatchesFilter { .. })
+        ) || def
+            .sub_ability
+            .as_deref()
+            .is_some_and(has_target_matches_filter)
+    }
+    for text in [
+        "Whenever a land you control enters, put a +1/+1 counter on target creature you control. Then if that creature has power 4 or greater, destroy target creature.",
+        "Whenever a land you control enters, put a +1/+1 counter on target creature you control. Then if that creature's power is 4 or greater, destroy target creature.",
+    ] {
+        let r = parse(text, "Test Warden", &[], &["Creature"], &[]);
+        let [trigger] = r.triggers.as_slice() else {
+            panic!("{text}: expected exactly one trigger: {r:#?}");
+        };
+        let execute = trigger
+            .execute
+            .as_deref()
+            .unwrap_or_else(|| panic!("{text}: trigger must have an execute body"));
+        // REACH GUARD: the first instruction parsed normally.
+        assert!(
+            matches!(
+                &*execute.effect,
+                Effect::PutCounter {
+                    target: TargetFilter::Typed(_),
+                    ..
+                }
+            ),
+            "{text}: root is the targeted counter placement: {execute:#?}"
+        );
+        let rider = execute
+            .sub_ability
+            .as_deref()
+            .unwrap_or_else(|| panic!("{text}: the rider must follow: {execute:#?}"));
+        assert!(
+            matches!(
+                &*rider.effect,
+                Effect::Unimplemented { name, .. }
+                    if name == "target_pt_threshold_rider_declares_target"
+            ),
+            "{text}: a rider with its own target must fail closed: {rider:#?}"
+        );
+        assert!(
+            !has_target_matches_filter(execute),
+            "{text}: no misbinding TargetMatchesFilter gate may survive: {execute:#?}"
+        );
+    }
+}
+
 /// CR 508.6 + CR 608.2c: The Commander 2017 "whenever enchanted player is
 /// attacked" curse cycle carries the rider "Each opponent attacking that player
 /// does the same." — a player-scoped replication of the antecedent effect.
