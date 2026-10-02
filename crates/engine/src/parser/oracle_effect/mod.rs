@@ -25032,6 +25032,20 @@ fn clause_announces_own_target(clause: &ClauseIr) -> bool {
         })
 }
 
+/// CR 115.1 + CR 608.2c: a clause gated by a target P/T threshold
+/// ([`LeadingConditionRoute::TargetPtThreshold`]) whose own instruction announces
+/// a target becomes the strict-failure gap
+/// `target_pt_threshold_rider_declares_target`. The gate's `TargetMatchesFilter
+/// { subject_slot: None }` would read the clause's own object rather than the
+/// antecedent "that creature", so the clause is refused, and
+/// `ClauseIr::replace_with_gap` drops the misbinding gate together with every
+/// other executable field.
+fn refuse_target_pt_threshold_rider_with_own_target(clause: &mut ClauseIr) {
+    if clause_announces_own_target(clause) {
+        clause.replace_with_gap("target_pt_threshold_rider_declares_target");
+    }
+}
+
 /// [`chain_declared_object_target`], also naming WHICH clause declared the
 /// antecedent (its index in `clauses`). Same walk, same exclusions: the only
 /// difference is that the declaring clause's position is returned alongside the
@@ -40727,6 +40741,12 @@ fn parse_effect_chain_ir_body(
                 }
                 for clause in &mut body_ir.clauses {
                     apply_outer_condition_to_clause(outer_condition, clause);
+                    // CR 115.1 + CR 608.2c: the outer gate governs every body
+                    // clause, so each one that announces its own target is
+                    // refused exactly as the single-clause guard below refuses it.
+                    if leading_route == Some(LeadingConditionRoute::TargetPtThreshold) {
+                        refuse_target_pt_threshold_rider_with_own_target(clause);
+                    }
                 }
                 for c in body_ir.clauses {
                     builder.absorb_clause(c);
@@ -43412,14 +43432,7 @@ fn parse_effect_chain_ir_body(
         // rather than misbound.
         if leading_route == Some(LeadingConditionRoute::TargetPtThreshold) {
             if let Some(reader) = builder.last_mut() {
-                if clause_announces_own_target(reader) {
-                    reader.parsed = parsed_clause(Effect::unimplemented(
-                        "target_pt_threshold_rider_declares_target",
-                        normalized_text,
-                    ));
-                    // The misbinding gate does not survive on the strict-failure node.
-                    reader.condition = None;
-                }
+                refuse_target_pt_threshold_rider_with_own_target(reader);
             }
         }
 

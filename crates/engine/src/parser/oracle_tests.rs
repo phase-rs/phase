@@ -26601,6 +26601,182 @@ fn target_pt_threshold_rider_declaring_its_own_target_fails_closed() {
     }
 }
 
+/// The execute body of a one-trigger landfall card whose first instruction is
+/// "put a +1/+1 counter on target creature you control" — asserted as the
+/// REACH GUARD that the chain parsed past its first instruction.
+fn pt_threshold_landfall_execute(text: &str) -> AbilityDefinition {
+    let r = parse(text, "Test Warden", &[], &["Creature"], &[]);
+    let [trigger] = r.triggers.as_slice() else {
+        panic!("{text}: expected exactly one trigger: {r:#?}");
+    };
+    let execute = trigger
+        .execute
+        .as_deref()
+        .unwrap_or_else(|| panic!("{text}: trigger must have an execute body"))
+        .clone();
+    assert!(
+        matches!(
+            &*execute.effect,
+            Effect::PutCounter {
+                target: TargetFilter::Typed(_),
+                ..
+            }
+        ),
+        "{text}: root is the targeted counter placement: {execute:#?}"
+    );
+    execute
+}
+
+/// Whether `condition` is, or has anywhere in its `And` / `Or` tree, the target
+/// P/T threshold gate's `TargetMatchesFilter { subject_slot: None }`.
+fn condition_tree_has_target_matches_filter(condition: &AbilityCondition) -> bool {
+    match condition {
+        AbilityCondition::TargetMatchesFilter {
+            subject_slot: None, ..
+        } => true,
+        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => conditions
+            .iter()
+            .any(condition_tree_has_target_matches_filter),
+        _ => false,
+    }
+}
+
+fn assert_target_pt_threshold_rider_gap(text: &str, rider: &AbilityDefinition) {
+    assert!(
+        matches!(
+            &*rider.effect,
+            Effect::Unimplemented { name, .. }
+                if name == "target_pt_threshold_rider_declares_target"
+        ),
+        "{text}: a rider with its own target must fail closed: {rider:#?}"
+    );
+    assert!(
+        rider.condition.is_none(),
+        "{text}: no misbinding gate may survive on the gap: {rider:#?}"
+    );
+}
+
+/// CR 115.1 + CR 608.2c: a leading target P/T threshold scopes over every
+/// clause of a ", then …" body (the multi-clause conditional path), so the
+/// body clause that announces its own target fails closed there too, while a
+/// targetless sibling clause keeps the gate.
+#[test]
+fn target_pt_threshold_multi_clause_body_refuses_own_target_clause() {
+    let text = "Whenever a land you control enters, put a +1/+1 counter on target creature you control. Then if that creature has power 4 or greater, destroy target creature, then you gain 2 life.";
+    let execute = pt_threshold_landfall_execute(text);
+    let rider = execute
+        .sub_ability
+        .as_deref()
+        .unwrap_or_else(|| panic!("{text}: the rider must follow: {execute:#?}"));
+    assert_target_pt_threshold_rider_gap(text, rider);
+    // REACH GUARD: the targetless tail clause was split off the same gated body
+    // and still carries the P/T threshold gate.
+    let tail = rider
+        .sub_ability
+        .as_deref()
+        .unwrap_or_else(|| panic!("{text}: the tail clause must follow: {rider:#?}"));
+    assert!(
+        matches!(&*tail.effect, Effect::GainLife { .. }),
+        "{text}: tail is the life gain: {tail:#?}"
+    );
+    assert!(
+        tail.condition
+            .as_ref()
+            .is_some_and(condition_tree_has_target_matches_filter),
+        "{text}: the targetless tail keeps the gate: {tail:#?}"
+    );
+}
+
+/// CR 115.1 + CR 608.2c: a target P/T threshold conjunct or disjunct carries
+/// its binding hazard to the whole `And` / `Or` gate, so a rider with its own
+/// target fails closed; the same compound gate over a targetless rider lowers
+/// with the threshold member intact.
+#[test]
+fn target_pt_threshold_compound_gate_refuses_own_target_rider() {
+    for connective in [" and you control a Forest", " or if you control a Forest"] {
+        let refused = format!(
+            "Whenever a land you control enters, put a +1/+1 counter on target creature you control. Then if that creature has power 4 or greater{connective}, destroy target creature."
+        );
+        let execute = pt_threshold_landfall_execute(&refused);
+        let rider = execute
+            .sub_ability
+            .as_deref()
+            .unwrap_or_else(|| panic!("{refused}: the rider must follow: {execute:#?}"));
+        assert_target_pt_threshold_rider_gap(&refused, rider);
+
+        // REACH GUARD: the same compound gate is recognized, with the threshold
+        // member inside it, when the rider announces no target.
+        let kept = format!(
+            "Whenever a land you control enters, put a +1/+1 counter on target creature you control. Then if that creature has power 4 or greater{connective}, draw a card."
+        );
+        let execute = pt_threshold_landfall_execute(&kept);
+        let rider = execute
+            .sub_ability
+            .as_deref()
+            .unwrap_or_else(|| panic!("{kept}: the rider must follow: {execute:#?}"));
+        assert!(
+            matches!(&*rider.effect, Effect::Draw { .. }),
+            "{kept}: rider is the draw: {rider:#?}"
+        );
+        assert!(
+            matches!(
+                rider.condition,
+                Some(AbilityCondition::And { .. } | AbilityCondition::Or { .. })
+            ) && rider
+                .condition
+                .as_ref()
+                .is_some_and(condition_tree_has_target_matches_filter),
+            "{kept}: the compound gate keeps its threshold member: {rider:#?}"
+        );
+    }
+}
+
+/// CR 115.1 + CR 608.2c: Reptilian Recruiter (verbatim Oracle text) is the one
+/// printed card whose target P/T threshold sits in an `Or` gate over a
+/// multi-clause body. Every body clause reads "that creature" / "it" — none
+/// announces its own target — so the now-routed gate refuses nothing and each
+/// clause keeps the `Or`.
+#[test]
+fn target_pt_threshold_or_gate_over_context_target_body_refuses_nothing() {
+    let text = "Trample\nWhen this creature enters, choose target creature. If that creature's power is 2 or less or if you control another Lizard, gain control of that creature until end of turn, untap it, and it gains haste until end of turn.";
+    let r = parse(
+        text,
+        "Reptilian Recruiter",
+        &[],
+        &["Creature"],
+        &["Lizard", "Warrior"],
+    );
+    let [trigger] = r.triggers.as_slice() else {
+        panic!("expected exactly one trigger: {r:#?}");
+    };
+    let execute = trigger
+        .execute
+        .as_deref()
+        .unwrap_or_else(|| panic!("trigger must have an execute body"));
+    let chain: Vec<&AbilityDefinition> =
+        std::iter::successors(Some(execute), |def| def.sub_ability.as_deref()).collect();
+    assert!(
+        chain
+            .iter()
+            .all(|def| !matches!(&*def.effect, Effect::Unimplemented { .. })),
+        "no Reptilian clause fails closed: {execute:#?}"
+    );
+    // REACH GUARD: the gain-control clause is gated by the Or with the P/T
+    // threshold disjunct, so the routed multi-clause path was taken.
+    let gain = chain
+        .iter()
+        .find(|def| matches!(&*def.effect, Effect::GainControl { .. }))
+        .unwrap_or_else(|| panic!("Reptilian must produce a GainControl: {execute:#?}"));
+    assert!(
+        matches!(gain.condition, Some(AbilityCondition::Or { .. }))
+            && gain
+                .condition
+                .as_ref()
+                .is_some_and(condition_tree_has_target_matches_filter),
+        "GainControl keeps the Or gate with its threshold disjunct: {gain:#?}"
+    );
+}
+
 /// CR 508.6 + CR 608.2c: The Commander 2017 "whenever enchanted player is
 /// attacked" curse cycle carries the rider "Each opponent attacking that player
 /// does the same." — a player-scoped replication of the antecedent effect.

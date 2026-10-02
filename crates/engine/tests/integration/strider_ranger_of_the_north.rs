@@ -498,7 +498,8 @@ const OWN_TARGET_RIDER_ORACLE: &str = "Whenever a land you control enters, put a
 /// counter recipient and a P1 destroy candidate of the given sizes, and a Forest
 /// in P0's hand. Plays the Forest and offers the recipient then the candidate
 /// for whatever target slots the landfall trigger announces, driving it to
-/// resolution. Returns `(runner, source, recipient, candidate)`.
+/// resolution, and asserts exactly one slot was announced. Returns
+/// `(runner, source, recipient, candidate)`.
 fn own_target_rider_landfall(
     recipient_size: (i32, i32),
     candidate_size: (i32, i32),
@@ -527,10 +528,16 @@ fn own_target_rider_landfall(
             card_id,
         })
         .expect("the Forest must be playable");
-    drive_board_declaring(
+    let declared = drive_board_declaring(
         &mut runner,
         &[TargetRef::Object(recipient), TargetRef::Object(candidate)],
         "own-target rider landfall",
+    );
+    // The fail-closed rider announces no target: the trigger asks only for the
+    // counter's recipient, so the candidate is never declared.
+    assert_eq!(
+        declared, 1,
+        "own-target rider landfall: only the counter's target slot is announced"
     );
     (runner, source, recipient, candidate)
 }

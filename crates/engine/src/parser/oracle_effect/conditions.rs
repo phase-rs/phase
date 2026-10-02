@@ -279,8 +279,22 @@ pub(super) enum LeadingConditionRoute {
     /// "That creature" names the earlier instruction's target, but the emitted
     /// `TargetMatchesFilter { subject_slot: None }` reads the gated node's own
     /// first object target at resolution, so it binds the antecedent only when
-    /// the gated instruction announces no target of its own.
+    /// the gated instruction announces no target of its own. Also names an
+    /// `And` / `Or` gate with such a member ([`LeadingConditionRoute::merge`]).
     TargetPtThreshold,
+}
+
+impl LeadingConditionRoute {
+    /// The route of a compound gate (`And` / `Or`) built from gates of routes
+    /// `self` and `other`: a P/T threshold member anywhere in the tree carries
+    /// its binding hazard to the whole gate, since the compound is stamped on
+    /// the same gated instruction.
+    fn merge(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::General, Self::General) => Self::General,
+            (Self::TargetPtThreshold, _) | (_, Self::TargetPtThreshold) => Self::TargetPtThreshold,
+        }
+    }
 }
 
 /// [`strip_leading_general_conditional`], also naming the recognizer family
@@ -343,34 +357,15 @@ pub(super) fn strip_routed_leading_general_conditional(
         if let Some(routed) = player_damage_scry
             .or(effect_discard_drain)
             .map(general)
-            .or_else(|| {
-                try_nom_condition_as_ability_condition(cond_text, ctx).map(|condition| {
-                    let route = nom_condition_route(cond_text, &condition);
-                    (condition, route)
-                })
-            })
+            .or_else(|| try_routed_nom_condition_as_ability_condition(cond_text, ctx))
             .or_else(|| parse_condition_text_in(cond_text, ctx).map(general))
             .or_else(|| parse_control_count_as_ability_condition(cond_text).map(general))
-            .or_else(|| parse_and_conjunction_condition(cond_text, ctx).map(general))
+            .or_else(|| parse_and_conjunction_condition(cond_text, ctx))
         {
             return (Some(routed), body);
         }
     }
     (None, text.to_string())
-}
-
-/// Route of a gate `try_nom_condition_as_ability_condition` produced from
-/// `cond_text`: [`LeadingConditionRoute::TargetPtThreshold`] exactly when the
-/// target P/T threshold recognizer (one arm of that dispatcher) reads
-/// `cond_text` as this same gate. The recognizer is re-run rather than lifted
-/// out of the dispatcher, so the dispatcher's precedence is unchanged; equality
-/// pins the label to that recognizer's reading.
-fn nom_condition_route(cond_text: &str, condition: &AbilityCondition) -> LeadingConditionRoute {
-    if parse_target_pt_threshold_condition_text(cond_text).as_ref() == Some(condition) {
-        LeadingConditionRoute::TargetPtThreshold
-    } else {
-        LeadingConditionRoute::General
-    }
 }
 
 /// CR 608.2c: Parse a top-level `"<cond> and <cond> [and …]"` conjunction into
@@ -380,11 +375,12 @@ fn nom_condition_route(cond_text: &str, condition: &AbilityCondition) -> Leading
 /// conjunct is parsed by the same single-condition dispatchers (no self-
 /// recursion); if any conjunct fails, the whole conjunction fails.
 /// Motivating card: Coiling Rebirth ("if the gift was promised and that
-/// creature isn't legendary, …").
+/// creature isn't legendary, …"). The returned route merges every conjunct's
+/// ([`LeadingConditionRoute::merge`]).
 fn parse_and_conjunction_condition(
     cond_text: &str,
     ctx: &mut ParseContext,
-) -> Option<AbilityCondition> {
+) -> Option<(AbilityCondition, LeadingConditionRoute)> {
     // structural top-level conjunction decomposition (each conjunct is parsed by
     // nom-backed dispatchers below), not parsing dispatch.
     let parts: Vec<&str> = cond_text.split(" and ").collect(); // allow-noncombinator: structural conjunction split, conjuncts parsed by nom dispatchers
@@ -392,14 +388,19 @@ fn parse_and_conjunction_condition(
         return None;
     }
     let mut conditions = Vec::with_capacity(parts.len());
+    let mut route = LeadingConditionRoute::General;
     for part in parts {
         let part = part.trim();
-        let condition = try_nom_condition_as_ability_condition(part, ctx)
-            .or_else(|| parse_condition_text_in(part, ctx))
-            .or_else(|| parse_control_count_as_ability_condition(part))?;
+        let (condition, part_route) = try_routed_nom_condition_as_ability_condition(part, ctx)
+            .or_else(|| {
+                parse_condition_text_in(part, ctx)
+                    .or_else(|| parse_control_count_as_ability_condition(part))
+                    .map(|condition| (condition, LeadingConditionRoute::General))
+            })?;
+        route = route.merge(part_route);
         conditions.push(condition);
     }
-    Some(AbilityCondition::And { conditions })
+    Some((AbilityCondition::And { conditions }, route))
 }
 
 /// CR 608.2c + CR 608.2d: Strip a leading `"If <condition>, "` head ONLY when the
@@ -6511,10 +6512,15 @@ fn parse_target_cast_variant_paid_condition_text(text: &str) -> Option<AbilityCo
 /// One disjunct of an " or if " chain. Beyond the shared dispatcher it accepts
 /// the target-anaphoric "it's a <type>" gate and the symbolic "{G}{W} was spent
 /// to cast this spell" gate, which the effect-suffix path owns.
-fn parse_or_if_disjunct(text: &str, ctx: &mut ParseContext) -> Option<AbilityCondition> {
-    try_nom_condition_as_ability_condition(text, ctx)
-        .or_else(|| parse_its_a_type_condition(text, ctx))
-        .or_else(|| parse_condition_text(text))
+fn parse_or_if_disjunct(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<(AbilityCondition, LeadingConditionRoute)> {
+    try_routed_nom_condition_as_ability_condition(text, ctx).or_else(|| {
+        parse_its_a_type_condition(text, ctx)
+            .or_else(|| parse_condition_text(text))
+            .map(|condition| (condition, LeadingConditionRoute::General))
+    })
 }
 
 /// CR 608.2c: Parse an " or if "-connected disjunction of condition clauses into
@@ -6526,8 +6532,12 @@ fn parse_or_if_disjunct(text: &str, ctx: &mut ParseContext) -> Option<AbilityCon
 /// function returns None so the caller leaves the gate unrepresented (honest
 /// `Condition_If` fallthrough) rather than firing the effect on a partial
 /// condition. The disjuncts themselves carry no " or if ", so the recursion
-/// short-circuits on the guard below — no unbounded recursion.
-fn parse_or_if_disjunction(text: &str, ctx: &mut ParseContext) -> Option<AbilityCondition> {
+/// short-circuits on the guard below — no unbounded recursion. The returned
+/// route merges every disjunct's ([`LeadingConditionRoute::merge`]).
+fn parse_or_if_disjunction(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<(AbilityCondition, LeadingConditionRoute)> {
     let lower = text.to_lowercase();
     fn split_on_or_if(input: &str) -> Option<(&str, &str)> {
         terminated(
@@ -6541,19 +6551,22 @@ fn parse_or_if_disjunction(text: &str, ctx: &mut ParseContext) -> Option<Ability
     // The first split doubles as the guard: no " or if " connective means this is
     // not a disjunction, so the single-arm dispatchers should handle the clause.
     let (first_disjunct, mut remaining) = split_on_or_if(lower.as_str())?;
-    let mut conditions = vec![parse_or_if_disjunct(first_disjunct.trim(), ctx)?];
+    let (first, mut route) = parse_or_if_disjunct(first_disjunct.trim(), ctx)?;
+    let mut conditions = vec![first];
     loop {
         let (disjunct, rest) = match split_on_or_if(remaining) {
             Some((disjunct, rest)) => (disjunct, Some(rest)),
             None => (remaining, None),
         };
-        conditions.push(parse_or_if_disjunct(disjunct.trim(), ctx)?);
+        let (condition, disjunct_route) = parse_or_if_disjunct(disjunct.trim(), ctx)?;
+        route = route.merge(disjunct_route);
+        conditions.push(condition);
         match rest {
             Some(r) => remaining = r,
             None => break,
         }
     }
-    Some(AbilityCondition::Or { conditions })
+    Some((AbilityCondition::Or { conditions }, route))
 }
 
 /// CR 613.1f + CR 702.1: single authority for lowering a keyword-presence
@@ -6585,8 +6598,18 @@ pub(super) fn try_nom_condition_as_ability_condition(
     text: &str,
     ctx: &mut ParseContext,
 ) -> Option<AbilityCondition> {
-    use crate::parser::oracle_nom::condition::parse_inner_condition;
+    try_routed_nom_condition_as_ability_condition(text, ctx).map(|(condition, _)| condition)
+}
 
+/// [`try_nom_condition_as_ability_condition`], also naming the recognizer family
+/// ([`LeadingConditionRoute`]) that produced the gate. Same arms, same
+/// precedence: each arm labels its own result, and the " or if " disjunction
+/// arm merges its disjuncts' routes, so a P/T threshold disjunct is named even
+/// inside an `Or`.
+pub(super) fn try_routed_nom_condition_as_ability_condition(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<(AbilityCondition, LeadingConditionRoute)> {
     let lower = text.to_lowercase();
 
     // CR 508.4 + CR 608.2c + CR 701.42: attacking meld-pair conditions are
@@ -6594,7 +6617,7 @@ pub(super) fn try_nom_condition_as_ability_condition(
     // dispatcher so trigger, activated-ability, and ordinary effect chains all
     // obtain the same typed source/partner predicates.
     if let Some((condition, ..)) = super::meld::parse_live_pair_ability_condition(text) {
-        return Some(condition);
+        return Some((condition, LeadingConditionRoute::General));
     }
 
     // CR 608.2c: "<condition A> or if <condition B>" disjunction (Reptilian
@@ -6603,8 +6626,8 @@ pub(super) fn try_nom_condition_as_ability_condition(
     // re-introduces "if"), so peel on " or if " and recurse every disjunct through
     // this dispatcher; bind `Or` only when EVERY disjunct parses. Tried first so a
     // disjunction wins over any single-arm match on its leading disjunct.
-    if let Some(condition) = parse_or_if_disjunction(text, ctx) {
-        return Some(condition);
+    if let Some(routed) = parse_or_if_disjunction(text, ctx) {
+        return Some(routed);
     }
 
     // CR 505.1 + CR 102.1 + CR 608.2c: resolution-time "it is[n't] your [phase]"
@@ -6613,12 +6636,12 @@ pub(super) fn try_nom_condition_as_ability_condition(
     // (it never anaphors to a target), and the `all_consuming` wrap over the
     // unique "it … your <phase>" shape forbids any partial / mis-bound match.
     if let Ok((_, condition)) = all_consuming(parse_current_phase_condition).parse(lower.as_str()) {
-        return Some(condition);
+        return Some((condition, LeadingConditionRoute::General));
     }
 
     // CR 508.1a: "you attacked with <filter> [this turn]" filtered attack-history gate.
     if let Some(condition) = parse_attacked_with_filter_condition(lower.as_str()) {
-        return Some(condition);
+        return Some((condition, LeadingConditionRoute::General));
     }
 
     // CR 508.1a + CR 603.4: target-anaphoric "it [didn't] attack this turn"
@@ -6626,7 +6649,7 @@ pub(super) fn try_nom_condition_as_ability_condition(
     // Tried after the controller-scoped "you attacked with" form above, whose
     // subject parser cannot match the anaphoric "it"/"that creature".
     if let Some(condition) = parse_target_attacked_this_turn_condition_text(lower.as_str()) {
-        return Some(condition);
+        return Some((condition, LeadingConditionRoute::General));
     }
 
     // CR 400.7 + CR 608.2c: per-target "if <subject> entered this turn" ETB gate
@@ -6638,7 +6661,7 @@ pub(super) fn try_nom_condition_as_ability_condition(
     // source-referential "~ entered this turn" (SourceEnteredThisTurn) forms, so
     // those still reach their own recognizers.
     if let Some(condition) = parse_target_entered_this_turn_condition_text(lower.as_str()) {
-        return Some(condition);
+        return Some((condition, LeadingConditionRoute::General));
     }
 
     // CR 608.2c + CR 205.3m: target-anaphoric type / subtype-membership gate
@@ -6650,7 +6673,7 @@ pub(super) fn try_nom_condition_as_ability_condition(
         lower.as_str(),
         ctx.chain_declared_object_target.as_ref(),
     ) {
-        return Some(condition);
+        return Some((condition, LeadingConditionRoute::General));
     }
 
     // CR 608.2c + CR 400.7: target-anaphoric reflexive object-property gate —
@@ -6663,7 +6686,7 @@ pub(super) fn try_nom_condition_as_ability_condition(
     // parameterized object characteristic (dealt-damage, combat status, mana
     // value, P/T), so it must not preempt the type/color recognizers.
     if let Some(condition) = parse_target_reflexive_property_condition_text(lower.as_str()) {
-        return Some(condition);
+        return Some((condition, LeadingConditionRoute::General));
     }
 
     // CR 115.1 + CR 208.1 + CR 608.2c: target-anaphoric P/T threshold —
@@ -6676,8 +6699,21 @@ pub(super) fn try_nom_condition_as_ability_condition(
     // otherwise mis-scope the subject to `Power { CostPaidObject }`, and over the
     // target-has gate in `mod.rs` that would fail it closed as `Keyword::Unknown`.
     if let Some(condition) = parse_target_pt_threshold_condition_text(lower.as_str()) {
-        return Some(condition);
+        return Some((condition, LeadingConditionRoute::TargetPtThreshold));
     }
+
+    try_unrouted_nom_condition_tail(text, ctx)
+        .map(|condition| (condition, LeadingConditionRoute::General))
+}
+
+/// The arms of [`try_routed_nom_condition_as_ability_condition`] after the
+/// target P/T threshold recognizer, in the same order. None of them produces a
+/// gate that needs a route-specific binding guard, so the routed dispatcher
+/// labels every result here [`LeadingConditionRoute::General`].
+fn try_unrouted_nom_condition_tail(text: &str, ctx: &mut ParseContext) -> Option<AbilityCondition> {
+    use crate::parser::oracle_nom::condition::parse_inner_condition;
+
+    let lower = text.to_lowercase();
 
     if let Some(condition) = parse_you_controlled_parent_target_condition(lower.as_str()) {
         return Some(condition);
