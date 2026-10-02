@@ -2296,6 +2296,17 @@ pub struct ChosenDamageSource {
 
 /// CR 120.1: Snapshot of a damage event for "was dealt damage by" queries.
 ///
+/// CR 702.110b: Record of an exploit sacrifice.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExploitRecord {
+    pub exploiter: ObjectId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exploiter_incarnation: Option<u64>,
+    pub sacrificed: ObjectId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sacrificed_incarnation: Option<u64>,
+}
+
 /// CR 608.2i + CR 608.2h: source characteristics snapshot at damage time
 /// (look-back; criteria need not still hold). Queries such as "opponents who
 /// were dealt combat damage by ~ or a Dragon this turn" (Estinien Varlineau)
@@ -4791,7 +4802,11 @@ pub struct PendingPlayerScopeSacrificeCompletion {
 pub enum PendingPlayerScopeSacrificeFollowUp {
     /// Emit the exploit event only after the chosen creature's sacrifice has
     /// actually completed, including after a graveyard-move replacement choice.
-    Exploit { exploiter: ObjectId },
+    Exploit {
+        exploiter: ObjectId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exploiter_incarnation: Option<u64>,
+    },
 }
 
 /// One discard instruction, parked mid-batch while an optional replacement
@@ -21222,6 +21237,9 @@ declare_game_state! {
     /// of deep-copying them on the AI-search hot path.
     #[serde(default)]
     pub damage_dealt_this_turn: im::Vector<DamageRecord>,
+    /// CR 702.110b + CR 400.7: Exploit records this turn for "if it exploited that creature" queries.
+    #[serde(default, skip_serializing_if = "im::Vector::is_empty")]
+    pub creatures_exploited_this_turn: im::Vector<ExploitRecord>,
     /// CR 702.173a + CR 608.2i: Set of players P such that, at some point this
     /// turn, a creature controlled by P that was an Assassin OR a commander
     /// (snapshot at damage-dealing time per CR 608.2i — "looks back in time")
@@ -27490,6 +27508,7 @@ impl GameState {
             batched_zone_change_trigger_fired: HashSet::new(),
             battlefield_entries_this_turn: Vec::new(),
             damage_dealt_this_turn: im::Vector::new(),
+            creatures_exploited_this_turn: im::Vector::new(),
             assassin_or_commander_dealt_combat_damage_this_turn: HashSet::new(),
             creature_types_dealt_combat_damage_this_turn: im::HashSet::new(),
             mana_spent_on_spells_this_turn: HashMap::new(),
@@ -29890,6 +29909,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         batched_zone_change_trigger_fired: _,
         battlefield_entries_this_turn: _,
         damage_dealt_this_turn: _,
+        creatures_exploited_this_turn: _,
         assassin_or_commander_dealt_combat_damage_this_turn: _,
         creature_types_dealt_combat_damage_this_turn: _,
         mana_spent_on_spells_this_turn: _,
@@ -30245,6 +30265,7 @@ impl PartialEq for GameState {
             && self.batched_zone_change_trigger_fired == other.batched_zone_change_trigger_fired
             && self.battlefield_entries_this_turn == other.battlefield_entries_this_turn
             && self.damage_dealt_this_turn == other.damage_dealt_this_turn
+            && self.creatures_exploited_this_turn == other.creatures_exploited_this_turn
             && self.assassin_or_commander_dealt_combat_damage_this_turn
                 == other.assassin_or_commander_dealt_combat_damage_this_turn
             && self.creature_types_dealt_combat_damage_this_turn
@@ -31529,6 +31550,7 @@ mod tests {
             .expect("the fixture emits an authoritative departure record");
         let exploit = GameEvent::CreatureExploited {
             exploiter,
+            exploiter_incarnation: None,
             sacrificed: victim,
             record,
         };

@@ -24540,6 +24540,36 @@ fn trigger_dies_trailing_if_dealt_damage_stays_resolution_time() {
 }
 
 #[test]
+fn trigger_dies_if_source_exploited_that_creature() {
+    // CR 702.110b + CR 608.2c: "Whenever another creature you control dies, put a +1/+1 counter on this creature. It gains haste until end of turn if it exploited that creature."
+    let def = parse_trigger_line(
+        "Whenever another creature you control dies, put a +1/+1 counter on this creature. It gains haste until end of turn if it exploited that creature.",
+        "Silumgar Scavenger",
+    );
+    assert_eq!(def.mode, TriggerMode::ChangesZone);
+    assert_eq!(def.origin, Some(Zone::Battlefield));
+    assert_eq!(def.destination, Some(Zone::Graveyard));
+    assert_eq!(
+        def.condition, None,
+        "a trailing resolution-time `if` must NOT be hoisted to an intervening-if (CR 603.4)"
+    );
+    let execute = def
+        .execute
+        .as_deref()
+        .expect("trigger must parse an execute");
+    // The chain has two parts: +1/+1 counter, then grant haste gated by TriggerEventTargetExploitedBySource
+    let sub = execute
+        .sub_ability
+        .as_deref()
+        .expect("must have sub_ability for haste");
+    assert_eq!(
+        sub.condition,
+        Some(AbilityCondition::TriggerEventTargetExploitedBySource),
+        "the trailing condition must stay on the haste effect"
+    );
+}
+
+#[test]
 fn trigger_you_dealt_damage() {
     // CR 120.1: "whenever you're dealt damage" — player damage received.
     let def = parse_trigger_line(

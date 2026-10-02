@@ -549,6 +549,7 @@ fn rewrite_cost_x_in_condition(cond: &mut crate::types::ability::AbilityConditio
         AbilityCondition::Not { condition } => rewrite_cost_x_in_condition(condition),
         // Carry no `QuantityExpr` and nest no condition — nothing to bind.
         AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
+        | AbilityCondition::TriggerEventTargetExploitedBySource
         | AbilityCondition::AdditionalCostPaid { .. }
         | AbilityCondition::AdditionalCostPaidInstead
         | AbilityCondition::AlternativeManaCostPaid

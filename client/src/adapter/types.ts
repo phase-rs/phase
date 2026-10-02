@@ -3413,7 +3413,7 @@ export type GameEvent =
   | { type: "EnergyChanged"; data: { player: PlayerId; delta: number } }
   | { type: "PlayerCounterChanged"; data: { player: PlayerId; counter_kind: PlayerCounterKind; delta: number } }
   | { type: "SpeedChanged"; data: { player: PlayerId; old_speed: number | null; new_speed: number | null } }
-  | { type: "CreatureExploited"; data: { exploiter: ObjectId; sacrificed: ObjectId } }
+  | { type: "CreatureExploited"; data: { exploiter: ObjectId; exploiter_incarnation?: number | null; sacrificed: ObjectId } }
   | { type: "PowerToughnessChanged"; data: { object_id: ObjectId; power: number; toughness: number; power_delta: number; toughness_delta: number } }
   | { type: "RoomEntered"; data: { player_id: PlayerId; dungeon: DungeonId; room_index: number; room_name: string } }
   | { type: "BecomesPlotted"; data: { object_id: ObjectId; player_id: PlayerId } }

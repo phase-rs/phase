@@ -20,8 +20,8 @@ use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_quantity::{canonicalize_quantity_ref, parse_cda_quantity};
 use super::super::oracle_target::{
-    parse_target, parse_type_phrase_folding, parse_zone_word, slot_matches_anaphor,
-    slot_zone_class, AnaphorNoun, AnaphorZoneClass,
+    parse_target, parse_type_phrase_folding, parse_zone_word, peek_zone_boundary,
+    slot_matches_anaphor, slot_zone_class, AnaphorNoun, AnaphorZoneClass,
 };
 use super::super::oracle_util::{parse_comparison_suffix, parse_subtype, TextPair};
 #[cfg(test)]
@@ -1194,8 +1194,66 @@ fn try_nom_condition_as_unless(
     static_condition_to_ability_condition(&negated, ctx)
 }
 
+/// CR 601.2a: cast origin is latched for this resolving spell when it is cast.
+/// CR 707.10: an uncast spell copy has no cast-origin fact to satisfy the positive gate.
+/// CR 109.5 + CR 400.3: "your" private zone belongs to the current spell controller.
+fn parse_negated_spell_cast_origin_condition(input: &str) -> OracleResult<'_, AbilityCondition> {
+    let (input, _) = (
+        tag("this spell "),
+        nom_condition::parse_wasnt,
+        tag(" cast from "),
+    )
+        .parse(input)?;
+    let (input, owner) = alt((
+        value(Some(ControllerRef::You), tag("your ")),
+        value(None, opt(tag("a "))),
+    ))
+    .parse(input)?;
+    let (input, zone) = parse_zone_word(input)?;
+    let (input, _) = peek_zone_boundary(input)?;
+    if owner.is_some() && !matches!(zone, Zone::Hand | Zone::Library | Zone::Graveyard) {
+        return Err(oracle_err(input));
+    }
+
+    let cast = AbilityCondition::WasCast { zone: Some(zone) };
+    let positive = match owner {
+        Some(controller) => AbilityCondition::And {
+            conditions: vec![
+                cast,
+                AbilityCondition::SourceMatchesFilter {
+                    filter: TargetFilter::Typed(
+                        TypedFilter::default().properties(vec![FilterProp::Owned { controller }]),
+                    ),
+                },
+            ],
+        },
+        None => cast,
+    };
+    Ok((
+        input,
+        AbilityCondition::Not {
+            condition: Box::new(positive),
+        },
+    ))
+}
+
 pub(super) fn strip_cast_from_zone_conditional(text: &str) -> (Option<AbilityCondition>, String) {
     let lower = text.to_lowercase();
+    if let Some((condition, rest)) = nom_on_lower(text, &lower, |input| {
+        terminated(
+            preceded(
+                (opt(tag("then ")), tag("if ")),
+                parse_negated_spell_cast_origin_condition,
+            ),
+            peek(alt((tag(", "), eof))),
+        )
+        .parse(input)
+    }) {
+        return (
+            Some(condition),
+            remainder_after_optional_comma(rest).to_string(),
+        );
+    }
     // CR 603.4 + CR 601.2: Negated effect-level form — "if you didn't cast it
     // from your hand/graveyard/exile" → ¬(cast ∧ origin=X). This is the OPPOSITE
     // presupposition from the "anywhere other than X" arm below: a copy or a
@@ -4000,6 +4058,26 @@ fn parse_trigger_event_target_damaged_by_source_this_turn(input: &str) -> Oracle
     }
 }
 
+/// CR 702.110b + CR 608.2c: trailing "if it exploited that creature" is
+/// a resolution-time rider on a trigger effect (e.g. Silumgar Scavenger).
+fn parse_trigger_event_target_exploited_by_source(input: &str) -> OracleResult<'_, ()> {
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("it"),
+        tag("this creature"),
+        tag("this permanent"),
+        tag("~"),
+    ))
+    .parse(input)?;
+    let (rest, _) = tag(" exploited ").parse(rest)?;
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("that creature"),
+        tag("that permanent"),
+        tag("it"),
+    ))
+    .parse(rest)?;
+    Ok((rest, ()))
+}
+
 pub(super) fn strip_suffix_conditional(
     text: &str,
     ctx: &mut ParseContext,
@@ -4020,6 +4098,18 @@ pub(super) fn strip_suffix_conditional(
     {
         return (
             Some(AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn),
+            text[..if_pos].trim().to_string(),
+        );
+    }
+    // CR 702.110b + CR 608.2c: trailing "if it exploited that creature" is
+    // a resolution-time rider on a trigger effect (e.g. Silumgar Scavenger).
+    if ctx.in_trigger
+        && all_consuming(parse_trigger_event_target_exploited_by_source)
+            .parse(condition_text)
+            .is_ok()
+    {
+        return (
+            Some(AbilityCondition::TriggerEventTargetExploitedBySource),
             text[..if_pos].trim().to_string(),
         );
     }
@@ -4396,6 +4486,7 @@ pub(super) fn reads_cast_time_snapshot(condition: &AbilityCondition) -> bool {
         }
         AbilityCondition::WhenYouDo
         | AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
+        | AbilityCondition::TriggerEventTargetExploitedBySource
         | AbilityCondition::AdditionalCostPaidInstead
         | AbilityCondition::AlternativeManaCostPaid
         | AbilityCondition::EffectOutcome { .. }
@@ -6083,6 +6174,7 @@ pub(crate) fn ability_condition_to_static_condition(
         // iteration); only meaningful inside `resolve_ability_chain`, never as
         // a continuous-effect gate.
         AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
+        | AbilityCondition::TriggerEventTargetExploitedBySource
         | AbilityCondition::EffectOutcome { .. }
         | AbilityCondition::EventOutcomeWon
         | AbilityCondition::CoinFlipOutcome { .. }
@@ -6852,6 +6944,16 @@ pub(super) fn try_nom_condition_as_ability_condition(
                 destination: None,
             }),
         });
+    }
+
+    // CR 614.15: this source-bound gate also selects an existing self-replacement.
+    if let Ok((_, condition)) = all_consuming(terminated(
+        parse_negated_spell_cast_origin_condition,
+        (multispace0, opt(char('.')), multispace0),
+    ))
+    .parse(lower.as_str())
+    {
+        return Some(condition);
     }
 
     if let Ok((after_prefix, _)) =
@@ -8753,6 +8855,171 @@ mod tests {
         SharedQualityRelation,
     };
     use crate::types::counter::{CounterMatch, CounterType};
+
+    /// SHAPE: both adapters preserve the complete owner-relative negative predicate.
+    /// CR 109.5 + CR 400.3: an owner's private zone must belong to the live controller.
+    #[test]
+    fn twinned_vision_negated_origin_adapter_shapes_and_boundaries() {
+        let expected = |zone, owner| {
+            let cast = AbilityCondition::WasCast { zone: Some(zone) };
+            AbilityCondition::Not {
+                condition: Box::new(if owner {
+                    AbilityCondition::And {
+                        conditions: vec![
+                            cast,
+                            AbilityCondition::SourceMatchesFilter {
+                                filter: TargetFilter::Typed(TypedFilter::default().properties(
+                                    vec![FilterProp::Owned {
+                                        controller: ControllerRef::You,
+                                    }],
+                                )),
+                            },
+                        ],
+                    }
+                } else {
+                    cast
+                }),
+            }
+        };
+        // Synthetic grammar fixtures vary the existing zone and owner-scope axes.
+        for (input, zone, owner) in [
+            ("this spell wasn't cast from your hand", Zone::Hand, true),
+            ("this spell wasn’t cast from your hand", Zone::Hand, true),
+            (
+                "this spell wasn't cast from your graveyard",
+                Zone::Graveyard,
+                true,
+            ),
+            (
+                "this spell wasn't cast from your library",
+                Zone::Library,
+                true,
+            ),
+            (
+                "this spell wasn't cast from a graveyard",
+                Zone::Graveyard,
+                false,
+            ),
+            ("this spell wasn't cast from exile", Zone::Exile, false),
+        ] {
+            assert_eq!(
+                try_nom_condition_as_ability_condition(input, &mut ParseContext::default()),
+                Some(expected(zone, owner)),
+                "full-condition adapter: {input}"
+            );
+            assert_eq!(
+                strip_cast_from_zone_conditional(&format!("if {input}, Draw a card.")),
+                (Some(expected(zone, owner)), "Draw a card.".to_string()),
+                "leading-condition adapter: {input}"
+            );
+        }
+        assert_eq!(
+            try_nom_condition_as_ability_condition(
+                "This spell wasn't cast from your hand.  ",
+                &mut ParseContext::default(),
+            ),
+            Some(expected(Zone::Hand, true))
+        );
+        assert_eq!(
+            strip_cast_from_zone_conditional(
+                "Then if this spell wasn't cast from your hand, Draw a card."
+            ),
+            (Some(expected(Zone::Hand, true)), "Draw a card.".to_string())
+        );
+        assert_eq!(
+            strip_cast_from_zone_conditional("if this spell wasn't cast from your hand"),
+            (Some(expected(Zone::Hand, true)), String::new())
+        );
+        for malformed in [
+            "this spell wasn't cast from your handful",
+            "this spell wasn't cast from your hand and the moon is blue",
+            "this spell wasn't cast from your exile",
+        ] {
+            assert_eq!(
+                try_nom_condition_as_ability_condition(malformed, &mut ParseContext::default()),
+                None,
+                "full-condition adapter must reject the whole condition: {malformed}"
+            );
+            let leading = format!("Then if {malformed}, Draw a card.");
+            assert_eq!(
+                strip_cast_from_zone_conditional(&leading),
+                (None, leading.clone()),
+                "leading adapter must preserve rejected input"
+            );
+        }
+    }
+
+    /// SHAPE: verbatim Twinned lowers its complete self-replacement; bad tails stay red.
+    /// Runtime witnesses live in integration::twinned_vision_cast_origin.
+    #[test]
+    fn twinned_vision_full_oracle_self_replacement_shape_and_strict_failure() {
+        let parsed = parse_oracle_text(
+            "Draw a card. If this spell wasn't cast from your hand, draw two cards instead.\nFlashback—{1}{U/R}{U/R}, Discard a card. (You may cast this card from your graveyard for its flashback cost. Then exile it.)",
+            "Twinned Vision",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+        assert_eq!(parsed.abilities.len(), 1);
+        let base = &parsed.abilities[0];
+        assert!(matches!(
+            *base.effect,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                ..
+            }
+        ));
+        let replacement = base
+            .sub_ability
+            .as_ref()
+            .expect("two-card replacement branch");
+        assert!(matches!(
+            *replacement.effect,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 2 },
+                ..
+            }
+        ));
+        assert_eq!(
+            replacement.condition,
+            Some(AbilityCondition::ConditionInstead {
+                inner: Box::new(
+                    try_nom_condition_as_ability_condition(
+                        "this spell wasn't cast from your hand",
+                        &mut ParseContext::default(),
+                    )
+                    .expect("typed owner-qualified gate")
+                ),
+            })
+        );
+        let _ = crate::types::ability_visit::visit_ability_def(base, &mut |effect| {
+            assert!(!matches!(effect, Effect::Unimplemented { .. }));
+            std::ops::ControlFlow::Continue(())
+        });
+
+        // Synthetic unsupported grammar retains the parsed base draw plus a strict gap.
+        for condition in [
+            "this spell wasn't cast from your handful",
+            "this spell wasn't cast from your hand and the moon is blue",
+            "this spell wasn't cast from your exile",
+        ] {
+            let parsed = parse_oracle_text(
+                &format!("Draw a card. If {condition}, draw two cards instead."),
+                "Unsupported grammar fixture",
+                &[],
+                &["Instant".to_string()],
+                &[],
+            );
+            let base = parsed.abilities.first().expect("base spell parses");
+            assert!(matches!(*base.effect, Effect::Draw { .. }));
+            let mut gap = false;
+            let _ = crate::types::ability_visit::visit_ability_def(base, &mut |effect| {
+                gap |= matches!(effect, Effect::Unimplemented { .. });
+                std::ops::ControlFlow::Continue(())
+            });
+            assert!(gap, "unsupported semantics must remain red: {condition}");
+        }
+    }
 
     /// CR 903.3d + CR 603.4: the `StaticCondition` -> `AbilityCondition` bridge
     /// must lower a commander-control gate, and must keep the two `ownership`

@@ -2909,7 +2909,8 @@ fn scan_quantity_expr(x: &QuantityExpr, mode: ScanMode) -> Axes {
 
 fn scan_ability_condition(x: &AbilityCondition, mode: ScanMode) -> Axes {
     match x {
-        AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn => Axes {
+        AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
+        | AbilityCondition::TriggerEventTargetExploitedBySource => Axes {
             event: true,
             sibling: false,
             projected: false,

@@ -1993,6 +1993,7 @@ fn legacy_ability_condition(x: &AbilityCondition) -> bool {
             conditions.iter().any(legacy_ability_condition)
         }
         AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
+        | AbilityCondition::TriggerEventTargetExploitedBySource
         | AbilityCondition::ObjectsShareQuality { .. }
         | AbilityCondition::TargetMatchesFilter { .. }
         | AbilityCondition::SourceMatchesFilter { .. }
@@ -6636,9 +6637,10 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
 
 fn rw_ability_condition(x: &AbilityCondition) -> RwProfile {
     match x {
-        // CR 608.2c + CR 603.3b: the damage record is frozen at the trigger
-        // event; a sibling cannot alter whether this source dealt that damage.
-        AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn => frozen_source_read(),
+        // CR 608.2c + CR 603.3b: the damage/exploit record is frozen at the trigger
+        // event; a sibling cannot alter whether this source dealt that damage or exploited that creature.
+        AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
+        | AbilityCondition::TriggerEventTargetExploitedBySource => frozen_source_read(),
         AbilityCondition::QuantityCheck {
             lhs,
             rhs,

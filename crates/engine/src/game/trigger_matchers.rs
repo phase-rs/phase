@@ -17511,6 +17511,7 @@ mod tests {
             .expect("the fixture's real battlefield departure emits a record");
         GameEvent::CreatureExploited {
             exploiter,
+            exploiter_incarnation: None,
             sacrificed,
             record,
         }
@@ -17833,6 +17834,7 @@ mod tests {
             .expect("the self-sacrifice fixture emits a departure record");
         let event = GameEvent::CreatureExploited {
             exploiter: source,
+            exploiter_incarnation: None,
             sacrificed: source,
             record,
         };
@@ -17919,6 +17921,7 @@ mod tests {
             .expect("the token self-sacrifice fixture emits a departure record");
         let event = GameEvent::CreatureExploited {
             exploiter: token,
+            exploiter_incarnation: None,
             sacrificed: token,
             record,
         };

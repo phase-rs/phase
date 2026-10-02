@@ -764,6 +764,7 @@ impl TriggerCollectionSession {
                 reconcile_off_zone_keyword_triggers(state);
                 observe_object_taps(state, &events);
                 observe_object_counter_placements(state, &events);
+                observe_creatures_exploited(state, &events);
                 None
             }
             TriggerCollectionOperation::RecordTriggerFired {
@@ -3930,6 +3931,32 @@ fn observe_object_counter_placements(state: &mut GameState, events: &[GameEvent]
     }
 }
 
+/// CR 702.110b: Record exploit occurrences this turn for resolution-time riders.
+fn observe_creatures_exploited(state: &mut GameState, events: &[GameEvent]) {
+    for event in events {
+        if let GameEvent::CreatureExploited {
+            exploiter,
+            exploiter_incarnation,
+            sacrificed,
+            record,
+        } = event
+        {
+            let sacrificed_incarnation = record
+                .trigger_source_context
+                .as_ref()
+                .map(|ctx| ctx.identity.reference.incarnation);
+            state.creatures_exploited_this_turn.push_back(
+                crate::types::game_state::ExploitRecord {
+                    exploiter: *exploiter,
+                    exploiter_incarnation: *exploiter_incarnation,
+                    sacrificed: *sacrificed,
+                    sacrificed_incarnation,
+                },
+            );
+        }
+    }
+}
+
 fn collect_pending_triggers(
     state: &mut GameState,
     events: &[GameEvent],
@@ -4816,6 +4843,11 @@ fn collect_pending_triggers_with_collection(
                             controller,
                         );
                         exploit_ability.optional = true;
+                        if let Some(source) = state.objects.get(object_id) {
+                            exploit_ability.set_trigger_source_recursive(
+                                trigger_source_context_for_latch(state, source),
+                            );
+                        }
                         pending.push(PendingTriggerContext::single(PendingTrigger {
                             source_id: *object_id,
                             controller,
@@ -11671,6 +11703,7 @@ fn gate_binding_diverges_at_fire_time(condition: &AbilityCondition) -> bool {
         // ability's matched event need not be the damage event the resolver
         // reads, and declining costs only the fire-time half.
         | AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
+        | AbilityCondition::TriggerEventTargetExploitedBySource
         | AbilityCondition::TriggeringSpellTargetsFilter { .. }
         // CR 614.1: an "instead" gate is a replacement-time reading of the
         // enclosing resolution, not a game-state predicate. Declined as a whole
@@ -15543,6 +15576,55 @@ pub(crate) fn damage_record_matches_dying_object(
     });
     let Some(death_index) = death_index else {
         return current_incarnation == recorded_incarnation;
+    };
+    let later_moves = state
+        .zone_changes_this_turn
+        .iter()
+        .filter(|change| {
+            change.object_id == object_id && change.turn_zone_change_index > death_index
+        })
+        .count() as u64;
+
+    current_incarnation.checked_sub(later_moves + 1) == Some(recorded_incarnation)
+}
+
+/// CR 702.110b + CR 400.7: Match an exploit record against a trigger event's dying object,
+/// ensuring the death corresponds to the exact incarnation of the victim that was exploited.
+pub(crate) fn exploit_record_matches_dying_object(
+    state: &GameState,
+    record: &crate::types::game_state::ExploitRecord,
+    object_id: ObjectId,
+    trigger_event: Option<&GameEvent>,
+) -> bool {
+    if record.sacrificed != object_id {
+        return false;
+    }
+    let Some(recorded_incarnation) = record.sacrificed_incarnation else {
+        return true;
+    };
+    let Some(current_incarnation) = state
+        .objects
+        .get(&object_id)
+        .map(|object| object.incarnation)
+    else {
+        return false;
+    };
+
+    let death_index = trigger_event.and_then(|event| match event {
+        GameEvent::ZoneChanged { record, .. } => Some(record.turn_zone_change_index),
+        GameEvent::CreatureDestroyed { .. } => state
+            .zone_changes_this_turn
+            .iter()
+            .rev()
+            .find(|change| {
+                change.object_id == object_id && change.from_zone == Some(Zone::Battlefield)
+            })
+            .map(|change| change.turn_zone_change_index),
+        _ => None,
+    });
+    let Some(death_index) = death_index else {
+        return current_incarnation == recorded_incarnation
+            || current_incarnation == recorded_incarnation + 1;
     };
     let later_moves = state
         .zone_changes_this_turn

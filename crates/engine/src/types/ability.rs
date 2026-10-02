@@ -27133,6 +27133,10 @@ pub enum AbilityCondition {
     /// incarnation. Unlike an intervening-if, this is checked only while the
     /// effect resolves.
     TriggerEventTargetDamagedBySourceThisTurn,
+    /// CR 702.110b + CR 608.2c + CR 400.7: Resolution-time rider on a dies trigger:
+    /// the source creature exploited the triggering creature (the creature whose
+    /// death fired this trigger).
+    TriggerEventTargetExploitedBySource,
     /// CR 702.33d + CR 702.33f + CR 608.2c: An optional additional cost was paid
     /// during casting. Parameterized for kicker variant gating:
     ///
@@ -27732,6 +27736,7 @@ impl AbilityCondition {
                 .iter()
                 .any(|condition| matches!(condition, AbilityCondition::WhenYouDo)),
             AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
+            | AbilityCondition::TriggerEventTargetExploitedBySource
             | AbilityCondition::AdditionalCostPaidInstead
             | AbilityCondition::AlternativeManaCostPaid
             | AbilityCondition::EffectOutcome { .. }
@@ -27866,6 +27871,7 @@ impl AbilityCondition {
                     | EffectOutcomeSignal::RevealUntilMatched,
             } => false,
             AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
+            | AbilityCondition::TriggerEventTargetExploitedBySource
             | AbilityCondition::AdditionalCostPaidInstead
             | AbilityCondition::AlternativeManaCostPaid
             | AbilityCondition::EventOutcomeWon

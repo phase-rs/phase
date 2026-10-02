@@ -1861,6 +1861,8 @@ pub enum GameEvent {
     /// trigger matching after the victim has become a new object.
     CreatureExploited {
         exploiter: ObjectId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exploiter_incarnation: Option<u64>,
         sacrificed: ObjectId,
         record: Box<ZoneChangeRecord>,
     },
