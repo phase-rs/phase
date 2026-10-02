@@ -1252,6 +1252,7 @@ pub fn casting_permission_is_cast_stable_for_pre_cast(permission: &CastingPermis
                 .as_ref()
                 .is_none_or(cast_permission_constraint_is_cast_stable_for_pre_cast)
                 && enters_with_modifications
+                    .modifications
                     .iter()
                     .all(continuous_modification_is_cast_stable_for_pre_cast)
         }

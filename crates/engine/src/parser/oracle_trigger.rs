@@ -1193,7 +1193,8 @@ struct AttackHeadScope {
 fn attack_head_scope(cond_lower: &str) -> Option<AttackHeadScope> {
     use crate::parser::oracle_nom::primitives::scan_at_word_boundaries;
     scan_at_word_boundaries(cond_lower, |input| {
-        let (rest, _) = parse_attack_verb(input)?;
+        let (rest, _) = parse_batch_creature_attack_subject(input)?;
+        let (rest, _) = parse_attack_verb(rest)?;
         let (rest, (attacked_player, attack_target)) = alt((
             value(
                 (ControllerRef::Opponent, AttackTargetFilter::Player),
@@ -1213,6 +1214,36 @@ fn attack_head_scope(cond_lower: &str) -> Option<AttackHeadScope> {
             },
         ))
     })
+}
+
+/// CR 508.1a + CR 603.2c: the batch-creature subject an attack head must name
+/// before the attacked-player relation proves anything about "those creatures"
+/// — the "<n> or more <type phrase>" quantifier phrase, parsed with the same
+/// shared type-phrase reader `try_parse_n_or_more_attacks` uses for its
+/// subject. A single-creature or player-subject head ("~ attacks you", "a
+/// creature attacks you") consumes no quantifier and is rejected here, so it
+/// can never be treated as evidence of a creature batch.
+fn parse_batch_creature_attack_subject(input: &str) -> OracleResult<'_, ()> {
+    let (rest, _) = opt(alt((
+        tag::<_, _, OracleError<'_>>("whenever "),
+        tag("when "),
+    )))
+    .parse(input)?;
+    let (rest, _) = terminated(
+        nom_primitives::parse_number,
+        tag::<_, _, OracleError<'_>>(" or more "),
+    )
+    .parse(rest)?;
+    let subject_input = rest;
+    let (_filter, rest) = parse_type_phrase_folding(subject_input);
+    if rest.len() == subject_input.len() {
+        // No type phrase consumed (e.g. "one or more opponents attack …") — the
+        // subject is not a creature batch.
+        return Err(oracle_err(input));
+    }
+    // The type-phrase reader leaves the separator before the verb; the verb
+    // parser starts at the verb token itself.
+    Ok((rest.trim_start(), ()))
 }
 
 /// CR 303.4b + CR 508.1a: "[actor] attack[s] enchanted player" names
@@ -6854,7 +6885,11 @@ fn parse_graveyard_origin_intervening_if(input: &str) -> OracleResult<'_, Trigge
         },
     );
     // Trailing anchor: the clause must end at the clause comma or end of input.
-    terminated(alt((compact, split, split_passive, bare_cast)), peek(alt((tag(","), eof)))).parse(rest)
+    terminated(
+        alt((compact, split, split_passive, bare_cast)),
+        peek(alt((tag(","), eof))),
+    )
+    .parse(rest)
 }
 
 /// CR 701.26 + CR 603.4: "if it's the first time that creature/permanent has become
@@ -7873,9 +7908,9 @@ fn extract_if_condition_with_card_name(
         }) {
             if nom_primitives::peek_clause_terminator(rest.trim_start()).is_ok() {
                 let clause_len = lower.len() - before.len() - rest.len();
-                return (
+                return IfExtraction::hoisted(
                     strip_condition_clause(text, before.len(), clause_len),
-                    Some(condition),
+                    condition,
                 );
             }
         }

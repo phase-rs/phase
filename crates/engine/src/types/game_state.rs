@@ -7987,7 +7987,7 @@ pub struct FinalizePrePaymentChecks {
     pub cascade_cast_transformed: bool,
     pub resolution_success_waiting_for: Option<WaitingFor>,
     pub cast_this_way_etb_counter: Option<CounterType>,
-    pub cast_this_way_enters_mods: Vec<ContinuousModification>,
+    pub cast_this_way_enters_mods: crate::types::ability::PendingEntersModifications,
 }
 
 /// CR 605.3b: Selects whether completing a mana-ability cost payment may ask
@@ -11111,8 +11111,11 @@ pub enum CastOfferKind {
         /// (the elected-permission application point, CR 611.2c), and the
         /// re-offers carry it through `FreeCastOfferRemaining`. Empty for
         /// windows without a rider and for saved states predating the field.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        enters_with_modifications: Vec<crate::types::ability::ContinuousModification>,
+        #[serde(
+            default,
+            skip_serializing_if = "crate::types::ability::PendingEntersModifications::is_empty"
+        )]
+        enters_with_modifications: crate::types::ability::PendingEntersModifications,
     },
     /// CR 608.2g + CR 609.4b: A during-resolution PAID cast of a single card
     /// from a graveyard — "you may cast target X card from a graveyard", with
@@ -11138,8 +11141,11 @@ pub enum CastOfferKind {
         /// Relm) snapshotted from the offering `CastFromZone` ability; the
         /// accept threads it into the elected permission (CR 611.2c). Empty
         /// for every other paid offer and for saved states predating the field.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        enters_with_modifications: Vec<crate::types::ability::ContinuousModification>,
+        #[serde(
+            default,
+            skip_serializing_if = "crate::types::ability::PendingEntersModifications::is_empty"
+        )]
+        enters_with_modifications: crate::types::ability::PendingEntersModifications,
         /// CR 712.14a: Whether the spell is cast transformed. Rare for this
         /// class; carried for parity with the free during-resolution casts.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -34320,7 +34326,7 @@ mod tests {
                 hit_card,
                 mana_spend_permission: None,
                 graveyard_replacement: None,
-                enters_with_modifications: Vec::new(),
+                enters_with_modifications: Default::default(),
                 cast_transformed: false,
                 additional_cost: None,
                 cleanup: crate::types::ability::ResolutionCastCleanup {
@@ -34477,19 +34483,26 @@ mod tests {
 
     /// CR 608.2c + CR 611.2a (row 6.8): the two `CastOfferKind` carriers of the
     /// gains-modifications rider deserialize a pre-fix payload without the
-    /// field to `Vec::new()` with the rest of the payload intact, omit the
-    /// field when the rider is empty, and round-trip a carried rider exactly.
+    /// field to the default rider with the rest of the payload intact, omit
+    /// the field when the rider is empty, and round-trip a carried rider
+    /// (including its typed cast-quality predicate) exactly.
     #[test]
     fn cast_offer_rider_field_back_compat_and_skip_when_empty() {
         use crate::types::ability::{
-            ContinuousModification, ResolutionCastFacePolicy, ResolutionCastSuccessAction,
-            ResolutionMvRejectAction,
+            ContinuousModification, PendingEntersModifications, ResolutionCastFacePolicy,
+            ResolutionCastSuccessAction, ResolutionMvRejectAction,
         };
         use crate::types::keywords::Keyword;
 
-        let rider = vec![ContinuousModification::AddKeyword {
-            keyword: Keyword::Haste,
-        }];
+        let rider = PendingEntersModifications {
+            modifications: vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Haste,
+            }],
+            cast_filter: Some(TargetFilter::Typed(
+                crate::types::ability::TypedFilter::default()
+                    .with_type(crate::types::ability::TypeFilter::Creature),
+            )),
+        };
         let policy =
             ResolutionCastFacePolicy::new(TargetFilter::Any, ObjectId(7), PlayerId(0), None);
         let cleanup = crate::types::ability::ResolutionCastCleanup {
@@ -34508,7 +34521,7 @@ mod tests {
             hit_card: ObjectId(8),
             mana_spend_permission: None,
             graveyard_replacement: None,
-            enters_with_modifications: Vec::new(),
+            enters_with_modifications: Default::default(),
             cast_transformed: false,
             additional_cost: None,
             cleanup: cleanup.clone(),
@@ -34551,7 +34564,7 @@ mod tests {
             face_policy: policy.clone(),
             zones: vec![Zone::Exile],
             graveyard_replacement: None,
-            enters_with_modifications: Vec::new(),
+            enters_with_modifications: Default::default(),
             member_pool: Vec::new(),
         };
         let window_value = serde_json::to_value(&window).unwrap();

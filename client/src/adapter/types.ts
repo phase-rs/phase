@@ -2466,6 +2466,18 @@ export type SpellStackToGraveyardReplacement =
   | { type: "Library"; position: LibraryPosition }
   | { type: "Hand" };
 
+/**
+ * Mirrors engine `PendingEntersModifications` — the cast-this-way
+ * gains-modifications rider carried on a cast permission/offer: the typed
+ * continuous modifications plus the printed spell-quality predicate ("a
+ * creature spell" in "If you cast a creature spell this way, it gains …").
+ * Each field is omitted when absent.
+ */
+export type PendingEntersModifications = {
+  modifications?: ContinuousModification[];
+  cast_filter?: TargetFilter;
+};
+
 export type CastOfferKind =
   | { type: "Adventure"; object_id: ObjectId; card_id: CardId; payment_mode?: CastPaymentMode }
   | { type: "Miracle"; object_id: ObjectId; cost: ManaCost }
@@ -2490,7 +2502,7 @@ export type CastOfferKind =
       graveyard_replacement?: SpellStackToGraveyardReplacement;
       // CR 608.2c + CR 611.2a: optional cast-this-way gains-modifications
       // rider (Strago and Relm); omitted when empty.
-      enters_with_modifications?: ContinuousModification[];
+      enters_with_modifications?: PendingEntersModifications;
       // Frozen resolution authority, including receipts to withdraw if the
       // accepted offer never becomes a cast.
       cleanup: ResolutionCastCleanup;
@@ -2512,7 +2524,7 @@ export type CastOfferKind =
       graveyard_replacement?: SpellStackToGraveyardReplacement;
       // CR 608.2c + CR 611.2a: optional cast-this-way gains-modifications
       // rider; omitted when empty.
-      enters_with_modifications?: ContinuousModification[];
+      enters_with_modifications?: PendingEntersModifications;
       // CR 607.2a: THIS resolution's "exiled this way" batch (Plargg and
       // Nassari); omitted when empty (no batch restriction). Display-only
       // pass-through — the modal renders `candidates`.

@@ -11244,11 +11244,14 @@ mod tests {
                 graveyard_replacement: Some(
                     crate::types::ability::SpellStackToGraveyardReplacement::Exile,
                 ),
-                enters_with_modifications: vec![
-                    crate::types::ability::ContinuousModification::AddKeyword {
-                        keyword: crate::types::keywords::Keyword::Haste,
-                    },
-                ],
+                enters_with_modifications: crate::types::ability::PendingEntersModifications {
+                    modifications: vec![
+                        crate::types::ability::ContinuousModification::AddKeyword {
+                            keyword: crate::types::keywords::Keyword::Haste,
+                        },
+                    ],
+                    cast_filter: None,
+                },
                 member_pool: vec![hand_candidate],
             },
         };
@@ -11311,7 +11314,7 @@ mod tests {
                 // CR 608.2c: the gains-modifications rider is public — the
                 // opponent-facing redaction must pass it through unredacted.
                 assert_eq!(
-                    enters_with_modifications,
+                    enters_with_modifications.modifications,
                     vec![crate::types::ability::ContinuousModification::AddKeyword {
                         keyword: crate::types::keywords::Keyword::Haste,
                     }],
@@ -14018,7 +14021,7 @@ mod tests {
                 duration: None,
                 graveyard_replacement: None,
                 enters_with_counter: None,
-                enters_with_modifications: Vec::new(),
+                enters_with_modifications: Default::default(),
                 mana_spend_permission: None,
                 cast_cost_modifier: None,
             }];
@@ -14331,7 +14334,7 @@ mod tests {
             source_id: None,
             graveyard_replacement: None,
             enters_with_counter: None,
-            enters_with_modifications: Vec::new(),
+            enters_with_modifications: Default::default(),
             mana_spend_permission: None,
             cast_cost_modifier: None,
         }

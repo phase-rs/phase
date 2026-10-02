@@ -2467,7 +2467,7 @@ pub(super) fn handle_resolution_choice(
                         cast_transformed: false,
                         cleanup,
                         graveyard_replacement: None,
-                        enters_with_modifications: Vec::new(),
+                        enters_with_modifications: Default::default(),
                         cost: crate::types::ability::ResolutionCastCost::Free,
                     },
                     events,
@@ -2855,7 +2855,7 @@ pub(super) fn handle_resolution_choice(
                         cast_transformed: false,
                         cleanup,
                         graveyard_replacement: None,
-                        enters_with_modifications: Vec::new(),
+                        enters_with_modifications: Default::default(),
                         cost: crate::types::ability::ResolutionCastCost::Free,
                     },
                     events,
@@ -2937,7 +2937,7 @@ pub(super) fn handle_resolution_choice(
                         cast_transformed: false,
                         cleanup,
                         graveyard_replacement: None,
-                        enters_with_modifications: Vec::new(),
+                        enters_with_modifications: Default::default(),
                         cost: crate::types::ability::ResolutionCastCost::Free,
                     },
                     events,
@@ -11361,7 +11361,7 @@ mod tests {
                 duration: None,
                 graveyard_replacement: None,
                 enters_with_counter: None,
-                enters_with_modifications: Vec::new(),
+                enters_with_modifications: Default::default(),
                 mana_spend_permission: None,
                 cast_cost_modifier: None,
             });
@@ -11375,7 +11375,7 @@ mod tests {
                 face_policy: policy.clone(),
                 zones: vec![Zone::Exile],
                 graveyard_replacement: None,
-                enters_with_modifications: Vec::new(),
+                enters_with_modifications: Default::default(),
                 member_pool: Vec::new(),
             },
         };
@@ -11466,7 +11466,10 @@ mod tests {
                 ),
                 zones: vec![Zone::Exile],
                 graveyard_replacement: None,
-                enters_with_modifications: rider,
+                enters_with_modifications: crate::types::ability::PendingEntersModifications {
+                    modifications: rider,
+                    cast_filter: None,
+                },
                 member_pool: candidates,
             },
         }
@@ -11545,7 +11548,7 @@ mod tests {
             "reach guard: the window re-offered the remaining cast"
         );
         assert_eq!(
-            enters_with_modifications, &rider,
+            enters_with_modifications.modifications, rider,
             "the success re-offer must carry the gains rider to the remaining cast"
         );
 
@@ -11713,7 +11716,7 @@ mod tests {
             "reach guard: the rejected card is dropped and the window re-offers"
         );
         assert_eq!(
-            enters_with_modifications, &rider,
+            enters_with_modifications.modifications, rider,
             "the rejected-cast re-offer must still carry the gains rider"
         );
         assert!(

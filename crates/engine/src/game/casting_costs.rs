@@ -2819,7 +2819,7 @@ fn finish_cost_object_moves(
                     cascade_cast_transformed,
                     resolution_success_waiting_for: resolution_success_waiting_for.map(|wf| *wf),
                     cast_this_way_etb_counter: None,
-                    cast_this_way_enters_mods: Vec::new(),
+                    cast_this_way_enters_mods: Default::default(),
                 }),
                 Some(actual_mana_spent),
                 ReturnedCreatureCostMove::Delivered,
@@ -12457,13 +12457,31 @@ fn finalize_cast_with_phyrexian_choices_inner(
     // begins). `source_id = object_id` (self-contained; attribution snapshot is
     // the creature's own name). CR 608.2c: read from the *selected* permission
     // supporting THIS cast so a sibling permission's rider cannot leak.
-    if !cast_this_way_enters_mods.is_empty() {
+    //
+    // CR 608.2c + CR 601.2a: the rider's printed spell-quality condition ("If
+    // you cast a creature spell this way, it gains …") gates the grant: it is
+    // evaluated against the elected spell, which has all the characteristics of
+    // its card (CR 601.2a). A cast that does not match the printed quality is
+    // granted no modifications, per the instruction as written.
+    let rider_quality_matches =
+        cast_this_way_enters_mods
+            .cast_filter
+            .as_ref()
+            .is_none_or(|filter| {
+                crate::game::filter::matches_target_filter(
+                    state,
+                    object_id,
+                    filter,
+                    &crate::game::filter::FilterContext::neutral(),
+                )
+            });
+    if rider_quality_matches && !cast_this_way_enters_mods.is_empty() {
         state.add_transient_continuous_effect(
             object_id,
             player,
             crate::types::ability::Duration::Permanent,
             crate::types::ability::TargetFilter::SpecificObject { id: object_id },
-            cast_this_way_enters_mods,
+            cast_this_way_enters_mods.modifications,
             None,
         );
     }
@@ -12968,7 +12986,7 @@ fn evaluate_cascade_constraint_with_resulting_mv(
                 source_id: None,
                 graveyard_replacement: None,
                 enters_with_counter: None,
-                enters_with_modifications: Vec::new(),
+                enters_with_modifications: Default::default(),
                 mana_spend_permission,
                 cast_cost_modifier: None,
             };
@@ -23796,7 +23814,7 @@ mod tests {
 
                     graveyard_replacement: None,
                     enters_with_counter: None,
-                    enters_with_modifications: Vec::new(),
+                    enters_with_modifications: Default::default(),
                     mana_spend_permission: None,
                     cast_cost_modifier: None,
                 });
@@ -23924,7 +23942,7 @@ mod tests {
 
                     graveyard_replacement: None,
                     enters_with_counter: None,
-                    enters_with_modifications: Vec::new(),
+                    enters_with_modifications: Default::default(),
                     mana_spend_permission: None,
                     cast_cost_modifier: None,
                 });
@@ -24007,7 +24025,7 @@ mod tests {
 
                     graveyard_replacement: None,
                     enters_with_counter: None,
-                    enters_with_modifications: Vec::new(),
+                    enters_with_modifications: Default::default(),
                     mana_spend_permission: None,
                     cast_cost_modifier: None,
                 });
@@ -24058,7 +24076,7 @@ mod tests {
 
                     graveyard_replacement: None,
                     enters_with_counter: None,
-                    enters_with_modifications: Vec::new(),
+                    enters_with_modifications: Default::default(),
                     mana_spend_permission: None,
                     cast_cost_modifier: None,
                 });
@@ -24118,7 +24136,7 @@ mod tests {
 
                     graveyard_replacement: None,
                     enters_with_counter: None,
-                    enters_with_modifications: Vec::new(),
+                    enters_with_modifications: Default::default(),
                     mana_spend_permission: None,
                     cast_cost_modifier: None,
                 });
@@ -24136,7 +24154,7 @@ mod tests {
 
                     graveyard_replacement: None,
                     enters_with_counter: None,
-                    enters_with_modifications: Vec::new(),
+                    enters_with_modifications: Default::default(),
                     mana_spend_permission: None,
                     cast_cost_modifier: None,
                 });
@@ -24188,7 +24206,7 @@ mod tests {
 
                     graveyard_replacement: None,
                     enters_with_counter: None,
-                    enters_with_modifications: Vec::new(),
+                    enters_with_modifications: Default::default(),
                     mana_spend_permission: None,
                     cast_cost_modifier: None,
                 });
@@ -24260,7 +24278,7 @@ mod tests {
 
                     graveyard_replacement: None,
                     enters_with_counter: None,
-                    enters_with_modifications: Vec::new(),
+                    enters_with_modifications: Default::default(),
                     mana_spend_permission: None,
                     cast_cost_modifier: None,
                 });
@@ -24297,7 +24315,7 @@ mod tests {
 
                     graveyard_replacement: None,
                     enters_with_counter: None,
-                    enters_with_modifications: Vec::new(),
+                    enters_with_modifications: Default::default(),
                     mana_spend_permission: None,
                     cast_cost_modifier: None,
                 });
@@ -24369,7 +24387,7 @@ mod tests {
 
                     graveyard_replacement: None,
                     enters_with_counter: None,
-                    enters_with_modifications: Vec::new(),
+                    enters_with_modifications: Default::default(),
                     mana_spend_permission: None,
                     cast_cost_modifier: None,
                 });
@@ -24387,7 +24405,7 @@ mod tests {
 
                     graveyard_replacement: None,
                     enters_with_counter: None,
-                    enters_with_modifications: Vec::new(),
+                    enters_with_modifications: Default::default(),
                     mana_spend_permission: None,
                     cast_cost_modifier: None,
                 });

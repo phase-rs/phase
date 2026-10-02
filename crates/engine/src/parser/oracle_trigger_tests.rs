@@ -16458,6 +16458,35 @@ fn attack_batch_chosen_number_declines_without_attack_scope() {
     );
 }
 
+/// CR 508.1a + CR 603.2c: the attacked-player prover only accepts a head that
+/// names a BATCH-CREATURE subject ("<n> or more <type>"), so a single-creature
+/// or player-subject head can never be treated as evidence of "those
+/// creatures". Paired positive first so no decline below is vacuous.
+#[test]
+fn attack_head_scope_requires_a_batch_creature_subject() {
+    assert!(
+        attack_head_scope("whenever one or more creatures attack one of your opponents").is_some(),
+        "the batch-creature subject must satisfy the prover"
+    );
+    assert!(
+        attack_head_scope("whenever one or more creatures attack you").is_some(),
+        "the batch 'attacks you' form must satisfy the prover"
+    );
+    for hostile in [
+        // Single attacker — no batch quantifier.
+        "whenever squall attacks you",
+        // A creature subject without the batch quantifier.
+        "whenever a creature attacks you",
+        // Player subject — no creature type phrase.
+        "whenever one or more opponents attack you",
+    ] {
+        assert!(
+            attack_head_scope(hostile).is_none(),
+            "a non-batch head must not prove the attack scope: {hostile}"
+        );
+    }
+}
+
 #[test]
 fn talion_kindly_lord_full_oracle_no_swallowed_clause() {
     let text = "Flying\nAs Talion, the Kindly Lord enters the battlefield, choose a number between 1 and 10.\nWhenever an opponent casts a spell with mana value, power, or toughness equal to the chosen number, that player loses 2 life and you draw a card.";
@@ -37261,7 +37290,8 @@ fn exile_origin_condition_extraordinary_journey() {
         extra.condition,
         Some(exile_or),
         "the verbatim Extraordinary Journey intervening-if must bind the exile disjunction"
-
+    );
+}
 
 /// CR 120.3a + CR 109.4 + CR 603.2: Emissary of Despair and Emissary of Hope
 /// combat-damage triggers establish TriggeringPlayer as the relative player

@@ -7168,12 +7168,19 @@ fn try_unrouted_nom_condition_tail(text: &str, ctx: &mut ParseContext) -> Option
     // `FirstCombatPhaseOfTurn`, so the phase is added only on the controller's
     // own turn (the `CurrentPhaseIs` possessive precedent in
     // `game/effects/mod.rs`). The non-possessive "of the turn" arm is unchanged.
-    if let Ok((_, possessive)) = alt((
-        value(
-            false,
-            tag::<_, _, OracleError<'_>>("it's the first combat phase of the turn"),
-        ),
-        value(true, tag("it's the first combat phase of your turn")),
+    // `all_consuming` requires the phase-occurrence phrase to BE the whole
+    // condition: a trailing conjunct ("… and you control a creature") must not
+    // be silently dropped by a partial match — the whole condition then stays
+    // honestly unbound rather than half-bound.
+    if let Ok((_, possessive)) = all_consuming(terminated(
+        alt((
+            value(
+                false,
+                tag::<_, _, OracleError<'_>>("it's the first combat phase of the turn"),
+            ),
+            value(true, tag("it's the first combat phase of your turn")),
+        )),
+        multispace0,
     ))
     .parse(lower.as_str())
     {

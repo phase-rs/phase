@@ -5651,7 +5651,7 @@ mod tests {
                 hit_card,
                 mana_spend_permission: None,
                 graveyard_replacement: None,
-                enters_with_modifications: Vec::new(),
+                enters_with_modifications: Default::default(),
                 cast_transformed: false,
                 additional_cost: None,
                 cleanup: ResolutionCastCleanup {
@@ -5822,7 +5822,7 @@ mod tests {
             source_id: None,
             graveyard_replacement: None,
             enters_with_counter: None,
-            enters_with_modifications: Vec::new(),
+            enters_with_modifications: Default::default(),
             mana_spend_permission: None,
             cast_cost_modifier: None,
         }];
