@@ -2622,8 +2622,9 @@ fn parse_threshold_with_exactly(input: &str) -> OracleResult<'_, (Comparator, i3
 ///     "that permanent has toughness 6 or greater" (Strider, Ranger of the North;
 ///     Dormant Grove; Yavimaya Bloomsage).
 ///
-/// Neither form is reached by `parse_target_reflexive_property_condition` (its
-/// tense parser rejects the possessive "'s" and the present-tense "has"), and the
+/// Neither form is reached by `parse_target_reflexive_property_condition`: its
+/// predicate parser rejects the possessive form's leading "is", and its tense
+/// parser has no present-tense " has " arm. The
 /// generic `parse_cda_quantity` fallback mis-scopes the possessive form to
 /// `Power { CostPaidObject }`. CR 115.1: "that creature" is the ability's first
 /// target, so this binds Target scope via `TargetMatchesFilter`, which resolves
@@ -2646,6 +2647,8 @@ fn parse_target_pt_threshold_condition(
         // "that creature's power is N…" (existing possessive form).
         delimited(tag("'s "), parse_reflexive_pt_stat, tag("is ")),
         // CR 208.1 + CR 608.2c + CR 608.2h: present-tense possession "that creature has power N or greater" — the earlier instruction's target, read live at resolution.
+        // Kept beside the possessive form, not on the reflexive tense axis, so the
+        // demonstrative-only subject keeps bare "it" (source-scoped) unclaimed.
         preceded(tag(" has "), parse_reflexive_pt_stat),
     ))
     .parse(rest)?;
