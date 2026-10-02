@@ -70,6 +70,7 @@ mod aura_graft_enchant_restriction;
 mod aura_on_player;
 mod aura_token_attach_guard;
 mod aurification_gold_counter_defender_cant_attack;
+mod avalanche_of_sector_7_activation_trigger;
 mod awaken_runtime;
 mod awe_strike_prevention;
 mod azog_morias_ruin_amass_lki;

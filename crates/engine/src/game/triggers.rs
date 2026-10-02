@@ -9810,6 +9810,56 @@ pub(crate) fn collect_mana_action_trigger_batch(
     pause
 }
 
+/// CR 603.10 + CR 603.3 + CR 605.3b: collect the triggers of one mana-ability
+/// activation event at the instant the ability became activated, and claim
+/// that exact occurrence so no later scan of the same action rediscovers it.
+///
+/// A mana ability resolves immediately after it is activated (CR 605.3b), and
+/// the enclosing frame collects its events only after that resolution — by
+/// which point the mana ability's own effect may have sacrificed or changed
+/// its source, or the trigger source itself. CR 603.10 checks trigger
+/// conditions immediately after the event, so the activation event is
+/// observed here, before production. Its ordinary triggers are queued, never
+/// dispatched: CR 603.3 holds them until a player would next receive priority,
+/// so a payment is never interrupted. An activation-triggered ability is never
+/// a triggered mana ability (that parser shape is strict-failed, CR 605.1b),
+/// so nothing here resolves inline.
+pub(crate) fn collect_activation_event_at_boundary(
+    state: &mut GameState,
+    events: &[GameEvent],
+    event_index: usize,
+) -> Result<(), ResolvedTriggerCollectionReplayInvariantError> {
+    let event = events[event_index].clone();
+    debug_assert!(
+        matches!(event, GameEvent::AbilityActivated { .. }),
+        "only an activation event is collected at its activation boundary"
+    );
+    let raw_batch = std::slice::from_ref(&event);
+    let seed = collect_triggers_for_batch(state, raw_batch);
+    let collected = collect_pending_and_delayed_triggers_for_batch(
+        state,
+        seed,
+        raw_batch,
+        DelayedTriggerEventScope::Any,
+    );
+    resolve_and_apply_trigger_collection(
+        state,
+        crate::types::resolved_commands::ResolvedTriggerCollection::DeferPending {
+            contexts: collected.contexts,
+        },
+    )?;
+    resolve_and_apply_trigger_collection(
+        state,
+        crate::types::resolved_commands::ResolvedTriggerCollection::ConsumeBeforePriority {
+            occurrences: vec![ConsumedTriggerEventOccurrence {
+                occurrence: trigger_event_occurrence(events, event_index),
+                event,
+                scope: ConsumedTriggerEventScope::AllCollectors,
+            }],
+        },
+    )
+}
+
 /// CR 603.3b + CR 603.7 + CR 605.4a: materialize one **undispatched** combined
 /// normal-plus-delayed collection for the range an accepted occurrence emitted,
 /// for storage on the sidecar across a pause.
@@ -14507,16 +14557,15 @@ fn evaluate_trigger_condition_with_source(
             .is_some_and(|(paid, _)| paid == *variant),
         // CR 605.1a: "that isn't a mana ability" gate on activated-ability
         // trigger events. `KeywordAbilityActivated` carries the explicit flag
-        // (Exhaust mana abilities still emit this event). `AbilityActivated`
-        // is emitted only by stack-using activations (CR 605.3b: mana
-        // abilities never reach the stack-pushing emission sites), so it
-        // trivially satisfies the qualifier; the explicit arm keeps the
-        // AST-level qualifier honest if the event family ever widens.
+        // (Exhaust mana abilities still emit this event); `AbilityActivated`
+        // carries the activation's kind (CR 605.3: mana abilities emit it too).
         TriggerCondition::ActivatedAbilityIsNonMana => match trigger_event {
             Some(GameEvent::KeywordAbilityActivated {
                 is_mana_ability, ..
             }) => !*is_mana_ability,
-            Some(GameEvent::AbilityActivated { .. }) => true,
+            Some(GameEvent::AbilityActivated { kind, .. }) => {
+                *kind != crate::types::events::ActivatedAbilityKind::Mana
+            }
             _ => false,
         },
         // CR 700.4 + CR 120.1: True when the dying creature was dealt damage by the
@@ -19624,6 +19673,7 @@ pub mod tests {
             player_id: PlayerId(0),
             source_id: ObjectId(1),
             kind: crate::types::events::ActivatedAbilityKind::Normal,
+            departed_source_lki: None,
         };
         assert!(check_trigger_condition(
             &state,

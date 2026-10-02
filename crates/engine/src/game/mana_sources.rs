@@ -960,6 +960,18 @@ pub(crate) fn activate_mana_source_option_with_output(
             object_id: option.object_id,
             caused_by: None,
         });
+        // CR 305.6 + CR 605.3: tapping a basic land for mana activates its
+        // intrinsic mana ability; observe its triggers at that boundary.
+        let activation_event = super::casting_targets::emit_ability_activated(
+            state,
+            player,
+            option.object_id,
+            crate::types::events::ActivatedAbilityKind::Mana,
+            crate::types::zones::Zone::Battlefield,
+            events,
+        );
+        super::triggers::collect_activation_event_at_boundary(state, events, activation_event)
+            .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
         // The atomic combination is planning metadata: Aura-trigger bonuses are
         // produced by their own TapsForMana abilities after this single source
         // event. Producing the combination here would add those bonuses twice.

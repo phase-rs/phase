@@ -60618,6 +60618,7 @@ fn an_activation_journal_row_round_trips() {
         activator: PlayerId(0),
         source,
         source_lki: state.objects[&source].snapshot_public_characteristics(),
+        source_zone: crate::types::zones::Zone::Battlefield,
         ability_tag: Some(crate::types::ability::AbilityTag::Boast),
         is_loyalty_ability: true,
         targets: vec![
