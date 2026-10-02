@@ -6830,6 +6830,8 @@ mod tests {
             filter: TargetFilter::Any,
             optional: false,
             decline_runs_continuation: false,
+            any_number: false,
+            pending_mana_ability: None,
         };
         bind_interaction_authority(
             &mut state,
@@ -6913,6 +6915,8 @@ mod tests {
             filter: TargetFilter::Any,
             optional: true,
             decline_runs_continuation: false,
+            any_number: false,
+            pending_mana_ability: None,
         };
         bind_interaction_authority(
             &mut state,

@@ -880,16 +880,23 @@ export function RevealModal({ data }: { data: RevealChoice["data"] }) {
   const objects = useGameStore((s) => s.gameState?.objects);
   const hoverProps = useInspectHoverProps();
   const [selected, setSelected] = useState<ObjectId | null>(null);
+  const [selectedMultiple, setSelectedMultiple] = useState<ObjectId[]>([]);
   const isOptional = data.optional === true;
+  const isAnyNumber = data.any_number === true;
 
   const handleConfirm = useCallback(() => {
-    if (selected !== null) {
+    if (isAnyNumber) {
+      dispatch({
+        type: "SelectCards",
+        data: { cards: selectedMultiple },
+      });
+    } else if (selected !== null) {
       dispatch({
         type: "SelectCards",
         data: { cards: [selected] },
       });
     }
-  }, [dispatch, selected]);
+  }, [dispatch, isAnyNumber, selected, selectedMultiple]);
 
   const handleDecline = useCallback(() => {
     dispatch({
@@ -897,6 +904,19 @@ export function RevealModal({ data }: { data: RevealChoice["data"] }) {
       data: { cards: [] },
     });
   }, [dispatch]);
+
+  const toggleSelect = useCallback(
+    (id: ObjectId) => {
+      if (isAnyNumber) {
+        setSelectedMultiple((prev) =>
+          prev.includes(id) ? prev.filter((cardId) => cardId !== id) : [...prev, id],
+        );
+      } else {
+        setSelected((prev) => (prev === id ? null : id));
+      }
+    },
+    [isAnyNumber],
+  );
 
   if (!objects) return null;
 
@@ -907,7 +927,7 @@ export function RevealModal({ data }: { data: RevealChoice["data"] }) {
       footer={
         <div className="flex gap-2">
           {isOptional && <ConfirmButton onClick={handleDecline} label={t("cardChoice.buttons.decline")} />}
-          <ConfirmButton onClick={handleConfirm} disabled={selected === null} />
+          <ConfirmButton onClick={handleConfirm} disabled={!isAnyNumber && selected === null} />
         </div>
       }
     >
@@ -915,7 +935,7 @@ export function RevealModal({ data }: { data: RevealChoice["data"] }) {
         {data.cards.map((id, index) => {
           const obj = objects[id];
           if (!obj) return null;
-          const isSelected = selected === id;
+          const isSelected = isAnyNumber ? selectedMultiple.includes(id) : selected === id;
           return (
             <motion.button
               key={id}
@@ -928,7 +948,7 @@ export function RevealModal({ data }: { data: RevealChoice["data"] }) {
               animate={{ opacity: isSelected ? 1 : 0.7, y: 0, scale: 1 }}
               transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
               whileHover={{ scale: 1.05, y: -6 }}
-              onClick={() => setSelected(isSelected ? null : id)}
+              onClick={() => toggleSelect(id)}
               {...hoverProps(id)}
             >
               <CardImage

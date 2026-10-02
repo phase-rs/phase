@@ -1423,8 +1423,26 @@ pub fn candidate_actions_broad_with_probe(
             player,
             cards,
             optional,
+            any_number,
             ..
         } => {
+            if *any_number {
+                let mut variants = vec![candidate(
+                    GameAction::SelectCards {
+                        cards: cards.clone(),
+                    },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )];
+                if *optional {
+                    variants.push(candidate(
+                        GameAction::SelectCards { cards: vec![] },
+                        TacticalClass::Selection,
+                        Some(*player),
+                    ));
+                }
+                return variants;
+            }
             // CR 701.20a: Normal reveal forces exactly one pick. Optional reveal
             // (e.g., reveal-lands) additionally permits an empty selection to
             // signal "I decline to reveal" — the source's decline branch fires.

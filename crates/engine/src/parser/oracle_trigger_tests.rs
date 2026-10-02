@@ -36283,6 +36283,7 @@ fn card_parking_hand_reveal_is_a_chosen_object_boundary_for_the_event_source_lif
         selection: CardSelectionMode::default(),
         choice_optional,
         reveal: true,
+        any_number: false,
     };
     assert!(introduces_chosen_object_target(&reveal(
         TargetFilter::Typed(TypedFilter::creature()),

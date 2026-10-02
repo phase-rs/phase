@@ -1578,6 +1578,7 @@ pub(crate) enum HandRevealImperativeAst {
     RevealAll {
         target: TargetFilter,
         card_filter: TargetFilter,
+        any_number: bool,
     },
     /// "reveals a number of cards from their hand equal to X" (CR 701.20a).
     RevealPartial {

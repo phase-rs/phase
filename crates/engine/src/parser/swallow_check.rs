@@ -13352,6 +13352,7 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
                 selection: crate::types::ability::CardSelectionMode::Chosen,
                 choice_optional: false,
                 reveal: true,
+                any_number: false,
             },
         );
         reveal.player_scope = Some(reveal_scope);

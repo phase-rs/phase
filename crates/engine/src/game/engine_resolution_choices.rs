@@ -4893,9 +4893,68 @@ pub(super) fn handle_resolution_choice(
                 filter,
                 optional,
                 decline_runs_continuation,
+                any_number,
+                pending_mana_ability,
             },
             GameAction::SelectCards { cards: chosen },
         ) => {
+            if let Some(pending) = pending_mana_ability {
+                return super::mana_abilities::handle_reveal_choice_for_mana_ability(
+                    state, *pending, &cards, &filter, chosen, events,
+                )
+                .map(ResolutionChoiceOutcome::WaitingFor);
+            }
+            if any_number {
+                for &chosen_id in &chosen {
+                    if !cards.contains(&chosen_id) {
+                        return Err(EngineError::InvalidAction(
+                            "Selected card not in revealed hand".to_string(),
+                        ));
+                    }
+                    if !matches!(filter, crate::types::ability::TargetFilter::Any)
+                        && !super::filter::matches_target_filter(
+                            state,
+                            chosen_id,
+                            &filter,
+                            &super::filter::FilterContext::from_source(state, chosen_id),
+                        )
+                    {
+                        return Err(EngineError::InvalidAction(
+                            "Selected card does not match the required filter".to_string(),
+                        ));
+                    }
+                }
+
+                if !chosen.is_empty() {
+                    state
+                        .resolve_and_apply_information(
+                            &chosen,
+                            ResolvedInformationAudience::Public,
+                            ResolvedInformationLifetime::UntilZoneChange,
+                            ResolvedInformationEdit::Reveal,
+                        )
+                        .expect("published hand-reveal occurrences must be live and distinct");
+
+                    let card_names: Vec<String> = chosen
+                        .iter()
+                        .filter_map(|id| state.objects.get(id).map(|o| o.name.clone()))
+                        .collect();
+                    events.push(GameEvent::CardsRevealed {
+                        player,
+                        card_ids: chosen.clone(),
+                        card_names,
+                    });
+                }
+
+                effects::publish_tracked_set(state, chosen.clone());
+                set_priority(state, player);
+                super::engine::resume_pending_continuation_if_priority(state, events)
+                    .expect("a settled reveal choice must resume its continuation");
+                return Ok(ResolutionChoiceOutcome::WaitingFor(
+                    state.waiting_for.clone(),
+                ));
+            }
+
             // CR 701.20a: Optional reveal prompts (e.g., reveal-lands like Port Town)
             // accept an empty selection to signal "I decline to reveal." The source
             // replacement's decline ability runs via `pending_continuation`, which the

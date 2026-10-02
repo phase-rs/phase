@@ -18321,6 +18321,10 @@ pub enum Effect {
         /// looked at (private to the ability controller).
         #[serde(default = "default_reveal_public")]
         reveal: bool,
+        /// CR 701.20a: "Reveal any number of [filter] cards in your hand" —
+        /// the player may choose 0..=N matching cards from their hand to reveal.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        any_number: bool,
     },
     /// CR 701.20a: "You may reveal a [FILTER] card from your hand" — optional self-reveal
     /// from the controller's own hand. Distinct from `RevealHand` (target player, used for
@@ -39691,6 +39695,7 @@ mod tests {
             selection: CardSelectionMode::Chosen,
             choice_optional: false,
             reveal: false,
+            any_number: false,
         };
         let json = serde_json::to_string(&effect).unwrap();
         assert!(

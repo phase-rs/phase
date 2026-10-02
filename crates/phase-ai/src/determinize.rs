@@ -398,6 +398,7 @@ mod tests {
                 selection: CardSelectionMode::Chosen,
                 choice_optional: false,
                 reveal: false,
+                any_number: false,
             },
             vec![TargetRef::Player(PlayerId(1))],
             source,

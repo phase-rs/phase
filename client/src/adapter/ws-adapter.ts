@@ -210,6 +210,8 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 103 — WaitingFor.RevealChoice gains any_number and pending_mana_ability
+ *      for multi-card hand reveals (Metalworker) and mana-ability resumption.
  * 102 — QuantityRef.SharedCardTypes adds a tagged quantity in serialized
  *      ability definitions and saved state. Keep this version in lockstep
  *      with the server and the preceding mana-activation schema.
@@ -676,7 +678,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 102;
+export const PROTOCOL_VERSION = 103;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

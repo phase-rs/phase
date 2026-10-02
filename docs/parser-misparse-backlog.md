@@ -466,7 +466,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Memory Theft
 - Memory Vampire
 - Mesmeric Fiend
-- Metalworker
 - Michelangelo's Technique
 - Midnight Arsonist
 - Mimeoplasm, Revered One

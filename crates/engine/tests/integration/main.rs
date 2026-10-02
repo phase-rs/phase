@@ -1094,6 +1094,7 @@ mod memory_jar_delayed_end_step;
 mod memory_plunder_free_cast_2884;
 mod mercenaries_any_player_activate_prevention_scope;
 mod merieke_ri_berit_cant_regenerate;
+mod metalworker_reveal_mana;
 mod metamorphic_alteration;
 mod militant_angel_attacked_opponents;
 mod mill_double_redirect_choice_continuation;

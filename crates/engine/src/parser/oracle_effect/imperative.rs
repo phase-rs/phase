@@ -4254,11 +4254,12 @@ pub(super) fn parse_hand_reveal_ast(
     // This function only handles hand-related reveals.
 
     if nom_primitives::scan_contains(lower, "hand") {
-        let (target, card_filter) =
+        let (target, card_filter, any_number) =
             parse_hand_reveal_target_and_card_filter(after_reveal_lower, ctx);
         return Some(HandRevealImperativeAst::RevealAll {
             target,
             card_filter,
+            any_number,
         });
     }
 
@@ -4268,7 +4269,7 @@ pub(super) fn parse_hand_reveal_ast(
 fn parse_hand_reveal_target_and_card_filter(
     after_reveal_lower: &str,
     ctx: &mut ParseContext,
-) -> (TargetFilter, TargetFilter) {
+) -> (TargetFilter, TargetFilter, bool) {
     // CR 701.20a + CR 608.2c: a bare "their hand" names the clause subject's
     // hand; with no subject of its own that is the acting player (Controller),
     // which a per-player scope rebinds to the iterating player and
@@ -4283,7 +4284,7 @@ fn parse_hand_reveal_target_and_card_filter(
     .parse(after_reveal_lower.trim())
     .is_ok()
     {
-        return (TargetFilter::Controller, TargetFilter::None);
+        return (TargetFilter::Controller, TargetFilter::None, false);
     }
 
     // CR 701.20a + reflexive choose: "<possessive> hand and you choose a [filter]
@@ -4305,12 +4306,17 @@ fn parse_hand_reveal_target_and_card_filter(
                     .is_ok();
 
             if chooses_card_from_it {
-                return (target, super::parse_choose_filter(choose, ctx));
+                return (target, super::parse_choose_filter(choose, ctx), false);
             }
         }
     }
 
-    if let Ok((after_all, _)) = tag::<_, _, OracleError<'_>>("all ").parse(after_reveal_lower) {
+    if let Ok((after_quantifier, is_any_number)) = alt((
+        value(true, tag::<_, _, OracleError<'_>>("any number of ")),
+        value(false, tag("all ")),
+    ))
+    .parse(after_reveal_lower)
+    {
         let Ok((hand_phrase, descriptor)) = terminated(
             take_until::<_, _, OracleError<'_>>(" cards"),
             alt((
@@ -4318,41 +4324,41 @@ fn parse_hand_reveal_target_and_card_filter(
                 tag(" cards from "),
             )),
         )
-        .parse(after_all) else {
-            return (TargetFilter::Any, TargetFilter::None);
+        .parse(after_quantifier) else {
+            return (TargetFilter::Any, TargetFilter::None, is_any_number);
         };
         let target = parse_hand_possessive_target(hand_phrase)
             .map(|(_, target)| target)
             .unwrap_or(TargetFilter::Any);
         if descriptor.trim().is_empty() {
-            return (target, TargetFilter::Any);
+            return (target, TargetFilter::Any, is_any_number);
         }
         let singular = format!("{} card", descriptor.trim());
         let (filter, rem) = parse_type_phrase_folding(&singular);
         if rem.trim().is_empty() && matches!(filter, TargetFilter::Typed(_)) {
-            return (target, filter);
+            return (target, filter, is_any_number);
         }
-        return (target, TargetFilter::None);
+        return (target, TargetFilter::None, is_any_number);
     }
 
     // CR 701.20a: "reveal a card from your hand" / "reveal an [type] card from ..."
     let Ok((after_article, _)) =
         alt((tag::<_, _, OracleError<'_>>("a "), tag("an "))).parse(after_reveal_lower)
     else {
-        return (TargetFilter::Any, TargetFilter::None);
+        return (TargetFilter::Any, TargetFilter::None, false);
     };
     if let Ok((hand_phrase, _)) = tag::<_, _, OracleError<'_>>("card from ").parse(after_article) {
         let target = parse_hand_possessive_target(hand_phrase)
             .map(|(_, target)| target)
             .unwrap_or(TargetFilter::Any);
-        return (target, TargetFilter::Any);
+        return (target, TargetFilter::Any, false);
     }
     let Ok((hand_phrase, descriptor)) = terminated(
         take_until::<_, _, OracleError<'_>>(" card from "),
         tag(" card from "),
     )
     .parse(after_article) else {
-        return (TargetFilter::Any, TargetFilter::None);
+        return (TargetFilter::Any, TargetFilter::None, false);
     };
     let target = parse_hand_possessive_target(hand_phrase)
         .map(|(_, target)| target)
@@ -4360,9 +4366,9 @@ fn parse_hand_reveal_target_and_card_filter(
     let singular = format!("{} card", descriptor.trim());
     let (filter, rem) = parse_type_phrase_folding(&singular);
     if rem.trim().is_empty() && matches!(filter, TargetFilter::Typed(_)) {
-        (target, filter)
+        (target, filter, false)
     } else {
-        (target, TargetFilter::None)
+        (target, TargetFilter::None, false)
     }
 }
 
@@ -4383,17 +4389,20 @@ pub(super) fn lower_hand_reveal_ast(ast: HandRevealImperativeAst) -> Effect {
             },
             choice_optional: false,
             reveal: false,
+            any_number: false,
         },
         HandRevealImperativeAst::RevealAll {
             target,
             card_filter,
+            any_number,
         } => Effect::RevealHand {
             target,
             card_filter,
             count: None,
             selection: crate::types::ability::CardSelectionMode::Chosen,
-            choice_optional: false,
+            choice_optional: any_number,
             reveal: true,
+            any_number,
         },
         HandRevealImperativeAst::RevealPartial { count } => Effect::RevealHand {
             target: TargetFilter::Any,
@@ -4402,6 +4411,7 @@ pub(super) fn lower_hand_reveal_ast(ast: HandRevealImperativeAst) -> Effect {
             selection: crate::types::ability::CardSelectionMode::Chosen,
             choice_optional: false,
             reveal: true,
+            any_number: false,
         },
         // CR 701.20a: Back-reference reveal — distinct from RevealHand (zone-wide).
         // ParentTarget binds at runtime to the parent ability's affected IDs.
@@ -6518,6 +6528,7 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
             selection: crate::types::ability::CardSelectionMode::Chosen,
             choice_optional,
             reveal: true,
+            any_number: false,
         },
         // CR 608.2d: Anaphoric "choose N of them/those" → select from the tracked set
         // populated by the preceding effect (RevealTop, RevealHand, ExileTop, etc.).

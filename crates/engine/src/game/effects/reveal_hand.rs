@@ -28,8 +28,8 @@ pub(crate) fn reveal_hand_parks_card_choice(
 pub(crate) fn effect_parks_reveal_card_choice(effect: &Effect) -> bool {
     matches!(
         effect,
-        Effect::RevealHand { card_filter, choice_optional, .. }
-            if reveal_hand_parks_card_choice(card_filter, *choice_optional)
+        Effect::RevealHand { card_filter, choice_optional, any_number, .. }
+            if *any_number || reveal_hand_parks_card_choice(card_filter, *choice_optional)
     )
 }
 
@@ -46,32 +46,36 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (card_filter, count, random, choice_optional, is_reveal, target) = match &ability.effect {
-        Effect::RevealHand {
-            card_filter,
-            count,
-            selection,
-            choice_optional,
-            reveal,
-            target,
-            ..
-        } => (
-            card_filter.clone(),
-            count.clone(),
-            selection.is_random(),
-            *choice_optional,
-            *reveal,
-            target.clone(),
-        ),
-        _ => (
-            TargetFilter::Any,
-            None,
-            false,
-            false,
-            true,
-            TargetFilter::Any,
-        ),
-    };
+    let (card_filter, count, random, choice_optional, is_reveal, target, any_number) =
+        match &ability.effect {
+            Effect::RevealHand {
+                card_filter,
+                count,
+                selection,
+                choice_optional,
+                reveal,
+                target,
+                any_number,
+                ..
+            } => (
+                card_filter.clone(),
+                count.clone(),
+                selection.is_random(),
+                *choice_optional,
+                *reveal,
+                target.clone(),
+                *any_number,
+            ),
+            _ => (
+                TargetFilter::Any,
+                None,
+                false,
+                false,
+                true,
+                TargetFilter::Any,
+                false,
+            ),
+        };
 
     // Find the target player from resolved targets. Targeted RevealHand
     // (Thoughtseize, Duress) builds a real `TargetRef::Player` slot — keep that
@@ -129,6 +133,46 @@ pub fn resolve(
         .map(|p| p.hand.iter().copied().collect())
         .unwrap_or_default();
 
+    let chooser = ability.original_controller.unwrap_or(ability.controller);
+
+    if any_number {
+        let eligible: Vec<_> = if matches!(card_filter, TargetFilter::Any) {
+            full_hand
+        } else {
+            let ctx = FilterContext::from_ability(ability);
+            full_hand
+                .into_iter()
+                .filter(|&id| matches_target_filter(state, id, &card_filter, &ctx))
+                .collect()
+        };
+
+        if eligible.is_empty() {
+            super::publish_tracked_set(state, vec![]);
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::Reveal,
+                source_id: ability.source_id,
+                subject: None,
+            });
+            return Ok(());
+        }
+
+        state.waiting_for = WaitingFor::RevealChoice {
+            player: chooser,
+            cards: eligible,
+            filter: card_filter,
+            optional: true,
+            decline_runs_continuation: true,
+            any_number: true,
+            pending_mana_ability: None,
+        };
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::Reveal,
+            source_id: ability.source_id,
+            subject: None,
+        });
+        return Ok(());
+    }
+
     let mut hand = full_hand;
     if random {
         hand.shuffle(&mut state.rng);
@@ -140,17 +184,6 @@ pub fn resolve(
     }
 
     let needs_reveal_choice = reveal_hand_parks_card_choice(&card_filter, choice_optional);
-    // CR 109.5 + CR 608.2c + CR 608.2d: the post-reveal choice belongs to the
-    // player the choosing instruction addresses. The parser only produces a
-    // card-parking reveal inside a player scope when that instruction is
-    // addressed to the ability's controller ("you" / imperative): the chain
-    // builder's consumer-actor gate declines any other continuation (a declined
-    // "from it" consumer becomes an explicit unimplemented gap), and a
-    // per-player clause's own reveal choice becomes the same gap. So the chooser
-    // is the printed controller: a player-scope fan-out rebinds `controller` to
-    // the iterating player and preserves the printed one in
-    // `original_controller`.
-    let chooser = ability.original_controller.unwrap_or(ability.controller);
 
     if hand.is_empty() {
         if needs_reveal_choice {
@@ -169,6 +202,8 @@ pub fn resolve(
                 filter: card_filter,
                 optional: true,
                 decline_runs_continuation: false,
+                any_number: false,
+                pending_mana_ability: None,
             };
         }
         events.push(GameEvent::EffectResolved {
@@ -259,6 +294,8 @@ pub fn resolve(
                 filter: card_filter,
                 optional: true,
                 decline_runs_continuation: false,
+                any_number: false,
+                pending_mana_ability: None,
             };
         }
         events.push(GameEvent::EffectResolved {
@@ -275,6 +312,8 @@ pub fn resolve(
         filter: card_filter,
         optional: choice_optional,
         decline_runs_continuation: false,
+        any_number: false,
+        pending_mana_ability: None,
     };
 
     events.push(GameEvent::EffectResolved {
@@ -335,6 +374,7 @@ mod tests {
                     selection: crate::types::ability::CardSelectionMode::Chosen,
                     choice_optional: false,
                     reveal: true,
+                    any_number: false,
                 },
                 vec![],
                 source,
@@ -402,6 +442,7 @@ mod tests {
                     selection: crate::types::ability::CardSelectionMode::Chosen,
                     choice_optional: false,
                     reveal: false,
+                    any_number: false,
                 },
                 vec![],
                 source,
@@ -603,6 +644,7 @@ mod tests {
                 selection: crate::types::ability::CardSelectionMode::Chosen,
                 choice_optional: false,
                 reveal: true,
+                any_number: false,
             },
             vec![TargetRef::Player(target_player)],
             ObjectId(100),
@@ -648,6 +690,7 @@ mod tests {
                 selection: crate::types::ability::CardSelectionMode::Chosen,
                 choice_optional: false,
                 reveal: false,
+                any_number: false,
             },
             // Source object slot only — no explicit player target.
             vec![TargetRef::Object(ObjectId(100))],
@@ -708,6 +751,7 @@ mod tests {
                 selection: crate::types::ability::CardSelectionMode::Chosen,
                 choice_optional: false,
                 reveal: false,
+                any_number: false,
             },
             // …but the explicit player target is the controller itself.
             vec![TargetRef::Player(PlayerId(0))],
@@ -738,6 +782,7 @@ mod tests {
                 selection: crate::types::ability::CardSelectionMode::Chosen,
                 choice_optional: false,
                 reveal: true,
+                any_number: false,
             },
             vec![TargetRef::Object(ObjectId(100))],
             ObjectId(100),
@@ -868,6 +913,7 @@ mod tests {
                 selection: crate::types::ability::CardSelectionMode::Random,
                 choice_optional: false,
                 reveal: true,
+                any_number: false,
             },
             vec![TargetRef::Player(PlayerId(1))],
             ObjectId(100),
@@ -948,6 +994,7 @@ mod tests {
                 selection: crate::types::ability::CardSelectionMode::Chosen,
                 choice_optional: false,
                 reveal: true,
+                any_number: false,
             },
             vec![TargetRef::Player(PlayerId(1))],
             ObjectId(100),
@@ -993,6 +1040,7 @@ mod tests {
                 selection: crate::types::ability::CardSelectionMode::Chosen,
                 choice_optional: false,
                 reveal: false,
+                any_number: false,
             },
             vec![TargetRef::Player(PlayerId(1))],
             ObjectId(100),
@@ -1047,6 +1095,7 @@ mod tests {
                 selection: crate::types::ability::CardSelectionMode::Chosen,
                 choice_optional: false,
                 reveal: false,
+                any_number: false,
             },
             vec![TargetRef::Player(PlayerId(1))],
             ObjectId(100),
@@ -1084,6 +1133,8 @@ mod tests {
             filter: TargetFilter::Any,
             optional: true,
             decline_runs_continuation: false,
+            any_number: false,
+            pending_mana_ability: None,
         };
         let mut continuation = ResolvedAbility::new(
             Effect::GainLife {
@@ -1106,6 +1157,8 @@ mod tests {
                 filter: TargetFilter::Any,
                 optional: true,
                 decline_runs_continuation: false,
+                any_number: false,
+                pending_mana_ability: None,
             },
             GameAction::SelectCards { cards: vec![] },
             &mut events,
