@@ -5,12 +5,12 @@ use rand_chacha::ChaCha20Rng;
 use crate::database::synthesis::KeywordTriggerInstaller;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCostOrigin,
-    BounceSelection, CardTypeSetSource, CastManaSpentMetric, ChosenAttribute, CommanderOwnership,
-    ControllerRef, CopyRetargetPermission, DamageAmountScope, DamageAmountThreshold,
-    DamageKindFilter, DelayedTriggerCondition, DurationEvent, Effect, FilterProp, ModalChoice,
-    NameStickerSet, ObjectScope, OriginConstraint, PlayerFilter, PlayerScope, PtValue,
-    QuantityExpr, QuantityRef, RenownSubject, ResolvedAbility, SacrificeCost, StaticCondition,
-    TargetFilter, TargetRef, TributeOutcome, TriggerCondition, TriggerConstraint,
+    AttachmentReferent, BounceSelection, CardTypeSetSource, CastManaSpentMetric, ChosenAttribute,
+    CommanderOwnership, ControllerRef, CopyRetargetPermission, DamageAmountScope,
+    DamageAmountThreshold, DamageKindFilter, DelayedTriggerCondition, DurationEvent, Effect,
+    FilterProp, ModalChoice, NameStickerSet, ObjectScope, OriginConstraint, PlayerFilter,
+    PlayerScope, PtValue, QuantityExpr, QuantityRef, RenownSubject, ResolvedAbility, SacrificeCost,
+    StaticCondition, TargetFilter, TargetRef, TributeOutcome, TriggerCondition, TriggerConstraint,
     TriggerDefinition, TriggerDefinitionOccurrenceRef, TriggerDefinitionRef, TriggerEntry,
     TriggerGrantProducerKey, TypeFilter, TypedFilter,
 };
@@ -12388,7 +12388,7 @@ fn filter_prop_binding_diverges(prop: &FilterProp) -> bool {
         // `Owned`/`ProtectorMatches` above — recurse into the same authority
         // rather than bucketing with `AttachedToRecipient` (whose divergence is
         // about the per-recipient `FilterContext` binding, a different axis).
-        FilterProp::AttachedToPlayer { player } => controller_ref_binding_diverges(player),
+        FilterProp::AttachedTo { to: AttachmentReferent::Player { player } } => controller_ref_binding_diverges(player),
         FilterProp::MostPrevalentCreatureTypeIn { scope, .. } => {
             controller_ref_binding_diverges(scope)
         }
@@ -12434,7 +12434,10 @@ fn filter_prop_binding_diverges(prop: &FilterProp) -> bool {
         // CR 613.4c: the per-recipient referent, which the fire-time
         // `FilterContext` carries as `None` — the prop-level counterpart of
         // `ObjectScope::Recipient`.
-        | FilterProp::AttachedToRecipient
+        | FilterProp::AttachedTo { to: AttachmentReferent::Recipient }
+        // CR 601.2c: a declared target slot's object, read through the resolving
+        // ability, the prop-level counterpart of `TargetFilter::ParentTargetSlot`.
+        | FilterProp::AttachedTo { to: AttachmentReferent::DeclaredTarget { .. } }
 
         // ---- RESOLUTION-PUBLISHED LEDGERS (CR 608.2c). ----
         //
@@ -12487,7 +12490,7 @@ fn filter_prop_binding_diverges(prop: &FilterProp) -> bool {
         // CR 400.7 + CR 301.5 + CR 303.4: source-relative reads, all served by
         // the `TriggerSourceContext` the fire-time leg carries.
         | FilterProp::SameName
-        | FilterProp::AttachedToSource
+        | FilterProp::AttachedTo { to: AttachmentReferent::Source }
         | FilterProp::SaddledSource
         | FilterProp::ConvokedSource
         | FilterProp::BlockingSource
@@ -25441,7 +25444,9 @@ pub mod tests {
         for prop in [
             // Reads the resolving ability.
             FilterProp::SameNameAsParentTarget,
-            FilterProp::AttachedToRecipient,
+            FilterProp::AttachedTo {
+                to: AttachmentReferent::Recipient,
+            },
             // Reads a ledger a RESOLUTION publishes.
             FilterProp::InTrackedSet {
                 id: crate::types::identifiers::TrackedSetId(1),
@@ -25477,7 +25482,9 @@ pub mod tests {
         for prop in [
             FilterProp::Token,
             FilterProp::Tapped,
-            FilterProp::AttachedToSource,
+            FilterProp::AttachedTo {
+                to: AttachmentReferent::Source,
+            },
             FilterProp::SameName,
             FilterProp::IsChosenCreatureType,
             FilterProp::HasSingleTarget,

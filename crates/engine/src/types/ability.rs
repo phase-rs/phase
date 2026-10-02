@@ -6382,6 +6382,43 @@ pub enum CombatRelationSubject {
     ParentTarget,
 }
 
+/// CR 701.3a + CR 303.4b: What a [`FilterProp::AttachedTo`] candidate must be
+/// attached to. Object referents (`Source`, `Recipient`, `DeclaredTarget`) and
+/// the player referent (`Player`) resolve through separate authorities in
+/// `game::filter`; only the relation is shared.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum AttachmentReferent {
+    /// The filter's source object ("Aura and Equipment attached to ~" —
+    /// Kellan, the Fae-Blooded; Whiplash, Vengeful Engineer).
+    Source,
+    /// CR 613.4c: the per-recipient object of the resolving effect ("Enchanted
+    /// creature gets +N/+M for each Aura attached to it" — Strong Back, Mantle
+    /// of the Ancients, Bruenor Battlehammer). Falls back to the source when no
+    /// recipient is bound (self-source triggers: Catti-brie, Wyleth).
+    Recipient,
+    /// CR 303.4b: a player the candidate is attached to, identified by
+    /// `ControllerRef` ("the number of Curses attached to enchanted player" —
+    /// Curse of Thirst, Curse of Surveillance).
+    Player { player: ControllerRef },
+    /// CR 601.2c + CR 608.2c: the object announced for declared target slot
+    /// `slot` of the resolving chain ("Destroy all Equipment attached to that
+    /// creature" — Turn to Slag; Light of Judgment; Fiery Annihilation). `slot`
+    /// uses the numbering of `TargetFilter::ParentTargetSlot { index }`
+    /// (`ability_utils::declared_targets_in_chain` counted from the mode root,
+    /// else the chain root) and is read only through
+    /// `targeting::declared_slot_referent`.
+    DeclaredTarget { slot: usize },
+}
+
+impl AttachmentReferent {
+    /// Whether evaluating this referent reads a declared target slot of the
+    /// resolving chain (and therefore needs a declared-slot view or carrier).
+    pub fn reads_declared_slot(&self) -> bool {
+        matches!(self, AttachmentReferent::DeclaredTarget { .. })
+    }
+}
+
 /// Individual filter properties that can be combined in a Typed filter.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -6557,41 +6594,14 @@ pub enum FilterProp {
     HasAdventure,
     EnchantedBy,
     EquippedBy,
-    /// CR 301.5 + CR 303.4: True when the matched object's `attached_to` field
-    /// equals the filter source's object ID. Inverse of `EnchantedBy`/`EquippedBy`,
-    /// which check whether the source has an attachment. Used for "Aura and
-    /// Equipment attached to ~" quantity clauses (Kellan, the Fae-Blooded) and
-    /// for any compound filter whose subject is "attached to <self>".
-    AttachedToSource,
-    /// CR 301.5 + CR 303.4 + CR 613.4c: True when the matched object's
-    /// `attached_to` field equals the *recipient* of the resolving effect (the
-    /// per-object `id` in a layer's affected list). Distinct from
-    /// `AttachedToSource` — for an Aura/Equipment static "Enchanted/Equipped
-    /// creature gets +N/+M for each X attached to it", the pronoun "it" refers
-    /// to the affected creature, not to the static's source object. The
-    /// recipient is supplied through `FilterContext::recipient_id`; when
-    /// recipient is unknown (no per-recipient context), this prop evaluates to
-    /// false. Covers ~25 cards: Strong Back, Mantle of the Ancients,
-    /// Auramancer's Guise, Champion of the Flame, Bruenor Battlehammer's
-    /// "Each creature you control gets +2/+0 for each Equipment attached to
-    /// it", and the broader "<subject> gets +N/+M for each Aura/Equipment
-    /// attached to it" family.
-    AttachedToRecipient,
-    /// CR 303.4 + CR 301.5: True when the matched object's `attached_to` field
-    /// resolves to a PLAYER equal to the player identified by `player`. This is
-    /// the player-referent counterpart of `AttachedToSource`/`AttachedToRecipient`
-    /// (both of which resolve against an OBJECT referent) — a Curse (or any
-    /// other player-enchanting Aura) needs to count SIBLING permanents attached
-    /// to a specific player, not to a creature. Reuses `ControllerRef` (resolved
-    /// via `controller_ref_player`/`source_enchanted_player`) rather than adding
-    /// a narrower "which player" type, since every "which player" axis this
-    /// needs (the enchanted player, a target player, "you", …) is already
-    /// expressed there. Powers "the number of Curses attached to [enchanted
-    /// player]" (Curse of Thirst, Curse of Surveillance) — `player` is
-    /// `ControllerRef::EnchantedPlayer` there, resolved against the counting
-    /// ability's own source (itself a Curse attached to the same player).
-    AttachedToPlayer {
-        player: ControllerRef,
+    /// CR 701.3a + CR 303.4b: True when the matched object is attached to the
+    /// object or player named by `to`. The single attachment-relation prop: the
+    /// referent axis is parameterized by [`AttachmentReferent`] rather than one
+    /// sibling variant per referent. Inverse direction of
+    /// `EnchantedBy`/`EquippedBy`/`HasAttachment`, which ask whether an object
+    /// HAS an attachment.
+    AttachedTo {
+        to: AttachmentReferent,
     },
     /// CR 303.4 + CR 301.5: Matches objects that have at least one attachment of the
     /// given kind whose controller matches `controller`. Unlike `EnchantedBy`/`EquippedBy`
@@ -6783,6 +6793,7 @@ pub enum FilterProp {
     /// preserving the single-type constraint while expressing the OR
     /// semantics at the property layer. Nest by composing with other props.
     AnyOf {
+        #[serde(deserialize_with = "deserialize_filter_props_compat")]
         props: Vec<FilterProp>,
     },
     /// CR 608.2c: Logical negation of a filter property — matches objects for
@@ -6794,6 +6805,7 @@ pub enum FilterProp {
     /// (De Morgan) into `Not(AttackedThisTurn)` AND `Not(EnteredThisTurn)` rather
     /// than a bespoke `NotAttacked`/`NotEntered` sibling cluster. Boxed for recursion.
     Not {
+        #[serde(deserialize_with = "deserialize_boxed_filter_prop_compat")]
         prop: Box<FilterProp>,
     },
     /// CR 608.2c: The object is a member of the active resolution-chain tracked
@@ -7133,7 +7145,7 @@ pub struct TypedFilter {
     pub type_filters: Vec<TypeFilter>,
     #[serde(default)]
     pub controller: Option<ControllerRef>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_filter_props_compat")]
     pub properties: Vec<FilterProp>,
 }
 
@@ -8815,6 +8827,64 @@ where
 {
     let value = serde_json::Value::deserialize(deserializer)?;
     quantity_ref_from_value(value)
+}
+
+/// CR 701.3a + CR 303.4b: decode a `FilterProp`, accepting the three legacy
+/// attachment-referent tags that predate `FilterProp::AttachedTo { to }`
+/// (`AttachedToSource`, `AttachedToRecipient`, `AttachedToPlayer { player }`).
+/// Serialization is canonical-new only. Nested props reach this decoder through
+/// the hooked `AnyOf.props`, `Not.prop`, `TypedFilter.properties` and
+/// `additional_filter` fields, so a legacy tag at any depth is accepted.
+fn filter_prop_from_value<E: serde::de::Error>(
+    mut value: serde_json::Value,
+) -> Result<FilterProp, E> {
+    let to = match value.get("type").and_then(serde_json::Value::as_str) {
+        Some("AttachedToSource") => AttachmentReferent::Source,
+        Some("AttachedToRecipient") => AttachmentReferent::Recipient,
+        Some("AttachedToPlayer") => {
+            let player = value
+                .get_mut("player")
+                .map(serde_json::Value::take)
+                .ok_or_else(|| E::custom("legacy AttachedToPlayer requires a player"))?;
+            AttachmentReferent::Player {
+                player: serde_json::from_value(player).map_err(E::custom)?,
+            }
+        }
+        _ => return serde_json::from_value(value).map_err(E::custom),
+    };
+    Ok(FilterProp::AttachedTo { to })
+}
+
+pub(crate) fn deserialize_filter_props_compat<'de, D>(
+    deserializer: D,
+) -> Result<Vec<FilterProp>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Vec::<serde_json::Value>::deserialize(deserializer)?
+        .into_iter()
+        .map(filter_prop_from_value)
+        .collect()
+}
+
+pub(crate) fn deserialize_boxed_filter_prop_compat<'de, D>(
+    deserializer: D,
+) -> Result<Box<FilterProp>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    filter_prop_from_value(serde_json::Value::deserialize(deserializer)?).map(Box::new)
+}
+
+pub(crate) fn deserialize_optional_filter_prop_compat<'de, D>(
+    deserializer: D,
+) -> Result<Option<FilterProp>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<serde_json::Value>::deserialize(deserializer)?
+        .map(filter_prop_from_value)
+        .transpose()
 }
 
 pub(crate) fn deserialize_boxed_quantity_ref_compat<'de, D>(
@@ -27287,7 +27357,11 @@ pub enum AbilityCondition {
             deserialize_with = "deserialize_revealed_card_types_compat"
         )]
         card_types: Vec<CoreType>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "deserialize_optional_filter_prop_compat"
+        )]
         additional_filter: Option<FilterProp>,
         /// CR 205.3m: Optional subtype constraint on the revealed card (e.g.
         /// Kenessos: "If it's a Kraken, Leviathan, Octopus, or Serpent

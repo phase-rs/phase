@@ -417,6 +417,55 @@ fn drain_spell_copied_observer_triggers(
     Ok(())
 }
 
+/// CR 707.10c + CR 115.7d: keep only the alternatives for copy slot `slot_idx`
+/// that, together with every edit already accepted in `slots` (each slot's
+/// `current`), leave a legal final set — a new choice may not make an
+/// unchanged target that was legal illegal. A no-op unless the copy's chain
+/// has a position whose filter reads a declared slot.
+pub(crate) fn restrict_copy_retarget_alternatives(
+    state: &GameState,
+    copy_id: ObjectId,
+    slots: &mut [CopyTargetSlot],
+    slot_idx: usize,
+) {
+    use super::super::ability_utils::{
+        chain_retarget_slots, copy_retarget_edit_is_legal, SlotEnforcement,
+    };
+    let Some(entry) = state.stack.iter().find(|entry| entry.id == copy_id) else {
+        return;
+    };
+    let Some(pre) = entry.ability() else {
+        return;
+    };
+    let has_dependent_slot = chain_retarget_slots(pre).iter().any(|binding| {
+        matches!(&binding.enforcement, SlotEnforcement::Filtered(filter)
+            if crate::game::filter::filter_reads_declared_slot(filter))
+    });
+    if !has_dependent_slot {
+        return;
+    }
+    let pool_controller = super::change_targets::retarget_pool_controller(state, entry, pre);
+    let Some(currents) = slots
+        .iter()
+        .map(|slot| slot.current.clone())
+        .collect::<Option<Vec<_>>>()
+    else {
+        return;
+    };
+    if currents.len() != pre.targets.len() || slot_idx >= slots.len() {
+        return;
+    }
+    let alternatives = std::mem::take(&mut slots[slot_idx].legal_alternatives);
+    slots[slot_idx].legal_alternatives = alternatives
+        .into_iter()
+        .filter(|alternative| {
+            let mut targets = currents.clone();
+            targets[slot_idx] = alternative.clone();
+            copy_retarget_edit_is_legal(state, pre, &targets, pool_controller).is_ok()
+        })
+        .collect();
+}
+
 /// CR 707.10c: Open the shared "may choose new targets" choice for a copied
 /// spell. The copy is already on the stack; `copy_ability` is the copy's
 /// re-sourced ability, so legal alternatives reflect the copy's identity.
@@ -448,6 +497,11 @@ pub(crate) fn open_copy_retarget_choice(
                 .unwrap_or_default(),
         })
         .collect();
+
+    let mut target_slots = target_slots;
+    for slot_idx in 0..target_slots.len() {
+        restrict_copy_retarget_alternatives(state, copy_id, &mut target_slots, slot_idx);
+    }
 
     // CR 707.10c: "its controller may choose new targets for the copy" — the
     // copy's controller makes the retarget choice.

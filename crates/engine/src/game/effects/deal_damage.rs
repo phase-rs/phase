@@ -5322,7 +5322,9 @@ mod tests {
                             filter: TargetFilter::Typed(TypedFilter {
                                 type_filters: vec![TypeFilter::Subtype("Aura".to_string())],
                                 controller: None,
-                                properties: vec![FilterProp::AttachedToRecipient],
+                                properties: vec![FilterProp::AttachedTo {
+                                    to: crate::types::ability::AttachmentReferent::Recipient,
+                                }],
                             }),
                         },
                     }),
@@ -6743,7 +6745,9 @@ mod tests {
                             filter: TargetFilter::Typed(TypedFilter {
                                 type_filters: vec![TypeFilter::Subtype("Aura".to_string())],
                                 controller: None,
-                                properties: vec![FilterProp::AttachedToRecipient],
+                                properties: vec![FilterProp::AttachedTo {
+                                    to: crate::types::ability::AttachmentReferent::Recipient,
+                                }],
                             }),
                         },
                     }),

@@ -13,7 +13,7 @@
 //! as the known near-miss — its gate opens, but its EFFECT then asks a second, independent
 //! question at the QUANTITY layer:
 //!
-//!   X = ObjectCount { Typed[Subtype(Equipment)] + FilterProp::AttachedToSource }
+//!   X = ObjectCount { Typed[Subtype(Equipment)] + FilterProp::AttachedTo { to: AttachmentReferent::Source } }
 //!
 //! That count enumerates the LIVE battlefield and asks each Equipment "are you attached to
 //! the source?" — i.e. `obj.attached_to == Some(source.id)`. SBA unattaches every Equipment
@@ -285,7 +285,7 @@ fn unequipped_whiplash_never_triggers() {
 /// KNOWN INFORMATION once the source is no longer in the zone it was expected in. He was
 /// equipped with 2 Equipment when he last existed, so X = 2.
 ///
-/// Before the fix, `FilterProp::AttachedToSource` asked each LIVE Equipment
+/// Before the fix, `FilterProp::AttachedTo { to: AttachmentReferent::Source }` asked each LIVE Equipment
 /// `attached_to == Some(source)`, SBA had already cleared that field (CR 704.5n), X resolved
 /// to 0, and the drain silently did nothing.
 #[test]

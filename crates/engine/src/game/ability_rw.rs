@@ -102,10 +102,10 @@
 
 use crate::types::ability::FilterProp;
 use crate::types::ability::{
-    AbilityCondition, AbilityDefinition, AttachCardinality, AttachSelection, AttackedYouScope,
-    CardTypeSetSource, ContinuousModification, ControllerRef, Duration, Effect, GuessSubject,
-    KeeperConstraint, ModalChoice, MultiTargetSpec, NameStickerSet, ObjectProperty, ObjectScope,
-    PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole,
+    AbilityCondition, AbilityDefinition, AttachCardinality, AttachSelection, AttachmentReferent,
+    AttackedYouScope, CardTypeSetSource, ContinuousModification, ControllerRef, Duration, Effect,
+    GuessSubject, KeeperConstraint, ModalChoice, MultiTargetSpec, NameStickerSet, ObjectProperty,
+    ObjectScope, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole,
     RepeatContinuation, ReplacementDefinition, ResolvedAbility, StaticCondition, StaticDefinition,
     TargetFilter, TriggerCondition, TriggerDefinition, TurnJournalKind, TypeFilter, TypedFilter,
     ZoneChoiceCandidateSource, ZoneRef,
@@ -2487,7 +2487,7 @@ fn legacy_filter_prop(p: &FilterProp) -> bool {
         // whether this prop nests a frozen-12 event-context tag is exactly
         // whether that referent is one — delegate rather than assert, mirroring
         // the sibling `ControllerRef`-bearing props.
-        | FilterProp::AttachedToPlayer { player: controller }
+        | FilterProp::AttachedTo { to: AttachmentReferent::Player { player: controller } }
         | FilterProp::MostPrevalentCreatureTypeIn {
             scope: controller, ..
         } => legacy_controller_ref(controller),
@@ -2511,6 +2511,11 @@ fn legacy_filter_prop(p: &FilterProp) -> bool {
         // not one of the frozen-12 event-context refs. Member-boundness is handled
         // in `member_bound_filter_prop`.
         FilterProp::InTrackedSet { .. } => false,
+        // CR 601.2c: a declared-slot referent mirrors `TargetFilter::ParentTargetSlot`,
+        // which is deliberately NOT one of the frozen-12 tags.
+        FilterProp::AttachedTo {
+            to: AttachmentReferent::DeclaredTarget { .. },
+        } => false,
         FilterProp::Token
         | FilterProp::NonToken
         | FilterProp::RepresentedByCard
@@ -2538,8 +2543,8 @@ fn legacy_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::HasAdventure
         | FilterProp::EnchantedBy
         | FilterProp::EquippedBy
-        | FilterProp::AttachedToSource
-        | FilterProp::AttachedToRecipient
+        | FilterProp::AttachedTo { to: AttachmentReferent::Source }
+        | FilterProp::AttachedTo { to: AttachmentReferent::Recipient }
         | FilterProp::Another
         | FilterProp::Unpaired
         | FilterProp::OtherThanTriggerObject
@@ -2777,7 +2782,7 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         // `EnchantedPlayer` referent is that source's enchanted player), so its
         // member-boundness is exactly the referent's — delegate rather than
         // assert, mirroring the sibling `ControllerRef`-bearing props.
-        | FilterProp::AttachedToPlayer { player: controller }
+        | FilterProp::AttachedTo { to: AttachmentReferent::Player { player: controller } }
         | FilterProp::MostPrevalentCreatureTypeIn {
             scope: controller, ..
         } => member_bound_controller_ref(controller),
@@ -2804,6 +2809,12 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         // selector (chain-first via `chain_tracked_set_id`). Per-source published
         // storage ⇒ member-bound.
         FilterProp::InTrackedSet { .. } => true,
+        // CR 601.2c + CR 608.2h: a declared-slot referent mirrors the fail-closed
+        // `TargetFilter::ParentTargetSlot` classification, and its look-back leg reads
+        // the referent's exit-time attachment record — member-bound.
+        FilterProp::AttachedTo {
+            to: AttachmentReferent::DeclaredTarget { .. },
+        } => true,
         FilterProp::Token
         | FilterProp::NonToken
         | FilterProp::RepresentedByCard
@@ -2831,8 +2842,8 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::HasAdventure
         | FilterProp::EnchantedBy
         | FilterProp::EquippedBy
-        | FilterProp::AttachedToSource
-        | FilterProp::AttachedToRecipient
+        | FilterProp::AttachedTo { to: AttachmentReferent::Source }
+        | FilterProp::AttachedTo { to: AttachmentReferent::Recipient }
         | FilterProp::Another
         | FilterProp::Unpaired
         | FilterProp::OtherThanTriggerObject
@@ -7928,8 +7939,10 @@ mod tests {
             // `AttachedToPlayer` must delegate its `ControllerRef` rather than
             // answer FALSE outright.
             TargetFilter::Typed(TypedFilter {
-                properties: vec![FilterProp::AttachedToPlayer {
-                    player: ControllerRef::EnchantedPlayer,
+                properties: vec![FilterProp::AttachedTo {
+                    to: AttachmentReferent::Player {
+                        player: ControllerRef::EnchantedPlayer,
+                    },
                 }],
                 ..TypedFilter::creature()
             }),
@@ -7954,8 +7967,10 @@ mod tests {
             // for the prop: a controller-relative attachment referent stays
             // member-invariant under uniformity.
             TargetFilter::Typed(TypedFilter {
-                properties: vec![FilterProp::AttachedToPlayer {
-                    player: ControllerRef::You,
+                properties: vec![FilterProp::AttachedTo {
+                    to: AttachmentReferent::Player {
+                        player: ControllerRef::You,
+                    },
                 }],
                 ..TypedFilter::creature()
             }),

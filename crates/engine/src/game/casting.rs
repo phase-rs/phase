@@ -1,14 +1,14 @@
 use crate::types::ability::{
     is_variable_remove_counter_cost_count, AbilityBlockKind, AbilityBlockReason, AbilityCondition,
     AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, ActivationManaPaymentRestriction,
-    AdditionalCost, BoardWideCostModifier, CardPlayMode, CardSelectionMode, CardTypeSetSource,
-    CastCostModifier, CastTimingPermission, CastingPermission, ChoiceType, CombatRelationSubject,
-    ContinuousModification, ControllerRef, CostObjectCount, CostPaidObjectSnapshot, CostReduction,
-    CounterCostSelection, Duration, Effect, EffectKind, FilterProp, GameRestriction,
-    ModalSelectionCondition, NameStickerSet, ObjectScope, ParsedCondition, PlayerFilter,
-    PlayerScope, ProhibitedActivity, QuantityExpr, QuantityRef, ResolvedAbility, RestrictionExpiry,
-    RestrictionPlayerScope, StaticCondition, StaticDefinition, SubAbilityLink,
-    TapCreaturesRequirement, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+    AdditionalCost, AttachmentReferent, BoardWideCostModifier, CardPlayMode, CardSelectionMode,
+    CardTypeSetSource, CastCostModifier, CastTimingPermission, CastingPermission, ChoiceType,
+    CombatRelationSubject, ContinuousModification, ControllerRef, CostObjectCount,
+    CostPaidObjectSnapshot, CostReduction, CounterCostSelection, Duration, Effect, EffectKind,
+    FilterProp, GameRestriction, ModalSelectionCondition, NameStickerSet, ObjectScope,
+    ParsedCondition, PlayerFilter, PlayerScope, ProhibitedActivity, QuantityExpr, QuantityRef,
+    ResolvedAbility, RestrictionExpiry, RestrictionPlayerScope, StaticCondition, StaticDefinition,
+    SubAbilityLink, TapCreaturesRequirement, TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
 use crate::types::actions::{AlternativeCastDecision, GameAction};
 use crate::types::card::LayoutKind;
@@ -1235,6 +1235,7 @@ pub(crate) fn is_blocked_by_cant_play_lands(
                         scoped_iteration_player: None,
                         // CR 603.4: not a zone-change intervening-`if`.
                         triggering_object: None,
+                        declared_slot_view: None,
                     },
                 ),
                 None => true,
@@ -23151,6 +23152,7 @@ fn apply_mana_spell_grants(
                 scoped_iteration_player: None,
                 // CR 603.4: not a zone-change intervening-`if`.
                 triggering_object: None,
+                declared_slot_view: None,
             };
             if !crate::game::filter::matches_target_filter(state, spell_id, filter, &filter_ctx) {
                 continue;
@@ -28649,6 +28651,11 @@ fn target_filter_reads_chosen_target(filter: &TargetFilter, read: TargetRead) ->
 fn filter_prop_reads_chosen_target(prop: &FilterProp, read: TargetRead) -> bool {
     match prop {
         FilterProp::SameNameAsParentTarget => read.includes_bindable(),
+        // CR 601.2c: attachment to a declared target slot's object reads a chosen
+        // target, exactly like `TargetFilter::ParentTargetSlot`.
+        FilterProp::AttachedTo {
+            to: AttachmentReferent::DeclaredTarget { .. },
+        } => read.includes_bindable(),
         FilterProp::CombatRelation { subject, .. } => {
             read.includes_bindable() && matches!(subject, CombatRelationSubject::ParentTarget)
         }
@@ -28658,7 +28665,9 @@ fn filter_prop_reads_chosen_target(prop: &FilterProp, read: TargetRead) -> bool 
             .is_some_and(|x| player_filter_reads_chosen_target(x, read)),
         FilterProp::Owned { controller }
         | FilterProp::ProtectorMatches { controller }
-        | FilterProp::AttachedToPlayer { player: controller }
+        | FilterProp::AttachedTo {
+            to: AttachmentReferent::Player { player: controller },
+        }
         | FilterProp::MostPrevalentCreatureTypeIn {
             scope: controller, ..
         } => controller_ref_reads_chosen_target(controller, read),
@@ -28717,8 +28726,12 @@ fn filter_prop_reads_chosen_target(prop: &FilterProp, read: TargetRead) -> bool 
         | FilterProp::HasAdventure
         | FilterProp::EnchantedBy
         | FilterProp::EquippedBy
-        | FilterProp::AttachedToSource
-        | FilterProp::AttachedToRecipient
+        | FilterProp::AttachedTo {
+            to: AttachmentReferent::Source,
+        }
+        | FilterProp::AttachedTo {
+            to: AttachmentReferent::Recipient,
+        }
         | FilterProp::Another
         | FilterProp::Unpaired
         | FilterProp::OtherThanTriggerObject
@@ -32751,7 +32764,12 @@ mod sacrifice_cost_context_identity_tests {
             .unwrap()
             .attached_to = Some(AttachTarget::Object(source));
         let attached: TargetFilter = TypedFilter::creature()
-            .properties(vec![FilterProp::AttachedToSource, FilterProp::Another])
+            .properties(vec![
+                FilterProp::AttachedTo {
+                    to: crate::types::ability::AttachmentReferent::Source,
+                },
+                FilterProp::Another,
+            ])
             .into();
         assert_eq!(
             find_eligible_sacrifice_targets(runner.state(), P0, source, &attached),
@@ -32910,8 +32928,10 @@ mod sacrifice_cost_context_identity_tests {
             vec![goblin]
         );
         let attached_to_payer: TargetFilter = TypedFilter::permanent()
-            .properties(vec![FilterProp::AttachedToPlayer {
-                player: ControllerRef::You,
+            .properties(vec![FilterProp::AttachedTo {
+                to: crate::types::ability::AttachmentReferent::Player {
+                    player: ControllerRef::You,
+                },
             }])
             .into();
         assert_eq!(

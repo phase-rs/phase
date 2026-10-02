@@ -3947,7 +3947,7 @@ fn authorize_candidate_actors(state: &GameState, actions: &mut [CandidateAction]
 /// the union IS the cascade there, so `pool_for`'s fallback is BASE behaviour.
 /// An empty INNER pool means that position has no legal alternative, and
 /// correctly yields no proposal for it — it must NOT fall back to the union.
-pub fn retarget_actions(
+fn retarget_proposals(
     state: &GameState,
     stack_entry_index: usize,
     scope: &RetargetScope,
@@ -3955,7 +3955,7 @@ pub fn retarget_actions(
     slot_pools: &[Vec<TargetRef>],
     current_targets: &[TargetRef],
     legal_new_targets: &[TargetRef],
-) -> Vec<GameAction> {
+) -> Vec<Vec<TargetRef>> {
     // M15/M5: the generator's own copy of `apply_retarget`'s alignment check —
     // if the payload's addresses no longer describe the stack entry they were
     // derived from, no proposal built from `slot_pools`/`current_targets`
@@ -4025,25 +4025,6 @@ pub fn retarget_actions(
             .map_or(legal_new_targets, Vec::as_slice)
     };
 
-    // CR 115.7a: the pool is FLAT for a multi-role mana node — it `flat_map`s
-    // every surfaced role filter together, so it is a per-slot SUPERSET
-    // (`change_targets.rs`, multi-role branch). `apply_retarget` re-checks each
-    // changed submission positionally via `retarget_slot_violation`, so a
-    // proposal built from a pool member legal only for another slot would be
-    // rejected. Consult the same authority here rather than re-deriving
-    // legality, so every proposed action is accepted by construction —
-    // including CR 115.7d's unchanged submissions, which that authority exempts.
-    let slot_legal = |new_targets: &[TargetRef]| {
-        crate::game::ability_utils::retarget_slot_violation(
-            &bindings,
-            effective_pools,
-            legal_new_targets,
-            current_targets,
-            new_targets,
-        )
-        .is_none()
-    };
-
     match scope {
         // CR 115.7a: "each target can be changed only to another legal target."
         // One proposal per member of the pool `apply_retarget` validates
@@ -4104,16 +4085,12 @@ pub fn retarget_actions(
         RetargetScope::Single => pool_for(0)
             .iter()
             .map(|target| vec![target.clone()])
-            .filter(|new_targets| slot_legal(new_targets))
-            .map(|new_targets| GameAction::RetargetSpell { new_targets })
             .collect(),
         // CR 115.7d: "the player may leave any number of the targets unchanged,
         // even if those targets would be illegal." Leaving every target
         // unchanged anchors the list; each single-slot substitution to another
         // legal target is offered on top of it. The anchor goes through the same
-        // `slot_legal` filter as every other proposal and passes unconditionally,
-        // because `retarget_slot_violation` exempts unchanged positions — no
-        // carve-out is needed, and none is made.
+        // `slot_legal` reducer check as every other proposal — no carve-out.
         //
         // ENUMERATION BOUND, stated rather than left silent: this emits the
         // unchanged anchor plus every SINGLE-slot substitution. CR 115.7d permits
@@ -4142,13 +4119,10 @@ pub fn retarget_actions(
             if !effective_pools.is_empty() && effective_pools.len() < current_targets.len() {
                 return Vec::new();
             }
-            let mut actions = Vec::new();
-            let anchor = current_targets.to_vec();
-            if slot_legal(&anchor) {
-                actions.push(GameAction::RetargetSpell {
-                    new_targets: anchor,
-                });
-            }
+            // The anchor first: under CR 115.7d it is always accepted
+            // (`engine::validate_retarget_submission` reads it as leaving
+            // every target unchanged when its elected reading is illegal).
+            let mut proposals = vec![current_targets.to_vec()];
             for slot in 0..current_targets.len() {
                 for target in pool_for(slot) {
                     if current_targets[slot] == *target {
@@ -4156,12 +4130,10 @@ pub fn retarget_actions(
                     }
                     let mut new_targets = current_targets.to_vec();
                     new_targets[slot] = target.clone();
-                    if slot_legal(&new_targets) {
-                        actions.push(GameAction::RetargetSpell { new_targets });
-                    }
+                    proposals.push(new_targets);
                 }
             }
-            actions
+            proposals
         }
         // A forced retarget is applied by `change_targets::resolve` without a
         // prompt, so this scope never reaches an interactive `RetargetChoice`;
@@ -4171,6 +4143,90 @@ pub fn retarget_actions(
         // combinator). There is no legal submission to propose.
         RetargetScope::ForcedTo(_) => Vec::new(),
     }
+}
+
+/// The retarget responses the AI may issue: [`retarget_proposals`] (the
+/// anchor plus every single-slot substitution, CR 115.7d), each kept only when
+/// the reducer accepts it (`engine::validate_retarget_submission`, CR 115.7a +
+/// CR 115.7d + CR 115.7e). Raw generation, the decision contract and
+/// `phase-ai`'s fallback all read this list, so none issues a rejected
+/// response.
+pub fn retarget_actions(
+    state: &GameState,
+    stack_entry_index: usize,
+    scope: &RetargetScope,
+    slots: &[RetargetSlotAddress],
+    slot_pools: &[Vec<TargetRef>],
+    current_targets: &[TargetRef],
+    legal_new_targets: &[TargetRef],
+) -> Vec<GameAction> {
+    retarget_proposals(
+        state,
+        stack_entry_index,
+        scope,
+        slots,
+        slot_pools,
+        current_targets,
+        legal_new_targets,
+    )
+    .into_iter()
+    .filter(|new_targets| {
+        crate::game::engine::validate_retarget_submission(
+            state,
+            &crate::game::engine::RetargetProposal {
+                stack_entry_index,
+                scope,
+                current_targets,
+                slots,
+                slot_pools,
+                legal_new_targets,
+                new_targets,
+            },
+        )
+        .is_ok()
+    })
+    .map(|new_targets| GameAction::RetargetSpell { new_targets })
+    .collect()
+}
+
+/// CR 115.7d: whether the reducer accepts at least one response to this
+/// prompt, stopping at the first. Exact: `All` always proposes the anchor,
+/// which is always accepted; `Single` proposes every member of its one pool,
+/// which is every possible response.
+pub(crate) fn retarget_response_exists(
+    state: &GameState,
+    stack_entry_index: usize,
+    scope: &RetargetScope,
+    slots: &[RetargetSlotAddress],
+    slot_pools: &[Vec<TargetRef>],
+    current_targets: &[TargetRef],
+    legal_new_targets: &[TargetRef],
+) -> bool {
+    retarget_proposals(
+        state,
+        stack_entry_index,
+        scope,
+        slots,
+        slot_pools,
+        current_targets,
+        legal_new_targets,
+    )
+    .iter()
+    .any(|new_targets| {
+        crate::game::engine::validate_retarget_submission(
+            state,
+            &crate::game::engine::RetargetProposal {
+                stack_entry_index,
+                scope,
+                current_targets,
+                slots,
+                slot_pools,
+                legal_new_targets,
+                new_targets,
+            },
+        )
+        .is_ok()
+    })
 }
 
 fn candidate(

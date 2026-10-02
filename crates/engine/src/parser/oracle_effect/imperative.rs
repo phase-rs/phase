@@ -47,18 +47,18 @@ use crate::parser::oracle_static::{
 };
 use crate::types::ability::{
     is_oneshot_target_source_prevent_shape, AbilityCondition, AbilityCost, AbilityDefinition,
-    AbilityKind, AttachCardinality, AttachSelection, BounceSelection, CardSelectionMode,
-    CategoryChooserScope, ChoiceType, Chooser, ContinuousModification, ControlWindow,
-    ControllerRef, CopyRetargetPermission, CountBinding, CountScope, CounterAdjustment,
-    CounterKindChooser, CounterKindDomain, DigSource, DoorLockOp, Duration, Effect, EffectScope,
-    ExtraPhaseAnchor, ExtraPhaseRecipient, FaceDownProfile, FilterProp, ForceBlockAttackerRef,
-    GrantedAbilityScope, LibraryPosition, MassLibraryShuffleMode, MultiTargetSpec,
-    ObjectSelectionCardinality, ObjectSelectionEligibility, OutsideGameSourcePool, PerPlayerScope,
-    PlayerFilter, PlayerRelation, PlayerScope, PossessionAxis, PreventionAmount, PreventionScope,
-    PtStat, PtValue, QuantityExpr, QuantityRef, ReassembleControlMode, ReturnResultReadSpec,
-    SearchSelectionConstraint, StaticDefinition, StickerTicketCostPayment, TapStateChange,
-    TargetChoiceTiming, TargetFilter, TargetSelectionMode, ThisWayCause, TypeFilter, TypedFilter,
-    ZoneChoiceCandidateSource, ZoneOwner, ZoneRef,
+    AbilityKind, AttachCardinality, AttachSelection, AttachmentReferent, BounceSelection,
+    CardSelectionMode, CategoryChooserScope, ChoiceType, Chooser, ContinuousModification,
+    ControlWindow, ControllerRef, CopyRetargetPermission, CountBinding, CountScope,
+    CounterAdjustment, CounterKindChooser, CounterKindDomain, DigSource, DoorLockOp, Duration,
+    Effect, EffectScope, ExtraPhaseAnchor, ExtraPhaseRecipient, FaceDownProfile, FilterProp,
+    ForceBlockAttackerRef, GrantedAbilityScope, LibraryPosition, MassLibraryShuffleMode,
+    MultiTargetSpec, ObjectSelectionCardinality, ObjectSelectionEligibility, OutsideGameSourcePool,
+    PerPlayerScope, PlayerFilter, PlayerRelation, PlayerScope, PossessionAxis, PreventionAmount,
+    PreventionScope, PtStat, PtValue, QuantityExpr, QuantityRef, ReassembleControlMode,
+    ReturnResultReadSpec, SearchSelectionConstraint, StaticDefinition, StickerTicketCostPayment,
+    TapStateChange, TargetChoiceTiming, TargetFilter, TargetSelectionMode, ThisWayCause,
+    TypeFilter, TypedFilter, ZoneChoiceCandidateSource, ZoneOwner, ZoneRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::phase::{Phase, PhaseGroup, TurnSegment};
@@ -7143,7 +7143,9 @@ pub(super) fn parse_utility_imperative_ast(
                 attachment: TargetFilter::Typed(
                     TypedFilter::default()
                         .subtype("Equipment".to_string())
-                        .properties(vec![FilterProp::AttachedToSource]),
+                        .properties(vec![FilterProp::AttachedTo {
+                            to: AttachmentReferent::Source,
+                        }]),
                 ),
                 target,
                 multi_target,
@@ -10272,9 +10274,7 @@ pub(super) fn parse_destroy_ast(
         // CR 608.2k: thread `ctx` so bare "it"/"them" anaphors bind to the
         // triggering subject ("Whenever a creature dies, destroy it" class).
         let (target, rem) = parse_target_with_ctx(rest, ctx);
-        if opens_attachment_qualifier(rem) {
-            return None;
-        }
+        let (target, rem) = bind_attachment_qualifier(target, rem, ctx)?;
         #[cfg(debug_assertions)]
         assert_no_compound_remainder(rem, text);
         return Some(ZoneCounterImperativeAst::Destroy { target, all: true });
@@ -10284,14 +10284,93 @@ pub(super) fn parse_destroy_ast(
     {
         // CR 608.2k: see comment above — anaphor binding via parse_target_with_ctx.
         let (target, rem) = parse_target_with_ctx(rest, ctx);
-        if opens_attachment_qualifier(rem) {
-            return None;
-        }
+        let (target, rem) = bind_attachment_qualifier(target, rem, ctx)?;
         #[cfg(debug_assertions)]
         assert_no_compound_remainder(rem, text);
         return Some(ZoneCounterImperativeAst::Destroy { target, all: false });
     }
     None
+}
+
+/// CR 701.3a + CR 601.2c: when a parsed target phrase leaves an " attached to
+/// <referent>" qualifier unconsumed, bind it as a declared-slot attachment
+/// referent (`FilterProp::AttachedTo { to: DeclaredTarget { slot } }`) on every
+/// typed leg of `target` through the shared `distribute_shared_properties`. `None` — the
+/// caller's fail-closed `attached_to_qualifier` gap — when the referent is not
+/// exactly one numbered declared slot ([`parse_attached_to_declared_referent`]),
+/// `target` is outside the admissible shape ([`legs_admit_declared_referent`]),
+/// or a leg did not receive the prop. A remainder with no attachment qualifier passes through unchanged.
+pub(super) fn bind_attachment_qualifier<'a>(
+    target: TargetFilter,
+    rem: &'a str,
+    ctx: &ParseContext,
+) -> Option<(TargetFilter, &'a str)> {
+    if !opens_attachment_qualifier(rem) {
+        return Some((target, rem));
+    }
+    let (prop, after) = parse_attached_to_declared_referent(rem, ctx)?;
+    if !legs_admit_declared_referent(&target) {
+        return None;
+    }
+    let bound = crate::parser::oracle_target::distribute_shared_properties(
+        target,
+        std::slice::from_ref(&prop),
+    );
+    legs_carry(&bound, &prop).then_some((bound, after))
+}
+
+/// The strict admissible shape for a declared-slot attachment referent: a
+/// `Typed` filter or an `Or` of them, with no controller or owner scope. A
+/// controller-relative leg ("target Equipment you control attached to that
+/// creature") is built through the per-player slot construction, which does not
+/// compose with the declared-slot union, so it stays a gap.
+fn legs_admit_declared_referent(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(typed) => {
+            typed.controller.is_none()
+                && !typed
+                    .properties
+                    .iter()
+                    .any(|prop| matches!(prop, FilterProp::Owned { .. }))
+        }
+        TargetFilter::Or { filters } => filters.iter().all(legs_admit_declared_referent),
+        _ => false,
+    }
+}
+
+/// Every typed leg of `filter` carries `prop` — distribution skips a leg that
+/// already holds a prop of the same kind, which must not pass silently.
+fn legs_carry(filter: &TargetFilter, prop: &FilterProp) -> bool {
+    match filter {
+        TargetFilter::Typed(typed) => typed.properties.contains(prop),
+        TargetFilter::Or { filters } => filters.iter().all(|leg| legs_carry(leg, prop)),
+        _ => false,
+    }
+}
+
+/// CR 701.3a + CR 601.2c: " attached to <demonstrative>" naming exactly one
+/// numbered declared target slot of the earlier clauses
+/// (`resolve_declared_slot_anaphor`), followed only by the clause terminator —
+/// a trailing restriction is never swallowed. Returns the prop and the
+/// unconsumed (terminator-only) remainder in original case.
+pub(super) fn parse_attached_to_declared_referent<'a>(
+    remainder: &'a str,
+    ctx: &ParseContext,
+) -> Option<(FilterProp, &'a str)> {
+    let lower = remainder.to_ascii_lowercase();
+    let (after_relation, _) = tag::<_, _, OracleError<'_>>(" attached to ")
+        .parse(lower.as_str())
+        .ok()?;
+    let (slot, rest) = super::resolve_declared_slot_anaphor(after_relation, ctx)?;
+    all_consuming((space0::<_, OracleError<'_>>, opt(tag(".")), space0, eof))
+        .parse(rest)
+        .ok()?;
+    Some((
+        FilterProp::AttachedTo {
+            to: AttachmentReferent::DeclaredTarget { slot },
+        },
+        &remainder[remainder.len() - rest.len()..],
+    ))
 }
 
 /// Detect "target {player,opponent}'s {graveyard,library,hand}" prefixes.
@@ -11105,6 +11184,11 @@ pub(super) fn parse_exile_ast(
     // path below.
     let (target_input, pre_lifted_counters) = super::split_counterless_enter_counters(rest_text);
     let (parsed_target, rem) = parse_target_with_ctx(target_input, ctx);
+    // CR 701.3a + CR 601.2c: "exile [up to one] target Equipment attached to that
+    // creature" (Fiery Annihilation) — the qualifier binds the target to the
+    // declared slot "that creature" names, or the clause fails closed. Dropping
+    // it would widen the target to every Equipment.
+    let (parsed_target, rem) = bind_attachment_qualifier(parsed_target, rem, ctx)?;
     // CR 122.1 + CR 702.62: "exile … with N <type> counter(s) on it" lifts the
     // counter clause onto the exile ChangeZone's `enter_with_counters` so the
     // object enters Exile carrying them (Taigam, Master Opportunist: "exile the
@@ -12346,6 +12430,18 @@ fn parse_empower_jace(lower: &str) -> Option<Effect> {
     Some(Effect::EmpowerJace { count })
 }
 
+/// CR 701.8a + CR 701.3a: a "destroy all/each <filter> attached to <referent>"
+/// clause whose referent binds to a numbered declared target slot
+/// ([`bind_attachment_qualifier`]). Only the destroy verb lowers the relation;
+/// every other mass verb keeps the fail-closed `attached_to_qualifier` gap.
+fn destroy_clause_binds_attachment_qualifier(text: &str, lower: &str, ctx: &ParseContext) -> bool {
+    nom_on_lower(text, lower, |input| {
+        value((), alt((tag("destroy all "), tag("destroy each ")))).parse(input)
+    })
+    .is_some()
+        && parse_destroy_ast(text, lower, &mut ctx.clone_throwaway()).is_some()
+}
+
 pub(super) fn parse_imperative_family_ast(
     text: &str,
     lower: &str,
@@ -12355,7 +12451,9 @@ pub(super) fn parse_imperative_family_ast(
     let lower = lower.trim_start();
     let first_word = lower.split_whitespace().next().unwrap_or("");
 
-    if mass_verb_clause_opens_attachment_qualifier(text, lower, ctx) {
+    if mass_verb_clause_opens_attachment_qualifier(text, lower, ctx)
+        && !destroy_clause_binds_attachment_qualifier(text, lower, ctx)
+    {
         return Some(ImperativeFamilyAst::GainKeyword(Effect::unimplemented(
             ATTACHED_TO_QUALIFIER_GAP,
             text,
@@ -18469,7 +18567,9 @@ mod tests {
                     .type_filters
                     .iter()
                     .any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Equipment")));
-                assert!(tf.properties.contains(&FilterProp::AttachedToSource));
+                assert!(tf.properties.contains(&FilterProp::AttachedTo {
+                    to: AttachmentReferent::Source
+                }));
             }
             other => panic!("expected typed Equipment filter, got {other:?}"),
         }
@@ -18503,7 +18603,9 @@ mod tests {
                     .type_filters
                     .iter()
                     .any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Equipment")));
-                assert!(tf.properties.contains(&FilterProp::AttachedToSource));
+                assert!(tf.properties.contains(&FilterProp::AttachedTo {
+                    to: AttachmentReferent::Source
+                }));
             }
             other => panic!("expected typed Equipment filter, got {other:?}"),
         }

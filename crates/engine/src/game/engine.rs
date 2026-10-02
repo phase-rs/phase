@@ -2,9 +2,7 @@ use rand::Rng;
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use thiserror::Error;
 
-use crate::types::ability::{
-    AbilityCondition, DurationEvent, EffectKind, KeywordAction, TargetRef,
-};
+use crate::types::ability::{DurationEvent, EffectKind, KeywordAction, TargetRef};
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::action_rejection::{ActionRejection, ActionRejectionCode};
@@ -9982,50 +9980,34 @@ fn finalize_copy_retarget(
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let changed_pins = state
+    // CR 707.10c + CR 115.7d + CR 115.7e: the final set is checked as a whole
+    // on a tentative chain (every accepted edit, with its pin refresh) before
+    // anything is written; a violation rejects the submission atomically.
+    let post = state
         .stack
         .iter()
         .find(|entry| entry.id == copy_id)
-        .and_then(|entry| entry.ability())
-        .map(|ability| {
-            ability
-                .targets
-                .iter()
-                .zip(targets.iter())
-                .filter(|(old, new)| ability.retarget_target_requires_pin_refresh(old, new, state))
-                .filter_map(|(_, target)| match target {
-                    TargetRef::Object(id) => {
-                        state.objects.get(id).map(ObjectIncarnationRef::from_object)
-                    }
-                    TargetRef::Player(_) => None,
-                })
-                .collect::<Vec<_>>()
+        .and_then(|entry| {
+            let ability = entry.ability()?;
+            let pool_controller = crate::game::effects::change_targets::retarget_pool_controller(
+                state, entry, ability,
+            );
+            Some(crate::game::ability_utils::copy_retarget_edit_is_legal(
+                state,
+                ability,
+                &targets,
+                pool_controller,
+            ))
         })
-        .unwrap_or_default();
-    if let Some(entry) = state.stack.iter_mut().find(|e| e.id == copy_id) {
-        if let Some(ability) = entry.ability_mut() {
-            // CR 707.10c + CR 601.2c: An additional-cost "instead choose"
-            // branch owns the declared slots. The root is only its mirror.
-            // Update the child before re-deriving the mirror and selected-group
-            // readers, including the unchanged members of a variable target set.
-            if ability.context.additional_cost_paid {
-                if let Some(sub) = ability.sub_ability.as_deref_mut().filter(|sub| {
-                    matches!(
-                        sub.condition,
-                        Some(AbilityCondition::AdditionalCostPaidInstead)
-                    )
-                }) {
-                    sub.targets = targets.clone();
-                    for pin in &changed_pins {
-                        sub.update_selected_target_incarnation(*pin);
-                    }
-                }
-            }
-            ability.targets = targets;
-            for pin in changed_pins {
-                ability.update_selected_target_incarnation(pin);
-            }
-            crate::game::ability_utils::restamp_derived_chain_targets(ability);
+        .transpose()?;
+    if let Some(post) = post {
+        if let Some(ability) = state
+            .stack
+            .iter_mut()
+            .find(|e| e.id == copy_id)
+            .and_then(|entry| entry.ability_mut())
+        {
+            *ability = post;
         }
     }
     events.push(GameEvent::EffectResolved {
@@ -15302,6 +15284,14 @@ fn apply_non_priority_pass_action(
             }
             let next_slot = slot_idx + 1;
             if next_slot < updated_slots.len() {
+                // CR 707.10c + CR 115.7d: the next slot's alternatives are
+                // re-checked against every edit accepted so far.
+                crate::game::effects::copy_spell::restrict_copy_retarget_alternatives(
+                    state,
+                    cid,
+                    &mut updated_slots,
+                    next_slot,
+                );
                 state.waiting_for = WaitingFor::CopyRetarget {
                     player: p,
                     copy_id: cid,
@@ -15938,6 +15928,19 @@ fn check_debug_action_access(state: &GameState, actor: PlayerId) -> Result<(), E
     Ok(())
 }
 
+/// The parts of a `RetargetChoice` response the reducer validates
+/// (`validate_retarget_submission`), independent of who submits it.
+#[derive(Clone, Copy)]
+pub(crate) struct RetargetProposal<'a> {
+    pub(crate) stack_entry_index: usize,
+    pub(crate) scope: &'a RetargetScope,
+    pub(crate) current_targets: &'a [TargetRef],
+    pub(crate) slots: &'a [RetargetSlotAddress],
+    pub(crate) slot_pools: &'a [Vec<TargetRef>],
+    pub(crate) legal_new_targets: &'a [TargetRef],
+    pub(crate) new_targets: &'a [TargetRef],
+}
+
 struct RetargetSubmission<'a> {
     player: PlayerId,
     stack_entry_index: usize,
@@ -15958,8 +15961,50 @@ fn apply_retarget(
     events: &mut Vec<GameEvent>,
     submission: RetargetSubmission<'_>,
 ) -> Result<WaitingFor, EngineError> {
-    let RetargetSubmission {
-        player,
+    let player = submission.player;
+    let stack_entry_index = submission.stack_entry_index;
+    let mutated = validate_retarget_submission(
+        state,
+        &RetargetProposal {
+            stack_entry_index,
+            scope: submission.scope,
+            current_targets: submission.current_targets,
+            slots: submission.slots,
+            slot_pools: submission.slot_pools,
+            legal_new_targets: submission.legal_new_targets,
+            new_targets: &submission.new_targets,
+        },
+    )?;
+    if let Some(stack_ability_mut) = state.stack[stack_entry_index].ability_mut() {
+        *stack_ability_mut = mutated;
+    }
+
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::ChangeTargets,
+        source_id: state
+            .stack
+            .get(stack_entry_index)
+            .map(|e| e.source_id)
+            .unwrap_or(ObjectId(0)),
+        subject: None,
+    });
+    state.waiting_for = WaitingFor::Priority { player };
+    state.priority_player = player;
+    resume_pending_continuation_if_priority(state, events)?;
+    Ok(state.waiting_for.clone())
+}
+
+/// CR 115.7a + CR 115.7d + CR 115.7e: the reducer's whole acceptance test for a
+/// retarget submission, without writing anything: `Ok` carries the stack
+/// entry's ability as it would stand after the write. `apply_retarget` commits
+/// exactly this value; the prompt-parking test and the AI's proposal
+/// enumeration (`ai_support::candidates::retarget_actions`) call it too, so no
+/// response is offered that the reducer would reject.
+pub(crate) fn validate_retarget_submission(
+    state: &GameState,
+    proposal: &RetargetProposal<'_>,
+) -> Result<crate::types::ability::ResolvedAbility, EngineError> {
+    let RetargetProposal {
         stack_entry_index,
         scope,
         current_targets,
@@ -15967,7 +16012,7 @@ fn apply_retarget(
         slot_pools,
         legal_new_targets,
         new_targets,
-    } = submission;
+    } = *proposal;
 
     // CR 115.7d + CR 601.2c: derived here (rather than only after the match
     // below) because H3's outer-empty re-derivation needs it before
@@ -16157,7 +16202,7 @@ fn apply_retarget(
         effective_pools,
         legal_new_targets,
         current_targets,
-        &new_targets,
+        new_targets,
     ) {
         return Err(EngineError::InvalidAction(format!(
             "Retarget: chosen target is not legal for target slot {slot}"
@@ -16169,6 +16214,38 @@ fn apply_retarget(
             "Invalid stack entry index for retargeting".to_string(),
         ));
     }
+
+    // CR 115.7a + CR 115.7d + CR 400.7: which positions this submission
+    // CHANGES (`retarget_positions_changed`, the one verdict the write loop
+    // and every check below read). A same-ID entry whose announced object is
+    // gone ELECTS the new object only when that object is a legal choice for
+    // the position (a member of its slot pool, Invariant SC); otherwise it is
+    // retained unchanged with its announced pin (CR 115.7d first clause).
+    // The written address domain: the prompt's `slots`, or ? for a
+    // compatibility payload without them ? the root positions the
+    // compatibility writer writes (M9/N16).
+    let written: Vec<RetargetSlotAddress> = if slots.is_empty() {
+        (0..new_targets.len())
+            .map(|slot| RetargetSlotAddress {
+                path: Vec::new(),
+                slot,
+            })
+            .collect()
+    } else {
+        slots.to_vec()
+    };
+    let elected_reading = state.stack[stack_entry_index]
+        .ability()
+        .map(|pre| {
+            crate::game::ability_utils::retarget_positions_changed(
+                state,
+                pre,
+                &written,
+                new_targets,
+                &|i, target| pool_for(i).contains(target),
+            )
+        })
+        .unwrap_or_default();
 
     // CR 115.7d: "choose new targets" is an operation on the SPELL, so it
     // writes every chain node that owns an addressed slot, not only the root
@@ -16192,168 +16269,185 @@ fn apply_retarget(
     // make that case unreachable again. `capture_target_incarnations_
     // recursive` must NOT be used here either — it blanket re-pins every
     // position regardless of that per-position decision.
-    let Some(mut mutated) = state.stack[stack_entry_index].ability().cloned() else {
-        return Err(EngineError::InvalidAction(
-            "Retarget: stack entry has no ability to retarget".to_string(),
-        ));
-    };
-    if slots.is_empty() {
-        // M9/N16 compatibility fallback: an empty OUTER `slots` means a
-        // payload predating the field, and BASE's write was an unconditional
-        // root-level `ability.targets = new_targets` with a pin refresh
-        // computed by zipping EVERY position (not gated on "changed" — CR 400.7:
-        // a same-ID retarget with a stale incarnation must still refresh).
-        // Falling back to that exact write (rather than silently writing
-        // nothing) is what keeps this case "behaves as at BASE" rather than a
-        // silently-accepted no-op.
-        let target_pins: Vec<_> = current_targets
-            .iter()
-            .zip(new_targets.iter())
-            .filter(|(old, new)| mutated.retarget_target_requires_pin_refresh(old, new, state))
-            .filter_map(|(_, target)| match target {
-                TargetRef::Object(id) => {
-                    state.objects.get(id).map(ObjectIncarnationRef::from_object)
-                }
-                TargetRef::Player(_) => None,
-            })
-            .collect();
-        mutated.targets = new_targets.clone();
-        for pin in target_pins {
-            mutated.update_selected_target_incarnation(pin);
-        }
-    } else {
-        // CR 400.7 + CR 603.7c (mirrors `write_retarget_position`'s forced-path
-        // semantics, incl. its `exposed.len() == 1` exemption): do NOT skip a
-        // position on raw `TargetRef` equality. A same-ID retarget can still be
-        // a genuine re-incarnation (the object left and returned) whose pin is
-        // stale, and only `retarget_target_requires_pin_refresh` can tell that
-        // apart from a true no-op — skipping the whole branch here made that
-        // case unreachable and left `update_selected_target_incarnation` uncalled
-        // on the interactive path (phase-rs/phase#8355 round-8 review finding
-        // H2). Writing the same `TargetRef` back is harmless; the pin decision
-        // is the part that must not be shortcut.
-        for (i, new_target) in new_targets.iter().enumerate() {
-            let Some(address) = slots.get(i) else {
-                continue;
-            };
-            let Some(node) = crate::game::ability_utils::node_at_mut(&mut mutated, &address.path)
-            else {
-                return Err(EngineError::InvalidAction(
-                    "Retarget: prompt slot address no longer resolves".to_string(),
-                ));
-            };
-            let Some(old) = node.targets.get(address.slot).cloned() else {
-                continue;
-            };
-            let refresh = node.retarget_target_requires_pin_refresh(&old, new_target, state);
-            node.targets[address.slot] = new_target.clone();
-            if refresh {
-                let pin = match new_target {
+    // Builds the post-write chain for one reading of the submission (which
+    // positions change) and runs the final-set checks on it.
+    let build_and_check = |positions_changed: &[bool]| -> Result<
+        crate::types::ability::ResolvedAbility,
+        EngineError,
+    > {
+        let Some(mut mutated) = state.stack[stack_entry_index].ability().cloned() else {
+            return Err(EngineError::InvalidAction(
+                "Retarget: stack entry has no ability to retarget".to_string(),
+            ));
+        };
+        if slots.is_empty() {
+            // M9/N16 compatibility fallback: an empty OUTER `slots` means a
+            // payload predating the field, and BASE's write was an unconditional
+            // root-level `ability.targets = new_targets` with a pin refresh
+            // computed by zipping EVERY position (not gated on "changed" — CR 400.7:
+            // a same-ID retarget with a stale incarnation must still refresh).
+            // Falling back to that exact write (rather than silently writing
+            // nothing) is what keeps this case "behaves as at BASE" rather than a
+            // silently-accepted no-op.
+            let target_pins: Vec<_> = new_targets
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| positions_changed.get(*i).copied().unwrap_or(false))
+                .filter_map(|(_, target)| match target {
                     TargetRef::Object(id) => {
                         state.objects.get(id).map(ObjectIncarnationRef::from_object)
                     }
                     TargetRef::Player(_) => None,
+                })
+                .collect();
+            mutated.targets = new_targets.to_vec();
+            for pin in target_pins {
+                mutated.update_selected_target_incarnation(pin);
+            }
+        } else {
+            // CR 400.7 + CR 603.7c (mirrors `write_retarget_position`'s forced-path
+            // semantics, incl. its `exposed.len() == 1` exemption): do NOT skip a
+            // position on raw `TargetRef` equality. A same-ID retarget can still be
+            // a genuine re-incarnation (the object left and returned) whose pin is
+            // stale, and only `retarget_target_requires_pin_refresh` can tell that
+            // apart from a true no-op — skipping the whole branch here made that
+            // case unreachable and left `update_selected_target_incarnation` uncalled
+            // on the interactive path (phase-rs/phase#8355 round-8 review finding
+            // H2). Writing the same `TargetRef` back is harmless; the pin decision
+            // is the part that must not be shortcut.
+            for (i, new_target) in new_targets.iter().enumerate() {
+                let Some(address) = slots.get(i) else {
+                    continue;
                 };
-                if let Some(pin) = pin {
-                    node.update_selected_target_incarnation(pin);
+                let Some(node) = crate::game::ability_utils::node_at_mut(&mut mutated, &address.path)
+                else {
+                    return Err(EngineError::InvalidAction(
+                        "Retarget: prompt slot address no longer resolves".to_string(),
+                    ));
+                };
+                if node.targets.get(address.slot).is_none() {
+                    continue;
+                }
+                // The one verdict (`retarget_positions_changed`), computed on
+                // the pre-write chain, so an earlier position's pin refresh on
+                // this node cannot change it.
+                let refresh = positions_changed.get(i).copied().unwrap_or(false);
+                node.targets[address.slot] = new_target.clone();
+                if refresh {
+                    let pin = match new_target {
+                        TargetRef::Object(id) => {
+                            state.objects.get(id).map(ObjectIncarnationRef::from_object)
+                        }
+                        TargetRef::Player(_) => None,
+                    };
+                    if let Some(pin) = pin {
+                        node.update_selected_target_incarnation(pin);
+                    }
                 }
             }
         }
-    }
-    crate::game::ability_utils::restamp_derived_chain_targets(&mut mutated);
+        crate::game::ability_utils::restamp_derived_chain_targets(&mut mutated);
 
-    // CR 115.7d (second clause) + CR 115.7e ("only the final set of targets is
-    // evaluated"): after the write, every UNCHANGED addressed slot that was
-    // LEGAL before the change must still be legal. A slot that was ALREADY
-    // illegal stays accepted — that is CR 115.7d's FIRST clause and must not
-    // be disturbed. Evaluated on the post-write chain and transactionally so a
-    // violation rolls back: the ability is only put back on the stack once
-    // this pass succeeds. `Legacy` bindings are skipped: they have no filter,
-    // and BASE applies no per-slot check to them. Uses the SAME constructor
-    // and controller as the pool builder (`slot_pool`), not
-    // `validate_targets_for_ability` (which would reintroduce round-5 defect
-    // B8's `ability.controller`).
-    let pool_controller = crate::game::effects::change_targets::retarget_pool_controller(
-        state,
-        &state.stack[stack_entry_index],
-        &mutated,
-    );
-    // `pre_write` is the ability as it stood before this call's write loop —
-    // `state.stack[stack_entry_index]` has not been overwritten yet (that
-    // happens below, only once this whole pass succeeds).
-    let pre_write = state.stack[stack_entry_index].ability().cloned();
-    for (i, binding) in derived.iter().enumerate() {
-        // A position this submission itself addressed and changed is already
-        // validated by the per-slot check above (CR 115.7d's FIRST clause);
-        // this pass is only for positions the submission left UNCHANGED,
-        // including every position beyond the exposed prefix.
-        let changed = i < new_targets.len() && current_targets.get(i) != new_targets.get(i);
-        if changed {
-            continue;
+        // CR 115.7d + CR 400.7: a position this reading RETAINS must still name
+        // its announced incarnation. Pins are keyed by object id per node, so
+        // electing a new incarnation at one position re-pins every position on
+        // that node holding the same id; a reading that cannot keep a retained
+        // position's pin cannot be realized and is refused (an exact
+        // resubmission then falls back to leaving every target unchanged).
+        if let Some(pre) = state.stack[stack_entry_index].ability() {
+            let pin_at = |chain: &crate::types::ability::ResolvedAbility,
+                          address: &RetargetSlotAddress| {
+                let node = crate::game::ability_utils::node_at(chain, &address.path)?;
+                match node.targets.get(address.slot)? {
+                    TargetRef::Object(id) => node
+                        .selected_target_incarnations
+                        .iter()
+                        .find(|pin| pin.object_id == *id)
+                        .copied(),
+                    TargetRef::Player(_) => None,
+                }
+            };
+            let retained_pin_lost = written.iter().enumerate().any(|(i, address)| {
+                !positions_changed.get(i).copied().unwrap_or(false)
+                    && pin_at(pre, address)
+                        .is_some_and(|announced| pin_at(&mutated, address) != Some(announced))
+            });
+            if retained_pin_lost {
+                return Err(EngineError::InvalidAction(
+                    "Retarget: a retained target would lose its announced incarnation"
+                        .to_string(),
+                ));
+            }
         }
-        let crate::game::ability_utils::SlotEnforcement::Filtered(filter) = &binding.enforcement
-        else {
-            continue;
-        };
-        let Some(pre_node) = pre_write
-            .as_ref()
-            .and_then(|a| crate::game::ability_utils::node_at(a, &binding.address.path))
-        else {
-            continue;
-        };
-        let Some(pre_current) = pre_node.targets.get(binding.address.slot) else {
-            continue;
-        };
-        let was_legal = crate::game::targeting::find_legal_targets_for_ability_with_controller(
+
+        // CR 115.7d (second clause) + CR 115.7e ("only the final set of targets is
+        // evaluated"): after the write, every UNCHANGED addressed slot that was
+        // LEGAL before the change must still be legal. A slot that was ALREADY
+        // illegal stays accepted — that is CR 115.7d's FIRST clause and must not
+        // be disturbed. Evaluated on the post-write chain and transactionally so a
+        // violation rolls back: the ability is only put back on the stack once
+        // this pass succeeds. `Legacy` bindings are skipped: they have no filter,
+        // and BASE applies no per-slot check to them. Uses the SAME constructor
+        // and controller as the pool builder (`slot_pool`), not
+        // `validate_targets_for_ability` (which would reintroduce round-5 defect
+        // B8's `ability.controller`).
+        let pool_controller = crate::game::effects::change_targets::retarget_pool_controller(
             state,
-            filter,
-            pre_node,
-            pool_controller,
-        )
-        .contains(pre_current);
-        if !was_legal {
-            // CR 115.7d FIRST clause: an already-illegal unchanged target
-            // stays accepted.
-            continue;
+            &state.stack[stack_entry_index],
+            &mutated,
+        );
+        // `pre_write` is the ability as it stood before this call's write loop —
+        // `state.stack[stack_entry_index]` has not been overwritten yet (that
+        // happens below, only once this whole pass succeeds).
+        let pre_write = state.stack[stack_entry_index].ability().cloned();
+        if let Some(pre_write) = pre_write.as_ref() {
+            // The checks address `derived`; read each binding's verdict by its
+            // written address.
+            let changed = |j: usize| {
+                derived.get(j).is_some_and(|binding| {
+                    written
+                        .iter()
+                        .position(|address| *address == binding.address)
+                        .and_then(|k| positions_changed.get(k).copied())
+                        .unwrap_or(false)
+                })
+            };
+            crate::game::ability_utils::unchanged_targets_stay_legal(
+                state,
+                pre_write,
+                &mutated,
+                &derived,
+                &changed,
+                pool_controller,
+            )?;
+            crate::game::ability_utils::changed_dependent_targets_are_legal(
+                state,
+                pre_write,
+                &mutated,
+                &derived,
+                &changed,
+                pool_controller,
+            )?;
         }
-        let Some(post_node) = crate::game::ability_utils::node_at(&mutated, &binding.address.path)
-        else {
-            continue;
-        };
-        let Some(post_current) = post_node.targets.get(binding.address.slot) else {
-            continue;
-        };
-        let still_legal = crate::game::targeting::find_legal_targets_for_ability_with_controller(
-            state,
-            filter,
-            post_node,
-            pool_controller,
-        )
-        .contains(post_current);
-        if !still_legal {
-            return Err(EngineError::InvalidAction(
-                "Retarget: the change would make an unchanged target illegal".to_string(),
-            ));
+
+        Ok(mutated)
+    };
+
+    // CR 115.7d: "the player may leave any number of the targets unchanged".
+    // A submission that resubmits every position exactly as it is can always
+    // mean "leave every target unchanged". When the elected reading of it (a
+    // same-id entry naming a legal new object elects that object) yields an
+    // illegal final set, it is read as leaving everything unchanged, with every
+    // announced pin kept ? a reading that always holds. Partial changes keep
+    // the elected reading alone.
+    match build_and_check(&elected_reading) {
+        Err(_)
+            if new_targets == current_targets && elected_reading.iter().any(|changed| *changed) =>
+        {
+            build_and_check(&vec![false; elected_reading.len()])
         }
+        result => result,
     }
-
-    if let Some(stack_ability_mut) = state.stack[stack_entry_index].ability_mut() {
-        *stack_ability_mut = mutated;
-    }
-
-    events.push(GameEvent::EffectResolved {
-        kind: EffectKind::ChangeTargets,
-        source_id: state
-            .stack
-            .get(stack_entry_index)
-            .map(|e| e.source_id)
-            .unwrap_or(ObjectId(0)),
-        subject: None,
-    });
-    state.waiting_for = WaitingFor::Priority { player };
-    state.priority_player = player;
-    resume_pending_continuation_if_priority(state, events)?;
-    Ok(state.waiting_for.clone())
 }
 
 /// CR 603.3c + CR 603.3d + CR 608.2c: Single authority for dropping a

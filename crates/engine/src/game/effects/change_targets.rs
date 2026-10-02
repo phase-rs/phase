@@ -137,7 +137,7 @@ pub fn resolve(
     let base = legal_new_targets_for_entry(state, &state.stack[stack_entry_index]);
     let pool_controller =
         retarget_pool_controller(state, &state.stack[stack_entry_index], &stack_ability);
-    let slot_pools: Vec<Vec<TargetRef>> = exposed
+    let mut slot_pools: Vec<Vec<TargetRef>> = exposed
         .iter()
         .map(|b| {
             let node =
@@ -145,6 +145,13 @@ pub fn resolve(
             slot_pool(state, node, &b.enforcement, pool_controller, &base)
         })
         .collect();
+    ability_utils::widen_dependent_retarget_pools(
+        state,
+        &stack_ability,
+        exposed,
+        &mut slot_pools,
+        pool_controller,
+    );
 
     if let Some(filter) = forced_to {
         // CR 115.7a/b: Forced retarget — resolve the new target from the filter,
@@ -227,7 +234,21 @@ pub fn resolve(
     // predicate degenerates to `!base.is_empty()`, i.e. to BASE's test
     // exactly; for `All` it IS BASE's test, because `All` always admits
     // the no-change submission (CR 115.7d).
-    if !retarget_prompt_is_dischargeable(scope, &slot_pools, &legal_new_targets) {
+    if !retarget_prompt_is_dischargeable(scope, &slot_pools, &legal_new_targets)
+        // CR 115.7d: park only when the reducer accepts at least one response
+        // (`ai_support::retarget_response_exists`, through
+        // `engine::validate_retarget_submission`). Otherwise every target is
+        // left unchanged, with its announced pin.
+        || !crate::ai_support::retarget_response_exists(
+            state,
+            stack_entry_index,
+            scope,
+            &slots,
+            &slot_pools,
+            &current_targets,
+            &legal_new_targets,
+        )
+    {
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
@@ -509,14 +530,22 @@ pub(crate) fn derive_slot_pools(
 ) -> Vec<Vec<TargetRef>> {
     let base = legal_new_targets_for_entry(state, entry);
     let pool_controller = retarget_pool_controller(state, entry, stack_ability);
-    bindings
+    let mut pools: Vec<Vec<TargetRef>> = bindings
         .iter()
         .map(|b| {
             let node =
                 ability_utils::node_at(stack_ability, &b.address.path).unwrap_or(stack_ability);
             slot_pool(state, node, &b.enforcement, pool_controller, &base)
         })
-        .collect()
+        .collect();
+    ability_utils::widen_dependent_retarget_pools(
+        state,
+        stack_ability,
+        bindings,
+        &mut pools,
+        pool_controller,
+    );
+    pools
 }
 
 /// Extract the target filter from an effect variant, if it has a standard `target` field.

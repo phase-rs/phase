@@ -43,6 +43,8 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // v101 adds `ActivatedAbilityKind::Mana` (mana-ability activations now emit
 // `GameEvent::AbilityActivated`), the event's `departed_source_lki`, and
 // `AbilityActivationRecord.source_zone`.
+// v103 folds FilterProp's attachment-referent siblings into
+// `FilterProp::AttachedTo { to: AttachmentReferent }`.
 // Keep the measured base so a future merge cannot collapse independent wire
 // changes onto one number.
 const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
@@ -77,7 +79,8 @@ const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
 // +29: the v100 additional-phase segment and recipient parse bump.
 // +30: the v101 mana-ability activation kind and departed-source LKI.
 // +31: v102 adds the tagged SharedCardTypes quantity.
-const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 31;
+// +32: the v103 FilterProp::AttachedTo attachment-referent parse bump.
+const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 32;
 // The LOBBY message-set version, not derived from the full-game number above.
 // The classifier below refuses an expression only on the SOURCE constants; this
 // script never reads itself, so its own EXPECTED_* must stay literals.
@@ -133,7 +136,8 @@ const PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION = 54;
 // recipient.
 // +29: wire 83 moves with full-game v101 for the mana-ability activation kind.
 // +30: wire 84 moves with full-game v102 for SharedCardTypes.
-const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 30;
+// +31: wire 85 moves with full-game v103 for the FilterProp::AttachedTo reshape.
+const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 31;
 // The P2P DRAFT wire version. A FIFTH independent surface, and the one this
 // script previously did not read at all: `DRAFT_PROTOCOL_VERSION` is an
 // EXACT-MATCH first-contact gate (p2p-draft-host.ts / p2p-draft-guest.ts refuse

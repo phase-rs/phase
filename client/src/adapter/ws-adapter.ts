@@ -210,6 +210,14 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 103 — FilterProp's attachment-referent siblings (AttachedToSource,
+ *      AttachedToRecipient, AttachedToPlayer) are one AttachedTo prop with a
+ *      tagged `to` referent (Source, Recipient, Player, DeclaredTarget) — see
+ *      PROTOCOL_VERSION's own `/// 103` entry in
+ *      crates/lobby-broker/src/protocol.rs. This client hands server frames to
+ *      JSON.parse, so a v102 client would take the new shape with no decode
+ *      error; the exact-match version check at connect refuses the pairing
+ *      instead.
  * 102 — QuantityRef.SharedCardTypes adds a tagged quantity in serialized
  *      ability definitions and saved state. Keep this version in lockstep
  *      with the server and the preceding mana-activation schema.
@@ -676,7 +684,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 102;
+export const PROTOCOL_VERSION = 103;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

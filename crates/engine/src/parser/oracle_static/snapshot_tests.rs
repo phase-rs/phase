@@ -1058,7 +1058,9 @@ fn cloud_midgar_mercenary_self_and_equipment_doubler_gated_on_equipped() {
         equip.type_filters
     );
     assert!(
-        equip.properties.contains(&FilterProp::AttachedToSource),
+        equip.properties.contains(&FilterProp::AttachedTo {
+            to: crate::types::ability::AttachmentReferent::Source
+        }),
         "expected AttachedToSource property, got {:?}",
         equip.properties
     );

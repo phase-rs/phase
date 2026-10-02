@@ -4,9 +4,9 @@ use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::AttachTarget;
 use crate::game::targeting::resolved_object_ids_for_filter;
 use crate::types::ability::{
-    AbilityCondition, AttachCardinality, AttachSelection, Effect, EffectError, EffectKind,
-    FilterProp, MultiTargetSpec, QuantityExpr, ResolvedAbility, TargetChoiceTiming, TargetFilter,
-    TargetRef, TypedFilter,
+    AbilityCondition, AttachCardinality, AttachSelection, AttachmentReferent, Effect, EffectError,
+    EffectKind, FilterProp, MultiTargetSpec, QuantityExpr, ResolvedAbility, TargetChoiceTiming,
+    TargetFilter, TargetRef, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
@@ -1657,10 +1657,14 @@ fn resolve_object_filter<'a>(
 
 fn filter_has_attached_to_source(filter: &TargetFilter) -> bool {
     match filter {
-        TargetFilter::Typed(tf) => tf
-            .properties
-            .iter()
-            .any(|p| matches!(p, FilterProp::AttachedToSource)),
+        TargetFilter::Typed(tf) => tf.properties.iter().any(|p| {
+            matches!(
+                p,
+                FilterProp::AttachedTo {
+                    to: AttachmentReferent::Source
+                }
+            )
+        }),
         TargetFilter::And { filters } | TargetFilter::Or { filters } => {
             filters.iter().any(filter_has_attached_to_source)
         }
@@ -1675,7 +1679,14 @@ fn strip_attached_to_source_prop(filter: &TargetFilter) -> TargetFilter {
             properties: tf
                 .properties
                 .iter()
-                .filter(|p| !matches!(p, FilterProp::AttachedToSource))
+                .filter(|p| {
+                    !matches!(
+                        p,
+                        FilterProp::AttachedTo {
+                            to: AttachmentReferent::Source
+                        }
+                    )
+                })
                 .cloned()
                 .collect(),
             ..tf.clone()
@@ -5156,7 +5167,9 @@ mod tests {
                 attachment: TargetFilter::Typed(
                     TypedFilter::default()
                         .subtype("Equipment".to_string())
-                        .properties(vec![FilterProp::AttachedToSource]),
+                        .properties(vec![FilterProp::AttachedTo {
+                            to: AttachmentReferent::Source,
+                        }]),
                 ),
                 target: TargetFilter::ParentTarget,
                 selection: AttachSelection::Targeted,
@@ -5206,7 +5219,9 @@ mod tests {
                 attachment: TargetFilter::Typed(
                     TypedFilter::default()
                         .subtype("Equipment".to_string())
-                        .properties(vec![FilterProp::AttachedToSource]),
+                        .properties(vec![FilterProp::AttachedTo {
+                            to: AttachmentReferent::Source,
+                        }]),
                 ),
                 target: TargetFilter::ParentTarget,
                 selection: AttachSelection::Targeted,
