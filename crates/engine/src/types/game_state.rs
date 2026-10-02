@@ -1180,6 +1180,16 @@ pub struct AbilityActivationRecord {
     /// The source as it was when the ability was activated (for a modifier
     /// scoped to abilities "of an artifact" and the like).
     pub source_lki: LKISnapshot,
+    /// CR 602.2: the zone the source was in when the ability was announced.
+    /// An activation trigger takes a cost-moved source's last known information
+    /// only when it was announced from the battlefield (CR 113.7). Records
+    /// predating the field were battlefield activations for every reader that
+    /// existed, so the default is the battlefield; it is omitted on the wire then.
+    #[serde(
+        default = "battlefield_zone",
+        skip_serializing_if = "is_battlefield_zone"
+    )]
+    pub source_zone: Zone,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ability_tag: Option<crate::types::ability::AbilityTag>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -1188,6 +1198,14 @@ pub struct AbilityActivationRecord {
     /// untargeted ability.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub targets: Vec<ActivationTargetFact>,
+}
+
+fn battlefield_zone() -> Zone {
+    Zone::Battlefield
+}
+
+fn is_battlefield_zone(zone: &Zone) -> bool {
+    *zone == Zone::Battlefield
 }
 
 /// One committed target of an activation, as it was when the ability was

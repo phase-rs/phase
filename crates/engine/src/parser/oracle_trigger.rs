@@ -2455,6 +2455,26 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
         }
     }
 
+    // CR 605.1b + CR 605.4a: an activation trigger that can observe a mana
+    // ability's activation (no "that isn't a mana ability" exclusion) and whose
+    // own untargeted resolution could add mana is a triggered mana ability: it
+    // must resolve immediately, without the stack. The engine does not route
+    // `AbilityActivated` triggers inline, so this shape stays honestly
+    // unsupported rather than silently waiting for priority.
+    if def.mode == TriggerMode::AbilityActivated
+        && !trigger_condition_excludes_mana_activations(def.condition.as_ref())
+    {
+        if let Some(execute) = def.execute.as_deref_mut() {
+            if crate::game::mana_abilities::could_be_triggered_mana_ability_body(execute) {
+                *execute.effect = Effect::unimplemented(
+                    "activation_triggered_mana_ability",
+                    "a mana-producing trigger on activating a mana ability resolves \
+                     immediately (CR 605.4a)",
+                );
+            }
+        }
+    }
+
     // CR 603.4 + CR 111.1: Token intervening-ifs parsed via
     // `zone_change_object_token_condition` default to destination Battlefield
     // (correct for ETB). On dies/leave triggers the zone-change event's `to`
@@ -9080,6 +9100,20 @@ fn try_parse_keyword_activation_trigger(lower: &str) -> Option<(TriggerMode, Tri
     None
 }
 
+/// CR 605.1a + CR 605.1b: Does this trigger condition exclude mana-ability
+/// activations ("that isn't a mana ability" / "if it isn't a mana ability")?
+/// Such a trigger can't trigger from a mana ability's activation, so its body is
+/// never a triggered mana ability.
+fn trigger_condition_excludes_mana_activations(condition: Option<&TriggerCondition>) -> bool {
+    match condition {
+        Some(TriggerCondition::ActivatedAbilityIsNonMana) => true,
+        Some(TriggerCondition::And { conditions }) => conditions
+            .iter()
+            .any(|condition| trigger_condition_excludes_mana_activations(Some(condition))),
+        _ => false,
+    }
+}
+
 /// CR 602.1 + CR 603.2 + CR 605.1a: Parse "Whenever <player_scope> activates
 /// an ability [that isn't a mana ability]" triggers — the generic activated-
 /// ability trigger class covering Burning-Tree Shaman ("a player"),
@@ -9093,29 +9127,45 @@ fn try_parse_keyword_activation_trigger(lower: &str) -> Option<(TriggerMode, Tri
 ///   the ability"). "a player" leaves `valid_target` unset so
 ///   `valid_player_matches` accepts every player (Burning-Tree Shaman).
 /// - **non-mana qualifier**: optional " that isn't a mana ability" (CR
-///   605.1a). Sets `TriggerCondition::ActivatedAbilityIsNonMana` so the
-///   qualifier is preserved in the AST even though `GameEvent::AbilityActivated`
-///   already excludes mana abilities (CR 605.3b).
+///   605.1a). Sets `TriggerCondition::ActivatedAbilityIsNonMana`, checked
+///   against the activation event's `kind` (mana abilities emit
+///   `GameEvent::AbilityActivated` too, CR 605.3).
 ///
 /// Nesting by prefix dispatch avoids enumerating the 6-way prefix × subject
 /// permutation as separate `tag` arms.
 fn try_parse_ability_activation_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
+    /// The grammatical person of the activating subject. Only a third-person
+    /// subject ("a player", "an opponent") is the antecedent of a later "they".
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum SubjectPerson {
+        Second,
+        Third,
+    }
+
     // Pair subject with its verb conjugation: third-person-singular subjects
     // ("a player", "an opponent") take "activates"; second-person ("you")
     // takes "activate". Each arm carries the typed `valid_target` filter so
     // the activating player is matched correctly via `valid_player_matches`.
-    fn parse_subject_and_verb(input: &str) -> OracleResult<'_, Option<TargetFilter>> {
+    fn parse_subject_and_verb(
+        input: &str,
+    ) -> OracleResult<'_, (Option<TargetFilter>, SubjectPerson)> {
         alt((
             // CR 602.2a: "a player" — leave `valid_target` unset so every
             // player's activation matches (Burning-Tree Shaman).
-            value(None, tag("a player activates ")),
+            value((None, SubjectPerson::Third), tag("a player activates ")),
             value(
-                Some(TargetFilter::Typed(
-                    TypedFilter::default().controller(ControllerRef::Opponent),
-                )),
+                (
+                    Some(TargetFilter::Typed(
+                        TypedFilter::default().controller(ControllerRef::Opponent),
+                    )),
+                    SubjectPerson::Third,
+                ),
                 tag("an opponent activates "),
             ),
-            value(Some(TargetFilter::Controller), tag("you activate ")),
+            value(
+                (Some(TargetFilter::Controller), SubjectPerson::Second),
+                tag("you activate "),
+            ),
         ))
         .parse(input)
     }
@@ -9124,24 +9174,42 @@ fn try_parse_ability_activation_trigger(lower: &str) -> Option<(TriggerMode, Tri
     // article + optional modifier + noun so the grammar accepts both "an
     // ability" and "an activated ability". An optional "of <source>" suffix
     // narrows the trigger to abilities whose source matches a type filter.
-    // The matcher already consults `def.valid_card` via `valid_card_matches`,
-    // so the source-object filter is propagated directly.
+    // The matcher consults `def.valid_card` for the activated source.
     // Cards: Crackdown Construct, Ashnod the Uncaring, Wizened Mentor,
-    // Runic Armasaur, Ceaseless Searblades.
-    fn parse_ability_object(input: &str) -> OracleResult<'_, Option<TargetFilter>> {
+    // Runic Armasaur, Ceaseless Searblades, Avalanche of Sector 7.
+    fn parse_ability_object(
+        input: &str,
+        person: SubjectPerson,
+    ) -> OracleResult<'_, Option<TargetFilter>> {
         let (rest, _) = (tag("an "), opt(tag("activated ")), tag("ability")).parse(input)?;
         // CR 602.1a + CR 113.7: Optional source-object filter narrows the
         // trigger to abilities whose source matches a type filter ("of an
         // artifact or creature", "of a creature or land", "of a permanent").
-        opt(preceded(
+        let (rest, source) = opt(preceded(
             tag(" of "),
-            terminated(
-                preceded(alt((tag("a "), tag("an "))), parse_source_type_disjunction),
-                opt(tag(" on the battlefield")),
-            ),
+            preceded(alt((tag("a "), tag("an "))), parse_source_type_disjunction),
         ))
-        .map(|filter| filter.map(source_object_filter))
-        .parse(rest)
+        .parse(rest)?;
+        let Some(type_filters) = source else {
+            return Ok((rest, None));
+        };
+        // CR 602.2a + CR 109.4: "<source> they control" — "they" is the
+        // activating player, so the source's controller is the triggering
+        // player (Avalanche of Sector 7). Only a third-person subject can be its
+        // antecedent.
+        let (rest, they_control) = if person == SubjectPerson::Third {
+            opt(value((), tag(" they control"))).parse(rest)?
+        } else {
+            (rest, None)
+        };
+        let (rest, _) = opt(tag(" on the battlefield")).parse(rest)?;
+        let mut filter = source_object_filter(type_filters);
+        if they_control.is_some() {
+            if let TargetFilter::Typed(typed) = &mut filter {
+                typed.controller = Some(ControllerRef::TriggeringPlayer);
+            }
+        }
+        Ok((rest, Some(filter)))
     }
 
     fn source_object_filter(type_filters: Vec<TypeFilter>) -> TargetFilter {
@@ -9209,14 +9277,22 @@ fn try_parse_ability_activation_trigger(lower: &str) -> Option<(TriggerMode, Tri
         .parse(input)
     }
 
-    let parse_line = preceded(
-        alt((tag("whenever "), tag("when "))),
+    fn parse_line(
+        input: &str,
+    ) -> OracleResult<
+        '_,
         (
-            parse_subject_and_verb,
-            parse_ability_object,
-            parse_qualifier,
+            Option<TargetFilter>,
+            Option<TargetFilter>,
+            Option<TriggerCondition>,
         ),
-    );
+    > {
+        let (rest, _) = alt((tag("whenever "), tag("when "))).parse(input)?;
+        let (rest, (subject, person)) = parse_subject_and_verb(rest)?;
+        let (rest, source_filter) = parse_ability_object(rest, person)?;
+        let (rest, qualifier) = parse_qualifier(rest)?;
+        Ok((rest, (subject, source_filter, qualifier)))
+    }
 
     if let Ok((_, (subject, source_filter, qualifier))) = all_consuming(parse_line).parse(lower) {
         let mut def = make_base();

@@ -3308,6 +3308,9 @@ export type PlayerActionKind =
   | "Draw"
   | "Forage";
 
+/** CR 602.2 + CR 605.1a + CR 606.1: which kind of activated ability was activated. */
+export type ActivatedAbilityKind = "Normal" | "Loyalty" | "Mana";
+
 export type GameEvent =
   | { type: "GameStarted" }
   | {
@@ -3320,7 +3323,10 @@ export type GameEvent =
   | { type: "PriorityPassed"; data: { player_id: PlayerId } }
   | { type: "SpellCast"; data: { card_id: CardId; controller: PlayerId; object_id: ObjectId; cast_mana_value?: number } }
   | { type: "XValueChosen"; data: { player: PlayerId; object_id: ObjectId; value: number } }
-  | { type: "AbilityActivated"; data: { player_id: PlayerId; source_id: ObjectId } }
+  // `kind` is the engine's activated-ability kind (CR 605.1a / 606.1); it is
+  // omitted by legacy payloads, which mean "Normal". `departed_source_lki` and
+  // `trigger_state` are engine-internal trigger authority the UI never renders.
+  | { type: "AbilityActivated"; data: { player_id: PlayerId; source_id: ObjectId; kind?: ActivatedAbilityKind } }
   | { type: "ExhaustAbilityActivated"; data: { player_id: PlayerId; source_id: ObjectId; is_mana_ability: boolean } }
   // `from` is null for an object that enters from no zone (a created token).
   | { type: "ZoneChanged"; data: { object_id: ObjectId; from: Zone | null; to: Zone } }

@@ -108,7 +108,12 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * Bumps to date:
  *  84 — full-game protocol 102 adds the SharedCardTypes quantity tag in
  *       serialized ability definitions. Keep the existing P2P handshake in
- *       lockstep; wire 83 is reserved for the pending mana-activation schema.
+ *       lockstep with full-game protocol 102.
+ *  83 — game_setup and state_update carry GameState, whose events now include
+ *       mana-ability activations (AbilityActivated kind "Mana") and a
+ *       departed-source LKI. A v82 peer would not recognize the kind; first
+ *       contact rejects the skew instead. Bumped in lockstep with full-game
+ *       protocol 101.
  *  82 — game_setup and state_update carry GameState, whose additional-phase
  *       abilities now name what they add as a TurnSegment (segment, and
  *       followed_by's elements) in place of a Phase, and who gets it as an

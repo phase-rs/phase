@@ -63,8 +63,17 @@ pub struct TournamentRequestId(pub u64);
 /// 102 — `QuantityRef::SharedCardTypes` adds a tagged quantity carried in
 ///      serialized ability definitions and saved GameState. Readers without
 ///      this tag cannot deserialize that quantity. P2P moves in lockstep
-///      (wire 84); full-game 101 / wire 83 are reserved for the pending
-///      mana-activation schema change.
+///      (wire 84), following the mana-activation schema in full-game 101 / wire 83.
+/// 101 — `ActivatedAbilityKind` gains `Mana` (CR 605.1a): activating a mana
+///      ability now emits `GameEvent::AbilityActivated { kind: "Mana" }`
+///      (CR 605.3). The event also gains `departed_source_lki`
+///      (`Option<Box<LKISnapshot>>`, omitted when absent) — the source's last
+///      known information when a cost moved it off the battlefield (CR 113.7) —
+///      and `AbilityActivationRecord` gains `source_zone` (omitted when it is the
+///      battlefield). Events ride in `GameState` (`current_trigger_event`,
+///      stack trigger batches), so a v100 peer cannot parse a `Mana` kind — a
+///      PARSE bump. Lobby messages are unchanged, and P2P moves in lockstep
+///      (wire 83).
 /// 100 — `Effect::AdditionalPhase` states what it adds as the text words it
 ///      (CR 500.8–500.10). Its `phase` field (a `Phase`) was replaced by
 ///      `segment`, the adjacently tagged `TurnSegment` 82 introduced

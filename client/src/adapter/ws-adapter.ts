@@ -212,7 +212,12 @@ export class NativeEngineVersionMismatchError extends Error {
  *
  * 102 — QuantityRef.SharedCardTypes adds a tagged quantity in serialized
  *      ability definitions and saved state. Keep this version in lockstep
- *      with the server; version 101 is reserved for pending mana activation.
+ *      with the server and the preceding mana-activation schema.
+ * 101 — GameEvent.AbilityActivated's kind gains "Mana" (mana-ability
+ *      activations now emit it) and an optional departed_source_lki — see
+ *      PROTOCOL_VERSION's own `/// 101` entry in
+ *      crates/lobby-broker/src/protocol.rs. The exact-match version check at
+ *      connect refuses a v100 pairing.
  * 100 — Effect.AdditionalPhase carries segment, a TurnSegment, in place of
  *      phase, followed_by holds TurnSegments, and recipient, an
  *      ExtraPhaseRecipient, replaces target — see PROTOCOL_VERSION's own

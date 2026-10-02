@@ -3318,6 +3318,9 @@ mod tests {
         }
     }
 
+    /// `GameEvent::AbilityActivated` now carries `kind: "Mana"` for mana-ability
+    /// activations and an optional `departed_source_lki`; a v100 peer cannot
+    /// parse the `Mana` kind, so it must be refused before it receives v101 state.
     /// `Effect::AdditionalPhase` now carries a `TurnSegment` in place of its
     /// `phase` field and an `ExtraPhaseRecipient` in place of its `target`
     /// field; a v99 peer cannot parse it, so it must be refused before it

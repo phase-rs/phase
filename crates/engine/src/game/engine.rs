@@ -11375,11 +11375,7 @@ fn apply_non_priority_pass_action(
                     && mana_sources::object_mana_ability_penalty(state, source_id, &ability_def)
                         .is_undoable()
                 {
-                    state
-                        .lands_tapped_for_mana
-                        .entry(*player)
-                        .or_default()
-                        .push(source_id);
+                    mana_sources::record_undoable_mana_tap(state, *player, source_id, &events);
                 }
                 // P7 v3 (CR 605.3b + CR 732.2a): this off-stack activation is the opener of a
                 // multi-activation loop period. The shared recorder also owns semantic

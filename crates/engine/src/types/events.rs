@@ -10,7 +10,7 @@ use super::ability::{
 };
 use super::card::PrintedCardRef;
 use super::card_type::{CardType, CoreType, Supertype};
-use super::game_state::{TriggerSourceContext, ZoneChangeRecord};
+use super::game_state::{LKISnapshot, TriggerSourceContext, ZoneChangeRecord};
 use super::identifiers::{CardId, ObjectId, ObjectIncarnationRef, TrackedSetId};
 use super::keywords::Keyword;
 use super::mana::ManaCost;
@@ -102,18 +102,92 @@ impl ManaAbilityTriggerState {
     }
 }
 
-/// CR 602.2 + CR 606.2: Discriminates how an activated ability was activated so
-/// that "Whenever you activate a loyalty ability" triggers (CR 606.2) can be told
-/// apart from ordinary activated abilities (CR 602.2) while both share the single
-/// `GameEvent::AbilityActivated` event family. A loyalty ability is an activated
-/// ability of a planeswalker paid for by adding or removing loyalty counters.
+/// CR 603.10 + CR 605.3b: Who owns an activation event's trigger observation.
+/// A mana ability's activation is observed at its own boundary, before the
+/// ability resolves (CR 603.10); the event then travels on through payment
+/// ledgers and the action's event list as already observed, so no later
+/// collector — live scan, durable cost ledger, or delayed-trigger match —
+/// observes it a second time (CR 603.2c: an ability triggers only once each
+/// time its trigger event occurs).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ActivationTriggerState {
+    /// Observed by the action's ordinary trigger collection (a stack-using or
+    /// loyalty activation), or a mana activation not yet at its boundary.
+    #[default]
+    Pending,
+    /// Already observed at the activation boundary, with the outcome of that
+    /// observation.
+    CollectedAtActivation { observers: ActivationObservers },
+}
+
+impl ActivationTriggerState {
+    pub fn is_pending(&self) -> bool {
+        matches!(self, Self::Pending)
+    }
+}
+
+/// CR 603.2 + CR 603.5: What observing an activation at its boundary bound.
+/// `Bound` means at least one trigger was admitted for the event — whether its
+/// context was queued or then pruned (a remembered decline still spends a
+/// "triggers only once each turn" limit). A bound observation has consequences
+/// a mana-tap undo cannot reverse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ActivationObservers {
+    Unbound,
+    Bound,
+}
+
+/// CR 602.2 + CR 605.1a + CR 606.2: Discriminates which kind of activated
+/// ability was activated, so "Whenever you activate a loyalty ability"
+/// triggers (CR 606.2), "that isn't a mana ability" qualifiers (CR 605.1a), and
+/// ordinary activation triggers share the single `GameEvent::AbilityActivated`
+/// event family. The three kinds partition activated abilities: CR 605.1a
+/// excludes loyalty abilities from being mana abilities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum ActivatedAbilityKind {
-    /// CR 602.2: An ordinary activated ability.
+    /// CR 602.2: An ordinary (non-loyalty, non-mana) activated ability.
     #[default]
     Normal,
     /// CR 606.1 + CR 606.2: A loyalty ability of a planeswalker.
     Loyalty,
+    /// CR 605.1a + CR 605.3: An activated mana ability. Activating it follows
+    /// CR 602.2 like any other activation, but it resolves immediately without
+    /// using the stack (CR 605.3b).
+    Mana,
+}
+
+impl ActivatedAbilityKind {
+    /// CR 606.1 + CR 605.1a: The single classifier of an activated ability's
+    /// kind, from the ability definition bound when it was announced. Never
+    /// reads live game state, so an ability removed from its source (a granted
+    /// ability, a source that left) is still classified as it was activated.
+    pub fn of_definition(def: &super::ability::AbilityDefinition) -> Self {
+        if def
+            .cost
+            .as_ref()
+            .is_some_and(super::ability::is_loyalty_ability_cost)
+        {
+            Self::Loyalty
+        } else if crate::game::mana_abilities::is_mana_ability(def) {
+            Self::Mana
+        } else {
+            Self::Normal
+        }
+    }
+
+    /// CR 602.5 + CR 606.1: Whether an activation of this kind falls under a
+    /// `CantBeActivated` prohibition's ability-kind axis. That axis predates the
+    /// `Mana` kind and distinguishes loyalty from non-loyalty abilities, so a
+    /// `Normal` requirement means "non-loyalty" and keeps covering mana
+    /// abilities. Mana abilities are carved out on the separate
+    /// `ActivationExemption::ManaAbilities` axis (CR 605.1a).
+    pub fn satisfies_prohibition_kind(self, required: Self) -> bool {
+        match required {
+            Self::Normal => matches!(self, Self::Normal | Self::Mana),
+            Self::Loyalty => self == Self::Loyalty,
+            Self::Mana => self == Self::Mana,
+        }
+    }
 }
 
 impl ManaTapState {
@@ -880,15 +954,14 @@ pub enum GameEvent {
         object_id: ObjectId,
         value: u32,
     },
-    /// CR 602.1 + CR 605.3b: An activated ability has been activated and put on
-    /// the stack. **Not emitted for mana abilities** (CR 605.3b: mana abilities
-    /// resolve immediately without using the stack and follow a separate code
-    /// path that never reaches this event). This invariant — `AbilityActivated`
-    /// fires only for non-mana activations — is what makes
-    /// `TriggerCondition::ActivatedAbilityIsNonMana` trivially satisfied when
-    /// matched against this event, and is what lets the generic
-    /// "Whenever a player activates an ability that isn't a mana ability"
-    /// trigger class (Burning-Tree Shaman, Flamescroll Celebrant) listen here.
+    /// CR 602.2b + CR 601.2i + CR 605.3: An activated ability has become
+    /// activated (all costs paid). Emitted for every activation, including
+    /// mana abilities (CR 605.3: activating a mana ability follows CR 602.2;
+    /// it then resolves immediately without using the stack, CR 605.3b).
+    /// `kind` tells the three apart, so "that isn't a mana ability"
+    /// qualifiers (`TriggerCondition::ActivatedAbilityIsNonMana`, Burning-Tree
+    /// Shaman) are a real check, and triggers without that carve-out (Elrond,
+    /// Moon-Reader; Avalanche of Sector 7) see mana activations.
     AbilityActivated {
         /// CR 602.2a: "Its controller is the player who activated the ability."
         /// Required so `extract_player_from_event` can resolve "that player" /
@@ -896,14 +969,25 @@ pub enum GameEvent {
         /// ability's effect (Burning-Tree Shaman, Flamescroll Celebrant).
         player_id: PlayerId,
         source_id: ObjectId,
-        /// CR 606.2: Distinguishes loyalty-ability activations (planeswalker
-        /// abilities paid with loyalty counters) from ordinary activated
-        /// abilities so the "Whenever you activate a loyalty ability" trigger
-        /// class can match without a separate event. `#[serde(default)]` keeps
-        /// older serialized `AbilityActivated` events (which predate this field)
-        /// deserializing as `Normal`.
+        /// CR 605.1a + CR 606.2: Which kind of activated ability this was.
+        /// `#[serde(default)]` keeps older serialized `AbilityActivated` events
+        /// (which predate this field) deserializing as `Normal`.
         #[serde(default)]
         kind: ActivatedAbilityKind,
+        /// CR 113.7 + CR 113.7a + CR 400.7: The source's last known information, present only
+        /// when the source was on the battlefield when the ability was announced
+        /// and a cost moved it off before the ability became activated (a
+        /// sacrificed Treasure or Clue). Activation triggers read the source's
+        /// characteristics and controller from it. `None` when the source is
+        /// still where it was, or was activated from another zone.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        departed_source_lki: Option<Box<LKISnapshot>>,
+        /// CR 603.10 + CR 603.2c: `CollectedAtActivation` for a mana ability's
+        /// activation, whose triggers were collected at its boundary (with
+        /// what that observation bound); every later collector skips it.
+        /// Omitted on the wire when `Pending`.
+        #[serde(default, skip_serializing_if = "ActivationTriggerState::is_pending")]
+        trigger_state: ActivationTriggerState,
     },
     /// CR 603.6a: Enters-the-battlefield and zone-change triggers fire on this
     /// event. `from` is `None` when an object is created directly in a zone
@@ -1939,8 +2023,22 @@ mod tests {
         });
         let event: GameEvent = serde_json::from_value(legacy).unwrap();
         match event {
-            GameEvent::AbilityActivated { kind, .. } => {
+            GameEvent::AbilityActivated {
+                kind,
+                departed_source_lki,
+                trigger_state,
+                ..
+            } => {
                 assert_eq!(kind, ActivatedAbilityKind::Normal);
+                assert!(
+                    departed_source_lki.is_none(),
+                    "a legacy event predating the field carries no departed-source LKI"
+                );
+                assert_eq!(
+                    trigger_state,
+                    ActivationTriggerState::Pending,
+                    "a legacy event is observed by ordinary collection"
+                );
             }
             other => panic!("expected AbilityActivated, got {other:?}"),
         }
@@ -1948,12 +2046,18 @@ mod tests {
 
     #[test]
     fn ability_activated_kind_round_trips() {
-        // CR 606.2: the discriminator survives serialization.
-        for kind in [ActivatedAbilityKind::Normal, ActivatedAbilityKind::Loyalty] {
+        // CR 606.2 + CR 605.1a: the discriminator survives serialization.
+        for kind in [
+            ActivatedAbilityKind::Normal,
+            ActivatedAbilityKind::Loyalty,
+            ActivatedAbilityKind::Mana,
+        ] {
             let event = GameEvent::AbilityActivated {
                 player_id: PlayerId(1),
                 source_id: ObjectId(9),
                 kind,
+                departed_source_lki: None,
+                trigger_state: crate::types::events::ActivationTriggerState::Pending,
             };
             let json = serde_json::to_value(&event).unwrap();
             let back: GameEvent = serde_json::from_value(json).unwrap();

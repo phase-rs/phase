@@ -40,6 +40,9 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // v100 replaces `AdditionalPhase.phase` with a `TurnSegment` `segment`,
 // retypes `followed_by` to `TurnSegment`, and replaces
 // `AdditionalPhase.target` with an `ExtraPhaseRecipient` `recipient`.
+// v101 adds `ActivatedAbilityKind::Mana` (mana-ability activations now emit
+// `GameEvent::AbilityActivated`), the event's `departed_source_lki`, and
+// `AbilityActivationRecord.source_zone`.
 // Keep the measured base so a future merge cannot collapse independent wire
 // changes onto one number.
 const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
@@ -72,7 +75,7 @@ const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
 // nominee fields.
 // +28: the v99 GraveyardCastPermission pool (from any graveyard).
 // +29: the v100 additional-phase segment and recipient parse bump.
-// +30: reserved for the pending v101 mana-activation schema.
+// +30: the v101 mana-ability activation kind and departed-source LKI.
 // +31: v102 adds the tagged SharedCardTypes quantity.
 const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 31;
 // The LOBBY message-set version, not derived from the full-game number above.
@@ -128,7 +131,7 @@ const PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION = 54;
 // +27: wire 81 moves with full-game v99 for the graveyard permission pool.
 // +28: wire 82 moves with full-game v100 for the additional-phase segment and
 // recipient.
-// +29: reserved for pending wire 83 (mana-activation schema).
+// +29: wire 83 moves with full-game v101 for the mana-ability activation kind.
 // +30: wire 84 moves with full-game v102 for SharedCardTypes.
 const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 30;
 // The P2P DRAFT wire version. A FIFTH independent surface, and the one this

@@ -627,8 +627,13 @@ fn finalized_root_matches(
                     GameEvent::AbilityActivated {
                         player_id,
                         source_id: event_source_id,
+                        kind,
                         ..
-                    } if *player_id == *payer && *event_source_id == *source_id
+                    } if *player_id == *payer
+                        && *event_source_id == *source_id
+                        // CR 605.3b: a mana activation of the same source is not
+                        // the paid activation landing on the stack.
+                        && *kind != crate::types::events::ActivatedAbilityKind::Mana
                 )
             })
         }
