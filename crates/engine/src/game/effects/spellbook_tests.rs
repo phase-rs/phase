@@ -203,6 +203,26 @@ fn parser_maps_draft_clauses_to_the_right_destination() {
             random: false,
         }
     ));
+    // Production-normalized Arms Scavenger / Tibalt rider: `, then exile it`
+    // is the same destination as Kayla's ` and exile it`.
+    assert!(matches!(
+        parse_effect("draft a card from ~'s spellbook, then exile it"),
+        Effect::DraftFromSpellbook {
+            destination: Zone::Exile,
+            tapped: false,
+            random: false,
+        }
+    ));
+    // Single-clause `parse_effect` does not split on the possessive apostrophe;
+    // the rider combinator still sees `, then exile it`.
+    assert!(matches!(
+        parse_effect("draft a card from this creature's spellbook, then exile it"),
+        Effect::DraftFromSpellbook {
+            destination: Zone::Exile,
+            tapped: false,
+            random: false,
+        }
+    ));
 }
 
 #[test]
@@ -434,4 +454,392 @@ fn spellbook_draft_offers_only_the_activated_sources_list() {
         }
         other => panic!("expected halt at SpellbookDraft, got {other:?}"),
     }
+}
+
+/// Verbatim Oracle of Arms Scavenger (Scryfall). The equip cost-reduction
+/// static is out of scope for these assertions.
+const ARMS_SCAVENGER_ORACLE: &str = "At the beginning of your upkeep, draft a card from this creature's spellbook, then exile it. Until end of turn, you may play that card.\nEquip abilities you activate cost {1} less to activate.";
+
+/// SHAPE: production `parse_oracle_text` of Arms Scavenger must lower the upkeep
+/// execute to `DraftFromSpellbook { Exile }` plus an anaphoric play grant, not
+/// `Unimplemented`. Revert the `, then exile it` rider and this execute is
+/// Unimplemented again.
+#[test]
+fn arms_scavenger_parse_oracle_text_shape() {
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::types::ability::{CardPlayMode, CastingPermission, Duration};
+    use crate::types::identifiers::TrackedSetId;
+    use crate::types::phase::Phase;
+    use crate::types::triggers::TriggerMode;
+
+    let parsed = parse_oracle_text(ARMS_SCAVENGER_ORACLE, "Arms Scavenger", &[], &[], &[]);
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::Phase && t.phase == Some(Phase::Upkeep))
+        .expect("Arms Scavenger must parse an upkeep trigger");
+    let execute = trigger
+        .execute
+        .as_deref()
+        .expect("upkeep trigger must have an execute clause");
+    assert!(
+        matches!(
+            &*execute.effect,
+            Effect::DraftFromSpellbook {
+                destination: Zone::Exile,
+                tapped: false,
+                random: false,
+            }
+        ),
+        "upkeep execute must be DraftFromSpellbook {{ Exile }}, not Unimplemented: {:?}",
+        execute.effect
+    );
+    let grant = execute
+        .sub_ability
+        .as_deref()
+        .expect("play-that-card grant must chain after the draft");
+    match &*grant.effect {
+        Effect::GrantCastingPermission {
+            permission:
+                CastingPermission::PlayFromExile {
+                    duration: Duration::UntilEndOfTurn,
+                    mode,
+                    ..
+                },
+            target: TargetFilter::TrackedSet {
+                id: TrackedSetId(0),
+            },
+            ..
+        } => {
+            assert_eq!(
+                *mode,
+                CardPlayMode::Play,
+                "Arms Scavenger says \"play that card\", not cast"
+            );
+        }
+        other => panic!(
+            "expected GrantCastingPermission PlayFromExile UntilEndOfTurn TrackedSet(0) Play, got {other:?}"
+        ),
+    }
+}
+
+/// SHAPE: Tibalt, Wicked Tormentor +1 body uses the same `, then exile it`
+/// rider and grants a **cast** permission.
+#[test]
+fn tibalt_wicked_tormentor_plus_one_parse_shape() {
+    use crate::parser::oracle_effect::parse_effect_chain;
+    use crate::types::ability::{AbilityKind, CardPlayMode, CastingPermission, Duration};
+    use crate::types::identifiers::TrackedSetId;
+
+    let def = parse_effect_chain(
+        "draft a card from ~'s spellbook, then exile it. Until end of turn, you may cast that card.",
+        AbilityKind::Activated,
+    );
+    assert!(
+        matches!(
+            &*def.effect,
+            Effect::DraftFromSpellbook {
+                destination: Zone::Exile,
+                tapped: false,
+                random: false,
+            }
+        ),
+        "Tibalt +1 execute must be DraftFromSpellbook {{ Exile }}, got {:?}",
+        def.effect
+    );
+    let grant = def
+        .sub_ability
+        .as_deref()
+        .expect("cast-that-card grant must chain after the draft");
+    match &*grant.effect {
+        Effect::GrantCastingPermission {
+            permission:
+                CastingPermission::PlayFromExile {
+                    duration: Duration::UntilEndOfTurn,
+                    mode: CardPlayMode::Cast,
+                    ..
+                },
+            target: TargetFilter::TrackedSet {
+                id: TrackedSetId(0),
+            },
+            ..
+        } => {}
+        other => panic!(
+            "expected GrantCastingPermission PlayFromExile UntilEndOfTurn TrackedSet(0) Cast, got {other:?}"
+        ),
+    }
+}
+
+/// RUNTIME: verbatim Arms Scavenger Oracle on the battlefield. Beginning-of-upkeep
+/// (CR 503.1a) must pause on `SpellbookDraft`, and answering it must put the
+/// chosen card in exile with a `PlayFromExile` `UntilEndOfTurn` permission
+/// (CR 608.2c + CR 611.2a), not in hand. Revert the rider → no draft prompt.
+/// Revert the publish → card may sit in exile with `casting_permissions == []`.
+#[test]
+fn arms_scavenger_upkeep_drafts_into_exile_with_play_grant() {
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::game::triggers::drain_order_triggers_with_identity;
+    use crate::types::ability::{CardPlayMode, CastingPermission, Duration};
+    use crate::types::actions::GameAction;
+    use crate::types::phase::Phase;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::Untap);
+    scenario.with_library_top(P0, &["Pad A", "Pad B", "Pad C", "Pad D"]);
+    let source = scenario
+        .add_creature_from_oracle(P0, "Arms Scavenger", 2, 2, ARMS_SCAVENGER_ORACLE)
+        .id();
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&source)
+        .unwrap()
+        .spellbook = vec![
+        "Fireshrieker".to_string(),
+        "Lion Sash".to_string(),
+        "Fishing Pole".to_string(),
+    ];
+
+    runner.advance_to_upkeep();
+    assert_eq!(
+        runner.state().phase,
+        Phase::Upkeep,
+        "reach-guard: the beginning-of-upkeep trigger window must have opened"
+    );
+    for _ in 0..16 {
+        if matches!(runner.state().waiting_for, WaitingFor::OrderTriggers { .. }) {
+            drain_order_triggers_with_identity(runner.state_mut());
+            continue;
+        }
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::SpellbookDraft { .. }
+        ) {
+            break;
+        }
+        if matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+            && !runner.state().stack.is_empty()
+        {
+            runner
+                .act(GameAction::PassPriority)
+                .expect("passing priority must resolve the upkeep trigger toward the draft");
+            continue;
+        }
+        panic!(
+            "expected OrderTriggers, stacked Priority, or SpellbookDraft during Arms upkeep, got {:?} (stack={})",
+            runner.state().waiting_for,
+            runner.state().stack.len()
+        );
+    }
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::SpellbookDraft { .. }
+        ),
+        "the upkeep execute must pause on SpellbookDraft, got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::SubmitSpellbookDraft {
+            card: "Lion Sash".to_string(),
+        })
+        .expect("the Arms Scavenger pick must be accepted");
+
+    let state = runner.state();
+    let drafted = state
+        .objects
+        .values()
+        .find(|o| o.name == "Lion Sash")
+        .expect("the drafted card must exist");
+    assert_eq!(
+        drafted.zone,
+        Zone::Exile,
+        "CR 701.13a: the drafted card is created in exile, not moved there from hand"
+    );
+    let in_hand = state.players[0]
+        .hand
+        .iter()
+        .filter_map(|id| state.objects.get(id))
+        .any(|o| o.name == "Lion Sash");
+    assert!(!in_hand, "the drafted card must not visit hand");
+    assert!(
+        drafted.casting_permissions.iter().any(|perm| matches!(
+            perm,
+            CastingPermission::PlayFromExile {
+                duration: Duration::UntilEndOfTurn,
+                mode: CardPlayMode::Play,
+                ..
+            }
+        )),
+        "CR 608.2c + CR 611.2a: until end of turn you may play that card; got {:?}",
+        drafted.casting_permissions
+    );
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "resolution must return to Priority after the draft, got {:?}",
+        state.waiting_for
+    );
+}
+
+/// RUNTIME sibling: Kayla's Kindling analog (` and exile it` + cast grant).
+/// The publish fix is shared; this row must assert the derived non-empty grant,
+/// not parity with the pre-fix empty tracked set. Revert-publish fails this
+/// even if the Arms `, then` rider is present.
+#[test]
+fn kayla_kindling_analog_exile_draft_attaches_cast_grant() {
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::parser::oracle_effect::parse_effect_chain;
+    use crate::types::ability::{
+        AbilityCost, AbilityKind, CardPlayMode, CastingPermission, Duration,
+    };
+    use crate::types::phase::Phase;
+
+    let def = parse_effect_chain(
+        "draft a card from ~'s spellbook and exile it. Until end of turn, you may cast that card.",
+        AbilityKind::Activated,
+    )
+    .cost(AbilityCost::Tap);
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature(P0, "Kayla Analog", 1, 1)
+        .with_ability_definition(def)
+        .id();
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&source)
+        .unwrap()
+        .spellbook = vec!["Lion Sash".to_string()];
+
+    let outcome = runner
+        .activate(source, 0)
+        .spellbook_pick("Lion Sash")
+        .resolve();
+
+    let drafted = outcome
+        .state()
+        .objects
+        .values()
+        .find(|o| o.name == "Lion Sash")
+        .expect("the drafted card must exist");
+    assert_eq!(drafted.zone, Zone::Exile);
+    let in_hand = outcome.state().players[0]
+        .hand
+        .iter()
+        .filter_map(|id| outcome.state().objects.get(id))
+        .any(|o| o.name == "Lion Sash");
+    assert!(!in_hand, "Kayla analog must not create the card in hand");
+    assert!(
+        drafted.casting_permissions.iter().any(|perm| matches!(
+            perm,
+            CastingPermission::PlayFromExile {
+                duration: Duration::UntilEndOfTurn,
+                mode: CardPlayMode::Cast,
+                ..
+            }
+        )),
+        "derived reading: the grant must attach (mode Cast); empty permissions is the pre-fix defect, got {:?}",
+        drafted.casting_permissions
+    );
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "resolution must return to Priority after the draft, got {:?}",
+        outcome.final_waiting_for()
+    );
+}
+
+/// Multi-authority hostile: two sources with different spellbooks and the
+/// exile+grant chain. Picking from source A grants only the card conjured from
+/// A's list; the permission's `source_id` is the resolving source.
+#[test]
+fn spellbook_exile_grant_binds_only_the_resolving_sources_pick() {
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::parser::oracle_effect::parse_effect_chain;
+    use crate::types::ability::{AbilityCost, AbilityKind, CastingPermission, Duration};
+    use crate::types::phase::Phase;
+
+    let draft_grant = || {
+        parse_effect_chain(
+            "draft a card from ~'s spellbook, then exile it. Until end of turn, you may play that card.",
+            AbilityKind::Activated,
+        )
+        .cost(AbilityCost::Tap)
+    };
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source_a = scenario
+        .add_creature(P0, "Archivist A", 1, 1)
+        .with_ability_definition(draft_grant())
+        .id();
+    let source_b = scenario
+        .add_creature(P0, "Archivist B", 1, 1)
+        .with_ability_definition(draft_grant())
+        .id();
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&source_a)
+        .unwrap()
+        .spellbook = vec!["Lion Sash".to_string(), "Alpha Two".to_string()];
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&source_b)
+        .unwrap()
+        .spellbook = vec!["Beta One".to_string(), "Beta Two".to_string()];
+
+    let outcome = runner
+        .activate(source_a, 0)
+        .spellbook_pick("Lion Sash")
+        .resolve();
+
+    let drafted = outcome
+        .state()
+        .objects
+        .values()
+        .find(|o| o.name == "Lion Sash")
+        .expect("A's pick must be conjured");
+    assert_eq!(drafted.zone, Zone::Exile);
+    let grant = drafted
+        .casting_permissions
+        .iter()
+        .find(|perm| {
+            matches!(
+                perm,
+                CastingPermission::PlayFromExile {
+                    duration: Duration::UntilEndOfTurn,
+                    ..
+                }
+            )
+        })
+        .expect("the conjured card must receive the play grant");
+    match grant {
+        CastingPermission::PlayFromExile { source_id, .. } => {
+            assert_eq!(
+                *source_id,
+                Some(source_a),
+                "the grant must stamp the resolving source, not the other permanent"
+            );
+        }
+        other => panic!("expected PlayFromExile grant, got {other:?}"),
+    }
+    assert!(
+        outcome
+            .state()
+            .objects
+            .values()
+            .all(|o| o.name != "Beta One" && o.name != "Beta Two"),
+        "source B's spellbook must not be conjured when A is resolving"
+    );
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "resolution must return to Priority, got {:?}",
+        outcome.final_waiting_for()
+    );
 }
