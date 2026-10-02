@@ -971,6 +971,11 @@ pub(crate) fn payable_spell_alternative_cost_details(
     // (current zone in `active_zones`, `affected == SelfRef`) with NO origin
     // restriction -- `SelfRef` identity-match, not other-grant
     // affected-filtering.
+    // CR 118.9 + CR 601.2f: select the first PAYABLE SELF grant — an
+    // unaffordable earlier grant must not mask an affordable later one. The
+    // payability test runs per candidate through the
+    // `spell_alternative_cost_is_payable` authority, preserving
+    // first-among-payable choice behavior.
     let granted_self = obj
         .static_definitions
         .iter_all()
@@ -979,24 +984,23 @@ pub(crate) fn payable_spell_alternative_cost_details(
                 && def.active_zones.contains(&obj.zone)
                 && matches!(def.affected, Some(TargetFilter::SelfRef))
         })
-        .find_map(|def| match &def.mode {
+        .filter_map(|def| match &def.mode {
             StaticMode::CastWithAlternativeCost {
                 cost,
                 timing_permission,
                 ..
             } => Some((cost.clone(), *timing_permission)),
             _ => None,
-        });
+        })
+        .find(|(cost, _)| spell_alternative_cost_is_payable(state, player, object_id, cost));
     if let Some((cost, timing_permission)) = granted_self {
-        if spell_alternative_cost_is_payable(state, player, object_id, &cost) {
-            return Some(PayableSpellAlternativeCost {
-                cost,
-                timing_permission,
-                // CR 118.9: a self grant carries no per-turn grant slot to
-                // consume.
-                once_per_turn_source: None,
-            });
-        }
+        return Some(PayableSpellAlternativeCost {
+            cost,
+            timing_permission,
+            // CR 118.9: a self grant carries no per-turn grant slot to
+            // consume.
+            once_per_turn_source: None,
+        });
     }
 
     // CR 118.9 + CR 601.2f: A permanent-granted alternative MANA cost (Rooftop

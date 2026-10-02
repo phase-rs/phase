@@ -43580,6 +43580,23 @@ fn perpetual_grant_trigger_rejects_unimplemented_inner_content() {
 /// clause closed rather than install the installable sibling alone.
 #[test]
 fn perpetual_grant_ability_multi_quote_partial_failure_stays_closed() {
+    // Reach-guards: the refusal must come from the uninstallable sibling (not
+    // a misparse of the installable one), and the installable sibling alone
+    // must parse under the same subject.
+    let uninstallable =
+        "If ~ would leave the battlefield, exile it instead of putting it anywhere else.";
+    let classified = crate::parser::oracle_static::classify_quoted_inner(uninstallable);
+    assert!(
+        classified
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::GrantReplacement { .. })),
+        "reach-guard: the exile-instead quote must classify to GrantReplacement, got {classified:?}"
+    );
+    let sibling = parse_effect("~ perpetually gains \"flying\"");
+    assert!(
+        matches!(sibling, Effect::ApplyPerpetual { .. }),
+        "reach-guard: the installable sibling must parse as ApplyPerpetual, got {sibling:?}"
+    );
     let e = parse_effect(
         "~ perpetually gains \"flying\" and \"If ~ would leave the battlefield, \
         exile it instead of putting it anywhere else.\"",
@@ -43984,6 +44001,16 @@ fn perpetual_racketeer_full_rider_stays_unimplemented() {
 /// matches no designed arm and stays `Unimplemented`.
 #[test]
 fn perpetual_the_duplicates_subject_stays_unimplemented() {
+    // Reach-guard: the same quote under a SUPPORTED subject must parse as
+    // ApplyPerpetual, proving the Unimplemented below comes from the deferred
+    // subject — not from a misparse of the self-cost quote.
+    let sibling = parse_effect(
+        "~ perpetually gains \"You may pay {R} rather than pay this spell's mana cost.\"",
+    );
+    assert!(
+        matches!(sibling, Effect::ApplyPerpetual { .. }),
+        "reach-guard: the installable sibling must parse as ApplyPerpetual, got {sibling:?}"
+    );
     let e = parse_effect(
         "the duplicates perpetually gain \"You may pay {R} rather than pay this \
         spell's mana cost.\"",

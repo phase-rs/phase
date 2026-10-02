@@ -16966,13 +16966,27 @@ fn try_parse_one_or_more_leave_graveyard(lower: &str) -> Option<(TriggerMode, Tr
     None
 }
 
+/// Bare-zone ellipsis in a disjunctive origin's second disjunct ("from your
+/// library or hand" — Oglor, Devoted Assistant): the possessive is elided and
+/// inherited from the first disjunct. Shared by the exile-path zone tokens and
+/// the graveyard-origin zone tokens so the ellipsis grammar lives in one
+/// place. (Templated Oracle text grammar, not a CR-specified construct.)
+fn parse_bare_zone_token(input: &str) -> OracleResult<'_, Zone> {
+    alt((
+        value(Zone::Hand, tag("hand")),
+        value(Zone::Library, tag("library")),
+    ))
+    .parse(input)
+}
+
 /// Parse a single zone token: "your library" → Zone::Library, "your graveyard" → Zone::Graveyard.
 /// Returns the typed zone and the remaining input. Used by the disjunctive
 /// source-zone combinator below.
 fn parse_your_zone_token(input: &str) -> nom::IResult<&str, Zone, OracleError<'_>> {
     alt((
-        value(Zone::Library, tag("your library")),
+        value(Zone::Library, tag::<_, _, OracleError<'_>>("your library")),
         value(Zone::Graveyard, tag("your graveyard")),
+        value(Zone::Hand, tag("your hand")),
         // CR 400.1: source zones expressed player-agnostically — bare plural
         // "graveyards"/"libraries" (any player's), "a graveyard", or "the
         // battlefield" (Ketramose, the New Dawn: "…from graveyards and/or the
@@ -16984,25 +16998,43 @@ fn parse_your_zone_token(input: &str) -> nom::IResult<&str, Zone, OracleError<'_
         value(Zone::Battlefield, tag("the battlefield")),
     ))
     .parse(input)
+    .or_else(|_| parse_bare_zone_token(input))
+}
+
+/// Parse a one-or-two zone union ("<zone>" or "<zone> and/or|or|and <zone>")
+/// with the caller's zone-token combinator. Returns the zones in reading order
+/// with the unconsumed remainder; callers enforce their own tail discipline.
+///
+/// Composable: one token invocation per alternative, joined by the shared
+/// "and/or" (canonical) / "or" / "and" disjunction combinator.
+fn parse_disjunctive_zone_pair<'a, F>(input: &'a str, mut token: F) -> OracleResult<'a, Vec<Zone>>
+where
+    F: FnMut(&'a str) -> OracleResult<'a, Zone>,
+{
+    let (input, first) = token(input)?;
+    // Optional second zone joined by "and/or" (canonical), "or", or "and".
+    let second = alt((
+        tag::<_, _, OracleError<'_>>(" and/or "),
+        tag(" or "),
+        tag(" and "),
+    ))
+    .parse(input)
+    .ok()
+    .and_then(|(after_sep, _)| token(after_sep).ok());
+    match second {
+        Some((rest, second)) => Ok((rest, vec![first, second])),
+        None => Ok((input, vec![first])),
+    }
 }
 
 /// Parse a zone-set phrase such as "your library", "your graveyard",
 /// or "your library and/or your graveyard" / "your graveyard and/or your library".
 /// Returns the list of source zones in reading order.
 ///
-/// Composable: one `parse_your_zone_token` invocation per alternative, joined
-/// by an optional "and/or" / "or" / "and" disjunction combinator.
+/// The exile-path instantiation of [`parse_disjunctive_zone_pair`] over
+/// [`parse_your_zone_token`].
 fn parse_disjunctive_zone_set(input: &str) -> nom::IResult<&str, Vec<Zone>, OracleError<'_>> {
-    let (input, first) = parse_your_zone_token(input)?;
-    // Optional second zone joined by "and/or" (canonical), "or", or "and".
-    let rest_parser = |i| -> nom::IResult<&str, Zone, OracleError<'_>> {
-        let (i, _) = alt((tag(" and/or "), tag(" or "), tag(" and "))).parse(i)?;
-        parse_your_zone_token(i)
-    };
-    match rest_parser(input) {
-        Ok((rest, second)) => Ok((rest, vec![first, second])),
-        Err(_) => Ok((input, vec![first])),
-    }
+    parse_disjunctive_zone_pair(input, parse_your_zone_token)
 }
 
 /// Parse "whenever one or more cards are put into exile from <zone-set>" — a batched
@@ -20451,18 +20483,19 @@ fn try_parse_put_into_graveyard(
 
     // Parse optional "from [zone]" clause
     let after_gy = after_gy.trim_start();
-    let origin = if let Ok((after_from, ())) =
+    let (origin, origin_zones) = if let Ok((after_from, ())) =
         value((), tag::<_, _, OracleError<'_>>("from ")).parse(after_gy)
     {
         let after_from = after_from.trim_start();
-        parse_graveyard_origin_zone
-            .parse(after_from)
-            .ok()
-            .map(|(_, z)| z)
-            .unwrap_or(None)
+        parse_graveyard_origin_union(after_from)?
     } else {
-        // No "from" clause -- no origin restriction (any zone to graveyard)
-        None
+        // No "from" clause -- no origin restriction (any zone to graveyard).
+        // Strict tail (mirrors the exile sibling): anything else here is
+        // unmodeled — fail the arm rather than silently truncate.
+        if !after_gy.trim().is_empty() {
+            return None;
+        }
+        (None, Vec::new())
     };
 
     let valid_card = match possessive.clone() {
@@ -20476,6 +20509,7 @@ fn try_parse_put_into_graveyard(
     def.mode = TriggerMode::ChangesZone;
     def.destination = Some(Zone::Graveyard);
     def.origin = origin;
+    def.origin_zones = origin_zones;
     def.valid_card = valid_card;
     def.valid_target = valid_target;
     Some((TriggerMode::ChangesZone, def))
@@ -20523,9 +20557,61 @@ fn parse_graveyard_origin_zone(input: &str) -> OracleResult<'_, Option<Zone>> {
         value(Some(Zone::Library), tag("an opponent's library")),
         value(Some(Zone::Library), tag("a player's library")),
         value(Some(Zone::Library), tag("any library")),
+        // CR 109.5: bare "a library" (Dreadhound: "…put into a graveyard
+        // from a library") — unowned, like "any library".
+        value(Some(Zone::Library), tag("a library")),
         value(Some(Zone::Hand), tag("your hand")),
     ))
     .parse(input)
+}
+
+/// CR 603.6c: the constrained arms of [`parse_graveyard_origin_zone`] as a
+/// `Zone`-typed token. The bare "anywhere" leaf is unconstrained, so it is
+/// malformed as a union member (mirroring [`parse_zone_list`]'s treatment of
+/// a bare `None` inside a zone list).
+fn parse_constrained_graveyard_origin_zone(input: &str) -> OracleResult<'_, Zone> {
+    let (rest, zone) = parse_graveyard_origin_zone(input)?;
+    zone.map(|zone| (rest, zone))
+        .ok_or_else(|| oracle_err(input))
+}
+
+/// CR 603.6c: one zone token of a put-into-graveyard origin — every
+/// constrained possessive arm plus the bare-zone ellipsis second disjunct
+/// ("from your library or hand", shared with the exile path). The bare-"hand"
+/// precedent is [`parse_hand_possessive`]'s own bare `"hand"` arm.
+fn parse_graveyard_origin_zone_token(input: &str) -> OracleResult<'_, Zone> {
+    parse_constrained_graveyard_origin_zone
+        .parse(input)
+        .or_else(|_| parse_bare_zone_token(input))
+}
+
+/// CR 603.1 + CR 603.6c: Parse the "from \<zone-set\>" tail of a
+/// put-into-graveyard trigger into `(origin, origin_zones)`. A two-zone union
+/// ("from your library or hand" — Oglor, Devoted Assistant) populates
+/// `origin_zones` with `origin` unset (the runtime matcher keys on the set,
+/// ignoring `origin`, when the set is non-empty); a single zone keeps the
+/// scalar `origin` shape; bare "anywhere" stays unconstrained. The tail must
+/// be FULLY consumed — any unconsumed remainder fails the arm (`None`) so the
+/// line falls through to an honest `TriggerMode::Unknown` instead of silently
+/// dropping the constraint.
+fn parse_graveyard_origin_union(input: &str) -> Option<(Option<Zone>, Vec<Zone>)> {
+    // Bare "anywhere" single: explicitly unconstrained (CR 603.6c: an ability
+    // that triggers on a card put into a zone "from anywhere" is never a
+    // leaves-the-battlefield ability). Strict tail — "anywhere other than X"
+    // belongs to the zone-change-clause path, not here.
+    if let Ok((tail, _)) = tag::<_, _, OracleError<'_>>("anywhere").parse(input) {
+        return tail.trim().is_empty().then_some((None, Vec::new()));
+    }
+    let (tail, zones) =
+        parse_disjunctive_zone_pair(input, parse_graveyard_origin_zone_token).ok()?;
+    if !tail.trim().is_empty() {
+        return None;
+    }
+    match zones.as_slice() {
+        [single] => Some((Some(*single), Vec::new())),
+        [_, _] => Some((None, zones)),
+        _ => None,
+    }
 }
 
 /// CR 400.3: Shared parser for possessive hand forms in zone-change triggers.
@@ -20741,17 +20827,19 @@ fn try_parse_one_or_more_put_into_graveyard(
 
         // Parse optional "from [zone]" clause using nom
         let after_gy = after_gy.trim_start();
-        let origin = if let Ok((after_from, ())) =
+        let (origin, origin_zones) = if let Ok((after_from, ())) =
             value((), tag::<_, _, OracleError<'_>>("from ")).parse(after_gy)
         {
             let after_from = after_from.trim_start();
-            parse_graveyard_origin_zone
-                .parse(after_from)
-                .ok()
-                .map(|(_, z)| z)
-                .unwrap_or(None)
+            let Some(parsed) = parse_graveyard_origin_union(after_from) else {
+                continue;
+            };
+            parsed
+        } else if after_gy.trim().is_empty() {
+            (None, Vec::new())
         } else {
-            None
+            // Unknown trailing text — bail rather than silently truncate.
+            continue;
         };
 
         // Parse the subject type filter: "creature cards", "land cards", "cards"
@@ -20785,6 +20873,7 @@ fn try_parse_one_or_more_put_into_graveyard(
         def.mode = TriggerMode::ChangesZoneAll;
         def.destination = Some(Zone::Graveyard);
         def.origin = origin;
+        def.origin_zones = origin_zones;
         def.valid_card = valid_card;
         def.valid_target = valid_target;
         def.batched = true;

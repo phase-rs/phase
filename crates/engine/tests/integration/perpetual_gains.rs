@@ -35,6 +35,8 @@ use engine::types::zones::self_spell_cost_mod_active_zones;
 
 const JESSIE: &str = "Deathtouch\nWhen Jessie Zane enters and whenever you cast a Snake spell, conjure a card named Ambush Viper into the top six cards of your library at random. It perpetually gains \"When this creature enters, draw a card.\"";
 const SANGUINE: &str = "Flying, lifelink\nWhenever this creature attacks, conjure a card named Sanguine Bond into the top fifteen cards of your library at random. It perpetually gains \"You may pay {0} rather than pay this spell's mana cost\" and \"When this permanent enters, draw a card.\"";
+const SANGUINE_TWO_SELF_COSTS: &str = "Flying, lifelink\nWhenever this creature attacks, conjure a card named Sanguine Bond into the top fifteen cards of your library at random. It perpetually gains \"You may pay {5} rather than pay this spell's mana cost\" and \"You may pay {0} rather than pay this spell's mana cost.\"";
+const SANGUINE_TWO_UNPAYABLE_COSTS: &str = "Flying, lifelink\nWhenever this creature attacks, conjure a card named Two Cost Bear into the top fifteen cards of your library at random. It perpetually gains \"You may pay {5} rather than pay this spell's mana cost\" and \"You may pay {9} rather than pay this spell's mana cost.\"";
 const FIST_OF_SUNS: &str =
     "You may pay {W}{U}{B}{R}{G} rather than pay the mana cost for spells you cast.";
 const ROOFTOP_STORM: &str =
@@ -430,12 +432,22 @@ fn indris_sequential_etbs_grant_each_set_independently() {
             1,
             "each first-set Bolt must keep exactly one Storm"
         );
+        assert_eq!(
+            runner.state().objects[id].perpetual_mods.len(),
+            1,
+            "each first-set Bolt must carry exactly one perpetual Storm install"
+        );
     }
     for id in set2 {
         assert_eq!(
             storm_count(&runner, id),
             1,
             "each second-set Bolt must gain exactly one Storm"
+        );
+        assert_eq!(
+            runner.state().objects[id].perpetual_mods.len(),
+            1,
+            "each second-set Bolt must carry exactly one perpetual Storm install"
         );
     }
 }
@@ -778,6 +790,239 @@ fn rooftop_storm_still_discounts_zombie_spell() {
     );
 }
 
+/// Shared prefix for the self-cost-preference tests (MED #2): an attacker
+/// carrying `attacker_oracle` conjures one `face` card with a two-quote
+/// self-alt-cost grant, driven through combat to the post-trigger settle.
+/// Returns the runner; the conjured card sits in the library (draw it with
+/// `draw_until_in_hand`). Mirrors the V3 Sanguine drive without the
+/// Fist-of-Suns multi-authority (the discrimination here is between two SELF
+/// grants, not self-vs-battlefield).
+fn conjure_two_cost_grant_runner(
+    attacker_oracle: &str,
+    conjured_name: &str,
+    face: CardFace,
+) -> GameRunner {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(
+        P0,
+        &[
+            "Filler 0",
+            "Filler 1",
+            "Filler 2",
+            "Filler 3",
+            "Filler 4",
+            "Filler 5",
+            "Filler 6",
+            "Filler 7",
+            "Filler 8",
+            "Filler 9",
+            "Filler 10",
+            "Filler 11",
+            "Filler 12",
+            "Filler 13",
+            "Filler 14",
+            "Filler 15",
+            "Filler 16",
+            "Filler 17",
+            "Filler 18",
+            "Filler 19",
+        ],
+    );
+    let attacker = scenario
+        .add_creature(P0, "Sanguine Soothsayer", 2, 2)
+        .from_oracle_text_with_keywords(&["Flying", "Lifelink"], attacker_oracle)
+        .id();
+
+    let mut runner = scenario.build();
+    runner.state_mut().debug_mode = true;
+    seed_conjure_registry(&mut runner, vec![face]);
+    assert_fully_parsed(&runner, attacker, "Sanguine Soothsayer");
+
+    runner.pass_both_players();
+    runner
+        .declare_attackers(&[(attacker, AttackTarget::Player(P1))])
+        .expect("DeclareAttackers should succeed");
+    for _ in 0..32 {
+        let bond_conjured = !named_object_ids(&runner, conjured_name).is_empty();
+        if bond_conjured
+            && runner.state().stack.is_empty()
+            && matches!(runner.state().phase, Phase::PostCombatMain)
+            && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+        {
+            break;
+        }
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::DeclareBlockers { .. }
+        ) {
+            runner.declare_blockers(&[]).expect("P1 blocks nothing");
+        } else if matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+            runner.pass_both_players();
+        } else {
+            panic!(
+                "unexpected prompt while resolving the attack trigger: {:?}",
+                runner.state().waiting_for
+            );
+        }
+    }
+    let conjured = named_object_ids(&runner, conjured_name);
+    assert_eq!(
+        conjured.len(),
+        1,
+        "the attack trigger must conjure exactly one {conjured_name}, found {}",
+        conjured.len()
+    );
+    runner
+}
+
+/// Fixture-shape pin for the self-cost-preference tests: the conjured card
+/// must carry exactly the two granted self alt-cost statics in quote order,
+/// each `SelfRef`-affected with the 6-zone self-cost reach.
+fn assert_two_self_cost_grants(
+    runner: &GameRunner,
+    id: ObjectId,
+    first: ManaCost,
+    second: ManaCost,
+) {
+    let obj = &runner.state().objects[&id];
+    let granted: Vec<_> = obj
+        .static_definitions
+        .iter_unchecked()
+        .filter(|def| matches!(def.mode, StaticMode::CastWithAlternativeCost { .. }))
+        .collect();
+    assert_eq!(
+        granted.len(),
+        2,
+        "the conjured card must carry exactly two granted self alt-cost statics"
+    );
+    for (def, expected) in granted.iter().zip([&first, &second]) {
+        assert_eq!(
+            def.affected,
+            Some(TargetFilter::SelfRef),
+            "each granted alt-cost static must affect the spell itself"
+        );
+        assert_eq!(
+            def.active_zones,
+            self_spell_cost_mod_active_zones(),
+            "each granted alt-cost static must carry the 6-zone self-cost reach"
+        );
+        assert!(
+            matches!(
+                def.mode,
+                StaticMode::CastWithAlternativeCost {
+                    cost: AbilityCost::Mana { ref cost },
+                    ..
+                } if cost == expected
+            ),
+            "granted alt-cost offer mismatch: expected {expected:?}, got {:?}",
+            def.mode
+        );
+    }
+}
+
+/// MED #2: payable-first SELF alt-cost selection (CR 118.9 + CR 601.2f). The
+/// conjured Bond carries two perpetual self-cost grants — unpayable {5} first,
+/// payable {0} later — and casts for {0} from an empty pool, proving the
+/// affordable later grant is selected instead of the unaffordable first one
+/// masking it.
+///
+/// Revert-failing: first-grant selection takes {5}, finds it unpayable, and
+/// offers no alternative — the printed {3}{B}{B} is unpayable from an empty
+/// pool, so the cast fails.
+#[test]
+fn self_alt_cost_unpayable_first_payable_later_chooses_later() {
+    let mut runner = conjure_two_cost_grant_runner(
+        SANGUINE_TWO_SELF_COSTS,
+        "Sanguine Bond",
+        minimal_enchantment_face(
+            "Sanguine Bond",
+            colored_cost(vec![ManaCostShard::Black, ManaCostShard::Black], 3),
+        ),
+    );
+
+    let bond = draw_until_in_hand(&mut runner, P0, "Sanguine Bond");
+    assert_two_self_cost_grants(&runner, bond, colored_cost(vec![], 5), ManaCost::zero());
+    assert_eq!(
+        runner.state().players[P0.0 as usize].mana_pool.total(),
+        0,
+        "precondition: the pool must be empty so only a {{0}} offer can pay"
+    );
+
+    let outcome = runner.cast(bond).accept_optional().resolve();
+    outcome.assert_zone(&[bond], Zone::Battlefield);
+    // No trigger quote on this grant (both quotes are costs) — nothing draws.
+    outcome.assert_hand_drawn(P0, 0);
+    assert_eq!(
+        outcome.mana_pool_total(P0),
+        0,
+        "the {{0}} later grant must leave the empty pool untouched"
+    );
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "the {{0}} cast must resolve cleanly, halted at {:?}",
+        outcome.final_waiting_for()
+    );
+}
+
+/// MED #2 control: when NO self alternative is payable, none is chosen — the
+/// spell casts for its printed cost instead. The pool pays {1}{B} exactly
+/// (neither {5} nor {9}), so a completed cast with an empty pool proves the
+/// printed path was taken. Guards the fix against over-correction (choosing
+/// an unpayable grant); not revert-failing under the old first-grant code,
+/// which also yields no alternative here.
+#[test]
+fn self_alt_cost_all_unavailable_falls_back_to_printed() {
+    let mut runner = conjure_two_cost_grant_runner(
+        SANGUINE_TWO_UNPAYABLE_COSTS,
+        "Two Cost Bear",
+        minimal_creature_face(
+            "Two Cost Bear",
+            colored_cost(vec![ManaCostShard::Black], 1),
+            vec!["Bear"],
+            2,
+            2,
+        ),
+    );
+
+    let bear = draw_until_in_hand(&mut runner, P0, "Two Cost Bear");
+    assert_two_self_cost_grants(
+        &runner,
+        bear,
+        colored_cost(vec![], 5),
+        colored_cost(vec![], 9),
+    );
+    // Seed the pool AFTER the combat drive (pools empty across phases): {B}
+    // plus one colorless pays exactly the printed {1}{B} — neither {5} nor
+    // {9}. Routes through `add_mana_to_pool` (the `with_mana_pool` authority)
+    // so each unit gets a distinct pip id.
+    for unit in mana(ManaType::Black, 1)
+        .into_iter()
+        .chain(mana(ManaType::Colorless, 1))
+    {
+        runner.state_mut().add_mana_to_pool(P0, unit);
+    }
+    assert_eq!(
+        runner.state().players[P0.0 as usize].mana_pool.total(),
+        2,
+        "precondition: the pool must pay exactly the printed {{1}}{{B}}"
+    );
+
+    let outcome = runner.cast(bear).accept_optional().resolve();
+    outcome.assert_zone(&[bear], Zone::Battlefield);
+    outcome.assert_hand_drawn(P0, 0);
+    assert_eq!(
+        outcome.mana_pool_total(P0),
+        0,
+        "with no payable alternative the printed {{1}}{{B}} must be paid in full"
+    );
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "the printed-cost cast must resolve cleanly, halted at {:?}",
+        outcome.final_waiting_for()
+    );
+}
+
 /// Full-pipeline zone move through `act` (never raw `resolve`): with
 /// `simulate: true` the move runs triggers, replacements, and SBAs.
 fn move_zone_simulated(runner: &mut GameRunner, id: ObjectId, to: Zone) {
@@ -818,7 +1063,7 @@ fn settle_stack(runner: &mut GameRunner) {
     }
 }
 
-fn zombie_tokens(runner: &GameRunner, controller: PlayerId) -> Vec<ObjectId> {
+fn subtype_tokens(runner: &GameRunner, controller: PlayerId, subtype: &str) -> Vec<ObjectId> {
     runner
         .state()
         .battlefield
@@ -832,32 +1077,145 @@ fn zombie_tokens(runner: &GameRunner, controller: PlayerId) -> Vec<ObjectId> {
                         .card_types
                         .subtypes
                         .iter()
-                        .any(|subtype| subtype.eq_ignore_ascii_case("Zombie"))
+                        .any(|candidate| candidate.eq_ignore_ascii_case(subtype))
             })
         })
         .collect()
 }
 
+fn zombie_tokens(runner: &GameRunner, controller: PlayerId) -> Vec<ObjectId> {
+    subtype_tokens(runner, controller, "Zombie")
+}
+
+const STORMFORGED_GENESIS: &str = "Deal 1 damage to target creature. Create X 1/1 white Soldier creature tokens. They perpetually gain storm.";
+
+/// MED #3 (nonempty created set): the typed `LastCreated` authority beats
+/// inherited chain-target propagation. The spell damages an unrelated victim
+/// (whose id sits in the chain's inherited targets), creates two Soldiers,
+/// and the Storm rider must hit the created set ONLY — never the victim.
+///
+/// Revert-failing: inherited propagation wins, so the victim gains Storm and
+/// the Soldiers gain nothing.
+#[test]
+fn last_created_rider_hits_created_set_not_inherited_target() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let victim = scenario.add_creature(P1, "Victim Bear", 2, 2).id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Stormforged Genesis", false, STORMFORGED_GENESIS)
+        .with_mana_cost(colored_cost(vec![ManaCostShard::X, ManaCostShard::Red], 0))
+        .id();
+    let mut pool = mana(ManaType::Red, 1);
+    pool.extend(mana(ManaType::Colorless, 2));
+    scenario.with_mana_pool(P0, pool);
+
+    let mut runner = scenario.build();
+    runner.state_mut().debug_mode = true;
+    assert_fully_parsed(&runner, spell, "Stormforged Genesis");
+
+    let outcome = runner.cast(spell).x(2).target_objects(&[victim]).resolve();
+    outcome.assert_zone(&[spell], Zone::Graveyard);
+
+    // The damage clause resolved (positive signal the chain ran).
+    let victim_obj = &runner.state().objects[&victim];
+    assert_eq!(
+        victim_obj.damage_marked, 1,
+        "the victim must take the chain's 1 damage"
+    );
+    assert!(
+        !victim_obj.has_keyword(&Keyword::Storm),
+        "the unrelated inherited target must NOT gain Storm"
+    );
+    assert!(
+        victim_obj.perpetual_mods.is_empty(),
+        "the unrelated inherited target must carry no perpetual install"
+    );
+
+    let soldiers = subtype_tokens(&runner, P0, "Soldier");
+    assert_eq!(
+        soldiers.len(),
+        2,
+        "X=2 must create exactly two Soldiers, found {}",
+        soldiers.len()
+    );
+    for id in &soldiers {
+        let token = &runner.state().objects[id];
+        assert!(
+            token.has_keyword(&Keyword::Storm),
+            "each created Soldier must gain the granted Storm"
+        );
+        assert_eq!(
+            token.perpetual_mods.len(),
+            1,
+            "each created Soldier must carry exactly one perpetual install"
+        );
+    }
+}
+
+/// MED #3 (empty created set): with X=0 the creation antecedent yields no
+/// objects, so the `LastCreated` rider applies to nothing — NOT to the
+/// unrelated inherited target. The victim's marked damage is the positive
+/// signal the chain resolved (without it the no-Storm assertions would pass
+/// vacuously on a fizzled chain).
+///
+/// Revert-failing: inherited propagation wins and the victim gains Storm.
+#[test]
+fn last_created_rider_with_empty_created_set_hits_nothing() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let victim = scenario.add_creature(P1, "Victim Bear", 2, 2).id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Stormforged Genesis", false, STORMFORGED_GENESIS)
+        .with_mana_cost(colored_cost(vec![ManaCostShard::X, ManaCostShard::Red], 0))
+        .id();
+    scenario.with_mana_pool(P0, mana(ManaType::Red, 1));
+
+    let mut runner = scenario.build();
+    runner.state_mut().debug_mode = true;
+    assert_fully_parsed(&runner, spell, "Stormforged Genesis");
+
+    let outcome = runner.cast(spell).x(0).target_objects(&[victim]).resolve();
+    outcome.assert_zone(&[spell], Zone::Graveyard);
+
+    assert!(
+        subtype_tokens(&runner, P0, "Soldier").is_empty(),
+        "X=0 must create no Soldiers"
+    );
+    let victim_obj = &runner.state().objects[&victim];
+    assert_eq!(
+        victim_obj.damage_marked, 1,
+        "the victim must take the chain's 1 damage"
+    );
+    assert!(
+        !victim_obj.has_keyword(&Keyword::Storm),
+        "with an empty created set the rider must hit nothing, not the victim"
+    );
+    assert!(
+        victim_obj.perpetual_mods.is_empty(),
+        "with an empty created set the victim must carry no perpetual install"
+    );
+}
+
 /// Matthewevans PR review (multiplicity): repeated independent perpetual
 /// trigger grants on the same physical card must each install one occurrence
 /// (CR 113.2c: "If an object has multiple instances of the same ability, each
-/// instance functions independently"). Oglor-driven end to end: mill the same
-/// Bears twice with a zone cycle between, and the first graveyard departure
-/// yields one Zombie while every later departure yields two — with distinct
-/// `Printed` occurrence refs retained across layer recomputation and further
-/// zone changes.
+/// instance functions independently"). Oglor-driven end to end: grant the same
+/// Bears three times (twice via the library, once via the hand) with zone
+/// cycles between — the first graveyard departure yields one Zombie, the next
+/// two yield two each, and the last yields three — with distinct `Printed`
+/// occurrence refs retained across layer recomputation and further zone
+/// changes.
 ///
-/// The grants route through the library because Oglor's "from your library
-/// or hand" origin currently parses to a single `Library` origin (pre-existing
-/// "A or B" origin-list limitation, out of scope for this fix) — hand routes
-/// would not fire the outer trigger. Likewise the graveyard departures target
-/// the battlefield and exile (scanned zones): the look-back scan only covers
-/// departures from the battlefield plus current-zone scans of
-/// battlefield/graveyard/exile/stack, so a graveyard -> hand/library departure
-/// of the trigger's own source is invisible to collection (pre-existing
-/// look-back gap: CR 603.10a lists leaves-graveyard triggers among those
-/// that look back, but the scan only implements leaves-battlefield look-back;
-/// extending it is out of scope for this fix).
+/// Both origin routes fire the outer trigger (CR 603.1): Oglor's "from your
+/// library or hand" origin parses to the disjunctive `origin_zones` set. The
+/// graveyard departures target the battlefield and exile (scanned zones): the
+/// look-back scan only covers departures from the battlefield plus
+/// current-zone scans of battlefield/graveyard/exile/stack, so a graveyard ->
+/// hand/library departure of the trigger's own source is invisible to
+/// collection (pre-existing look-back gap: CR 603.10a lists
+/// leaves-graveyard triggers among those that look back, but the scan only
+/// implements leaves-battlefield look-back; extending it is out of scope for
+/// this fix).
 ///
 /// Revert-failing: the structural-equality installer guard collapses the
 /// second grant, so the `base_trigger_definitions` count stays 1 and every
@@ -991,5 +1349,35 @@ fn oglor_repeated_grants_retain_multiplicity_across_zone_cycles() {
         zombie_tokens(&runner, P0).len(),
         5,
         "the second graveyard departure must fire both instances (+2)"
+    );
+
+    // Grant #3 (hand route): exile -> hand is quiet (Oglor needs a graveyard
+    // destination; the granted leaves-graveyard triggers need a graveyard
+    // origin), then hand -> graveyard fires Oglor's disjunctive origin
+    // (CR 603.1) for a third independent grant.
+    move_zone_simulated(&mut runner, bears, Zone::Hand);
+    settle_stack(&mut runner);
+    assert_eq!(
+        zombie_tokens(&runner, P0).len(),
+        5,
+        "exile -> hand must fire nothing"
+    );
+    move_zone_simulated(&mut runner, bears, Zone::Graveyard);
+    settle_stack(&mut runner);
+    assert_eq!(
+        runner.state().objects[&bears]
+            .base_trigger_definitions
+            .len(),
+        3,
+        "hand -> graveyard must fire Oglor's library-or-hand origin for a third grant"
+    );
+
+    // Departure #3: three instances -> three more Zombies (5 + 3 = 8).
+    move_zone_simulated(&mut runner, bears, Zone::Battlefield);
+    settle_stack(&mut runner);
+    assert_eq!(
+        zombie_tokens(&runner, P0).len(),
+        8,
+        "leaving the graveyard with three instances must create three more Zombies"
     );
 }

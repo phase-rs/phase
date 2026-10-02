@@ -12235,16 +12235,13 @@ fn try_parse_perpetual_grant_ability(tp: TextPair, ctx: &ParseContext) -> Option
     }
 
     let (lower_rest, target) = parse_perpetual_self_subject(tp.lower, ctx)?;
-    // Not a CR citation -- a Rust string-slicing idiom (`oracle_util`'s
-    // `text.len() - rest.len()` offset), used because `TextPair` cannot be
-    // reconstructed here: `parse_perpetual_self_subject` returns a
-    // lowercase-only remainder. Re-derive the ORIGINAL-case remainder from how
-    // much of `tp.lower` the subject prefix consumed, so the quoted bodies
-    // below are classified with their printed casing preserved
-    // (`classify_quoted_inner`'s fallback stamps its `AbilityDefinition::description`
-    // straight from the text it is handed).
-    let consumed = tp.lower.len() - lower_rest.len();
-    let orig_rest = &tp.original[consumed..];
+    // Re-derive the ORIGINAL-case remainder (via the Unicode-safe boundary
+    // mapper — a naive lower-derived byte offset breaks when lowercasing
+    // changes byte length) so the quoted bodies below are classified with
+    // their printed casing preserved (`classify_quoted_inner`'s fallback
+    // stamps its `AbilityDefinition::description` straight from the text it
+    // is handed).
+    let orig_rest = tp.original_remainder(lower_rest)?;
 
     let (mut rest, first_body) = parse_perpetual_quoted_ability_body(orig_rest)?;
     let mut bodies = vec![first_body];
@@ -12411,10 +12408,9 @@ fn try_parse_perpetual_grant_self_alt_cost(tp: TextPair, ctx: &ParseContext) -> 
 
     let (lower_rest, target) = parse_perpetual_self_subject(tp.lower, ctx)?;
     // Lowercase-only remainder, as in `try_parse_perpetual_grant_ability`:
-    // re-derive the ORIGINAL-case remainder so the self-cost slice below
-    // preserves mana-symbol casing.
-    let consumed = tp.lower.len() - lower_rest.len();
-    let orig_rest = &tp.original[consumed..];
+    // re-derive the ORIGINAL-case remainder (via the Unicode-safe boundary
+    // mapper) so the self-cost slice below preserves mana-symbol casing.
+    let orig_rest = tp.original_remainder(lower_rest)?;
 
     let (mut rest, first_body) = parse_perpetual_quoted_ability_body(orig_rest)?;
     let mut bodies = vec![first_body];

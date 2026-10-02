@@ -16196,7 +16196,8 @@ impl TryFrom<ContinuousModification> for PerpetualGrantModification {
             //
             // The `GrantAbility` resolution-time `GenericEffect` gate above is
             // explicitly NOT mirrored: a trigger's `execute` runs through
-            // normal trigger resolution (CR 603.1), so a resolution-time grant
+            // normal trigger resolution (CR 603.1: triggered abilities have a
+            // trigger condition and an effect), so a resolution-time grant
             // nested inside it resolves like any other trigger body — that
             // gate's rationale (the installer cannot route nested statics at
             // grant time) does not apply.
