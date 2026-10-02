@@ -30,8 +30,8 @@ use crate::types::game_state::{
     AutoMayChoice, CastOfferKind, ClauseMinimumSnapshot, DayNight, DiscardBatchCursor,
     ExileLinkKind, GameState, LKISnapshot, ManaAbilityResume, MayTriggerAutoChoiceKey,
     PendingContinuation, PendingCostMoveResume, PendingDiscardBatchCompletion,
-    PendingPlayerScopeLinkedExile, PendingPlayerScopeSacrificeChoice,
-    PendingPlayerScopeSacrificeCompletion, PendingPlayerScopeSacrificeFollowUp,
+    PendingPlayerScopeSacrificeChoice, PendingPlayerScopeSacrificeCompletion,
+    PendingPlayerScopeSacrificeFollowUp, PendingPlayerScopeTail, PlayerScopeCreatedTokens,
     RepeatUntilStopWitness, ResolutionOptionalPaymentOption, ReturnResultOccurrenceId, WaitingFor,
     ZoneChangeRecord, ZoneOpponentChooserPurpose,
 };
@@ -1162,15 +1162,21 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
     {
         let scoped_source = state
             .active_ability_continuation()
-            .and_then(|pending| pending.player_scope_linked_exile.as_ref())
+            .and_then(|pending| pending.player_scope_tail.as_ref())
             .map(|scope| scope.source_id);
         if let Some(source_id) = scoped_source {
             let additions = linked_exile_batch_from_events(state, source_id, events);
+            let ledger = state.last_created_token_ids.clone();
             if let Some(scope) = state
                 .active_ability_continuation_frame_mut()
-                .and_then(|frame| frame.pending.player_scope_linked_exile.as_mut())
+                .and_then(|frame| frame.pending.player_scope_tail.as_mut())
             {
-                extend_linked_exile_batch(&mut scope.batch, additions);
+                extend_linked_exile_batch(&mut scope.linked_exile_batch, additions);
+                // CR 608.2f: the answered seat's entry has just completed and
+                // published its tokens; they are part of this clause's result.
+                if let Some(acc) = scope.created_tokens.as_mut() {
+                    fold_player_scope_created_tokens(acc, &ledger);
+                }
             }
         }
         let discard_frame = state
@@ -1208,7 +1214,7 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
             trigger_firing,
             attachment_choice,
             attachment_remainder: _,
-            player_scope_linked_exile,
+            player_scope_tail,
             player_scope_queue_end,
         } = cont;
         debug_assert!(
@@ -1221,10 +1227,8 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
         );
         restore_continuation_trigger_firing(state, trigger_firing);
         state.resolving_continuation_attach_host = search_attach_host;
-        let previous_scope = std::mem::replace(
-            &mut state.resolving_player_scope_linked_exile,
-            player_scope_linked_exile,
-        );
+        let previous_scope =
+            std::mem::replace(&mut state.resolving_player_scope_tail, player_scope_tail);
         let source_id = chain.source_id;
         let prior_occurrence = std::mem::replace(
             &mut state.active_return_result_occurrence,
@@ -1255,20 +1259,37 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
                 let _ = resolve_ability_chain(state, &chain, events, 1);
             }
         }
-        if let Some(scope) = state.resolving_player_scope_linked_exile.as_ref() {
-            mark_exile_choice_tracks_by_source(state, scope.source_id);
+        // The exile-choice tracking belongs only to a tail that consumes the
+        // linked-exile channel — the same predicate that installed it.
+        if let Some(source_id) = state
+            .resolving_player_scope_tail
+            .as_ref()
+            .filter(|scope| {
+                crate::game::exile_links::ability_contains_linked_exile_consumer(&scope.after_scope)
+            })
+            .map(|scope| scope.source_id)
+        {
+            mark_exile_choice_tracks_by_source(state, source_id);
         }
         if let Some(snapshot) = trigger_snapshot {
             super::triggers::restore_trigger_event_context(state, snapshot);
         }
-        let completed_scope = std::mem::take(&mut state.resolving_player_scope_linked_exile);
-        state.resolving_player_scope_linked_exile = previous_scope;
+        let completed_scope = std::mem::take(&mut state.resolving_player_scope_tail);
+        state.resolving_player_scope_tail = previous_scope;
         state.resolving_continuation_attach_host = None;
         if !waits_for_resolution_choice(&state.waiting_for)
             && state.active_ability_continuation().is_none()
         {
             if let Some(mut scope) = completed_scope {
-                bind_resolution_exile_batch_paths(&mut scope.after_scope, &scope.batch);
+                // CR 608.2e + CR 608.2c: every seat has drained — the next
+                // instruction's "the tokens" names the whole clause's union.
+                if let Some(acc) = scope.created_tokens.as_ref() {
+                    publish_player_scope_created_tokens(state, acc);
+                }
+                bind_resolution_exile_batch_paths(
+                    &mut scope.after_scope,
+                    &scope.linked_exile_batch,
+                );
                 let _ = resolve_ability_chain(state, &scope.after_scope, events, 1);
             }
         }
@@ -2712,7 +2733,7 @@ fn prepend_to_pending_continuation_with_producer(
             trigger_firing,
             attachment_choice,
             attachment_remainder,
-            player_scope_linked_exile,
+            player_scope_tail,
             player_scope_queue_end,
         } = existing;
         assert!(
@@ -2735,7 +2756,7 @@ fn prepend_to_pending_continuation_with_producer(
                 trigger_firing,
                 attachment_choice,
                 attachment_remainder,
-                player_scope_linked_exile,
+                player_scope_tail,
                 player_scope_queue_end,
             },
             choose_zone_trigger_context: frame.choose_zone_trigger_context,
@@ -2755,6 +2776,99 @@ fn park_player_scope_queue_end(state: &mut GameState, placeholder: ResolvedAbili
     } else {
         state.park_ability_continuation(pending);
     }
+}
+
+/// CR 608.2f + CR 608.2e: park a paused player-scope clause's own frame — its
+/// remaining generated seats, or its queue-end placeholder — outside the
+/// complete child stack the pausing seat raised. The scoped action is
+/// processed for each affected player individually in APNAP order (CR 608.2f),
+/// so every instruction that seat parked (its child operation, then its own
+/// remaining in-seat instructions) resolves before the next seat; the next
+/// instruction begins only after this one has been processed for every player
+/// (CR 608.2e), so the frame carrying the clause's tail authority is the
+/// clause's last-draining frame whatever owns the stack top.
+/// Player-scope twin of `park_repeat_for_after_current_iteration`.
+fn park_player_scope_after_paused_seat(
+    state: &mut GameState,
+    pending: PendingContinuation,
+    seat_boundary: ChildStackDepth,
+) {
+    match state
+        .resolution_stack
+        .capture_child_boundary()
+        .cmp(&seat_boundary)
+    {
+        std::cmp::Ordering::Less => {
+            panic!("player-scope seat removed a parent frame before its clause could be re-parked")
+        }
+        std::cmp::Ordering::Equal => state.park_ability_continuation(pending),
+        std::cmp::Ordering::Greater => state
+            .insert_ability_continuation_parent_at_child_boundary(pending, seat_boundary)
+            .expect(
+                "player-scope clause must be parked below its paused seat's complete child stack",
+            ),
+    }
+}
+
+/// CR 608.2f: a generated player-scope leg processes each remaining seat
+/// individually, in APNAP order, after the previous seat's instructions, each
+/// seat's nodes stamped with that seat's `scoped_player` by the driver; the
+/// first node stamped with another seat begins the next seat's instruction.
+/// Detaches and returns that node (with everything after it), or `None` when
+/// the chain holds no other seat.
+fn split_off_next_player_scope_seat(ability: &mut ResolvedAbility) -> Option<Box<ResolvedAbility>> {
+    let seat = ability.scoped_player;
+    let mut cursor = ability;
+    loop {
+        if cursor
+            .sub_ability
+            .as_ref()
+            .is_some_and(|next| next.scoped_player != seat)
+        {
+            return cursor.sub_ability.take();
+        }
+        cursor = cursor.sub_ability.as_deref_mut()?;
+    }
+}
+
+/// The one install path for an `OptionalEffect` direct-choice frame.
+///
+/// CR 608.2e + CR 608.2f: when the frame's ability is a seat of a paused
+/// player-scope clause whose tail authority is live, the decision handler must
+/// resolve only this seat's instructions — the clause's remaining seats and
+/// its tail authority keep a frame that drains after the decision.
+fn install_optional_effect_frame(
+    state: &mut GameState,
+    mut frame: OptionalEffectFrame,
+    waiting_for: WaitingFor,
+) -> Result<(), EffectError> {
+    let owns_live_seat = state
+        .resolving_player_scope_tail
+        .as_ref()
+        .is_some_and(|tail| tail.source_id == frame.ability.source_id)
+        && frame.ability.scoped_player.is_some();
+    let clause_remainder = owns_live_seat.then(|| {
+        let next_seats = split_off_next_player_scope_seat(&mut frame.ability);
+        let placeholder = (*frame.ability).clone();
+        (next_seats, placeholder)
+    });
+    state
+        .install_direct_choice_frame(ResolutionFrame::OptionalEffect(frame), waiting_for)
+        .map_err(|error| EffectError::InvalidParam(error.to_string()))?;
+    match clause_remainder {
+        // The direct-choice child is the only frame this node raised, so its
+        // immediate parent is the node's child boundary.
+        Some((Some(next_seats), _)) => {
+            let pending = PendingContinuation::new(next_seats, state);
+            state
+                .insert_ability_continuation_parent_of_active(pending)
+                .map_err(|error| EffectError::InvalidParam(error.to_string()))?;
+        }
+        // The clause's last seat: its queue end carries the live authority.
+        Some((None, placeholder)) => park_player_scope_queue_end(state, placeholder),
+        None => {}
+    }
+    Ok(())
 }
 
 /// CR 118.12 + CR 608.2c: Complete the original rider of a paused
@@ -12938,6 +13052,60 @@ fn publish_player_scope_clause_results(
     linked_exile_batch_from_events(state, outer.source_id, scoped_events)
 }
 
+/// CR 608.2c + CR 608.2f: fold one seat's created-token publication into its
+/// clause's union. An id the clause found in the ledger (an earlier
+/// instruction's token, or a stale value left by a seat that created nothing)
+/// is never this clause's.
+fn fold_player_scope_created_tokens(acc: &mut PlayerScopeCreatedTokens, ledger: &[ObjectId]) {
+    for id in ledger {
+        if !acc.baseline.contains(id) && !acc.tokens.contains(id) {
+            acc.tokens.push(*id);
+        }
+    }
+}
+
+/// CR 608.2e + CR 608.2f + CR 608.2c: "each player creates …" is one
+/// instruction taken for every matched player, and the next instruction's "the
+/// tokens" names everything it created — so a completed clause publishes the
+/// union of its seats' tokens, not the last seat's. A clause that published
+/// nothing (empty union) leaves the ledger exactly as the last seat left it.
+/// Existence is re-checked with the predicate `token::record_last_created_token`
+/// applies, so the slot never names an object that no longer exists.
+fn publish_player_scope_created_tokens(state: &mut GameState, acc: &PlayerScopeCreatedTokens) {
+    if acc.tokens.is_empty() {
+        return;
+    }
+    let published: Vec<ObjectId> = acc
+        .tokens
+        .iter()
+        .copied()
+        .filter(|id| state.objects.contains_key(id))
+        .collect();
+    state.last_created_token_ids = published;
+}
+
+/// CR 608.2c: does any instruction of this detached tail read the created-token
+/// ledger (`LastCreated`)? Walks the chain's `sub_ability` / `else_ability`;
+/// per node: the effect's target slot and its condition.
+fn ability_chain_reads_last_created(ability: &ResolvedAbility) -> bool {
+    ability
+        .effect
+        .target_filter()
+        .is_some_and(filter_contains_last_created)
+        || ability
+            .condition
+            .as_ref()
+            .is_some_and(condition_depends_on_last_created)
+        || ability
+            .sub_ability
+            .as_deref()
+            .is_some_and(ability_chain_reads_last_created)
+        || ability
+            .else_ability
+            .as_deref()
+            .is_some_and(ability_chain_reads_last_created)
+}
+
 /// CR 400.7 + CR 608.2f: capture only current incarnations exiled by this
 /// completed slice of a multi-player instruction, preserving event order.
 pub(super) fn linked_exile_batch_from_events(
@@ -15218,7 +15386,23 @@ fn resolve_chain_body(
         }
 
         let initial_waiting_for = state.waiting_for.clone();
-        let mut paused = false;
+        // The pausing seat's child boundary, once a seat pauses the clause.
+        let mut paused_at: Option<ChildStackDepth> = None;
+        let mut pending_legs: Option<Box<ResolvedAbility>> = None;
+        // CR 608.2c + CR 608.2f: the clause's created-token union. The ledger
+        // as the clause found it is an earlier instruction's result, never
+        // this clause's.
+        let mut clause_tokens = PlayerScopeCreatedTokens {
+            baseline: state.last_created_token_ids.clone(),
+            tokens: Vec::new(),
+        };
+        // A tail that reads the ledger must be detached on a pause so it runs
+        // once over the union, exactly like a linked-exile consumer.
+        let after_scope_reads_created_tokens = after_scope
+            .as_deref()
+            .is_some_and(ability_chain_reads_last_created);
+        let after_scope_detaches =
+            after_scope_needs_linked_exile || after_scope_reads_created_tokens;
         // CR 608.2c: the zero-fill's reduction domain is the set of players the
         // clause has actually applied to. A mid-fan-out pause leaves the tail
         // unresolved, so filling them as zero would publish a contribution they
@@ -15283,7 +15467,12 @@ fn resolve_chain_body(
             // keeping "you" references stable (CR 109.5).
             scoped.set_controller_recursive(*pid);
             scoped.set_scoped_player_recursive(*pid);
+            let seat_boundary = state.resolution_stack.capture_child_boundary();
             resolve_ability_chain(state, &scoped, events, depth + 1)?;
+            // CR 608.2f: this seat's publication joins the clause's union —
+            // possibly partial if it paused mid-entry; the drain-start fold
+            // completes it once the answered seat finishes.
+            fold_player_scope_created_tokens(&mut clause_tokens, &state.last_created_token_ids);
 
             // CR 608.2e: Break if inner effect entered a player-choice state —
             // remaining players resume after the choice resolves via continuation.
@@ -15343,7 +15532,7 @@ fn resolve_chain_body(
                 // The unscoped tail is owned explicitly by the continuation
                 // sidecar below. Only generated per-seat nodes are linearized
                 // here, so no ordinary scoped sibling can impersonate them.
-                let mut tail = if after_scope_needs_linked_exile {
+                let mut tail = if after_scope_detaches {
                     None
                 } else {
                     after_scope.clone()
@@ -15381,14 +15570,13 @@ fn resolve_chain_body(
                 // frozen extremum. The next `player_scope` link's
                 // `capture_clause_minimum_snapshot` overwrites it; `apply()`
                 // disposes of any residue once resolution ends.
-                if tail.is_some() {
-                    append_to_pending_continuation(state, tail);
-                }
+                // Placed after the clause postlude, at this seat's boundary.
+                pending_legs = tail;
                 // `i`, not `i + 1`: player `i` is the one who just paused, so
                 // they have NOT completed the clause and must not be filled as
                 // a zero contributor.
                 applied_domain_end = i;
-                paused = true;
+                paused_at = Some(seat_boundary);
                 break;
             }
         }
@@ -15400,30 +15588,54 @@ fn resolve_chain_body(
             after_scope_needs_linked_exile,
             &events[scoped_events_before..],
         );
-        if !paused {
-            // CR 608.2e: this `player_scope` clause has completed. Clear its
-            // frozen values before running any following instruction; if the
-            // tail is another `player_scope` clause, that recursive entry will
-            // capture its own fresh snapshot against the post-this-clause board.
-            state.clause_minimum_snapshot = None;
-            if let Some(mut after_scope) = after_scope {
-                bind_resolution_exile_batch_paths(&mut after_scope, &linked_batch);
-                resolve_ability_chain(state, &after_scope, events, depth + 1)?;
-            }
-        } else if after_scope_needs_linked_exile {
-            if let Some(after_scope) = after_scope {
-                if state.active_ability_continuation().is_none() {
-                    park_player_scope_queue_end(state, after_scope.as_ref().clone());
+        match paused_at {
+            None => {
+                // CR 608.2e: this `player_scope` clause has completed. Clear its
+                // frozen values before running any following instruction; if the
+                // tail is another `player_scope` clause, that recursive entry will
+                // capture its own fresh snapshot against the post-this-clause board.
+                state.clause_minimum_snapshot = None;
+                publish_player_scope_created_tokens(state, &clause_tokens);
+                if let Some(mut after_scope) = after_scope {
+                    bind_resolution_exile_batch_paths(&mut after_scope, &linked_batch);
+                    resolve_ability_chain(state, &after_scope, events, depth + 1)?;
                 }
-                if let Some(frame) = state.active_ability_continuation_frame_mut() {
-                    // CR 608.2f: generated APNAP nodes and their exact union are
-                    // explicit pause authority. The detached tail resolves once only
-                    // after every generated seat has drained.
-                    frame.pending.player_scope_linked_exile = Some(PendingPlayerScopeLinkedExile {
+            }
+            Some(seat_boundary) => {
+                // CR 608.2f: generated APNAP nodes and the clause's exact
+                // union(s) are explicit pause authority, built BEFORE the
+                // clause's frame is placed and attached at construction, so it
+                // rides the clause's last-draining frame whatever the paused
+                // seat left on top. The detached tail resolves once, only after
+                // every generated seat has drained.
+                let scope_tail = after_scope
+                    .filter(|_| after_scope_detaches)
+                    .map(|after_scope| PendingPlayerScopeTail {
                         source_id: ability.source_id,
                         after_scope,
-                        batch: linked_batch,
+                        linked_exile_batch: linked_batch,
+                        created_tokens: after_scope_reads_created_tokens.then_some(clause_tokens),
                     });
+                let clause_frame = match (pending_legs, scope_tail) {
+                    (Some(legs), scope_tail) => {
+                        let mut pending = PendingContinuation::new(legs, state);
+                        if scope_tail.is_some() {
+                            pending.player_scope_tail = scope_tail;
+                        }
+                        Some(pending)
+                    }
+                    (None, Some(scope_tail)) => {
+                        let mut pending = PendingContinuation::player_scope_queue_end(
+                            scope_tail.after_scope.clone(),
+                            state,
+                        );
+                        pending.player_scope_tail = Some(scope_tail);
+                        Some(pending)
+                    }
+                    (None, None) => None,
+                };
+                if let Some(pending) = clause_frame {
+                    park_player_scope_after_paused_seat(state, pending, seat_boundary);
                 }
             }
         }
@@ -15768,24 +15980,21 @@ fn resolve_chain_body(
                 let hydrated_ability = ability_with_event_context_targets(state, ability);
                 let decision_subject_id =
                     resolved_optional_decision_subject_id(state, &hydrated_ability);
-                state
-                    .install_direct_choice_frame(
-                        ResolutionFrame::OptionalEffect(OptionalEffectFrame {
-                            ability: Box::new(hydrated_ability),
-                            trigger_event: state.current_trigger_event.clone(),
-                            trigger_events: state.current_trigger_events.clone(),
-                            trigger_match_count: state.current_trigger_match_count,
-                            return_result_occurrence: state.active_return_result_occurrence,
-                        }),
-                        WaitingFor::OpponentMayChoice {
-                            player: first,
-                            decision_subject_id,
-                            source_id: ability.source_id,
-                            description,
-                            remaining,
-                        },
-                    )
-                    .map_err(|error| EffectError::InvalidParam(error.to_string()))?;
+                let frame = OptionalEffectFrame {
+                    ability: Box::new(hydrated_ability),
+                    trigger_event: state.current_trigger_event.clone(),
+                    trigger_events: state.current_trigger_events.clone(),
+                    trigger_match_count: state.current_trigger_match_count,
+                    return_result_occurrence: state.active_return_result_occurrence,
+                };
+                let waiting_for = WaitingFor::OpponentMayChoice {
+                    player: first,
+                    decision_subject_id,
+                    source_id: ability.source_id,
+                    description,
+                    remaining,
+                };
+                install_optional_effect_frame(state, frame, waiting_for)?;
             }
             return Ok(());
         }
@@ -15859,22 +16068,19 @@ fn resolve_chain_body(
                 )?;
                 return Ok(());
             }
-            state
-                .install_direct_choice_frame(
-                    ResolutionFrame::OptionalEffect(OptionalEffectFrame {
-                        ability: Box::new(ability_with_event_context_targets(state, ability)),
-                        trigger_event: state.current_trigger_event.clone(),
-                        trigger_events: state.current_trigger_events.clone(),
-                        trigger_match_count: state.current_trigger_match_count,
-                        return_result_occurrence: state.active_return_result_occurrence,
-                    }),
-                    WaitingFor::ResolutionOptionalPaymentChoice {
-                        player: payer,
-                        source_id: ability.source_id,
-                        costs,
-                    },
-                )
-                .map_err(|error| EffectError::InvalidParam(error.to_string()))?;
+            let frame = OptionalEffectFrame {
+                ability: Box::new(ability_with_event_context_targets(state, ability)),
+                trigger_event: state.current_trigger_event.clone(),
+                trigger_events: state.current_trigger_events.clone(),
+                trigger_match_count: state.current_trigger_match_count,
+                return_result_occurrence: state.active_return_result_occurrence,
+            };
+            let waiting_for = WaitingFor::ResolutionOptionalPaymentChoice {
+                player: payer,
+                source_id: ability.source_id,
+                costs,
+            };
+            install_optional_effect_frame(state, frame, waiting_for)?;
             return Ok(());
         }
 
@@ -15902,37 +16108,34 @@ fn resolve_chain_body(
         }
         let hydrated_ability = ability_with_event_context_targets(state, ability);
         let decision_subject_id = resolved_optional_decision_subject_id(state, &hydrated_ability);
-        state
-            .install_direct_choice_frame(
-                ResolutionFrame::OptionalEffect(OptionalEffectFrame {
-                    ability: Box::new(hydrated_ability),
-                    // CR 608.2: capture the triggering event in lockstep with the stashed
-                    // ability while `current_trigger_event` is still live (we are inside
-                    // `execute_effect`). Restored when the optional decision resumes so an
-                    // optional ("may") trigger's effect resolves `TriggeringPlayer` and
-                    // other event-context refs exactly as a non-optional trigger would.
-                    trigger_event: state.current_trigger_event.clone(),
-                    // CR 603.2c + CR 608.2: capture the PLURAL event batch in lockstep so a
-                    // "you may" reproduction (Captain Marvel, Apex Avenger) folds every
-                    // `CounterAdded` occurrence when the decision resumes.
-                    trigger_events: state.current_trigger_events.clone(),
-                    // CR 603.2c + CR 608.2: mirror the batched-trigger subject count so a
-                    // "you may" sub-ability of a batched trigger (Ur-Dragon's optional
-                    // permanent-from-hand sub-effect) resumes with the same
-                    // `EventContextAmount` the pre-pause resolution observed.
-                    trigger_match_count: state.current_trigger_match_count,
-                    return_result_occurrence: state.active_return_result_occurrence,
-                }),
-                WaitingFor::OptionalEffectChoice {
-                    player: prompt_player,
-                    decision_subject_id,
-                    source_id: ability.source_id,
-                    description,
-                    may_trigger_key,
-                    same_card_may_trigger_choice_available,
-                },
-            )
-            .map_err(|error| EffectError::InvalidParam(error.to_string()))?;
+        let frame = OptionalEffectFrame {
+            ability: Box::new(hydrated_ability),
+            // CR 608.2: capture the triggering event in lockstep with the stashed
+            // ability while `current_trigger_event` is still live (we are inside
+            // `execute_effect`). Restored when the optional decision resumes so an
+            // optional ("may") trigger's effect resolves `TriggeringPlayer` and
+            // other event-context refs exactly as a non-optional trigger would.
+            trigger_event: state.current_trigger_event.clone(),
+            // CR 603.2c + CR 608.2: capture the PLURAL event batch in lockstep so a
+            // "you may" reproduction (Captain Marvel, Apex Avenger) folds every
+            // `CounterAdded` occurrence when the decision resumes.
+            trigger_events: state.current_trigger_events.clone(),
+            // CR 603.2c + CR 608.2: mirror the batched-trigger subject count so a
+            // "you may" sub-ability of a batched trigger (Ur-Dragon's optional
+            // permanent-from-hand sub-effect) resumes with the same
+            // `EventContextAmount` the pre-pause resolution observed.
+            trigger_match_count: state.current_trigger_match_count,
+            return_result_occurrence: state.active_return_result_occurrence,
+        };
+        let waiting_for = WaitingFor::OptionalEffectChoice {
+            player: prompt_player,
+            decision_subject_id,
+            source_id: ability.source_id,
+            description,
+            may_trigger_key,
+            same_card_may_trigger_choice_available,
+        };
+        install_optional_effect_frame(state, frame, waiting_for)?;
         return Ok(());
     }
 
@@ -16681,8 +16884,13 @@ fn resolve_chain_body(
         .collect();
     let linked_batch =
         linked_exile_batch_from_events(state, ability.source_id, &events[events_before..]);
-    if let Some(scope) = state.resolving_player_scope_linked_exile.as_mut() {
-        extend_linked_exile_batch(&mut scope.batch, linked_batch.iter().copied());
+    if let Some(scope) = state.resolving_player_scope_tail.as_mut() {
+        extend_linked_exile_batch(&mut scope.linked_exile_batch, linked_batch.iter().copied());
+        // CR 608.2f: a generated seat node of a paused clause has finished;
+        // its published tokens join the clause's union.
+        if let Some(acc) = scope.created_tokens.as_mut() {
+            fold_player_scope_created_tokens(acc, &state.last_created_token_ids);
+        }
     }
     let linked_batch_owned;
     let ability = if linked_batch.is_empty() || ability.sub_ability.is_none() {
@@ -17069,7 +17277,7 @@ fn resolve_chain_body(
 
     if ability.sub_ability.is_none()
         && waits_for_resolution_choice(&state.waiting_for)
-        && state.resolving_player_scope_linked_exile.is_some()
+        && state.resolving_player_scope_tail.is_some()
         && state.active_ability_continuation().is_none()
     {
         park_player_scope_queue_end(state, ability.clone());
@@ -29929,6 +30137,165 @@ mod tests {
             .transient_continuous_effects
             .iter()
             .any(|effect| { effect.affected == TargetFilter::SpecificObject { id: stale } }));
+    }
+
+    #[test]
+    fn player_scope_created_token_fold_excludes_baseline_dedups_and_keeps_order() {
+        let mut acc = PlayerScopeCreatedTokens {
+            baseline: vec![ObjectId(1)],
+            tokens: Vec::new(),
+        };
+        // Seat 0 created nothing: the ledger still names the earlier token.
+        fold_player_scope_created_tokens(&mut acc, &[ObjectId(1)]);
+        assert!(
+            acc.tokens.is_empty(),
+            "a baseline id is never this clause's"
+        );
+        fold_player_scope_created_tokens(&mut acc, &[ObjectId(5), ObjectId(6)]);
+        // The same seat's publication folded again (drain start after a node fold).
+        fold_player_scope_created_tokens(&mut acc, &[ObjectId(5), ObjectId(6)]);
+        fold_player_scope_created_tokens(&mut acc, &[ObjectId(3)]);
+        assert_eq!(
+            acc.tokens,
+            vec![ObjectId(5), ObjectId(6), ObjectId(3)],
+            "APNAP publication order, each id once"
+        );
+    }
+
+    #[test]
+    fn player_scope_created_token_publish_filters_dead_ids_and_skips_empty_union() {
+        let mut state = GameState::new_two_player(42);
+        let live = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Live Token".to_string(),
+            Zone::Battlefield,
+        );
+        let dead = ObjectId(9_999);
+        state.last_created_token_ids = vec![dead];
+
+        publish_player_scope_created_tokens(&mut state, &PlayerScopeCreatedTokens::default());
+        assert_eq!(
+            state.last_created_token_ids,
+            vec![dead],
+            "an empty union leaves the ledger exactly as the last seat left it"
+        );
+
+        publish_player_scope_created_tokens(
+            &mut state,
+            &PlayerScopeCreatedTokens {
+                baseline: Vec::new(),
+                tokens: vec![dead, live],
+            },
+        );
+        assert_eq!(state.last_created_token_ids, vec![live]);
+
+        publish_player_scope_created_tokens(
+            &mut state,
+            &PlayerScopeCreatedTokens {
+                baseline: Vec::new(),
+                tokens: vec![dead],
+            },
+        );
+        assert!(
+            state.last_created_token_ids.is_empty(),
+            "an all-dead union names nothing"
+        );
+    }
+
+    fn last_created_walk_node(target: TargetFilter) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        )
+    }
+
+    #[test]
+    fn ability_chain_reads_last_created_walks_targets_conditions_and_branches() {
+        let creature = TargetFilter::Typed(TypedFilter::creature());
+        assert!(ability_chain_reads_last_created(&last_created_walk_node(
+            TargetFilter::LastCreated
+        )));
+        assert!(!ability_chain_reads_last_created(&last_created_walk_node(
+            creature.clone()
+        )));
+
+        let nested = TargetFilter::And {
+            filters: vec![TargetFilter::LastCreated, creature.clone()],
+        };
+        assert!(ability_chain_reads_last_created(&last_created_walk_node(
+            nested
+        )));
+        let nested_without = TargetFilter::And {
+            filters: vec![creature.clone(), TargetFilter::Controller],
+        };
+        assert!(!ability_chain_reads_last_created(&last_created_walk_node(
+            nested_without
+        )));
+
+        let mut conditioned = last_created_walk_node(creature.clone());
+        conditioned.condition = Some(AbilityCondition::SourceMatchesFilter {
+            filter: TargetFilter::LastCreated,
+        });
+        assert!(ability_chain_reads_last_created(&conditioned));
+        conditioned.condition = Some(AbilityCondition::SourceMatchesFilter {
+            filter: creature.clone(),
+        });
+        assert!(!ability_chain_reads_last_created(&conditioned));
+
+        let deep = last_created_walk_node(creature.clone()).sub_ability(
+            last_created_walk_node(creature.clone())
+                .sub_ability(last_created_walk_node(TargetFilter::LastCreated)),
+        );
+        assert!(ability_chain_reads_last_created(&deep));
+        let deep_without = last_created_walk_node(creature.clone()).sub_ability(
+            last_created_walk_node(creature.clone())
+                .sub_ability(last_created_walk_node(creature.clone())),
+        );
+        assert!(!ability_chain_reads_last_created(&deep_without));
+
+        let mut with_else = last_created_walk_node(creature.clone());
+        with_else.else_ability = Some(Box::new(last_created_walk_node(TargetFilter::LastCreated)));
+        assert!(ability_chain_reads_last_created(&with_else));
+        with_else.else_ability = Some(Box::new(last_created_walk_node(creature)));
+        assert!(!ability_chain_reads_last_created(&with_else));
+    }
+
+    #[test]
+    fn split_off_next_player_scope_seat_detaches_at_the_next_seats_head() {
+        let seat = |player: PlayerId| {
+            let mut head = last_created_walk_node(TargetFilter::LastCreated)
+                .sub_ability(last_created_walk_node(TargetFilter::LastCreated));
+            head.set_scoped_player_recursive(player);
+            head
+        };
+        let mut chain = seat(PlayerId(1));
+        let mut next = seat(PlayerId(2));
+        next.sub_link = SubAbilityLink::SequentialSibling;
+        crate::game::ability_utils::append_to_sub_chain(&mut chain, next.clone());
+
+        let split = split_off_next_player_scope_seat(&mut chain).expect("seat B splits off");
+        assert_eq!(*split, next, "the split begins at seat B's head");
+        let in_seat = chain
+            .sub_ability
+            .as_deref()
+            .expect("seat A's in-seat sub stays");
+        assert_eq!(in_seat.scoped_player, Some(PlayerId(1)));
+        assert!(in_seat.sub_ability.is_none());
+
+        let mut single = seat(PlayerId(1));
+        assert!(split_off_next_player_scope_seat(&mut single).is_none());
+        assert!(
+            single.sub_ability.is_some(),
+            "a single-seat chain is left intact"
+        );
     }
 
     #[test]
