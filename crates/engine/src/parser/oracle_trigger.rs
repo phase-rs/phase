@@ -9126,9 +9126,9 @@ fn trigger_condition_excludes_mana_activations(condition: Option<&TriggerConditi
 ///   the ability"). "a player" leaves `valid_target` unset so
 ///   `valid_player_matches` accepts every player (Burning-Tree Shaman).
 /// - **non-mana qualifier**: optional " that isn't a mana ability" (CR
-///   605.1a). Sets `TriggerCondition::ActivatedAbilityIsNonMana` so the
-///   qualifier is preserved in the AST even though `GameEvent::AbilityActivated`
-///   already excludes mana abilities (CR 605.3b).
+///   605.1a). Sets `TriggerCondition::ActivatedAbilityIsNonMana`, checked
+///   against the activation event's `kind` (mana abilities emit
+///   `GameEvent::AbilityActivated` too, CR 605.3).
 ///
 /// Nesting by prefix dispatch avoids enumerating the 6-way prefix × subject
 /// permutation as separate `tag` arms.

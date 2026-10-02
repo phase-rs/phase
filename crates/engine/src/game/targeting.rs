@@ -7180,6 +7180,7 @@ mod tests {
             source_id: ObjectId(99),
             kind: crate::types::events::ActivatedAbilityKind::Normal,
             departed_source_lki: None,
+            trigger_state: crate::types::events::ActivationTriggerState::Pending,
         };
         assert_eq!(extract_player_from_event(&event, &state), Some(PlayerId(1)));
     }

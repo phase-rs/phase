@@ -22,8 +22,11 @@ use engine::types::ability::{
     ControllerRef, Effect, FilterProp, TargetFilter, TypeFilter, TypedFilter,
 };
 use engine::types::actions::GameAction;
-use engine::types::events::{ActivatedAbilityKind, GameEvent};
-use engine::types::game_state::{ManaChoice, StackEntryKind, WaitingFor};
+use engine::types::card_type::CoreType;
+use engine::types::events::{ActivatedAbilityKind, ActivationTriggerState, GameEvent};
+use engine::types::game_state::{
+    ManaAbilityCostParentLifecycle, ManaChoice, PendingCostMoveResume, StackEntryKind, WaitingFor,
+};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaType};
 use engine::types::phase::Phase;
@@ -203,33 +206,61 @@ fn avalanche_trigger_parses_activator_relative_source_filter() {
     );
 }
 
-/// "they" has no antecedent after "you activate", so that shape is not accepted.
+/// "they" has no antecedent after "you activate", so that shape is not accepted;
+/// the third-person shape on the same sentence is (control).
 #[test]
 fn they_control_requires_a_third_person_activator() {
-    let parsed = parse_oracle_text(
-        "Whenever you activate an ability of an artifact they control, draw a card.",
-        "Probe",
-        &[],
-        &["Creature".to_string()],
-        &[],
-    );
-    assert!(
-        parsed
+    let parse = |text: &str| {
+        parse_oracle_text(text, "Probe", &[], &["Creature".to_string()], &[])
             .triggers
-            .iter()
-            .all(|t| t.mode != TriggerMode::AbilityActivated),
+            .into_iter()
+            .find(|t| t.mode == TriggerMode::AbilityActivated)
+    };
+    assert!(
+        parse("Whenever you activate an ability of an artifact they control, draw a card.")
+            .is_none(),
         "a second-person subject is never the antecedent of \"they\""
+    );
+    let control =
+        parse("Whenever a player activates an ability of an artifact they control, draw a card.")
+            .expect("control: the third-person shape parses");
+    assert!(
+        matches!(
+            &control.valid_card,
+            Some(TargetFilter::Typed(TypedFilter {
+                controller: Some(ControllerRef::TriggeringPlayer),
+                ..
+            }))
+        ),
+        "control binds the source's controller to the activator: {:?}",
+        control.valid_card
     );
 }
 
 fn activation_trigger_execute(text: &str) -> Effect {
+    (*activation_trigger_definition(text).effect).clone()
+}
+
+fn activation_trigger_definition(text: &str) -> engine::types::ability::AbilityDefinition {
     let parsed = parse_oracle_text(text, "Probe", &[], &["Creature".to_string()], &[]);
     let trigger = parsed
         .triggers
         .iter()
         .find(|t| t.mode == TriggerMode::AbilityActivated)
         .unwrap_or_else(|| panic!("{text:?} must parse as AbilityActivated"));
-    (*trigger.execute.as_deref().expect("execute").effect).clone()
+    trigger.execute.as_deref().expect("execute").clone()
+}
+
+/// Every effect of an ability's chain: the head, then each sub/else link.
+fn chain_effects(def: &engine::types::ability::AbilityDefinition) -> Vec<Effect> {
+    let mut effects = vec![(*def.effect).clone()];
+    for link in [def.sub_ability.as_deref(), def.else_ability.as_deref()]
+        .into_iter()
+        .flatten()
+    {
+        effects.extend(chain_effects(link));
+    }
+    effects
 }
 
 fn is_activation_mana_gap(effect: &Effect) -> bool {
@@ -257,7 +288,7 @@ fn activation_triggered_mana_bodies_are_strict_failed() {
 
 /// Controls: a body that adds no mana, a targeted mana-producing body (not a
 /// mana ability, CR 605.1b), a non-mana mixed body, and a trigger that excludes
-/// mana activations all stay ordinary triggers.
+/// mana activations all stay ordinary triggers — every link of the chain.
 #[test]
 fn ordinary_activation_trigger_bodies_are_not_strict_failed() {
     for text in [
@@ -266,12 +297,60 @@ fn ordinary_activation_trigger_bodies_are_not_strict_failed() {
         "Whenever you activate an ability, you gain 1 life and draw a card.",
         "Whenever you activate an ability that isn't a mana ability, add {G}.",
     ] {
-        let effect = activation_trigger_execute(text);
+        let effects = chain_effects(&activation_trigger_definition(text));
         assert!(
-            !matches!(effect, Effect::Unimplemented { .. }),
-            "{text:?} must stay an ordinary trigger, got {effect:?}"
+            effects
+                .iter()
+                .all(|effect| !matches!(effect, Effect::Unimplemented { .. })),
+            "{text:?} must stay an ordinary trigger in every link, got {effects:?}"
         );
     }
+}
+
+/// CR 605.1b: a TARGETED mana-producing activation trigger is not a mana
+/// ability, so it goes on the stack, takes its target, and resolves both
+/// instructions.
+#[test]
+fn a_targeted_mana_producing_activation_trigger_resolves_through_the_stack() {
+    let mut scenario = main_phase();
+    let watcher = scenario
+        .add_creature(P0, "Watcher", 1, 1)
+        .from_oracle_text(
+            "Whenever you activate an ability, add {G}. This creature deals 1 damage to any target.",
+        )
+        .id();
+    let dork = scenario
+        .add_creature(P0, "Dork", 1, 1)
+        .from_oracle_text(MANA)
+        .id();
+    let mut runner = scenario.build();
+    let p1_life = life(&runner, P1);
+    activate(&mut runner, dork, 0);
+    assert_eq!(pool(&runner, P0), 1, "reach: the mana ability produced");
+    if matches!(
+        runner.state().waiting_for,
+        WaitingFor::TriggerTargetSelection { .. }
+    ) {
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(engine::types::ability::TargetRef::Player(P1)),
+            })
+            .expect("target the opponent");
+    }
+    assert_eq!(
+        triggers_on_stack_from(&runner, watcher),
+        1,
+        "the targeted trigger uses the stack: {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(pool(&runner, P0), 1, "it has not resolved yet");
+    resolve_stack(&mut runner);
+    assert_eq!(
+        pool(&runner, P0),
+        2,
+        "its own {{G}} was added on resolution"
+    );
+    assert_eq!(life(&runner, P1), p1_life - 1, "and it dealt its damage");
 }
 
 // ---------------------------------------------------------------------------
@@ -756,61 +835,94 @@ fn trigger_source_sacrificed_as_the_cost_does_not_trigger() {
     );
 }
 
-fn searblades_power_after(oracles: &[(&str, bool)]) -> i32 {
+/// What a Searblades board observed: Searblades' power after every activation
+/// resolved, the mana each activation produced, and how many Searblades
+/// triggers each activation put on the stack.
+struct SearbladesRun {
+    power: i32,
+    mana_per_activation: Vec<usize>,
+    triggers_per_activation: Vec<usize>,
+}
+
+/// Each source is a creature with `oracle` and the given creature subtypes.
+fn searblades_run(sources: &[(&str, &[&str])]) -> SearbladesRun {
     let mut scenario = main_phase();
     let searblades = scenario
         .add_creature(P0, "Ceaseless Searblades", 2, 4)
         .from_oracle_text(SEARBLADES)
         .id();
-    let sources: Vec<ObjectId> = oracles
+    let ids: Vec<ObjectId> = sources
         .iter()
-        .map(|(oracle, elemental)| {
-            let mut builder = scenario.add_creature(P0, "Source", 1, 1);
-            if *elemental {
-                builder.with_subtypes(vec!["Elemental"]);
-            }
-            builder.from_oracle_text(oracle).id()
+        .map(|(oracle, subtypes)| {
+            scenario
+                .add_creature(P0, "Source", 1, 1)
+                .with_subtypes(subtypes.to_vec())
+                .from_oracle_text(oracle)
+                .id()
         })
         .collect();
     let mut runner = scenario.build();
-    for source in sources {
+    let mut mana_per_activation = Vec::new();
+    let mut triggers_per_activation = Vec::new();
+    for source in ids {
+        let before = pool(&runner, P0);
         activate(&mut runner, source, 0);
+        mana_per_activation.push(pool(&runner, P0) - before);
+        settle_trigger_order(&mut runner);
+        triggers_per_activation.push(triggers_on_stack_from(&runner, searblades));
         resolve_stack(&mut runner);
     }
-    runner.state().objects[&searblades].power.expect("power")
+    SearbladesRun {
+        power: runner.state().objects[&searblades].power.expect("power"),
+        mana_per_activation,
+        triggers_per_activation,
+    }
 }
 
 #[test]
 fn ceaseless_searblades_pumps_for_an_elemental_mana_ability() {
-    assert_eq!(searblades_power_after(&[(MANA, true)]), 3);
+    let run = searblades_run(&[(MANA, &["Elemental"])]);
+    assert_eq!(run.mana_per_activation, vec![1], "reach: mana produced");
+    assert_eq!(run.triggers_per_activation, vec![1]);
+    assert_eq!(run.power, 3);
 }
 
 #[test]
 fn ceaseless_searblades_ignores_a_non_elemental_mana_ability() {
-    assert_eq!(searblades_power_after(&[(MANA, false)]), 2);
+    let run = searblades_run(&[(MANA, &["Human"])]);
+    assert_eq!(run.mana_per_activation, vec![1], "reach: mana produced");
+    assert_eq!(
+        run.triggers_per_activation,
+        vec![0],
+        "no trigger for a non-Elemental"
+    );
+    assert_eq!(run.power, 2);
 }
 
 #[test]
 fn ceaseless_searblades_pumps_once_per_elemental_activation() {
-    assert_eq!(searblades_power_after(&[(MANA, true), (MANA, true)]), 4);
+    let run = searblades_run(&[(MANA, &["Elemental"]), (MANA, &["Elemental"])]);
+    assert_eq!(run.mana_per_activation, vec![1, 1], "reach: mana produced");
+    assert_eq!(run.triggers_per_activation, vec![1, 1]);
+    assert_eq!(run.power, 4);
 }
 
 // ---------------------------------------------------------------------------
 // "that isn't a mana ability" stays a real exclusion; cost-moved sources
 // ---------------------------------------------------------------------------
 
-fn harsh_mentor_life_delta(oracle: &str, source_is_artifact: bool) -> i32 {
+fn harsh_mentor_life_delta(oracle: &str, source_type: CoreType) -> i32 {
     let mut scenario = main_phase();
     scenario
         .add_creature(P0, "Harsh Mentor", 2, 2)
         .from_oracle_text(HARSH_MENTOR);
-    let source = if source_is_artifact {
-        add_artifact(&mut scenario, P1, "Source", oracle)
-    } else {
-        scenario
+    let source = match source_type {
+        CoreType::Artifact => add_artifact(&mut scenario, P1, "Source", oracle),
+        CoreType::Creature => scenario
             .add_creature(P1, "Source", 1, 1)
             .from_oracle_text(oracle)
-            .id()
+            .id(),
+        other => panic!("fixture builds artifact or creature sources, not {other:?}"),
     };
     let mut runner = scenario.build();
     give_p1_priority(&mut runner);
@@ -822,20 +934,21 @@ fn harsh_mentor_life_delta(oracle: &str, source_is_artifact: bool) -> i32 {
 
 #[test]
 fn harsh_mentor_still_excludes_mana_abilities() {
-    assert_eq!(harsh_mentor_life_delta(MANA, false), 0);
-    assert_eq!(harsh_mentor_life_delta(TREASURE_C, true), 0);
+    assert_eq!(harsh_mentor_life_delta(MANA, CoreType::Creature), 0);
+    assert_eq!(harsh_mentor_life_delta(TREASURE_C, CoreType::Artifact), 0);
     assert_eq!(
-        harsh_mentor_life_delta(DRAW, false),
+        harsh_mentor_life_delta(DRAW, CoreType::Creature),
         -2,
         "reach: it observes P1"
     );
 }
 
-/// CR 113.7: a Clue-like artifact sacrificed as the cost of a non-mana ability.
+/// CR 113.7 + CR 113.7a: a Clue-like artifact sacrificed as the cost of a
+/// non-mana ability.
 #[test]
 fn harsh_mentor_sees_a_source_sacrificed_as_the_cost() {
     assert_eq!(
-        harsh_mentor_life_delta("Sacrifice this artifact: Draw a card.", true),
+        harsh_mentor_life_delta("Sacrifice this artifact: Draw a card.", CoreType::Artifact),
         -2
     );
 }
@@ -1242,6 +1355,285 @@ fn replacement_paused_cost_publishes_one_activation_and_one_trigger() {
     assert_eq!(triggers_on_stack_from(&runner, avalanche), 1);
     resolve_stack(&mut runner);
     assert_eq!(life(&runner, P1), life0 - 1);
+}
+
+// ---------------------------------------------------------------------------
+// Durable payment ledgers keep a collected activation collected (CR 603.2c)
+// ---------------------------------------------------------------------------
+
+const RIP: &str =
+    "If a card or token would be put into a graveyard from anywhere, exile it instead.";
+const LEYLINE: &str =
+    "If a card would be put into an opponent's graveyard from anywhere, exile it instead.";
+const PETAL: &str = "{T}, Sacrifice this artifact: Add one mana of any color.";
+
+/// P0: Avalanche plus two competing graveyard replacements, so P1 sacrificing
+/// a Petal pauses on a replacement-order choice mid-payment.
+fn pause_board() -> GameScenario {
+    let mut scenario = main_phase();
+    scenario
+        .add_creature(P0, "Rest in Peace", 0, 0)
+        .as_enchantment()
+        .from_oracle_text(RIP);
+    scenario
+        .add_creature(P0, "Leyline of the Void", 0, 0)
+        .as_enchantment()
+        .from_oracle_text(LEYLINE);
+    scenario
+}
+
+/// Drive a paused mana payment to completion, collecting every action's events.
+fn finish_payment(runner: &mut GameRunner, events: &mut Vec<GameEvent>) {
+    for _ in 0..15 {
+        let action = match runner.state().waiting_for.clone() {
+            WaitingFor::ReplacementChoice { .. } => GameAction::ChooseReplacement { index: 0 },
+            WaitingFor::ChooseManaColor { .. } => GameAction::ChooseManaColor {
+                choice: ManaChoice::SingleColor(ManaType::Black),
+                count: 1,
+            },
+            WaitingFor::OrderTriggers { .. } | WaitingFor::Priority { .. } => return,
+            other => panic!("unexpected payment prompt {other:?}"),
+        };
+        events.extend(runner.act(action).expect("complete payment").events);
+    }
+    panic!("payment did not complete");
+}
+
+/// The paused mana cost's (child, parent) sources, and whether the parent's
+/// durable ledger holds an already-collected activation.
+fn paused_mana_frames(runner: &GameRunner) -> (ObjectId, ObjectId, bool) {
+    let Some(PendingCostMoveResume::ManaAbilityPayment { pending, cursor }) =
+        runner.state().pending_cost_move_resume.as_ref()
+    else {
+        panic!("missing mana cost cursor: {:?}", runner.state().waiting_for);
+    };
+    let parent = cursor
+        .parent
+        .as_ref()
+        .expect("the child carries its parent");
+    assert_eq!(parent.lifecycle, ManaAbilityCostParentLifecycle::Suspended);
+    let collected_in_ledger = parent.cursor.deferred_cost_events.iter().any(|event| {
+        matches!(
+            event,
+            GameEvent::AbilityActivated {
+                trigger_state: ActivationTriggerState::CollectedAtActivation,
+                ..
+            }
+        )
+    });
+    (
+        pending.source_id,
+        parent.pending.source_id,
+        collected_in_ledger,
+    )
+}
+
+/// Finding 1 (verifier board): Dimir Signet's {1} is paid by Lotus Petal, whose
+/// sacrifice pauses on a replacement choice with Signet suspended above it.
+/// Two activations, two Avalanche triggers — the resumed child's activation is
+/// not re-observed from the parent's ledger.
+#[test]
+fn a_resumed_child_activation_is_not_observed_again_from_its_parents_ledger() {
+    let mut scenario = pause_board();
+    let avalanche = add_avalanche(&mut scenario);
+    let signet = add_artifact(&mut scenario, P1, "Dimir Signet", "{1}, {T}: Add {U}{B}.");
+    let petal = add_artifact(&mut scenario, P1, "Lotus Petal", PETAL);
+    let mut runner = scenario.build();
+    give_p1_priority(&mut runner);
+    let life0 = life(&runner, P1);
+    let mut events = activate(&mut runner, signet, 0);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "reach: the Petal's sacrifice paused"
+    );
+    let (child, parent, _) = paused_mana_frames(&runner);
+    assert_eq!(
+        (child, parent),
+        (petal, signet),
+        "reach: Petal child, Signet parent"
+    );
+    finish_payment(&mut runner, &mut events);
+    assert_eq!(runner.state().objects[&petal].zone, Zone::Exile, "reach");
+    assert_eq!(pool(&runner, P1), 2, "reach: Signet produced {{U}}{{B}}");
+    assert_eq!(activations_of_kind(&events, ActivatedAbilityKind::Mana), 2);
+    settle_trigger_order(&mut runner);
+    assert_eq!(triggers_on_stack_from(&runner, avalanche), 2);
+    resolve_stack(&mut runner);
+    assert_eq!(life(&runner, P1), life0 - 2);
+}
+
+/// A board where an EARLIER synchronous sibling (Mind Stone) completes before a
+/// later sibling (Lotus Petal) pauses. The Stone's collected activation is
+/// carried in the suspended parent's durable ledger across the pause.
+fn sibling_board() -> (GameRunner, ObjectId, ObjectId, ObjectId, ObjectId) {
+    let mut scenario = pause_board();
+    let avalanche = add_avalanche(&mut scenario);
+    let parent = add_artifact(
+        &mut scenario,
+        P1,
+        "Thran Dynamo",
+        "{2}, {T}: Add {C}{C}{C}.",
+    );
+    let stone = add_artifact(&mut scenario, P1, "Mind Stone", MANA);
+    let petal = add_artifact(&mut scenario, P1, "Lotus Petal", PETAL);
+    (scenario.build(), avalanche, parent, stone, petal)
+}
+
+#[test]
+fn an_earlier_synchronous_sibling_carried_across_a_later_pause_triggers_once() {
+    let (mut runner, avalanche, parent, stone, petal) = sibling_board();
+    give_p1_priority(&mut runner);
+    let life0 = life(&runner, P1);
+    let mut events = activate(&mut runner, parent, 0);
+    let (child, paused_parent, carried) = paused_mana_frames(&runner);
+    assert_eq!(
+        (child, paused_parent),
+        (petal, parent),
+        "reach: Petal paused under the parent"
+    );
+    assert!(
+        runner.state().objects[&stone].tapped,
+        "reach: the Stone paid synchronously first"
+    );
+    assert!(
+        carried,
+        "reach: the Stone's collected activation sits in the durable ledger"
+    );
+    finish_payment(&mut runner, &mut events);
+    assert_eq!(
+        pool(&runner, P1),
+        3,
+        "reach: the parent produced {{C}}{{C}}{{C}}"
+    );
+    settle_trigger_order(&mut runner);
+    assert_eq!(
+        triggers_on_stack_from(&runner, avalanche),
+        3,
+        "one per activation"
+    );
+    resolve_stack(&mut runner);
+    assert_eq!(life(&runner, P1), life0 - 3);
+}
+
+/// The collected state survives a save: serialize the game while the Stone's
+/// collected activation sits in the durable ledger, restore it, and finish.
+#[test]
+fn a_collected_activation_restored_from_a_save_is_still_not_observed_again() {
+    let (mut runner, avalanche, parent, _, _) = sibling_board();
+    give_p1_priority(&mut runner);
+    let life0 = life(&runner, P1);
+    activate(&mut runner, parent, 0);
+    assert!(
+        paused_mana_frames(&runner).2,
+        "reach: a collected activation is in the ledger"
+    );
+    let saved = serde_json::to_string(runner.state()).expect("game state serializes");
+    let restored: engine::types::game_state::GameState =
+        serde_json::from_str(&saved).expect("game state restores");
+    let mut runner = GameRunner::from_state(restored);
+    assert!(
+        paused_mana_frames(&runner).2,
+        "reach: the restored ledger still carries it"
+    );
+    let mut events = Vec::new();
+    finish_payment(&mut runner, &mut events);
+    settle_trigger_order(&mut runner);
+    assert_eq!(triggers_on_stack_from(&runner, avalanche), 3);
+    resolve_stack(&mut runner);
+    assert_eq!(life(&runner, P1), life0 - 3);
+}
+
+// ---------------------------------------------------------------------------
+// Mana undo is refused when the activation was observed (CR 605.3b)
+// ---------------------------------------------------------------------------
+
+/// A Land Creature with the given creature subtype and "{T}: Add {G}."
+fn add_mana_land_creature(scenario: &mut GameScenario, subtype: &str) -> ObjectId {
+    scenario
+        .add_creature(P0, "Land Creature", 1, 1)
+        .as_land()
+        .as_creature()
+        .with_subtypes(vec![subtype])
+        .from_oracle_text("{T}: Add {G}.")
+        .id()
+}
+
+fn undo_tracked(runner: &GameRunner, land: ObjectId) -> bool {
+    runner
+        .state()
+        .lands_tapped_for_mana
+        .get(&P0)
+        .is_some_and(|tapped| tapped.contains(&land))
+}
+
+/// Finding 2: Searblades observed the tap, so undo is not offered and a
+/// submitted undo is refused; tapping again is impossible, so power stays 3.
+fn assert_observed_mana_tap_is_not_undoable(use_land_tap_action: bool) {
+    let mut scenario = main_phase();
+    let searblades = scenario
+        .add_creature(P0, "Ceaseless Searblades", 2, 4)
+        .from_oracle_text(SEARBLADES)
+        .id();
+    let land = add_mana_land_creature(&mut scenario, "Elemental");
+    let mut runner = scenario.build();
+    if use_land_tap_action {
+        let tap = tap_land_selection(&runner, land);
+        runner.act(tap).expect("tap the land");
+    } else {
+        activate(&mut runner, land, 0);
+    }
+    assert_eq!(pool(&runner, P0), 1, "reach: mana produced");
+    settle_trigger_order(&mut runner);
+    assert_eq!(
+        triggers_on_stack_from(&runner, searblades),
+        1,
+        "reach: observed"
+    );
+    assert!(!undo_tracked(&runner, land), "undo is not offered");
+    assert!(
+        runner
+            .act(GameAction::UntapLandForMana { object_id: land })
+            .is_err(),
+        "a submitted undo is refused"
+    );
+    assert!(runner.state().objects[&land].tapped);
+    resolve_stack(&mut runner);
+    assert_eq!(runner.state().objects[&searblades].power, Some(3));
+}
+
+#[test]
+fn an_observed_mana_tap_is_not_undoable_via_tap_land_for_mana() {
+    assert_observed_mana_tap_is_not_undoable(true);
+}
+
+#[test]
+fn an_observed_mana_tap_is_not_undoable_via_activate_ability() {
+    assert_observed_mana_tap_is_not_undoable(false);
+}
+
+/// Control: the same tap with no observer stays undoable.
+#[test]
+fn an_unobserved_mana_tap_is_still_undoable() {
+    for use_land_tap_action in [true, false] {
+        let mut scenario = main_phase();
+        let land = add_mana_land_creature(&mut scenario, "Elemental");
+        let mut runner = scenario.build();
+        if use_land_tap_action {
+            let tap = tap_land_selection(&runner, land);
+            runner.act(tap).expect("tap the land");
+        } else {
+            activate(&mut runner, land, 0);
+        }
+        assert!(undo_tracked(&runner, land), "undo is offered");
+        runner
+            .act(GameAction::UntapLandForMana { object_id: land })
+            .expect("undo accepted");
+        assert!(!runner.state().objects[&land].tapped);
+        assert_eq!(pool(&runner, P0), 0);
+    }
 }
 
 // ---------------------------------------------------------------------------

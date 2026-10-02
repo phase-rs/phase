@@ -4019,7 +4019,7 @@ pub fn matches_target_filter_on_lki_snapshot(
     )
 }
 
-/// CR 113.7 + CR 400.7: Evaluate a target filter against the last known
+/// CR 113.7 + CR 113.7a + CR 400.7: Evaluate a target filter against the last known
 /// information of an object that LEFT THE BATTLEFIELD, as the object it was
 /// there. Differs from [`matches_target_filter_on_lki_snapshot`] only in that
 /// the synthesized record names the battlefield as the zone it departed, so a

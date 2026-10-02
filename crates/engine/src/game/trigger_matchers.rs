@@ -5042,11 +5042,17 @@ pub(super) fn match_ability_activated(
         player_id,
         source_id: activated_id,
         departed_source_lki,
+        trigger_state,
         ..
     } = event
     else {
         return false;
     };
+    // CR 603.10: a mana activation's triggers were collected at its boundary;
+    // every later collector (live scan, cost ledger, delayed match) refuses it.
+    if !trigger_state.is_pending() {
+        return false;
+    }
     if !valid_player_matches(trigger, state, *player_id, source_context) {
         return false;
     }
@@ -5069,7 +5075,7 @@ pub(super) fn match_ability_activated(
 ///   never from `state.current_trigger_event`, which can name an enclosing
 ///   trigger when a mana ability is activated mid-resolution.
 /// * A source a cost moved off the battlefield (a sacrificed Treasure) answers
-///   from its last known information (CR 113.7): characteristics and
+///   from its last known information (CR 113.7 + CR 113.7a): characteristics and
 ///   controller. Its attachment relationships are NOT carried over: after all
 ///   costs are paid, nothing is attached to an object that left, so an "ability
 ///   of equipped creature" trigger does not fire when the creature was
@@ -5150,11 +5156,15 @@ pub(super) fn match_loyalty_ability_activated(
         player_id,
         source_id: activated_id,
         kind: crate::types::events::ActivatedAbilityKind::Loyalty,
+        trigger_state,
         ..
     } = event
     else {
         return false;
     };
+    if !trigger_state.is_pending() {
+        return false;
+    }
     // CR 109.5: "you" = the controller of the trigger source.
     if source_context.source_read(state).controller() != *player_id {
         return false;
@@ -7473,6 +7483,7 @@ mod tests {
                 source_id: activated,
                 kind: crate::types::events::ActivatedAbilityKind::Normal,
                 departed_source_lki: None,
+                trigger_state: crate::types::events::ActivationTriggerState::Pending,
             },
             &trigger,
             &test_trigger_source_context(&state, source),
@@ -7485,6 +7496,7 @@ mod tests {
                 source_id: activated,
                 kind: crate::types::events::ActivatedAbilityKind::Normal,
                 departed_source_lki: None,
+                trigger_state: crate::types::events::ActivationTriggerState::Pending,
             },
             &trigger,
             &test_trigger_source_context(&state, source),
@@ -7524,6 +7536,7 @@ mod tests {
                 source_id: activated,
                 kind: crate::types::events::ActivatedAbilityKind::Normal,
                 departed_source_lki: None,
+                trigger_state: crate::types::events::ActivationTriggerState::Pending,
             },
             &trigger,
             &test_trigger_source_context(&state, source),
@@ -7536,11 +7549,59 @@ mod tests {
                 source_id: activated,
                 kind: crate::types::events::ActivatedAbilityKind::Normal,
                 departed_source_lki: None,
+                trigger_state: crate::types::events::ActivationTriggerState::Pending,
             },
             &trigger,
             &test_trigger_source_context(&state, source),
             &state
         ));
+    }
+
+    /// CR 603.10: an activation already observed at its boundary is refused by
+    /// every later collector; a legacy event without the field decodes as
+    /// `Pending` and is observed once.
+    #[test]
+    fn ability_activation_collected_at_its_boundary_is_not_matched_again() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Elrond".to_string(),
+            Zone::Battlefield,
+        );
+        let activated = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Dork".to_string(),
+            Zone::Battlefield,
+        );
+        let trigger = make_trigger(TriggerMode::AbilityActivated);
+        let collected = GameEvent::AbilityActivated {
+            player_id: PlayerId(0),
+            source_id: activated,
+            kind: crate::types::events::ActivatedAbilityKind::Mana,
+            departed_source_lki: None,
+            trigger_state: crate::types::events::ActivationTriggerState::CollectedAtActivation,
+        };
+        let context = test_trigger_source_context(&state, source);
+        assert!(!match_ability_activated(
+            &collected, &trigger, &context, &state
+        ));
+        // The state survives a serialization round trip.
+        let restored: GameEvent =
+            serde_json::from_value(serde_json::to_value(&collected).unwrap()).unwrap();
+        assert!(!match_ability_activated(
+            &restored, &trigger, &context, &state
+        ));
+        // A legacy event (no field) is Pending and matches.
+        let legacy: GameEvent = serde_json::from_value(serde_json::json!({
+            "type": "AbilityActivated",
+            "data": { "player_id": 0, "source_id": activated.0, "kind": "Mana" }
+        }))
+        .unwrap();
+        assert!(match_ability_activated(&legacy, &trigger, &context, &state));
     }
 
     #[test]
@@ -7617,6 +7678,7 @@ mod tests {
                 source_id: chandra,
                 kind: crate::types::events::ActivatedAbilityKind::Loyalty,
                 departed_source_lki: None,
+                trigger_state: crate::types::events::ActivationTriggerState::Pending,
             },
             &trigger,
             &test_trigger_source_context(&state, regulator),
@@ -7647,6 +7709,7 @@ mod tests {
                 source_id: planeswalker,
                 kind: crate::types::events::ActivatedAbilityKind::Loyalty,
                 departed_source_lki: None,
+                trigger_state: crate::types::events::ActivationTriggerState::Pending,
             },
             &trigger,
             &test_trigger_source_context(&state, source),
@@ -7658,6 +7721,7 @@ mod tests {
                 source_id: planeswalker,
                 kind: crate::types::events::ActivatedAbilityKind::Normal,
                 departed_source_lki: None,
+                trigger_state: crate::types::events::ActivationTriggerState::Pending,
             },
             &trigger,
             &test_trigger_source_context(&state, source),
@@ -7688,6 +7752,7 @@ mod tests {
                 source_id: jace,
                 kind: crate::types::events::ActivatedAbilityKind::Loyalty,
                 departed_source_lki: None,
+                trigger_state: crate::types::events::ActivationTriggerState::Pending,
             },
             &trigger,
             &test_trigger_source_context(&state, regulator),
@@ -7720,6 +7785,7 @@ mod tests {
                 source_id: chandra,
                 kind: crate::types::events::ActivatedAbilityKind::Normal,
                 departed_source_lki: None,
+                trigger_state: crate::types::events::ActivationTriggerState::Pending,
             },
             &trigger,
             &test_trigger_source_context(&state, regulator),
@@ -7753,6 +7819,7 @@ mod tests {
                 source_id: chandra,
                 kind: crate::types::events::ActivatedAbilityKind::Loyalty,
                 departed_source_lki: None,
+                trigger_state: crate::types::events::ActivationTriggerState::Pending,
             },
             &trigger,
             &test_trigger_source_context(&state, regulator),
@@ -7787,6 +7854,7 @@ mod tests {
                 source_id: host,
                 kind: crate::types::events::ActivatedAbilityKind::Loyalty,
                 departed_source_lki: None,
+                trigger_state: crate::types::events::ActivationTriggerState::Pending,
             },
             &trigger,
             &test_trigger_source_context(&state, talent),
@@ -7799,6 +7867,7 @@ mod tests {
                 source_id: other,
                 kind: crate::types::events::ActivatedAbilityKind::Loyalty,
                 departed_source_lki: None,
+                trigger_state: crate::types::events::ActivationTriggerState::Pending,
             },
             &trigger,
             &test_trigger_source_context(&state, talent),

@@ -3039,6 +3039,7 @@ mod tests {
             source_id: source_creature,
             kind: crate::types::events::ActivatedAbilityKind::Normal,
             departed_source_lki: None,
+            trigger_state: crate::types::events::ActivationTriggerState::Pending,
         });
 
         let copy_effect = ResolvedAbility::new(
@@ -3192,6 +3193,7 @@ mod tests {
             source_id: basalt,
             kind: crate::types::events::ActivatedAbilityKind::Normal,
             departed_source_lki: None,
+            trigger_state: crate::types::events::ActivationTriggerState::Pending,
         });
 
         let copy_effect = ResolvedAbility::new(
@@ -3266,6 +3268,7 @@ mod tests {
             source_id: source_creature,
             kind: crate::types::events::ActivatedAbilityKind::Normal,
             departed_source_lki: None,
+            trigger_state: crate::types::events::ActivationTriggerState::Pending,
         });
 
         let copy_effect = ResolvedAbility::new(

@@ -27360,6 +27360,8 @@ pub(crate) fn record_activated_ability_placed(
         source_id,
         kind,
         announced_zone,
+        // Observed by this action's ordinary trigger collection.
+        crate::types::events::ActivationTriggerState::Pending,
         events,
     );
     // CR 702.142b: Emit additional event when a boast ability is activated.

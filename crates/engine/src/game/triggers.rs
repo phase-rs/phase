@@ -9811,8 +9811,7 @@ pub(crate) fn collect_mana_action_trigger_batch(
 }
 
 /// CR 603.10 + CR 603.3 + CR 605.3b: collect the triggers of one mana-ability
-/// activation event at the instant the ability became activated, and claim
-/// that exact occurrence so no later scan of the same action rediscovers it.
+/// activation event at the instant the ability became activated.
 ///
 /// A mana ability resolves immediately after it is activated (CR 605.3b), and
 /// the enclosing frame collects its events only after that resolution — by
@@ -9824,17 +9823,43 @@ pub(crate) fn collect_mana_action_trigger_batch(
 /// so a payment is never interrupted. An activation-triggered ability is never
 /// a triggered mana ability (that parser shape is strict-failed, CR 605.1b),
 /// so nothing here resolves inline.
+///
+/// The published event carries `ActivationTriggerState::CollectedAtActivation`,
+/// which every activation matcher refuses, so its ownership survives any later
+/// transfer into a payment ledger. The collection here matches a LOCAL
+/// `Pending` view of that event; the view never leaves this function.
 pub(crate) fn collect_activation_event_at_boundary(
     state: &mut GameState,
     events: &[GameEvent],
     event_index: usize,
 ) -> Result<(), ResolvedTriggerCollectionReplayInvariantError> {
-    let event = events[event_index].clone();
-    debug_assert!(
-        matches!(event, GameEvent::AbilityActivated { .. }),
-        "only an activation event is collected at its activation boundary"
+    let GameEvent::AbilityActivated {
+        player_id,
+        source_id,
+        kind,
+        departed_source_lki,
+        trigger_state,
+    } = &events[event_index]
+    else {
+        debug_assert!(
+            false,
+            "only an activation event is collected at its boundary"
+        );
+        return Ok(());
+    };
+    debug_assert_eq!(
+        *trigger_state,
+        crate::types::events::ActivationTriggerState::CollectedAtActivation,
+        "a boundary-collected activation is published as already collected"
     );
-    let raw_batch = std::slice::from_ref(&event);
+    let pending_view = GameEvent::AbilityActivated {
+        player_id: *player_id,
+        source_id: *source_id,
+        kind: *kind,
+        departed_source_lki: departed_source_lki.clone(),
+        trigger_state: crate::types::events::ActivationTriggerState::Pending,
+    };
+    let raw_batch = std::slice::from_ref(&pending_view);
     let seed = collect_triggers_for_batch(state, raw_batch);
     let collected = collect_pending_and_delayed_triggers_for_batch(
         state,
@@ -9846,16 +9871,6 @@ pub(crate) fn collect_activation_event_at_boundary(
         state,
         crate::types::resolved_commands::ResolvedTriggerCollection::DeferPending {
             contexts: collected.contexts,
-        },
-    )?;
-    resolve_and_apply_trigger_collection(
-        state,
-        crate::types::resolved_commands::ResolvedTriggerCollection::ConsumeBeforePriority {
-            occurrences: vec![ConsumedTriggerEventOccurrence {
-                occurrence: trigger_event_occurrence(events, event_index),
-                event,
-                scope: ConsumedTriggerEventScope::AllCollectors,
-            }],
         },
     )
 }
@@ -19661,11 +19676,9 @@ pub mod tests {
         ));
     }
 
-    /// CR 605.1a + CR 605.3b: `AbilityActivated` is emitted only by stack-using
-    /// activations (mana abilities never reach those emission sites), so the
-    /// "that isn't a mana ability" qualifier on Burning-Tree Shaman /
-    /// Flamescroll Celebrant is trivially satisfied — the explicit arm keeps
-    /// the AST-level gate honest if the event family ever widens.
+    /// CR 605.1a: `ActivatedAbilityIsNonMana` accepts an ordinary activation
+    /// (`kind: Normal`) — the "that isn't a mana ability" qualifier on
+    /// Burning-Tree Shaman / Flamescroll Celebrant — and refuses a mana one.
     #[test]
     fn activated_ability_is_non_mana_accepts_ability_activated_event() {
         let state = setup();
@@ -19674,6 +19687,7 @@ pub mod tests {
             source_id: ObjectId(1),
             kind: crate::types::events::ActivatedAbilityKind::Normal,
             departed_source_lki: None,
+            trigger_state: crate::types::events::ActivationTriggerState::Pending,
         };
         assert!(check_trigger_condition(
             &state,
@@ -19681,6 +19695,20 @@ pub mod tests {
             PlayerId(0),
             None,
             Some(&event),
+        ));
+        let mana = GameEvent::AbilityActivated {
+            player_id: PlayerId(0),
+            source_id: ObjectId(1),
+            kind: crate::types::events::ActivatedAbilityKind::Mana,
+            departed_source_lki: None,
+            trigger_state: crate::types::events::ActivationTriggerState::Pending,
+        };
+        assert!(!check_trigger_condition(
+            &state,
+            &TriggerCondition::ActivatedAbilityIsNonMana,
+            PlayerId(0),
+            None,
+            Some(&mana),
         ));
     }
 

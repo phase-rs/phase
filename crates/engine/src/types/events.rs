@@ -102,6 +102,28 @@ impl ManaAbilityTriggerState {
     }
 }
 
+/// CR 603.10 + CR 605.3b: Who owns an activation event's trigger observation.
+/// A mana ability's activation is observed at its own boundary, before the
+/// ability resolves (CR 603.10); the event then travels on through payment
+/// ledgers and the action's event list as already observed, so no later
+/// collector — live scan, durable cost ledger, or delayed-trigger match —
+/// observes it a second time.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ActivationTriggerState {
+    /// Observed by the action's ordinary trigger collection (a stack-using or
+    /// loyalty activation).
+    #[default]
+    Pending,
+    /// Already observed at the activation boundary.
+    CollectedAtActivation,
+}
+
+impl ActivationTriggerState {
+    pub fn is_pending(&self) -> bool {
+        matches!(self, Self::Pending)
+    }
+}
+
 /// CR 602.2 + CR 605.1a + CR 606.2: Discriminates which kind of activated
 /// ability was activated, so "Whenever you activate a loyalty ability"
 /// triggers (CR 606.2), "that isn't a mana ability" qualifiers (CR 605.1a), and
@@ -939,7 +961,7 @@ pub enum GameEvent {
         /// (which predate this field) deserializing as `Normal`.
         #[serde(default)]
         kind: ActivatedAbilityKind,
-        /// CR 113.7 + CR 400.7: The source's last known information, present only
+        /// CR 113.7 + CR 113.7a + CR 400.7: The source's last known information, present only
         /// when the source was on the battlefield when the ability was announced
         /// and a cost moved it off before the ability became activated (a
         /// sacrificed Treasure or Clue). Activation triggers read the source's
@@ -947,6 +969,11 @@ pub enum GameEvent {
         /// still where it was, or was activated from another zone.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         departed_source_lki: Option<Box<LKISnapshot>>,
+        /// CR 603.10: `CollectedAtActivation` for a mana ability's activation,
+        /// whose triggers were collected at its boundary; every later collector
+        /// skips it. Omitted on the wire when `Pending`.
+        #[serde(default, skip_serializing_if = "ActivationTriggerState::is_pending")]
+        trigger_state: ActivationTriggerState,
     },
     /// CR 603.6a: Enters-the-battlefield and zone-change triggers fire on this
     /// event. `from` is `None` when an object is created directly in a zone
@@ -1983,12 +2010,18 @@ mod tests {
             GameEvent::AbilityActivated {
                 kind,
                 departed_source_lki,
+                trigger_state,
                 ..
             } => {
                 assert_eq!(kind, ActivatedAbilityKind::Normal);
                 assert!(
                     departed_source_lki.is_none(),
                     "a legacy event predating the field carries no departed-source LKI"
+                );
+                assert_eq!(
+                    trigger_state,
+                    ActivationTriggerState::Pending,
+                    "a legacy event is observed by ordinary collection"
                 );
             }
             other => panic!("expected AbilityActivated, got {other:?}"),
@@ -2008,6 +2041,7 @@ mod tests {
                 source_id: ObjectId(9),
                 kind,
                 departed_source_lki: None,
+                trigger_state: crate::types::events::ActivationTriggerState::Pending,
             };
             let json = serde_json::to_value(&event).unwrap();
             let back: GameEvent = serde_json::from_value(json).unwrap();

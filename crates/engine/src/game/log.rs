@@ -3906,6 +3906,7 @@ mod tests {
             source_id,
             kind: Default::default(),
             departed_source_lki: None,
+            trigger_state: crate::types::events::ActivationTriggerState::Pending,
         };
         let keyword = |source_id| GameEvent::KeywordAbilityActivated {
             ability_tag: AbilityTag::Equip,
@@ -3927,6 +3928,7 @@ mod tests {
             source_id: source,
             kind: crate::types::events::ActivatedAbilityKind::Mana,
             departed_source_lki: None,
+            trigger_state: crate::types::events::ActivationTriggerState::Pending,
         };
         assert_eq!(lines(&[mana]), 0);
     }
