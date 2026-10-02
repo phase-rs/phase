@@ -45,7 +45,7 @@ use crate::types::ability::{
 use crate::types::counter::CounterType;
 use crate::types::game_state::{DistributionUnit, TargetSelectionConstraint};
 use crate::types::phase::Phase;
-use crate::types::statics::CostModifyMode;
+use crate::types::statics::{CostModifyMode, StaticMode};
 use crate::types::zones::{EtbTapState, Zone};
 
 // Parse-phase functions from the parent module (oracle_effect/mod.rs).
@@ -1043,6 +1043,52 @@ pub(super) fn attach_graveyard_redirect_rider_to_prior_cast_from_zone(
     let mut rider = AbilityDefinition::new(AbilityKind::Spell, rider_effect);
     rider.sub_link = SubAbilityLink::SequentialSibling;
     prev.sub_ability = Some(Box::new(rider));
+    true
+}
+
+/// CR 614.1a: absorb an exact "a spell cast this way" destination rider into
+/// the immediately preceding class-wide graveyard cast permission ("Until end of
+/// turn, you may cast instant and sorcery spells from any graveyard. If a spell
+/// cast this way would be put into a graveyard, exile it instead." — The Great
+/// Work). "Cast this way" names every spell cast under that permission, which is
+/// what `GraveyardCastPermission::graveyard_destination_replacement` scopes:
+/// the redirect applies to the stack-to-graveyard move of a spell cast through
+/// it (`casting` stamps it when the spell is cast).
+///
+/// The field carries a zone, so only the exile destination is representable;
+/// any other destination is left to the routes after this one.
+pub(super) fn attach_graveyard_redirect_rider_to_prior_graveyard_cast_grant(
+    defs: &mut [AbilityDefinition],
+    dest: &SpellStackToGraveyardReplacement,
+) -> bool {
+    if !matches!(dest, SpellStackToGraveyardReplacement::Exile) {
+        return false;
+    }
+    let Some(prev) = defs.last_mut() else {
+        return false;
+    };
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = &mut *prev.effect
+    else {
+        return false;
+    };
+    let [grant] = static_abilities.as_mut_slice() else {
+        return false;
+    };
+    let [ContinuousModification::GrantStaticAbility { definition }] =
+        grant.modifications.as_mut_slice()
+    else {
+        return false;
+    };
+    let StaticMode::GraveyardCastPermission {
+        graveyard_destination_replacement: slot @ None,
+        ..
+    } = &mut definition.mode
+    else {
+        return false;
+    };
+    *slot = Some(Zone::Exile);
     true
 }
 

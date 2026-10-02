@@ -2797,6 +2797,10 @@ fn derive_suspected_abilities(obj: &mut crate::game::game_object::GameObject) {
 /// (they are not part of the face-down CR 708.2a re-seed, which is why this is
 /// separable at all).
 fn seed_live_characteristics_from_base(obj: &mut crate::game::game_object::GameObject) {
+    // Capture BEFORE the reset below clears it: a set marker means the copy
+    // layer overwrote live `token_art` last pass, so the art baseline must
+    // be re-derived rather than reused.
+    let art_overwritten_by_copy = obj.layer1_copy_effect.is_some();
     obj.name = obj.base_name.clone();
     // CR 707.2 + CR 613.1a: the copied Room half data is layer-derived — it
     // survives only as long as a Layer-1a copy effect keeps re-applying it.
@@ -2867,6 +2871,21 @@ fn seed_live_characteristics_from_base(obj: &mut crate::game::game_object::GameO
     // while it is copying another object.
     if !obj.is_token {
         obj.token_image_ref = None;
+    }
+    // Intrinsic art body baseline. A nontoken carries no descriptor of its
+    // own: reset to `None` (a plain drop, never an allocation); a
+    // copy-of-token effect re-applies the source's descriptor below while
+    // active. A true token REUSES its live descriptor on ordinary passes —
+    // every authority that mutates the printed base restores eagerly, so
+    // live state is already coherent and no fresh keyword/subtype
+    // materialization happens here. Re-derive only when live cannot still
+    // be valid: absent (a pre-descriptor snapshot healing on its first
+    // pass), or overwritten by a copy last pass (the copy layer overwrites
+    // again below while still active).
+    if !obj.is_token {
+        obj.token_art = None;
+    } else if obj.token_art.is_none() || art_overwritten_by_copy {
+        obj.restore_token_art_baseline();
     }
 }
 
@@ -8964,6 +8983,7 @@ fn apply_continuous_effect_filtered(
                 display_source,
                 printed_ref,
                 token_image_ref,
+                token_art,
             } => {
                 let copy_effect = crate::types::ability::CopyEffectInstanceRef {
                     continuous_effect_id: effect
@@ -8987,6 +9007,7 @@ fn apply_continuous_effect_filtered(
                 obj.display_source = *display_source;
                 obj.printed_ref = printed_ref.clone();
                 obj.token_image_ref = token_image_ref.clone();
+                obj.token_art = token_art.clone();
             }
             // CR 707.9b + CR 707.2: Name override is a copiable-value override
             // applied at Layer 1 after the base CopyValues (ordered by timestamp
@@ -10918,6 +10939,7 @@ mod tests {
                 display_source: crate::game::game_object::DisplaySource::Card,
                 printed_ref: None,
                 token_image_ref: None,
+                token_art: None,
             }],
             None,
         );
@@ -11386,6 +11408,7 @@ mod tests {
                 display_source: crate::game::game_object::DisplaySource::Card,
                 printed_ref: None,
                 token_image_ref: None,
+                token_art: None,
             },
         );
         install_until_end_of_turn(
@@ -23735,6 +23758,7 @@ mod tests {
                 display_source: crate::game::game_object::DisplaySource::Card,
                 printed_ref: None,
                 token_image_ref: None,
+                token_art: None,
             }],
             None,
         );
@@ -25019,6 +25043,7 @@ mod tests {
                 display_source: crate::game::game_object::DisplaySource::Card,
                 printed_ref: None,
                 token_image_ref: None,
+                token_art: None,
             }],
             None,
         );
@@ -25045,6 +25070,7 @@ mod tests {
                 display_source: crate::game::game_object::DisplaySource::Card,
                 printed_ref: None,
                 token_image_ref: None,
+                token_art: None,
             }],
             None,
         );
@@ -25938,6 +25964,7 @@ mod tests {
                 display_source: crate::game::game_object::DisplaySource::Card,
                 printed_ref: None,
                 token_image_ref: None,
+                token_art: None,
             }],
             None,
         );
@@ -26023,6 +26050,7 @@ mod tests {
                 display_source: crate::game::game_object::DisplaySource::Card,
                 printed_ref: None,
                 token_image_ref: None,
+                token_art: None,
             }],
             None,
         );
@@ -26112,6 +26140,7 @@ mod tests {
             display_source: crate::game::game_object::DisplaySource::Card,
             printed_ref: None,
             token_image_ref: None,
+            token_art: None,
         };
 
         // The whole `Layer::Copy` set: (modification, adds ANY generator, adds a
@@ -26280,6 +26309,7 @@ mod tests {
                     display_source: crate::game::game_object::DisplaySource::Card,
                     printed_ref: None,
                     token_image_ref: None,
+                    token_art: None,
                 }],
                 None,
             );
@@ -26375,6 +26405,7 @@ mod tests {
                     display_source: crate::game::game_object::DisplaySource::Card,
                     printed_ref: None,
                     token_image_ref: None,
+                    token_art: None,
                 }],
                 None,
             );
@@ -26512,6 +26543,7 @@ mod tests {
                 display_source: Default::default(),
                 printed_ref: None,
                 token_image_ref: None,
+                token_art: None,
             },
             ContinuousModification::CopyChosen,
             ContinuousModification::SetName {

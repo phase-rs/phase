@@ -65,7 +65,8 @@ const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
 // +27: the v98 PerPlayerScope::Opponents value, the PerPlayerChoiceOrder and
 // SubstituteChooser chooser purposes, and the per-player frame's current and
 // nominee fields.
-const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 27;
+// +28: the v99 GraveyardCastPermission pool (from any graveyard).
+const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 28;
 // The LOBBY message-set version, not derived from the full-game number above.
 // The classifier below refuses an expression only on the SOURCE constants; this
 // script never reads itself, so its own EXPECTED_* must stay literals.
@@ -116,7 +117,8 @@ const PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION = 54;
 // +25: wire 79 moves with full-game v97 for the serialized TargetReadOrigin.
 // +26: wire 80 moves with full-game v98 for per-player choice order and
 // PerPlayerScope::Opponents.
-const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 26;
+// +27: wire 81 moves with full-game v99 for the graveyard permission pool.
+const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 27;
 // The P2P DRAFT wire version. A FIFTH independent surface, and the one this
 // script previously did not read at all: `DRAFT_PROTOCOL_VERSION` is an
 // EXACT-MATCH first-contact gate (p2p-draft-host.ts / p2p-draft-guest.ts refuse

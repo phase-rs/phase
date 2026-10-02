@@ -1,7 +1,7 @@
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::character::complete::{alpha1, one_of, space1};
+use nom::character::complete::{alpha1, digit1, multispace0, one_of, space1};
 use nom::combinator::{
     all_consuming, consumed, eof, fail, map, not, opt, peek, recognize, rest, value,
 };
@@ -61,16 +61,16 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
     AdditionalCostOrigin, AdditionalCostPaymentSource, AggregateFunction, AttachmentKind,
     AttackersDeclaredCountSubject, CardSelectionMode, CardTypeSetSource, CastManaObjectScope,
-    CastManaSpentMetric, CastVariantPaid, CoinFlipResult, Comparator, ControllerRef, CountScope,
-    CounterTriggerFilter, DamageAmountScope, DamageAmountThreshold, DamageChannel,
-    DamageKindFilter, DelayedTriggerCondition, DestinationConstraint, DieResultFilter, Effect,
-    EffectScope, FilterProp, ManaAbilityProducedFilter, NameStickerSet, ObjectScope,
-    OriginConstraint, ParsedCondition, PlayerFilter, PlayerRelation, PlayerScope,
-    PropertyAggregate, PtStat, PtValueScope, QuantityExpr, QuantityRef, RenownSubject,
-    SacrificeAggregateStat, SacrificeCost, SacrificeRequirement, SharedQuality, StaticCondition,
-    SubAbilityLink, TapCreaturesRequirement, TapStateChange, TargetFilter, TriggerCondition,
-    TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
-    ZoneChangeClause,
+    CastManaSpentMetric, CastVariantPaid, CoinFlipResult, CombatRelation, CombatRelationSubject,
+    Comparator, ControllerRef, CountScope, CounterTriggerFilter, DamageAmountScope,
+    DamageAmountThreshold, DamageChannel, DamageKindFilter, DelayedTriggerCondition,
+    DestinationConstraint, DieResultFilter, Effect, EffectScope, FilterProp,
+    ManaAbilityProducedFilter, NameStickerSet, ObjectScope, OriginConstraint, ParsedCondition,
+    PlayerFilter, PlayerRelation, PlayerScope, PropertyAggregate, PtStat, PtValueScope,
+    QuantityExpr, QuantityRef, RenownSubject, SacrificeAggregateStat, SacrificeCost,
+    SacrificeRequirement, SharedQuality, StaticCondition, SubAbilityLink, TapCreaturesRequirement,
+    TapStateChange, TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition,
+    TypeFilter, TypedFilter, UnlessPayModifier, ZoneChangeClause,
 };
 use crate::types::card_type::{is_land_subtype, CoreType};
 use crate::types::counter::CounterType;
@@ -14102,6 +14102,41 @@ fn try_parse_event(
     // "a <filter> creature" attacker-side qualifier so a filtered "blocks"
     // trigger fires only against a matching attacker.
     if let Ok((after_blocks, _)) = tag::<_, _, OracleError<'_>>("blocks").parse(rest) {
+        // CR 509.3e: a minimum blocked-creature count is part of the event,
+        // not the source's permission to block additional creatures.
+        // Keep recognized but unrepresentable counts terminally unsupported.
+        if peek(preceded(
+            space1,
+            preceded(
+                // The shared number authority also recognizes articles as one;
+                // those belong to the existing per-attacker grammar below.
+                not(alt((tag("a "), tag("an ")))),
+                alt((
+                    value((), nom_primitives::parse_number),
+                    value((), digit1),
+                    value((), tag("exactly ")),
+                )),
+            ),
+        ))
+        .parse(after_blocks)
+        .is_ok()
+        {
+            let parsed = preceded(space1, parse_count_qualified_block_filter).parse(after_blocks);
+            let Ok((_, (minimum, filter))) = parsed else {
+                return Some(unknown_trigger_definition(full_lower));
+            };
+            if !matches!(subject, TargetFilter::SelfRef) {
+                return Some(unknown_trigger_definition(full_lower));
+            }
+            let mut def = make_base();
+            def.mode = TriggerMode::Blocks;
+            def.valid_card = Some(subject.clone());
+            def.valid_target = None;
+            // CR 603.2c: one source-level trigger for this qualifying occurrence.
+            def.batched = true;
+            def.condition = Some(source_block_count_condition(filter, minimum));
+            return Some((TriggerMode::Blocks, def));
+        }
         let mut def = make_base();
         def.mode = TriggerMode::Blocks;
         def.valid_card = Some(subject.clone());
@@ -16549,6 +16584,48 @@ fn subject_attack_scope(subject_scope: Option<&ControllerRef>) -> Option<Subject
             | ControllerRef::ActivePlayer
             | ControllerRef::SpecificPlayer { .. },
         ) => None,
+    }
+}
+
+/// CR 509.3e + CR 509.3f: parse the full count and creature characteristics
+/// for a source's blocking event; unsupported comparators and tails fail closed.
+fn parse_count_qualified_block_filter(input: &str) -> OracleResult<'_, (i32, TargetFilter)> {
+    let (noun, (comparator, minimum)) = parse_event_amount_quantifier(input)?;
+    if !matches!(comparator, Comparator::GE) {
+        return Err(oracle_err(input));
+    }
+    let minimum = i32::try_from(minimum).map_err(|_| oracle_err(input))?;
+    let (filter, remainder) = parse_type_phrase_folding(noun);
+    let creature_filter = matches!(&filter, TargetFilter::Typed(typed)
+        if typed.type_filters.iter().any(|kind| matches!(kind, TypeFilter::Creature)));
+    if !creature_filter {
+        return Err(oracle_err(noun));
+    }
+    let (remainder, _) = all_consuming(multispace0).parse(remainder)?;
+    Ok((remainder, (minimum, filter)))
+}
+
+/// CR 509.3e + CR 509.3f: count matching attackers actually blocked by this
+/// source at the event. The attacking conjunct excludes the inverse relation.
+/// CR 603.4: this event qualifier is not an intervening-if and must not be
+/// rechecked when the ability resolves; EventTime is stripped when stacking.
+fn source_block_count_condition(filter: TargetFilter, minimum: i32) -> TriggerCondition {
+    let filter = add_property(filter, FilterProp::Attacking { defender: None });
+    let filter = add_property(
+        filter,
+        FilterProp::CombatRelation {
+            relation: CombatRelation::BlockingOrBlockedBy,
+            subject: CombatRelationSubject::Source,
+        },
+    );
+    TriggerCondition::EventTime {
+        condition: Box::new(TriggerCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { filter },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: minimum },
+        }),
     }
 }
 

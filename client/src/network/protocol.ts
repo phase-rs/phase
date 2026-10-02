@@ -106,6 +106,11 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
+ *  81 — game_setup and state_update carry GameState, whose graveyard cast
+ *       permissions now carry a pool (GraveyardPermissionPool: AnyGraveyard is
+ *       "from any graveyard"). A v80 peer would default it to the own graveyard
+ *       and refuse a cast the permission allows, so first contact rejects the
+ *       skew. Bumped in lockstep with full-game protocol 99.
  *  80 — game_setup and state_update carry GameState, whose abilities can now
  *       serialize ZoneOwner {"Each":"Opponents"}, the PerPlayerChoiceOrder
  *       and SubstituteChooser chooser purposes, and per-player frame
@@ -507,7 +512,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 80 as const;
+export const WIRE_PROTOCOL_VERSION = 81 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

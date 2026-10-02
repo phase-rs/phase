@@ -31813,6 +31813,7 @@ fn chosen_muldrotha_variant_requests_and_consumes_permanent_type_slot() {
                 extra_cost: None,
                 enters_with_counter: None,
                 required_cast_keyword: None,
+                pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
             })
             .affected(TargetFilter::Typed(TypedFilter::new(TypeFilter::Permanent))),
         );
@@ -31960,6 +31961,7 @@ fn muldrotha_and_graveyard_artifact_creature(state: &mut GameState) -> (ObjectId
                 extra_cost: None,
                 enters_with_counter: None,
                 required_cast_keyword: None,
+                pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
             })
             .affected(TargetFilter::Typed(TypedFilter::new(TypeFilter::Permanent))),
         );

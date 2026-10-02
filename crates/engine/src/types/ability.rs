@@ -9,7 +9,7 @@ use serde::ser::SerializeStructVariant;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
-use super::card::{PrintedCardRef, PrintedLoyalty, TokenImageRef};
+use super::card::{PrintedCardRef, PrintedLoyalty, TokenArtDescriptor, TokenImageRef};
 use super::card_type::{CardType, CoreType, SubtypeSet, Supertype};
 use super::counter::{CounterMatch, CounterType};
 use super::events::BendingType;
@@ -32209,6 +32209,12 @@ pub enum ContinuousModification {
         /// `None` for printed-card sources.
         #[serde(default)]
         token_image_ref: Option<TokenImageRef>,
+        /// Intrinsic token-art body of the source, carried so a copy of a
+        /// token without an exact ref still renders from the source's shape
+        /// rather than the recipient's stale descriptor. `None` for
+        /// printed-card sources and pre-descriptor snapshots.
+        #[serde(default)]
+        token_art: Option<TokenArtDescriptor>,
     },
     /// CR 707.2c + CR 613.1a: Parse-time MARKER for the static ability
     /// "enchanted creature is a copy of the chosen creature" (Metamorphic

@@ -2723,9 +2723,23 @@ pub(super) fn parse_targeted_action_ast(
         // creatures" collapsed to a single optional slot and only one creature
         // could be chosen (issue #6205).
         let (target_text, multi_target) = super::strip_optional_target_prefix(rest);
-        let (target, _rem) = parse_target_with_ctx(target_text, ctx);
-        #[cfg(debug_assertions)]
-        assert_no_compound_remainder(_rem, text);
+        // CR 608.2k: A singular bare object pronoun ("gains control of it") in a subject-bearing
+        // clause is an anaphor, not a parent-target chain. Route it through
+        // `resolve_it_pronoun` — identical to the tap/sacrifice/counter clauses — so
+        // "When this creature enters, an opponent gains control of it" binds the
+        // control transfer to `SelfRef` (the named source). Without a subject (a true
+        // parent-target chain), the guard falls through to `parse_target_with_ctx` → `ParentTarget`.
+        let target = if ctx.subject.is_some()
+            && is_bare_object_pronoun(target_text.trim())
+            && !is_bare_plural_object_pronoun(target_text.trim())
+        {
+            resolve_it_pronoun(ctx)
+        } else {
+            let (target, _rem) = parse_target_with_ctx(target_text, ctx);
+            #[cfg(debug_assertions)]
+            assert_no_compound_remainder(_rem, text);
+            target
+        };
         return Some(TargetedImperativeAst::GainControl {
             target,
             all,
@@ -16995,6 +17009,28 @@ mod tests {
     use super::*;
     use crate::types::ability::{ParitySource, ZoneChoiceChooser};
     use crate::types::phase::PhaseGroup;
+
+    #[test]
+    fn control_transfer_self_pronoun_preserves_plural_parent_antecedent() {
+        for (pronoun, expected) in [
+            ("it", TargetFilter::SelfRef),
+            ("them", TargetFilter::ParentTarget),
+        ] {
+            let text = format!("gain control of {pronoun}");
+            let mut ctx = ParseContext {
+                subject: Some(TargetFilter::SelfRef),
+                ..ParseContext::default()
+            };
+            let result = parse_targeted_action_ast(&text, &text, &mut ctx);
+            assert!(
+                matches!(
+                    result,
+                    Some(TargetedImperativeAst::GainControl { target, .. }) if target == expected
+                ),
+                "pronoun {pronoun} must preserve its operand authority"
+            );
+        }
+    }
 
     /// CR 301.5 + CR 303.4: a verb-led mass clause with an attachment qualifier
     /// is recognized; a clause led by the for-each quantifier is not a verb-led

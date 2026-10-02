@@ -3318,6 +3318,10 @@ mod tests {
         }
     }
 
+    /// `GraveyardCastPermission.pool` (CR 404.1 + CR 601.3) is new in serialized
+    /// full-game state; a v98 peer would default it to the own graveyard and
+    /// refuse a cast from any graveyard the permission allows, so it must be
+    /// refused before it receives v99 state.
     /// `ZoneOpponentChooserPurpose::PerPlayerChoiceOrder` (CR 101.4c) and
     /// `SubstituteChooser` (CR 800.4g), the per-player frame's `current` and
     /// `nominee` fields, and `PerPlayerScope::Opponents` (CR 102.2 + CR 102.3)
@@ -3369,8 +3373,8 @@ mod tests {
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_98_for_per_player_choice_order() {
-        assert_eq!(PROTOCOL_VERSION, 98);
+    fn protocol_version_is_99_for_graveyard_permission_pool() {
+        assert_eq!(PROTOCOL_VERSION, 99);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3381,7 +3385,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_98_for_per_player_choice_order` stays
+    /// `protocol_version_is_99_for_graveyard_permission_pool` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

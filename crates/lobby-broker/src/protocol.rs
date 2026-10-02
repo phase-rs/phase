@@ -60,6 +60,12 @@ pub struct TournamentRequestId(pub u64);
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
+/// 99 — `StaticMode::GraveyardCastPermission` gains `pool`
+///      (`GraveyardPermissionPool`, `#[serde(default, skip_serializing_if = ...)]`):
+///      `AnyGraveyard` is "from any graveyard" (CR 404.1 + CR 601.3 — The Great
+///      Work). A v98 peer silently defaults it to the own graveyard and refuses a
+///      cast from another player's graveyard the permission allows, and desyncs.
+///
 /// 98 — `PerPlayerScope` gains `Opponents` (CR 102.2 + CR 102.3), the
 ///      team-relative population of "for each opponent, choose …" (Ultimate
 ///      Magic: Meteor), written as `{"Each":"Opponents"}` inside `ZoneOwner`.
@@ -813,7 +819,7 @@ pub struct TournamentRequestId(pub u64);
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 98;
+pub const PROTOCOL_VERSION: u32 = 99;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -2054,12 +2060,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 98);
+        assert_eq!(PROTOCOL_VERSION, 99);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which refuses an older full-game peer that cannot preserve the exact
         // Full-session identity across draft match attachment and follow-ups.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 97);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 98);
     }
 
     #[test]

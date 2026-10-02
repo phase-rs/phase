@@ -3480,6 +3480,7 @@ pub(super) fn handle_resolution_choice(
                                             crate::game::game_object::DisplaySource::Token,
                                         printed_ref: None,
                                         token_image_ref: None,
+                                        token_art: None,
                                         extra_keywords: vec![],
                                         additional_modifications: vec![],
                                         tapped: true,

@@ -16407,6 +16407,7 @@ mod tests {
                         extra_cost: None,
                         enters_with_counter: None,
                         required_cast_keyword: None,
+                        pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
                     },
                 )
                 .affected(crate::types::ability::TargetFilter::Typed(

@@ -1797,7 +1797,7 @@ fn handle_persist_chosen_attribute_choice(
     )?;
     // CR 111.1 + CR 707.2: art routing follows the copy (token vs printed
     // source), captured alongside the values — NOT a copiable value itself.
-    let (display_source, printed_ref, token_image_ref) = state
+    let (display_source, printed_ref, token_image_ref, token_art) = state
         .objects
         .get(&donor_id)
         .map(|o| {
@@ -1805,6 +1805,7 @@ fn handle_persist_chosen_attribute_choice(
                 o.display_source,
                 o.printed_ref.clone(),
                 o.token_image_ref.clone(),
+                o.token_art.clone(),
             )
         })
         .unwrap_or_default();
@@ -1926,6 +1927,7 @@ fn handle_persist_chosen_attribute_choice(
         display_source,
         printed_ref,
         token_image_ref,
+        token_art,
         additional_modifications: Vec::new(),
         effect_kind: crate::types::ability::EffectKind::ChoosePermanent,
     };
@@ -7987,6 +7989,7 @@ mod tests {
                 display_source: crate::game::game_object::DisplaySource::Token,
                 printed_ref: None,
                 token_image_ref: None,
+                token_art: None,
                 extra_keywords: Vec::new(),
                 additional_modifications: Vec::new(),
                 tapped: false,
