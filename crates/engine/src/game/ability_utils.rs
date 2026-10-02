@@ -3327,6 +3327,91 @@ pub(crate) fn fight_subject_needs_target_slot(subject: &TargetFilter) -> bool {
     }
 }
 
+/// CR 601.2c + CR 701.14a: Only declared fighters occupy announcement slots.
+fn fight_declared_slot_filters<'a>(
+    subject: &'a TargetFilter,
+    target: &'a TargetFilter,
+) -> impl Iterator<Item = &'a TargetFilter> {
+    fight_subject_needs_target_slot(subject)
+        .then_some(subject)
+        .into_iter()
+        .chain(std::iter::once(target))
+        .filter(|filter| !filter.is_context_ref())
+}
+
+/// CR 601.2c: The recipient is mandatory independently of the source count.
+fn each_power_damage_recipient_slot_filter(ability: &ResolvedAbility) -> Option<&TargetFilter> {
+    if ability.target_choice_timing != TargetChoiceTiming::Stack {
+        return None;
+    }
+    match &ability.effect {
+        Effect::EachDealsDamageEqualToPower { recipient, .. } => Some(recipient),
+        _ => None,
+    }
+}
+
+/// CR 115.1a + CR 601.2c: Whether this instruction owns an announced target
+/// role, including an optional role whose declared selection is empty.
+/// Resolution results and declarations on descendants are separate authorities.
+pub(crate) fn node_has_stack_target_declaration(ability: &ResolvedAbility) -> bool {
+    if ability.target_choice_timing != TargetChoiceTiming::Stack
+        || paid_instead_delegate(ability).is_some()
+    {
+        return false;
+    }
+    if damage_replacement_target_roles(&ability.effect).is_some()
+        || damage_replacement_source_slot_filter(&ability.effect).is_some()
+    {
+        return true;
+    }
+    if paired_subject_filters(&ability.effect).is_some() {
+        return paired_subject_slot_filters(&ability.effect)
+            .next()
+            .is_some();
+    }
+    if let Effect::Fight { subject, target } = &ability.effect {
+        return fight_declared_slot_filters(subject, target)
+            .next()
+            .is_some();
+    }
+    if let Effect::MoveCounters {
+        source,
+        target,
+        selection,
+        ..
+    } = &ability.effect
+    {
+        return move_counter_stack_target_filters(source, target, *selection)
+            .into_iter()
+            .any(|filter| !filter.is_context_ref());
+    }
+    if let Some(role) = mana_multi_role(&ability.effect) {
+        return role.surfaced_filters().next().is_some();
+    }
+    if let Effect::Attach {
+        attachment,
+        target,
+        selection,
+    } = &ability.effect
+    {
+        return attach_attachment_claims_announcement_slot(attachment, selection)
+            || attach_host_filter_needs_target_slot(target);
+    }
+    if matches!(ability.effect, Effect::EachDealsDamageEqualToPower { .. }) {
+        return each_power_damage_recipient_slot_filter(ability).is_some();
+    }
+    if is_per_opponent_target_fanout(ability) {
+        return true;
+    }
+    ability_needs_companion_target_player_slot(ability)
+        || (effect_needs_target_creature_quantity_slot(&ability.effect)
+            && !one_sided_fight_source_supplies_quantity_creature(&ability.effect))
+        || effect_needs_parent_target_combat_relation_slot(&ability.effect)
+        || become_copy_recipient_slot_filter(&ability.effect).is_some()
+        || (!effect_target_filter_references_chosen_player(&ability.effect)
+            && triggers::extract_target_filter_from_effect(&ability.effect).is_some())
+}
+
 /// CR 115.1 + CR 601.2c: the `Effect::BecomeCopy` RECIPIENT filter that must be
 /// announced as its own target slot, or `None` when the recipient needs no
 /// announcement (`crate::types::ability::CopyRecipient::Source`, or an untargeted CR 611.2c set).
@@ -3665,12 +3750,7 @@ fn collect_target_slots_inner(
     // fights …" only surface the opponent as a target slot — the fighter is the
     // ability source or the host permanent.
     if let Effect::Fight { subject, target } = &ability.effect {
-        let mut filters: Vec<&TargetFilter> = Vec::new();
-        if fight_subject_needs_target_slot(subject) {
-            filters.push(subject);
-        }
-        filters.push(target);
-        for filter in filters {
+        for filter in fight_declared_slot_filters(subject, target) {
             // CR 608.2c + CR 701.14a: A context-ref fighter (SelfRef, ParentTarget,
             // ParentTargetSlot, TrackedSet — the reciprocal "those creatures fight
             // each other") resolves from chain context, never a cast-time choice,
@@ -3679,9 +3759,6 @@ fn collect_target_slots_inner(
             // target to a TrackedSet, which is equally a context ref — generating a
             // slot for it produced a spurious all-players slot that panicked the
             // cast (Malamet Battle Glyph).
-            if filter.is_context_ref() {
-                continue;
-            }
             let legal_targets =
                 legal_targets_for_ability_filter(state, ability, filter, &acc.slots);
             if legal_targets.is_empty() && !ability.optional_targeting {
@@ -3792,7 +3869,7 @@ fn collect_target_slots_inner(
         // last. The resolver (`deal_damage::resolve_each_deals_equal_to_power`)
         // reads `ability.targets` as `[source.., recipient]`, treating the final
         // object target as the recipient.
-        if ability.target_choice_timing == TargetChoiceTiming::Stack {
+        if each_power_damage_recipient_slot_filter(ability).is_some() {
             // CR 601.2c + CR 115.1d: the source count ("up to two" → 0..=2, or
             // "two" → exactly 2) lives in the ability's `multi_target` spec.
             let source_legal =
@@ -6349,16 +6426,8 @@ fn collect_target_slot_specs(
     // CR 701.14a + CR 115.1: Mirror the dual-fighter `Fight` branch in
     // `collect_target_slots` so per-slot specs line up one-for-one.
     if let Effect::Fight { subject, target } = &ability.effect {
-        let mut filters: Vec<&TargetFilter> = Vec::new();
-        if fight_subject_needs_target_slot(subject) {
-            filters.push(subject);
-        }
-        filters.push(target);
-        for filter in filters {
+        for filter in fight_declared_slot_filters(subject, target) {
             // Keep per-slot metadata aligned with the surfaced cast-time slots.
-            if filter.is_context_ref() {
-                continue;
-            }
             let id = TargetInstanceId(*next_instance);
             *next_instance += 1;
             specs.push(TargetSlotSpec {
@@ -6441,7 +6510,7 @@ fn collect_target_slot_specs(
         // one-for-one — the variable-count SOURCE slots first (sharing one
         // instance per CR 115.3 so the same creature can't fill two source
         // slots), then the single mandatory RECIPIENT slot (its own instance).
-        if ability.target_choice_timing == TargetChoiceTiming::Stack {
+        if each_power_damage_recipient_slot_filter(ability).is_some() {
             let source_legal = legal_targets_for_ability_filter(state, ability, sources, &[]);
             if let Some(spec) = ability.multi_target.as_ref() {
                 if let Ok(bounds) =
@@ -11321,7 +11390,315 @@ fn build_mode_sequences(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::types::ability::{
+        AttachCardinality, CopyRecipient, ManaProduction, ManaTargetRole, PreventionAmount,
+        PreventionScope,
+    };
     use crate::types::ability::{CombatRelation, CombatRelationSubject};
+
+    #[test]
+    fn node_declaration_query_matches_production_role_boundaries() {
+        let mut state = GameState::new_two_player(42);
+        let object = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Role source".into(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&object)
+            .unwrap()
+            .card_types
+            .core_types
+            .extend([CoreType::Creature, CoreType::Artifact]);
+        let creature = TargetFilter::Typed(TypedFilter::creature());
+        let context = TargetFilter::ParentTargetSlot { index: 0 };
+        let tracked = TargetFilter::TrackedSet {
+            id: TrackedSetId(0),
+        };
+        let power = QuantityExpr::Ref {
+            qty: QuantityRef::Power {
+                scope: ObjectScope::Target,
+            },
+        };
+        let mut cases = Vec::new();
+        for (a, b, count) in [
+            (&context, &tracked, 0),
+            (&creature, &tracked, 1),
+            (&creature, &creature, 2),
+        ] {
+            cases.push((
+                "fight",
+                Effect::Fight {
+                    subject: a.clone(),
+                    target: b.clone(),
+                },
+                count,
+                count,
+            ));
+            cases.push((
+                "paired",
+                Effect::ExchangeControl {
+                    target_a: a.clone(),
+                    target_b: b.clone(),
+                },
+                count,
+                count,
+            ));
+        }
+        for selection in [
+            CounterMoveSelection::StackTarget,
+            CounterMoveSelection::StackTargetAnyNumber,
+            CounterMoveSelection::ResolutionDistributionAnyNumber,
+        ] {
+            for source in [&creature, &context] {
+                for target in [&creature, &tracked] {
+                    let count = usize::from(!source.is_context_ref())
+                        + usize::from(
+                            selection != CounterMoveSelection::ResolutionDistributionAnyNumber
+                                && !target.is_context_ref(),
+                        );
+                    cases.push((
+                        "move counters",
+                        Effect::MoveCounters {
+                            source: source.clone(),
+                            target: target.clone(),
+                            counter_type: None,
+                            count: Some(QuantityExpr::Fixed { value: 1 }),
+                            mode: CounterTransferMode::Move,
+                            selection,
+                        },
+                        count,
+                        count,
+                    ));
+                }
+            }
+        }
+        for (recipient, count_source, count) in [
+            (&TargetFilter::ScopedPlayer, &TargetFilter::Controller, 0),
+            (&TargetFilter::ScopedPlayer, &TargetFilter::Player, 1),
+            (&TargetFilter::Player, &TargetFilter::Player, 2),
+        ] {
+            cases.push((
+                "mana",
+                Effect::Mana {
+                    produced: ManaProduction::Colorless {
+                        count: QuantityExpr::Fixed { value: 1 },
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: Some(ManaTargetRole::Both {
+                        recipient: recipient.clone(),
+                        count_source: count_source.clone(),
+                    }),
+                },
+                count,
+                count,
+            ));
+        }
+        for selection in [
+            AttachSelection::Targeted,
+            AttachSelection::AtResolution {
+                count: AttachCardinality::One,
+            },
+        ] {
+            for host in [&context, &creature] {
+                let count =
+                    usize::from(selection.is_targeted()) + usize::from(!host.is_context_ref());
+                cases.push((
+                    "attach",
+                    Effect::Attach {
+                        attachment: creature.clone(),
+                        target: host.clone(),
+                        selection: selection.clone(),
+                    },
+                    count,
+                    count,
+                ));
+            }
+        }
+        for (recipient, target, count) in [
+            (CopyRecipient::Source, context.clone(), 0),
+            (CopyRecipient::Target(creature.clone()), context.clone(), 1),
+            (CopyRecipient::Target(creature.clone()), creature.clone(), 2),
+        ] {
+            cases.push((
+                "copy",
+                Effect::BecomeCopy {
+                    recipient,
+                    target,
+                    duration: None,
+                    mana_value_limit: None,
+                    additional_modifications: vec![],
+                },
+                count,
+                count,
+            ));
+        }
+        cases.push((
+            "source prevention",
+            Effect::PreventDamage {
+                amount: PreventionAmount::All,
+                amount_dynamic: None,
+                target: TargetFilter::Any,
+                recipient_scope: EffectScope::Single,
+                scope: PreventionScope::AllDamage,
+                damage_source_filter: Some(TargetFilter::And {
+                    filters: vec![context.clone(), creature.clone()],
+                }),
+                prevention_duration: None,
+            },
+            1,
+            1,
+        ));
+        cases.push((
+            "quantity",
+            Effect::Draw {
+                count: power.clone(),
+                target: TargetFilter::Controller,
+            },
+            1,
+            1,
+        ));
+        cases.push((
+            "no quantity",
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            0,
+            0,
+        ));
+        cases.push((
+            "companion player",
+            Effect::GainControlAll {
+                target: TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::TargetPlayer),
+                ),
+            },
+            1,
+            1,
+        ));
+        cases.push((
+            "combat relation",
+            Effect::DestroyAll {
+                cant_regenerate: false,
+                target: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                    FilterProp::CombatRelation {
+                        subject: CombatRelationSubject::ParentTarget,
+                        relation: CombatRelation::BlockingOrBlockedBy,
+                    },
+                ])),
+            },
+            1,
+            1,
+        ));
+        cases.push((
+            "one-sided quantity source",
+            Effect::DealDamage {
+                amount: power,
+                target: creature.clone(),
+                damage_source: Some(DamageSource::Target),
+                excess: None,
+            },
+            1,
+            1,
+        ));
+        // Existing primary ChosenPlayer asymmetry: announcement excludes it,
+        // while the spec route still emits one. This unit preserves both.
+        cases.push((
+            "chosen-player exclusion",
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::ChosenPlayer { index: 0 }),
+                ),
+            },
+            0,
+            1,
+        ));
+        for (name, effect, slot_count, spec_count) in cases {
+            let mut ability = ResolvedAbility::new(effect, vec![], object, PlayerId(0));
+            ability.optional_targeting = true;
+            let slots = build_target_slots(&state, &ability).unwrap();
+            let specs = target_slot_specs(&state, &ability);
+            assert_eq!(slots.len(), slot_count, "{name}: announcement slots");
+            assert_eq!(
+                specs.len(),
+                spec_count,
+                "{name}: per-route spec preservation"
+            );
+            assert_eq!(
+                node_has_stack_target_declaration(&ability),
+                slot_count != 0,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn each_power_recipient_declaration_preserves_sources_extra_and_mandatory_order() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".into(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let second = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Second source".into(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&second)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let creature = TargetFilter::Typed(TypedFilter::creature());
+        for (maximum, extra) in [(0, None), (2, Some(creature.clone()))] {
+            let mut ability = ResolvedAbility::new(
+                Effect::EachDealsDamageEqualToPower {
+                    sources: creature.clone(),
+                    recipient: creature.clone(),
+                    extra_source: extra.clone(),
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            );
+            ability.multi_target = Some(MultiTargetSpec::fixed(0, maximum));
+            let slots = build_target_slots(&state, &ability).unwrap();
+            let specs = target_slot_specs(&state, &ability);
+            let expected = maximum + usize::from(extra.is_some()) + 1;
+            assert_eq!(slots.len(), expected);
+            assert_eq!(specs.len(), expected);
+            assert!(!slots.last().unwrap().optional);
+            assert!(!specs.last().unwrap().optional);
+            assert!(slots.iter().take(expected - 1).all(|slot| slot.optional));
+            assert!(specs.iter().take(expected - 1).all(|spec| spec.optional));
+            assert!(node_has_stack_target_declaration(&ability));
+            ability.target_choice_timing = TargetChoiceTiming::Resolution;
+            assert!(!node_has_stack_target_declaration(&ability));
+            assert!(build_target_slots(&state, &ability).unwrap().is_empty());
+            assert!(target_slot_specs(&state, &ability).is_empty());
+        }
+    }
 
     fn addr(slot: usize) -> RetargetSlotAddress {
         RetargetSlotAddress { path: vec![], slot }
