@@ -386,7 +386,6 @@ const COMMANDER_FORMAT_CONFIG: FormatConfig = {
   default_deck_copy_limit: { type: "UpTo", data: 1 },
   uses_commander: true,
   allow_debug_actions: false,
-  allow_experimental_dungeons: false,
 };
 
 function publishedPayload(playerDeck = ["Player"], opponentDeck = ["Opponent"], pool?: string[] | null) {
