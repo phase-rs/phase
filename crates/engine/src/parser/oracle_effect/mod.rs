@@ -40428,7 +40428,11 @@ fn parse_effect_chain_ir_body(
         // Super-Adaptoid). Both fail closed instead of shipping a gate they
         // cannot evaluate: a comparison whose "that creature" has no declared
         // object target, or a non-keyword predicate (`Keyword::Unknown`: counter
-        // and P/T thresholds such as Bring Low's "a +1/+1 counter on it").
+        // thresholds such as Bring Low's and Urdnan's "a +1/+1 counter on it" or
+        // Hadana's Climb's "three or more +1/+1 counters on it"). Fixed-N P/T
+        // thresholds ("that creature has power 4 or greater") never reach this
+        // gate: the leading general conditional claims them via
+        // `parse_target_pt_threshold_condition`.
         let mut comparative_gate_producer: Option<usize> = None;
         let (target_has_cond, text) = if condition.is_none()
             && specialized_guard_available

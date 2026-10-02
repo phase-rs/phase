@@ -26340,7 +26340,7 @@ fn rider_declaring_its_own_target_fails_closed() {
 }
 
 /// CR 608.2c: an "if that creature has <predicate>," gate whose predicate is not
-/// a keyword (a counter or power threshold) cannot be evaluated by the
+/// a keyword (a counter threshold) cannot be evaluated by the
 /// keyword check, so it must fail closed as a named `Unimplemented` rather than
 /// ship as an inert `TargetHasKeywordInstead{Unknown}` that reads as supported.
 /// Real keyword gates (Toxic, Flying) are unchanged.
@@ -26353,9 +26353,9 @@ fn unknown_keyword_gate_fails_closed() {
             &["Instant"][..],
         ),
         (
-            "Strider, Ranger of the North",
-            "Landfall — Whenever a land you control enters, target creature gets +1/+1 until end of turn. Then if that creature has power 4 or greater, it gains first strike until end of turn.",
-            &["Creature"][..],
+            "Hadana's Climb",
+            "At the beginning of combat on your turn, put a +1/+1 counter on target creature you control. Then if that creature has three or more +1/+1 counters on it, transform Hadana's Climb.",
+            &["Enchantment"][..],
         ),
         (
             "Urdnan, Dromoka Warrior",
@@ -26409,6 +26409,108 @@ fn unknown_keyword_gate_fails_closed() {
             .find_map(find_keyword_gate)
             .unwrap_or_else(|| panic!("{name}: keyword gate must survive: {r:#?}"));
         assert!(keyword_matches(gate), "{name}: wrong keyword {gate:?}");
+    }
+}
+
+/// CR 208.1 + CR 608.2c + CR 608.2h: "Then if that creature has power/toughness
+/// N or greater, …" names the earlier instruction's target and reads its current
+/// power/toughness at resolution. It lowers to a Target-scoped live
+/// `TargetMatchesFilter{PtComparison}` on the gated sub-ability — not the
+/// fail-closed `target_has_unknown_keyword_condition` (Strider, Dormant Grove,
+/// Yavimaya Bloomsage).
+#[test]
+fn target_has_pt_threshold_gate_lowers_to_target_filter() {
+    fn find_pt_gate(def: &AbilityDefinition) -> Option<(&AbilityDefinition, PtStat, i32)> {
+        if let Some(AbilityCondition::TargetMatchesFilter {
+            filter: TargetFilter::Typed(tf),
+            use_lki: false,
+            subject_slot: None,
+        }) = &def.condition
+        {
+            if let [FilterProp::PtComparison {
+                stat,
+                scope: PtValueScope::Current,
+                comparator: Comparator::GE,
+                value: QuantityExpr::Fixed { value },
+            }] = tf.properties.as_slice()
+            {
+                return Some((def, *stat, *value));
+            }
+        }
+        def.sub_ability.as_deref().and_then(find_pt_gate)
+    }
+    for (name, text, types, expected_stat, expected_n) in [
+        (
+            "Strider, Ranger of the North",
+            "Landfall — Whenever a land you control enters, target creature gets +1/+1 until end of turn. Then if that creature has power 4 or greater, it gains first strike until end of turn.",
+            &["Creature"][..],
+            PtStat::Power,
+            4,
+        ),
+        (
+            "Dormant Grove",
+            "At the beginning of combat on your turn, put a +1/+1 counter on target creature you control. Then if that creature has toughness 6 or greater, transform this enchantment.",
+            &["Enchantment"][..],
+            PtStat::Toughness,
+            6,
+        ),
+        (
+            "Yavimaya Bloomsage",
+            "At the beginning of your end step, put a +1/+1 counter on target creature you control. Then if that creature has power 7 or greater, this creature becomes prepared. (While it's prepared, you may cast a copy of its spell. Doing so unprepares it.)",
+            &["Creature"][..],
+            PtStat::Power,
+            7,
+        ),
+    ] {
+        let r = parse(text, name, &[], types, &[]);
+        assert!(
+            !format!("{r:?}").contains("Unimplemented"),
+            "{name}: the threshold gate must parse with no gap: {r:#?}"
+        );
+        let [trigger] = r.triggers.as_slice() else {
+            panic!("{name}: expected exactly one trigger: {r:#?}");
+        };
+        let execute = trigger
+            .execute
+            .as_deref()
+            .unwrap_or_else(|| panic!("{name}: trigger must have an execute body"));
+        let (gated, stat, n) = find_pt_gate(execute)
+            .unwrap_or_else(|| panic!("{name}: Target-scoped PtComparison gate: {execute:#?}"));
+        assert_eq!((stat, n), (expected_stat, expected_n), "{name}");
+
+        if name == "Strider, Ranger of the North" {
+            assert!(
+                matches!(
+                    &*execute.effect,
+                    Effect::Pump {
+                        target: TargetFilter::Typed(_),
+                        ..
+                    }
+                ),
+                "{name}: root is the targeted pump: {execute:#?}"
+            );
+            match &*gated.effect {
+                Effect::GenericEffect {
+                    static_abilities, ..
+                } => {
+                    // "it" binds to the pump's target: the first-strike grant
+                    // affects `ParentTarget`, not the trigger source.
+                    assert!(
+                        static_abilities.iter().any(|s| s.affected
+                            == Some(TargetFilter::ParentTarget)
+                            && s.modifications.iter().any(|m| matches!(
+                                m,
+                                ContinuousModification::AddKeyword {
+                                    keyword: Keyword::FirstStrike
+                                }
+                            ))),
+                        "{name}: gated body grants first strike to the parent target: \
+                         {static_abilities:?}"
+                    );
+                }
+                other => panic!("{name}: expected GenericEffect gated body, got {other:?}"),
+            }
+        }
     }
 }
 

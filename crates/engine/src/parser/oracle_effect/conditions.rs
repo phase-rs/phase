@@ -5,7 +5,7 @@ use nom::branch::alt;
 use nom::bytes::complete::{tag, tag_no_case, take_until, take_while};
 use nom::character::complete::{char, multispace0, satisfy};
 use nom::combinator::{all_consuming, eof, map, opt, peek, recognize, value};
-use nom::sequence::{preceded, terminated};
+use nom::sequence::{delimited, preceded, terminated};
 use nom::Parser;
 
 use super::super::oracle_nom::bridge::{nom_on_lower, nom_parse_lower};
@@ -2612,26 +2612,43 @@ fn parse_threshold_with_exactly(input: &str) -> OracleResult<'_, (Comparator, i3
     parse_or_threshold(input)
 }
 
-/// CR 115.1 + CR 208.1 + CR 608.2c: target-anaphoric possessive power/toughness
-/// comparison — "that creature's power is 2 or less" / "that permanent's
-/// toughness is exactly N" (Depressurize, Gore Vassal, Reptilian Recruiter's
-/// first disjunct). The possessive "'s <stat> is N" form is NOT reached by
-/// `parse_target_reflexive_property_condition` (its predicate parser rejects the
-/// leading "is"), and the generic `parse_cda_quantity` fallback mis-scopes it to
+/// CR 115.1 + CR 208.1 + CR 608.2c: target-anaphoric power/toughness threshold
+/// — two semantically identical surface forms of "the earlier instruction's
+/// target has <stat> <threshold>":
+///   - possessive "that creature's power is 2 or less" / "that permanent's
+///     toughness is exactly N" (Depressurize, Gore Vassal, Reptilian Recruiter's
+///     first disjunct);
+///   - present-tense possession "that creature has power 4 or greater" /
+///     "that permanent has toughness 6 or greater" (Strider, Ranger of the North;
+///     Dormant Grove; Yavimaya Bloomsage).
+///
+/// Neither form is reached by `parse_target_reflexive_property_condition` (its
+/// tense parser rejects the possessive "'s" and the present-tense "has"), and the
+/// generic `parse_cda_quantity` fallback mis-scopes the possessive form to
 /// `Power { CostPaidObject }`. CR 115.1: "that creature" is the ability's first
 /// target, so this binds Target scope via `TargetMatchesFilter`, which resolves
 /// `ability.targets[0]` and — for subject-based triggers with no chosen target —
 /// falls back to the triggering source (see effects/mod.rs). Composes:
 ///   - subject: `parse_target_demonstrative_subject` (that creature/permanent/card)
-///   - possessive `'s ` + stat (`parse_reflexive_pt_stat`) + linking `is `
+///   - possessive `'s ` + stat + linking `is `, or ` has ` + stat
+///     (`parse_reflexive_pt_stat`)
 ///   - threshold: `parse_threshold_with_exactly`.
-fn parse_target_possessive_pt_comparison(
+///
+/// Only P/T is on this axis: counter thresholds ("that creature has a +1/+1
+/// counter on it") deliberately stay on the target-has gate's fail-closed
+/// `Keyword::Unknown` path, since routing them here would also reroute
+/// "instead" gates through `lower_instead_condition`.
+fn parse_target_pt_threshold_condition(
     input: &str,
 ) -> super::super::oracle_nom::error::OracleResult<'_, AbilityCondition> {
     let (rest, _) = parse_target_demonstrative_subject(input)?;
-    let (rest, _) = tag("'s ").parse(rest)?;
-    let (rest, stat) = parse_reflexive_pt_stat(rest)?;
-    let (rest, _) = tag("is ").parse(rest)?;
+    let (rest, stat) = alt((
+        // "that creature's power is N…" (existing possessive form).
+        delimited(tag("'s "), parse_reflexive_pt_stat, tag("is ")),
+        // CR 208.1 + CR 608.2c + CR 608.2h: present-tense possession "that creature has power N or greater" — the earlier instruction's target, read live at resolution.
+        preceded(tag(" has "), parse_reflexive_pt_stat),
+    ))
+    .parse(rest)?;
     let (rest, (comparator, value)) = parse_threshold_with_exactly(rest)?;
     Ok((
         rest,
@@ -2650,9 +2667,9 @@ fn parse_target_possessive_pt_comparison(
     ))
 }
 
-fn parse_target_possessive_pt_comparison_text(text: &str) -> Option<AbilityCondition> {
+fn parse_target_pt_threshold_condition_text(text: &str) -> Option<AbilityCondition> {
     let lower = text.trim().trim_end_matches('.').to_ascii_lowercase();
-    let parsed = all_consuming(parse_target_possessive_pt_comparison)
+    let parsed = all_consuming(parse_target_pt_threshold_condition)
         .parse(lower.as_str())
         .ok()
         .map(|(_, c)| c);
@@ -3004,8 +3021,10 @@ pub(super) enum KeywordConditionStrip {
         condition: Box<AbilityCondition>,
         body: String,
     },
-    /// The gate's words are not a keyword (`Keyword::Unknown`): a counter,
-    /// power/toughness threshold, or other predicate this stripper cannot type.
+    /// The gate's words are not a keyword (`Keyword::Unknown`): a counter
+    /// threshold or other predicate this stripper cannot type. (Fixed-N
+    /// power/toughness thresholds are claimed upstream by
+    /// `parse_target_pt_threshold_condition`.)
     UnknownKeyword,
 }
 
@@ -3043,13 +3062,15 @@ pub(super) fn strip_target_keyword_instead(text: &str) -> KeywordConditionStrip 
         ))
         .parse(i)?;
         // CR 122.1b: `Keyword::from_str` is infallible — an unrecognized phrase
-        // (a counter or power/toughness gate such as "a +1/+1 counter on it" or
-        // "power 4 or greater") becomes `Keyword::Unknown`. The runtime check
-        // for this gate is `has_keyword`, which such prose can never satisfy,
-        // so an `Unknown` gate would be silently inert while reading as
-        // supported. No condition is built for it; once the rest of the gate
-        // grammar matches, the caller receives `UnknownKeyword` and fails the
-        // clause closed (Bring Low, Strider, Urdnan) instead.
+        // (a counter gate such as "a +1/+1 counter on it") becomes
+        // `Keyword::Unknown`. The runtime check for this gate is `has_keyword`,
+        // which such prose can never satisfy, so an `Unknown` gate would be
+        // silently inert while reading as supported. No condition is built for
+        // it; once the rest of the gate grammar matches, the caller receives
+        // `UnknownKeyword` and fails the clause closed (Bring Low, Urdnan)
+        // instead. Fixed-N power/toughness thresholds never reach here in the
+        // chunk loop: they are claimed upstream by
+        // `parse_target_pt_threshold_condition`.
         let keyword = match Keyword::from_str(keyword_str).unwrap() {
             Keyword::Unknown(_) => None,
             keyword => Some(keyword),
@@ -3381,9 +3402,10 @@ pub(super) fn strip_counter_conditional(
     // creature"/"that permanent"/"that card" is deliberately NOT offered in the
     // leading position. A sentence-initial "If that creature has … counter …,
     // [source] deals N … instead" belongs to the target-gated *replacement*
-    // class (Bring Low, Strider, Urdnan), whose counter/P-T gate is not a
-    // keyword, so `strip_target_keyword_instead` fails it closed (see the CR
-    // 122.1b note there). Offering the demonstrative here would GATE OUT that
+    // class (Bring Low, Urdnan), whose counter gate is not a keyword, so
+    // `strip_target_keyword_instead` fails it closed (see the CR 122.1b note
+    // there). Fixed-N P/T thresholds are claimed upstream by
+    // `parse_target_pt_threshold_condition`. Offering the demonstrative here would GATE OUT that
     // owner and over-accept those cards into a false-green additive
     // `DealDamage` sibling (the "instead" is a replacement, not additive).
     // CR 115.1's demonstrative-as-target is honored only in the trailing form
@@ -3410,7 +3432,7 @@ pub(super) fn strip_counter_conditional(
     // CR 608.2c + CR 400.7: leading, PAST-tense EXPLICIT-DEMONSTRATIVE — "If that
     // <permanent> had counter(s) on it, [additive effect]". Distinct from the
     // present-tense "if that creature has ... counter ..., ... instead"
-    // REPLACEMENT class handled above (Bring Low, Strider, Urdnan): this branch
+    // REPLACEMENT class handled above (Bring Low, Urdnan): this branch
     // fires only on past tense `had` AND only when the residual body is additive
     // (carries no standalone "instead" token anywhere). The subject is the
     // chain-root SPELL's target, read live-or-LKI at resolution
@@ -6591,13 +6613,16 @@ pub(super) fn try_nom_condition_as_ability_condition(
         return Some(condition);
     }
 
-    // CR 115.1 + CR 208.1 + CR 608.2c: target-anaphoric possessive P/T comparison —
-    // "that creature's power is 2 or less" / "that permanent's toughness is
-    // exactly N" (Depressurize, Gore Vassal, Reptilian disjunct A). Placed right
-    // after the reflexive arm (which does not match the possessive "'s ... is N"
-    // form) so it wins over the generic `parse_cda_quantity` path downstream that
-    // would otherwise mis-scope the subject to `Power { CostPaidObject }`.
-    if let Some(condition) = parse_target_possessive_pt_comparison_text(lower.as_str()) {
+    // CR 115.1 + CR 208.1 + CR 608.2c: target-anaphoric P/T threshold —
+    // possessive "that creature's power is 2 or less" / "that permanent's
+    // toughness is exactly N" (Depressurize, Gore Vassal, Reptilian disjunct A)
+    // and present-possession "that creature has power 4 or greater" (Strider,
+    // Dormant Grove, Yavimaya Bloomsage). Placed right after the reflexive arm
+    // (which matches neither the possessive "'s ... is N" nor the "has" form) so
+    // it wins over the generic `parse_cda_quantity` path downstream that would
+    // otherwise mis-scope the subject to `Power { CostPaidObject }`, and over the
+    // target-has gate in `mod.rs` that would fail it closed as `Keyword::Unknown`.
+    if let Some(condition) = parse_target_pt_threshold_condition_text(lower.as_str()) {
         return Some(condition);
     }
 
@@ -9142,6 +9167,8 @@ mod tests {
     /// CR 608.2c: a non-keyword "has" predicate (a counter or P/T threshold)
     /// must not ship as an inert `TargetHasKeywordInstead{Unknown}` gate; the
     /// stripper reports it so the chunk loop can fail the clause closed.
+    /// (In the chunk loop the dispatcher now claims P/T thresholds upstream via
+    /// `parse_target_pt_threshold_condition`; this stripper's direct contract is unchanged.)
     #[test]
     fn strip_target_keyword_instead_refuses_unknown_keyword_gates() {
         for text in [
@@ -9284,13 +9311,14 @@ mod tests {
         );
     }
 
-    /// CR 115.1 + CR 208.1: target-anaphoric possessive P/T comparison — "that
+    /// CR 115.1 + CR 208.1: target-anaphoric P/T threshold — possessive "that
     /// creature's power is 2 or less" / "that permanent's toughness is exactly 3"
+    /// and present-possession "that creature has power 4 or greater"
     /// → `TargetMatchesFilter{PtComparison{.., Current, .., Fixed}}` (Target scope,
     /// NOT `Power{CostPaidObject}`). The "exactly" leaf composes with the
     /// "or less"/"or greater" thresholds.
     #[test]
-    fn target_possessive_pt_comparison_binds_target_scope() {
+    fn target_pt_threshold_condition_binds_target_scope() {
         let pt = |c: &AbilityCondition| -> (PtStat, Comparator, i32) {
             match c {
                 AbilityCondition::TargetMatchesFilter {
@@ -9311,24 +9339,62 @@ mod tests {
         };
         assert_eq!(
             pt(
-                &parse_target_possessive_pt_comparison_text("that creature's power is 2 or less")
+                &parse_target_pt_threshold_condition_text("that creature's power is 2 or less")
                     .unwrap()
             ),
             (PtStat::Power, Comparator::LE, 2)
         );
         assert_eq!(
-            pt(&parse_target_possessive_pt_comparison_text(
+            pt(&parse_target_pt_threshold_condition_text(
                 "that permanent's toughness is exactly 3"
             )
             .unwrap()),
             (PtStat::Toughness, Comparator::EQ, 3)
         );
+        // Present-tense possession "has <stat> N…" (Strider, Dormant Grove,
+        // Yavimaya Bloomsage) — the same Target-scoped live PtComparison.
+        for (text, expected) in [
+            (
+                "that creature has power 4 or greater",
+                (PtStat::Power, Comparator::GE, 4),
+            ),
+            (
+                "that permanent has toughness 6 or greater",
+                (PtStat::Toughness, Comparator::GE, 6),
+            ),
+            (
+                "that creature has power exactly 3",
+                (PtStat::Power, Comparator::EQ, 3),
+            ),
+            (
+                "that creature has toughness 2 or less",
+                (PtStat::Toughness, Comparator::LE, 2),
+            ),
+        ] {
+            let condition = parse_target_pt_threshold_condition_text(text)
+                .unwrap_or_else(|| panic!("{text}: must parse"));
+            assert_eq!(pt(&condition), expected, "{text}");
+        }
         // The reflexive past-tense "had power" form is owned by the reflexive arm,
-        // not this possessive-present recognizer.
+        // not this recognizer.
         assert!(
-            parse_target_possessive_pt_comparison_text("that creature had power 2 or less")
-                .is_none()
+            parse_target_pt_threshold_condition_text("that creature had power 2 or less").is_none()
         );
+        // Off-axis "has" predicates stay unclaimed: counters (fail-closed
+        // target-has gate), comparatives (comparative gate), bare "it" (source
+        // scope), keywords (keyword gate), and a threshold-less stat.
+        for text in [
+            "that creature has a +1/+1 counter on it",
+            "that creature has greater power than ~",
+            "it has power 4 or greater",
+            "that creature has flying",
+            "that creature has power 4",
+        ] {
+            assert!(
+                parse_target_pt_threshold_condition_text(text).is_none(),
+                "{text}: must not be claimed"
+            );
+        }
     }
 
     /// CR 201.5: the source equality wrapper fires ONLY on "exactly N" — the
