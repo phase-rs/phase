@@ -13848,6 +13848,7 @@ fn quantity_ref_reads_chain_local_result(reference: &QuantityRef) -> bool {
         | QuantityRef::FilteredTrackedSetSize { .. } => true,
         QuantityRef::PropertyAggregate(aggregate) => source_reads_chain_set(aggregate.source()),
         QuantityRef::DistinctCardTypes { source }
+        | QuantityRef::SharedCardTypes { source }
         | QuantityRef::DistinctSubtypes { source, .. } => source_reads_chain_set(source),
         QuantityRef::PlayerCount { filter } | QuantityRef::EventContextPlayerCount { filter } => {
             player_filter_reads_chain_local_result(filter)

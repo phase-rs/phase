@@ -28381,6 +28381,7 @@ fn quantity_ref_reads_target_object(qty: &QuantityRef, read: TargetRead) -> bool
             card_type_set_source_reads_chosen_target(aggregate.source(), read)
         }
         QuantityRef::DistinctCardTypes { source }
+        | QuantityRef::SharedCardTypes { source }
         | QuantityRef::DistinctSubtypes { source, .. }
         | QuantityRef::DistinctColorsAmong { source } => {
             card_type_set_source_reads_chosen_target(source, read)

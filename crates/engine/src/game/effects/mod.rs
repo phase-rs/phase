@@ -599,6 +599,7 @@ pub(crate) fn matches_player_scope(
                                         recipient: None,
                                         scoped_player: Some(p.id),
                                         damage_source: None,
+                                        spell: None,
                                         event_amount: None,
                                     },
                                 );

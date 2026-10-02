@@ -1865,7 +1865,7 @@ fn quantity_ref_uses_filter_prop(qty: &QuantityRef, pred: &impl Fn(&FilterProp) 
         | QuantityRef::LifeTotal { .. }
         | QuantityRef::GraveyardSize { .. }
         | QuantityRef::LifeAboveStarting
-        | QuantityRef::StartingLifeTotal
+        | QuantityRef::StartingLifeTotal { .. }
         | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::TriggeringScryLookCount
         | QuantityRef::TriggeringScryBottomCount
