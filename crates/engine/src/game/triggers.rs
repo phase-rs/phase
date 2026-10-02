@@ -9927,13 +9927,20 @@ pub(crate) fn collect_activation_event_at_boundary(
         LogicalZoneTriggerCollection::Ordinary,
         &mut session,
     );
-    let collected = collect_pending_and_delayed_triggers_for_batch(
-        state,
-        seed,
-        raw_batch,
-        DelayedTriggerEventScope::Any,
-    );
-    let observers = if session.admitted_matches > 0 || !collected.contexts.is_empty() {
+    let (collected, delayed_terminalized_unfired) =
+        collect_pending_and_delayed_triggers_reporting_terminalized(
+            state,
+            seed,
+            raw_batch,
+            DelayedTriggerEventScope::Any,
+        );
+    // Anything irreversible the observation did binds it: an admitted trigger
+    // (even one later pruned), a collected context, or a one-shot delayed
+    // trigger this activation consumed without firing (CR 603.4).
+    let observers = if session.admitted_matches > 0
+        || !collected.contexts.is_empty()
+        || delayed_terminalized_unfired > 0
+    {
         crate::types::events::ActivationObservers::Bound
     } else {
         crate::types::events::ActivationObservers::Unbound
@@ -11180,8 +11187,8 @@ pub fn check_delayed_triggers(state: &mut GameState, events: &[GameEvent]) -> Ve
     // "match, then terminalize, then dispatch": the unmatched-reflexive pass must
     // precede the empty-batch early return, so a complete boundary with zero
     // firing contexts still expires a reflexive that this batch did not satisfy.
-    let (pending, _) =
-        collect_matching_delayed_triggers(state, events, DelayedTriggerEventScope::Any);
+    let pending =
+        collect_matching_delayed_triggers(state, events, DelayedTriggerEventScope::Any).contexts;
     terminalize_unmatched_reflexives_for_closed_batch(state, events, DelayedTriggerEventScope::Any);
     if pending.is_empty() {
         return vec![];
@@ -11220,8 +11227,11 @@ pub fn check_delayed_triggers(state: &mut GameState, events: &[GameEvent]) -> Ve
 /// transactions use this before claiming their events, so a one-shot delayed
 /// trigger caused by a cost is ordered with the other triggers from that cost.
 pub(crate) fn collect_delayed_triggers_into_deferred(state: &mut GameState, events: &[GameEvent]) {
-    let (pending, consumed_events) =
-        collect_matching_delayed_triggers(state, events, DelayedTriggerEventScope::Any);
+    let DelayedTriggerMatch {
+        contexts: pending,
+        consumed: consumed_events,
+        ..
+    } = collect_matching_delayed_triggers(state, events, DelayedTriggerEventScope::Any);
     state.deferred_triggers.extend(pending);
     state
         .consumed_before_priority_trigger_events
@@ -12974,12 +12984,9 @@ fn collect_matching_delayed_triggers(
     state: &mut GameState,
     events: &[GameEvent],
     scope: DelayedTriggerEventScope,
-) -> (
-    Vec<PendingTriggerContext>,
-    Vec<ConsumedTriggerEventOccurrence>,
-) {
+) -> DelayedTriggerMatch {
     if state.delayed_triggers.is_empty() && state.epic_effects.is_empty() {
-        return (Vec::new(), Vec::new());
+        return DelayedTriggerMatch::default();
     }
 
     // Separate "abilities to fire" from "indices to remove".
@@ -13103,6 +13110,7 @@ fn collect_matching_delayed_triggers(
         usize,
         super::lifecycle::DelayedTerminalDisposition,
     > = to_discard.iter().copied().collect();
+    let terminalized_unfired = to_discard.len();
     let mut combined: Vec<usize> = to_remove
         .iter()
         .map(|(idx, _, _)| *idx)
@@ -13163,7 +13171,24 @@ fn collect_matching_delayed_triggers(
             ctx.pending.timestamp,
         )
     });
-    (pending, consumed_events)
+    DelayedTriggerMatch {
+        contexts: pending,
+        consumed: consumed_events,
+        terminalized_unfired,
+    }
+}
+
+/// What matching delayed triggers against one batch did.
+#[derive(Default)]
+struct DelayedTriggerMatch {
+    /// The firing contexts, in APNAP order.
+    contexts: Vec<PendingTriggerContext>,
+    /// Raw event identities the firings consumed.
+    consumed: Vec<ConsumedTriggerEventOccurrence>,
+    /// CR 603.4 + CR 603.7b: one-shot delayed triggers the batch removed
+    /// without firing — a false intervening-if consumed their single
+    /// occurrence. Removal is irreversible even though nothing fired.
+    terminalized_unfired: usize,
 }
 
 /// CR 603.12: Close the lifetime of every reflexive delayed trigger that did not
@@ -13255,9 +13280,30 @@ fn collect_pending_and_delayed_triggers_for_batch(
     delayed_events: &[GameEvent],
     delayed_scope: DelayedTriggerEventScope,
 ) -> CollectedTriggerContextBatch {
+    collect_pending_and_delayed_triggers_reporting_terminalized(
+        state,
+        normal_pending,
+        delayed_events,
+        delayed_scope,
+    )
+    .0
+}
+
+/// [`collect_pending_and_delayed_triggers_for_batch`], also reporting how many
+/// one-shot delayed triggers the batch removed without firing
+/// (`DelayedTriggerMatch::terminalized_unfired`).
+fn collect_pending_and_delayed_triggers_reporting_terminalized(
+    state: &mut GameState,
+    normal_pending: Vec<PendingTriggerContext>,
+    delayed_events: &[GameEvent],
+    delayed_scope: DelayedTriggerEventScope,
+) -> (CollectedTriggerContextBatch, usize) {
     let normal_was_non_empty = !normal_pending.is_empty();
-    let (delayed_pending, delayed_consumed) =
-        collect_matching_delayed_triggers(state, delayed_events, delayed_scope);
+    let DelayedTriggerMatch {
+        contexts: delayed_pending,
+        consumed: delayed_consumed,
+        terminalized_unfired,
+    } = collect_matching_delayed_triggers(state, delayed_events, delayed_scope);
     let mut contexts = normal_pending;
     contexts.extend(delayed_pending);
     contexts.sort_by_key(|ctx| {
@@ -13266,12 +13312,15 @@ fn collect_pending_and_delayed_triggers_for_batch(
             ctx.pending.timestamp,
         )
     });
-    CollectedTriggerContextBatch {
-        contexts,
-        delayed_events: delayed_events.to_vec(),
-        delayed_consumed,
-        normal_was_non_empty,
-    }
+    (
+        CollectedTriggerContextBatch {
+            contexts,
+            delayed_events: delayed_events.to_vec(),
+            delayed_consumed,
+            normal_was_non_empty,
+        },
+        terminalized_unfired,
+    )
 }
 
 /// CR 603.3d: the prompt currently OWED by the trigger machinery, or `None`.
@@ -24169,8 +24218,150 @@ pub mod tests {
         );
     }
 
-    /// The OTHER half of CR 603.7b, and the discriminating counterpart to the
-    /// test above: a STATED-DURATION delayed ability whose first matching event
+    /// CR 603.4 + CR 603.7b + CR 605.3b: a mana activation that CONSUMES a
+    /// one-shot delayed watcher on a false intervening-`if` has an irreversible
+    /// consequence (the watcher is gone, though nothing fired), so its boundary
+    /// observation is `Bound` and undo is never recorded. Controls: with the gate
+    /// TRUE the watcher fires (`Bound` via its context); with no watcher the
+    /// activation is `Unbound` and undoable.
+    ///
+    /// REVERT-TO-RED: drop `delayed_terminalized_unfired > 0` from the boundary's
+    /// `Bound` decision and the false-gate leg records `Unbound` and undo.
+    #[test]
+    fn a_false_gated_delayed_watcher_consumed_by_a_mana_activation_binds_it() {
+        use crate::types::ability::DelayedTriggerLifetime;
+        use crate::types::events::{
+            ActivatedAbilityKind, ActivationObservers, ActivationTriggerState,
+        };
+        use crate::types::triggers::TriggerMode;
+
+        #[derive(Clone, Copy, PartialEq)]
+        enum Watcher {
+            None,
+            GateFalse,
+            GateTrue,
+        }
+
+        fn run(watcher: Watcher) -> (GameState, ActivationObservers, ObjectId) {
+            let controller = PlayerId(0);
+            let mut state = setup();
+            state.active_player = controller;
+            state.priority_player = controller;
+            let land = create_object(
+                &mut state,
+                CardId(0x0605_0301),
+                controller,
+                "Tapped Land".to_string(),
+                Zone::Battlefield,
+            );
+            if watcher != Watcher::None {
+                let source = create_object(
+                    &mut state,
+                    CardId(0x0605_0302),
+                    controller,
+                    "Next Activation Rider".to_string(),
+                    Zone::Battlefield,
+                );
+                // "When you next activate an ability this turn, if you control
+                // your commander, you become the monarch."
+                let mut trigger_def = TriggerDefinition::new(TriggerMode::AbilityActivated);
+                trigger_def.valid_target = Some(TargetFilter::Controller);
+                let mut ability = ResolvedAbility::new(
+                    Effect::BecomeMonarch {
+                        target: TargetFilter::Controller,
+                    },
+                    vec![],
+                    source,
+                    controller,
+                );
+                ability.condition = Some(AbilityCondition::ControlsCommander {
+                    ownership: CommanderOwnership::Own,
+                });
+                let source_object = state.objects.get(&source).expect("installed source");
+                ability.trigger_source =
+                    Some(trigger_source_context_for_latch(&state, source_object));
+                state.delayed_triggers.push(DelayedTrigger {
+                    condition: DelayedTriggerCondition::WhenNextEvent {
+                        trigger: Box::new(trigger_def),
+                        or_trigger: None,
+                        lifetime: DelayedTriggerLifetime::ThisTurn,
+                    },
+                    ability: Box::new(ability),
+                    controller,
+                    source_id: source,
+                    one_shot: true,
+                    provenance: DelayedInstallIdentity::LegacyDelayed,
+                });
+            }
+            if watcher == Watcher::GateTrue {
+                let commander = make_creature(&mut state, controller, "Your Commander", 2, 2);
+                state
+                    .objects
+                    .get_mut(&commander)
+                    .expect("staged commander")
+                    .is_commander = true;
+            }
+            let mut events = Vec::new();
+            let index = crate::game::casting_targets::emit_ability_activated(
+                &state,
+                controller,
+                land,
+                ActivatedAbilityKind::Mana,
+                Zone::Battlefield,
+                &mut events,
+            );
+            collect_activation_event_at_boundary(&mut state, &mut events, index)
+                .expect("boundary collection");
+            let GameEvent::AbilityActivated {
+                trigger_state: ActivationTriggerState::CollectedAtActivation { observers },
+                ..
+            } = events[index]
+            else {
+                panic!("the boundary marks the activation collected");
+            };
+            crate::game::mana_sources::record_undoable_mana_tap(
+                &mut state, controller, land, &events,
+            );
+            (state, observers, land)
+        }
+
+        let undoable = |state: &GameState, land: ObjectId| {
+            state
+                .lands_tapped_for_mana
+                .get(&PlayerId(0))
+                .is_some_and(|tapped| tapped.contains(&land))
+        };
+
+        let (state, observers, land) = run(Watcher::None);
+        assert!(
+            observers == ActivationObservers::Unbound,
+            "no watcher: unbound"
+        );
+        assert!(undoable(&state, land), "no watcher: undoable");
+
+        let (state, observers, land) = run(Watcher::GateTrue);
+        assert_eq!(state.deferred_triggers.len(), 1, "reach: a true gate fires");
+        assert!(observers == ActivationObservers::Bound);
+        assert!(!undoable(&state, land));
+
+        let (state, observers, land) = run(Watcher::GateFalse);
+        assert!(
+            state.delayed_triggers.is_empty(),
+            "reach: the false gate consumed the one-shot (CR 603.7b)"
+        );
+        assert!(
+            state.deferred_triggers.is_empty(),
+            "reach: nothing fired (CR 603.4)"
+        );
+        assert!(
+            observers == ActivationObservers::Bound,
+            "consuming the watcher binds the observation"
+        );
+        assert!(!undoable(&state, land), "so the tap is not undoable");
+    }
+
+    /// The OTHER half of CR 603.7b, and the discriminating counterpart to
+    /// `when_next_event_one_shot_is_consumed_by_a_false_intervening_if`: a STATED-DURATION delayed ability whose first matching event
     /// fails the intervening-`if` must SURVIVE and still fire on a later matching
     /// event in the same turn.
     ///
@@ -26285,8 +26476,11 @@ pub mod tests {
             total_damage: 5,
         }];
 
-        let (pending, consumed) =
-            collect_matching_delayed_triggers(&mut state, &events, DelayedTriggerEventScope::Any);
+        let DelayedTriggerMatch {
+            contexts: pending,
+            consumed,
+            ..
+        } = collect_matching_delayed_triggers(&mut state, &events, DelayedTriggerEventScope::Any);
 
         // CR 603.2c: one firing per damaging source — two creatures → two firings.
         assert_eq!(pending.len(), 2, "one firing per damaging source");
