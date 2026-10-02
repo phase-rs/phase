@@ -22,7 +22,9 @@ use super::rules::{
     cast_spell_action, AttackTarget, GameAction, GameEvent, GameRunner, GameScenario, Keyword,
     ObjectId, Phase, PlayerId, WaitingFor, Zone, P0, P1,
 };
-use engine::types::ability::{AbilityCost, Effect, PtValue, TargetFilter};
+use engine::types::ability::{
+    AbilityCost, Effect, PtValue, TargetFilter, TriggerDefinitionOccurrenceRef,
+};
 use engine::types::actions::DebugAction;
 use engine::types::card::CardFace;
 use engine::types::card_type::{CardType, CoreType};
@@ -39,6 +41,7 @@ const ROOFTOP_STORM: &str =
     "You may pay {0} rather than pay the mana cost for Zombie creature spells you cast.";
 const INDRIS: &str = "When Indris, the Hydrostatic Surge enters, conjure four cards named Lightning Bolt into your library. They perpetually gain storm. Then shuffle.\nWhenever you cast an instant or sorcery spell, draw a card.";
 const JEWEL_MINE: &str = "When Jewel Mine Overseer enters, conjure seven cards named Seven Dwarves on top of your library. They perpetually gain \"When this creature enters, draw a card.\" Then shuffle.\nAt the beginning of your upkeep, exile the top card of your library. You may play that card this turn.";
+const OGLOR: &str = "At the beginning of your upkeep, look at the top two cards of your library, then put one of them into your graveyard.\nWhenever a creature card is put into your graveyard from your library or hand, it perpetually gains \"When this card leaves your graveyard, create a tapped 2/2 black Zombie creature token.\"";
 
 fn mana(color: ManaType, n: usize) -> Vec<ManaUnit> {
     (0..n)
@@ -772,5 +775,221 @@ fn rooftop_storm_still_discounts_zombie_spell() {
         outcome.mana_pool_total(P0),
         0,
         "the Rooftop {{0}} grant must leave the empty pool untouched"
+    );
+}
+
+/// Full-pipeline zone move through `act` (never raw `resolve`): with
+/// `simulate: true` the move runs triggers, replacements, and SBAs.
+fn move_zone_simulated(runner: &mut GameRunner, id: ObjectId, to: Zone) {
+    runner
+        .act(GameAction::Debug(DebugAction::MoveToZone {
+            object_id: id,
+            to_zone: to,
+            library_position: None,
+            simulate: true,
+        }))
+        .expect("simulated zone move must succeed");
+}
+
+/// Drain the stack to quiescence (bounded: every test using this leaves only
+/// triggers it intends to resolve), answering CR 603.3b same-controller
+/// ordering prompts in encounter order along the way.
+fn settle_stack(runner: &mut GameRunner) {
+    let mut guard = 0;
+    loop {
+        guard += 1;
+        assert!(guard < 100, "stack did not settle within the bound");
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                let order: Vec<usize> = (0..triggers.len()).collect();
+                runner
+                    .act(GameAction::OrderTriggers { order })
+                    .expect("trigger order must succeed");
+            }
+            _ => {
+                if runner.state().stack.is_empty() {
+                    break;
+                }
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("priority pass must succeed");
+            }
+        }
+    }
+}
+
+fn zombie_tokens(runner: &GameRunner, controller: PlayerId) -> Vec<ObjectId> {
+    runner
+        .state()
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| {
+            runner.state().objects.get(id).is_some_and(|obj| {
+                obj.is_token
+                    && obj.controller == controller
+                    && obj
+                        .card_types
+                        .subtypes
+                        .iter()
+                        .any(|subtype| subtype.eq_ignore_ascii_case("Zombie"))
+            })
+        })
+        .collect()
+}
+
+/// Matthewevans PR review (multiplicity): repeated independent perpetual
+/// trigger grants on the same physical card must each install one occurrence
+/// (CR 113.2c: "If an object has multiple instances of the same ability, each
+/// instance functions independently"). Oglor-driven end to end: mill the same
+/// Bears twice with a zone cycle between, and the first graveyard departure
+/// yields one Zombie while every later departure yields two — with distinct
+/// `Printed` occurrence refs retained across layer recomputation and further
+/// zone changes.
+///
+/// The grants route through the library because Oglor's "from your library
+/// or hand" origin currently parses to a single `Library` origin (pre-existing
+/// "A or B" origin-list limitation, out of scope for this fix) — hand routes
+/// would not fire the outer trigger. Likewise the graveyard departures target
+/// the battlefield and exile (scanned zones): the look-back scan only covers
+/// departures from the battlefield plus current-zone scans of
+/// battlefield/graveyard/exile/stack, so a graveyard -> hand/library departure
+/// of the trigger's own source is invisible to collection (pre-existing
+/// look-back gap: CR 603.10a lists leaves-graveyard triggers among those
+/// that look back, but the scan only implements leaves-battlefield look-back;
+/// extending it is out of scope for this fix).
+///
+/// Revert-failing: the structural-equality installer guard collapses the
+/// second grant, so the `base_trigger_definitions` count stays 1 and every
+/// post-second-grant departure yields one Zombie instead of two.
+#[test]
+fn oglor_repeated_grants_retain_multiplicity_across_zone_cycles() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let oglor = scenario
+        .add_creature_to_hand(P0, "Oglor, Devoted Assistant", 3, 4)
+        .from_oracle_text(OGLOR)
+        .id();
+    let bears = scenario
+        .add_creature_to_hand(P0, "Grizzly Bears", 2, 2)
+        .id();
+
+    let mut runner = scenario.build();
+    runner.state_mut().debug_mode = true;
+    assert_fully_parsed(&runner, oglor, "Oglor, Devoted Assistant");
+
+    // Oglor to the battlefield (no ETB; the upkeep half never fires — the
+    // whole test stays in PreCombatMain).
+    move_zone_simulated(&mut runner, oglor, Zone::Battlefield);
+    settle_stack(&mut runner);
+
+    // Grant #1: library -> graveyard fires Oglor's trigger (CR 603.1). The
+    // hand -> library hop matches nothing (destination is not the graveyard).
+    move_zone_simulated(&mut runner, bears, Zone::Library);
+    move_zone_simulated(&mut runner, bears, Zone::Graveyard);
+    settle_stack(&mut runner);
+    assert_eq!(
+        runner.state().objects[&bears]
+            .base_trigger_definitions
+            .len(),
+        1,
+        "reach-guard: the first Oglor resolution must grant one trigger"
+    );
+
+    // Departure #1: one instance -> one Zombie. The battlefield is a scanned
+    // zone, so the granted trigger is found for the graveyard -> battlefield
+    // event; entry also runs the layer pipeline with one grant installed.
+    move_zone_simulated(&mut runner, bears, Zone::Battlefield);
+    settle_stack(&mut runner);
+    assert_eq!(
+        zombie_tokens(&runner, P0).len(),
+        1,
+        "the first graveyard departure must fire the single granted trigger"
+    );
+
+    // Grant #2: the same physical card, a second independent resolution. The
+    // battlefield -> hand hop is quiet (the granted origin=Graveyard clause
+    // does not match a battlefield origin; Oglor needs a graveyard
+    // destination), as is hand -> library.
+    move_zone_simulated(&mut runner, bears, Zone::Hand);
+    settle_stack(&mut runner);
+    assert_eq!(
+        zombie_tokens(&runner, P0).len(),
+        1,
+        "leaving the battlefield must fire no granted trigger"
+    );
+    move_zone_simulated(&mut runner, bears, Zone::Library);
+    move_zone_simulated(&mut runner, bears, Zone::Graveyard);
+    settle_stack(&mut runner);
+    {
+        let obj = &runner.state().objects[&bears];
+        assert_eq!(
+            obj.base_trigger_definitions.len(),
+            2,
+            "CR 113.2c: two independent grants must install two trigger instances"
+        );
+        let refs: Vec<_> = obj
+            .trigger_definitions
+            .iter_unchecked()
+            .map(|entry| entry.occurrence.clone())
+            .collect();
+        assert_eq!(
+            refs.len(),
+            2,
+            "the live list must carry both granted occurrences"
+        );
+        assert!(
+            refs.iter().all(|occurrence| matches!(
+                occurrence,
+                TriggerDefinitionOccurrenceRef::Printed { .. }
+            )),
+            "both occurrences must be Printed slots, got {refs:?}"
+        );
+        assert_ne!(
+            refs[0], refs[1],
+            "the two occurrences must have distinct refs"
+        );
+    }
+
+    // Layer recompute + zone change: a battlefield round-trip re-derives the
+    // live list, then a non-granting return to the graveyard, then the final
+    // departure. Leaving the graveyard for the battlefield fires both
+    // instances (1 + 2 = 3 Zombies).
+    move_zone_simulated(&mut runner, bears, Zone::Battlefield);
+    settle_stack(&mut runner);
+    assert_eq!(
+        zombie_tokens(&runner, P0).len(),
+        3,
+        "leaving the graveyard with two instances must create two more Zombies"
+    );
+    assert_eq!(
+        runner.state().objects[&bears]
+            .base_trigger_definitions
+            .len(),
+        2,
+        "both instances must survive the battlefield layer recompute"
+    );
+    // Battlefield -> graveyard matches neither Oglor's origin filter
+    // (library/hand only) nor the granted leaves-graveyard trigger.
+    move_zone_simulated(&mut runner, bears, Zone::Graveyard);
+    settle_stack(&mut runner);
+    assert_eq!(
+        zombie_tokens(&runner, P0).len(),
+        3,
+        "a non-matching zone change must fire nothing and grant nothing"
+    );
+    assert_eq!(
+        runner.state().objects[&bears]
+            .base_trigger_definitions
+            .len(),
+        2,
+        "both instances must survive the further zone change"
+    );
+    move_zone_simulated(&mut runner, bears, Zone::Exile);
+    settle_stack(&mut runner);
+    assert_eq!(
+        zombie_tokens(&runner, P0).len(),
+        5,
+        "the second graveyard departure must fire both instances (+2)"
     );
 }

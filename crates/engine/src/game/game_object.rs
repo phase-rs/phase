@@ -2182,18 +2182,19 @@ impl GameObject {
                         // trigger's source is the recipient object; the inner
                         // "~"/"this creature" was normalized card-wide before
                         // classification, so no pronoun rebinding is needed at
-                        // install. Dedup by structural equality against the
-                        // base list (`push_printed_trigger` does not dedup
-                        // internally); a skipped re-install is re-materialized
-                        // into the live list by the next layer pass.
+                        // install. No structural-equality dedup: CR 113.2c (verified:
+                        // "If an object has multiple instances of the same
+                        // ability, each instance functions independently") --
+                        // each `ApplyPerpetual` resolution installs one
+                        // occurrence, so two independent grants of equal bodies
+                        // (Oglor granting the same card twice) yield two
+                        // triggers. `push_printed_trigger` mints a distinct
+                        // `Printed` occurrence ref per call, and layer
+                        // re-materialization rebuilds the live list
+                        // slot-for-slot, so one recorded grant stays exactly
+                        // one occurrence while independent grants stack.
                         PerpetualGrantModification::GrantTrigger { trigger } => {
-                            if !self
-                                .base_trigger_definitions
-                                .iter()
-                                .any(|t| t == trigger.as_ref())
-                            {
-                                self.push_printed_trigger(trigger.as_ref().clone());
-                            }
+                            self.push_printed_trigger(trigger.as_ref().clone());
                         }
                     }
                 }
