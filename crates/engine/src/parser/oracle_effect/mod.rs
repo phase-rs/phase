@@ -47149,7 +47149,7 @@ mod additional_phase_recipient_subject_tests {
                     "{text:?}"
                 );
                 assert!(
-                    parsed.triggers.is_empty() && parsed.static_abilities.is_empty(),
+                    parsed.triggers.is_empty() && parsed.statics.is_empty(),
                     "{text:?}"
                 );
             }
@@ -47197,7 +47197,7 @@ mod additional_phase_recipient_subject_tests {
                 assert!(sibling.sub_ability.is_none() && sibling.else_ability.is_none());
             }
             assert!(def.else_ability.is_none());
-            assert!(parsed.triggers.is_empty() && parsed.static_abilities.is_empty());
+            assert!(parsed.triggers.is_empty() && parsed.statics.is_empty());
         }
     }
 
@@ -47224,7 +47224,7 @@ mod additional_phase_recipient_subject_tests {
         assert_eq!(grant.cost, Some(AbilityCost::Tap));
         assert!(matches!(*grant.effect, Effect::DealDamage { .. }));
         assert!(def.sub_ability.is_none() && def.else_ability.is_none());
-        assert!(parsed.triggers.is_empty() && parsed.static_abilities.is_empty());
+        assert!(parsed.triggers.is_empty() && parsed.statics.is_empty());
     }
 
     #[test]

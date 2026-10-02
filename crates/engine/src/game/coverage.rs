@@ -15715,7 +15715,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             face.oracle_text = Some(oracle.to_string());
             face.abilities = parsed.abilities;
             face.triggers = parsed.triggers;
-            face.static_abilities = parsed.static_abilities;
+            face.static_abilities = parsed.statics;
             face.parse_warnings = parsed.parse_warnings;
             let card = coverage_result_for_face(face);
             assert_eq!(card.supported, supported, "{oracle:?}: {card:?}");
