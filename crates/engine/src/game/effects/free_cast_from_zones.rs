@@ -20,7 +20,7 @@ pub(crate) struct FreeCastWindowRequest {
     /// cast's `ResolutionCastRequest` (the elected-permission application
     /// point) and into the re-offer carrier, so each cast of the window
     /// receives it exactly once. Empty for every window without a rider.
-    pub(crate) enters_with_modifications: Vec<crate::types::ability::ContinuousModification>,
+    pub(crate) enters_with_modifications: crate::types::ability::PendingEntersModifications,
     pub(crate) face_policy: crate::types::ability::ResolutionCastFacePolicy,
 }
 
@@ -43,7 +43,7 @@ pub(in crate::game) fn free_cast_window_resolution_request(
     face_policy: crate::types::ability::ResolutionCastFacePolicy,
     zones: Vec<Zone>,
     graveyard_replacement: Option<crate::types::ability::SpellStackToGraveyardReplacement>,
-    enters_with_modifications: Vec<crate::types::ability::ContinuousModification>,
+    enters_with_modifications: crate::types::ability::PendingEntersModifications,
     member_pool: Vec<ObjectId>,
 ) -> crate::game::casting::ResolutionCastRequest {
     let cleanup = crate::types::ability::ResolutionCastCleanup {
@@ -140,7 +140,7 @@ pub fn resolve(
             // chain-metadata skip does not claim it and no rider reaches these
             // casts (BF-P2-9); the effect also carries no rider field (BF-P2-8).
             // Only the `CastFromZone` conversions snapshot one.
-            enters_with_modifications: Vec::new(),
+            enters_with_modifications: Default::default(),
             face_policy,
         },
         events,
@@ -508,7 +508,7 @@ mod tests {
             face_policy,
             zones.to_vec(),
             None,
-            Vec::new(),
+            Default::default(),
             member_pool.to_vec(),
         );
         eligible_candidates(state, zones, max_total_mv, member_pool, &request)
@@ -1111,9 +1111,12 @@ mod tests {
             source,
             PlayerId(0),
         );
-        let rider = vec![ContinuousModification::AddKeyword {
-            keyword: Keyword::Haste,
-        }];
+        let rider = crate::types::ability::PendingEntersModifications {
+            modifications: vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Haste,
+            }],
+            cast_filter: None,
+        };
         let mut events = Vec::new();
         resolve_with_face_policy(
             &mut state,
@@ -1201,6 +1204,7 @@ mod dandan_read_sweep_tests {
             face_policy,
             vec![Zone::Graveyard],
             None,
+            Default::default(),
             Vec::new(),
         );
 

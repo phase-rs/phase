@@ -55150,9 +55150,12 @@ fn cast_this_way_enters_with_finality_counter_rider_parses() {
     assert_eq!(
         &*sub.effect,
         &Effect::AddPendingEntersModifications {
-            modifications: vec![ContinuousModification::AddSubtype {
-                subtype: "Vampire".to_string(),
-            }],
+            rider: crate::types::ability::PendingEntersModifications {
+                modifications: vec![ContinuousModification::AddSubtype {
+                    subtype: "Vampire".to_string(),
+                }],
+                cast_filter: None,
+            },
         },
         "the type tail must lower to AddSubtype(Vampire)"
     );
@@ -55282,8 +55285,8 @@ fn tomb_aclazotz_counter_plus_type_tail_parses() {
     assert!(
         tomb_effects.iter().any(|e| matches!(
             e,
-            Effect::AddPendingEntersModifications { modifications }
-                if modifications == &[ContinuousModification::AddSubtype {
+            Effect::AddPendingEntersModifications { rider }
+                if rider.modifications == [ContinuousModification::AddSubtype {
                     subtype: "Vampire".to_string(),
                 }]
         )),
@@ -55353,8 +55356,8 @@ fn tomb_aclazotz_counter_plus_type_tail_parses() {
     assert!(
         matches!(
             &*tail.effect,
-            Effect::AddPendingEntersModifications { modifications }
-                if modifications == &[ContinuousModification::AddSubtype {
+            Effect::AddPendingEntersModifications { rider }
+                if rider.modifications == [ContinuousModification::AddSubtype {
                     subtype: "Vampire".to_string(),
                 }]
         ),
@@ -55436,6 +55439,33 @@ fn has_gains_rider_carrier(parsed: &crate::parser::oracle::ParsedAbilities) -> b
         .any(|node| matches!(&*node.effect, Effect::AddPendingEntersModifications { .. }))
 }
 
+/// Reach guard for the "if you do, it gains …" negatives: the node carrying the
+/// `OptionalEffectPerformed` gate must ALSO show the body was lowered — a
+/// `GenericEffect` whose static definitions carry the Haste keyword or the
+/// granted trigger — so the decline is the parent predicate's doing, not the
+/// body never being reached.
+fn optional_gate_node_carries_lowered_gains_body(
+    parsed: &crate::parser::oracle::ParsedAbilities,
+) -> bool {
+    parsed_ability_nodes(parsed).iter().any(|node| {
+        node.condition
+            .as_ref()
+            .is_some_and(AbilityCondition::is_optional_effect_performed)
+            && matches!(
+                &*node.effect,
+                Effect::GenericEffect { static_abilities, .. }
+                    if static_abilities.iter().any(|stat| stat.modifications.iter().any(|m| {
+                        matches!(
+                            m,
+                            ContinuousModification::AddKeyword {
+                                keyword: Keyword::Haste
+                            } | ContinuousModification::GrantTrigger { .. }
+                        )
+                    }))
+            )
+    })
+}
+
 /// CR 608.2c + CR 611.2a + CR 611.2c — the gains-modifications cast-permission
 /// rider: "If you cast a [quality] spell this way, it gains <modifications>"
 /// (Strago and Relm; The Mysterious Sphere). The recognizer peels the prefix
@@ -55454,12 +55484,23 @@ fn cast_this_way_gains_rider_prefix_and_body_grammar() {
     let strago = "if you cast a creature spell this way, it gains haste and \"At the beginning of the end step, sacrifice this creature.\"";
     let clause =
         try_parse_cast_this_way_gains_rider(strago).expect("Strago's printed rider must parse");
-    let Effect::AddPendingEntersModifications { modifications } = &clause.effect else {
+    let Effect::AddPendingEntersModifications { rider } = &clause.effect else {
         panic!(
             "the rider must lower to AddPendingEntersModifications, got {:?}",
             clause.effect
         );
     };
+    // CR 608.2c + CR 601.2a: the printed quality ("a creature") is carried as a
+    // typed predicate — never dropped — so the runtime gates the grant on the
+    // elected spell.
+    assert_eq!(
+        rider.cast_filter,
+        Some(TargetFilter::Typed(
+            TypedFilter::default().with_type(TypeFilter::Creature)
+        )),
+        "the creature quality must be recorded as a typed cast predicate"
+    );
+    let modifications = &rider.modifications;
     assert_eq!(modifications.len(), 2, "got {modifications:?}");
     assert!(
         matches!(
@@ -55486,9 +55527,10 @@ fn cast_this_way_gains_rider_prefix_and_body_grammar() {
     let sphere = "if you cast a creature spell this way, it gains haste and \"Sacrifice this creature at the beginning of your end step.\"";
     let clause = try_parse_cast_this_way_gains_rider(sphere)
         .expect("The Mysterious Sphere's rider must parse");
-    let Effect::AddPendingEntersModifications { modifications } = &clause.effect else {
+    let Effect::AddPendingEntersModifications { rider } = &clause.effect else {
         panic!("Sphere rider must lower to AddPendingEntersModifications");
     };
+    let modifications = &rider.modifications;
     assert!(
         matches!(
             &modifications[0],
@@ -55508,9 +55550,18 @@ fn cast_this_way_gains_rider_prefix_and_body_grammar() {
     ] {
         let clause = try_parse_cast_this_way_gains_rider(text)
             .unwrap_or_else(|| panic!("rider must parse for {text:?}"));
-        let Effect::AddPendingEntersModifications { modifications } = &clause.effect else {
+        let Effect::AddPendingEntersModifications { rider } = &clause.effect else {
             panic!("rider must lower to AddPendingEntersModifications for {text:?}");
         };
+        // CR 608.2c + CR 601.2a: the quality axis is typed — the anaphoric form
+        // names no quality (unconditional), the quality form carries the
+        // creature predicate.
+        assert_eq!(
+            rider.cast_filter.is_none(),
+            text == "if you cast it this way, it gains haste",
+            "the anaphoric form must carry no quality predicate for {text:?}"
+        );
+        let modifications = &rider.modifications;
         assert_eq!(
             matches!(
                 modifications.first(),
@@ -55521,6 +55572,16 @@ fn cast_this_way_gains_rider_prefix_and_body_grammar() {
         );
     }
 
+    // Negative — a quality phrase that is not a recognized type phrase declines
+    // the whole rider rather than silently dropping its printed condition.
+    // Paired with the creature-quality positives above.
+    assert!(
+        try_parse_cast_this_way_gains_rider(
+            "if you cast a frobnicate spell this way, it gains haste"
+        )
+        .is_none(),
+        "an unclassifiable quality phrase must decline the rider"
+    );
     // Negative — the no-quality wording is owned by `strip_cast_this_way_gate`
     // (a CR 603.7 delayed-trigger reading) and must decline here. Paired: the
     // identical body with the quality noun parses above.
@@ -55563,9 +55624,10 @@ fn cast_this_way_gains_rider_prefix_and_body_grammar() {
         "if you cast a creature spell this way, it gains \"Frobnicate this creature.\"",
     )
     .expect("a quoted body must be represented, never silently dropped");
-    let Effect::AddPendingEntersModifications { modifications } = &clause.effect else {
+    let Effect::AddPendingEntersModifications { rider } = &clause.effect else {
         panic!("quoted body must lower to AddPendingEntersModifications");
     };
+    let modifications = &rider.modifications;
     assert!(
         modifications.iter().any(|modification| matches!(
             modification,
@@ -55733,12 +55795,13 @@ fn strago_and_relm_cast_this_way_gains_rider_parses_through_card() {
         SubAbilityLink::SequentialSibling,
         "the rider is a sequential sibling of the grant"
     );
-    let Effect::AddPendingEntersModifications { modifications } = &*rider.effect else {
+    let Effect::AddPendingEntersModifications { rider: payload } = &*rider.effect else {
         panic!(
             "the rider must lower to AddPendingEntersModifications, got {:?}",
             rider.effect
         );
     };
+    let modifications = &payload.modifications;
     assert!(
         matches!(
             modifications.first(),
@@ -55795,12 +55858,13 @@ fn if_you_do_gains_rider_requires_cast_grant_parent() {
         .sub_ability
         .as_deref()
         .expect("the \"if you do\" rider must attach as the cast grant's sub-ability");
-    let Effect::AddPendingEntersModifications { modifications } = &*rider.effect else {
+    let Effect::AddPendingEntersModifications { rider: payload } = &*rider.effect else {
         panic!(
             "the gate-form rider must lower to AddPendingEntersModifications, got {:?}",
             rider.effect
         );
     };
+    let modifications = &payload.modifications;
     assert_eq!(
         modifications.get(1),
         Some(&ContinuousModification::AddKeyword {
@@ -55831,12 +55895,10 @@ fn if_you_do_gains_rider_requires_cast_grant_parent() {
         &["Human".to_string()],
     );
     assert!(
-        parsed_ability_nodes(&parsed).iter().any(|node| node
-            .condition
-            .as_ref()
-            .is_some_and(AbilityCondition::is_optional_effect_performed)),
-        "reach guard: the pay-life parent's \"if you do\" gate must be represented, or \
-         this negative is vacuous"
+        optional_gate_node_carries_lowered_gains_body(&parsed),
+        "reach guard: the pay-life parent's \"if you do\" gate must be represented AND \
+         its body lowered to a GenericEffect carrying the haste/granted-trigger \
+         modification, or this negative is vacuous"
     );
     assert!(
         !has_gains_rider_carrier(&parsed),
@@ -55875,12 +55937,11 @@ fn unclassifiable_gains_rider_stays_unimplemented() {
 }
 
 /// CR 611.2a (row 3.6): Alaundo the Seer's duration-bound rider is declined, so
-/// its base representation is preserved exactly — the granted trigger's
-/// `CastFromZone` sub-ability stays a `GenericEffect` with
-/// `duration: UntilEndOfTurn` and an additive Haste modification, and NO
-/// `AddPendingEntersModifications` appears anywhere in the tree. A
-/// duration-blind recognizer would flip it to a permanent haste carrier
-/// (rules-wrong).
+/// no gains-modifications carrier is carved out of its base representation. The
+/// direct recognizer declines the duration-bound sentence (discriminator), and
+/// the card's quoted ability remains represented as an honest `Unimplemented`
+/// clause at this head (reach guard) — the rider must never be half-claimed as
+/// a permanent grant.
 #[test]
 fn alaundo_duration_bound_rider_is_not_claimed() {
     const ALAUNDO: &str = "{T}: Draw a card, then exile a card from your hand and put a number of time counters on it equal to its mana value. It gains \"When the last time counter is removed from this card, if it's exiled, you may cast it without paying its mana cost. If you cast a creature spell this way, it gains haste until end of turn.\" Then remove a time counter from each other card you own in exile.";
@@ -55895,25 +55956,35 @@ fn alaundo_duration_bound_rider_is_not_claimed() {
         !has_gains_rider_carrier(&parsed),
         "the duration-bound rider must not be claimed by the gains rider"
     );
+    // Reach guard: the duration-bound rider sentence is present in the tree
+    // (inside the honest `Unimplemented` clause covering the quoted ability), so
+    // the negative above is not vacuous.
     let nodes = parsed_ability_nodes(&parsed);
-    let cast = nodes
-        .iter()
-        .find(|node| matches!(&*node.effect, Effect::CastFromZone { .. }))
-        .expect("the granted trigger's CastFromZone must parse");
-    let rider = cast
-        .sub_ability
-        .as_deref()
-        .expect("the granted trigger's rider sub-ability must parse");
-    match &*rider.effect {
-        Effect::GenericEffect { duration, .. } => assert_eq!(
-            *duration,
-            Some(Duration::UntilEndOfTurn),
-            "the base duration-bound lowering must be preserved"
-        ),
-        other => {
-            panic!("the duration-bound rider must keep its GenericEffect lowering, got {other:?}")
-        }
-    }
+    assert!(
+        nodes.iter().any(|node| {
+            matches!(
+                &*node.effect,
+                Effect::Unimplemented { description, .. }
+                    if description
+                        .as_deref()
+                        .is_some_and(|text| text.contains("gains haste until end of turn"))
+            )
+        }),
+        "the duration-bound rider sentence must remain represented, got {:?}",
+        nodes
+            .iter()
+            .map(|node| format!("{:?}", node.effect))
+            .collect::<Vec<_>>()
+    );
+    // Discriminator: the recognizer itself declines the duration-bound body
+    // rather than lowering it to a permanent grant.
+    assert!(
+        try_parse_cast_this_way_gains_rider(
+            "if you cast a creature spell this way, it gains haste until end of turn"
+        )
+        .is_none(),
+        "the duration-bound rider sentence must decline at the recognizer"
+    );
 }
 
 /// CR 611.2a (row 3.7): Thundermane Dragon's rider sentence is consumed by the
@@ -56013,11 +56084,10 @@ fn if_you_do_gains_rider_corpus_hostiles_stay_unclaimed() {
         "the synthetic cast-grant-free parent must not produce the gains rider"
     );
     assert!(
-        parsed_ability_nodes(&parsed).iter().any(|node| node
-            .condition
-            .as_ref()
-            .is_some_and(AbilityCondition::is_optional_effect_performed)),
-        "reach guard: the synthetic parent's \"if you do\" gate must be represented"
+        optional_gate_node_carries_lowered_gains_body(&parsed),
+        "reach guard: the synthetic parent's \"if you do\" gate must be represented AND \
+         its body lowered to a GenericEffect carrying the haste/granted-trigger \
+         modification, or this negative is vacuous"
     );
 }
 

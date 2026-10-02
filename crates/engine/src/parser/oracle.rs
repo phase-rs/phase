@@ -9271,8 +9271,8 @@ fn resolve_guards_in_effect(effect: &mut Effect) {
                 resolve_guards_in_continuous_mod(modification);
             }
         }
-        Effect::AddPendingEntersModifications { modifications, .. } => {
-            for modification in modifications {
+        Effect::AddPendingEntersModifications { rider, .. } => {
+            for modification in rider.modifications.iter_mut() {
                 resolve_guards_in_continuous_mod(modification);
             }
         }
@@ -9543,7 +9543,7 @@ fn resolve_guards_in_casting_permission(permission: &mut CastingPermission) {
             enters_with_modifications,
             ..
         } => {
-            for modification in enters_with_modifications {
+            for modification in enters_with_modifications.modifications.iter_mut() {
                 resolve_guards_in_continuous_mod(modification);
             }
         }
@@ -10324,8 +10324,8 @@ fn demote_lifetimes_in_effect(effect: &mut Effect) {
         // made, and documented, in `types::ability_visit`.
         Effect::ExileResolvingSpellInsteadOfGraveyard { .. } => {}
         // --- nested continuous modifications ---
-        Effect::AddPendingEntersModifications { modifications, .. } => {
-            for m in modifications.iter_mut() {
+        Effect::AddPendingEntersModifications { rider, .. } => {
+            for m in rider.modifications.iter_mut() {
                 demote_lifetimes_in_modification(m);
             }
         }
@@ -10995,8 +10995,8 @@ fn render_effect_descriptions(effect: &mut Effect, card_name: &str) {
         Effect::Unimplemented { description, .. } => {
             render_granter_ref_in_description(description, card_name)
         }
-        Effect::AddPendingEntersModifications { modifications, .. } => {
-            for m in modifications.iter_mut() {
+        Effect::AddPendingEntersModifications { rider, .. } => {
+            for m in rider.modifications.iter_mut() {
                 render_modification_descriptions(m, card_name);
             }
         }
@@ -11110,7 +11110,7 @@ fn render_effect_descriptions(effect: &mut Effect, card_name: &str) {
                 },
             ..
         } => {
-            for m in enters_with_modifications.iter_mut() {
+            for m in enters_with_modifications.modifications.iter_mut() {
                 render_modification_descriptions(m, card_name);
             }
         }

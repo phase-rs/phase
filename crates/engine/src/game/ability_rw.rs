@@ -3238,8 +3238,8 @@ fn legacy_effect(x: &Effect) -> bool {
         Effect::EmpowerJace { count } => legacy_quantity_expr(count),
         // Deferred continuous-modification carrier — no `count`; descend the mods
         // for a nested frozen tag (AddType/AddSubtype return `false`).
-        Effect::AddPendingEntersModifications { modifications } => {
-            modifications.iter().any(legacy_continuous_modification)
+        Effect::AddPendingEntersModifications { rider } => {
+            rider.modifications.iter().any(legacy_continuous_modification)
         }
         Effect::GainEnergy { amount } | Effect::Intensify { amount, .. } => {
             legacy_quantity_expr(amount)
@@ -5042,7 +5042,7 @@ fn rw_effect(
         // bearing ContinuousModification is ever admitted into this rider, the
         // parser extension MUST merge each mod's QuantityExpr here via
         // rw_quantity_expr.
-        Effect::AddPendingEntersModifications { modifications: _ } => {
+        Effect::AddPendingEntersModifications { rider: _ } => {
             (self_write(StateKind::SetMembership), Some(WriteScope::SelfSource))
         }
         Effect::Proliferate => {

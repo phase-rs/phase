@@ -1242,6 +1242,10 @@ fn resolve_cast_slot_group(
         head.controller,
         freeze_cast_permission_constraint(state, head, constraint),
     );
+    // CR 608.2c + CR 611.2a: snapshot the gains-modifications rider from the
+    // head slot before the clone's effect is replaced; every cast of the batch
+    // window receives it through the per-cast request and the re-offer carrier.
+    let enters_with_modifications = cast_from_zone_enters_with_modifications(head);
     let mut window = head.clone();
     window.effect = Effect::FreeCastFromZones {
         count,
@@ -1260,6 +1264,7 @@ fn resolve_cast_slot_group(
             max_total_mv: None,
             zones,
             graveyard_replacement,
+            enters_with_modifications,
             face_policy,
         },
         events,
@@ -2239,15 +2244,15 @@ fn cast_from_zone_enters_with_counter(
 /// `cast_from_zone_enters_with_counter`.
 fn cast_from_zone_enters_with_modifications(
     ability: &ResolvedAbility,
-) -> Vec<crate::types::ability::ContinuousModification> {
+) -> crate::types::ability::PendingEntersModifications {
     let mut cursor = ability.sub_ability.as_deref();
     while let Some(sub) = cursor {
-        if let Effect::AddPendingEntersModifications { modifications } = &sub.effect {
-            return modifications.clone();
+        if let Effect::AddPendingEntersModifications { rider } = &sub.effect {
+            return rider.clone();
         }
         cursor = sub.sub_ability.as_deref();
     }
-    Vec::new()
+    Default::default()
 }
 
 /// Result of a lingering cast permission grant. An exile-delivery batch owns
@@ -5525,9 +5530,14 @@ mod tests {
     fn gains_rider_sub_ability(source: ObjectId) -> ResolvedAbility {
         ResolvedAbility::new(
             Effect::AddPendingEntersModifications {
-                modifications: vec![crate::types::ability::ContinuousModification::AddKeyword {
-                    keyword: crate::types::keywords::Keyword::Haste,
-                }],
+                rider: crate::types::ability::PendingEntersModifications {
+                    modifications: vec![
+                        crate::types::ability::ContinuousModification::AddKeyword {
+                            keyword: crate::types::keywords::Keyword::Haste,
+                        },
+                    ],
+                    cast_filter: None,
+                },
             },
             vec![],
             source,
@@ -5618,8 +5628,8 @@ mod tests {
                     "the destination rider still snapshots"
                 );
                 assert_eq!(
-                    enters_with_modifications,
-                    &vec![crate::types::ability::ContinuousModification::AddKeyword {
+                    enters_with_modifications.modifications,
+                    vec![crate::types::ability::ContinuousModification::AddKeyword {
                         keyword: crate::types::keywords::Keyword::Haste,
                     }],
                     "the mint must snapshot the gains rider from the sub chain"
@@ -5753,8 +5763,8 @@ mod tests {
                     "reach guard: both fanout candidates are eligible"
                 );
                 assert_eq!(
-                    enters_with_modifications,
-                    &vec![crate::types::ability::ContinuousModification::AddKeyword {
+                    enters_with_modifications.modifications,
+                    vec![crate::types::ability::ContinuousModification::AddKeyword {
                         keyword: crate::types::keywords::Keyword::Haste,
                     }],
                     "the fanout conversion must snapshot the gains rider"
@@ -5889,8 +5899,8 @@ mod tests {
                 );
                 assert_eq!(member_pool, &vec![current]);
                 assert_eq!(
-                    enters_with_modifications,
-                    &vec![crate::types::ability::ContinuousModification::AddKeyword {
+                    enters_with_modifications.modifications,
+                    vec![crate::types::ability::ContinuousModification::AddKeyword {
                         keyword: crate::types::keywords::Keyword::Haste,
                     }],
                     "the batch conversion must snapshot the gains rider"

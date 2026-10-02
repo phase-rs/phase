@@ -3348,7 +3348,7 @@ fn foretell_cast_does_not_inherit_sibling_alt_cost_or_spend_rider() {
                 graveyard_replacement: None,
                 mana_spend_permission: Some(ManaSpendPermission::AnyColor),
                 enters_with_counter: None,
-                enters_with_modifications: Vec::new(),
+                enters_with_modifications: Default::default(),
                 cast_cost_modifier: None,
             });
     }
@@ -4636,7 +4636,7 @@ fn exile_with_alt_cost_zero_uses_no_cost_path() {
             graveyard_replacement: None,
             mana_spend_permission: None,
             enters_with_counter: None,
-            enters_with_modifications: Vec::new(),
+            enters_with_modifications: Default::default(),
             cast_cost_modifier: None,
         });
     let prepared = prepare_spell_cast(&state, PlayerId(0), exiled).unwrap();
@@ -20972,7 +20972,7 @@ fn graveyard_in_place_alt_cost_grant_is_consumed_after_one_cast() {
                 graveyard_replacement: None,
                 mana_spend_permission: None,
                 enters_with_counter: None,
-                enters_with_modifications: Vec::new(),
+                enters_with_modifications: Default::default(),
                 cast_cost_modifier: None,
             });
     }
@@ -21268,9 +21268,12 @@ fn graveyard_cast_this_way_enters_with_type_grant_rider() {
     );
     counter_rider.sub_ability = Some(Box::new(ResolvedAbility::new(
         Effect::AddPendingEntersModifications {
-            modifications: vec![ContinuousModification::AddSubtype {
-                subtype: "Vampire".to_string(),
-            }],
+            rider: crate::types::ability::PendingEntersModifications {
+                modifications: vec![ContinuousModification::AddSubtype {
+                    subtype: "Vampire".to_string(),
+                }],
+                cast_filter: None,
+            },
         },
         vec![],
         ObjectId(9110),
@@ -21309,8 +21312,8 @@ fn graveyard_cast_this_way_enters_with_type_grant_rider() {
                     enters_with_counter: Some(CounterType::Finality),
                     enters_with_modifications,
                     ..
-                } if enters_with_modifications
-                        == &[ContinuousModification::AddSubtype {
+                } if enters_with_modifications.modifications
+                        == [ContinuousModification::AddSubtype {
                             subtype: "Vampire".to_string(),
                         }]
             )),
@@ -21495,7 +21498,7 @@ fn enters_with_counter_does_not_leak_from_non_consumed_permission() {
                     graveyard_replacement: None,
                     mana_spend_permission: None,
                     enters_with_counter: rider_on_consumed.clone(),
-                    enters_with_modifications: Vec::new(),
+                    enters_with_modifications: Default::default(),
                     cast_cost_modifier: None,
                 });
             // P2: foreign-granted (to the opponent) so it never supports
@@ -21514,7 +21517,7 @@ fn enters_with_counter_does_not_leak_from_non_consumed_permission() {
                     graveyard_replacement: None,
                     mana_spend_permission: None,
                     enters_with_counter: Some(CounterType::Finality),
-                    enters_with_modifications: Vec::new(),
+                    enters_with_modifications: Default::default(),
                     cast_cost_modifier: None,
                 });
         }
@@ -21612,7 +21615,7 @@ fn exact_permission_does_not_inherit_sibling_etb_counter() {
                     duration: Some(Duration::UntilEndOfTurn),
                     graveyard_replacement: None,
                     enters_with_counter,
-                    enters_with_modifications: Vec::new(),
+                    enters_with_modifications: Default::default(),
                     mana_spend_permission: None,
                     cast_cost_modifier: None,
                 });
@@ -21707,7 +21710,10 @@ fn exact_permission_does_not_inherit_sibling_permanent_modification() {
                     duration: Some(Duration::UntilEndOfTurn),
                     graveyard_replacement: None,
                     enters_with_counter: None,
-                    enters_with_modifications,
+                    enters_with_modifications: crate::types::ability::PendingEntersModifications {
+                        modifications: enters_with_modifications,
+                        cast_filter: None,
+                    },
                     mana_spend_permission: None,
                     cast_cost_modifier: None,
                 });
@@ -21799,7 +21805,10 @@ fn resolution_cast_request_mods_apply_exactly_once() {
                 cast_transformed: false,
                 cleanup,
                 graveyard_replacement: None,
-                enters_with_modifications: mods,
+                enters_with_modifications: crate::types::ability::PendingEntersModifications {
+                    modifications: mods,
+                    cast_filter: None,
+                },
                 cost: ResolutionCastCost::Free,
             },
             &mut Vec::new(),
@@ -21930,7 +21939,10 @@ fn resolution_request_mods_do_not_leak_from_sibling_permission() {
                     duration: Some(Duration::UntilEndOfTurn),
                     graveyard_replacement: None,
                     enters_with_counter: None,
-                    enters_with_modifications: vec![ContinuousModification::AddKeyword { keyword }],
+                    enters_with_modifications: crate::types::ability::PendingEntersModifications {
+                        modifications: vec![ContinuousModification::AddKeyword { keyword }],
+                        cast_filter: None,
+                    },
                     mana_spend_permission: None,
                     cast_cost_modifier: None,
                 });
@@ -22004,7 +22016,7 @@ fn hand_alt_cost_permission_overrides_printed_mana_cost() {
                 graveyard_replacement: None,
                 mana_spend_permission: None,
                 enters_with_counter: None,
-                enters_with_modifications: Vec::new(),
+                enters_with_modifications: Default::default(),
                 cast_cost_modifier: None,
             });
     }
@@ -22056,7 +22068,7 @@ fn beseech_style_permission() -> CastingPermission {
         graveyard_replacement: None,
         mana_spend_permission: None,
         enters_with_counter: None,
-        enters_with_modifications: Vec::new(),
+        enters_with_modifications: Default::default(),
         cast_cost_modifier: None,
     }
 }
@@ -22099,7 +22111,7 @@ fn failing_mana_value_permission_does_not_override_unconstrained_permission() {
                 graveyard_replacement: None,
                 mana_spend_permission: None,
                 enters_with_counter: None,
-                enters_with_modifications: Vec::new(),
+                enters_with_modifications: Default::default(),
                 cast_cost_modifier: None,
             });
     }
@@ -29222,7 +29234,7 @@ fn prototype_from_exile_uses_play_permission_any_color_not_alt_cost_sibling() {
             graveyard_replacement: None,
             mana_spend_permission: None,
             enters_with_counter: None,
-            enters_with_modifications: Vec::new(),
+            enters_with_modifications: Default::default(),
             cast_cost_modifier: None,
         },
         CastingPermission::PlayFromExile {
@@ -31161,7 +31173,7 @@ fn cast_only_from_zones_blocks_affected_opponent_from_exile() {
             graveyard_replacement: None,
             mana_spend_permission: None,
             enters_with_counter: None,
-            enters_with_modifications: Vec::new(),
+            enters_with_modifications: Default::default(),
             cast_cost_modifier: None,
         });
 
@@ -34466,7 +34478,7 @@ fn cast_with_keyword_convoke_uses_caster_not_stored_controller() {
                 graveyard_replacement: None,
                 mana_spend_permission: None,
                 enters_with_counter: None,
-                enters_with_modifications: Vec::new(),
+                enters_with_modifications: Default::default(),
                 cast_cost_modifier: None,
             });
     }
@@ -47505,7 +47517,7 @@ fn normal_cost_grant(player: PlayerId, cost: ManaCost) -> crate::types::ability:
         duration: None,
         graveyard_replacement: None,
         enters_with_counter: None,
-        enters_with_modifications: vec![],
+        enters_with_modifications: Default::default(),
         mana_spend_permission: None,
         cast_cost_modifier: None,
     }
@@ -47830,7 +47842,7 @@ fn free_cast_grant(player: PlayerId) -> crate::types::ability::CastingPermission
         duration: None,
         graveyard_replacement: None,
         enters_with_counter: None,
-        enters_with_modifications: vec![],
+        enters_with_modifications: Default::default(),
         mana_spend_permission: None,
         cast_cost_modifier: None,
     }
@@ -48471,7 +48483,7 @@ fn resolution_offer_grant(
         duration: None,
         graveyard_replacement: None,
         enters_with_counter: None,
-        enters_with_modifications: vec![],
+        enters_with_modifications: Default::default(),
         mana_spend_permission: None,
         cast_cost_modifier: None,
     }
@@ -55369,9 +55381,12 @@ fn resolve_graveyard_paid_grant_with_gains_rider(
     if with_rider {
         grant.sub_ability = Some(Box::new(ResolvedAbility::new(
             Effect::AddPendingEntersModifications {
-                modifications: vec![ContinuousModification::AddKeyword {
-                    keyword: Keyword::Haste,
-                }],
+                rider: crate::types::ability::PendingEntersModifications {
+                    modifications: vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Haste,
+                    }],
+                    cast_filter: None,
+                },
             },
             vec![],
             ObjectId(9200),
@@ -55583,8 +55598,12 @@ fn paid_offer_accept_applies_the_gains_rider() {
         panic!("reach guard: the rider-bearing paid offer must be minted");
     };
     assert_eq!(
-        enters_with_modifications, &rider,
+        enters_with_modifications.modifications, rider,
         "reach guard: the mint carries the gains rider"
+    );
+    assert!(
+        enters_with_modifications.cast_filter.is_none(),
+        "the synthetic rider carries no printed quality"
     );
     let accepted = apply_as_current(
         &mut state,
@@ -55840,7 +55859,7 @@ fn declining_a_paid_offer_withdraws_only_the_triggers_it_recorded() {
             hit_card: spell,
             mana_spend_permission: None,
             graveyard_replacement: None,
-            enters_with_modifications: Vec::new(),
+            enters_with_modifications: Default::default(),
             cast_transformed: false,
             additional_cost: None,
             cleanup: crate::types::ability::ResolutionCastCleanup {
@@ -55930,7 +55949,7 @@ fn cancelling_an_accepted_paid_offer_withdraws_its_tail_receipt() {
             hit_card: spell,
             mana_spend_permission: None,
             graveyard_replacement: None,
-            enters_with_modifications: Vec::new(),
+            enters_with_modifications: Default::default(),
             cast_transformed: false,
             additional_cost: None,
             cleanup: crate::types::ability::ResolutionCastCleanup {
@@ -56334,7 +56353,7 @@ fn graveyard_paid_offer_uses_exact_appended_permission_over_conflicting_sibling(
                 crate::types::ability::SpellStackToGraveyardReplacement::Hand,
             ),
             enters_with_counter: None,
-            enters_with_modifications: Vec::new(),
+            enters_with_modifications: Default::default(),
             mana_spend_permission: None,
             cast_cost_modifier: None,
         });
@@ -56464,7 +56483,7 @@ fn free_during_resolution_cast_auto_resolves_with_empty_pool() {
             cast_transformed: false,
             cleanup,
             graveyard_replacement: None,
-            enters_with_modifications: Vec::new(),
+            enters_with_modifications: Default::default(),
             cost: crate::types::ability::ResolutionCastCost::Free,
         },
         &mut Vec::new(),
@@ -56571,7 +56590,7 @@ fn resolution_test_request(filter: TargetFilter) -> ResolutionCastRequest {
         face_policy,
         cast_transformed: false,
         graveyard_replacement: None,
-        enters_with_modifications: Vec::new(),
+        enters_with_modifications: Default::default(),
         cost: crate::types::ability::ResolutionCastCost::Free,
     }
 }
@@ -57507,7 +57526,7 @@ fn exact_resolution_offer_does_not_inherit_sibling_cast_transformed() {
                 duration: Some(Duration::UntilEndOfTurn),
                 graveyard_replacement: None,
                 enters_with_counter: None,
-                enters_with_modifications: Vec::new(),
+                enters_with_modifications: Default::default(),
                 mana_spend_permission: None,
                 cast_cost_modifier: None,
             });
@@ -57536,7 +57555,7 @@ fn exact_resolution_offer_does_not_inherit_sibling_cast_transformed() {
             cast_transformed: false,
             cleanup,
             graveyard_replacement: None,
-            enters_with_modifications: Vec::new(),
+            enters_with_modifications: Default::default(),
             cost: crate::types::ability::ResolutionCastCost::Free,
         },
         &mut Vec::new(),
@@ -57612,7 +57631,7 @@ fn exact_resolution_offer_does_not_consume_sibling_once_per_turn_permission() {
             cast_transformed: false,
             cleanup,
             graveyard_replacement: None,
-            enters_with_modifications: Vec::new(),
+            enters_with_modifications: Default::default(),
             cost: crate::types::ability::ResolutionCastCost::Free,
         },
         &mut Vec::new(),
@@ -57680,7 +57699,7 @@ fn exact_resolution_offer_without_concession_does_not_inherit_later_any_color_si
                 duration: None,
                 graveyard_replacement: None,
                 enters_with_counter: None,
-                enters_with_modifications: Vec::new(),
+                enters_with_modifications: Default::default(),
                 mana_spend_permission: None,
                 cast_cost_modifier: None,
             });
@@ -57696,7 +57715,7 @@ fn exact_resolution_offer_without_concession_does_not_inherit_later_any_color_si
                 duration: Some(Duration::UntilEndOfTurn),
                 graveyard_replacement: None,
                 enters_with_counter: None,
-                enters_with_modifications: Vec::new(),
+                enters_with_modifications: Default::default(),
                 mana_spend_permission: Some(ManaSpendPermission::AnyColor),
                 cast_cost_modifier: None,
             });

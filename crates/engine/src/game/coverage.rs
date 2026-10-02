@@ -7973,7 +7973,7 @@ fn visit_effect_modification_carriers(
             ..
         } => visit_all(additional_modifications),
         Effect::ReturnAsAura { grants, .. } => visit_all(grants),
-        Effect::AddPendingEntersModifications { modifications } => visit_all(modifications),
+        Effect::AddPendingEntersModifications { rider } => visit_all(&rider.modifications),
         Effect::EachPlayerCopyChosen {
             copy_modifications, ..
         } => visit_all(copy_modifications),

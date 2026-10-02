@@ -4337,12 +4337,23 @@ fn def_is_delivered_gains_rider_carrier(def: &AbilityDefinition) -> bool {
 /// and `mode_abilities` are visited to find hosts. The carrier test is anchored
 /// to the host's own `sub_ability` chain — a host's `else_ability` /
 /// `mode_abilities` branch is not read, because delivery does not read it.
+///
+/// CR 118.9: a host carrying an `alt_ability_cost` is NOT a delivering host —
+/// that branch grants `ExileWithAltAbilityCost`, which has no
+/// `enters_with_modifications` channel, so the rider would be dropped. Keeping
+/// such a host out of the exemption preserves an honest warning instead of
+/// clearing it over a represented-but-undelivered rider.
 fn def_tree_has_delivered_gains_rider(def: &AbilityDefinition) -> bool {
-    if matches!(&*def.effect, Effect::CastFromZone { .. })
-        && def
-            .sub_ability
-            .as_deref()
-            .is_some_and(def_is_delivered_gains_rider_carrier)
+    if matches!(
+        &*def.effect,
+        Effect::CastFromZone {
+            alt_ability_cost: None,
+            ..
+        }
+    ) && def
+        .sub_ability
+        .as_deref()
+        .is_some_and(def_is_delivered_gains_rider_carrier)
     {
         return true;
     }
@@ -14975,9 +14986,12 @@ mod detect_condition_if_replacement_exemption_tests {
         let mut carrier = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::AddPendingEntersModifications {
-                modifications: vec![ContinuousModification::AddKeyword {
-                    keyword: Keyword::Haste,
-                }],
+                rider: crate::types::ability::PendingEntersModifications {
+                    modifications: vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Haste,
+                    }],
+                    cast_filter: None,
+                },
             },
         );
         carrier.sub_link = SubAbilityLink::SequentialSibling;

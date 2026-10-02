@@ -320,7 +320,7 @@ fn cast_under_unriddled_permission_has_no_rider() {
             duration: Some(Duration::UntilEndOfTurn),
             graveyard_replacement: None,
             enters_with_counter: None,
-            enters_with_modifications: Vec::new(),
+            enters_with_modifications: Default::default(),
             mana_spend_permission: None,
             cast_cost_modifier: None,
         });
@@ -352,10 +352,12 @@ fn cast_under_unriddled_permission_has_no_rider() {
     );
 }
 
-/// Row 3.5: a non-creature cast made this way shows no observable rider
-/// manifestation — the granted trigger is battlefield-gated, and haste on an
-/// instant is inert. Every transient rider modification is scoped to the
-/// (now-departed) object id.
+/// Row 3.5: a non-creature cast made this way is granted NOTHING — the printed
+/// condition ("If you cast a creature spell this way") is false for an instant
+/// (CR 608.2c + CR 601.2a), so no rider modification is installed at all, not
+/// even one scoped to the (now-departed) cast object id. A positive twin
+/// (creature cast) proves the gate discriminates rather than suppressing the
+/// rider universally.
 #[test]
 fn noncreature_cast_shows_no_rider_manifestation() {
     let (mut runner, strago, instant) = build_strago_runner(library_top_instant);
@@ -394,6 +396,10 @@ fn noncreature_cast_shows_no_rider_manifestation() {
             "no battlefield object may inherit the instant's inert haste ({id:?})"
         );
     }
+    // CR 608.2c + CR 601.2a: the creature-quality gate is false for an instant,
+    // so NO rider modification is granted — not the haste, not the granted
+    // sacrifice trigger, at any scope. The pre-fix behavior installed both
+    // scoped to the instant; this assertion discriminates the gate.
     assert!(
         runner
             .state()
@@ -405,11 +411,13 @@ fn noncreature_cast_shows_no_rider_manifestation() {
                         modification,
                         ContinuousModification::AddKeyword {
                             keyword: Keyword::Haste
-                        }
+                        } | ContinuousModification::GrantTrigger { .. }
                     )
-                }) || effect.affected == TargetFilter::SpecificObject { id: instant }
+                })
             }),
-        "the rider's modifications must be scoped to the cast object id only"
+        "the printed creature-quality gate must suppress every rider modification for a \
+         non-creature cast; effects: {:?}",
+        runner.state().transient_continuous_effects
     );
 
     drive_to_end_step(&mut runner);
