@@ -1569,9 +1569,28 @@ fn undo_tracked(runner: &GameRunner, land: ObjectId) -> bool {
         .is_some_and(|tapped| tapped.contains(&land))
 }
 
+/// The two undo-recording routes for a land's mana tap.
+#[derive(Clone, Copy)]
+enum TapRoute {
+    TapLandForMana,
+    ActivateAbility,
+}
+
+fn tap_by(runner: &mut GameRunner, land: ObjectId, route: TapRoute) {
+    match route {
+        TapRoute::TapLandForMana => {
+            let tap = tap_land_selection(runner, land);
+            runner.act(tap).expect("tap the land");
+        }
+        TapRoute::ActivateAbility => {
+            activate(runner, land, 0);
+        }
+    }
+}
+
 /// Finding 2: Searblades observed the tap, so undo is not offered and a
 /// submitted undo is refused; tapping again is impossible, so power stays 3.
-fn assert_observed_mana_tap_is_not_undoable(use_land_tap_action: bool) {
+fn assert_observed_mana_tap_is_not_undoable(route: TapRoute) {
     let mut scenario = main_phase();
     let searblades = scenario
         .add_creature(P0, "Ceaseless Searblades", 2, 4)
@@ -1579,12 +1598,7 @@ fn assert_observed_mana_tap_is_not_undoable(use_land_tap_action: bool) {
         .id();
     let land = add_mana_land_creature(&mut scenario, "Elemental");
     let mut runner = scenario.build();
-    if use_land_tap_action {
-        let tap = tap_land_selection(&runner, land);
-        runner.act(tap).expect("tap the land");
-    } else {
-        activate(&mut runner, land, 0);
-    }
+    tap_by(&mut runner, land, route);
     assert_eq!(pool(&runner, P0), 1, "reach: mana produced");
     settle_trigger_order(&mut runner);
     assert_eq!(
@@ -1606,27 +1620,22 @@ fn assert_observed_mana_tap_is_not_undoable(use_land_tap_action: bool) {
 
 #[test]
 fn an_observed_mana_tap_is_not_undoable_via_tap_land_for_mana() {
-    assert_observed_mana_tap_is_not_undoable(true);
+    assert_observed_mana_tap_is_not_undoable(TapRoute::TapLandForMana);
 }
 
 #[test]
 fn an_observed_mana_tap_is_not_undoable_via_activate_ability() {
-    assert_observed_mana_tap_is_not_undoable(false);
+    assert_observed_mana_tap_is_not_undoable(TapRoute::ActivateAbility);
 }
 
 /// Control: the same tap with no observer stays undoable.
 #[test]
 fn an_unobserved_mana_tap_is_still_undoable() {
-    for use_land_tap_action in [true, false] {
+    for route in [TapRoute::TapLandForMana, TapRoute::ActivateAbility] {
         let mut scenario = main_phase();
         let land = add_mana_land_creature(&mut scenario, "Elemental");
         let mut runner = scenario.build();
-        if use_land_tap_action {
-            let tap = tap_land_selection(&runner, land);
-            runner.act(tap).expect("tap the land");
-        } else {
-            activate(&mut runner, land, 0);
-        }
+        tap_by(&mut runner, land, route);
         assert!(undo_tracked(&runner, land), "undo is offered");
         runner
             .act(GameAction::UntapLandForMana { object_id: land })
