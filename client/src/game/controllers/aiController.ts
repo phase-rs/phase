@@ -13,8 +13,9 @@ import {
   recordAiDecisionDiagnostic,
 } from "../aiDecisionDiagnostics";
 import { debugLog } from "../debugLog";
-import { dispatchAiActionProposal } from "../dispatch";
+import { dispatchAiActionProposal, isDispatchIdle, processRemoteUpdate } from "../dispatch";
 import { attemptStateRehydrate, isEnginePanic, notifyEngineLost, routePanic } from "../engineRecovery";
+import { stateFingerprint } from "../staleStateWatchdog";
 import type { OpponentController } from "./types";
 
 /**
@@ -414,6 +415,7 @@ export function createAIController(config: AIControllerConfig): AIController {
     // This turns additive latency (delay + compute) into max(delay, compute),
     // which matters most for deeper engine-owned searches.
     const { adapter, gameState } = useGameStore.getState();
+    let proposalAdapter = adapter;
     // Each seat has its own difficulty — a controller driving three AI players
     // can simultaneously run Easy, Medium, and VeryHard policies.
     const difficulty = difficultyByPlayerId.get(playerId) ?? "Medium";
@@ -520,6 +522,7 @@ export function createAIController(config: AIControllerConfig): AIController {
               ? retryAdapter?.getAiTacticalActionProposal
               : retryAdapter?.getAiActionProposal;
             if (!retryGetProposal) return;
+            proposalAdapter = retryAdapter;
             proposal = await retryGetProposal.call(retryAdapter, difficulty, playerId);
           } catch (retryErr) {
             if (!isAttemptCurrent(attempt)) return;
@@ -549,6 +552,27 @@ export function createAIController(config: AIControllerConfig): AIController {
             `AI returned no engine-bounded proposal for player ${playerId} (waitingFor: ${currentWaitingFor?.type ?? "none"})`,
             "warn",
           );
+          failed = true;
+          return;
+        }
+        if (
+          scheduledWaitingFor.type === "Priority"
+          && proposal.semanticOwner !== scheduledWaitingFor.data.player
+        ) {
+          // The live engine may have advanced beyond the displayed prompt.
+          // Reconcile its atomic snapshot before scheduling another decision.
+          if (!proposalAdapter || useGameStore.getState().adapter !== proposalAdapter) return;
+          const snapshot = await proposalAdapter.getSnapshot();
+          if (!isAttemptCurrent(attempt)) return;
+          const currentStore = useGameStore.getState();
+          if (currentStore.adapter !== proposalAdapter || !currentStore.gameState) return;
+          if (stateFingerprint(snapshot.state) !== stateFingerprint(currentStore.gameState)) {
+            // Do not queue a snapshot that could outlive this game session.
+            // With no events, an idle dispatch commits synchronously.
+            if (!isDispatchIdle()) return;
+            await processRemoteUpdate(snapshot, []);
+            return;
+          }
           failed = true;
           return;
         }
