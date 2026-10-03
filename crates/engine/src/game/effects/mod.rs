@@ -19658,7 +19658,7 @@ pub(crate) fn evaluate_condition(
             // part of the effect requires information about an illegal target,
             // it fails to determine any such information", so a slot that was
             // an illegal target at resolution tests as unmatched.
-            // CR 109.4 + CR 603.2: without a slot, "that creature" / "it" is, in
+            // CR 608.2c + CR 603.2: without a slot, "that creature" / "it" is, in
             // order: the node's own resolution-bound attachment-host recipient;
             // else the ability's first object target; else — for subject-based
             // triggers that carry no chosen target — the triggering event's
