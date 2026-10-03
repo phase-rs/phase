@@ -26,7 +26,7 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::zones::create_object;
 use engine::types::ability::{
     AbilityCondition, AbilityDefinition, ContinuousModification, ControllerRef, Duration, Effect,
-    PlayerFilter, PreventionAmount, PtValue, QuantityExpr, QuantityModification,
+    OpponentMayScope, PlayerFilter, PreventionAmount, PtValue, QuantityExpr, QuantityModification,
     ReplacementDefinition, ReplacementMode, ResolvedAbility, SubAbilityLink, TargetFilter,
     TargetRef, TypedFilter,
 };
@@ -1729,6 +1729,7 @@ enum Asked {
     Scry,
     Shield,
     Optional,
+    OpponentMay,
 }
 
 /// One answered pause: who was asked what, and the resolution stack then.
@@ -1740,8 +1741,8 @@ struct Answered {
 
 /// Answer the current pause through `apply()` after a serde round trip: keep
 /// the scried card, decline a prevention shield (so each recipient is dealt
-/// its damage exactly once), accept an optional seat. `None` when resolution
-/// is not paused on one of those prompts.
+/// its damage exactly once), accept an optional seat or an "any opponent may"
+/// offer. `None` when resolution is not paused on one of those prompts.
 fn answer_pause(state: &mut GameState, events: &mut Vec<GameEvent>) -> Option<Answered> {
     let (player, asked, action) = match state.waiting_for.clone() {
         WaitingFor::ScryChoice { player, cards, .. } => {
@@ -1755,6 +1756,11 @@ fn answer_pause(state: &mut GameState, events: &mut Vec<GameEvent>) -> Option<An
         WaitingFor::OptionalEffectChoice { player, .. } => (
             player,
             Asked::Optional,
+            GameAction::DecideOptionalEffect { accept: true },
+        ),
+        WaitingFor::OpponentMayChoice { player, .. } => (
+            player,
+            Asked::OpponentMay,
             GameAction::DecideOptionalEffect { accept: true },
         ),
         _ => return None,
@@ -2225,6 +2231,537 @@ fn optional_last_seat_decision_remainder_precedes_the_queue_end() {
             damage_dealt_to(events, id).len(),
             1,
             "REACH-GUARD: {id:?} is dealt damage once"
+        );
+    }
+}
+
+// --- "any opponent may" offers inside a paused clause ------------------------------
+
+/// "any opponent may …": the node's controller's opponents are offered it in
+/// APNAP order; the first to accept has it happen (CR 608.2d + CR 101.4).
+fn any_opponent_may(mut node: ResolvedAbility) -> ResolvedAbility {
+    node.optional = true;
+    node.optional_for = Some(OpponentMayScope::AnyOpponent);
+    node
+}
+
+/// "<controller> scries 1" — the controller is rebound per seat.
+fn scry_one(source: ObjectId) -> ResolvedAbility {
+    ResolvedAbility::new(
+        Effect::Scry {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        },
+        vec![],
+        source,
+        P0,
+    )
+}
+
+/// How an accepted "any opponent may" offer pauses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OfferPause {
+    /// "… may have you scry 1. You gain 3 life.": the scry pauses, and the
+    /// generic pause path parks the remaining "you gain 3 life" (the prepend
+    /// route).
+    Scry,
+    /// "… may have it deal 1 damage to each creature you control.": the damage
+    /// pauses on P0's shield, and the damage handler stashes the rest of its
+    /// simultaneous damage (the append route).
+    Damage,
+}
+
+struct OfferRun {
+    state: GameState,
+    events: Vec<GameEvent>,
+    answered: Vec<Answered>,
+    p0_shielded: ObjectId,
+    p0_second: ObjectId,
+    p1_creature: ObjectId,
+}
+
+/// "Each player may gain 1 life. If they do, any opponent may <offer>." in two
+/// players, optionally above an enclosing continuation `U` ("you gain 7
+/// life"). Every seat and every offer is accepted through `apply()`; seat 0's
+/// offer is answered by a handler that installs no floor, while a queue-end
+/// barrier is the stack-top continuation beneath the offer.
+fn run_opponent_offer_after_seat_decision(
+    offer: OfferPause,
+    enclosing: bool,
+    seed: u64,
+) -> OfferRun {
+    let Board {
+        mut state,
+        source,
+        copied,
+        stale,
+    } = board(2, seed);
+    install_damage_shield(&mut state, copied);
+    let p1_creature = creature(&mut state, 71, P1, "Bear");
+    if enclosing {
+        let earlier = PendingContinuation::new(Box::new(gain_life(source, 7)), &state);
+        state.park_ability_continuation(earlier);
+    }
+
+    let offered = match offer {
+        OfferPause::Scry => {
+            let mut scry = scry_one(source);
+            scry.sub_ability = Some(Box::new(gain_life(source, 3)));
+            scry
+        }
+        OfferPause::Damage => damage_own_creatures(source),
+    };
+    let mut offered = any_opponent_may(offered);
+    offered.condition = Some(AbilityCondition::effect_performed());
+    let mut seat = gain_life(source, 1);
+    seat.optional = true;
+    seat.player_scope = Some(PlayerFilter::All);
+    seat.sub_ability = Some(Box::new(offered));
+
+    let mut events = Vec::new();
+    resolve_ability_chain(&mut state, &seat, &mut events, 0).expect("fan-out starts");
+    let answered = answer_every_pause(&mut state, &mut events);
+    OfferRun {
+        state,
+        events,
+        answered,
+        p0_shielded: copied,
+        p0_second: stale,
+        p1_creature,
+    }
+}
+
+/// The reach-guards every offer row checks first: seat 0 decides, its
+/// opponent accepts the offer, and the offer pauses; seat 0's offer prompt sits
+/// on the queue-end barrier(s) above the clause frame; seat 0's "gain 1 life"
+/// resolves once.
+fn assert_offer_reach(run: &OfferRun, offer: OfferPause, enclosing: bool) {
+    let pause = match offer {
+        OfferPause::Scry => (P0, Asked::Scry),
+        OfferPause::Damage => (P0, Asked::Shield),
+    };
+    assert_eq!(
+        asked(&run.answered).get(..3),
+        Some(&[(P0, Asked::Optional), (P1, Asked::OpponentMay), pause][..]),
+        "REACH-GUARD: seat 0 decides, P1 accepts the offer, and the offer pauses"
+    );
+    let continuations = if enclosing { 4 } else { 2 };
+    let mut frames = vec![FrameKind::AbilityContinuation; continuations];
+    frames.push(FrameKind::OptionalEffect);
+    assert_eq!(
+        run.answered[1].frames, frames,
+        "REACH-GUARD (P0.g): seat 0's offer prompt sits on the queue-end barrier \
+         ([U, clause frame, U's barrier, the offer's barrier, offer] / \
+         [clause frame, the offer's barrier, offer])"
+    );
+    assert_eq!(
+        life_gain_of(&run.events, P0, 1).len(),
+        1,
+        "REACH-GUARD: seat 0's decision resolves once"
+    );
+}
+
+/// The checks every offer row makes once seat 0's work is proven: the clause
+/// drains in the answering actions, seat 1 is asked the same way, and seat 1's
+/// "gain 1 life" resolves once.
+fn assert_offer_clause_completes(run: &OfferRun, offer: OfferPause, label: &str) {
+    assert_clause_drained(&run.state, label);
+    let mut seat_one = vec![(P1, Asked::Optional), (P0, Asked::OpponentMay)];
+    if offer == OfferPause::Scry {
+        seat_one.push((P1, Asked::Scry));
+    }
+    assert_eq!(
+        asked(&run.answered).get(3..),
+        Some(&seat_one[..]),
+        "REACH-GUARD: seat 1 decides, then P0 accepts its offer"
+    );
+    assert_eq!(
+        life_gain_of(&run.events, P1, 1).len(),
+        1,
+        "REACH-GUARD: seat 1's decision resolves once"
+    );
+}
+
+/// Seat 0's accepted offer scries, so its remaining "you gain 3 life" is
+/// parked while the barrier beneath the offer is the stack-top continuation:
+/// it resolves, before seat 1 begins.
+#[test]
+fn opponent_offer_remainder_parked_above_a_barrier_precedes_the_next_seat() {
+    let run = run_opponent_offer_after_seat_decision(OfferPause::Scry, false, 54);
+    assert_offer_reach(&run, OfferPause::Scry, false);
+    let p0_rest = life_gain_of(&run.events, P0, 3);
+    assert_eq!(
+        p0_rest.len(),
+        1,
+        "CR 608.2c: seat 0's remaining instruction after the accepted offer resolves once"
+    );
+    assert_eq!(
+        run.answered[2].frames,
+        vec![FrameKind::AbilityContinuation; 3],
+        "P0.g: [clause frame, barrier, seat 0's parked remainder]"
+    );
+    assert_offer_clause_completes(&run, OfferPause::Scry, "scry offer");
+    let order = [
+        life_gain_of(&run.events, P0, 1)[0],
+        p0_rest[0],
+        life_gain_of(&run.events, P1, 1)[0],
+    ];
+    assert!(
+        order.windows(2).all(|pair| pair[0] < pair[1]),
+        "CR 608.2f: seat 0's remaining instruction precedes seat 1 ({order:?})"
+    );
+    assert_eq!(
+        life_gain_of(&run.events, P1, 3).len(),
+        1,
+        "REACH-GUARD: seat 1's remaining instruction resolves once"
+    );
+}
+
+/// The same offer above an enclosing continuation `U`: seat 0's remaining
+/// instruction resolves before seat 1, and the whole clause before `U`.
+#[test]
+fn opponent_offer_remainder_parked_above_a_barrier_precedes_the_next_seat_and_u() {
+    let run = run_opponent_offer_after_seat_decision(OfferPause::Scry, true, 55);
+    assert_offer_reach(&run, OfferPause::Scry, true);
+    let p0_rest = life_gain_of(&run.events, P0, 3);
+    assert_eq!(
+        p0_rest.len(),
+        1,
+        "CR 608.2c: seat 0's remaining instruction after the accepted offer resolves once"
+    );
+    assert_eq!(
+        run.answered[2].frames,
+        vec![FrameKind::AbilityContinuation; 5],
+        "P0.g: [U, clause frame, two barriers, seat 0's parked remainder]"
+    );
+    assert_offer_clause_completes(&run, OfferPause::Scry, "scry offer above U");
+    let p1_rest = life_gain_of(&run.events, P1, 3);
+    assert_eq!(
+        p1_rest.len(),
+        1,
+        "CR 608.2c: seat 1's remaining instruction after the accepted offer resolves once"
+    );
+    let enclosing = life_gain_of(&run.events, P0, 7);
+    assert_eq!(enclosing.len(), 1, "REACH-GUARD: U resolves once");
+    let order = [
+        life_gain_of(&run.events, P0, 1)[0],
+        p0_rest[0],
+        life_gain_of(&run.events, P1, 1)[0],
+        p1_rest[0],
+        enclosing[0],
+    ];
+    assert!(
+        order.windows(2).all(|pair| pair[0] < pair[1]),
+        "CR 608.2f + CR 608.2e: each seat's remaining instruction precedes the next seat, \
+         and the clause precedes U ({order:?})"
+    );
+}
+
+/// Seat 0's accepted offer deals damage that pauses on P0's shield, so the
+/// damage handler stashes the rest of its damage while the barrier beneath the
+/// offer is the stack-top continuation: that damage is dealt, before seat 1
+/// begins and before `U`.
+#[test]
+fn opponent_offer_appended_damage_parked_above_a_barrier_precedes_the_next_seat_and_u() {
+    let run = run_opponent_offer_after_seat_decision(OfferPause::Damage, true, 56);
+    assert_offer_reach(&run, OfferPause::Damage, true);
+    assert_eq!(
+        damage_dealt_to(&run.events, run.p0_shielded).len(),
+        1,
+        "REACH-GUARD: P0's shielded creature is dealt damage once"
+    );
+    let p0_rest = damage_dealt_to(&run.events, run.p0_second);
+    assert_eq!(
+        p0_rest.len(),
+        1,
+        "CR 608.2c: the rest of the accepted offer's damage is dealt once"
+    );
+    assert_eq!(
+        run.answered[2].frames,
+        vec![FrameKind::AbilityContinuation; 5],
+        "P0.g: [U, clause frame, two barriers, seat 0's parked damage]"
+    );
+    assert_offer_clause_completes(&run, OfferPause::Damage, "damage offer above U");
+    let p1 = damage_dealt_to(&run.events, run.p1_creature);
+    assert_eq!(
+        p1.len(),
+        1,
+        "REACH-GUARD: seat 1's offer deals its damage once"
+    );
+    let enclosing = life_gain_of(&run.events, P0, 7);
+    assert_eq!(enclosing.len(), 1, "REACH-GUARD: U resolves once");
+    let order = [
+        damage_dealt_to(&run.events, run.p0_shielded)[0],
+        p0_rest[0],
+        life_gain_of(&run.events, P1, 1)[0],
+        p1[0],
+        enclosing[0],
+    ];
+    assert!(
+        order.windows(2).all(|pair| pair[0] < pair[1]),
+        "CR 608.2f + CR 608.2e: seat 0's remaining damage precedes seat 1, and the clause \
+         precedes U ({order:?})"
+    );
+}
+
+/// "Each player deals 1 damage to each creature they control — any opponent
+/// may have it happen. Put a charge counter on the tokens." in three players:
+/// each seat is an "any opponent may" offer, and the next instruction is
+/// detached (its tail authority rides the clause's frames). Seat 2's offer is
+/// raised while its leg drains, with the clause's queue end (carrying the tail
+/// authority) beneath it, and is answered by a handler that installs no floor;
+/// the accepted damage pauses on P2's shield, so the damage handler stashes
+/// the rest of seat 2's damage while that queue end is the stack-top
+/// continuation. That damage is dealt, before the next instruction.
+#[test]
+fn opponent_offer_appended_damage_parked_above_the_queue_end_precedes_the_tail() {
+    let Board {
+        mut state,
+        source,
+        copied,
+        stale,
+    } = board(3, 57);
+    let p1_creature = creature(&mut state, 71, P1, "Bear");
+    let p2_shielded = creature(&mut state, 73, P2, "Shielded Wolf");
+    let p2_second = creature(&mut state, 74, P2, "Second Wolf");
+    install_damage_shield(&mut state, p2_shielded);
+
+    let mut tail = tail_counter(source);
+    tail.sub_link = SubAbilityLink::SequentialSibling;
+    let mut offer = any_opponent_may(damage_own_creatures(source));
+    offer.player_scope = Some(PlayerFilter::All);
+    offer.sub_ability = Some(Box::new(tail));
+
+    let mut events = Vec::new();
+    resolve_ability_chain(&mut state, &offer, &mut events, 0).expect("fan-out starts");
+    let mut answered = Vec::new();
+    let mut authority = Vec::new();
+    loop {
+        let parked = tail_authority_parked(&state);
+        let Some(answer) = answer_pause(&mut state, &mut events) else {
+            break;
+        };
+        answered.push(answer);
+        authority.push(parked);
+        assert!(answered.len() < 16, "pauses must terminate");
+    }
+    assert_clause_drained(&state, "opponent offers with a detached tail");
+    assert_eq!(
+        asked(&answered),
+        vec![
+            (P1, Asked::OpponentMay),
+            (P0, Asked::OpponentMay),
+            (P0, Asked::OpponentMay),
+            (P2, Asked::Shield)
+        ],
+        "REACH-GUARD: each seat's offer goes to its first opponent in APNAP order, and          seat 2's accepted offer pauses on P2's shield"
+    );
+    assert!(
+        authority.iter().all(|parked| *parked),
+        "REACH-GUARD (B1): the tail authority is parked at every pause"
+    );
+    for (seat, label) in [
+        (0, "[clause frame, seat 0's offer]"),
+        (1, "[next-seat frame, seat 1's offer]"),
+        (2, "[queue end, seat 2's offer]"),
+    ] {
+        assert_eq!(
+            answered[seat].frames,
+            vec![FrameKind::AbilityContinuation, FrameKind::OptionalEffect],
+            "REACH-GUARD (P0.g): {label}"
+        );
+    }
+    for id in [copied, stale, p1_creature, p2_shielded] {
+        assert_eq!(
+            damage_dealt_to(&events, id).len(),
+            1,
+            "REACH-GUARD: {id:?} is dealt damage once"
+        );
+    }
+    let p2_rest = damage_dealt_to(&events, p2_second);
+    assert_eq!(
+        p2_rest.len(),
+        1,
+        "CR 608.2c: the rest of seat 2's accepted damage is dealt once"
+    );
+    let tail = charge_added(&events);
+    assert_eq!(
+        tail.len(),
+        1,
+        "REACH-GUARD: the next instruction resolves once"
+    );
+    let order = [
+        first_damage(&events, copied, "P0's first creature"),
+        first_damage(&events, p1_creature, "P1's creature"),
+        first_damage(&events, p2_shielded, "P2's shielded creature"),
+        p2_rest[0],
+        tail[0],
+    ];
+    assert!(
+        order.windows(2).all(|pair| pair[0] < pair[1]),
+        "CR 608.2f + CR 608.2e: seats in APNAP order, seat 2's remaining damage, then          the next instruction ({order:?})"
+    );
+}
+
+/// A drained leg's seat raises a prompt it does not own (its node comes from
+/// another source) directly above an enclosing continuation `U`: the barrier
+/// beneath that prompt is the last frame the clause's work drains through, so
+/// the clause's detached next instruction still resolves — once, after every
+/// seat and before `U`.
+///
+/// "Each player scries 1, then may gain 1 life. Put a charge counter on the
+/// tokens." in three players above `U` ("you gain 7 life"), the "may gain 1
+/// life" node carrying another source.
+#[test]
+fn foreign_prompt_barrier_in_a_drained_leg_keeps_the_tail_authority() {
+    let Board {
+        mut state, source, ..
+    } = board(3, 58);
+    let foreign = create_object(
+        &mut state,
+        CardId(9),
+        P0,
+        "Foreign Source".to_string(),
+        Zone::Battlefield,
+    );
+    let earlier = PendingContinuation::new(Box::new(gain_life(source, 7)), &state);
+    state.park_ability_continuation(earlier);
+
+    let mut tail = tail_counter(source);
+    tail.sub_link = SubAbilityLink::SequentialSibling;
+    let mut may_gain = gain_life(foreign, 1);
+    may_gain.optional = true;
+    // Kept per seat by its `CurrentScopeSucceeded` gate.
+    may_gain.condition = Some(AbilityCondition::current_scope_succeeded());
+    may_gain.sub_ability = Some(Box::new(tail));
+    let mut scry = scry_one(source);
+    scry.player_scope = Some(PlayerFilter::All);
+    scry.sub_ability = Some(Box::new(may_gain));
+
+    let mut events = Vec::new();
+    resolve_ability_chain(&mut state, &scry, &mut events, 0).expect("fan-out starts");
+    let answered = answer_every_pause(&mut state, &mut events);
+    assert_eq!(
+        asked(&answered),
+        vec![
+            (P0, Asked::Scry),
+            (P0, Asked::Optional),
+            (P1, Asked::Scry),
+            (P1, Asked::Optional),
+            (P2, Asked::Scry),
+            (P2, Asked::Optional)
+        ],
+        "REACH-GUARD: each seat scries, then decides, in APNAP order"
+    );
+    assert_eq!(
+        answered[3].frames,
+        vec![
+            FrameKind::AbilityContinuation,
+            FrameKind::AbilityContinuation,
+            FrameKind::OptionalEffect
+        ],
+        "REACH-GUARD (P0.g): [U, the barrier, seat 1's foreign prompt]"
+    );
+    let gains: Vec<usize> = [P0, P1, P2]
+        .iter()
+        .map(|&player| {
+            let seat = life_gain_of(&events, player, 1);
+            assert_eq!(
+                seat.len(),
+                1,
+                "REACH-GUARD: {player:?}'s seat gains life once"
+            );
+            seat[0]
+        })
+        .collect();
+    let tail = charge_added(&events);
+    assert_eq!(
+        tail.len(),
+        1,
+        "CR 608.2e: the clause's next instruction resolves once"
+    );
+    assert_clause_drained(&state, "foreign prompt in a drained leg above U");
+    let enclosing = life_gain_of(&events, P0, 7);
+    assert_eq!(enclosing.len(), 1, "REACH-GUARD: U resolves once");
+    assert!(
+        gains[2] < tail[0] && tail[0] < enclosing[0],
+        "CR 608.2e: the next instruction follows every seat and precedes U \
+         (last seat at {}, tail at {}, U at {})",
+        gains[2],
+        tail[0],
+        enclosing[0]
+    );
+}
+
+/// "Each player may scry 1, then gain 3 life." above an enclosing continuation
+/// `U` ("you gain 7 life"), in two players. Seat 0's accepted scry parks its
+/// remaining "gain 3 life" above the queue-end barrier beneath seat 0's
+/// prompt; answering the scry resumes that remainder, passes the barrier, and
+/// resumes seat 1 in the same action — no continuation is left parked while a
+/// player holds priority.
+#[test]
+fn optional_seat_remainder_above_a_barrier_resumes_the_next_seat_in_the_same_action() {
+    let Board {
+        mut state, source, ..
+    } = board(2, 59);
+    let earlier = PendingContinuation::new(Box::new(gain_life(source, 7)), &state);
+    state.park_ability_continuation(earlier);
+    let mut scry = scry_one(source);
+    scry.sub_ability = Some(Box::new(gain_life(source, 3)));
+    scry.player_scope = Some(PlayerFilter::All);
+    scry.optional = true;
+
+    let mut events = Vec::new();
+    resolve_ability_chain(&mut state, &scry, &mut events, 0).expect("fan-out starts");
+    let mut answered = Vec::new();
+    for _ in 0..2 {
+        answered.push(answer_pause(&mut state, &mut events).expect("seat 0 is paused"));
+    }
+    assert_eq!(
+        asked(&answered),
+        vec![(P0, Asked::Optional), (P0, Asked::Scry)],
+        "REACH-GUARD: seat 0 decides, then scries"
+    );
+    assert_eq!(
+        answered[1].frames,
+        vec![FrameKind::AbilityContinuation; 4],
+        "REACH-GUARD (P0.g): [U, clause frame, barrier, seat 0's parked remainder]"
+    );
+    assert_eq!(
+        life_gain_of(&events, P0, 3).len(),
+        1,
+        "REACH-GUARD: seat 0's remaining instruction resolves once"
+    );
+    let WaitingFor::OptionalEffectChoice { player, .. } = state.waiting_for.clone() else {
+        panic!(
+            "CR 608.2f: answering seat 0's scry resumes seat 1's decision, got {:?} with \
+             frames {:?}",
+            state.waiting_for,
+            frame_kinds(&state)
+        );
+    };
+    assert_eq!(player, P1, "seat 1 decides next");
+    answered.extend(answer_every_pause(&mut state, &mut events));
+    assert_clause_drained(&state, "optional scry seats above U");
+    assert_eq!(
+        asked(&answered[2..]),
+        vec![(P1, Asked::Optional), (P1, Asked::Scry)],
+        "REACH-GUARD: seat 1 decides, then scries"
+    );
+    let order = [
+        life_gain_of(&events, P0, 3)[0],
+        life_gain_of(&events, P1, 3)[0],
+        life_gain_of(&events, P0, 7)[0],
+    ];
+    assert!(
+        order.windows(2).all(|pair| pair[0] < pair[1]),
+        "CR 608.2f + CR 608.2e: seats in APNAP order, then U ({order:?})"
+    );
+    for (player, gained, label) in [(P1, 3, "seat 1's remainder"), (P0, 7, "U")] {
+        assert_eq!(
+            life_gain_of(&events, player, gained).len(),
+            1,
+            "REACH-GUARD: {label} resolves once"
         );
     }
 }

@@ -1157,6 +1157,7 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
     // The continuation — the completed ChangeZone's chained downstream, or any
     // other parked chain — runs only once the inner iteration finished without
     // re-pausing on a further per-target replacement choice.
+    let mut drained_queue_end = false;
     if !waits_for_resolution_choice(&state.waiting_for)
         && state.active_ability_continuation().is_some()
     {
@@ -1221,6 +1222,7 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
             player_scope_clause,
             player_scope_queue_end,
         } = cont;
+        drained_queue_end = player_scope_queue_end;
         debug_assert!(
             pending_return_result_producer.is_none(),
             "an instruction result must settle before its reader continuation drains"
@@ -1362,6 +1364,16 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
     }
     clear_post_replacement_token_choice_seed_if_resolution_drained(state);
     clear_return_result_frames_if_idle(state);
+    // CR 608.2c: a player-scope queue end holds no instruction — draining it
+    // only completes its clause — so it does not stand in for the next
+    // continuation's resumption: that continuation resumes in this same pass,
+    // exactly as a later drain call would.
+    if drained_queue_end
+        && matches!(state.waiting_for, WaitingFor::Priority { .. })
+        && state.active_ability_continuation().is_some()
+    {
+        drain_pending_continuation(state, events);
+    }
 }
 
 pub(crate) fn clear_return_result_frames_if_idle(state: &mut GameState) {
@@ -2617,6 +2629,25 @@ fn active_continuation_predates_player_scope_floor(state: &GameState) -> bool {
             .is_some_and(|floor| state.resolution_stack.capture_child_boundary() <= floor.depth)
 }
 
+/// CR 608.2c + CR 608.2f + CR 608.2e: whether the stack-top continuation must
+/// not take in instructions stashed now, which are parked above it as a frame
+/// of their own instead. The shared guard of both splice authorities
+/// (`append_to_pending_continuation`,
+/// `prepend_to_pending_continuation_with_producer`), so it holds for every
+/// consumer that resumes paused work, whether or not that consumer installs a
+/// floor:
+/// - a player-scope queue end never resolves its chain, so instructions
+///   spliced into it would never be followed;
+/// - a continuation parked before the player-scope clause work now resolving
+///   began resumes only after that work
+///   (`active_continuation_predates_player_scope_floor`).
+fn active_continuation_refuses_stashed_work(state: &GameState) -> bool {
+    state
+        .active_ability_continuation()
+        .is_some_and(|active| active.player_scope_queue_end)
+        || active_continuation_predates_player_scope_floor(state)
+}
+
 pub(crate) fn append_to_pending_continuation(
     state: &mut GameState,
     tail: Option<Box<ResolvedAbility>>,
@@ -2626,11 +2657,12 @@ pub(crate) fn append_to_pending_continuation(
     };
 
     // CR 608.2f + CR 608.2e: a continuation parked before the resolving
-    // player-scope seat began holds an enclosing chain's later instructions.
-    // The seat's remainder is parked above it as its own frame, never spliced
+    // player-scope work began holds that clause's later seats or an
+    // enclosing chain's later instructions, and a queue end resolves nothing.
+    // The work's remainder is parked above it as its own frame, never spliced
     // onto its end — the twin of `prepend_to_pending_continuation_with_producer`'s
-    // floor guard.
-    if active_continuation_predates_player_scope_floor(state) {
+    // guard.
+    if active_continuation_refuses_stashed_work(state) {
         state.park_ability_continuation(PendingContinuation::new(tail, state));
         return;
     }
@@ -2769,7 +2801,7 @@ fn prepend_to_pending_continuation_with_producer(
     }
 
     if state.active_ability_continuation().is_some()
-        && !active_continuation_predates_player_scope_floor(state)
+        && !active_continuation_refuses_stashed_work(state)
     {
         let frame = state
             .take_active_ability_continuation()
@@ -2893,9 +2925,8 @@ enum ClauseFrameBelowPrompt {
     /// The clause's queue end after its last seat; carries the live tail
     /// authority.
     QueueEnd(ResolvedAbility),
-    /// A queue end carrying no authority: it only keeps the decision's work
-    /// above a continuation parked before the clause work that raised the
-    /// prompt.
+    /// A queue end that keeps the decision's work above a continuation parked
+    /// before the clause work that raised the prompt.
     Barrier(ResolvedAbility),
 }
 
@@ -2946,11 +2977,10 @@ fn install_optional_effect_frame(
             park_player_scope_queue_end(state, placeholder)
         }
         Some(ClauseFrameBelowPrompt::Barrier(placeholder)) => {
-            let mut pending =
-                PendingContinuation::player_scope_queue_end(Box::new(placeholder), state);
-            // Not the clause's last-draining frame: any live tail authority
-            // stays on the frames the drain parks.
-            pending.player_scope_tail = None;
+            // The prompt's own clause frames (if any) were parked before it;
+            // this barrier is the last frame the decision's work drains
+            // through, so a live tail authority stays on it.
+            let pending = PendingContinuation::player_scope_queue_end(Box::new(placeholder), state);
             state
                 .insert_ability_continuation_parent_of_active(pending)
                 .map_err(|error| EffectError::InvalidParam(error.to_string()))?;
