@@ -8045,10 +8045,10 @@ fn static_mode_uses_chosen_color(mode: &crate::types::statics::StaticMode) -> bo
 
 /// CR 611.2c + CR 109.5: True when a granted static mode resolves a player
 /// reference ("you"/"your opponents") that must be the INSTALLING player rather
-/// than the carrier's controller, so the graft has to snapshot
-/// `effect.controller` as the definition's anchor.
+/// than the carrier's controller, so the graft has to stamp that player as the
+/// definition's anchor.
 ///
-/// Two member classes today:
+/// Three member classes today:
 /// - `MustBeBlockedByAll` / `MustBeBlocked` carrying a controller-relative
 ///   blocker filter (`ControllerRef::You`/`Opponent`/… — "your opponents", "you
 ///   control"). Grafted onto a TARGET permanent by a one-shot effect (You Look
@@ -8056,8 +8056,11 @@ fn static_mode_uses_chosen_color(mode: &crate::types::statics::StaticMode) -> bo
 ///   to the target's controller.
 /// - `MustAttackAwayFromSource`, whose avoided player is the granting effect's
 ///   controller (CR 701.15b).
+/// - `Goaded`, whose goader is the installing player (CR 701.15b); consumed by
+///   `combat::goad_static_hits_for_creature`.
 ///
-/// Mirrors `static_mode_uses_chosen_color`.
+/// The anchor's value is `graft_installing_player`. Mirrors
+/// `static_mode_uses_chosen_color`.
 fn static_mode_needs_source_controller_anchor(mode: &crate::types::statics::StaticMode) -> bool {
     use crate::types::statics::StaticMode;
     match mode {
@@ -8073,7 +8076,34 @@ fn static_mode_needs_source_controller_anchor(mode: &crate::types::statics::Stat
         // (Maximum Carnage chapter I), so re-deriving it from the carrier would
         // avoid the wrong player.
         StaticMode::MustAttackAwayFromSource => true,
+        // CR 701.15b: a goaded creature attacks a player other than the controller of
+        // the permanent, spell, or ability that caused it to be goaded — the
+        // INSTALLING player, never the carrier's own controller. Grafted by a
+        // resolution ("The tokens are goaded for the rest of the game", Life of the
+        // Party) or by a static on another permanent ("Enchanted creature is
+        // goaded.", The Sound of Drums).
+        StaticMode::Goaded => true,
         _ => false,
+    }
+}
+
+/// CR 109.5 + CR 113.8 + CR 611.3a: the installing player a grafted mode's
+/// anchor names — the single authority for every
+/// `static_mode_needs_source_controller_anchor` mode.
+/// - Resolution-generated effect (`transient_id: Some`): the controller of the
+///   spell or ability that created it, fixed when the effect began; later
+///   control changes of its source or of the carrier don't move it.
+/// - Static-ability effect (`transient_id: None`): the CURRENT controller of the
+///   object the static is on. Layer 6 (CR 613.1f) applies after layer 2
+///   (CR 613.1b), so the live source controller is read here; `effect.controller`
+///   was gathered before this pass's layer-2 effects applied.
+fn graft_installing_player(state: &GameState, effect: &ActiveContinuousEffect) -> PlayerId {
+    match effect.transient_id {
+        Some(_) => effect.controller,
+        None => state
+            .objects
+            .get(&effect.source_id)
+            .map_or(effect.controller, |source| source.controller),
     }
 }
 
@@ -8707,6 +8737,14 @@ fn apply_continuous_effect_filtered(
     } else {
         None
     };
+
+    // CR 701.15b + CR 109.5: pre-read the graft's installing player before the
+    // recipient loop's mutable borrow (mirrors `chosen_color`).
+    let graft_installer = matches!(
+        effect.modification,
+        ContinuousModification::AddStaticMode { .. }
+    )
+    .then(|| graft_installing_player(state, effect));
 
     // Pre-read chosen keyword from source (avoids borrow conflict in the loop).
     // CR 608.2d + CR 613.1f: When the modification is `RemoveChosenKeyword`,
@@ -9560,17 +9598,20 @@ fn apply_continuous_effect_filtered(
                 let mut def =
                     StaticDefinition::new(resolved_mode.clone()).affected(TargetFilter::SelfRef);
                 // CR 611.2c + CR 109.5: A player reference carried by the granted
-                // mode — a controller-relative blocker filter ("your opponents")
-                // or `MustAttackAwayFromSource`'s avoided player (CR 701.15b) —
-                // grafted onto a TARGET permanent would otherwise resolve "you"
-                // as the target's controller. Snapshot the installing player
-                // (`effect.controller`, the single authority) so combat
-                // re-derives the reference from the spell controller — the
-                // continuous effect's anchor is locked at materialization.
-                // `None` anchor (permanent-static lures) still resolves from the
-                // carrier.
-                if static_mode_needs_source_controller_anchor(&resolved_mode) {
-                    def = def.source_controller(effect.controller);
+                // mode — a controller-relative blocker filter ("your opponents"),
+                // `MustAttackAwayFromSource`'s avoided player, or `Goaded`'s
+                // goader (CR 701.15b) — grafted onto another permanent would
+                // otherwise resolve "you" as the carrier's controller. Anchor the
+                // installing player (`graft_installing_player`, the single
+                // authority: the resolving spell/ability's controller for a
+                // resolution-generated effect, the static source's current
+                // controller for a static-ability effect) so combat re-derives
+                // the reference from it. `None` anchor (permanent-static lures)
+                // still resolves from the carrier.
+                if let Some(installer) = graft_installer
+                    .filter(|_| static_mode_needs_source_controller_anchor(&resolved_mode))
+                {
+                    def = def.source_controller(installer);
                 }
                 // CR 611.2c: stamp the directing object so combat / future
                 // attribution consumers can name the object that grafted this
@@ -9591,7 +9632,9 @@ fn apply_continuous_effect_filtered(
                 // requirement — one per opponent-set); a mode-only guard would
                 // silently drop the second caster's requirement. Full-def equality
                 // still collapses the same effect re-applied across layer passes
-                // (identical anchor), so no grant is multiplied.
+                // (identical anchor), so no grant is multiplied. CR 701.15c /
+                // CR 701.15d: distinct goaders yield distinct defs; the same
+                // goader again collapses.
                 if !obj.static_definitions.iter_all().any(|sd| sd == &def) {
                     obj.static_definitions.push(def);
                 }

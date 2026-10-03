@@ -421,6 +421,7 @@ mod gimbal_gremlin_prodigy;
 mod glen_elendras_answer_counter_all_conjunction;
 mod gluntch_choose_player_chain;
 mod goad_badge_defender_gated_anchor;
+mod goad_grant_goader_identity;
 mod goaded_creature_under_pacifism_visible;
 mod goblin_furrier_snow_damage;
 mod gollum_scheming_guide_card_predicate_guess;

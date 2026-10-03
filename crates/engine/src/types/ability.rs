@@ -30550,10 +30550,10 @@ pub struct StaticDefinition {
     /// explicitly materialize one. `GrantStaticAbility` sets it only for an
     /// unconditional, bare-`SelfRef` `CantAttack` / `CantAttackOrBlock` with an
     /// eligible controller-relative defended scope. `AddStaticMode` separately
-    /// sets it for controller-relative `MustBeBlocked*` filters and
-    /// `MustAttackAwayFromSource`. Other granted statics, including quoted
-    /// statics with a nontrivial scope or condition, retain the carrier
-    /// controller fallback when this is `None`.
+    /// sets it for controller-relative `MustBeBlocked*` filters,
+    /// `MustAttackAwayFromSource`, and `Goaded` (CR 701.15b). Other granted
+    /// statics, including quoted statics with a nontrivial scope or condition,
+    /// retain the carrier controller fallback when this is `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_controller: Option<crate::types::player::PlayerId>,
     /// CR 508.1d + CR 611.2c: The object that grafted this static onto its
