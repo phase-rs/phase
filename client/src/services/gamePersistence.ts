@@ -93,6 +93,13 @@ export interface PersistedP2PHostSession {
   playerTokens: Record<number, string>;
   /** PlayerId.0 → deck submitted by that guest (pre-game data). */
   guestDecks: Record<number, unknown>;
+  /**
+   * PlayerId.0 → display name the guest sent with its deck. A reconnecting
+   * guest's `reconnect` frame carries no name, so the host's copy is the only
+   * one that survives a host refresh. Optional: sessions saved before this
+   * field existed resume with commander/fallback labels.
+   */
+  guestNames?: Record<number, string>;
   /** PlayerId.0 → resolved AI deck for AI-controlled seats. */
   aiDecks?: Record<number, unknown>;
   /** Tokens that were kicked — refused on reconnect on resume. */

@@ -19,6 +19,7 @@ import { PEER_CONNECT_OPTIONS } from "../../network/connection";
 import { WIRE_PROTOCOL_VERSION, encodeWireMessage, type P2PMessage } from "../../network/protocol";
 import { p2pFinalStateCommitment } from "../../services/p2pTerminalResult";
 import { ownsP2PHostLease } from "../../services/p2pSession";
+import type { PersistedP2PHostSession } from "../../services/gamePersistence";
 
 /** `multiplayer:reconnectRejected.hostDisconnectedBeforeSetup`, rendered in English. */
 const HOST_DISCONNECTED_BEFORE_SETUP = "Host disconnected before game setup completed";
@@ -831,7 +832,7 @@ function makeHost(
   return { adapter, emitConnection };
 }
 
-function makeResumedHost() {
+function makeResumedHost(sessionOverrides: Partial<PersistedP2PHostSession> = {}) {
   const { peer, onGuestConnected, emitConnection } = createFakePeer();
   const hostDeck = {
     player: { main_deck: ["Mountain"], sideboard: [] },
@@ -850,6 +851,7 @@ function makeResumedHost() {
     playerCount: 2,
     hostDeckData: hostDeck,
     gameStarted: true,
+    ...sessionOverrides,
   };
   const adapter = new P2PHostAdapter(
     hostDeck,
@@ -914,7 +916,7 @@ const NATIVE_GUEST_ATTACHMENT = {
 async function joinGuest(
   emitConnection: (c: DataConnection) => void,
   msg:
-    | { type: "guest_deck"; deckData: unknown; wireProtocolVersion?: number }
+    | { type: "guest_deck"; deckData: unknown; displayName?: string; wireProtocolVersion?: number }
     | { type: "reconnect"; playerToken: string; wireProtocolVersion?: number },
 ): Promise<FakeOpenableConnection> {
   const conn = new FakeOpenableConnection();
@@ -1572,6 +1574,117 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     expect(await reconnect.getSentMessages()).toContainEqual(expect.objectContaining({ type: "reconnect_ack" }));
     expect(persistenceMocks.saveResumableGameStrict.mock.invocationCallOrder[0])
       .toBeLessThan(send.mock.invocationCallOrder[0]!);
+    adapter.dispose();
+  });
+
+  // Issue #9527: a refreshed host labelled its guest "Opp 2" because the
+  // guest's join-time display name was never persisted and the resumed host
+  // never re-announced seat names to its own UI.
+  it("keeps a guest's display name across a host refresh", async () => {
+    const { adapter: original, emitConnection } = makeHost(2, 5_000, undefined, {
+      gameId: "names-game",
+      roomCode: "ABCDE",
+    });
+    await original.initialize();
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: ["Forest"], sideboard: [] } },
+      displayName: "Bioplay",
+    });
+    await original.initializeGame();
+    const setup = (await guest.getSentMessages()).find(
+      (message): message is { type: "game_setup"; playerToken: string } =>
+        typeof message === "object" && message !== null && (message as { type: string }).type === "game_setup",
+    );
+    const savedCalls = persistenceMocks.saveP2PHostSession.mock.calls as unknown as Array<
+      [string, PersistedP2PHostSession]
+    >;
+    const savedSession = savedCalls[savedCalls.length - 1]![1];
+    expect(savedSession.guestNames).toEqual({ 1: "Bioplay" });
+    original.dispose();
+
+    const { adapter: resumed, emitConnection: emitResumedConnection } = makeResumedHost(savedSession);
+    const hostEvents: P2PAdapterEvent[] = [];
+    resumed.onEvent((event) => hostEvents.push(event));
+    await resumed.initialize();
+
+    expect(hostEvents).toContainEqual({
+      type: "playerIdentity",
+      playerId: 0,
+      playerNames: expect.objectContaining({ 1: "Bioplay" }),
+    });
+
+    const reconnected = await joinGuest(emitResumedConnection, {
+      type: "reconnect",
+      playerToken: setup!.playerToken,
+    });
+    await flushPromises();
+    expect(await reconnected.getSentMessages()).toContainEqual(expect.objectContaining({
+      type: "reconnect_ack",
+      playerNames: expect.objectContaining({ 1: "Bioplay" }),
+    }));
+    resumed.dispose();
+  });
+
+  // Issue #9527, native authority: a host that delegated to its local
+  // phase-server resumes without a WASM snapshot and must still re-announce
+  // its guests' persisted names.
+  it("re-announces persisted guest names when a native host resumes", async () => {
+    const { peer, onGuestConnected } = createFakePeer();
+    const hostDeck = {
+      player: { main_deck: ["Mountain"], sideboard: [] },
+      opponent: { main_deck: ["Forest"], sideboard: [] },
+      ai_decks: [],
+    };
+    const adapter = new P2PHostAdapter(
+      hostDeck,
+      peer as unknown as Peer,
+      onGuestConnected,
+      2,
+      commanderConfig(),
+      undefined,
+      5_000,
+      undefined,
+      true,
+      undefined,
+      {
+        gameId: "native-names-game",
+        roomCode: "ABCDE",
+        resumeData: {
+          session: {
+            gameId: "native-names-game",
+            roomCode: "ABCDE",
+            sessionKey: "native-names-session",
+            useBroker: false,
+            playerTokens: {},
+            guestDecks: {},
+            guestNames: { 1: "Bioplay" },
+            kickedTokens: [],
+            eliminatedSeats: [],
+            playerCount: 2,
+            hostDeckData: hostDeck,
+            gameStarted: true,
+            nativeSession: {
+              gameCode: "native-game",
+              fullKey: { game_code: "native-game", generation: 1 },
+              playerTokens: { 0: "native-host-token" },
+            },
+          },
+        },
+      },
+      {},
+    );
+    nativeWebSocketMocks.initializePregame.mockResolvedValue(NATIVE_HOST_ATTACHMENT);
+    const hostEvents: P2PAdapterEvent[] = [];
+    adapter.onEvent((event) => hostEvents.push(event));
+
+    await adapter.initialize();
+
+    expect(hostEvents).toContainEqual({
+      type: "playerIdentity",
+      playerId: 0,
+      playerNames: expect.objectContaining({ 1: "Bioplay" }),
+    });
     adapter.dispose();
   });
 
