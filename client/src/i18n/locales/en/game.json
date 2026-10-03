@@ -2306,7 +2306,9 @@
     "accept": "Yes",
     "decline": "No",
     "sourceFallback": "Effect",
-    "entryLabel": "{{source}} — {{decision}}"
+    "entryLabel": "{{source}} — {{decision}}",
+    "optionalTriggers": "Optional triggers ({{count, number}})",
+    "replacementChoices": "Replacement choices ({{count, number}})"
   },
   "optionalEffect": {
     "sourceFallback": "Effect",

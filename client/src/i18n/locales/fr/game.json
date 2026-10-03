@@ -2268,7 +2268,9 @@
     "accept": "Oui",
     "decline": "Non",
     "sourceFallback": "Effet",
-    "entryLabel": "{{source}} — {{decision}}"
+    "entryLabel": "{{source}} — {{decision}}",
+    "optionalTriggers": "Capacités déclenchées facultatives ({{count, number}})",
+    "replacementChoices": "Choix de remplacement ({{count, number}})"
   },
   "optionalEffect": {
     "sourceFallback": "Effet",

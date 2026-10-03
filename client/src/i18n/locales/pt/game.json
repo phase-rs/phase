@@ -2268,7 +2268,9 @@
     "accept": "Sim",
     "decline": "Não",
     "sourceFallback": "Efeito",
-    "entryLabel": "{{source}} — {{decision}}"
+    "entryLabel": "{{source}} — {{decision}}",
+    "optionalTriggers": "Habilidades desencadeadas opcionais ({{count, number}})",
+    "replacementChoices": "Escolhas de substituição ({{count, number}})"
   },
   "optionalEffect": {
     "sourceFallback": "Efeito",

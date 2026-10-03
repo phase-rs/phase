@@ -2268,7 +2268,9 @@
     "accept": "Ja",
     "decline": "Nein",
     "sourceFallback": "Effekt",
-    "entryLabel": "{{source}} – {{decision}}"
+    "entryLabel": "{{source}} – {{decision}}",
+    "optionalTriggers": "Optionale ausgelöste Fähigkeiten ({{count, number}})",
+    "replacementChoices": "Ersetzungsentscheidungen ({{count, number}})"
   },
   "optionalEffect": {
     "sourceFallback": "Effekt",
