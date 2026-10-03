@@ -7841,6 +7841,12 @@ impl FilterProp {
     /// True when this property restricts membership to a resolution-chain
     /// tracked set, at any nesting depth. See
     /// [`TargetFilter::references_tracked_set`](TargetFilter::references_tracked_set).
+    /// Reference/comparison sub-filters (`DifferentNameFrom`, `DistinctFrom`,
+    /// `SharesQuality`, `Targets`, `TargetsOnly`, `CanEnchant`) are
+    /// deliberately NOT traversed: they compare against their inner filter
+    /// rather than restricting the outer population to it, so recursing into
+    /// them would under-refuse (a "different name from the tracked ones"
+    /// population is, by construction, not the tracked set).
     pub fn references_tracked_set(&self) -> bool {
         match self {
             FilterProp::InTrackedSet { .. } => true,
@@ -23136,6 +23142,11 @@ impl TargetFilter {
                 filters.iter().any(TargetFilter::references_tracked_set)
             }
             TargetFilter::Not { filter } => filter.references_tracked_set(),
+            // The narrowing sub-filter constrains which object matches, so a
+            // tracked-set restriction inside it restricts this filter too.
+            TargetFilter::ChosenDamageSource { filter, .. } => filter
+                .as_deref()
+                .is_some_and(TargetFilter::references_tracked_set),
             _ => false,
         }
     }
@@ -41550,6 +41561,59 @@ mod tests {
                 caused_by: Some(ThisWayCause::Exiled),
             })
         );
+    }
+
+    /// Unit 8e refusal gate: `references_tracked_set` descends through
+    /// membership combinators (`And`/`Or`/`Not`, `Typed` properties, the
+    /// `ChosenDamageSource` narrowing) but NOT through reference/comparison
+    /// sub-filters, which compare against their inner filter rather than
+    /// restricting the outer population to it. Recursing into a
+    /// `DifferentNameFrom` would under-refuse: "a different name from the
+    /// tracked ones" is, by construction, not the tracked set.
+    #[test]
+    fn references_tracked_set_covers_narrowing_not_reference_subfilters() {
+        let tracked = || TargetFilter::TrackedSet {
+            id: crate::types::identifiers::TrackedSetId(0),
+        };
+        // Membership positions: all true.
+        assert!(tracked().references_tracked_set());
+        assert!(
+            TargetFilter::ChosenDamageSource {
+                filter: Some(Box::new(tracked())),
+            }
+            .references_tracked_set(),
+            "the narrowing sub-filter restricts the match, so a tracked-set \
+             restriction inside it counts"
+        );
+        assert!(
+            TargetFilter::Not {
+                filter: Box::new(tracked()),
+            }
+            .references_tracked_set(),
+            "negation of a membership still names the set (the destroy-the-rest shape)"
+        );
+        assert!(
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature).properties(vec![
+                FilterProp::Not {
+                    prop: Box::new(FilterProp::InTrackedSet {
+                        id: crate::types::identifiers::TrackedSetId(0),
+                    }),
+                }
+            ]),)
+            .references_tracked_set()
+        );
+        // Reference positions: all false.
+        assert!(
+            !TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature).properties(vec![
+                FilterProp::DifferentNameFrom {
+                    filter: Box::new(tracked()),
+                },
+            ]),)
+            .references_tracked_set(),
+            "a comparison reference must not read as a membership restriction"
+        );
+        assert!(!TargetFilter::ChosenDamageSource { filter: None }.references_tracked_set());
+        assert!(!TargetFilter::Any.references_tracked_set());
     }
 
     #[test]
