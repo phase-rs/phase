@@ -548,6 +548,7 @@ fn row_1b_declared_player_reader_acts_on_the_declared_player_only() {
         declared(),
         Effect::TargetOnly { target: declared() },
         |class| match class {
+            "illegal" => vec![P1, P0],
             "AdditionalPhase" => vec![P0, P2],
             _ => vec![P1, P2],
         },
@@ -658,8 +659,8 @@ fn row_6_tagged_declaring_sub_does_not_inherit_the_parents_player() {
     assert_eq!(illegal.counters, 1);
 }
 
-/// Row 6b: the same refusal through the paused-parent entry. The root's discard parks a
-/// `DiscardChoice`, so the sub is cloned in the generic paused-parent branch.
+/// Row 6b: the illegal-declared-player refusal through the paused-parent entry. The root's
+/// discard parks a `DiscardChoice`, so the sub is cloned in the generic paused-parent branch.
 #[test]
 fn row_6b_tagged_declaring_sub_does_not_inherit_through_a_paused_parent() {
     let shape = || {
@@ -686,6 +687,29 @@ fn row_6b_tagged_declaring_sub_does_not_inherit_through_a_paused_parent() {
         "nobody loses life"
     );
     assert_eq!(illegal.counters, 1);
+}
+
+/// Row 6b': the never-announced refusal through the paused-parent entry. The sub's "up to one
+/// target player" is declined, so only the declaring-group gate keeps the parent's player out.
+#[test]
+fn row_6b_prime_declined_declaring_sub_does_not_inherit_through_a_paused_parent() {
+    let mut sub = tagged(lose_life(TargetFilter::Player));
+    sub.multi = Some(MultiTargetSpec::up_to(q(1)));
+    let out = run(
+        chain(vec![node(discard(TargetFilter::Player)), sub]),
+        &Opts {
+            picks: &[P2, DECLINE],
+            extra_hand: 1,
+            ..Default::default()
+        },
+    );
+    assert_eq!(out.seats[2].hand, 1, "the parent's discard reached P2");
+    assert_eq!(
+        out.seats.iter().map(|s| s.life).collect::<Vec<_>>(),
+        vec![20, 20, 20],
+        "no one loses life"
+    );
+    assert_eq!(out.counters, 1);
 }
 
 /// Row 7a: a declaring root clause whose "up to one target player" is declined affects no one.
