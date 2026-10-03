@@ -21334,6 +21334,16 @@ declare_game_state! {
     #[serde(skip)]
     pub(crate) resolving_player_scope_tail: Option<PendingPlayerScopeTail>,
 
+    /// CR 608.2f: execution-local resolution-stack depth at which the frames of
+    /// the player-scope seat — or of the drained clause frame carrying a tail
+    /// authority — now resolving begin. A continuation below it was parked
+    /// before that seat began (an enclosing chain's later instructions), so it
+    /// never absorbs the seat's remainder, and a clause frame completes only
+    /// once nothing it raised is still parked. `None` outside a player-scope
+    /// seat or clause frame.
+    #[serde(skip)]
+    pub(crate) resolving_player_scope_floor: Option<ChildStackDepth>,
+
     /// CR 730.3e (second clause): routing override for the card components of a
     /// TOKEN merged permanent leaving the battlefield under a card-scoped
     /// (`NonToken`) `Moved` redirect. "If the merged permanent is a token but
@@ -27512,6 +27522,7 @@ impl GameState {
             payment_transaction_just_handled: false,
             resolving_continuation_attach_host: None,
             resolving_player_scope_tail: None,
+            resolving_player_scope_floor: None,
             merged_card_component_route: None,
             resolution_coin_flip: None,
             pending_player_scope_sacrifice_choice: None,
@@ -29912,6 +29923,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         payment_transaction_just_handled: _,
         resolving_continuation_attach_host: _,
         resolving_player_scope_tail: _,
+        resolving_player_scope_floor: _,
         merged_card_component_route: _,
         resolution_coin_flip: _,
         may_trigger_auto_choices: _,

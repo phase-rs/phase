@@ -13,8 +13,9 @@
 //! Rows (phase-0 plan): V0.1–V0.4b drive the printed cards through the cast
 //! pipeline; V0.5–V0.9, V0.17 and V0.18 drive hand-built player-scope chains
 //! through the public `resolve_ability_chain` entry and answer every pause with
-//! the real `apply()` action; V0.16 records (asserts nothing about haste) the
-//! repeat driver's behavior for the adjacent `repeat_for` class.
+//! the real `apply()` action. The enclosing-continuation rows resolve the
+//! clause while an enclosing chain's later instructions are already parked
+//! beneath it.
 
 use engine::game::effects::resolve_ability_chain;
 use engine::game::engine::apply;
@@ -22,18 +23,17 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::zones::create_object;
 use engine::types::ability::{
     AbilityCondition, AbilityDefinition, ContinuousModification, ControllerRef, Duration, Effect,
-    PlayerFilter, QuantityExpr, QuantityModification, ReplacementDefinition, ResolvedAbility,
-    SubAbilityLink, TargetFilter, TargetRef,
+    PlayerFilter, PtValue, QuantityExpr, QuantityModification, ReplacementDefinition,
+    ResolvedAbility, SubAbilityLink, TargetFilter, TargetRef,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::format::FormatConfig;
-use engine::types::game_state::{GameState, WaitingFor};
+use engine::types::game_state::{GameState, PendingContinuation, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::keywords::Keyword;
-use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::replacements::ReplacementEvent;
@@ -56,9 +56,6 @@ const THE_WAR_GAMES: &str = "(As this Saga enters and after your draw step, add 
 
 /// Parallel Lives (ISD), Oracle verbatim.
 const PARALLEL_LIVES: &str = "If an effect would create one or more tokens under your control, it creates twice that many of those tokens instead.";
-
-/// Furygale Flocking, Oracle verbatim (MTGJSON).
-const FURYGALE_FLOCKING: &str = "This spell costs {1} less to cast for each instant and sorcery card in your graveyard.\nFor each opponent, create two 3/3 blue and red Elemental creature tokens with flying that attack that opponent this turn if able. They gain haste until end of turn.";
 
 // --- shared helpers -----------------------------------------------------------
 
@@ -444,9 +441,11 @@ fn rendmaw_paused_at_seat_zero_goads_every_seats_birds() {
     );
     assert!(tokens_of(runner.state(), "Bird", P1).is_empty());
     assert!(tokens_of(runner.state(), "Bird", P2).is_empty());
-    println!(
-        "P0.g V0.6 frames at the seat-0 pause: {:?}",
-        frame_kinds(runner.state())
+    // P0.g: arm E — the seat raised no frame; only the clause frame is parked.
+    assert_eq!(
+        frame_kinds(runner.state()),
+        vec![FrameKind::AbilityContinuation],
+        "REACH-GUARD (P0.g): the seat-0 pause is arm E"
     );
 
     let mut runner = GameRunner::from_state(round_trip(runner.state()));
@@ -454,11 +453,6 @@ fn rendmaw_paused_at_seat_zero_goads_every_seats_birds() {
     let answered = runner_answer_replacements(&mut runner, &mut events);
     assert!(answered >= 1);
     let state = runner.state();
-    println!(
-        "P0.f V0.6 after last answer: waiting_for={:?} frames={:?}",
-        state.waiting_for,
-        frame_kinds(state)
-    );
     assert!(
         matches!(state.waiting_for, WaitingFor::Priority { .. }),
         "P0.f: the answering action drains the whole clause"
@@ -513,42 +507,35 @@ fn life_of_the_party_paused_copy_route_goads_both_opponents_tokens() {
     let mut runner = scenario.build();
     runner.cast(life).resolve();
 
-    let paused = matches!(
-        runner.state().waiting_for,
-        WaitingFor::ReplacementChoice { player: P1, .. }
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { player: P1, .. }
+        ),
+        "REACH-GUARD (P0.e): the copy route pauses at P1's CR 616.1 prompt, got {:?}",
+        runner.state().waiting_for
     );
-    println!(
-        "P0.e V0.8: paused={paused} waiting_for={:?} frames={:?} authority_parked={}",
-        runner.state().waiting_for,
+    assert!(
+        tokens_of(runner.state(), "Life of the Party", P2).is_empty(),
+        "REACH-GUARD (P0.a): P2's seat is still pending at P1's pause"
+    );
+    // P0.g: arm G1 — the copy-token owner is the seat's only child frame.
+    assert_eq!(
         frame_kinds(runner.state()),
-        tail_authority_parked(runner.state())
+        vec![FrameKind::AbilityContinuation, FrameKind::CopyToken],
+        "REACH-GUARD (P0.g): the copy-route pause is arm G1"
     );
-    let mut authority_at_pause = None;
+    let authority_at_pause = tail_authority_parked(runner.state());
     let mut events = Vec::new();
-    if paused {
-        assert!(
-            tokens_of(runner.state(), "Life of the Party", P2).is_empty(),
-            "REACH-GUARD (P0.a): P2's seat is still pending at P1's pause"
-        );
-        authority_at_pause = Some(tail_authority_parked(runner.state()));
-        runner_answer_replacements(&mut runner, &mut events);
-        let state = runner.state();
-        println!(
-            "P0.f V0.8 after last answer: waiting_for={:?} frames={:?}",
-            state.waiting_for,
-            frame_kinds(state)
-        );
-        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
-        assert!(no_parked_continuation(state));
-    }
+    runner_answer_replacements(&mut runner, &mut events);
     let state = runner.state();
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert!(no_parked_continuation(state));
     let p1_tokens = tokens_of(state, "Life of the Party", P1);
-    if paused {
-        assert!(
-            p1_tokens.len() >= 3,
-            "REACH-GUARD: both replacements modified P1's copy count"
-        );
-    }
+    assert!(
+        p1_tokens.len() >= 3,
+        "REACH-GUARD: both replacements modified P1's copy count"
+    );
     let p2_token = single_party_token(state, P2);
     for token in p1_tokens.iter().copied().chain([p2_token]) {
         assert_eq!(
@@ -557,12 +544,10 @@ fn life_of_the_party_paused_copy_route_goads_both_opponents_tokens() {
             "CR 608.2c: token {token:?} is one of \"the tokens\""
         );
     }
-    if let Some(parked) = authority_at_pause {
-        assert!(
-            parked,
-            "REACH-GUARD (B1): the tail authority rode the clause frame at the copy-route pause"
-        );
-    }
+    assert!(
+        authority_at_pause,
+        "REACH-GUARD (B1): the tail authority rode the clause frame at the copy-route pause"
+    );
 }
 
 // --- hand-built chains ------------------------------------------------------------
@@ -772,11 +757,6 @@ fn answer_optional_seats(
         };
         prompted.push(player);
         authority.push(tail_authority_parked(state));
-        println!(
-            "P0.g optional prompt for {player:?}: frames={:?} authority={}",
-            frame_kinds(state),
-            authority.last().unwrap()
-        );
         *state = round_trip(state);
         apply(
             state,
@@ -791,11 +771,6 @@ fn answer_optional_seats(
 }
 
 fn assert_clause_drained(state: &GameState, label: &str) {
-    println!(
-        "P0.f {label}: waiting_for={:?} frames={:?}",
-        state.waiting_for,
-        frame_kinds(state)
-    );
     assert!(
         matches!(state.waiting_for, WaitingFor::Priority { .. }),
         "P0.f ({label}): the last answer drains the clause, got {:?}",
@@ -986,7 +961,7 @@ fn run_seat_zero_copy_pause(
     scope: PlayerFilter,
     players: u8,
     replaced: PlayerId,
-) -> (GameState, Vec<GameEvent>, ObjectId, Vec<FrameKind>, bool) {
+) -> (GameState, Vec<GameEvent>, ObjectId, bool) {
     let Board {
         mut state,
         source,
@@ -1009,22 +984,30 @@ fn run_seat_zero_copy_pause(
     );
     let mut events = Vec::new();
     resolve_ability_chain(&mut state, &chain, &mut events, 0).expect("fan-out starts");
-    let paused = matches!(
-        state.waiting_for,
-        WaitingFor::ReplacementChoice { player, .. } if player == replaced
-    );
-    let frames = frame_kinds(&state);
-    let authority = tail_authority_parked(&state);
-    println!(
-        "P0.e/P0.g seat pause: paused={paused} waiting_for={:?} frames={frames:?} authority={authority}",
+    assert!(
+        matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice { player, .. } if player == replaced
+        ),
+        "REACH-GUARD (P0.e): the copy route pauses at {replaced:?}'s CR 616.1 prompt, got {:?}",
         state.waiting_for
     );
-    if paused {
-        state = round_trip(&state);
-        answer_replacements(&mut state, &mut events);
-        assert_clause_drained(&state, "copy-route seat pause");
-    }
-    (state, events, stale, frames, authority)
+    // P0.g: arm G2 — the copy-token owner on top, the seat's in-seat remainder
+    // parked at its child boundary, and the clause's frame beneath both.
+    assert_eq!(
+        frame_kinds(&state),
+        vec![
+            FrameKind::AbilityContinuation,
+            FrameKind::AbilityContinuation,
+            FrameKind::CopyToken,
+        ],
+        "REACH-GUARD (P0.g): the seat pause is arm G2"
+    );
+    let authority = tail_authority_parked(&state);
+    state = round_trip(&state);
+    answer_replacements(&mut state, &mut events);
+    assert_clause_drained(&state, "copy-route seat pause");
+    (state, events, stale, authority)
 }
 
 /// V0.8b — arm G2 with a detached ledger-reading tail: seat 0 pauses with
@@ -1033,12 +1016,8 @@ fn run_seat_zero_copy_pause(
 /// (union), and P0's +1/+1 lands before P1's token exists.
 #[test]
 fn paused_copy_seat_with_in_seat_remainder_completes_before_next_seat() {
-    let (state, events, stale, frames, _authority) =
+    let (state, events, stale, authority) =
         run_seat_zero_copy_pause(tail_counter, PlayerFilter::All, 3, P0);
-    assert!(
-        matches!(state.waiting_for, WaitingFor::Priority { .. }),
-        "REACH-GUARD (P0.e): the copy route paused and resumed (frames at pause {frames:?})"
-    );
     let p0 = copy_tokens(&state, P0);
     assert!(
         p0.len() >= 3,
@@ -1069,6 +1048,10 @@ fn paused_copy_seat_with_in_seat_remainder_completes_before_next_seat() {
         "CR 608.2f: seat 0's in-seat instruction completes before seat 1 begins \
          (P0 +1/+1 at {p0_counters:?}, P1 token at {p1_created})"
     );
+    assert!(
+        authority,
+        "REACH-GUARD (B1): the tail authority rode the clause frame at the arm-G2 pause"
+    );
 }
 
 fn gain_one_life(source: ObjectId) -> ResolvedAbility {
@@ -1097,11 +1080,11 @@ fn life_gained_by(events: &[GameEvent], player: PlayerId) -> Vec<usize> {
 /// seat 1, and the next instruction follows the whole clause.
 #[test]
 fn paused_seat_remainder_precedes_next_seats_and_non_detached_tail() {
-    let (state, events, _stale, frames, _authority) =
+    let (state, events, _stale, authority) =
         run_seat_zero_copy_pause(gain_one_life, PlayerFilter::All, 3, P0);
     assert!(
-        matches!(state.waiting_for, WaitingFor::Priority { .. }),
-        "REACH-GUARD (P0.e): paused and resumed (frames at pause {frames:?})"
+        !authority,
+        "REACH-GUARD: a tail that reads no clause-wide result is not detached"
     );
     let p0 = copy_tokens(&state, P0);
     let p1 = copy_tokens(&state, P1);
@@ -1140,11 +1123,11 @@ fn paused_seat_remainder_precedes_next_seats_and_non_detached_tail() {
 /// precedes the non-detached tail.
 #[test]
 fn single_paused_seat_remainder_precedes_non_detached_tail() {
-    let (state, events, _stale, frames, _authority) =
+    let (state, events, _stale, authority) =
         run_seat_zero_copy_pause(gain_one_life, PlayerFilter::Opponent, 2, P1);
     assert!(
-        matches!(state.waiting_for, WaitingFor::Priority { .. }),
-        "REACH-GUARD (P0.e): P1's seat paused and resumed (frames at pause {frames:?})"
+        !authority,
+        "REACH-GUARD: a tail that reads no clause-wide result is not detached"
     );
     let p1 = copy_tokens(&state, P1);
     assert!(p1.len() >= 3, "REACH-GUARD: replacements applied to P1");
@@ -1267,10 +1250,6 @@ fn scry_fan_out_with_in_seat_draw_drains_in_the_last_answer() {
             );
         };
         assert_eq!(player, expected, "REACH-GUARD: scry prompts follow APNAP");
-        println!(
-            "P0.g V0.18 at {player:?}'s scry: frames={:?}",
-            frame_kinds(&state)
-        );
         last_events = apply(&mut state, player, GameAction::SelectCards { cards })
             .expect("scry answer resolves")
             .events;
@@ -1294,26 +1273,281 @@ fn scry_fan_out_with_in_seat_draw_drains_in_the_last_answer() {
     assert!(gain[0] > p2_draw, "the tail follows P2's draw");
 }
 
-/// V0.16 — R-4 class-boundary measurement (record only): Furygale Flocking's
-/// repeat-driver tokens and their haste, at whatever product code is built.
-#[test]
-fn record_furygale_flocking_haste_by_iteration() {
-    let mut scenario = GameScenario::new_n_player(3, 42);
-    scenario.at_phase(Phase::PreCombatMain);
-    let flocking = scenario
-        .add_spell_to_hand_from_oracle(P0, "Furygale Flocking", false, FURYGALE_FLOCKING)
-        .with_mana_cost(ManaCost::zero())
-        .id();
-    let mut runner = scenario.build();
-    runner.cast(flocking).resolve();
-    engine::game::layers::evaluate_layers(runner.state_mut());
-    let state = runner.state();
-    let elementals = tokens_of(state, "Elemental", P0);
-    for id in &elementals {
-        println!(
-            "V0.16 Furygale Flocking: token {id:?} haste={}",
-            state.objects[id].has_keyword(&Keyword::Haste)
+// --- a clause resolving above an enclosing chain's parked continuation -------------
+
+fn bird_token(source: ObjectId) -> ResolvedAbility {
+    ResolvedAbility::new(
+        Effect::Token {
+            name: "Bird".to_string(),
+            power: PtValue::Fixed(1),
+            toughness: PtValue::Fixed(1),
+            types: vec!["Creature".to_string(), "Bird".to_string()],
+            colors: vec![],
+            keywords: vec![],
+            tapped: false,
+            count: QuantityExpr::Fixed { value: 1 },
+            owner: TargetFilter::Controller,
+            attach_to: None,
+            enters_attacking: false,
+            supertypes: vec![],
+            static_abilities: vec![],
+            enter_with_counters: vec![],
+        },
+        vec![],
+        source,
+        P0,
+    )
+}
+
+/// Whether the scoped `Token` template keeps an in-seat "that token"
+/// instruction (a remainder the pausing seat must finish itself).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InSeat {
+    PlusOneCounter,
+    Nothing,
+}
+
+/// Scope-`All` `Token` (a CR 616.1 pause on it raises no child frame) →
+/// optional in-seat +1/+1 on "that token" (kept per seat by its
+/// `CurrentScopeSucceeded` gate) → the next instruction: a charge counter on
+/// "the tokens" (detached, it reads the created-token ledger).
+fn scoped_bird_chain(source: ObjectId, in_seat: InSeat) -> ResolvedAbility {
+    let mut tail = tail_counter(source);
+    tail.sub_link = SubAbilityLink::SequentialSibling;
+    let after_head = match in_seat {
+        InSeat::PlusOneCounter => {
+            let mut kept = put_counter_on_last_created(source, CounterType::Plus1Plus1);
+            kept.condition = Some(AbilityCondition::current_scope_succeeded());
+            kept.sub_link = SubAbilityLink::ContinuationStep;
+            kept.sub_ability = Some(Box::new(tail));
+            kept
+        }
+        InSeat::Nothing => tail,
+    };
+    let mut head = bird_token(source);
+    head.player_scope = Some(PlayerFilter::All);
+    head.sub_ability = Some(Box::new(after_head));
+    head
+}
+
+fn counter_added(events: &[GameEvent], ids: &[ObjectId], counter: &CounterType) -> Vec<usize> {
+    events
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| {
+            matches!(e, GameEvent::CounterAdded { object_id, counter_type, .. }
+                if ids.contains(object_id) && counter_type == counter)
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// One CR 616.1 prompt of the parked-continuation rows.
+struct Prompt {
+    player: PlayerId,
+    frames: Vec<FrameKind>,
+    authority: bool,
+}
+
+struct ParkedRun {
+    state: GameState,
+    events: Vec<GameEvent>,
+    stale: ObjectId,
+    prompts: Vec<Prompt>,
+}
+
+/// Park an enclosing chain's later instruction `U` ("you gain 1 life"), then
+/// resolve the scoped Bird clause above it with a CR 616.1 replacement pair on
+/// each of `replaced`'s tokens, answering every prompt through `apply()`.
+fn run_clause_above_parked_continuation(in_seat: InSeat, replaced: &[PlayerId]) -> ParkedRun {
+    let Board {
+        mut state,
+        source,
+        stale,
+        ..
+    } = board(3, 47);
+    for (n, player) in (0u64..).zip(replaced) {
+        install_token_count_replacement(
+            &mut state,
+            60 + 2 * n,
+            *player,
+            QuantityModification::DOUBLE,
+        );
+        install_token_count_replacement(
+            &mut state,
+            61 + 2 * n,
+            *player,
+            QuantityModification::Plus { value: 1 },
         );
     }
-    println!("V0.16 Furygale Flocking: tokens = {}", elementals.len());
+    let earlier = PendingContinuation::new(Box::new(gain_one_life(source)), &state);
+    state.park_ability_continuation(earlier);
+    let chain = scoped_bird_chain(source, in_seat);
+    let mut events = Vec::new();
+    resolve_ability_chain(&mut state, &chain, &mut events, 0).expect("fan-out starts");
+    assert!(
+        tokens_of(&state, "Bird", P1).is_empty() && tokens_of(&state, "Bird", P2).is_empty(),
+        "REACH-GUARD: the clause paused at seat 0, before seats 1 and 2 created anything"
+    );
+
+    let mut prompts = Vec::new();
+    while let WaitingFor::ReplacementChoice { player, .. } = state.waiting_for.clone() {
+        prompts.push(Prompt {
+            player,
+            frames: frame_kinds(&state),
+            authority: tail_authority_parked(&state),
+        });
+        state = round_trip(&state);
+        let result = apply(
+            &mut state,
+            player,
+            GameAction::ChooseReplacement { index: 0 },
+        )
+        .expect("replacement order answer resolves");
+        events.extend(result.events);
+        assert!(prompts.len() < 16, "replacement prompts must terminate");
+    }
+    assert_clause_drained(&state, "clause above an enclosing continuation");
+    ParkedRun {
+        state,
+        events,
+        stale,
+        prompts,
+    }
+}
+
+/// The derived reading for every parked-continuation row: the in-seat
+/// instruction (if any) names only its seat's tokens and finishes before the
+/// next seat begins; the next instruction names every seat's tokens exactly
+/// once; and the enclosing continuation resumes only after it.
+fn assert_clause_then_parked_continuation(run: &ParkedRun, in_seat: InSeat) {
+    let ParkedRun {
+        state,
+        events,
+        stale,
+        ..
+    } = run;
+    let birds: Vec<Vec<ObjectId>> = [P0, P1, P2]
+        .iter()
+        .map(|player| tokens_of(state, "Bird", *player))
+        .collect();
+    for (player, tokens) in [P0, P1, P2].iter().zip(&birds) {
+        assert!(!tokens.is_empty(), "REACH-GUARD: {player:?} created Birds");
+    }
+    assert!(
+        birds[0].len() >= 3,
+        "REACH-GUARD: both replacements modified P0's Bird count, got {}",
+        birds[0].len()
+    );
+    let all: Vec<ObjectId> = birds.iter().flatten().copied().collect();
+    if in_seat == InSeat::PlusOneCounter {
+        for token in &all {
+            assert_eq!(
+                counters_of(state, *token, &CounterType::Plus1Plus1),
+                1,
+                "CR 608.2c: the in-seat \"that token\" names {token:?} once"
+            );
+        }
+        let p0_counters = counter_added(events, &birds[0], &CounterType::Plus1Plus1);
+        let p1_created = token_created_for(events, &birds[1]).expect("P1's Bird was created");
+        assert!(
+            p0_counters.len() == birds[0].len() && p0_counters.iter().all(|&i| i < p1_created),
+            "CR 608.2f: seat 0's in-seat instruction precedes seat 1 \
+             (P0 +1/+1 at {p0_counters:?}, P1 Bird at {p1_created})"
+        );
+    }
+    for token in &all {
+        assert_eq!(
+            counters_of(state, *token, &charge()),
+            1,
+            "CR 608.2c + CR 608.2e: the next instruction names {token:?} exactly once"
+        );
+    }
+    assert_eq!(
+        counters_of(state, *stale, &charge()),
+        0,
+        "the earlier instruction's token is never one of this clause's tokens"
+    );
+    let charges = counter_added(events, &all, &charge());
+    let gains = life_gained_by(events, P0);
+    assert_eq!(
+        gains.len(),
+        1,
+        "REACH-GUARD: the enclosing continuation resolves exactly once"
+    );
+    assert!(
+        charges.iter().all(|&i| i < gains[0]),
+        "CR 608.2c + CR 608.2e: the clause's next instruction resolves before \
+         the enclosing chain's later instruction (charges at {charges:?}, life at {})",
+        gains[0]
+    );
+}
+
+/// Seat 0 pauses with its in-seat remainder while an enclosing continuation is
+/// parked: the remainder is parked above that continuation (not spliced into
+/// it), then the clause's remaining seats, then the tail over the union, then
+/// the enclosing continuation.
+#[test]
+fn paused_seat_above_parked_continuation_finishes_clause_before_it() {
+    let run = run_clause_above_parked_continuation(InSeat::PlusOneCounter, &[P0]);
+    assert_clause_then_parked_continuation(&run, InSeat::PlusOneCounter);
+    let prompted: Vec<PlayerId> = run.prompts.iter().map(|p| p.player).collect();
+    assert_eq!(prompted, vec![P0]);
+    assert_eq!(
+        run.prompts[0].frames,
+        vec![FrameKind::AbilityContinuation; 3],
+        "P0.g: [enclosing continuation, clause frame, seat 0's remainder]"
+    );
+    assert!(
+        run.prompts[0].authority,
+        "REACH-GUARD (B1): authority parked"
+    );
+}
+
+/// A generated leg pauses mid-seat (P1) while the enclosing continuation sits
+/// directly beneath the drained clause frame: the leg's remainder keeps the
+/// tail authority on a frame of its own.
+#[test]
+fn paused_leg_above_parked_continuation_keeps_the_tail_authority() {
+    let run = run_clause_above_parked_continuation(InSeat::PlusOneCounter, &[P0, P1]);
+    assert_clause_then_parked_continuation(&run, InSeat::PlusOneCounter);
+    assert!(
+        tokens_of(&run.state, "Bird", P1).len() >= 3,
+        "REACH-GUARD: both replacements modified P1's Bird count"
+    );
+    let prompted: Vec<PlayerId> = run.prompts.iter().map(|p| p.player).collect();
+    assert_eq!(prompted, vec![P0, P1]);
+    assert_eq!(
+        run.prompts[1].frames,
+        vec![FrameKind::AbilityContinuation; 2],
+        "P0.g: [enclosing continuation, P1's remainder carrying the authority]"
+    );
+    assert!(
+        run.prompts.iter().all(|p| p.authority),
+        "REACH-GUARD (B1): authority parked at every prompt"
+    );
+}
+
+/// The last seat's terminal node pauses inside a drained leg while the
+/// enclosing continuation sits beneath it: the clause's queue end carries the
+/// tail authority.
+#[test]
+fn paused_last_seat_above_parked_continuation_parks_the_queue_end() {
+    let run = run_clause_above_parked_continuation(InSeat::Nothing, &[P0, P2]);
+    assert_clause_then_parked_continuation(&run, InSeat::Nothing);
+    assert!(
+        tokens_of(&run.state, "Bird", P2).len() >= 3,
+        "REACH-GUARD: both replacements modified P2's Bird count"
+    );
+    let prompted: Vec<PlayerId> = run.prompts.iter().map(|p| p.player).collect();
+    assert_eq!(prompted, vec![P0, P2]);
+    assert_eq!(
+        run.prompts[1].frames,
+        vec![FrameKind::AbilityContinuation; 2],
+        "P0.g: [enclosing continuation, the clause's queue end]"
+    );
+    assert!(
+        run.prompts.iter().all(|p| p.authority),
+        "REACH-GUARD (B1): authority parked at every prompt"
+    );
 }

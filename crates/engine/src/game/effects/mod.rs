@@ -1203,6 +1203,9 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
                     .set_direct_discard_result_for_immediate_node(result);
             }
         }
+        // Every frame this chain parks from here on lies at or above this
+        // depth; anything below it predates the drained frame.
+        let drained_floor = state.resolution_stack.capture_child_boundary();
         let cont = frame.pending;
         let PendingContinuation {
             chain,
@@ -1229,6 +1232,14 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
         state.resolving_continuation_attach_host = search_attach_host;
         let previous_scope =
             std::mem::replace(&mut state.resolving_player_scope_tail, player_scope_tail);
+        // CR 608.2f: a clause frame carrying its tail authority resolves the
+        // clause's remaining seats; a continuation below it was parked before
+        // the clause began (an enclosing chain's later instructions) and must
+        // not absorb a pausing seat's remainder.
+        let enclosing_floor = state.resolving_player_scope_floor;
+        if state.resolving_player_scope_tail.is_some() {
+            state.resolving_player_scope_floor = Some(drained_floor);
+        }
         let source_id = chain.source_id;
         let prior_occurrence = std::mem::replace(
             &mut state.active_return_result_occurrence,
@@ -1276,9 +1287,15 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
         }
         let completed_scope = std::mem::take(&mut state.resolving_player_scope_tail);
         state.resolving_player_scope_tail = previous_scope;
+        state.resolving_player_scope_floor = enclosing_floor;
         state.resolving_continuation_attach_host = None;
+        // CR 608.2e: the clause is complete only when its chain raised no
+        // choice and parked nothing that is still pending. A continuation
+        // below the drained frame was parked before the clause began and
+        // resumes only after this clause's next instruction, so it never holds
+        // the tail back.
         if !waits_for_resolution_choice(&state.waiting_for)
-            && state.active_ability_continuation().is_none()
+            && state.resolution_stack.capture_child_boundary() <= drained_floor
         {
             if let Some(mut scope) = completed_scope {
                 // CR 608.2e + CR 608.2c: every seat has drained — the next
@@ -2576,6 +2593,21 @@ fn active_frame_requires_ability_continuation_parent(state: &GameState) -> bool 
         || state.active_multi_draw_frame().is_some()
 }
 
+/// CR 608.2f + CR 608.2e: whether the stack-top continuation was parked before
+/// the player-scope seat (or clause frame) now resolving began — it lies below
+/// `resolving_player_scope_floor`, holding an enclosing chain's later
+/// instructions. The scoped action is processed for each affected player
+/// individually, so a pausing seat's remaining instructions finish before the
+/// next seat and before the clause's next instruction; that enclosing
+/// continuation resumes only after all of them, and so must never absorb the
+/// seat's remainder.
+fn active_continuation_predates_player_scope_floor(state: &GameState) -> bool {
+    state.active_ability_continuation().is_some()
+        && state
+            .resolving_player_scope_floor
+            .is_some_and(|floor| state.resolution_stack.capture_child_boundary() <= floor)
+}
+
 pub(crate) fn append_to_pending_continuation(
     state: &mut GameState,
     tail: Option<Box<ResolvedAbility>>,
@@ -2717,7 +2749,9 @@ fn prepend_to_pending_continuation_with_producer(
         return;
     }
 
-    if state.active_ability_continuation().is_some() {
+    if state.active_ability_continuation().is_some()
+        && !active_continuation_predates_player_scope_floor(state)
+    {
         let frame = state
             .take_active_ability_continuation()
             .expect("active continuation must remain the stack top while it is prepended")
@@ -15468,7 +15502,14 @@ fn resolve_chain_body(
             scoped.set_controller_recursive(*pid);
             scoped.set_scoped_player_recursive(*pid);
             let seat_boundary = state.resolution_stack.capture_child_boundary();
-            resolve_ability_chain(state, &scoped, events, depth + 1)?;
+            // CR 608.2f: a continuation already parked when this seat begins
+            // holds an enclosing chain's later instructions; the seat's own
+            // remainder is parked above it, inside this seat's boundary, never
+            // spliced into it.
+            let enclosing_floor = state.resolving_player_scope_floor.replace(seat_boundary);
+            let seat_result = resolve_ability_chain(state, &scoped, events, depth + 1);
+            state.resolving_player_scope_floor = enclosing_floor;
+            seat_result?;
             // CR 608.2f: this seat's publication joins the clause's union —
             // possibly partial if it paused mid-entry; the drain-start fold
             // completes it once the answered seat finishes.
@@ -17275,10 +17316,15 @@ fn resolve_chain_body(
         crate::game::sba::apply_enduring_story_if_triggered(state, events);
     }
 
+    // CR 608.2f: a terminal node of a paused clause's seat keeps the clause's
+    // tail authority on a frame of its own unless a continuation parked during
+    // this clause frame's drain already carries it; one parked before the
+    // drained frame does not.
     if ability.sub_ability.is_none()
         && waits_for_resolution_choice(&state.waiting_for)
         && state.resolving_player_scope_tail.is_some()
-        && state.active_ability_continuation().is_none()
+        && (state.active_ability_continuation().is_none()
+            || active_continuation_predates_player_scope_floor(state))
     {
         park_player_scope_queue_end(state, ability.clone());
         return Ok(());
