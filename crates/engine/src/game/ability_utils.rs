@@ -2069,10 +2069,10 @@ pub(crate) fn declared_group_player_slot(
 
 type DeclaredSlotVisit<'a> = dyn FnMut(&'a ResolvedAbility, &[ChainStep], Option<usize>) + 'a;
 
-/// CR 601.2c + CR 115.10a: the single walk that numbers a chain's declared target slots; every consumer
-/// of that numbering reads it from here. Calls `visit(node, path, first_slot)`
-/// for each node reached from `root` in numbering order (the node, its
-/// `sub_ability` line, then its `else_ability`), where `path` is the steps from
+/// CR 601.2c + CR 115.10a: the single walk that numbers a chain's declared target slots for
+/// `declared_targets_in_chain`, `illegal_declared_target_slots` and `declared_group_player_slot`.
+/// Calls `visit(node, path, first_slot)` for each node reached from `root` in numbering order
+/// (the node, its `sub_ability` line, then its `else_ability`), where `path` is the steps from
 /// `root` to `node` and `first_slot` is `Some(n)` when the node's own entries
 /// are declarations numbered from `n`, `None` when they are not (a paid
 /// "instead" delegator's mirror, an inheriting rider's snapshot — see

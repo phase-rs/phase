@@ -523,9 +523,9 @@ fn class_loop(
     failures
 }
 
-/// Row 1a: `[pick(P2), tagged effect(Player)]`, the effect declares slot 1 = P1.
+/// `[pick(P2), tagged effect(Player)]`, the effect declares slot 1 = P1.
 #[test]
-fn row_1a_declaring_player_clause_affects_no_one_when_its_player_is_illegal() {
+fn declaring_player_clause_affects_no_one_when_its_player_is_illegal() {
     let failures = class_loop(
         TargetFilter::Player,
         Effect::TargetOnly {
@@ -540,10 +540,10 @@ fn row_1a_declaring_player_clause_affects_no_one_when_its_player_is_illegal() {
     assert!(failures.is_empty(), "{failures:#?}");
 }
 
-/// Row 1b: a `DeclaredPlayer` reader acts on the declared player although another player slot
+/// A `DeclaredPlayer` reader acts on the declared player although another player slot
 /// precedes or follows the declaring node.
 #[test]
-fn row_1b_declared_player_reader_acts_on_the_declared_player_only() {
+fn declared_player_reader_acts_on_the_declared_player_only() {
     let mut failures = class_loop(
         declared(),
         Effect::TargetOnly { target: declared() },
@@ -566,9 +566,9 @@ fn row_1b_declared_player_reader_acts_on_the_declared_player_only() {
     assert!(failures.is_empty(), "{failures:#?}");
 }
 
-/// Row 1d: the parser's "target opponent" filter shape is a declaring filter too.
+/// The parser's "target opponent" filter shape is a declaring filter too.
 #[test]
-fn row_1d_typed_opponent_declaring_clause_affects_no_one_when_its_player_is_illegal() {
+fn typed_opponent_declaring_clause_affects_no_one_when_its_player_is_illegal() {
     let mut failures = Vec::new();
     for (name, eff) in classes(opponent())
         .into_iter()
@@ -598,9 +598,9 @@ fn row_1d_typed_opponent_declaring_clause_affects_no_one_when_its_player_is_ille
     assert!(failures.is_empty(), "{failures:#?}");
 }
 
-/// Row 1c: effects with no declared slot keep their caster fallback.
+/// Effects with no declared slot keep their caster fallback.
 #[test]
-fn row_1c_caster_fallbacks_are_preserved() {
+fn caster_fallbacks_are_preserved() {
     let noop = || {
         chain(vec![node(Effect::TargetOnly {
             target: TargetFilter::Controller,
@@ -624,9 +624,9 @@ fn row_1c_caster_fallbacks_are_preserved() {
     }
 }
 
-/// Row 6: the declaring `Player` sub does not inherit the parent's announced player.
+/// The declaring `Player` sub does not inherit the parent's announced player.
 #[test]
-fn row_6_tagged_declaring_sub_does_not_inherit_the_parents_player() {
+fn tagged_declaring_sub_does_not_inherit_the_parents_player() {
     let shape = || {
         chain(vec![
             node(draw(TargetFilter::Player)),
@@ -659,10 +659,10 @@ fn row_6_tagged_declaring_sub_does_not_inherit_the_parents_player() {
     assert_eq!(illegal.counters, 1);
 }
 
-/// Row 6b: the illegal-declared-player refusal through the paused-parent entry. The root's
+/// The illegal-declared-player refusal through the paused-parent entry. The root's
 /// discard parks a `DiscardChoice`, so the sub is cloned in the generic paused-parent branch.
 #[test]
-fn row_6b_tagged_declaring_sub_does_not_inherit_through_a_paused_parent() {
+fn tagged_declaring_sub_does_not_inherit_through_a_paused_parent() {
     let shape = || {
         chain(vec![
             node(discard(TargetFilter::Player)),
@@ -689,10 +689,10 @@ fn row_6b_tagged_declaring_sub_does_not_inherit_through_a_paused_parent() {
     assert_eq!(illegal.counters, 1);
 }
 
-/// Row 6b': the never-announced refusal through the paused-parent entry. The sub's "up to one
+/// The never-announced refusal through the paused-parent entry. The sub's "up to one
 /// target player" is declined, so only the declaring-group gate keeps the parent's player out.
 #[test]
-fn row_6b_prime_declined_declaring_sub_does_not_inherit_through_a_paused_parent() {
+fn declined_declaring_sub_does_not_inherit_through_a_paused_parent() {
     let mut sub = tagged(lose_life(TargetFilter::Player));
     sub.multi = Some(MultiTargetSpec::up_to(q(1)));
     let out = run(
@@ -712,9 +712,9 @@ fn row_6b_prime_declined_declaring_sub_does_not_inherit_through_a_paused_parent(
     assert_eq!(out.counters, 1);
 }
 
-/// Row 7a: a declaring root clause whose "up to one target player" is declined affects no one.
+/// A declaring root clause whose "up to one target player" is declined affects no one.
 #[test]
-fn row_7a_declined_root_declaring_clause_affects_no_one() {
+fn declined_root_declaring_clause_affects_no_one() {
     let shape = || {
         let mut def = chain(vec![tagged(draw(TargetFilter::Player))]);
         def.multi_target = Some(MultiTargetSpec::up_to(q(1)));
@@ -743,9 +743,9 @@ fn row_7a_declined_root_declaring_clause_affects_no_one() {
     assert_eq!(declined.counters, 1);
 }
 
-/// Row 7a': the declining sub does not refill from the parent's announced player.
+/// The declining sub does not refill from the parent's announced player.
 #[test]
-fn row_7a_prime_declined_sub_declaring_clause_affects_no_one() {
+fn declined_sub_declaring_clause_affects_no_one() {
     let shape = || {
         let mut sub = tagged(lose_life(TargetFilter::Player));
         sub.multi = Some(MultiTargetSpec::up_to(q(1)));

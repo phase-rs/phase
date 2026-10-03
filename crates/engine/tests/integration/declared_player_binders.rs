@@ -197,9 +197,9 @@ fn reader_chain(reader: Effect) -> AbilityDefinition {
     chain(vec![decl(), n(pick()), n(reader)])
 }
 
-/// Row 4a: `collect_player_targets` (phase_out) binds the declared player, not the parent's.
+/// `collect_player_targets` (phase_out) binds the declared player, not the parent's.
 #[test]
-fn row_4a_phase_out_binds_the_declared_player() {
+fn phase_out_binds_the_declared_player() {
     for (label, filter) in [
         ("DeclaredPlayer", declared()),
         (
@@ -224,9 +224,9 @@ fn row_4a_phase_out_binds_the_declared_player() {
     }
 }
 
-/// Row 4b: the transient-effect player binding.
+/// The transient-effect player binding.
 #[test]
-fn row_4b_transient_effect_binds_the_declared_player() {
+fn transient_effect_binds_the_declared_player() {
     for (label, filter) in [
         ("DeclaredPlayer", declared()),
         (
@@ -259,9 +259,9 @@ fn row_4b_transient_effect_binds_the_declared_player() {
     }
 }
 
-/// Row 4c: a pending stack entry (no resolution carrier) reads the declared player too.
+/// A pending stack entry (no resolution carrier) reads the declared player too.
 #[test]
-fn row_4c_pending_stack_reach_reads_the_declared_player() {
+fn pending_stack_reach_reads_the_declared_player() {
     let state = GameState::new_two_player(42);
     let source = ObjectId(900);
     let acted_on = |filter: TargetFilter| {
@@ -308,9 +308,9 @@ fn unless_chain(payer: TargetFilter) -> AbilityDefinition {
     chain(vec![decl(), n(pick()), gated])
 }
 
-/// Row 5: the declared payer is prompted, and its decision gates the effect (CR 118.12a).
+/// The declared payer is prompted, and its decision gates the effect (CR 118.12a).
 #[test]
-fn row_5_unless_payer_is_the_declared_player() {
+fn unless_payer_is_the_declared_player() {
     let declined = run(unless_chain(declared()), &PICKS_A, false);
     assert_eq!(
         declined.unless_prompt,
@@ -321,10 +321,10 @@ fn row_5_unless_payer_is_the_declared_player() {
     assert_eq!(declined.counters, 1, "reach guard");
 }
 
-/// Row 5, illegal leg: no prompt reaches the eliminated declared player; the gated effect on the
+/// Illegal leg: no prompt reaches the eliminated declared player; the gated effect on the
 /// caster still applies.
 #[test]
-fn row_5_illegal_declared_payer_is_not_prompted() {
+fn illegal_declared_payer_is_not_prompted() {
     let out = run(unless_chain(declared()), &PICKS_A, true);
     assert_eq!(out.unless_prompt, Vec::<PlayerId>::new());
     assert_eq!(out.hands[0], 1, "the gated draw applies to the caster");
@@ -410,9 +410,9 @@ fn run_after(before: Before, with_later: bool, eliminate: Option<usize>) -> Out 
     out
 }
 
-/// Row 8: the declared-group lookup numbers the tagged node's slot as the illegal-slot stamp
+/// The declared-group lookup numbers the tagged node's slot as the illegal-slot stamp
 /// does, after an inheriting rider's snapshot or a paid "instead" delegator's mirror.
-fn row_8(before: Before) {
+fn declared_slot_numbering(before: Before) {
     // (i) the declared player is illegal: the reader affects no one.
     let out = run_after(before, false, Some(1));
     assert_eq!(
@@ -433,16 +433,16 @@ fn row_8(before: Before) {
 }
 
 #[test]
-fn row_8_plain_chain_numbering_matches_the_stamp() {
-    row_8(Before::Plain);
+fn plain_chain_numbering_matches_the_stamp() {
+    declared_slot_numbering(Before::Plain);
 }
 
 #[test]
-fn row_8_inheriting_rider_does_not_shift_the_declared_slot() {
-    row_8(Before::Rider);
+fn inheriting_rider_does_not_shift_the_declared_slot() {
+    declared_slot_numbering(Before::Rider);
 }
 
 #[test]
-fn row_8_paid_instead_delegator_does_not_shift_the_declared_slot() {
-    row_8(Before::Delegator);
+fn paid_instead_delegator_does_not_shift_the_declared_slot() {
+    declared_slot_numbering(Before::Delegator);
 }
