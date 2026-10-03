@@ -32,8 +32,8 @@ use crate::types::game_state::{
     PendingContinuation, PendingCostMoveResume, PendingDiscardBatchCompletion,
     PendingPlayerScopeSacrificeChoice, PendingPlayerScopeSacrificeCompletion,
     PendingPlayerScopeSacrificeFollowUp, PendingPlayerScopeTail, PlayerScopeCreatedTokens,
-    RepeatUntilStopWitness, ResolutionOptionalPaymentOption, ReturnResultOccurrenceId, WaitingFor,
-    ZoneChangeRecord, ZoneOpponentChooserPurpose,
+    PlayerScopeFloor, RepeatUntilStopWitness, ResolutionOptionalPaymentOption,
+    ReturnResultOccurrenceId, WaitingFor, ZoneChangeRecord, ZoneOpponentChooserPurpose,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef, TrackedSetId};
 use crate::types::mana::ManaCost;
@@ -1218,6 +1218,7 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
             attachment_choice,
             attachment_remainder: _,
             player_scope_tail,
+            player_scope_clause,
             player_scope_queue_end,
         } = cont;
         debug_assert!(
@@ -1230,15 +1231,22 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
         );
         restore_continuation_trigger_firing(state, trigger_firing);
         state.resolving_continuation_attach_host = search_attach_host;
+        // CR 608.2f + CR 608.2e: a frame holding a paused clause's work — the
+        // clause's own frame (its remaining seats, or its tail authority), or
+        // a pausing seat's remainder — finishes that work before anything
+        // parked before it: the clause's own later seats and next
+        // instruction, and an enclosing chain's later instructions. Its floor
+        // keeps a re-pausing instruction's remainder above them.
+        let clause_source =
+            player_scope_clause.or_else(|| player_scope_tail.as_ref().map(|scope| scope.source_id));
         let previous_scope =
             std::mem::replace(&mut state.resolving_player_scope_tail, player_scope_tail);
-        // CR 608.2f: a clause frame carrying its tail authority resolves the
-        // clause's remaining seats; a continuation below it was parked before
-        // the clause began (an enclosing chain's later instructions) and must
-        // not absorb a pausing seat's remainder.
         let enclosing_floor = state.resolving_player_scope_floor;
-        if state.resolving_player_scope_tail.is_some() {
-            state.resolving_player_scope_floor = Some(drained_floor);
+        if let Some(source_id) = clause_source {
+            state.resolving_player_scope_floor = Some(PlayerScopeFloor {
+                depth: drained_floor,
+                source_id,
+            });
         }
         let source_id = chain.source_id;
         let prior_occurrence = std::mem::replace(
@@ -2594,18 +2602,19 @@ fn active_frame_requires_ability_continuation_parent(state: &GameState) -> bool 
 }
 
 /// CR 608.2f + CR 608.2e: whether the stack-top continuation was parked before
-/// the player-scope seat (or clause frame) now resolving began — it lies below
-/// `resolving_player_scope_floor`, holding an enclosing chain's later
-/// instructions. The scoped action is processed for each affected player
-/// individually, so a pausing seat's remaining instructions finish before the
-/// next seat and before the clause's next instruction; that enclosing
-/// continuation resumes only after all of them, and so must never absorb the
-/// seat's remainder.
+/// the player-scope clause work (a seat, a drained clause frame or seat
+/// remainder, or a decision) now resolving began — it lies below
+/// `resolving_player_scope_floor`, holding the clause's own later seats or an
+/// enclosing chain's later instructions. The scoped action is processed for
+/// each affected player individually, so a pausing seat's remaining
+/// instructions finish before the next seat and before the clause's next
+/// instruction; a continuation parked before them resumes only after all of
+/// them, and so must never absorb the seat's remainder.
 fn active_continuation_predates_player_scope_floor(state: &GameState) -> bool {
     state.active_ability_continuation().is_some()
         && state
             .resolving_player_scope_floor
-            .is_some_and(|floor| state.resolution_stack.capture_child_boundary() <= floor)
+            .is_some_and(|floor| state.resolution_stack.capture_child_boundary() <= floor.depth)
 }
 
 pub(crate) fn append_to_pending_continuation(
@@ -2778,6 +2787,7 @@ fn prepend_to_pending_continuation_with_producer(
             attachment_choice,
             attachment_remainder,
             player_scope_tail,
+            player_scope_clause,
             player_scope_queue_end,
         } = existing;
         assert!(
@@ -2801,6 +2811,7 @@ fn prepend_to_pending_continuation_with_producer(
                 attachment_choice,
                 attachment_remainder,
                 player_scope_tail,
+                player_scope_clause,
                 player_scope_queue_end,
             },
             choose_zone_trigger_context: frame.choose_zone_trigger_context,
@@ -2875,12 +2886,29 @@ fn split_off_next_player_scope_seat(ability: &mut ResolvedAbility) -> Option<Box
     }
 }
 
+/// The paused clause's frame an `OptionalEffect` prompt keeps beneath it.
+enum ClauseFrameBelowPrompt {
+    /// The clause's remaining seats; carries the live tail authority.
+    NextSeats(Box<ResolvedAbility>),
+    /// The clause's queue end after its last seat; carries the live tail
+    /// authority.
+    QueueEnd(ResolvedAbility),
+    /// A queue end carrying no authority: it only keeps the decision's work
+    /// above a continuation parked before the clause work that raised the
+    /// prompt.
+    Barrier(ResolvedAbility),
+}
+
 /// The one install path for an `OptionalEffect` direct-choice frame.
 ///
 /// CR 608.2e + CR 608.2f: when the frame's ability is a seat of a paused
 /// player-scope clause whose tail authority is live, the decision handler must
 /// resolve only this seat's instructions — the clause's remaining seats and
-/// its tail authority keep a frame that drains after the decision.
+/// its tail authority keep a frame that drains after the decision. When any
+/// other prompt raised by player-scope clause work sits directly above a
+/// continuation parked before that work began, a clause frame is kept between
+/// them: the handler answers the prompt after the work's floor is gone, and
+/// the decision's remaining instructions must still finish first.
 fn install_optional_effect_frame(
     state: &mut GameState,
     mut frame: OptionalEffectFrame,
@@ -2891,25 +2919,42 @@ fn install_optional_effect_frame(
         .as_ref()
         .is_some_and(|tail| tail.source_id == frame.ability.source_id)
         && frame.ability.scoped_player.is_some();
-    let clause_remainder = owns_live_seat.then(|| {
-        let next_seats = split_off_next_player_scope_seat(&mut frame.ability);
-        let placeholder = (*frame.ability).clone();
-        (next_seats, placeholder)
-    });
+    let below = if owns_live_seat {
+        Some(match split_off_next_player_scope_seat(&mut frame.ability) {
+            Some(next_seats) => ClauseFrameBelowPrompt::NextSeats(next_seats),
+            None => ClauseFrameBelowPrompt::QueueEnd((*frame.ability).clone()),
+        })
+    } else if active_continuation_predates_player_scope_floor(state) {
+        Some(ClauseFrameBelowPrompt::Barrier((*frame.ability).clone()))
+    } else {
+        None
+    };
     state
         .install_direct_choice_frame(ResolutionFrame::OptionalEffect(frame), waiting_for)
         .map_err(|error| EffectError::InvalidParam(error.to_string()))?;
-    match clause_remainder {
+    match below {
         // The direct-choice child is the only frame this node raised, so its
         // immediate parent is the node's child boundary.
-        Some((Some(next_seats), _)) => {
+        Some(ClauseFrameBelowPrompt::NextSeats(next_seats)) => {
             let pending = PendingContinuation::new(next_seats, state);
             state
                 .insert_ability_continuation_parent_of_active(pending)
                 .map_err(|error| EffectError::InvalidParam(error.to_string()))?;
         }
         // The clause's last seat: its queue end carries the live authority.
-        Some((None, placeholder)) => park_player_scope_queue_end(state, placeholder),
+        Some(ClauseFrameBelowPrompt::QueueEnd(placeholder)) => {
+            park_player_scope_queue_end(state, placeholder)
+        }
+        Some(ClauseFrameBelowPrompt::Barrier(placeholder)) => {
+            let mut pending =
+                PendingContinuation::player_scope_queue_end(Box::new(placeholder), state);
+            // Not the clause's last-draining frame: any live tail authority
+            // stays on the frames the drain parks.
+            pending.player_scope_tail = None;
+            state
+                .insert_ability_continuation_parent_of_active(pending)
+                .map_err(|error| EffectError::InvalidParam(error.to_string()))?;
+        }
         None => {}
     }
     Ok(())
@@ -4549,6 +4594,34 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
 }
 
 pub(super) fn resolve_optional_effect_decision(
+    state: &mut GameState,
+    ability: ResolvedAbility,
+    choice: AutoMayChoice,
+    events: &mut Vec<GameEvent>,
+    depth: u32,
+) -> Result<(), EffectError> {
+    // CR 608.2f + CR 608.2e: a decision answered while a paused player-scope
+    // clause's frame is the stack-top continuation resumes that clause's work
+    // after the floor of the work that raised the prompt is gone. Everything
+    // already parked — the clause's own later seats, its queue end, an
+    // enclosing chain's later instructions — follows the decision's remaining
+    // instructions, so the decision runs on a floor of its own.
+    let enclosing_floor = state.resolving_player_scope_floor;
+    if enclosing_floor.is_none() {
+        state.resolving_player_scope_floor = state
+            .active_ability_continuation()
+            .and_then(|continuation| continuation.player_scope_clause)
+            .map(|source_id| PlayerScopeFloor {
+                depth: state.resolution_stack.capture_child_boundary(),
+                source_id,
+            });
+    }
+    let result = resolve_optional_effect_choice(state, ability, choice, events, depth);
+    state.resolving_player_scope_floor = enclosing_floor;
+    result
+}
+
+fn resolve_optional_effect_choice(
     state: &mut GameState,
     mut ability: ResolvedAbility,
     choice: AutoMayChoice,
@@ -15516,7 +15589,12 @@ fn resolve_chain_body(
             // holds an enclosing chain's later instructions; the seat's own
             // remainder is parked above it, inside this seat's boundary, never
             // spliced into it.
-            let enclosing_floor = state.resolving_player_scope_floor.replace(seat_boundary);
+            let enclosing_floor = state
+                .resolving_player_scope_floor
+                .replace(PlayerScopeFloor {
+                    depth: seat_boundary,
+                    source_id: ability.source_id,
+                });
             let seat_result = resolve_ability_chain(state, &scoped, events, depth + 1);
             state.resolving_player_scope_floor = enclosing_floor;
             seat_result?;
@@ -15685,7 +15763,10 @@ fn resolve_chain_body(
                     }
                     (None, None) => None,
                 };
-                if let Some(pending) = clause_frame {
+                if let Some(mut pending) = clause_frame {
+                    // CR 608.2f: the clause's own frame holds its work, so its
+                    // drain re-installs the clause's floor.
+                    pending.player_scope_clause = Some(ability.source_id);
                     park_player_scope_after_paused_seat(state, pending, seat_boundary);
                 }
             }

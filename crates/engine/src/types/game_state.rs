@@ -2601,6 +2601,17 @@ pub(crate) struct PlayerScopeCreatedTokens {
     pub tokens: Vec<ObjectId>,
 }
 
+/// CR 608.2f + CR 608.2e: where the player-scope clause work now resolving
+/// begins on the resolution stack, and which clause it belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PlayerScopeFloor {
+    /// Every frame this work parks lies above this depth; a continuation at or
+    /// below it was parked before the work began.
+    pub depth: ChildStackDepth,
+    /// The source of the clause whose work this is.
+    pub source_id: ObjectId,
+}
+
 /// One execution of a resolving root, distinct for originals and spell copies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ReturnResultOccurrenceId(pub u64);
@@ -2652,6 +2663,13 @@ pub struct PendingContinuation {
         skip_serializing_if = "Option::is_none"
     )]
     pub(crate) player_scope_tail: Option<PendingPlayerScopeTail>,
+    /// CR 608.2f: the source of the paused player-scope clause this
+    /// continuation holds work for — the clause's own frame, or a continuation
+    /// parked while that clause's work resolved. Draining it re-installs the
+    /// clause's floor, so its instructions finish before anything parked
+    /// before them. `None` for every other continuation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) player_scope_clause: Option<ObjectId>,
     /// Private queue terminator for generated player-scope continuations. The
     /// placeholder `chain` is never resolved when this is set.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -2697,6 +2715,9 @@ impl PendingContinuation {
             attachment_choice: None,
             attachment_remainder: None,
             player_scope_tail: state.resolving_player_scope_tail.clone(),
+            player_scope_clause: state
+                .resolving_player_scope_floor
+                .map(|floor| floor.source_id),
             player_scope_queue_end: false,
         }
     }
@@ -2721,6 +2742,9 @@ impl PendingContinuation {
             attachment_choice: None,
             attachment_remainder: None,
             player_scope_tail: state.resolving_player_scope_tail.clone(),
+            player_scope_clause: state
+                .resolving_player_scope_floor
+                .map(|floor| floor.source_id),
             player_scope_queue_end: false,
         }
     }
@@ -21334,15 +21358,14 @@ declare_game_state! {
     #[serde(skip)]
     pub(crate) resolving_player_scope_tail: Option<PendingPlayerScopeTail>,
 
-    /// CR 608.2f: execution-local resolution-stack depth at which the frames of
-    /// the player-scope seat — or of the drained clause frame carrying a tail
-    /// authority — now resolving begin. A continuation below it was parked
-    /// before that seat began (an enclosing chain's later instructions), so it
-    /// never absorbs the seat's remainder, and a clause frame completes only
-    /// once nothing it raised is still parked. `None` outside a player-scope
-    /// seat or clause frame.
+    /// CR 608.2f: execution-local floor of the player-scope clause work now
+    /// resolving — a seat in the driver's first pass, a continuation drained on
+    /// behalf of a paused clause, or a decision answered for one. A continuation
+    /// below it was parked before that work began (the clause's own later seats,
+    /// or an enclosing chain's later instructions), so it never absorbs that
+    /// work's remainder. `None` outside player-scope clause work.
     #[serde(skip)]
-    pub(crate) resolving_player_scope_floor: Option<ChildStackDepth>,
+    pub(crate) resolving_player_scope_floor: Option<PlayerScopeFloor>,
 
     /// CR 730.3e (second clause): routing override for the card components of a
     /// TOKEN merged permanent leaving the battlefield under a card-scoped

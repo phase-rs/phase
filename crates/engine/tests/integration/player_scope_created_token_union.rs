@@ -15,7 +15,10 @@
 //! through the public `resolve_ability_chain` entry and answer every pause with
 //! the real `apply()` action. The enclosing-continuation rows resolve the
 //! clause while an enclosing chain's later instructions are already parked
-//! beneath it.
+//! beneath it. The re-pause rows resume a paused clause's work after the seat
+//! that paused it — a drained seat remainder or clause frame, or an optional
+//! seat's decision — and pause it again through the damage handler's own
+//! continuation stash.
 
 use engine::game::effects::resolve_ability_chain;
 use engine::game::engine::apply;
@@ -1582,6 +1585,37 @@ fn damage_dealt_to(events: &[GameEvent], id: ObjectId) -> Vec<usize> {
         .collect()
 }
 
+/// "You may prevent the next 1 damage to this creature." on `host`: damage to
+/// it pauses on a `ReplacementChoice`, and the damage handler stashes the rest
+/// of that instruction's simultaneous damage as a continuation (the append
+/// route).
+fn install_damage_shield(state: &mut GameState, host: ObjectId) {
+    let shield = ReplacementDefinition::new(ReplacementEvent::DamageDone)
+        .valid_card(TargetFilter::SelfRef)
+        .prevention_shield(PreventionAmount::Next(1))
+        .mode(ReplacementMode::Optional { decline: None })
+        .description("You may prevent the next 1 damage to this creature.".to_string());
+    let obj = state.objects.get_mut(&host).expect("shield host exists");
+    obj.replacement_definitions = vec![shield.clone()].into();
+    obj.base_replacement_definitions = Arc::new(vec![shield]);
+}
+
+/// "<seat> deals 1 damage to each creature they control" — the controller is
+/// rebound per seat.
+fn damage_own_creatures(source: ObjectId) -> ResolvedAbility {
+    ResolvedAbility::new(
+        Effect::DamageAll {
+            amount: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            player_filter: None,
+            damage_source: None,
+        },
+        vec![],
+        source,
+        P0,
+    )
+}
+
 /// A seat that pauses through a damage handler's own continuation stash (the
 /// append route) while an enclosing continuation `U` is parked: seat 0's
 /// remaining in-seat damage finishes before seat 1 begins, and the whole
@@ -1601,16 +1635,7 @@ fn appended_seat_remainder_above_parked_continuation_finishes_clause_before_it()
         copied,
         stale,
     } = board(3, 48);
-    let shield = ReplacementDefinition::new(ReplacementEvent::DamageDone)
-        .valid_card(TargetFilter::SelfRef)
-        .prevention_shield(PreventionAmount::Next(1))
-        .mode(ReplacementMode::Optional { decline: None })
-        .description("You may prevent the next 1 damage to this creature.".to_string());
-    {
-        let obj = state.objects.get_mut(&copied).expect("shield host exists");
-        obj.replacement_definitions = vec![shield.clone()].into();
-        obj.base_replacement_definitions = Arc::new(vec![shield]);
-    }
+    install_damage_shield(&mut state, copied);
     let p1_bear = creature(&mut state, 71, P1, "Bear");
     let p2_bear = creature(&mut state, 72, P2, "Bear");
 
@@ -1619,17 +1644,7 @@ fn appended_seat_remainder_above_parked_continuation_finishes_clause_before_it()
 
     let mut tail = gain_life(source, 2);
     tail.sub_link = SubAbilityLink::SequentialSibling;
-    let mut damage = ResolvedAbility::new(
-        Effect::DamageAll {
-            amount: QuantityExpr::Fixed { value: 1 },
-            target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
-            player_filter: None,
-            damage_source: None,
-        },
-        vec![],
-        source,
-        P0,
-    );
+    let mut damage = damage_own_creatures(source);
     damage.player_scope = Some(PlayerFilter::All);
     damage.sub_ability = Some(Box::new(tail));
 
@@ -1704,4 +1719,512 @@ fn appended_seat_remainder_above_parked_continuation_finishes_clause_before_it()
         vec![FrameKind::AbilityContinuation; 3],
         "P0.g: [enclosing continuation, clause frame, seat 0's remainder]"
     );
+}
+
+// --- a paused clause's work resumed after the seat that paused it -------------------
+
+/// The prompt a damage-clause row answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Asked {
+    Scry,
+    Shield,
+    Optional,
+}
+
+/// One answered pause: who was asked what, and the resolution stack then.
+struct Answered {
+    player: PlayerId,
+    asked: Asked,
+    frames: Vec<FrameKind>,
+}
+
+/// Answer the current pause through `apply()` after a serde round trip: keep
+/// the scried card, decline a prevention shield (so each recipient is dealt
+/// its damage exactly once), accept an optional seat. `None` when resolution
+/// is not paused on one of those prompts.
+fn answer_pause(state: &mut GameState, events: &mut Vec<GameEvent>) -> Option<Answered> {
+    let (player, asked, action) = match state.waiting_for.clone() {
+        WaitingFor::ScryChoice { player, cards, .. } => {
+            (player, Asked::Scry, GameAction::SelectCards { cards })
+        }
+        WaitingFor::ReplacementChoice { player, .. } => (
+            player,
+            Asked::Shield,
+            GameAction::ChooseReplacement { index: 1 },
+        ),
+        WaitingFor::OptionalEffectChoice { player, .. } => (
+            player,
+            Asked::Optional,
+            GameAction::DecideOptionalEffect { accept: true },
+        ),
+        _ => return None,
+    };
+    let frames = frame_kinds(state);
+    *state = round_trip(state);
+    let result = apply(state, player, action).expect("the pause's answer resolves");
+    events.extend(result.events);
+    Some(Answered {
+        player,
+        asked,
+        frames,
+    })
+}
+
+fn answer_every_pause(state: &mut GameState, events: &mut Vec<GameEvent>) -> Vec<Answered> {
+    let mut answered = Vec::new();
+    while let Some(answer) = answer_pause(state, events) {
+        answered.push(answer);
+        assert!(answered.len() < 16, "pauses must terminate");
+    }
+    answered
+}
+
+fn asked(answered: &[Answered]) -> Vec<(PlayerId, Asked)> {
+    answered.iter().map(|a| (a.player, a.asked)).collect()
+}
+
+/// The first event index at which `id` was dealt damage.
+fn first_damage(events: &[GameEvent], id: ObjectId, label: &str) -> usize {
+    *damage_dealt_to(events, id)
+        .first()
+        .unwrap_or_else(|| panic!("{label} was dealt damage"))
+}
+
+fn charge_added(events: &[GameEvent]) -> Vec<usize> {
+    events
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| {
+            matches!(e, GameEvent::CounterAdded { counter_type, .. } if *counter_type == charge())
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// Arm G3, re-paused: seat 0 scries, so its in-seat damage is parked as the
+/// seat's remainder above the clause frame. That remainder drains when the
+/// scry is answered, and its damage pauses again on P0's shielded creature:
+/// the damage handler stashes the rest of seat 0's simultaneous damage, which
+/// finishes before seat 1 begins and before the next instruction.
+///
+/// The damage is seat 0's last in-seat instruction (the next instruction is
+/// split off the clause), so the pause path forwards no sub-ability and every
+/// recipient is dealt damage exactly once.
+#[test]
+fn drained_seat_remainder_repause_finishes_its_seat_before_the_next_seat() {
+    let Board {
+        mut state,
+        source,
+        copied,
+        stale,
+    } = board(3, 49);
+    install_damage_shield(&mut state, copied);
+    let third = creature(&mut state, 73, P0, "Third Creature");
+    let p1_bear = creature(&mut state, 71, P1, "Bear");
+    let p2_bear = creature(&mut state, 72, P2, "Bear");
+
+    let mut tail = gain_life(source, 2);
+    tail.sub_link = SubAbilityLink::SequentialSibling;
+    let mut damage = damage_own_creatures(source);
+    damage.condition = Some(AbilityCondition::current_scope_succeeded());
+    damage.sub_link = SubAbilityLink::ContinuationStep;
+    damage.sub_ability = Some(Box::new(tail));
+    let mut scry = ResolvedAbility::new(
+        Effect::Scry {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        },
+        vec![],
+        source,
+        P0,
+    );
+    scry.player_scope = Some(PlayerFilter::All);
+    scry.sub_ability = Some(Box::new(damage));
+
+    let mut events = Vec::new();
+    resolve_ability_chain(&mut state, &scry, &mut events, 0).expect("fan-out starts");
+    let answered = answer_every_pause(&mut state, &mut events);
+    assert_clause_drained(&state, "drained seat remainder re-paused");
+    assert_eq!(
+        asked(&answered),
+        vec![
+            (P0, Asked::Scry),
+            (P0, Asked::Shield),
+            (P1, Asked::Scry),
+            (P2, Asked::Scry)
+        ],
+        "REACH-GUARD: seat 0 scries, its drained remainder pauses on the shield, \
+         then seats 1 and 2 scry"
+    );
+    assert_eq!(
+        answered[0].frames,
+        vec![FrameKind::AbilityContinuation; 2],
+        "REACH-GUARD (P0.g, arm G3): [clause frame, seat 0's remainder]"
+    );
+
+    let shielded = first_damage(&events, copied, "P0's shielded creature");
+    let second = first_damage(&events, stale, "P0's second creature");
+    let last = first_damage(&events, third, "P0's third creature");
+    let p1 = first_damage(&events, p1_bear, "P1's creature");
+    let p2 = first_damage(&events, p2_bear, "P2's creature");
+    assert!(
+        shielded < second && second < last && last < p1,
+        "CR 608.2f: seat 0's remaining damage precedes seat 1 (P0 shielded at \
+         {shielded}, P0 remainder at {second} and {last}, P1 at {p1})"
+    );
+    for (label, id) in [
+        ("P0's shielded creature", copied),
+        ("P0's second creature", stale),
+        ("P0's third creature", third),
+        ("P1's creature", p1_bear),
+        ("P2's creature", p2_bear),
+    ] {
+        assert_eq!(
+            damage_dealt_to(&events, id).len(),
+            1,
+            "REACH-GUARD: {label} is dealt damage once"
+        );
+    }
+    let tail = life_gain_of(&events, P0, 2);
+    assert_eq!(
+        tail.len(),
+        1,
+        "REACH-GUARD: the next instruction resolves once"
+    );
+    assert!(
+        p1 < p2 && p2 < tail[0],
+        "CR 608.2f + CR 608.2e: seats in APNAP order, then the next instruction"
+    );
+    assert_eq!(
+        answered[1].frames,
+        vec![FrameKind::AbilityContinuation; 2],
+        "P0.g: [clause frame, seat 0's re-parked remainder]"
+    );
+}
+
+/// A drained clause frame whose seat re-pauses above an enclosing continuation
+/// `U` ("you gain 1 life"): seat 0 pauses on its shielded creature, so the
+/// clause's remaining seats are parked as the clause frame above `U`. When that
+/// frame drains, seat 2's damage pauses on its own shielded creature: the rest
+/// of seat 2's damage finishes before `U`, which resolves last.
+///
+/// The clause has no next instruction: it would be seat 2's sub-ability, which
+/// a paused damage instruction runs twice (pre-existing residual R-A).
+#[test]
+fn drained_clause_frame_seat_repause_finishes_before_the_enclosing_continuation() {
+    let Board {
+        mut state,
+        source,
+        copied,
+        stale,
+    } = board(3, 50);
+    install_damage_shield(&mut state, copied);
+    let p1_bear = creature(&mut state, 71, P1, "Bear");
+    let p2_first = creature(&mut state, 72, P2, "Shielded Bear");
+    let p2_second = creature(&mut state, 74, P2, "Second Bear");
+    let p2_third = creature(&mut state, 75, P2, "Third Bear");
+    install_damage_shield(&mut state, p2_first);
+
+    let earlier = PendingContinuation::new(Box::new(gain_life(source, 1)), &state);
+    state.park_ability_continuation(earlier);
+    let mut damage = damage_own_creatures(source);
+    damage.player_scope = Some(PlayerFilter::All);
+
+    let mut events = Vec::new();
+    resolve_ability_chain(&mut state, &damage, &mut events, 0).expect("fan-out starts");
+    let answered = answer_every_pause(&mut state, &mut events);
+    assert_clause_drained(&state, "drained clause frame re-paused above U");
+    assert_eq!(
+        asked(&answered),
+        vec![(P0, Asked::Shield), (P2, Asked::Shield)],
+        "REACH-GUARD: seat 0 pauses in the first pass, seat 2 inside the drained clause frame"
+    );
+    assert_eq!(
+        answered[0].frames,
+        vec![FrameKind::AbilityContinuation; 3],
+        "REACH-GUARD (P0.g): [U, clause frame, seat 0's remainder]"
+    );
+
+    let enclosing = life_gain_of(&events, P0, 1);
+    assert_eq!(enclosing.len(), 1, "REACH-GUARD: U resolves once");
+    let p2_shielded = first_damage(&events, p2_first, "P2's shielded creature");
+    let p2_rest = [
+        first_damage(&events, p2_second, "P2's second creature"),
+        first_damage(&events, p2_third, "P2's third creature"),
+    ];
+    assert!(
+        p2_rest.iter().all(|&i| p2_shielded < i && i < enclosing[0]),
+        "CR 608.2f + CR 608.2e: seat 2's remaining damage precedes U (P2 shielded at \
+         {p2_shielded}, P2 remainder at {p2_rest:?}, U at {})",
+        enclosing[0]
+    );
+    let order = [
+        first_damage(&events, copied, "P0's shielded creature"),
+        first_damage(&events, stale, "P0's second creature"),
+        first_damage(&events, p1_bear, "P1's creature"),
+        p2_shielded,
+    ];
+    assert!(
+        order.windows(2).all(|pair| pair[0] < pair[1]),
+        "CR 608.2f: seats in APNAP order, each seat's damage before the next ({order:?})"
+    );
+    for id in [copied, stale, p1_bear, p2_first, p2_second, p2_third] {
+        assert_eq!(
+            damage_dealt_to(&events, id).len(),
+            1,
+            "REACH-GUARD: {id:?} is dealt damage once"
+        );
+    }
+    assert_eq!(
+        answered[1].frames,
+        vec![FrameKind::AbilityContinuation; 2],
+        "P0.g: [U, seat 2's re-parked remainder]"
+    );
+}
+
+/// "Each player may have it deal 1 damage to each creature they control."
+/// above an enclosing continuation `U`; every seat accepts. Each decision is
+/// answered outside any drain. Seat 0's (first pass, the clause frame beneath
+/// its prompt) and seat 2's (raised while the clause frame drained, `U`
+/// beneath its prompt) damage each pauses on a shield: each seat's remaining
+/// damage finishes before the next seat and before `U`.
+#[test]
+fn optional_seat_decisions_finish_their_damage_before_the_next_seat_and_u() {
+    let Board {
+        mut state,
+        source,
+        copied,
+        stale,
+    } = board(3, 51);
+    install_damage_shield(&mut state, copied);
+    let p1_bear = creature(&mut state, 71, P1, "Bear");
+    let p2_first = creature(&mut state, 72, P2, "Shielded Bear");
+    let p2_second = creature(&mut state, 74, P2, "Second Bear");
+    install_damage_shield(&mut state, p2_first);
+
+    let earlier = PendingContinuation::new(Box::new(gain_life(source, 1)), &state);
+    state.park_ability_continuation(earlier);
+    let mut damage = damage_own_creatures(source);
+    damage.player_scope = Some(PlayerFilter::All);
+    damage.optional = true;
+
+    let mut events = Vec::new();
+    resolve_ability_chain(&mut state, &damage, &mut events, 0).expect("fan-out starts");
+    let answered = answer_every_pause(&mut state, &mut events);
+    assert_clause_drained(&state, "optional seats above U");
+    assert_eq!(
+        asked(&answered),
+        vec![
+            (P0, Asked::Optional),
+            (P0, Asked::Shield),
+            (P1, Asked::Optional),
+            (P2, Asked::Optional),
+            (P2, Asked::Shield)
+        ],
+        "REACH-GUARD (P0.d): each seat is asked in APNAP order; seats 0 and 2 pause on \
+         their shields"
+    );
+    assert_eq!(
+        answered[0].frames.last(),
+        Some(&FrameKind::OptionalEffect),
+        "REACH-GUARD: seat 0's prompt is a direct-choice frame"
+    );
+
+    let p0_rest = first_damage(&events, stale, "P0's second creature");
+    let p1 = first_damage(&events, p1_bear, "P1's creature");
+    assert!(
+        p0_rest < p1,
+        "CR 608.2f: seat 0's remaining damage precedes seat 1 (P0 remainder at \
+         {p0_rest}, P1 at {p1})"
+    );
+    let enclosing = life_gain_of(&events, P0, 1);
+    let p2_rest = first_damage(&events, p2_second, "P2's second creature");
+    assert!(
+        enclosing.first().is_some_and(|&u| p2_rest < u),
+        "CR 608.2f + CR 608.2e: seat 2's remaining damage precedes U (P2 remainder \
+         at {p2_rest}, U at {enclosing:?})"
+    );
+    for id in [copied, stale, p1_bear, p2_first, p2_second] {
+        assert_eq!(
+            damage_dealt_to(&events, id).len(),
+            1,
+            "REACH-GUARD: {id:?} is dealt damage once"
+        );
+    }
+    assert_eq!(enclosing.len(), 1, "REACH-GUARD: U resolves once");
+    let order = [
+        first_damage(&events, copied, "P0's shielded creature"),
+        p0_rest,
+        p1,
+        first_damage(&events, p2_first, "P2's shielded creature"),
+        p2_rest,
+        enclosing[0],
+    ];
+    assert!(
+        order.windows(2).all(|pair| pair[0] < pair[1]),
+        "CR 608.2f + CR 608.2e: seats in APNAP order, then U ({order:?})"
+    );
+}
+
+/// "Each player may have it deal 1 damage to each creature they control. Put
+/// a charge counter on the tokens." (the tail reads the created-token ledger,
+/// so it is detached and its authority rides the clause's frames). Every seat
+/// accepts; `shielded`'s first creature carries a shield, so that seat's
+/// decision — raised while the clause frame drained, beneath it the clause's
+/// next-seat frame or queue end — pauses its damage.
+fn run_optional_seats_with_detached_tail(shielded: PlayerId, seed: u64) -> DetachedRun {
+    let Board {
+        mut state, source, ..
+    } = board(3, seed);
+    let first = creature(&mut state, 81, shielded, "Shielded Bear");
+    let second = creature(&mut state, 82, shielded, "Second Bear");
+    install_damage_shield(&mut state, first);
+    let other = creature(
+        &mut state,
+        83,
+        if shielded == P1 { P2 } else { P1 },
+        "Other Bear",
+    );
+
+    let mut tail = tail_counter(source);
+    tail.sub_link = SubAbilityLink::SequentialSibling;
+    let mut damage = damage_own_creatures(source);
+    damage.player_scope = Some(PlayerFilter::All);
+    damage.optional = true;
+    damage.sub_ability = Some(Box::new(tail));
+
+    let mut events = Vec::new();
+    resolve_ability_chain(&mut state, &damage, &mut events, 0).expect("fan-out starts");
+    let mut answered = Vec::new();
+    let mut authority = Vec::new();
+    loop {
+        let parked = tail_authority_parked(&state);
+        let Some(answer) = answer_pause(&mut state, &mut events) else {
+            break;
+        };
+        answered.push(answer);
+        authority.push(parked);
+        assert!(answered.len() < 16, "pauses must terminate");
+    }
+    assert_clause_drained(&state, "optional seats with a detached tail");
+    DetachedRun {
+        events,
+        answered,
+        authority,
+        first,
+        second,
+        other,
+    }
+}
+
+struct DetachedRun {
+    events: Vec<GameEvent>,
+    answered: Vec<Answered>,
+    /// The tail-authority reach-guard, recorded at every pause.
+    authority: Vec<bool>,
+    first: ObjectId,
+    second: ObjectId,
+    other: ObjectId,
+}
+
+/// Seat 1's decision is raised while the clause frame drains, with the
+/// clause's next-seat frame beneath its prompt: seat 1's remaining damage
+/// finishes before seat 2 begins.
+#[test]
+fn optional_leg_decision_remainder_precedes_the_next_seat_frame() {
+    let run = run_optional_seats_with_detached_tail(P1, 52);
+    assert_eq!(
+        asked(&run.answered),
+        vec![
+            (P0, Asked::Optional),
+            (P1, Asked::Optional),
+            (P1, Asked::Shield),
+            (P2, Asked::Optional)
+        ],
+        "REACH-GUARD (P0.d): each seat is asked in APNAP order; seat 1 pauses on its shield"
+    );
+    assert!(
+        run.authority.iter().all(|parked| *parked),
+        "REACH-GUARD (B1): the tail authority is parked at every pause"
+    );
+    assert_eq!(
+        run.answered[1].frames,
+        vec![FrameKind::AbilityContinuation, FrameKind::OptionalEffect],
+        "REACH-GUARD (P0.g): [next-seat frame, seat 1's prompt]"
+    );
+    let events = &run.events;
+    let p1_rest = first_damage(events, run.second, "P1's second creature");
+    let p2 = first_damage(events, run.other, "P2's creature");
+    assert!(
+        first_damage(events, run.first, "P1's shielded creature") < p1_rest && p1_rest < p2,
+        "CR 608.2f: seat 1's remaining damage precedes seat 2 (P1 remainder at \
+         {p1_rest}, P2 at {p2})"
+    );
+    for id in [run.first, run.second, run.other] {
+        assert_eq!(
+            damage_dealt_to(events, id).len(),
+            1,
+            "REACH-GUARD: {id:?} is dealt damage once"
+        );
+    }
+    let tail = charge_added(events);
+    assert_eq!(
+        tail.len(),
+        1,
+        "REACH-GUARD: the next instruction resolves once"
+    );
+    assert!(
+        p2 < tail[0],
+        "CR 608.2e: the next instruction follows the whole clause"
+    );
+}
+
+/// Seat 2's decision is raised while the clause frame drains, with the
+/// clause's queue end (carrying the tail authority) beneath its prompt: seat
+/// 2's remaining damage is dealt, before the next instruction.
+#[test]
+fn optional_last_seat_decision_remainder_precedes_the_queue_end() {
+    let run = run_optional_seats_with_detached_tail(P2, 53);
+    assert_eq!(
+        asked(&run.answered),
+        vec![
+            (P0, Asked::Optional),
+            (P1, Asked::Optional),
+            (P2, Asked::Optional),
+            (P2, Asked::Shield)
+        ],
+        "REACH-GUARD (P0.d): each seat is asked in APNAP order; seat 2 pauses on its shield"
+    );
+    assert!(
+        run.authority.iter().all(|parked| *parked),
+        "REACH-GUARD (B1): the tail authority is parked at every pause"
+    );
+    assert_eq!(
+        run.answered[2].frames,
+        vec![FrameKind::AbilityContinuation, FrameKind::OptionalEffect],
+        "REACH-GUARD (P0.g): [queue end, seat 2's prompt]"
+    );
+    let events = &run.events;
+    let p2_rest = first_damage(events, run.second, "P2's second creature");
+    let tail = charge_added(events);
+    assert_eq!(
+        tail.len(),
+        1,
+        "REACH-GUARD: the next instruction resolves once"
+    );
+    assert!(
+        first_damage(events, run.first, "P2's shielded creature") < p2_rest && p2_rest < tail[0],
+        "CR 608.2f + CR 608.2e: seat 2's remaining damage precedes the next \
+         instruction (P2 remainder at {p2_rest}, tail at {})",
+        tail[0]
+    );
+    let p1 = first_damage(events, run.other, "P1's creature");
+    assert!(p1 < p2_rest, "CR 608.2f: seats in APNAP order");
+    for id in [run.first, run.second, run.other] {
+        assert_eq!(
+            damage_dealt_to(events, id).len(),
+            1,
+            "REACH-GUARD: {id:?} is dealt damage once"
+        );
+    }
 }
