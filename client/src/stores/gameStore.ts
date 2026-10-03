@@ -671,7 +671,7 @@ export const useGameStore = create<GameStore>()(
 
     dispatch: async (action) => {
       const submittedAction = applySpellPaymentPreference(action);
-      const { adapter, gameState, gameId, gameMode } = get();
+      const { adapter, gameState, gameId, gameMode, gameSessionGeneration } = get();
       if (!adapter || !gameState) {
         throw new Error("Game not initialized");
       }
@@ -720,8 +720,14 @@ export const useGameStore = create<GameStore>()(
 
       // Read-then-commit with no `await` between, so no other commit interleaves.
       const checkpoint = checkpointPromise ? await checkpointPromise : null;
-      const stateHistory = checkpoint
-        ? [...get().stateHistory, checkpoint].slice(-MAX_UNDO_HISTORY)
+      const current = get();
+      // The checkpoint was captured before submit; only attach it when the
+      // session is unchanged, so a stale checkpoint cannot enter a
+      // replacement game's history.
+      const sessionUnchanged =
+        current.adapter === adapter && current.gameSessionGeneration === gameSessionGeneration;
+      const stateHistory = checkpoint && sessionUnchanged
+        ? [...current.stateHistory, checkpoint].slice(-MAX_UNDO_HISTORY)
         : undefined;
       get().commitEngineSnapshot(snapshot, {
         events: result.events,

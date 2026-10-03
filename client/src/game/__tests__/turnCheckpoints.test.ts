@@ -5,7 +5,7 @@ import { useGameStore } from "../../stores/gameStore";
 import { usePreferencesStore } from "../../stores/preferencesStore";
 import { buildEngineAdapterMock } from "../../test/factories/engineAdapterFactory";
 import { buildGameState } from "../../test/factories/gameStateFactory";
-import { dispatchAction } from "../dispatch";
+import { abandonPendingDispatches, dispatchAction } from "../dispatch";
 
 /**
  * Debug-rewind checkpoints have the same provenance requirement as undo
@@ -98,5 +98,34 @@ describe("turn checkpoints", () => {
     expect(submitAction).toHaveBeenCalledOnce();
     expect(useGameStore.getState().turnCheckpoints).toHaveLength(0);
     expect(useGameStore.getState().gameState).toBe(postState);
+  });
+
+  it("TurnStarted capture resolving after a session boundary is discarded", async () => {
+    const preState = buildGameState({ turn_number: 1, stack: [] });
+    const postState = buildGameState({ turn_number: 2, stack: [] });
+    let resolveTurnExport!: (json: string) => void;
+    const turnExport = new Promise<string>((resolve) => {
+      resolveTurnExport = resolve;
+    });
+    const exportPersistenceState = vi
+      .fn()
+      .mockResolvedValueOnce(JSON.stringify({ state: preState, precast_shortcut_runtime: null }))
+      .mockReturnValue(turnExport);
+    const adapter = buildEngineAdapterMock(preState, {
+      exportPersistenceState,
+      submitAction: vi.fn().mockResolvedValue({ events: [turnStartedEvent(2)] }),
+      getState: vi.fn().mockResolvedValue(postState),
+    });
+    seedStore(preState, adapter);
+
+    const inFlight = dispatchAction({ type: "PassPriority" }, 0);
+    // Wait for the turn capture to start, then turn the session over while
+    // it is in flight: the resolving checkpoint must be discarded.
+    await vi.waitFor(() => expect(exportPersistenceState).toHaveBeenCalledTimes(2));
+    abandonPendingDispatches();
+    resolveTurnExport(JSON.stringify({ state: postState, precast_shortcut_runtime: null }));
+    await inFlight;
+
+    expect(useGameStore.getState().turnCheckpoints).toHaveLength(0);
   });
 });

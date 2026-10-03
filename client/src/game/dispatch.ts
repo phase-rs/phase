@@ -547,7 +547,9 @@ async function processAction(
   const turnEvent = events.find((e) => e.type === "TurnStarted");
   if (turnEvent) {
     const turnCheckpoint = await captureTrustedCheckpoint(adapter).catch(() => null);
-    if (turnCheckpoint) {
+    // Re-check after the await: a session boundary mid-capture must not let
+    // a stale checkpoint land in (or persist under) the replacement game.
+    if (turnCheckpoint && isDispatchContextCurrent(generation, session)) {
       const prev = useGameStore.getState();
       const updated = [...prev.turnCheckpoints, turnCheckpoint].slice(-MAX_UNDO_HISTORY);
       useGameStore.setState({ turnCheckpoints: updated });

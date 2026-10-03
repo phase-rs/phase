@@ -272,6 +272,33 @@ describe("gameStore", () => {
     expect(useGameStore.getState().stateHistory[0]).toEqual(envelope);
   });
 
+  it("dispatch drops the checkpoint when the session turns over mid-flight", async () => {
+    const state1 = buildGameState({ turn_number: 1 });
+    const state2 = buildGameState({ turn_number: 2 });
+    let resolveExport!: (json: string) => void;
+    const exportPromise = new Promise<string>((resolve) => {
+      resolveExport = resolve;
+    });
+    const adapter = buildEngineAdapterMock(state1, {
+      exportPersistenceState: vi.fn().mockReturnValue(exportPromise),
+    });
+
+    await act(() => useGameStore.getState().initGame("test-id", adapter));
+    adapter.getState.mockResolvedValue(state2);
+
+    const inFlight = useGameStore.getState().dispatch({ type: "PassPriority" });
+    // Session turns over mid-capture: replacement adapter and generation.
+    const replacement = buildEngineAdapterMock(state2);
+    act(() => useGameStore.setState({ adapter: replacement, gameSessionGeneration: 999 }));
+
+    await act(async () => {
+      resolveExport(JSON.stringify({ state: state1, precast_shortcut_runtime: null }));
+      await inFlight;
+    });
+
+    expect(useGameStore.getState().stateHistory).toHaveLength(0);
+  });
+
   it("dispatch does not push to stateHistory when the stack is non-empty", async () => {
     // Even an undoable action like PassPriority must skip the checkpoint
     // while something is mid-resolution. Otherwise undoing later would
