@@ -6757,10 +6757,10 @@ pub(crate) fn players_to_attack_away_from_gated(
 /// designations are NOT included: they carry no object source (CR 701.15b).
 ///
 /// The goading player is the static's `source_controller` anchor when present
-/// (a grafted designation — `layers.rs` `graft_installing_player`), else the
-/// static's source controller (a printed `Goaded` static on the goading
-/// permanent). The carrier element is unchanged: badge attribution still names
-/// the object holding the static.
+/// (a grafted designation — `layers.rs`
+/// `active_effect_condition_controller`), else the static's source controller
+/// (a printed `Goaded` static on the goading permanent). The carrier element is
+/// unchanged: badge attribution still names the object holding the static.
 fn goad_static_hits_for_creature<'a>(
     state: &'a GameState,
     creature_id: ObjectId,
@@ -6773,9 +6773,9 @@ fn goad_static_hits_for_creature<'a>(
             let affected = def.affected.as_ref()?;
             let ctx = FilterContext::from_source(state, source.id);
             // CR 701.15b + CR 109.5: a grafted designation carries its installing
-            // player as the anchor (layers.rs graft_installing_player); a printed
-            // Goaded static carries none and goads for its source's current
-            // controller.
+            // player as the anchor (layers.rs
+            // active_effect_condition_controller); a printed Goaded static
+            // carries none and goads for its source's current controller.
             matches_target_filter(state, creature_id, affected, &ctx).then_some((
                 def.source_controller.unwrap_or(source.controller),
                 source.id,

@@ -205,7 +205,7 @@ fn life_of_the_party_token_is_goaded_by_the_caster() {
         assert_eq!(
             goad_tces(runner.state(), token),
             vec![(P0, Duration::Permanent)],
-            "REACH-GUARD: every opponent's token carries the resolution-installed goad              effect, controlled by the caster P0, for the rest of the game"
+            "REACH-GUARD: every opponent's token carries the resolution-installed goad effect, controlled by the caster P0, for the rest of the game"
         );
         assert!(
             !goaded_defs(runner.state(), token).is_empty(),

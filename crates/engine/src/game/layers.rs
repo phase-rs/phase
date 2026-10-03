@@ -1515,10 +1515,16 @@ fn designation_player(
     }
 }
 
-/// Selects the controller that supplies "you" for an active effect's
-/// condition. Printed and granted static abilities read their source's current
+/// Selects the controller that supplies "you" for an active effect: its
+/// condition, and a grafted mode's installing-player anchor
+/// (`static_mode_needs_source_controller_anchor`; CR 701.15b: a goaded
+/// creature attacks a player other than the controller of what goaded it).
+/// Printed and granted static abilities read their source's current
 /// controller; resolution-created transient continuous effects retain the
-/// controller that created them.
+/// controller that created them (CR 109.5 + CR 113.8 + CR 611.3a). For a
+/// grafted anchor, applied in layer 6 (CR 613.1f) after layer 2 (CR 613.1b),
+/// the live source read sees this pass's control changes, which
+/// `effect.controller` (gathered before layer 2 applied) does not.
 pub(crate) fn active_effect_condition_controller(
     state: &GameState,
     effect: &ActiveContinuousEffect,
@@ -8059,7 +8065,7 @@ fn static_mode_uses_chosen_color(mode: &crate::types::statics::StaticMode) -> bo
 /// - `Goaded`, whose goader is the installing player (CR 701.15b); consumed by
 ///   `combat::goad_static_hits_for_creature`.
 ///
-/// The anchor's value is `graft_installing_player`. Mirrors
+/// The anchor's value is `active_effect_condition_controller`. Mirrors
 /// `static_mode_uses_chosen_color`.
 fn static_mode_needs_source_controller_anchor(mode: &crate::types::statics::StaticMode) -> bool {
     use crate::types::statics::StaticMode;
@@ -8084,26 +8090,6 @@ fn static_mode_needs_source_controller_anchor(mode: &crate::types::statics::Stat
         // goaded.", The Sound of Drums).
         StaticMode::Goaded => true,
         _ => false,
-    }
-}
-
-/// CR 109.5 + CR 113.8 + CR 611.3a: the installing player a grafted mode's
-/// anchor names — the single authority for every
-/// `static_mode_needs_source_controller_anchor` mode.
-/// - Resolution-generated effect (`transient_id: Some`): the controller of the
-///   spell or ability that created it, fixed when the effect began; later
-///   control changes of its source or of the carrier don't move it.
-/// - Static-ability effect (`transient_id: None`): the CURRENT controller of the
-///   object the static is on. Layer 6 (CR 613.1f) applies after layer 2
-///   (CR 613.1b), so the live source controller is read here; `effect.controller`
-///   was gathered before this pass's layer-2 effects applied.
-fn graft_installing_player(state: &GameState, effect: &ActiveContinuousEffect) -> PlayerId {
-    match effect.transient_id {
-        Some(_) => effect.controller,
-        None => state
-            .objects
-            .get(&effect.source_id)
-            .map_or(effect.controller, |source| source.controller),
     }
 }
 
@@ -8744,7 +8730,7 @@ fn apply_continuous_effect_filtered(
         effect.modification,
         ContinuousModification::AddStaticMode { .. }
     )
-    .then(|| graft_installing_player(state, effect));
+    .then(|| active_effect_condition_controller(state, effect));
 
     // Pre-read chosen keyword from source (avoids borrow conflict in the loop).
     // CR 608.2d + CR 613.1f: When the modification is `RemoveChosenKeyword`,
@@ -9602,8 +9588,8 @@ fn apply_continuous_effect_filtered(
                 // `MustAttackAwayFromSource`'s avoided player, or `Goaded`'s
                 // goader (CR 701.15b) — grafted onto another permanent would
                 // otherwise resolve "you" as the carrier's controller. Anchor the
-                // installing player (`graft_installing_player`, the single
-                // authority: the resolving spell/ability's controller for a
+                // installing player (`active_effect_condition_controller`, the
+                // single authority: the resolving spell/ability's controller for a
                 // resolution-generated effect, the static source's current
                 // controller for a static-ability effect) so combat re-derives
                 // the reference from it. `None` anchor (permanent-static lures)
