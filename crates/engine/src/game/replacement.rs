@@ -11321,14 +11321,7 @@ fn auto_choice_identities(
             // Remember only branches without intrinsic payment or selection prompts.
             // The ordinary delivery pipeline still owns noninteractive post-effects.
             let branch_can_prompt = |branch: Option<&AbilityDefinition>| {
-                // CR 615.5: damage delivery resolves the full continuation, including
-                // ChangeZone prefixes that modify other event kinds instead.
-                let continuation = if matches!(proposed, ProposedEvent::Damage { .. }) {
-                    branch
-                } else {
-                    EventModifiers::first_non_modifier_ability(branch)
-                };
-                continuation.is_some_and(|ability| {
+                branch.is_some_and(|ability| {
                     let resolved =
                         build_resolved_from_def(ability, rid.source, object.controller_or_owner());
                     super::resolution_prompt::chain_offers_choice(&resolved)
@@ -11339,8 +11332,24 @@ fn auto_choice_identities(
                 ReplacementMode::Mandatory => None,
                 ReplacementMode::MayCost { .. } => unreachable!(),
             };
+            let (execute, decline) = if matches!(proposed, ProposedEvent::Damage { .. }) {
+                // CR 615.5: damage delivery resolves the full continuation, including
+                // ChangeZone prefixes that modify other event kinds instead.
+                (definition.execute.as_deref(), decline)
+            } else {
+                // Match ordinary delivery: accept skips applied modifier prefixes,
+                // while mixed decline retains its full root; pure modifiers do not run.
+                (
+                    EventModifiers::first_non_modifier_ability(definition.execute.as_deref()),
+                    if EventModifiers::has_only_event_modifier(decline) {
+                        None
+                    } else {
+                        decline
+                    },
+                )
+            };
             if entry_controller_choice(state, proposed, *rid).is_some()
-                || branch_can_prompt(definition.execute.as_deref())
+                || branch_can_prompt(execute)
                 || branch_can_prompt(decline)
                 || definition
                     .runtime_execute

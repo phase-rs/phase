@@ -723,6 +723,86 @@ fn interactive_leading_damage_continuation_is_ineligible_and_keeps_ordinary_sele
 }
 
 #[test]
+fn interactive_modifier_prefix_in_mixed_decline_is_ineligible_and_resolves_normally() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let decline = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::ChangeZone {
+            origin: Some(Zone::Battlefield),
+            destination: Zone::Hand,
+            target: TargetFilter::SelfRef,
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+        },
+    )
+    .optional()
+    .sub_ability(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 2 },
+            player: TargetFilter::Controller,
+        },
+    ));
+    let source = scenario
+        .add_creature(P0, "Mixed decline replacement", 1, 1)
+        .with_replacement_definition(
+            ReplacementDefinition::new(ReplacementEvent::GainLife)
+                .quantity_modification(QuantityModification::Prevent)
+                .mode(ReplacementMode::Optional {
+                    decline: Some(Box::new(decline)),
+                }),
+        )
+        .id();
+    let spell = scenario
+        .add_spell_to_hand(P0, "Life spell", true)
+        .with_ability(Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            player: TargetFilter::Controller,
+        })
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(spell).resolve();
+    assert_prompt(runner.state(), ReplacementChoiceKind::OptionalBranch, false);
+    assert!(runner.act(remember_optional(1)).is_err());
+    assert!(runner.state().replacement_auto_choices.is_empty());
+    assert_prompt(runner.state(), ReplacementChoiceKind::OptionalBranch, false);
+    runner
+        .act(GameAction::ChooseReplacement { index: 1 })
+        .unwrap();
+    // CR 608.2d: the nested optional effect must ask before moving its source.
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::OptionalEffectChoice {
+            player: P0,
+            source_id,
+            ..
+        } if source_id == source
+    ));
+    assert_eq!(runner.state().objects[&source].zone, Zone::Battlefield);
+    assert_eq!(runner.state().players[0].life, 21);
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .unwrap();
+    // CR 608.2c + CR 119.3: return the source before the follow-up life gain.
+    assert_eq!(runner.state().objects[&source].zone, Zone::Hand);
+    assert_eq!(runner.state().players[0].life, 23);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().replacement_auto_choices.is_empty());
+}
+
+#[test]
 fn exact_record_removal_survives_prior_removals_and_rejects_changed_or_foreign_keys() {
     let (mut runner, sources, spells) = life_scenario(false);
     let mut keys = Vec::new();
