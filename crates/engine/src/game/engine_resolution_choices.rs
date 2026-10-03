@@ -7723,15 +7723,33 @@ pub(super) fn handle_resolution_choice(
             // continuation chain carries the list because it is a
             // `ResolvedAbility` — unlike `last_named_choice`, which is a
             // single GameState slot cleared after every drain.
+            // CR 608.2c + CR 608.2d: the same answer joins the chain's
+            // reference set (`SpellContext::prior_player_choices`), which a
+            // later "different"/ordinal choice of this ability excludes.
+            // CR 614.12a + CR 607.2d: only an answer to the holder's OWN
+            // instruction does either — an entering permanent's "As ~ enters,
+            // choose a player" answered mid-resolution is that object's linked
+            // choice and must not shift the holder's `ChosenPlayer` index.
             if matches!(
                 choice_type,
                 ChoiceType::Player { .. } | ChoiceType::Opponent { .. }
             ) {
                 if let Ok(pid) = choice.parse::<u8>() {
-                    if let Some(frame) = state.active_ability_continuation_frame_mut() {
+                    if let Some(frame) =
+                        state
+                            .active_ability_continuation_frame_mut()
+                            .filter(|frame| {
+                                effects::choose::named_choice_answer_owned_by(
+                                    source.as_ref(),
+                                    &frame.pending.chain,
+                                )
+                            })
+                    {
+                        let pid = crate::types::player::PlayerId(pid);
                         let mut chosen = frame.pending.chain.chosen_players.clone();
-                        chosen.push(crate::types::player::PlayerId(pid));
+                        chosen.push(pid);
                         frame.pending.chain.set_chosen_players_recursive(&chosen);
+                        frame.pending.chain.record_prior_player_choice(pid);
                     }
                 }
             }

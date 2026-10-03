@@ -1770,6 +1770,37 @@ pub(crate) fn parse_bare_card_set_anaphor(input: &str) -> OracleResult<'_, ()> {
     }
 }
 
+/// CR 608.2c: the demonstrative population a leading "for each of those
+/// <noun>" / "for each of them" names — the set an earlier instruction
+/// published. The noun restates that population; it is not a fresh filter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PopulationAnaphor {
+    /// "of them" — the bare plural pronoun.
+    Pronoun,
+    /// "of those <noun>" / "of these <noun>" — a type word restating the
+    /// population ("permanents", "cards", "creatures", a subtype).
+    Restated(TypeFilter),
+}
+
+/// CR 608.2c: parse the demonstrative population of a leading for-each
+/// clause — "of them", "of those permanents", "of these creatures". Callers
+/// require it to consume the whole isolated clause, so a qualified population
+/// ("of those cards that …", "of those opponents who …") or a noun that is not
+/// a type word ("of those colors", "of those tokens") declines.
+pub(crate) fn parse_population_anaphor(input: &str) -> OracleResult<'_, PopulationAnaphor> {
+    preceded(
+        tag("of "),
+        alt((
+            value(PopulationAnaphor::Pronoun, tag("them")),
+            map(
+                preceded(alt((tag("those "), tag("these "))), parse_type_filter_word),
+                PopulationAnaphor::Restated,
+            ),
+        )),
+    )
+    .parse(input)
+}
+
 fn parse_object_property_aggregate_head(
     input: &str,
 ) -> OracleResult<'_, (AggregateFunction, ObjectProperty)> {
@@ -7125,6 +7156,65 @@ mod tests {
         SharedQuality, SharedQualityRelation, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::mana::ManaColor;
+
+    // ── `PopulationAnaphor` / `parse_population_anaphor` (CR 608.2c): the
+    // demonstrative population of a leading for-each clause, across the
+    // pronoun form, the "those"/"these" determiners, type words and subtypes.
+
+    #[test]
+    fn population_anaphor_accepts_pronoun_and_restated_type_words() {
+        let whole = |input| all_consuming(parse_population_anaphor).parse(input);
+        assert_eq!(whole("of them"), Ok(("", PopulationAnaphor::Pronoun)));
+        assert_eq!(
+            whole("of those permanents"),
+            Ok(("", PopulationAnaphor::Restated(TypeFilter::Permanent)))
+        );
+        assert_eq!(
+            whole("of those cards"),
+            Ok(("", PopulationAnaphor::Restated(TypeFilter::Card)))
+        );
+        assert_eq!(
+            whole("of these creatures"),
+            Ok(("", PopulationAnaphor::Restated(TypeFilter::Creature)))
+        );
+        assert_eq!(
+            whole("of those goblins"),
+            Ok((
+                "",
+                PopulationAnaphor::Restated(TypeFilter::Subtype("Goblin".to_string()))
+            ))
+        );
+    }
+
+    #[test]
+    fn population_anaphor_declines_non_type_nouns_and_qualified_populations() {
+        for input in [
+            "of those colors",
+            "of those tokens",
+            "of those opponents",
+            "of those players",
+            "creature you control",
+        ] {
+            assert!(
+                parse_population_anaphor(input).is_err(),
+                "{input:?} names no restated object population"
+            );
+        }
+        // A qualified population is not the published set itself: the
+        // combinator stops at the type word, so whole-clause callers decline.
+        for input in [
+            "of those cards that have the same name",
+            "of those creature cards",
+            "of them that share a type",
+        ] {
+            assert!(
+                all_consuming(parse_population_anaphor)
+                    .parse(input)
+                    .is_err(),
+                "{input:?} must not be consumed whole"
+            );
+        }
+    }
 
     // ── U1.1 building-block tests: `PlayerProperty` / `parse_player_property_keyword`
     // / `player_property_quantity` / `player_property_leader_filter`. Test the

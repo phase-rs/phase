@@ -44,7 +44,7 @@ pub fn resolve(
         &choice_type,
         ability.controller,
         ability.source_id,
-        &ability.chosen_players,
+        &ability.context.prior_player_choices,
     );
 
     // CR 609.3: If an effect attempts to do something impossible, it does only
@@ -134,7 +134,7 @@ pub(crate) fn resolve_random_in_chain(
         &choice_type,
         ability.controller,
         ability.source_id,
-        &ability.chosen_players,
+        &ability.context.prior_player_choices,
     );
 
     // CR 609.3: An impossible random choice (no legal option) does nothing; the
@@ -192,6 +192,11 @@ pub(crate) fn resolve_random_in_chain(
             let mut updated = ability.chosen_players.clone();
             updated.push(PlayerId(pid));
             ability.set_chosen_players_recursive(&updated);
+            // CR 608.2c + CR 608.2d: the game-selected answer is this
+            // ability's own choice (the random site mutates the resolving
+            // ability itself), so it joins the reference set a later
+            // "different"/ordinal choice excludes.
+            ability.record_prior_player_choice(PlayerId(pid));
         }
     }
 
@@ -378,6 +383,20 @@ pub(crate) fn resolution_chosen_color(
             .get(&source_id)
             .and_then(|src| src.chosen_color())
     })
+}
+
+/// CR 608.2d + CR 614.12a + CR 607.2d: whether an answered player choice is
+/// the holder's own instruction choice. A prompt bound to another object — an
+/// "As ~ enters, choose a player" replacement of a permanent entering while
+/// the holder resolves — is that object's linked choice, not the resolving
+/// ability's: it neither binds the holder's chosen-player anaphor nor joins
+/// its reference set. A source-less prompt was raised by the holder's own
+/// resolution-only choice.
+pub(crate) fn named_choice_answer_owned_by(
+    source: Option<&NamedChoiceSource>,
+    holder: &ResolvedAbility,
+) -> bool {
+    source.is_none_or(|source| source.prompt.identity.reference.object_id == holder.source_id)
 }
 
 pub(crate) fn named_choice_authority(
@@ -646,11 +665,15 @@ const LAND_TYPES: &[&str] = &[
 /// CR 700.2: The controller of a modal spell or ability chooses options as part of
 /// casting or resolution. If an option would be illegal, it can't be chosen.
 ///
-/// `already_chosen` is the resolution-scoped list of players picked by earlier
-/// `Choose(Player)` instructions in this chain. `ChoiceType::Player` and
-/// `ChoiceType::Opponent` only consult it when their `distinctness` is
-/// `DistinctFromPriorChoices` (CR 608.2c + the Gluntch ordinal-cued "choose a
-/// second/third player" ruling, "three distinct players"). The default
+/// `prior_choices` is the resolving ability's reference set
+/// (`SpellContext::prior_player_choices`): the players its own earlier
+/// `Choose(Player | Opponent)` instructions chose in this resolution, across
+/// its repeat iterations and pauses, never another object's choice
+/// (CR 608.2c + CR 608.2d). It is not the per-Choose anaphor binding
+/// (`chosen_players`). `ChoiceType::Player` and `ChoiceType::Opponent` only
+/// consult it when their `distinctness` is `DistinctFromPriorChoices` (the
+/// Gluntch ordinal-cued "choose a second/third player" ruling, "three distinct
+/// players"; Dack Fayden's "choose a different opponent"). The default
 /// `Independent` distinctness never filters on it — the "Offering" cycle
 /// ruling (Benevolent/Infernal/Intellectual/Sylvan Offering) confirms a
 /// repeated "Choose an opponent." may pick the same player again. When
@@ -662,7 +685,7 @@ fn compute_options(
     choice_type: &ChoiceType,
     controller: PlayerId,
     source_id: crate::types::identifiers::ObjectId,
-    already_chosen: &[PlayerId],
+    prior_choices: &[PlayerId],
 ) -> Vec<String> {
     match choice_type {
         // CR 205.3m: Creature types are shared between creature and kindred cards.
@@ -776,7 +799,7 @@ fn compute_options(
             .iter()
             .filter(|id| {
                 *distinctness != PlayerChoiceDistinctness::DistinctFromPriorChoices
-                    || !already_chosen.contains(id)
+                    || !prior_choices.contains(id)
             })
             .filter(|id| {
                 restriction.as_ref().is_none_or(|filter| {
@@ -801,7 +824,7 @@ fn compute_options(
             .filter(|&&id| players::player_exists_for_choice(state, id))
             .filter(|id| {
                 *distinctness != PlayerChoiceDistinctness::DistinctFromPriorChoices
-                    || !already_chosen.contains(id)
+                    || !prior_choices.contains(id)
             })
             .map(|id| id.0.to_string())
             .collect(),
@@ -1603,7 +1626,7 @@ mod tests {
     fn choose_opponent_independent_by_default_allows_repeat_choice() {
         let mut state = GameState::new_two_player(42);
         let mut ability = make_choose_ability(ChoiceType::opponent());
-        ability.chosen_players = vec![PlayerId(1)];
+        ability.context.prior_player_choices = vec![PlayerId(1)];
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
         match &state.waiting_for {
@@ -1660,7 +1683,7 @@ mod tests {
     /// TWO INDEPENDENT BEHAVIOUR CHANGES, and this row asserts both. The eliminated seat
     /// `"2"` was offered at HEAD — a strictly-live CR 102.1 defect with nothing to do with
     /// phasing, because `state.seat_order` is not pruned on elimination and this arm
-    /// filtered only on `already_chosen`. The phased-out seat `"1"` is the phasing half.
+    /// filtered only on the prior-choice list. The phased-out seat `"1"` is the phasing half.
     ///
     /// Total equality, never `!contains`: exclusion AND identity in one assertion.
     ///
@@ -1737,7 +1760,7 @@ mod tests {
         // only the ordinal-cued `DistinctFromPriorChoices` (Gluntch) does.
         let mut state = GameState::new_two_player(42);
         let mut ability = make_choose_ability(ChoiceType::player());
-        ability.chosen_players = vec![PlayerId(0)];
+        ability.context.prior_player_choices = vec![PlayerId(0)];
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
         match &state.waiting_for {
@@ -1757,7 +1780,7 @@ mod tests {
         // chosen earlier in the same resolution.
         let mut state = GameState::new_two_player(42);
         let mut ability = make_choose_ability(ChoiceType::player_distinct_from_prior());
-        ability.chosen_players = vec![PlayerId(0)];
+        ability.context.prior_player_choices = vec![PlayerId(0)];
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
         match &state.waiting_for {
@@ -1782,7 +1805,7 @@ mod tests {
             player: PlayerId(0),
         };
         let mut ability = make_choose_ability(ChoiceType::player_distinct_from_prior());
-        ability.chosen_players = vec![PlayerId(0), PlayerId(1)];
+        ability.context.prior_player_choices = vec![PlayerId(0), PlayerId(1)];
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
         assert!(
@@ -1904,6 +1927,92 @@ mod tests {
             "the game-selected player is bound into chosen_players"
         );
         assert!(state.last_named_choice.is_some());
+    }
+
+    /// V2.5a (CR 608.2c + CR 608.2d): the option authority reads the
+    /// ability's reference set, not its anaphor binding. A prior choice held
+    /// only in `prior_player_choices` is excluded for
+    /// `DistinctFromPriorChoices` and offered for `Independent`; a player held
+    /// only in `chosen_players` (the current Choose's anaphor binding) is not a
+    /// prior choice and stays offered.
+    #[test]
+    fn distinct_choice_reads_the_reference_set_not_the_anaphor_binding() {
+        use crate::types::format::FormatConfig;
+        let offered = |ability: &ResolvedAbility| {
+            let mut state = GameState::new(FormatConfig::standard(), 4, 42);
+            let mut events = Vec::new();
+            resolve(&mut state, ability, &mut events).unwrap();
+            match state.waiting_for {
+                WaitingFor::NamedChoice { options, .. } => options,
+                other => panic!("Expected NamedChoice, got {other:?}"),
+            }
+        };
+
+        let mut distinct = make_choose_ability(ChoiceType::opponent_distinct_from_prior());
+        distinct.context.prior_player_choices = vec![PlayerId(1)];
+        assert_eq!(offered(&distinct), ["2", "3"]);
+
+        let mut independent = make_choose_ability(ChoiceType::opponent());
+        independent.context.prior_player_choices = vec![PlayerId(1)];
+        assert_eq!(offered(&independent), ["1", "2", "3"]);
+
+        let mut bound_only = make_choose_ability(ChoiceType::opponent_distinct_from_prior());
+        bound_only.chosen_players = vec![PlayerId(1)];
+        assert_eq!(
+            offered(&bound_only),
+            ["1", "2", "3"],
+            "the anaphor binding is not the reference set"
+        );
+    }
+
+    /// V2.5b (unit): the random answer site records the game-selected player
+    /// into the reference set of the resolving ability and its sub-ability,
+    /// alongside the anaphor binding.
+    #[test]
+    fn random_player_choice_records_into_the_reference_set() {
+        let mut state = GameState::new_two_player(42);
+        let mut ability = ResolvedAbility::new(
+            Effect::Choose {
+                choice_type: ChoiceType::player_distinct_from_prior(),
+                persist: false,
+                selection: TargetSelectionMode::Random,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(ResolvedAbility::new(
+            Effect::Draw {
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                target: crate::types::ability::TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        ));
+        let mut events = Vec::new();
+
+        assert!(resolve_random_in_chain(
+            &mut state,
+            &mut ability,
+            &mut events
+        ));
+        assert_eq!(ability.chosen_players.len(), 1, "the pick is bound");
+        let pick = ability.chosen_players[0];
+        assert!(
+            [PlayerId(0), PlayerId(1)].contains(&pick),
+            "the pick is a legal option"
+        );
+        assert_eq!(ability.context.prior_player_choices, vec![pick]);
+        assert_eq!(
+            ability
+                .sub_ability
+                .as_ref()
+                .expect("sub")
+                .context
+                .prior_player_choices,
+            vec![pick]
+        );
     }
 
     #[test]

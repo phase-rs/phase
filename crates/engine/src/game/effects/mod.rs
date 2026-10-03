@@ -1279,6 +1279,7 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
             } else {
                 let _ = resolve_ability_chain(state, &chain, events, 1);
             }
+            hand_back_prior_player_choices(state, &chain);
         }
         // The exile-choice tracking belongs only to a tail that consumes the
         // linked-exile channel — the same predicate that installed it.
@@ -1373,6 +1374,31 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
         && state.active_ability_continuation().is_some()
     {
         drain_pending_continuation(state, events);
+    }
+}
+
+/// CR 608.2c + CR 608.2d: a drained continuation's own player choices belong
+/// to the same resolving ability's next active holder — its parked repeat
+/// template or its parked continuation — so a later "different"/ordinal
+/// choice of that ability (a following repeat iteration included) excludes
+/// them. Active frame only: repeat consumers never search below a nested
+/// continuation. A re-paused chain's new top is its own child, which already
+/// inherited the set, so the union is idempotent there.
+fn hand_back_prior_player_choices(state: &mut GameState, chain: &ResolvedAbility) {
+    let choices = &chain.context.prior_player_choices;
+    if choices.is_empty() {
+        return;
+    }
+    if let Some(repeat) = state
+        .active_repeat_for_mut()
+        .filter(|repeat| repeat.ability.shares_resolution_owner(chain))
+    {
+        repeat.ability.absorb_prior_player_choices(choices);
+    } else if let Some(frame) = state
+        .active_ability_continuation_frame_mut()
+        .filter(|frame| frame.pending.chain.shares_resolution_owner(chain))
+    {
+        frame.pending.chain.absorb_prior_player_choices(choices);
     }
 }
 
@@ -4225,11 +4251,21 @@ pub(crate) fn apply_parent_chain_context(
     // latch is node-local: a non-ChangeZone parent (a hand reveal, a target
     // declaration) carries none, so the wholesale hand-off must not erase it.
     let child_duration_events = std::mem::take(&mut child.context.duration_events);
+    // CR 608.2c + CR 608.2d: the NamedChoice answer handler records this
+    // ability's own player choices directly onto the parked continuation,
+    // which can run ahead of this hand-off (as with `chosen_players` below),
+    // so the child's own reference set is unioned back, never erased.
+    let child_prior_player_choices = std::mem::take(&mut child.context.prior_player_choices);
     child.context = parent.context.clone();
     child.context.face_down_in_exile |= child_face_down_in_exile;
     for event in child_duration_events {
         if !child.context.duration_events.contains(&event) {
             child.context.duration_events.push(event);
+        }
+    }
+    for player in child_prior_player_choices {
+        if !child.context.prior_player_choices.contains(&player) {
+            child.context.prior_player_choices.push(player);
         }
     }
     // CR 120.1 + CR 608.2b: The damage-subject binding names the object THIS
@@ -14552,10 +14588,19 @@ pub fn resolve_ability_chain(
     // ability can be resumed from serialized state, so discard any stale value
     // before it begins a new resolution; nested producers replace the context
     // after this node's effect completes.
+    // CR 608.2c: a new top-level resolution starts with no prior player
+    // choices of its own. The reference set is cleared over this ability's
+    // OWN tree (every node, on an owned clone) — never another chain's — and
+    // over every node, not the root alone, because the hand-off in
+    // `apply_parent_chain_context` unions a child's own set back in.
     let root_context_owned;
-    let ability = if depth == 0 && ability.context.forwarded_result_context.is_some() {
+    let ability = if depth == 0
+        && (ability.context.forwarded_result_context.is_some()
+            || ability.has_prior_player_choices_recursive())
+    {
         let mut owned = ability.clone();
         owned.context.forwarded_result_context = None;
+        owned.clear_prior_player_choices_recursive();
         root_context_owned = owned;
         &root_context_owned
     } else {
@@ -32372,6 +32417,73 @@ mod tests {
             )),
             "shuffle continuation must resolve for the searching player"
         );
+    }
+
+    /// V2.5c (CR 608.2c): a new top-level resolution starts with no prior
+    /// player choices of its own. The depth-0 entry clears a stale reference
+    /// set over the ability's whole tree — the root and every sub-node, since
+    /// the parent→child hand-off unions a child's own set back in — while a
+    /// resumed (depth 1) node keeps the set it carries.
+    #[test]
+    fn top_level_resolution_clears_a_stale_reference_set_over_the_whole_tree() {
+        use crate::types::format::FormatConfig;
+        let distinct_choose = || {
+            ResolvedAbility::new(
+                Effect::Choose {
+                    choice_type: ChoiceType::opponent_distinct_from_prior(),
+                    persist: false,
+                    selection: TargetSelectionMode::Chosen,
+                },
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            )
+        };
+        let offered = |ability: &ResolvedAbility, depth: u32| {
+            let mut state = GameState::new(FormatConfig::standard(), 4, 42);
+            let mut events = Vec::new();
+            resolve_ability_chain(&mut state, ability, &mut events, depth).unwrap();
+            let options = match &state.waiting_for {
+                WaitingFor::NamedChoice { options, .. } => options.clone(),
+                other => panic!("reach-guard: the choice must raise a prompt, got {other:?}"),
+            };
+            (options, state.players[0].life)
+        };
+
+        // (i) A stale set on the root itself.
+        let mut root = distinct_choose();
+        root.context.prior_player_choices = vec![PlayerId(1)];
+        assert_eq!(offered(&root, 0).0, ["1", "2", "3"]);
+        // Sibling: the same node resumed at depth 1 still excludes P1.
+        assert_eq!(offered(&root, 1).0, ["2", "3"]);
+
+        // (ii) A stale set stamped on the root AND its sub-node: a root-only
+        // clear would let the hand-off union bring the sub's P1 back.
+        let mut sub = distinct_choose();
+        sub.sub_link = SubAbilityLink::ContinuationStep;
+        let mut root = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(sub);
+        root.record_prior_player_choice(PlayerId(1));
+        assert!(root
+            .sub_ability
+            .as_ref()
+            .is_some_and(|sub| sub.context.prior_player_choices == [PlayerId(1)]));
+        let life_before = GameState::new(FormatConfig::standard(), 4, 42).players[0].life;
+        let (options, life_after) = offered(&root, 0);
+        assert_eq!(
+            life_after,
+            life_before + 1,
+            "reach-guard: the root's life gain resolved before the sub's choice"
+        );
+        assert_eq!(options, ["1", "2", "3"]);
     }
 
     /// CR 608.2c + CR 109.5: Direct unit test of the synchronous-continuation

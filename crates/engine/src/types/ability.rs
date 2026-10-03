@@ -853,8 +853,10 @@ pub enum PlayerChoiceDistinctness {
     #[default]
     Independent,
     /// Ordinal-cued instructions ("choose a second player", "choose a third
-    /// player" — Gluntch, the Bestower) require each successive choice to
-    /// exclude every player already chosen earlier in this resolution.
+    /// player" — Gluntch, the Bestower) or "a different" ("choose a different
+    /// opponent" — Dack Fayden, Helping Hand) require each successive choice to
+    /// exclude every player this ability already chose earlier in this
+    /// resolution (`SpellContext::prior_player_choices`).
     DistinctFromPriorChoices,
 }
 
@@ -1108,6 +1110,16 @@ impl ChoiceType {
     /// must exclude players already chosen earlier in this resolution.
     pub fn player_distinct_from_prior() -> Self {
         Self::Player {
+            distinctness: PlayerChoiceDistinctness::DistinctFromPriorChoices,
+        }
+    }
+
+    /// "Choose a different opponent" (Dack Fayden, Helping Hand): an opponent
+    /// this ability has not already chosen in this resolution (CR 608.2c +
+    /// CR 608.2d).
+    pub fn opponent_distinct_from_prior() -> Self {
+        Self::Opponent {
+            restriction: None,
             distinctness: PlayerChoiceDistinctness::DistinctFromPriorChoices,
         }
     }
@@ -28354,6 +28366,14 @@ pub struct SpellContext {
     /// batch-run context equality is unaffected. Not redacted from viewer states.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_ability_provenance: Option<AbilityProvenance>,
+    /// CR 608.2c + CR 608.2d: players this ability's own `Choose(Player |
+    /// Opponent)` instructions have chosen earlier in this resolution — the
+    /// reference set a `DistinctFromPriorChoices` choice excludes. Travels with
+    /// the chain, its parked continuations and its parked repeat template.
+    /// Distinct from `ResolvedAbility::chosen_players`, the per-Choose anaphor
+    /// binding. Never fed by another object's choice.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prior_player_choices: Vec<PlayerId>,
 }
 
 impl SpellContext {
@@ -35385,6 +35405,64 @@ impl ResolvedAbility {
         }
     }
 
+    /// CR 608.2c + CR 608.2d: record a player this ability's own `Choose`
+    /// instruction just chose into its reference set, on this node and every
+    /// sub/else branch, so a later `DistinctFromPriorChoices` choice anywhere
+    /// in the rest of the resolution excludes it.
+    pub fn record_prior_player_choice(&mut self, player: PlayerId) {
+        self.absorb_prior_player_choices(&[player]);
+    }
+
+    /// CR 608.2c + CR 608.2d: ordered union of `players` into the reference
+    /// set of this node and every sub/else branch (idempotent).
+    pub fn absorb_prior_player_choices(&mut self, players: &[PlayerId]) {
+        for player in players {
+            if !self.context.prior_player_choices.contains(player) {
+                self.context.prior_player_choices.push(*player);
+            }
+        }
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.absorb_prior_player_choices(players);
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.absorb_prior_player_choices(players);
+        }
+    }
+
+    /// Whether any node of this ability tree carries a non-empty reference set.
+    pub fn has_prior_player_choices_recursive(&self) -> bool {
+        !self.context.prior_player_choices.is_empty()
+            || self
+                .sub_ability
+                .as_deref()
+                .is_some_and(Self::has_prior_player_choices_recursive)
+            || self
+                .else_ability
+                .as_deref()
+                .is_some_and(Self::has_prior_player_choices_recursive)
+    }
+
+    /// CR 608.2c: empty the reference set on this node and every sub/else
+    /// branch — a new top-level resolution starts with no prior choices.
+    pub fn clear_prior_player_choices_recursive(&mut self) {
+        self.context.prior_player_choices.clear();
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.clear_prior_player_choices_recursive();
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.clear_prior_player_choices_recursive();
+        }
+    }
+
+    /// Whether `other` is part of the same resolving ability: every node,
+    /// parked continuation and repeat template of one resolving ability
+    /// carries its `source_id` and `ability_index`
+    /// (`apply_parent_chain_context` propagates the index), while a nested
+    /// replacement chain carries its own object's `source_id`.
+    pub fn shares_resolution_owner(&self, other: &ResolvedAbility) -> bool {
+        self.source_id == other.source_id && self.ability_index == other.ability_index
+    }
+
     pub fn set_context_recursive(&mut self, context: SpellContext) {
         self.context = context.clone();
         if let Some(sub) = self.sub_ability.as_mut() {
@@ -35849,6 +35927,32 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<SpellContext>(wire).expect("attachment bindings round-trip"),
             populated
+        );
+    }
+
+    /// A2.5: the ability-owned player-choice reference set is an additive,
+    /// default-skipped field — a populated set round-trips, an empty one is
+    /// not serialized, and a payload without the key reads as empty.
+    #[test]
+    fn spell_context_prior_player_choices_round_trip_and_default_skip() {
+        let populated = SpellContext {
+            prior_player_choices: vec![PlayerId(2)],
+            ..SpellContext::default()
+        };
+        let wire = serde_json::to_value(&populated).expect("context serializes");
+        assert_eq!(wire["prior_player_choices"], serde_json::json!([2]));
+        assert_eq!(
+            serde_json::from_value::<SpellContext>(wire).expect("context deserializes"),
+            populated
+        );
+
+        let absent = serde_json::to_value(SpellContext::default()).expect("context serializes");
+        assert!(absent.get("prior_player_choices").is_none());
+        assert_eq!(
+            serde_json::from_value::<SpellContext>(absent)
+                .expect("a payload without the key deserializes")
+                .prior_player_choices,
+            Vec::<PlayerId>::new()
         );
     }
 
