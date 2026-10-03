@@ -13,7 +13,7 @@ import {
   recordAiDecisionDiagnostic,
 } from "../aiDecisionDiagnostics";
 import { debugLog } from "../debugLog";
-import { dispatchAiActionProposal, processRemoteUpdate } from "../dispatch";
+import { dispatchAiActionProposal, isDispatchIdle, processRemoteUpdate } from "../dispatch";
 import { attemptStateRehydrate, isEnginePanic, notifyEngineLost, routePanic } from "../engineRecovery";
 import { stateFingerprint } from "../staleStateWatchdog";
 import type { OpponentController } from "./types";
@@ -567,6 +567,9 @@ export function createAIController(config: AIControllerConfig): AIController {
           const currentStore = useGameStore.getState();
           if (currentStore.adapter !== proposalAdapter || !currentStore.gameState) return;
           if (stateFingerprint(snapshot.state) !== stateFingerprint(currentStore.gameState)) {
+            // Do not queue a snapshot that could outlive this game session.
+            // With no events, an idle dispatch commits synchronously.
+            if (!isDispatchIdle()) return;
             await processRemoteUpdate(snapshot, []);
             return;
           }

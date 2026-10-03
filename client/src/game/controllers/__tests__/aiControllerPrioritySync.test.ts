@@ -2,14 +2,14 @@ import "../../../test/helpers/persistedStorage";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { AiActionProposal, EngineSnapshot, GameState } from "../../../adapter/types";
+import type { ActionResult, AiActionProposal, EngineSnapshot, GameState } from "../../../adapter/types";
 import { nextSnapshotSeq } from "../../../adapter/types";
 import { useGameStore } from "../../../stores/gameStore";
 import { buildEngineAdapterMock } from "../../../test/factories/engineAdapterFactory";
 import { gameObjectFactory } from "../../../test/factories/gameObjectFactory";
 import { buildLegalActionsResult, gameStateFactory } from "../../../test/factories/gameStateFactory";
 import { useUiStore } from "../../../stores/uiStore";
-import { processRemoteUpdate } from "../../dispatch";
+import { dispatchActionForGameSession, isDispatchIdle, processRemoteUpdate } from "../../dispatch";
 import { notifyEngineLost } from "../../engineRecovery";
 import { createAIController, type AIController } from "../aiController";
 import { createGameLoopController } from "../gameLoopController";
@@ -88,6 +88,45 @@ describe("AI priority snapshot handoff", () => {
     expect(adapter.submitAiActionProposal).not.toHaveBeenCalled();
     expect(useGameStore.getState().gameState).toBe(displayed);
     expect(notifyEngineLost).toHaveBeenCalledExactlyOnceWith("ai-controller-stuck:Priority");
+  });
+
+  it("does not queue a reconciliation snapshot behind dispatch across game teardown", async () => {
+    const displayed = priorityState(1);
+    const live = priorityState(0);
+    let finishSubmission!: (result: ActionResult) => void;
+    const pendingSubmission = new Promise<ActionResult>((resolve) => { finishSubmission = resolve; });
+    const adapter = buildEngineAdapterMock(live, {
+      getAiActionProposal: vi.fn().mockResolvedValue(proposal(0)),
+      submitAction: vi.fn().mockReturnValue(pendingSubmission),
+    });
+    await processRemoteUpdate(snapshotOf(displayed), []);
+    useGameStore.setState({ adapter });
+    const pendingDispatch = dispatchActionForGameSession(
+      { type: "SetPhaseStops", data: { stops: [] } },
+      adapter,
+      useGameStore.getState().gameSessionGeneration,
+      0,
+    );
+    expect(isDispatchIdle()).toBe(false);
+    controller.start();
+    await vi.advanceTimersByTimeAsync(10_000);
+    const snapshotReads = vi.mocked(adapter.getSnapshot).mock.calls.length;
+    expect(snapshotReads).toBeGreaterThan(6);
+    expect(useGameStore.getState().gameState).toBe(displayed);
+    expect(notifyEngineLost).not.toHaveBeenCalled();
+
+    controller.dispose();
+    useGameStore.getState().reset();
+    finishSubmission({ events: [], waiting_for: live.waiting_for });
+    await pendingDispatch;
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(isDispatchIdle()).toBe(true);
+    expect(useGameStore.getState().gameState).toBeNull();
+    expect(useGameStore.getState().waitingFor).toBeNull();
+    expect(adapter.getSnapshot).toHaveBeenCalledTimes(snapshotReads);
+    expect(adapter.submitAiActionProposal).not.toHaveBeenCalled();
+    expect(notifyEngineLost).not.toHaveBeenCalled();
   });
 
   it("wakes the human auto-pass controller after reconciling priority", async () => {
