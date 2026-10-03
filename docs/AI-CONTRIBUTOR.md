@@ -27,9 +27,11 @@ Skill references in this section use the `$skill` / `/skill` convention defined 
 
 | Tier     | Models | Procedure |
 |----------|--------|-----------|
-| Frontier | **Anthropic:** `claude-opus-4-8`+ (including `claude-opus-5`+), `claude-sonnet-5`+ · **OpenAI:** `gpt-5-5`+ (including the `gpt-5.6` family) · **Cursor/Codex:** `codex-5-5`+ · **Meta:** `muse-spark-1.3`+ | Full pipeline per §4 onward. |
+| Frontier | **Anthropic:** `claude-opus-4-8`+ (including `claude-opus-5`+), `claude-sonnet-5`+ · **OpenAI:** `gpt-5-5`+ (including the `gpt-5.6` family) · **Cursor/Codex:** `codex-5-5`+ · **Meta:** `muse-spark-1.3`+ · **DeepSeek:** `deepseek-v4.1-flash` (provisional — see below) | Full pipeline per §4 onward. |
 
 **Meta.** Floor `muse-spark-1.3`+, set by maintainer ruling. The Muse Code harness reports the `muse-spark` product name but no canonical versioned identifier, so Muse runs declare via the hedged `Model:` form below; a run that cannot establish itself at or above this floor aborts per the rule above instead of declaring a tier.
+
+**DeepSeek (provisional).** `deepseek-v4.1-flash` is listed provisionally as a proposal, not a ruling: maintainers should confirm admission, pin the version floor (for example `deepseek-v4.1-flash`+ versus an exact model), or remove the row. Until a ruling lands, the `Tier:` line on such PRs is the maintainers' call, not the contributor's.
 
 **Frontier-tier models only.** There is no longer a Standard tier. The floor is per-vendor and is stated by exact model, not by family wildcard — `claude-sonnet-5` is accepted while `claude-sonnet-4-6` is not, so a `claude-sonnet-*` reading of this table is wrong (but a *newer* version than the one named does qualify — see the reading rule below). **Not accepted:** `claude-opus-4-7` and below, `claude-sonnet-4-6` and below, every `claude-haiku-*` including `claude-haiku-4-5`, every `composer-*`, `gpt-5-4` and below including `gpt-5-3`, and `codex-5-4` and below. If that is your model, abort per §0 rather than opening a PR. A PR declaring a non-Frontier model, or whose commits show one, will be closed as out-of-policy without an implementation review. This is not a judgement about those models generally; it reflects that review capacity here is the scarce resource, and sub-Frontier runs have consistently consumed several maintainer rounds per PR to reach a standard a Frontier run reaches on the first pass.
 
