@@ -2616,6 +2616,16 @@ pub(crate) fn append_to_pending_continuation(
         return;
     };
 
+    // CR 608.2f + CR 608.2e: a continuation parked before the resolving
+    // player-scope seat began holds an enclosing chain's later instructions.
+    // The seat's remainder is parked above it as its own frame, never spliced
+    // onto its end — the twin of `prepend_to_pending_continuation_with_producer`'s
+    // floor guard.
+    if active_continuation_predates_player_scope_floor(state) {
+        state.park_ability_continuation(PendingContinuation::new(tail, state));
+        return;
+    }
+
     if let Some(active_occurrence) = state
         .active_ability_continuation()
         .map(|frame| frame.return_result_occurrence)

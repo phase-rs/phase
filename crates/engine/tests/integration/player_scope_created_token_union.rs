@@ -23,8 +23,9 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::zones::create_object;
 use engine::types::ability::{
     AbilityCondition, AbilityDefinition, ContinuousModification, ControllerRef, Duration, Effect,
-    PlayerFilter, PtValue, QuantityExpr, QuantityModification, ReplacementDefinition,
-    ResolvedAbility, SubAbilityLink, TargetFilter, TargetRef,
+    PlayerFilter, PreventionAmount, PtValue, QuantityExpr, QuantityModification,
+    ReplacementDefinition, ReplacementMode, ResolvedAbility, SubAbilityLink, TargetFilter,
+    TargetRef, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -1055,9 +1056,14 @@ fn paused_copy_seat_with_in_seat_remainder_completes_before_next_seat() {
 }
 
 fn gain_one_life(source: ObjectId) -> ResolvedAbility {
+    gain_life(source, 1)
+}
+
+/// "<controller> gains `value` life" — the controller is rebound per seat.
+fn gain_life(source: ObjectId, value: i32) -> ResolvedAbility {
     ResolvedAbility::new(
         Effect::GainLife {
-            amount: QuantityExpr::Fixed { value: 1 },
+            amount: QuantityExpr::Fixed { value },
             player: TargetFilter::Controller,
         },
         vec![],
@@ -1549,5 +1555,153 @@ fn paused_last_seat_above_parked_continuation_parks_the_queue_end() {
     assert!(
         run.prompts.iter().all(|p| p.authority),
         "REACH-GUARD (B1): authority parked at every prompt"
+    );
+}
+
+fn life_gain_of(events: &[GameEvent], player: PlayerId, gained: i32) -> Vec<usize> {
+    events
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| {
+            matches!(e, GameEvent::LifeChanged { player_id, amount, .. }
+                if *player_id == player && *amount == gained)
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
+fn damage_dealt_to(events: &[GameEvent], id: ObjectId) -> Vec<usize> {
+    events
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| {
+            matches!(e, GameEvent::DamageDealt { target: TargetRef::Object(target), .. }
+                if *target == id)
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// A seat that pauses through a damage handler's own continuation stash (the
+/// append route) while an enclosing continuation `U` is parked: seat 0's
+/// remaining in-seat damage finishes before seat 1 begins, and the whole
+/// clause, including its next instruction, finishes before `U` resumes.
+///
+/// "Each player deals 1 damage to each creature they control. You gain 2
+/// life." resolves above `U` ("you gain 1 life"). P0's first creature carries
+/// an optional prevention shield, so seat 0's damage pauses on a
+/// `ReplacementChoice` and the damage handler stashes the rest of seat 0's
+/// simultaneous damage as that seat's remainder. Declining the shield keeps
+/// the damage, so every recipient is dealt damage exactly once.
+#[test]
+fn appended_seat_remainder_above_parked_continuation_finishes_clause_before_it() {
+    let Board {
+        mut state,
+        source,
+        copied,
+        stale,
+    } = board(3, 48);
+    let shield = ReplacementDefinition::new(ReplacementEvent::DamageDone)
+        .valid_card(TargetFilter::SelfRef)
+        .prevention_shield(PreventionAmount::Next(1))
+        .mode(ReplacementMode::Optional { decline: None })
+        .description("You may prevent the next 1 damage to this creature.".to_string());
+    {
+        let obj = state.objects.get_mut(&copied).expect("shield host exists");
+        obj.replacement_definitions = vec![shield.clone()].into();
+        obj.base_replacement_definitions = Arc::new(vec![shield]);
+    }
+    let p1_bear = creature(&mut state, 71, P1, "Bear");
+    let p2_bear = creature(&mut state, 72, P2, "Bear");
+
+    let earlier = PendingContinuation::new(Box::new(gain_life(source, 1)), &state);
+    state.park_ability_continuation(earlier);
+
+    let mut tail = gain_life(source, 2);
+    tail.sub_link = SubAbilityLink::SequentialSibling;
+    let mut damage = ResolvedAbility::new(
+        Effect::DamageAll {
+            amount: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            player_filter: None,
+            damage_source: None,
+        },
+        vec![],
+        source,
+        P0,
+    );
+    damage.player_scope = Some(PlayerFilter::All);
+    damage.sub_ability = Some(Box::new(tail));
+
+    let mut events = Vec::new();
+    resolve_ability_chain(&mut state, &damage, &mut events, 0).expect("fan-out starts");
+    let WaitingFor::ReplacementChoice { player, .. } = state.waiting_for.clone() else {
+        panic!(
+            "REACH-GUARD: seat 0's damage pauses on the shield, got {:?}",
+            state.waiting_for
+        );
+    };
+    assert_eq!(
+        player, P0,
+        "REACH-GUARD: the shielded creature's controller is prompted"
+    );
+    assert!(
+        events.iter().all(|e| !matches!(
+            e,
+            GameEvent::DamageDealt { .. } | GameEvent::LifeChanged { .. }
+        )),
+        "REACH-GUARD: the clause paused on seat 0's first recipient, so seat 0 still has \
+         damage to deal and no later seat has begun"
+    );
+    let paused_frames = frame_kinds(&state);
+
+    state = round_trip(&state);
+    let result = apply(&mut state, P0, GameAction::ChooseReplacement { index: 1 })
+        .expect("declining the shield resolves");
+    events.extend(result.events);
+    assert_clause_drained(&state, "appended seat remainder above U");
+
+    let shielded = damage_dealt_to(&events, copied);
+    let remainder = damage_dealt_to(&events, stale);
+    let p1 = damage_dealt_to(&events, p1_bear);
+    let p2 = damage_dealt_to(&events, p2_bear);
+    for (label, hits) in [
+        ("P0's shielded creature", &shielded),
+        ("P0's other creature", &remainder),
+        ("P1's creature", &p1),
+        ("P2's creature", &p2),
+    ] {
+        assert_eq!(hits.len(), 1, "REACH-GUARD: {label} is dealt damage once");
+    }
+    let tail = life_gain_of(&events, P0, 2);
+    let enclosing = life_gain_of(&events, P0, 1);
+    assert_eq!(
+        (tail.len(), enclosing.len()),
+        (1, 1),
+        "REACH-GUARD: the next instruction and U each resolve once"
+    );
+    assert!(
+        shielded[0] < remainder[0] && remainder[0] < p1[0],
+        "CR 608.2f: seat 0's remaining damage precedes seat 1 \
+         (P0 shielded at {}, P0 remainder at {}, P1 at {})",
+        shielded[0],
+        remainder[0],
+        p1[0]
+    );
+    assert!(
+        p1[0] < p2[0] && p2[0] < tail[0],
+        "CR 608.2f + CR 608.2e: seats in APNAP order, then the next instruction"
+    );
+    assert!(
+        tail[0] < enclosing[0],
+        "CR 608.2e: the clause's next instruction precedes the enclosing chain's \
+         later instruction (tail at {}, U at {})",
+        tail[0],
+        enclosing[0]
+    );
+    assert_eq!(
+        paused_frames,
+        vec![FrameKind::AbilityContinuation; 3],
+        "P0.g: [enclosing continuation, clause frame, seat 0's remainder]"
     );
 }
