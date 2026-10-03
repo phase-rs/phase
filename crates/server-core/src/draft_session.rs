@@ -948,6 +948,7 @@ fn deck_payload_from_submission(
         //
         // A Commander pod launches client-side; see the pod launch path.
         commander: Vec::new(),
+        companion: submission.companion.clone().into_iter().collect(),
         attraction_deck: Vec::new(),
         signature_spell: Vec::new(),
         ..Default::default()
@@ -1002,15 +1003,17 @@ fn authorize_client_draft_action(seat: usize, action: DraftAction) -> Result<Dra
             card_instance_ids,
         }),
         // The seat is table authority and is overwritten with the authenticated
-        // one; the designation is player data and is carried through untouched.
+        // one; the designation and companion are player data and are carried through untouched.
         DraftAction::SubmitDeck {
             main_deck,
             commanders,
+            companion,
             ..
         } => Ok(DraftAction::SubmitDeck {
             seat: seat as u8,
             main_deck,
             commanders,
+            companion,
         }),
         // The seat is table authority and is overwritten with the
         // authenticated one; the pile and the decision are player data and are
@@ -2055,6 +2058,7 @@ mod tests {
                 seat: 0,
                 main_deck: vec!["x".to_string()],
                 commanders: vec!["x".to_string()],
+                companion: Some("Yorion, Sky Nomad".to_string()),
             },
         )
         .expect("submit deck is allowed for any seat");
@@ -2064,6 +2068,7 @@ mod tests {
                 seat: 3,
                 main_deck: vec!["x".to_string()],
                 commanders: vec!["x".to_string()],
+                companion: Some("Yorion, Sky Nomad".to_string()),
             }
         );
     }

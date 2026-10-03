@@ -225,7 +225,7 @@ import type {
  *       TypeScript mirrors are REQUIRED rather than optional, for that same
  *       reason — a client never constructs one of these views.
  */
-export const DRAFT_PROTOCOL_VERSION = 30 as const;
+export const DRAFT_PROTOCOL_VERSION = 31 as const;
 
 /** Canonical multiset fingerprint: deck order is UI-only, card counts are not. */
 export function deckSubmissionFingerprint(mainDeck: readonly string[]): string {
@@ -266,6 +266,7 @@ export interface DraftDeckPayload {
   main_deck: string[];
   sideboard: string[];
   commander: string[];
+  companion?: string[];
 }
 
 export interface DraftMatchDeckPayload {
@@ -475,6 +476,10 @@ export type DraftP2PMessage =
        * missing field.
        */
       commanders: string[];
+      /**
+       * CR 702.139a: optional companion designated for this deck.
+       */
+      companion?: string | null;
     }
   | {
       type: "draft_workspace_update";
@@ -999,12 +1004,17 @@ function validateSubmitDeck(raw: Record<string, unknown>): DraftP2PMessage {
   // CR 903.13e filler case is exactly that. Copy neither
   // `validateDraftEffectPick`'s `[0] === [1]` nor `validatePick`'s `new Set(...)`.
   //
-  // `mainDeck`'s guard above is deliberately a TYPE guard only (an array of
-  // strings), with no entry-count cap. A deck-SIZE refusal stays with the
-  // engine: `draftPeerSession`'s decode `.catch` drops a validator throw, so
-  // raising a size refusal here would convert an engine-loud refusal (which
-  // reaches the guest as `draft_error`) into a wire-silent one.
-  return { ...raw, type: "draft_submit_deck", commanders } as DraftP2PMessage;
+  let companion: string | null | undefined = undefined;
+  if (raw.companion !== undefined && raw.companion !== null) {
+    if (typeof raw.companion !== "string" || !raw.companion.trim()) {
+      throw new Error("Invalid draft deck submission: companion must be a non-empty string or null");
+    }
+    companion = requireDraftCardInstanceId(raw.companion, "companion", "deck submission");
+  } else if (raw.companion === null) {
+    companion = null;
+  }
+
+  return { ...raw, type: "draft_submit_deck", commanders, ...(companion !== undefined ? { companion } : {}) } as DraftP2PMessage;
 }
 
 function validateDraftEffectPick(raw: Record<string, unknown>): DraftP2PMessage {

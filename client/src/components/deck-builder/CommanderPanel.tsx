@@ -262,7 +262,7 @@ export function CommanderPanel({
         </div>
       )}
 
-      {companionCandidates !== null && (
+      {(companion || (companionCandidates !== null && companionCandidates.length > 0)) && (
         <div className="space-y-2 border-t border-white/10 pt-3">
           <h5 className="text-xs font-semibold uppercase text-gray-500">
             {t("commanderPanel.companion.heading")}
@@ -283,7 +283,7 @@ export function CommanderPanel({
           ) : (
             <p className="text-xs text-gray-500">{t("commanderPanel.companion.noCompanion")}</p>
           )}
-          {!companion && companionCandidates.map((name) => (
+          {!companion && companionCandidates?.map((name) => (
             <button
               key={name}
               onClick={() => onSetCompanion(name)}

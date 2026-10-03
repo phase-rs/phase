@@ -65,6 +65,16 @@ pub fn validate_companion_condition(
     condition: &CompanionCondition,
     main_deck: &[DeckEntry],
 ) -> bool {
+    validate_companion_condition_with_min_deck_size(condition, main_deck, 60)
+}
+
+/// CR 702.139: Validate that a main deck meets a companion's deckbuilding condition
+/// for a format with the given minimum deck size (e.g. 40 for Limited, 60 for Constructed).
+pub fn validate_companion_condition_with_min_deck_size(
+    condition: &CompanionCondition,
+    main_deck: &[DeckEntry],
+    min_deck_size: usize,
+) -> bool {
     match condition {
         CompanionCondition::EvenManaValues => main_deck
             .iter()
@@ -139,8 +149,8 @@ pub fn validate_companion_condition(
 
         CompanionCondition::MinDeckSizeOver(over) => {
             let total: u32 = main_deck.iter().map(|e| e.count).sum();
-            // Yorion requires 80+ cards (60 minimum + 20 over)
-            total >= 60 + over
+            // Yorion requires min_deck_size + 20 cards (e.g. 60 in 40-card Limited, 80 in 60-card Constructed)
+            total >= (min_deck_size as u32) + over
         }
 
         CompanionCondition::PermanentsHaveActivatedAbilities => main_deck.iter().all(|entry| {
@@ -234,6 +244,24 @@ pub fn is_eligible_companion(
     commanders: &[DeckEntry],
     uses_commander: bool,
 ) -> bool {
+    is_eligible_companion_with_min_deck_size(
+        companion,
+        starting_deck,
+        commanders,
+        uses_commander,
+        60,
+    )
+}
+
+/// Tests one candidate against a complete starting deck for a format with the
+/// given minimum deck size.
+pub fn is_eligible_companion_with_min_deck_size(
+    companion: &DeckEntry,
+    starting_deck: &[DeckEntry],
+    commanders: &[DeckEntry],
+    uses_commander: bool,
+    min_deck_size: usize,
+) -> bool {
     // allow-raw-authority: DeckEntry carries a printed CardFace snapshot; deck validation has no GameState or live object to query.
     let Some(condition) = companion.card.keywords.iter().find_map(|keyword| {
         if let Keyword::Companion(condition) = keyword {
@@ -245,7 +273,7 @@ pub fn is_eligible_companion(
         return false;
     };
 
-    validate_companion_condition(condition, starting_deck)
+    validate_companion_condition_with_min_deck_size(condition, starting_deck, min_deck_size)
         && commander_allows_companion(companion, starting_deck, commanders, uses_commander)
 }
 
@@ -260,34 +288,37 @@ fn companion_offers(
     pool: &PlayerDeckPool,
     sideboard_policy: SideboardPolicy,
     uses_commander: bool,
+    min_deck_size: usize,
 ) -> Vec<CompanionRevealChoice> {
     let starting =
         companion_starting_deck(&pool.current_main, &pool.current_commander, uses_commander);
-    let candidates: Vec<(CompanionChoiceSource, &DeckEntry)> = if uses_commander {
-        pool.current_companion
-            .first()
-            .map(|entry| (CompanionChoiceSource::Dedicated, entry))
-            .into_iter()
-            .collect()
-    } else if !matches!(sideboard_policy, SideboardPolicy::Forbidden) {
-        pool.current_sideboard
-            .iter()
-            .enumerate()
-            .map(|(index, entry)| (CompanionChoiceSource::Sideboard { index }, entry))
-            .collect()
-    } else {
-        Vec::new()
-    };
+    let candidates: Vec<(CompanionChoiceSource, &DeckEntry)> =
+        if let Some(entry) = pool.current_companion.first() {
+            vec![(CompanionChoiceSource::Dedicated, entry)]
+        } else if !matches!(sideboard_policy, SideboardPolicy::Forbidden) {
+            pool.current_sideboard
+                .iter()
+                .enumerate()
+                .map(|(index, entry)| (CompanionChoiceSource::Sideboard { index }, entry))
+                .collect()
+        } else {
+            Vec::new()
+        };
 
     candidates
         .into_iter()
         .filter_map(|(source, entry)| {
-            is_eligible_companion(entry, &starting, &pool.current_commander, uses_commander).then(
-                || CompanionRevealChoice {
-                    name: entry.card.name.clone(),
-                    source,
-                },
+            is_eligible_companion_with_min_deck_size(
+                entry,
+                &starting,
+                &pool.current_commander,
+                uses_commander,
+                min_deck_size,
             )
+            .then(|| CompanionRevealChoice {
+                name: entry.card.name.clone(),
+                source,
+            })
         })
         .collect()
 }
@@ -297,10 +328,12 @@ fn companion_offers(
 /// Returns CompanionReveal WaitingFor if eligible companions exist, otherwise None.
 pub fn check_companion_reveal(state: &GameState, player: PlayerId) -> Option<WaitingFor> {
     let pool = state.deck_pools.iter().find(|p| p.player == player)?;
+    let min_deck_size = state.format_config.deck_size.min_cards() as usize;
     let mut eligible = companion_offers(
         pool,
         state.format_config.sideboard_policy,
         state.format_config.uses_commander,
+        min_deck_size,
     );
     if state.format_config.format == GameFormat::TinyLeaders {
         eligible
@@ -365,6 +398,7 @@ pub fn handle_declare_companion(
             .iter_mut()
             .find(|pool| pool.player == player)
             .ok_or_else(|| "Player deck pool does not exist".to_string())?;
+        let min_deck_size = state.format_config.deck_size.min_cards() as usize;
         let starting = companion_starting_deck(
             &pool.current_main,
             &pool.current_commander,
@@ -378,11 +412,12 @@ pub fn handle_declare_companion(
                     .filter(|entry| entry.card.name == choice.name)
                     .cloned()
                     .ok_or_else(|| "Companion sideboard offer is stale".to_string())?;
-                if !is_eligible_companion(
+                if !is_eligible_companion_with_min_deck_size(
                     &entry,
                     &starting,
                     &pool.current_commander,
                     state.format_config.uses_commander,
+                    min_deck_size,
                 ) {
                     return Err("Companion is no longer eligible".to_string());
                 }
@@ -401,12 +436,14 @@ pub fn handle_declare_companion(
                     .filter(|entry| entry.card.name == choice.name)
                     .cloned()
                     .ok_or_else(|| "Dedicated companion offer is stale".to_string())?;
-                if !state.format_config.uses_commander
-                    || !is_eligible_companion(
+                if (!state.format_config.uses_commander
+                    && state.format_config.format != GameFormat::Limited)
+                    || !is_eligible_companion_with_min_deck_size(
                         &entry,
                         &starting,
                         &pool.current_commander,
                         state.format_config.uses_commander,
+                        min_deck_size,
                     )
                 {
                     return Err("Companion is no longer eligible".to_string());
@@ -635,7 +672,7 @@ pub(crate) fn resume_companion_to_hand_payment(
 mod tests {
     use super::*;
     use crate::types::card::CardFace;
-    use crate::types::card_type::{CardType, CoreType};
+    use crate::types::card_type::{CardType, CoreType, Supertype};
     use crate::types::keywords::CompanionCondition;
     use crate::types::mana::ManaCost;
 
@@ -896,6 +933,50 @@ mod tests {
         assert!(!validate_companion_condition(
             &CompanionCondition::MinDeckSizeOver(20),
             &deck
+        ));
+    }
+
+    #[test]
+    fn min_deck_size_over_limited_valid() {
+        // In 40-card Limited, Yorion (+20) requires 60 cards
+        let deck = vec![DeckEntry {
+            card: CardFace {
+                name: "Plains".to_string(),
+                card_type: CardType {
+                    supertypes: vec![Supertype::Basic],
+                    core_types: vec![CoreType::Land],
+                    subtypes: vec![],
+                },
+                ..Default::default()
+            },
+            count: 60,
+        }];
+        assert!(validate_companion_condition_with_min_deck_size(
+            &CompanionCondition::MinDeckSizeOver(20),
+            &deck,
+            40,
+        ));
+    }
+
+    #[test]
+    fn min_deck_size_over_limited_invalid() {
+        // 59 cards is not enough for Yorion in 40-card Limited (needs 60)
+        let deck = vec![DeckEntry {
+            card: CardFace {
+                name: "Plains".to_string(),
+                card_type: CardType {
+                    supertypes: vec![Supertype::Basic],
+                    core_types: vec![CoreType::Land],
+                    subtypes: vec![],
+                },
+                ..Default::default()
+            },
+            count: 59,
+        }];
+        assert!(!validate_companion_condition_with_min_deck_size(
+            &CompanionCondition::MinDeckSizeOver(20),
+            &deck,
+            40,
         ));
     }
 

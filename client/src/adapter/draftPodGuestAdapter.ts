@@ -49,7 +49,7 @@ export type DraftPodGuestEvent =
   | { type: "viewUpdated"; view: DraftPlayerView }
   | { type: "pickAcknowledged"; view: DraftPlayerView }
   | { type: "deckSubmissionAcknowledged"; submissionId: string; view: DraftPlayerView }
-  | { type: "recoveredDeckSubmissionAccepted"; mainDeck: string[]; commanders: string[]; view: DraftPlayerView }
+  | { type: "recoveredDeckSubmissionAccepted"; mainDeck: string[]; commanders: string[]; companion?: string | null; view: DraftPlayerView }
   | { type: "lobbyUpdate"; seats: SeatPublicView[]; joined: number; total: number }
   | { type: "draftPaused"; reason: DraftPauseReason }
   | { type: "draftResumed" }
@@ -295,6 +295,7 @@ export class DraftPodGuestAdapter {
           type: "recoveredDeckSubmissionAccepted",
           mainDeck: event.mainDeck,
           commanders: event.commanders,
+          companion: event.companion,
           view: event.view,
         });
         break;
@@ -467,9 +468,13 @@ export class DraftPodGuestAdapter {
     await this.guest.submitSharedStackDecision(pile, decision);
   }
 
-  async submitDeck(mainDeck: string[], commanders: string[]): Promise<void> {
+  async submitDeck(mainDeck: string[], commanders: string[], companion?: string | null): Promise<void> {
     if (!this.guest) throw new Error("Guest not initialized");
-    await this.guest.submitDeck(mainDeck, commanders);
+    if (companion !== undefined) {
+      await this.guest.submitDeck(mainDeck, commanders, companion);
+    } else {
+      await this.guest.submitDeck(mainDeck, commanders);
+    }
   }
 
   async updateWorkspace(state: DraftWorkspaceState): Promise<void> {

@@ -130,6 +130,43 @@ fn build_card_face_map(pool: &PlayerDeckPool) -> HashMap<String, crate::types::c
     faces
 }
 
+fn companion_for_rebuild(
+    pool: &PlayerDeckPool,
+    format: crate::types::format::GameFormat,
+) -> Vec<DeckEntry> {
+    if format != crate::types::format::GameFormat::Limited {
+        return (*pool.registered_companion).clone();
+    }
+    // CR 100.4b + CR 702.139a/b: In Limited, the dedicated companion represents a physical
+    // card set aside from the pool outside the main deck. Count all copies of the designated
+    // companion across the registered pool (main + sideboard + companion) and subtract those
+    // committed to the current main deck. If no copy remains outside the main deck, suppress
+    // the outside-game companion designation.
+    let mut rebuilt = Vec::new();
+    for comp in pool.registered_companion.iter() {
+        let total_registered: u32 = pool
+            .registered_main
+            .iter()
+            .chain(pool.registered_sideboard.iter())
+            .chain(pool.registered_companion.iter())
+            .filter(|e| e.card.name.eq_ignore_ascii_case(&comp.card.name))
+            .map(|e| e.count)
+            .sum();
+        let in_current_main: u32 = pool
+            .current_main
+            .iter()
+            .filter(|e| e.card.name.eq_ignore_ascii_case(&comp.card.name))
+            .map(|e| e.count)
+            .sum();
+        if total_registered > in_current_main {
+            let mut entry = comp.clone();
+            entry.count = 1;
+            rebuilt.push(entry);
+        }
+    }
+    rebuilt
+}
+
 fn deck_payload_from_current_pools(state: &GameState) -> Result<DeckPayload, String> {
     let p0 = state
         .deck_pools
@@ -149,6 +186,7 @@ fn deck_payload_from_current_pools(state: &GameState) -> Result<DeckPayload, Str
     //
     // Seats >= 2 are AI players (e.g., cEDH 4-player Bo3). Collect their pools
     // so `bracket_tier = Cedh` is not silently dropped between games.
+    let format = state.format_config.format;
     let ai_decks = state
         .deck_pools
         .iter()
@@ -157,9 +195,7 @@ fn deck_payload_from_current_pools(state: &GameState) -> Result<DeckPayload, Str
             main_deck: (*p.current_main).clone(),
             sideboard: (*p.current_sideboard).clone(),
             commander: (*p.current_commander).clone(),
-            // Dedicated companions are rebuilt from their registered external
-            // slot, never from the consumed current offer.
-            companion: (*p.registered_companion).clone(),
+            companion: companion_for_rebuild(p, format),
             attraction_deck: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: (*p.registered_scheme_deck).clone(),
@@ -180,7 +216,7 @@ fn deck_payload_from_current_pools(state: &GameState) -> Result<DeckPayload, Str
             main_deck: (*p0.current_main).clone(),
             sideboard: (*p0.current_sideboard).clone(),
             commander: (*p0.current_commander).clone(),
-            companion: (*p0.registered_companion).clone(),
+            companion: companion_for_rebuild(p0, format),
             attraction_deck: Vec::new(),
             planar_deck: (*p0.registered_planar_deck).clone(),
             scheme_deck: (*p0.registered_scheme_deck).clone(),
@@ -193,7 +229,7 @@ fn deck_payload_from_current_pools(state: &GameState) -> Result<DeckPayload, Str
             main_deck: (*p1.current_main).clone(),
             sideboard: (*p1.current_sideboard).clone(),
             commander: (*p1.current_commander).clone(),
-            companion: (*p1.registered_companion).clone(),
+            companion: companion_for_rebuild(p1, format),
             attraction_deck: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: (*p1.registered_scheme_deck).clone(),
@@ -440,6 +476,9 @@ pub fn handle_submit_sideboard(
     let registered_pool_map = {
         let mut map = entries_to_count_map(&pool.registered_main);
         for (name, count) in entries_to_count_map(&pool.registered_sideboard) {
+            *map.entry(name).or_insert(0) += count;
+        }
+        for (name, count) in entries_to_count_map(&pool.registered_companion) {
             *map.entry(name).or_insert(0) += count;
         }
         map

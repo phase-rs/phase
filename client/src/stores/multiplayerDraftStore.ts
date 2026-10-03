@@ -395,7 +395,7 @@ interface MultiplayerDraftActions {
   retryWorkspaceSync: () => Promise<void>;
   setIntergameWorkspaceState: (next: DraftWorkspaceState) => void;
   /** Both: submit the built deck. */
-  submitDeck: (commanders?: string[]) => Promise<void>;
+  submitDeck: (commanders?: string[], companion?: string | null) => Promise<void>;
   /** Host: kick a player from the pod. */
   kickPlayer: (seat: number, reason?: string) => void;
   /** Host: pause the draft. */
@@ -2148,14 +2148,16 @@ export const useMultiplayerDraftStore = create<
     set({ intergameWorkspaceState: workspace });
   },
 
-  submitDeck: async (commanders = []) => {
+  submitDeck: async (commanders = [], companion = null) => {
     const { role, view, workspaceState } = get();
     if (!view || !workspaceState) return;
     const workspace = reconcileWorkspaceState(workspaceState, view.pool);
     const partition = projectWorkspacePartition(workspace, view.pool);
 
     if (role === "host" && activeHostAdapter) {
-      const nextView = await activeHostAdapter.submitDeck(partition.mainDeck, commanders);
+      const nextView = companion
+        ? await activeHostAdapter.submitDeck(partition.mainDeck, commanders, companion)
+        : await activeHostAdapter.submitDeck(partition.mainDeck, commanders);
       installWorkspace({
         view: nextView,
         base: workspace,
@@ -2166,15 +2168,19 @@ export const useMultiplayerDraftStore = create<
           submittedPartition: partition,
         },
       });
-      void autosaveDraftDeck({ view, setCode: null, partition, commanders });
+      void autosaveDraftDeck({ view, setCode: null, partition, commanders, companion });
     } else if (role === "guest" && activeGuestAdapter) {
-      await activeGuestAdapter.submitDeck(partition.mainDeck, commanders);
+      if (companion) {
+        await activeGuestAdapter.submitDeck(partition.mainDeck, commanders, companion);
+      } else {
+        await activeGuestAdapter.submitDeck(partition.mainDeck, commanders);
+      }
       set({
         submittedDeck: partition.mainDeck,
         submittedWorkspaceState: cloneWorkspace(workspace),
         submittedPartition: partition,
       });
-      void autosaveDraftDeck({ view, setCode: null, partition, commanders });
+      void autosaveDraftDeck({ view, setCode: null, partition, commanders, companion });
     }
   },
 
@@ -3691,7 +3697,7 @@ function handleGuestEvent(event: DraftPodGuestEvent, set: SetFn): void {
       break;
     case "recoveredDeckSubmissionAccepted": {
       const partition = recoveredSubmissionPartition(event.mainDeck, event.view.pool);
-      if (partition) void autosaveDraftDeck({ view: event.view, setCode: null, partition, commanders: event.commanders });
+      if (partition) void autosaveDraftDeck({ view: event.view, setCode: null, partition, commanders: event.commanders, companion: event.companion });
       break;
     }
   }

@@ -52,6 +52,7 @@ export interface DraftRunState {
   lastOpponentSeat?: number;
   /** Exact engine tokens; an empty array is authoritative, absence is legacy. */
   draft_set_codes?: string[];
+  companion?: string | null;
   activeMatch?: DraftRunActiveMatch;
 }
 
@@ -90,8 +91,8 @@ export interface DraftMatchPayload {
    * Cube source applies.
    */
   booster_pack_pool?: string[] | null;
-  player: { main_deck: string[]; sideboard: string[]; commander: string[] };
-  opponent: { main_deck: string[]; sideboard: string[]; commander: string[] };
+  player: { main_deck: string[]; sideboard: string[]; commander: string[]; companion?: string[] };
+  opponent: { main_deck: string[]; sideboard: string[]; commander: string[]; companion?: string[] };
   ai_decks: never[];
 }
 
