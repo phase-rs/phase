@@ -744,6 +744,14 @@ fn register_transient_effect(
                     .collect();
             register_for_players(state, player_ids);
         }
+        // CR 608.2b + CR 608.2c: the declared player of the chain, bound to no
+        // one when that target was illegal on resolution.
+        Some(TargetFilter::DeclaredPlayer { group }) => register_for_players(
+            state,
+            crate::game::targeting::resolve_live_declared_player(state, ability, *group)
+                .into_iter()
+                .collect(),
+        ),
         Some(TargetFilter::None) | None => {}
         // CR 608.2k: A grant whose affected object is the ability's cost-paid
         // object (Jhoira of the Ghitu's suspend grant — "If it doesn't have

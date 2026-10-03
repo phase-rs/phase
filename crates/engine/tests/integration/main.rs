@@ -264,6 +264,7 @@ mod dawnbreak_reclaimer;
 mod death_priest_myrkul_oxford_anthem;
 mod deck_pool_projection;
 mod declare_attackers_end_combat_pairing;
+mod declared_player_binders;
 mod declared_player_reference;
 mod declared_player_slot_carry;
 mod declared_prevent_recipient_scope;

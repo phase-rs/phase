@@ -2041,36 +2041,76 @@ pub fn flatten_targets_in_chain(ability: &ResolvedAbility) -> Vec<TargetRef> {
 
 /// CR 608.2c + CR 115.1a: the first player target the chain node tagged
 /// `declares_chosen_group == Some(group)` announced, with its slot number as
-/// [`flatten_targets_in_chain`] numbers it (the numbering
+/// [`declared_targets_in_chain`] numbers it (the numbering
 /// `ResolvedAbility::illegal_target_slots` uses). The outer `None` means no node
-/// carries `group`; the inner `None` means that node announced no player.
+/// carries `group`; the inner `None` means that node announced no player or
+/// declares no slots of its own (an inheriting rider's snapshot, a paid
+/// "instead" delegator's mirror).
 pub(crate) fn declared_group_player_slot(
     root: &ResolvedAbility,
     group: crate::types::ability::ChosenGroupId,
 ) -> Option<Option<(usize, PlayerId)>> {
-    fn walk(
-        node: &ResolvedAbility,
-        group: crate::types::ability::ChosenGroupId,
-        offset: &mut usize,
-    ) -> Option<Option<(usize, PlayerId)>> {
-        let own = chain_node_targets(node);
-        if node.declares_chosen_group == Some(group) {
-            return Some(own.iter().enumerate().find_map(|(i, target)| match target {
-                TargetRef::Player(player) => Some((*offset + i, *player)),
-                TargetRef::Object(_) => None,
+    let mut found = None;
+    walk_declared_slots(root, &mut |node, _, first_slot| {
+        if found.is_none() && node.declares_chosen_group == Some(group) {
+            found = Some(first_slot.and_then(|first| {
+                chain_node_targets(node)
+                    .iter()
+                    .enumerate()
+                    .find_map(|(i, target)| match target {
+                        TargetRef::Player(player) => Some((first + i, *player)),
+                        TargetRef::Object(_) => None,
+                    })
             }));
         }
-        *offset += own.len();
-        node.sub_ability
-            .as_deref()
-            .and_then(|sub| walk(sub, group, offset))
-            .or_else(|| {
-                node.else_ability
-                    .as_deref()
-                    .and_then(|other| walk(other, group, offset))
-            })
+    });
+    found
+}
+
+type DeclaredSlotVisit<'a> = dyn FnMut(&'a ResolvedAbility, &[ChainStep], Option<usize>) + 'a;
+
+/// CR 601.2c + CR 115.10a: the single walk that numbers a chain's declared target slots; every consumer
+/// of that numbering reads it from here. Calls `visit(node, path, first_slot)`
+/// for each node reached from `root` in numbering order (the node, its
+/// `sub_ability` line, then its `else_ability`), where `path` is the steps from
+/// `root` to `node` and `first_slot` is `Some(n)` when the node's own entries
+/// are declarations numbered from `n`, `None` when they are not (a paid
+/// "instead" delegator's mirror, an inheriting rider's snapshot — see
+/// [`declared_targets_in_chain`]). A delegator continues into its delegate only.
+fn walk_declared_slots<'a>(root: &'a ResolvedAbility, visit: &mut DeclaredSlotVisit<'a>) {
+    fn go<'a>(
+        node: &'a ResolvedAbility,
+        targets_are_inherited: bool,
+        next_slot: &mut usize,
+        path: &mut Vec<ChainStep>,
+        visit: &mut DeclaredSlotVisit<'a>,
+    ) {
+        let delegate = paid_instead_delegate(node);
+        if delegate.is_some() || targets_are_inherited {
+            visit(node, path, None);
+        } else {
+            visit(node, path, Some(*next_slot));
+            *next_slot += chain_node_targets(node).len();
+        }
+        if let Some(delegate) = delegate {
+            path.push(ChainStep::SubAbility);
+            go(delegate, targets_are_inherited, next_slot, path, visit);
+            path.pop();
+            return;
+        }
+        if let Some(sub_ability) = node.sub_ability.as_deref() {
+            path.push(ChainStep::SubAbility);
+            let inherited = rider_entries_are_inherited(node, sub_ability);
+            go(sub_ability, inherited, next_slot, path, visit);
+            path.pop();
+        }
+        if let Some(else_ability) = node.else_ability.as_deref() {
+            path.push(ChainStep::ElseAbility);
+            go(else_ability, false, next_slot, path, visit);
+            path.pop();
+        }
     }
-    walk(root, group, &mut 0)
+    go(root, false, &mut 0, &mut Vec::new(), visit);
 }
 
 /// CR 601.2c: The targets a chain declares, as [`flatten_targets_in_chain`]
@@ -2091,28 +2131,12 @@ pub(crate) fn declared_group_player_slot(
 /// on what an inherited entry is. Genuinely distinct printed target words keep
 /// their multiplicity.
 pub fn declared_targets_in_chain(ability: &ResolvedAbility) -> Vec<TargetRef> {
-    fn visit(ability: &ResolvedAbility, targets_are_inherited: bool, out: &mut Vec<TargetRef>) {
-        if let Some(sub_ability) = paid_instead_delegate(ability) {
-            visit(sub_ability, targets_are_inherited, out);
-            return;
-        }
-        if !targets_are_inherited {
-            out.extend(chain_node_targets(ability));
-        }
-        if let Some(sub_ability) = ability.sub_ability.as_deref() {
-            visit(
-                sub_ability,
-                rider_entries_are_inherited(ability, sub_ability),
-                out,
-            );
-        }
-        if let Some(else_ability) = ability.else_ability.as_deref() {
-            visit(else_ability, false, out);
-        }
-    }
-
     let mut targets = Vec::new();
-    visit(ability, false, &mut targets);
+    walk_declared_slots(ability, &mut |node, _, first_slot| {
+        if first_slot.is_some() {
+            targets.extend(chain_node_targets(node));
+        }
+    });
     targets
 }
 
@@ -2206,107 +2230,49 @@ pub(crate) fn illegal_declared_target_slots(
     validated: &mut ResolvedAbility,
 ) -> Vec<usize> {
     let mut illegal = Vec::new();
-    visit_illegal_declared_target_slots(
-        Some(declared),
-        Some(validated),
-        false,
-        &mut 0,
-        &mut illegal,
-    );
+    walk_declared_slots(declared, &mut |node, path, first_slot| {
+        let mut twin = node_at_mut(validated, path);
+        if let Some(twin) = twin.as_mut() {
+            twin.illegal_local_target_slots.clear();
+        }
+        let Some(first_slot) = first_slot else {
+            return;
+        };
+        let mut survivors = twin
+            .as_ref()
+            .map_or_else(Vec::new, |twin| twin.targets.clone());
+        let declared_here = node.targets.iter().enumerate().filter(|(_, target)| {
+            !is_per_opponent_target_fanout(node) || matches!(target, TargetRef::Object(_))
+        });
+        for ((local_slot, target), slot) in declared_here.zip(first_slot..) {
+            match survivors.iter().position(|survivor| survivor == target) {
+                Some(found) => {
+                    survivors.swap_remove(found);
+                }
+                None => {
+                    illegal.push(slot);
+                    if let Some(twin) = twin.as_mut() {
+                        twin.illegal_local_target_slots.push(local_slot);
+                    }
+                }
+            }
+        }
+    });
     illegal
 }
 
 /// CR 608.2b: clears target-legality metadata before an execution path that skips the
 /// normal initial legality check.
 pub(crate) fn clear_illegal_local_target_slots(ability: &mut ResolvedAbility) {
-    let mut ignored = Vec::new();
-    visit_illegal_declared_target_slots(None, Some(ability), false, &mut 0, &mut ignored);
-}
-
-fn visit_illegal_declared_target_slots(
-    declared: Option<&ResolvedAbility>,
-    mut validated: Option<&mut ResolvedAbility>,
-    targets_are_inherited: bool,
-    next_slot: &mut usize,
-    illegal: &mut Vec<usize>,
-) {
-    if let Some(validated) = validated.as_deref_mut() {
-        validated.illegal_local_target_slots.clear();
-    }
-
-    if let Some(declared) = declared {
-        if let Some(delegate) = paid_instead_delegate(declared) {
-            let validated_delegate = validated
-                .as_deref_mut()
-                .and_then(|node| node.sub_ability.as_deref_mut());
-            visit_illegal_declared_target_slots(
-                Some(delegate),
-                validated_delegate,
-                targets_are_inherited,
-                next_slot,
-                illegal,
-            );
-            return;
-        }
-        if !targets_are_inherited {
-            let mut survivors = validated
-                .as_deref()
-                .map_or_else(Vec::new, |node| node.targets.clone());
-            for (local_slot, target) in declared.targets.iter().enumerate().filter(|(_, target)| {
-                !is_per_opponent_target_fanout(declared) || matches!(target, TargetRef::Object(_))
-            }) {
-                match survivors.iter().position(|survivor| survivor == target) {
-                    Some(found) => {
-                        survivors.swap_remove(found);
-                    }
-                    None => {
-                        illegal.push(*next_slot);
-                        if let Some(validated) = validated.as_deref_mut() {
-                            validated.illegal_local_target_slots.push(local_slot);
-                        }
-                    }
-                }
-                *next_slot += 1;
-            }
-        }
-        if let Some(sub_ability) = declared.sub_ability.as_deref() {
-            let validated_sub = validated
-                .as_deref_mut()
-                .and_then(|node| node.sub_ability.as_deref_mut());
-            let inherited = rider_entries_are_inherited(declared, sub_ability);
-            visit_illegal_declared_target_slots(
-                Some(sub_ability),
-                validated_sub,
-                inherited,
-                next_slot,
-                illegal,
-            );
-        }
-        if let Some(else_ability) = declared.else_ability.as_deref() {
-            let validated_else = validated
-                .as_deref_mut()
-                .and_then(|node| node.else_ability.as_deref_mut());
-            visit_illegal_declared_target_slots(
-                Some(else_ability),
-                validated_else,
-                false,
-                next_slot,
-                illegal,
-            );
-        }
-    } else if let Some(validated) = validated {
-        if let Some(sub_ability) = validated.sub_ability.as_deref_mut() {
-            visit_illegal_declared_target_slots(None, Some(sub_ability), false, next_slot, illegal);
-        }
-        if let Some(else_ability) = validated.else_ability.as_deref_mut() {
-            visit_illegal_declared_target_slots(
-                None,
-                Some(else_ability),
-                false,
-                next_slot,
-                illegal,
-            );
-        }
+    ability.illegal_local_target_slots.clear();
+    for next in [
+        ability.sub_ability.as_deref_mut(),
+        ability.else_ability.as_deref_mut(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        clear_illegal_local_target_slots(next);
     }
 }
 
@@ -5720,6 +5686,12 @@ pub(crate) fn collect_player_targets(
                 TargetRef::Player(player) => Some(player),
                 TargetRef::Object(_) => None,
             })
+            .into_iter()
+            .collect();
+    }
+    // CR 608.2b + CR 608.2c: "that player" is the declared player, no one when illegal.
+    if let TargetFilter::DeclaredPlayer { group } = target {
+        return crate::game::targeting::resolve_live_declared_player(state, ability, *group)
             .into_iter()
             .collect();
     }
@@ -25182,7 +25154,10 @@ mod tests {
         assert_eq!(exhausted, full_cost);
     }
 
-    /// CR 608.2c: a declared group names the slot `flatten_targets_in_chain` numbers.
+    /// CR 608.2c: a declared group names the slot `declared_targets_in_chain` numbers, and the
+    /// slot `illegal_declared_target_slots` marks when that player is pruned, after an
+    /// inheriting rider's snapshot or a paid "instead" delegator's mirror as well as in a
+    /// plain chain.
     #[test]
     fn declared_group_player_slot_follows_chain_numbering() {
         use crate::types::ability::ChosenGroupId;
@@ -25214,13 +25189,13 @@ mod tests {
         let root = node(None, vec![o(1)])
             .sub_ability(node(None, vec![p(0), o(2)]).sub_ability(node(Some(g2), vec![p(2)])))
             .else_ability(node(Some(g1), vec![o(3), p(1)]).sub_ability(node(Some(g3), vec![o(4)])));
-        let flat = flatten_targets_in_chain(&root);
+        let numbered = declared_targets_in_chain(&root);
         for (group, slot, player) in [(g2, 3, PlayerId(2)), (g1, 5, PlayerId(1))] {
             assert_eq!(
                 declared_group_player_slot(&root, group),
                 Some(Some((slot, player)))
             );
-            assert_eq!(flat[slot], TargetRef::Player(player));
+            assert_eq!(numbered[slot], TargetRef::Player(player));
         }
         assert_eq!(
             declared_group_player_slot(&root, g3),
@@ -25228,5 +25203,49 @@ mod tests {
             "a tagged node that announced no player"
         );
         assert_eq!(declared_group_player_slot(&root, g4), None, "no such group");
+
+        // The tagged node's player P1 follows a head `A`; per shape the chain before it differs.
+        let a = ObjectId(77);
+        let head = || change_zone_head(Zone::Exile, vec![TargetRef::Object(a)]);
+        let check = |label: &str, build: &dyn Fn(ResolvedAbility) -> ResolvedAbility| {
+            let declared = build(node(Some(g1), vec![p(1)]));
+            let (slot, player) = declared_group_player_slot(&declared, g1)
+                .flatten()
+                .unwrap_or_else(|| panic!("{label}: tagged node found"));
+            assert_eq!(player, PlayerId(1), "{label}");
+            assert_eq!(
+                declared_targets_in_chain(&declared)[slot],
+                p(1),
+                "{label}: lookup slot is the engine's slot"
+            );
+            let mut validated = build(node(Some(g1), vec![]));
+            assert_eq!(
+                illegal_declared_target_slots(&declared, &mut validated),
+                vec![slot],
+                "{label}: the stamp marks the lookup's slot when the player is pruned"
+            );
+            let tagged_node =
+                std::iter::successors(Some(&declared), |node| node.sub_ability.as_deref())
+                    .find(|node| node.declares_chosen_group == Some(g1))
+                    .expect("tagged node on the sub line");
+            assert_eq!(
+                declared_slots_ahead_of(&declared, tagged_node),
+                slot,
+                "{label}: the base offset counts the same slots"
+            );
+        };
+        check("plain", &|tagged| head().sub_ability(tagged));
+        check("rider", &|tagged| {
+            head().sub_ability(
+                gain_life_anaphor_rider(vec![TargetRef::Object(a)]).sub_ability(tagged),
+            )
+        });
+        check("delegator", &|tagged| {
+            let mut instead = head();
+            instead.condition = Some(AbilityCondition::AdditionalCostPaidInstead);
+            let mut delegator = head();
+            delegator.context.additional_cost_paid = true;
+            delegator.sub_ability(instead.sub_ability(tagged))
+        });
     }
 }
