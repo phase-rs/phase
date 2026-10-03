@@ -44,11 +44,23 @@ behavior or AST change. When in doubt, run the pipeline.
 tilt up             # continuous build/test — leave running
 ```
 
-**Tilt is the build system.** Do not run `cargo build`/`clippy`/`test` or
+**Tilt is the build system.** While Tilt is running, do not run
+`cargo build`/`clippy`/`test` or
 `pnpm type-check` directly — they fight Tilt for target locks. Read results with
 `tilt logs <resource> --tail 50`. The one command always run directly is
 `cargo fmt --all`. Full reference: the
 [`project-reference`](.claude/skills/project-reference/SKILL.md) skill.
+
+Confirm whether Tilt is running with `tilt get uiresource clippy` before choosing
+the verification path. If Tilt is unavailable, run the checks directly:
+
+```bash
+cargo clippy --all-targets -- -D warnings
+cargo test -p <changed-crate>
+```
+
+Replace `<changed-crate>` with the package name of each crate you changed. See
+`project-reference` above for frontend checks.
 
 ## Pull requests
 
