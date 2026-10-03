@@ -707,6 +707,10 @@ export const LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION - 1;
  * PROTOCOL_VERSION moved twice for GameState-only changes and the derived lobby
  * window went disjoint from the deployed broker's.
  *
+ * 15 — Tournament deck submission: a new `SubmitTournamentDeck` client message
+ *      (carries a DeckData) and a `deck_submitted` readiness flag on
+ *      PlayerSummary. Both additive; MIN_SUPPORTED stays 2. The deck is private
+ *      and never projected. Mirrored in types.ts (ClientMessage + PlayerSummary).
  * 14 — PairingView.report_gate gains a `Hosted` arm (the Rust ReportGate enum's
  *      new variant), the "a field's type changed" trigger. No broker emits it
  *      until server-authoritative hosting is wired behind
@@ -838,7 +842,7 @@ export const LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION - 1;
  * 1 — Initial lobby-owned version, covering the lobby variant set unchanged
  *     since #1880.
  */
-export const LOBBY_PROTOCOL_VERSION = 14;
+export const LOBBY_PROTOCOL_VERSION = 15;
 
 /**
  * Lowest broker LOBBY_PROTOCOL_VERSION this client accepts.

@@ -876,6 +876,16 @@ pub const MIN_SUPPORTED_PROTOCOL: u32 = PROTOCOL_VERSION.saturating_sub(1);
 /// broker's window went disjoint from the shipped client's. This constant is
 /// the fix — it moves only for reasons the lobby can actually observe.
 ///
+/// 15 — Tournament deck submission for server-hosted play: a new
+///      `SubmitTournamentDeck` [`LobbyClientMessage`] (client → broker, carrying
+///      a `DeckData`) — the "a lobby variant is added" trigger — and a
+///      `deck_submitted` readiness flag added to `PlayerSummary` (broker →
+///      client, on `TournamentUpdate`/`GetTournament`) — the "a field is added"
+///      trigger. The deck itself is private and never projected.
+///      [`MIN_SUPPORTED_LOBBY_PROTOCOL`] does not move: both are additive (an
+///      older reader ignores the new `PlayerSummary` field, and no broker rejects
+///      an absent one), and no client emits `SubmitTournamentDeck` until the
+///      hosted-play UI ships behind its own client-side capability floor.
 /// 14 — `PairingView.report_gate` (broker → client, on `TournamentUpdate` and
 ///      the `GetTournament` reply) gains a `ReportGate::Hosted` arm — the "a
 ///      field's type changed" trigger, a serialized enum's value space growing.
@@ -1140,7 +1150,7 @@ pub const MIN_SUPPORTED_PROTOCOL: u32 = PROTOCOL_VERSION.saturating_sub(1);
 ///     that direction can reject — into one legible handshake refusal.
 /// 1 — Initial lobby-owned version, covering the `LobbyClientMessage` /
 ///     `LobbyServerMessage` variant sets, unchanged since #1880.
-pub const LOBBY_PROTOCOL_VERSION: u32 = 14;
+pub const LOBBY_PROTOCOL_VERSION: u32 = 15;
 
 /// Lowest [`LOBBY_PROTOCOL_VERSION`] a broker accepts from a client.
 ///
@@ -1274,6 +1284,13 @@ pub struct PlayerSummary {
     pub player_key: String,
     pub display_name: String,
     pub dropped: bool,
+    /// Whether this entrant has submitted a deck for server-hosted play
+    /// ([`crate::tournament::TournamentManager::submit_deck`]) — a readiness flag
+    /// the client renders (e.g. "deck submitted" / "deck needed"). Only the
+    /// boolean crosses the wire: the deck itself is private and NEVER projected,
+    /// so an opponent cannot see a decklist before the match.
+    #[serde(default)]
+    pub deck_submitted: bool,
 }
 
 impl From<&crate::tournament::TournamentPlayer> for PlayerSummary {
@@ -1282,6 +1299,7 @@ impl From<&crate::tournament::TournamentPlayer> for PlayerSummary {
             player_key: player.player_key.clone(),
             display_name: player.display_name.clone(),
             dropped: player.dropped,
+            deck_submitted: player.deck.is_some(),
         }
     }
 }
@@ -1430,6 +1448,7 @@ impl From<&crate::tournament::TournamentMeta> for TournamentView {
                         player_key: key.clone(),
                         display_name: key.clone(),
                         dropped: false,
+                        deck_submitted: false,
                     }
                 })
         };
@@ -1634,6 +1653,21 @@ pub enum LobbyClientMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<TournamentRequestId>,
     },
+    /// Player-gated: submit (or resubmit) the token owner's deck for
+    /// server-hosted play. Held privately on the entrant until the server spawns
+    /// their pairing's table; the tournament enforces no deck legality. The token
+    /// need only belong to a seated, non-dropped entrant (not to any particular
+    /// pairing) — a deck is per-event, not per-pairing.
+    SubmitTournamentDeck {
+        code: String,
+        player_token: String,
+        deck: DeckData,
+        /// This caller's [`TournamentRequestId`]. See
+        /// [`LobbyClientMessage::StartTournamentRound`] — same additive,
+        /// optional shape, same `None`-means-uncorrelated meaning.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<TournamentRequestId>,
+    },
     /// Player-gated: drop the token's owner from the event.
     DropFromTournament {
         code: String,
@@ -1706,6 +1740,7 @@ impl LobbyClientMessage {
         match self {
             Self::StartTournamentRound { request_id, .. }
             | Self::ReportMatchResult { request_id, .. }
+            | Self::SubmitTournamentDeck { request_id, .. }
             | Self::DropFromTournament { request_id, .. }
             | Self::EndTournament { request_id, .. } => *request_id,
             Self::ClientHello { .. }
@@ -1997,6 +2032,7 @@ fn is_known_lobby_tag(tag: &str) -> bool {
             | "GetTournament"
             | "StartTournamentRound"
             | "ReportMatchResult"
+            | "SubmitTournamentDeck"
             | "DropFromTournament"
             | "EndTournament"
             | "RenewTournamentCredential"
@@ -2051,7 +2087,7 @@ mod tests {
     /// rather than silently re-coupling the lobby to full-game churn.
     #[test]
     fn lobby_protocol_version_is_independent_of_the_full_game_one() {
-        assert_eq!(LOBBY_PROTOCOL_VERSION, 14);
+        assert_eq!(LOBBY_PROTOCOL_VERSION, 15);
         // Deliberately still 2, not 12: every lobby version past 2 keeps this
         // floor's guarantee — that a version-2 client can still parse every
         // frame it already understands. Individually: 3 is additive in both
@@ -2197,6 +2233,7 @@ mod tests {
                     ),
                     display_name: "Alice".to_string(),
                     dropped: false,
+                    deck: None,
                 },
                 TournamentPlayer {
                     player_key: "key-b".to_string(),
@@ -2206,6 +2243,7 @@ mod tests {
                     ),
                     display_name: "Bob".to_string(),
                     dropped: true,
+                    deck: None,
                 },
             ],
             pairings: vec![TournamentPairing {
@@ -2259,7 +2297,7 @@ mod tests {
     /// the same rule, as does version 13 (`FormatConfig` gains the optional
     /// `allow_experimental_dungeons` flag) and version 14 (`Hosted` report gate).
     #[test]
-    fn the_tournament_chain_spans_lobby_versions_four_through_fourteen() {
+    fn the_tournament_chain_spans_lobby_versions_four_through_fifteen() {
         const PRE_TOURNAMENT_LOBBY_VERSION: u32 = 3;
         const TOURNAMENT_SET_LOBBY_VERSION: u32 = PRE_TOURNAMENT_LOBBY_VERSION + 1;
         const CORRELATED_SETTLEMENT_LOBBY_VERSION: u32 = TOURNAMENT_SET_LOBBY_VERSION + 1;
@@ -2281,7 +2319,11 @@ mod tests {
         // Adds a `Hosted` arm to `PairingView.report_gate` (a serialized enum's
         // value space grows) — the "a field's type changed" trigger.
         const HOSTED_MATCH_LOBBY_VERSION: u32 = EXPERIMENTAL_DUNGEONS_LOBBY_VERSION + 1;
-        assert_eq!(LOBBY_PROTOCOL_VERSION, HOSTED_MATCH_LOBBY_VERSION);
+        // Adds a `SubmitTournamentDeck` client variant and a `deck_submitted`
+        // `PlayerSummary` field — the "a lobby variant is added" / "a field is
+        // added" triggers.
+        const DECK_SUBMISSION_LOBBY_VERSION: u32 = HOSTED_MATCH_LOBBY_VERSION + 1;
+        assert_eq!(LOBBY_PROTOCOL_VERSION, DECK_SUBMISSION_LOBBY_VERSION);
     }
 
     /// The guard for [`is_known_lobby_tag`], which is a string `matches!` and
@@ -2314,6 +2356,10 @@ mod tests {
                 r#"{"type":"ReportMatchResult","data":{"code":"TOUR01","pairing_id":0,"player_token":"tok","outcome":{"Decisive":{"winner":"key-a","game_wins":{"key-a":2,"key-b":1}}}}}"#,
             ),
             (
+                "SubmitTournamentDeck",
+                r#"{"type":"SubmitTournamentDeck","data":{"code":"TOUR01","player_token":"tok","deck":{"main_deck":["Island","Forest"]}}}"#,
+            ),
+            (
                 "DropFromTournament",
                 r#"{"type":"DropFromTournament","data":{"code":"TOUR01","player_token":"tok"}}"#,
             ),
@@ -2333,6 +2379,10 @@ mod tests {
             (
                 "ReportMatchResult (correlated)",
                 r#"{"type":"ReportMatchResult","data":{"code":"TOUR01","pairing_id":0,"player_token":"tok","outcome":{"Decisive":{"winner":"key-a","game_wins":{"key-a":2,"key-b":1}}},"request_id":43}}"#,
+            ),
+            (
+                "SubmitTournamentDeck (correlated)",
+                r#"{"type":"SubmitTournamentDeck","data":{"code":"TOUR01","player_token":"tok","deck":{"main_deck":["Island","Forest"]},"request_id":44}}"#,
             ),
             (
                 "DropFromTournament (correlated)",
@@ -2639,15 +2689,21 @@ mod tests {
                 outcome: PodOutcome::Draw,
                 request_id: Some(TournamentRequestId(2)),
             },
+            LobbyClientMessage::SubmitTournamentDeck {
+                code: "TOUR01".to_string(),
+                player_token: "tok".to_string(),
+                deck: DeckData::default(),
+                request_id: Some(TournamentRequestId(3)),
+            },
             LobbyClientMessage::DropFromTournament {
                 code: "TOUR01".to_string(),
                 player_token: "tok".to_string(),
-                request_id: Some(TournamentRequestId(3)),
+                request_id: Some(TournamentRequestId(4)),
             },
             LobbyClientMessage::EndTournament {
                 code: "TOUR01".to_string(),
                 organizer_token: "tok".to_string(),
-                request_id: Some(TournamentRequestId(4)),
+                request_id: Some(TournamentRequestId(5)),
             },
         ];
         for (i, msg) in gated.iter().enumerate() {
@@ -2917,8 +2973,14 @@ mod tests {
     /// (point replies) legitimately do.
     #[test]
     fn broadcast_tournament_messages_never_carry_a_token() {
-        let meta = meta_fixture();
+        let mut meta = meta_fixture();
+        const PRIVATE_CARD: &str = "private-deck-card-do-not-leak";
+        meta.players[0].deck = Some(DeckData {
+            main_deck: vec![PRIVATE_CARD.to_string()],
+            ..Default::default()
+        });
         let view = TournamentView::from(&meta);
+        assert!(view.players[0].deck_submitted);
         let broadcasts = [
             LobbyServerMessage::TournamentUpdate {
                 code: meta.code.clone(),
@@ -2937,6 +2999,10 @@ mod tests {
             for secret in [ORGANIZER_SECRET, PLAYER_A_SECRET, PLAYER_B_SECRET] {
                 assert!(!json.contains(secret), "{json} leaked {secret}");
             }
+            assert!(
+                !json.contains(PRIVATE_CARD),
+                "{json} leaked a submitted deck"
+            );
         }
     }
 

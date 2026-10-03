@@ -1311,6 +1311,7 @@ fn reject_if_disabled(msg: &ClientMessage, mode: ServerMode) -> Option<&'static 
         | ClientMessage::GetTournament { .. }
         | ClientMessage::StartTournamentRound { .. }
         | ClientMessage::ReportMatchResult { .. }
+        | ClientMessage::SubmitTournamentDeck { .. }
         | ClientMessage::DropFromTournament { .. }
         | ClientMessage::EndTournament { .. }
         | ClientMessage::RenewTournamentCredential { .. } => None,
@@ -1527,6 +1528,7 @@ fn full_socket_authority(message: &ClientMessage) -> FullSocketAuthority {
         | ClientMessage::GetTournament { .. }
         | ClientMessage::StartTournamentRound { .. }
         | ClientMessage::ReportMatchResult { .. }
+        | ClientMessage::SubmitTournamentDeck { .. }
         | ClientMessage::DropFromTournament { .. }
         | ClientMessage::EndTournament { .. }
         // Rotation is authorized by the presented credential exactly as the
@@ -5207,6 +5209,17 @@ fn to_lobby_client_message(msg: &ClientMessage) -> Option<lobby_broker::LobbyCli
             outcome: outcome.clone(),
             request_id: *request_id,
         },
+        ClientMessage::SubmitTournamentDeck {
+            code,
+            player_token,
+            deck,
+            request_id,
+        } => L::SubmitTournamentDeck {
+            code: code.clone(),
+            player_token: player_token.clone(),
+            deck: deck.clone(),
+            request_id: *request_id,
+        },
         ClientMessage::DropFromTournament {
             code,
             player_token,
@@ -7505,6 +7518,7 @@ fn operation_failed_message(msg: &ClientMessage, message: String) -> Option<Serv
         | ClientMessage::GetTournament { .. }
         | ClientMessage::StartTournamentRound { .. }
         | ClientMessage::ReportMatchResult { .. }
+        | ClientMessage::SubmitTournamentDeck { .. }
         | ClientMessage::DropFromTournament { .. }
         | ClientMessage::EndTournament { .. }
         | ClientMessage::RenewTournamentCredential { .. } => None,
@@ -12287,6 +12301,7 @@ async fn handle_client_message(
         | ClientMessage::GetTournament { .. }
         | ClientMessage::StartTournamentRound { .. }
         | ClientMessage::ReportMatchResult { .. }
+        | ClientMessage::SubmitTournamentDeck { .. }
         | ClientMessage::DropFromTournament { .. }
         | ClientMessage::EndTournament { .. }
         | ClientMessage::RenewTournamentCredential { .. } => {
@@ -19061,6 +19076,15 @@ mod mode_gate_tests {
                 },
                 request_id: None,
             },
+            ClientMessage::SubmitTournamentDeck {
+                code: "TOUR01".into(),
+                player_token: "player-tok".into(),
+                deck: server_core::protocol::DeckData {
+                    main_deck: vec!["Island".into(), "Forest".into()],
+                    ..Default::default()
+                },
+                request_id: None,
+            },
             ClientMessage::DropFromTournament {
                 code: "TOUR01".into(),
                 player_token: "player-tok".into(),
@@ -19085,11 +19109,13 @@ mod mode_gate_tests {
             player_key: "key-a".into(),
             display_name: "Alice".into(),
             dropped: false,
+            deck_submitted: false,
         };
         let bob = PlayerSummary {
             player_key: "key-b".into(),
             display_name: "Bob".into(),
             dropped: true,
+            deck_submitted: true,
         };
         TournamentView {
             summary: TournamentSummary {
@@ -19174,7 +19200,7 @@ mod mode_gate_tests {
     #[test]
     fn tournament_variants_survive_the_canonical_lobby_roundtrip() {
         let frames = tournament_client_frames();
-        assert_eq!(frames.len(), 8, "every new client variant is covered");
+        assert_eq!(frames.len(), 9, "every new client variant is covered");
 
         for msg in &frames {
             let projected = to_lobby_client_message(msg).unwrap_or_else(|| {

@@ -15,6 +15,7 @@
 //! the Worker already advertises so the two shells agree on name length.
 
 use crate::protocol::DraftLobbyMetadata;
+use engine::starter_decks::DeckData;
 
 /// Max display-name length, in characters. Matches `DISPLAY_NAME_MAX_LENGTH` in
 /// the Worker's `name-filter.ts`.
@@ -376,6 +377,27 @@ pub fn validate_report_match_result_fields(
     Ok(())
 }
 
+pub struct SubmitTournamentDeckFields<'a> {
+    pub code: &'a str,
+    pub player_token: &'a str,
+    pub deck: &'a DeckData,
+}
+
+pub fn validate_submit_tournament_deck_fields(
+    fields: SubmitTournamentDeckFields<'_>,
+) -> Result<(), String> {
+    validate_token("code", fields.code, MAX_GAME_CODE_LEN)?;
+    validate_token("player_token", fields.player_token, MAX_TOKEN_LEN)?;
+    // Bound the attacker-controlled deck through the SAME single authority that
+    // bounds a casual `CreateGameWithSettings`/`JoinGameWithPassword` deck — the
+    // tournament deck is the identical `DeckData`, just retained on the entrant
+    // rather than a game session. No deck LEGALITY is enforced (the tournament
+    // touches no `GameState`); resolution rejects anything unusable when the
+    // pairing's table is actually spawned.
+    crate::inbound_guard::validate_deck_payload("deck", fields.deck)?;
+    Ok(())
+}
+
 pub struct DropFromTournamentFields<'a> {
     pub code: &'a str,
     pub player_token: &'a str,
@@ -565,6 +587,18 @@ pub fn validate_lobby_message(msg: &crate::protocol::LobbyClientMessage) -> Resu
                 outcome,
             })?;
         }
+        M::SubmitTournamentDeck {
+            code,
+            player_token,
+            deck,
+            request_id: _,
+        } => {
+            validate_submit_tournament_deck_fields(SubmitTournamentDeckFields {
+                code,
+                player_token,
+                deck,
+            })?;
+        }
         M::DropFromTournament {
             code,
             player_token,
@@ -672,6 +706,92 @@ mod tests {
         assert!(validate_optional_label("f", Some("Room"), MAX_ROOM_NAME_LEN).is_ok());
         let long = "r".repeat(41);
         assert!(validate_optional_label("f", Some(&long), MAX_ROOM_NAME_LEN).is_err());
+    }
+
+    #[test]
+    fn submit_tournament_deck_bounds_the_deck_via_the_shared_authority() {
+        // A normal (empty) deck passes.
+        assert!(
+            validate_submit_tournament_deck_fields(SubmitTournamentDeckFields {
+                code: "T",
+                player_token: "tok",
+                deck: &empty_deck(),
+            })
+            .is_ok()
+        );
+        // An over-sized main deck is refused by the same limit a casual game uses.
+        let mut oversized = empty_deck();
+        oversized.main_deck = vec!["Forest".to_string(); MAX_MAIN_DECK_ENTRIES + 1];
+        assert!(
+            validate_submit_tournament_deck_fields(SubmitTournamentDeckFields {
+                code: "T",
+                player_token: "tok",
+                deck: &oversized,
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn submit_tournament_deck_bounds_every_supplementary_list() {
+        let cases = [
+            (
+                "companion",
+                DeckData {
+                    companion: vec!["Card".into(); 5],
+                    ..Default::default()
+                },
+            ),
+            (
+                "attraction_deck",
+                DeckData {
+                    attraction_deck: vec!["Card".into(); 201],
+                    ..Default::default()
+                },
+            ),
+            (
+                "contraption_deck",
+                DeckData {
+                    contraption_deck: vec!["Card".into(); 201],
+                    ..Default::default()
+                },
+            ),
+            (
+                "sticker_sheets",
+                DeckData {
+                    sticker_sheets: vec!["Card".into(); 201],
+                    ..Default::default()
+                },
+            ),
+            (
+                "signature_spell",
+                DeckData {
+                    signature_spell: vec!["Card".into(); 5],
+                    ..Default::default()
+                },
+            ),
+        ];
+        for (field, deck) in cases {
+            let err = guard_inbound(&M::SubmitTournamentDeck {
+                code: "T".into(),
+                player_token: "tok".into(),
+                deck,
+                request_id: None,
+            })
+            .unwrap_err();
+            assert!(err.contains(field), "{err}");
+        }
+
+        let mut invalid_name = empty_deck();
+        invalid_name.sticker_sheets = vec!["x".repeat(MAX_DECK_CARD_NAME_LEN + 1)];
+        let err = guard_inbound(&M::SubmitTournamentDeck {
+            code: "T".into(),
+            player_token: "tok".into(),
+            deck: invalid_name,
+            request_id: None,
+        })
+        .unwrap_err();
+        assert!(err.contains("sticker_sheets[0]"), "{err}");
     }
 
     #[test]
