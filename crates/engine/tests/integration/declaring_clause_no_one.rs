@@ -9,7 +9,7 @@ use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
-use engine::types::phase::Phase;
+use engine::types::phase::{Phase, PhaseGroup, TurnSegment};
 use engine::types::player::{PlayerCounterKind, PlayerId};
 use engine::types::zones::Zone;
 
@@ -423,8 +423,8 @@ fn classes(f: TargetFilter) -> Vec<(&'static str, Effect)> {
         (
             "AdditionalPhase",
             Effect::AdditionalPhase {
-                target: f.clone(),
-                phase: Phase::PostCombatMain,
+                recipient: ExtraPhaseRecipient::TargetedPlayer(f.clone()),
+                segment: TurnSegment::Phase(PhaseGroup::PostcombatMain),
                 after: ExtraPhaseAnchor::ThisPhase { named: None },
                 followed_by: vec![],
                 count: q(1),
