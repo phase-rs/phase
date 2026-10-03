@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "standard",
   "version": 1,
-  "updated": "2026-10-02T00:00:00Z",
+  "updated": "2026-10-03T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/standard",
   "decks": [
     {
@@ -159,19 +159,31 @@
       "main": [
         {
           "count": 4,
-          "name": "Esper Origins"
+          "name": "Fabled Passage"
         },
         {
           "count": 2,
-          "name": "Keen-Eyed Curator"
+          "name": "Elven Passage"
         },
         {
-          "count": 1,
-          "name": "Surrak, Elusive Hunter"
+          "count": 2,
+          "name": "Escape Tunnel"
         },
         {
           "count": 3,
-          "name": "Mightform Harmonizer"
+          "name": "Ba Sing Se"
+        },
+        {
+          "count": 14,
+          "name": "Forest"
+        },
+        {
+          "count": 1,
+          "name": "Bushwhack"
+        },
+        {
+          "count": 4,
+          "name": "Llanowar Elves"
         },
         {
           "count": 4,
@@ -179,7 +191,7 @@
         },
         {
           "count": 4,
-          "name": "Llanowar Elves"
+          "name": "Esper Origins"
         },
         {
           "count": 4,
@@ -190,12 +202,8 @@
           "name": "Lumbering Worldwagon"
         },
         {
-          "count": 2,
-          "name": "Shared Roots"
-        },
-        {
-          "count": 4,
-          "name": "Earthbender Ascension"
+          "count": 1,
+          "name": "Surrak, Elusive Hunter"
         },
         {
           "count": 1,
@@ -203,33 +211,45 @@
         },
         {
           "count": 4,
-          "name": "Sapling Nursery"
+          "name": "Earthbender Ascension"
         },
         {
-          "count": 3,
-          "name": "Ba Sing Se"
-        },
-        {
-          "count": 4,
-          "name": "Escape Tunnel"
-        },
-        {
-          "count": 4,
-          "name": "Fabled Passage"
+          "count": 2,
+          "name": "Glimpse the Core"
         },
         {
           "count": 1,
-          "name": "Demolition Field"
+          "name": "Keen-Eyed Curator"
         },
         {
-          "count": 14,
-          "name": "Forest"
+          "count": 4,
+          "name": "Mightform Harmonizer"
+        },
+        {
+          "count": 3,
+          "name": "Sapling Nursery"
+        },
+        {
+          "count": 1,
+          "name": "Promising Vein"
         }
       ],
       "sideboard": [
         {
+          "count": 3,
+          "name": "Meltstrider's Gear"
+        },
+        {
           "count": 1,
-          "name": "Gigantic Big Bear"
+          "name": "Keen-Eyed Curator"
+        },
+        {
+          "count": 2,
+          "name": "Torpor Orb"
+        },
+        {
+          "count": 1,
+          "name": "Sandman, Shifting Scoundrel"
         },
         {
           "count": 2,
@@ -240,20 +260,12 @@
           "name": "Mossborn Hydra"
         },
         {
-          "count": 3,
-          "name": "Torpor Orb"
-        },
-        {
-          "count": 2,
-          "name": "Meltstrider's Resolve"
+          "count": 1,
+          "name": "Leatherhead, Swamp Stalker"
         },
         {
           "count": 1,
-          "name": "Keen-Eyed Curator"
-        },
-        {
-          "count": 2,
-          "name": "Warg Tactics"
+          "name": "Sapling Nursery"
         }
       ]
     },
