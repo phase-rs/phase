@@ -49851,7 +49851,7 @@ fn exile_from_top_until_second_person_nonland_filter() {
     let Effect::ExileFromTopUntil { player: _, until } = e else {
         panic!("expected ExileFromTopUntil, got {:?}", e);
     };
-    let UntilCondition::NextMatches { filter } = until else {
+    let UntilCondition::NextMatches { filter, .. } = until else {
         panic!("expected NextMatches arm, got {:?}", until);
     };
     // Filter is `Typed { type_filters: [Non(Land)] }`.
@@ -49880,7 +49880,7 @@ fn exile_from_top_until_supertype_legendary_filter() {
     let Effect::ExileFromTopUntil { player: _, until } = e else {
         panic!("expected ExileFromTopUntil, got {:?}", e);
     };
-    let UntilCondition::NextMatches { filter } = until else {
+    let UntilCondition::NextMatches { filter, .. } = until else {
         panic!("expected NextMatches arm, got {:?}", until);
     };
     let TargetFilter::Typed(typed) = filter else {
@@ -49913,7 +49913,7 @@ fn exile_from_top_until_third_person_possessive_etali_form() {
     let Effect::ExileFromTopUntil { player: _, until } = e else {
         panic!("expected ExileFromTopUntil, got {:?}", e);
     };
-    let UntilCondition::NextMatches { filter } = until else {
+    let UntilCondition::NextMatches { filter, .. } = until else {
         panic!("expected NextMatches arm, got {:?}", until);
     };
     let TargetFilter::Typed(typed) = filter else {
@@ -49942,7 +49942,7 @@ fn chaos_wand_lowers_to_targeted_exile_until_optional_cast_and_cleanup() {
         *player,
         TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
     );
-    let UntilCondition::NextMatches { filter } = until else {
+    let UntilCondition::NextMatches { filter, .. } = until else {
         panic!("expected NextMatches, got {until:?}");
     };
     let TargetFilter::Or { filters } = filter else {
@@ -50124,7 +50124,7 @@ fn each_player_exiles_outer_effect_lowers_to_exile_from_top_until() {
     let Effect::ExileFromTopUntil { ref until, .. } = *def.effect else {
         panic!("expected outer ExileFromTopUntil, got {:?}", def.effect);
     };
-    let UntilCondition::NextMatches { filter } = until else {
+    let UntilCondition::NextMatches { filter, .. } = until else {
         panic!("expected NextMatches arm, got {:?}", until);
     };
     let TargetFilter::Typed(typed) = filter else {
@@ -79818,4 +79818,307 @@ fn prevention_declared_prefixes_keep_full_filters_and_counts() {
             "{text}: announced count"
         );
     }
+}
+
+/// CR 608.2c: the until-clause's count is a quantity — "a/an" is one card,
+/// a number word is that many, and "X" binds through the clause's where-X.
+#[test]
+fn exile_from_top_until_reads_the_match_count() {
+    let count_of = |text: &str| {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        match &*def.effect {
+            Effect::ExileFromTopUntil {
+                until: UntilCondition::NextMatches { count, .. },
+                ..
+            } => count.clone(),
+            other => panic!("expected a counted exile loop for {text:?}, got {other:?}"),
+        }
+    };
+    assert_eq!(
+        count_of("Exile cards from the top of your library until you exile a nonland card."),
+        QuantityExpr::Fixed { value: 1 }
+    );
+    assert_eq!(
+        count_of(
+            "Exile cards from the top of your library until you exile two nonland cards \
+             with mana value 4 or less."
+        ),
+        QuantityExpr::Fixed { value: 2 }
+    );
+    assert_eq!(
+        count_of(
+            "Exile cards from the top of your library until you exile X nonland cards, \
+             where X is the number of cards in your hand."
+        ),
+        QuantityExpr::Ref {
+            qty: QuantityRef::HandSize {
+                player: PlayerScope::Controller
+            }
+        }
+    );
+}
+
+/// An X the engine cannot represent ("the number of times this
+/// creature has mutated" — Auspicious Starrix) is an honest gap, never a
+/// one-card loop.
+#[test]
+fn exile_from_top_until_with_an_unrepresentable_x_is_a_gap() {
+    let def = parse_effect_chain(
+        "Exile cards from the top of your library until you exile X permanent cards, \
+         where X is the number of times this creature has mutated. Put those permanent \
+         cards onto the battlefield.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(&*def.effect, Effect::Unimplemented { name, .. } if name == "where_x_binding"),
+        "got {:?}",
+        def.effect
+    );
+}
+
+/// CR 608.2c + CR 608.2g + CR 608.2d: Invasion of Alara's body. One of the two
+/// found cards may be cast during resolution, one of those still in exile goes
+/// to hand, and the other exiled cards — those not matching the loop's filter —
+/// go to the bottom.
+#[test]
+fn invasion_of_alara_body_lowers_cast_one_hand_one_bottom_the_rest() {
+    let def = parse_effect_chain(
+        "Exile cards from the top of your library until you exile two nonland cards with \
+         mana value 4 or less. You may cast one of those two cards without paying its mana \
+         cost. Put one of them into your hand. Then put the other cards exiled this way on \
+         the bottom of your library in a random order.",
+        AbilityKind::Spell,
+    );
+    let Effect::ExileFromTopUntil {
+        until: UntilCondition::NextMatches { filter: found, .. },
+        ..
+    } = &*def.effect
+    else {
+        panic!("expected the counted exile loop, got {:?}", def.effect);
+    };
+    let cast = def.sub_ability.as_deref().expect("cast step");
+    assert!(
+        matches!(
+            &*cast.effect,
+            Effect::CastFromZone {
+                target: TargetFilter::ParentTarget,
+                without_paying_mana_cost: true,
+                driver: CastFromZoneDriver::ResolutionWindow {
+                    bounds: ResolutionCastWindow {
+                        max_casts: Some(1),
+                        max_total_mv: None,
+                    },
+                },
+                ..
+            }
+        ),
+        "got {:?}",
+        cast.effect
+    );
+    assert!(!cast.optional, "the window's offer is the only \"may\"");
+    let choose = cast.sub_ability.as_deref().expect("hand choice");
+    assert!(
+        matches!(
+            &*choose.effect,
+            Effect::ChooseFromZone {
+                count: 1,
+                zone: Zone::Exile,
+                candidate_source: ZoneChoiceCandidateSource::ParentTargets,
+                ..
+            }
+        ),
+        "got {:?}",
+        choose.effect
+    );
+    let to_hand = choose.sub_ability.as_deref().expect("hand move");
+    assert!(matches!(
+        &*to_hand.effect,
+        Effect::ChangeZone {
+            destination: Zone::Hand,
+            ..
+        }
+    ));
+    let bottom = to_hand.sub_ability.as_deref().expect("bottom step");
+    let Effect::PutAtLibraryPosition {
+        target,
+        position: LibraryPosition::Bottom,
+        ..
+    } = &*bottom.effect
+    else {
+        panic!("expected the bottom step, got {:?}", bottom.effect);
+    };
+    assert_eq!(
+        *target,
+        TargetFilter::And {
+            filters: vec![
+                TargetFilter::ExiledBySource,
+                TargetFilter::Not {
+                    filter: Box::new(found.clone()),
+                },
+            ],
+        }
+    );
+}
+
+/// The two readings above are tied to the exile-until loop: without one, "put
+/// one of them into your hand" is not a choice from an exiled batch, and "the
+/// other cards exiled this way" keeps its plain exiled-pile reading.
+#[test]
+fn batch_readings_need_a_prior_exile_until_loop() {
+    let def = parse_effect_chain(
+        "Exile the top three cards of your library. Put the other cards exiled this way on \
+         the bottom of your library in a random order.",
+        AbilityKind::Spell,
+    );
+    let bottom = def.sub_ability.as_deref().expect("bottom step");
+    assert!(
+        matches!(
+            &*bottom.effect,
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::ExiledBySource,
+                ..
+            }
+        ),
+        "got {:?}",
+        bottom.effect
+    );
+    let def = parse_effect_chain(
+        "Exile the top two cards of your library. Put one of them into your hand.",
+        AbilityKind::Spell,
+    );
+    // Reach guard: the first clause parsed as the fixed-count top exile.
+    assert!(
+        matches!(
+            &*def.effect,
+            Effect::ExileTop {
+                player: TargetFilter::Controller,
+                count: QuantityExpr::Fixed { value: 2 },
+                ..
+            }
+        ),
+        "got {:?}",
+        def.effect
+    );
+    assert_no_batch_hand_choice(&def);
+}
+
+fn assert_no_batch_hand_choice(def: &AbilityDefinition) {
+    let mut node = Some(def);
+    while let Some(ability) = node {
+        assert!(
+            !matches!(
+                &*ability.effect,
+                Effect::ChooseFromZone {
+                    candidate_source: ZoneChoiceCandidateSource::ParentTargets,
+                    ..
+                }
+            ),
+            "no exiled batch to choose from: {:?}",
+            ability.effect
+        );
+        node = ability.sub_ability.as_deref();
+    }
+}
+
+/// CR 608.2c + CR 608.2d: "put one of them into your hand" reads the loop's
+/// found cards from its parent targets, so it binds only when nothing between
+/// the loop and it may replace those targets. With a targeting clause in
+/// between it fails closed; the same text without that clause binds.
+#[test]
+fn a_clause_between_the_loop_and_the_hand_choice_fails_closed() {
+    let loop_then = |middle: &str| {
+        parse_effect_chain(
+            &format!(
+                "Exile cards from the top of your library until you exile two nonland cards.{middle} \
+                 Put one of them into your hand."
+            ),
+            AbilityKind::Spell,
+        )
+    };
+    let is_counted_loop = |effect: &Effect| {
+        matches!(
+            effect,
+            Effect::ExileFromTopUntil {
+                until: UntilCondition::NextMatches {
+                    count: QuantityExpr::Fixed { value: 2 },
+                    ..
+                },
+                ..
+            }
+        )
+    };
+
+    let blocked = loop_then(" Tap target creature.");
+    assert!(is_counted_loop(&blocked.effect), "got {:?}", blocked.effect);
+    let tap = blocked.sub_ability.as_deref().expect("tap step");
+    assert!(
+        matches!(&*tap.effect, Effect::SetTapState { .. }),
+        "got {:?}",
+        tap.effect
+    );
+    let hand = tap.sub_ability.as_deref().expect("hand step");
+    assert!(
+        matches!(&*hand.effect, Effect::Unimplemented { .. }),
+        "got {:?}",
+        hand.effect
+    );
+    assert_no_batch_hand_choice(&blocked);
+
+    // Yes-partner: the same loop with nothing in between binds the choice.
+    let bound = loop_then("");
+    assert!(is_counted_loop(&bound.effect), "got {:?}", bound.effect);
+    let hand = bound.sub_ability.as_deref().expect("hand step");
+    assert!(
+        matches!(
+            &*hand.effect,
+            Effect::ChooseFromZone {
+                candidate_source: ZoneChoiceCandidateSource::ParentTargets,
+                ..
+            }
+        ),
+        "got {:?}",
+        hand.effect
+    );
+}
+
+/// CR 608.2c: "each other card exiled this way" after an exile-until loop
+/// (Codie, Vociferous Codex) is every exiled card except the found one — the
+/// loop's non-matching cards, all of them — not "another card" in the
+/// not-the-source sense, and not one card.
+#[test]
+fn each_other_card_exiled_this_way_after_an_exile_until_loop_is_the_rest() {
+    let def = parse_effect_chain(
+        "Exile cards from the top of your library until you exile an instant or sorcery card. \
+         Until end of turn, you may cast that card without paying its mana cost. Put each \
+         other card exiled this way on the bottom of your library in a random order.",
+        AbilityKind::Spell,
+    );
+    let Effect::ExileFromTopUntil {
+        until: UntilCondition::NextMatches { filter: found, .. },
+        ..
+    } = &*def.effect
+    else {
+        panic!("expected the exile loop, got {:?}", def.effect);
+    };
+    let mut node = def.sub_ability.as_deref();
+    let mut bottom = None;
+    while let Some(ability) = node {
+        if let Effect::PutAtLibraryPosition { target, count, .. } = &*ability.effect {
+            bottom = Some((target.clone(), count.clone()));
+        }
+        node = ability.sub_ability.as_deref();
+    }
+    let (target, count) = bottom.expect("the bottom step");
+    assert_eq!(
+        target,
+        TargetFilter::And {
+            filters: vec![
+                TargetFilter::ExiledBySource,
+                TargetFilter::Not {
+                    filter: Box::new(found.clone()),
+                },
+            ],
+        }
+    );
+    assert_eq!(count, QuantityExpr::Fixed { value: 0 });
 }

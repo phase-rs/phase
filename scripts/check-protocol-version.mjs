@@ -78,7 +78,8 @@ const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
 // +30: the v101 mana-ability activation kind and departed-source LKI.
 // +31: v102 adds the tagged SharedCardTypes quantity.
 // +32: v103 removes FormatConfig.allow_experimental_dungeons for the format-derived dungeon pool.
-const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 32;
+// +33: the v104 counted exile-until loop and the ParentTargets zone choice.
+const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 33;
 // The LOBBY message-set version, not derived from the full-game number above.
 // The classifier below refuses an expression only on the SOURCE constants; this
 // script never reads itself, so its own EXPECTED_* must stay literals.
@@ -135,7 +136,8 @@ const PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION = 54;
 // +29: wire 83 moves with full-game v101 for the mana-ability activation kind.
 // +30: wire 84 moves with full-game v102 for SharedCardTypes.
 // +31: wire 85 moves with full-game v103 for the format-derived dungeon pool.
-const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 31;
+// +32: wire 86 moves with full-game v104 for the counted exile-until loop.
+const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 32;
 // The P2P DRAFT wire version. A FIFTH independent surface, and the one this
 // script previously did not read at all: `DRAFT_PROTOCOL_VERSION` is an
 // EXACT-MATCH first-contact gate (p2p-draft-host.ts / p2p-draft-guest.ts refuse

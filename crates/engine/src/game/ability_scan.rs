@@ -475,6 +475,9 @@ fn scan_zone_choice_candidate_source(
         // record, narrowed by live zone membership. Both are ability/state reads
         // this local node cannot see; fail closed.
         ZoneChoiceCandidateSource::CostPaidObjects => Axes::CONSERVATIVE,
+        // CR 608.2c: the pool is the ability's handed-over targets, narrowed by
+        // live zone membership; fail closed like the cost-paid record.
+        ZoneChoiceCandidateSource::ParentTargets => Axes::CONSERVATIVE,
     }
 }
 

@@ -1,5 +1,5 @@
 use crate::game::filter::{matches_target_filter, FilterContext};
-use crate::game::quantity::resolve_quantity;
+use crate::game::quantity::resolve_quantity_with_targets;
 use crate::types::ability::{
     Effect, EffectError, EffectKind, ObjectProperty, ResolvedAbility, TargetFilter, TargetRef,
     UntilCondition,
@@ -16,9 +16,9 @@ use crate::types::zones::Zone;
 ///
 /// * `NextMatches(filter)` — Etali / Cascade / Discover-shape (CR 701.57a /
 ///   CR 702.85a). The just-exiled card is checked against the filter; the loop
-///   ends on the first match. The hit `ObjectId` is injected into the
-///   sub_ability chain as a target so downstream "cast that card" / "put it
-///   onto the battlefield" sub-effects can address it.
+///   ends on the `count`th match (the first, for "a/an"). The hit `ObjectId`s
+///   are injected into the sub_ability chain as targets so downstream "cast
+///   that card" / "put it onto the battlefield" sub-effects can address them.
 ///
 /// * `CumulativeThreshold { property, comparator, threshold }` — Tasha's
 ///   Hideous Laughter / Dream Harvest / Improvisation Capstone (CR 202.3 +
@@ -86,15 +86,27 @@ pub fn resolve(
     // dynamic refs read from the same context the ability is resolving in.
     let threshold_value: Option<i32> = match until {
         UntilCondition::NextMatches { .. } => None,
-        UntilCondition::CumulativeThreshold { threshold, .. } => Some(resolve_quantity(
-            state,
-            threshold,
-            ability.controller,
-            ability.source_id,
-        )),
+        UntilCondition::CumulativeThreshold { threshold, .. } => {
+            Some(resolve_quantity_with_targets(state, threshold, ability))
+        }
     };
 
-    let mut hit_id: Option<ObjectId> = None;
+    // CR 608.2c + CR 107.3a: how many matching cards end a `NextMatches` loop
+    // ("until you exile two nonland cards …"), resolved once in the resolving
+    // ability's context so an X count reads the X its controller announced.
+    let match_count: usize = match until {
+        UntilCondition::NextMatches { count, .. } => {
+            usize::try_from(resolve_quantity_with_targets(state, count, ability)).unwrap_or(0)
+        }
+        UntilCondition::CumulativeThreshold { .. } => 0,
+    };
+
+    let mut hits: Vec<ObjectId> = resume.map(|resume| resume.hits.clone()).unwrap_or_default();
+    // "until you exile X … cards" with X = 0 is satisfied before the first
+    // card moves, so nothing is exiled.
+    if matches!(until, UntilCondition::NextMatches { .. }) && hits.len() >= match_count {
+        library.clear();
+    }
     let mut cumulative = resume.map_or(0, |resume| resume.cumulative);
     let mut linked_batch = resume
         .map(|resume| resume.linked_batch.clone())
@@ -146,6 +158,7 @@ pub fn resolve(
                         remaining: library[index + 1..].to_vec(),
                         linked_batch,
                         cumulative,
+                        hits,
                     },
                 ));
                 super::append_to_pending_continuation(state, Some(Box::new(ability.clone())));
@@ -184,8 +197,11 @@ pub fn resolve(
             }
         }
         let stopped = match until {
-            UntilCondition::NextMatches { filter } => {
-                matches_target_filter(state, obj_id, filter, &ctx)
+            UntilCondition::NextMatches { filter, .. } => {
+                if matches_target_filter(state, obj_id, filter, &ctx) {
+                    hits.push(obj_id);
+                }
+                hits.len() >= match_count
             }
             UntilCondition::CumulativeThreshold {
                 property,
@@ -197,9 +213,6 @@ pub fn resolve(
             }
         };
         if stopped {
-            if matches!(until, UntilCondition::NextMatches { .. }) {
-                hit_id = Some(obj_id);
-            }
             break;
         }
     }
@@ -220,7 +233,7 @@ pub fn resolve(
     // CR 400.7: An object that moves from one zone to another becomes a new
     // object. Sub-ability chaining differs per stop-condition kind:
     //
-    // * NextMatches: inject the hit card as the sub-ability's target so
+    // * NextMatches: inject the hit cards as the sub-ability's targets so
     //   "cast that card" / "you may put it onto the battlefield" address the
     //   right object. If no hit was found, the "cast that card" link is
     //   skipped, but any downstream exile-cleanup link that references
@@ -234,7 +247,7 @@ pub fn resolve(
     if let Some(ref sub) = ability.sub_ability {
         match until {
             UntilCondition::NextMatches { .. } => {
-                if let Some(hit) = hit_id {
+                if !hits.is_empty() {
                     let mut sub_clone = sub.as_ref().clone();
                     // CR 608.2c + CR 610.3: Sub-ability target injection is conditional
                     // on the sub-ability's effect filter:
@@ -255,13 +268,15 @@ pub fn resolve(
                     //   as the parent target so anaphoric `ParentTarget` / `SelfRef`
                     //   references resolve to the just-exiled card.
                     if !sub_effect_references_exiled_by_source(&sub_clone) {
-                        sub_clone.targets = vec![TargetRef::Object(hit)];
+                        sub_clone.targets = hits.iter().copied().map(TargetRef::Object).collect();
                     }
                     sub_clone.context = ability.context.clone();
+                    // CR 400.7j: the rest of this ability finds the cards this
+                    // loop exiled through the exact batch, not through a
+                    // source-wide ledger or a trigger's earlier snapshot.
+                    sub_clone.context.exile_until_batch = linked_batch.clone();
                     super::bind_resolution_exile_batch_paths(&mut sub_clone, &linked_batch);
                     super::resolve_ability_chain(state, &sub_clone, events, 1)?;
-                } else if linked_batch.is_empty() {
-                    // CR 607.2a: no current batch means there is no "rest" to move.
                 } else if let Some(cleanup) = first_exiled_by_source_link(sub.as_ref()) {
                     // CR 608.2c + CR 701.13a: Library exhausted with no hit
                     // (Jodah, the Unifier — no legendary nonland with lesser
@@ -277,18 +292,44 @@ pub fn resolve(
                     // cleanup's `DistinctFrom { ParentTarget }` leg fails open
                     // when there are no object targets, so clearing `targets`
                     // here lets every exiled card be swept to the bottom.
-                    let mut cleanup_clone = cleanup.clone();
-                    cleanup_clone.targets = linked_batch
-                        .iter()
-                        .map(|pin| TargetRef::Object(pin.object_id))
-                        .collect();
-                    cleanup_clone.target_incarnations = linked_batch.clone();
-                    // CR 607.2a + CR 608.2c: explicit targets are this exact batch.
-                    if let Effect::PutAtLibraryPosition { target, .. } = &mut cleanup_clone.effect {
-                        *target = TargetFilter::Any;
+                    let mut pool = linked_batch.clone();
+                    // CR 607.2a: a bare exiled-cards cleanup also takes the cards
+                    // the ability exiled before its loop (Possibility Storm's
+                    // "exiles it"), as `put_on_top` does after a match.
+                    if matches!(
+                        &cleanup.effect,
+                        Effect::PutAtLibraryPosition { target, .. }
+                            if target.without_exile_anaphor().is_none()
+                    ) {
+                        for id in super::put_on_top::cards_exiled_with_source_now(
+                            state,
+                            ability.source_id,
+                        ) {
+                            let pin = crate::types::identifiers::ObjectIncarnationRef::from_object(
+                                &state.objects[&id],
+                            );
+                            if !pool.contains(&pin) {
+                                pool.push(pin);
+                            }
+                        }
                     }
-                    cleanup_clone.context = ability.context.clone();
-                    super::resolve_ability_chain(state, &cleanup_clone, events, 1)?;
+                    // CR 607.2a: no current pool means there is no "rest" to move.
+                    if !pool.is_empty() {
+                        let mut cleanup_clone = cleanup.clone();
+                        cleanup_clone.targets = pool
+                            .iter()
+                            .map(|pin| TargetRef::Object(pin.object_id))
+                            .collect();
+                        cleanup_clone.target_incarnations = pool;
+                        // CR 607.2a + CR 608.2c: explicit targets are this exact pool.
+                        if let Effect::PutAtLibraryPosition { target, .. } =
+                            &mut cleanup_clone.effect
+                        {
+                            *target = TargetFilter::Any;
+                        }
+                        cleanup_clone.context = ability.context.clone();
+                        super::resolve_ability_chain(state, &cleanup_clone, events, 1)?;
+                    }
                 }
             }
             UntilCondition::CumulativeThreshold { .. } => {
@@ -449,6 +490,7 @@ mod tests {
             Effect::ExileFromTopUntil {
                 player: TargetFilter::Controller,
                 until: UntilCondition::NextMatches {
+                    count: QuantityExpr::Fixed { value: 1 },
                     filter: nonland_filter(),
                 },
             },
@@ -508,6 +550,7 @@ mod tests {
                 // "their library" to the scoped event player, not Controller.
                 player: TargetFilter::ScopedPlayer,
                 until: UntilCondition::NextMatches {
+                    count: QuantityExpr::Fixed { value: 1 },
                     filter: nonland_filter(),
                 },
             },
@@ -605,6 +648,7 @@ mod tests {
                     TypedFilter::default().controller(ControllerRef::Opponent),
                 ),
                 until: UntilCondition::NextMatches {
+                    count: QuantityExpr::Fixed { value: 1 },
                     filter: instant_or_sorcery_filter(),
                 },
             },
@@ -712,6 +756,7 @@ mod tests {
                     TypedFilter::default().controller(ControllerRef::Opponent),
                 ),
                 until: UntilCondition::NextMatches {
+                    count: QuantityExpr::Fixed { value: 1 },
                     filter: instant_or_sorcery_filter(),
                 },
             },
@@ -790,6 +835,7 @@ mod tests {
             Effect::ExileFromTopUntil {
                 player: TargetFilter::Controller,
                 until: UntilCondition::NextMatches {
+                    count: QuantityExpr::Fixed { value: 1 },
                     filter: nonland_filter(),
                 },
             },
@@ -834,6 +880,119 @@ mod tests {
         assert_eq!(
             state.players[0].library.iter().copied().collect::<Vec<_>>(),
             vec![land]
+        );
+    }
+
+    /// Saved shapes from before the counted loop still load: a `NextMatches`
+    /// without `count` is a one-match loop, a paused loop without `hits` has
+    /// found nothing, and a context without `exile_until_batch` has no batch.
+    #[test]
+    fn shapes_saved_before_the_counted_loop_still_load() {
+        let until: UntilCondition =
+            serde_json::from_str(r#"{"type":"NextMatches","filter":{"type":"Any"}}"#).unwrap();
+        assert_eq!(
+            until,
+            UntilCondition::NextMatches {
+                filter: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 1 },
+            }
+        );
+
+        let pending: crate::types::game_state::PendingExileFromTopUntil = serde_json::from_str(
+            r#"{"pending_card":7,"remaining":[8],"linked_batch":[],"cumulative":0}"#,
+        )
+        .unwrap();
+        assert!(pending.hits.is_empty());
+
+        let context = serde_json::to_value(crate::types::ability::SpellContext::default()).unwrap();
+        assert!(context.get("exile_until_batch").is_none());
+        let loaded: crate::types::ability::SpellContext = serde_json::from_value(context).unwrap();
+        assert!(loaded.exile_until_batch.is_empty());
+    }
+
+    /// CR 616.1: a counted loop paused for a replacement choice stores the
+    /// matches it already found, so the resumed loop still stops on the second.
+    #[test]
+    fn a_counted_loop_paused_for_a_replacement_choice_stores_its_matches() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Replacement Source".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.replacement_definitions.push(
+                ReplacementDefinition::new(ReplacementEvent::Moved)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::ChangeZone {
+                            origin: None,
+                            destination: Zone::Graveyard,
+                            target: TargetFilter::Any,
+                            owner_library: false,
+                            enter_transformed: false,
+                            enters_under: None,
+                            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                            enters_attacking: false,
+                            up_to: false,
+                            enter_with_counters: vec![],
+                            conditional_enter_with_counters: vec![],
+                            face_down_profile: None,
+                            enters_modified_if: None,
+                        },
+                    ))
+                    .destination_zone(Zone::Exile)
+                    .valid_card(TargetFilter::Typed(TypedFilter::new(TypeFilter::Land))),
+            );
+            obj.replacement_definitions
+                .push(obj.replacement_definitions[0].clone());
+        }
+
+        let first = add_library_card(&mut state, PlayerId(0), "Bear", false);
+        let land = add_library_card(&mut state, PlayerId(0), "Forest", true);
+        let second = add_library_card(&mut state, PlayerId(0), "Wolf", false);
+        let tail = add_library_card(&mut state, PlayerId(0), "Elk", false);
+        state.players[0].library = crate::im::vector![first, land, second, tail];
+
+        let ability = ResolvedAbility::new(
+            Effect::ExileFromTopUntil {
+                player: TargetFilter::Controller,
+                until: UntilCondition::NextMatches {
+                    count: QuantityExpr::Fixed { value: 2 },
+                    filter: nonland_filter(),
+                },
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+        assert_eq!(
+            state.pending_exile_from_top_until.as_ref().unwrap().hits,
+            vec![first]
+        );
+        while matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }) {
+            crate::game::engine::apply_as_current(
+                &mut state,
+                GameAction::ChooseReplacement { index: 0 },
+            )
+            .unwrap();
+        }
+
+        assert_eq!(state.objects[&first].zone, Zone::Exile);
+        assert_eq!(state.objects[&second].zone, Zone::Exile);
+        assert_eq!(
+            state.objects[&tail].zone,
+            Zone::Library,
+            "the loop stops on its second match"
         );
     }
 
@@ -922,6 +1081,7 @@ mod tests {
             Effect::ExileFromTopUntil {
                 player: TargetFilter::Controller,
                 until: UntilCondition::NextMatches {
+                    count: QuantityExpr::Fixed { value: 1 },
                     filter: nonland_filter(),
                 },
             },
@@ -995,6 +1155,7 @@ mod tests {
             Effect::ExileFromTopUntil {
                 player: TargetFilter::Controller,
                 until: UntilCondition::NextMatches {
+                    count: QuantityExpr::Fixed { value: 1 },
                     filter: nonland_filter(),
                 },
             },
@@ -1097,6 +1258,7 @@ mod tests {
             Effect::ExileFromTopUntil {
                 player: TargetFilter::Controller,
                 until: UntilCondition::NextMatches {
+                    count: QuantityExpr::Fixed { value: 1 },
                     filter: nonland_filter(),
                 },
             },
@@ -1272,6 +1434,7 @@ mod tests {
             Effect::ExileFromTopUntil {
                 player: TargetFilter::Controller,
                 until: UntilCondition::NextMatches {
+                    count: QuantityExpr::Fixed { value: 1 },
                     filter: nonland_filter(),
                 },
             },
@@ -1477,6 +1640,7 @@ mod tests {
                 Effect::ExileFromTopUntil {
                     player: TargetFilter::Controller,
                     until: UntilCondition::NextMatches {
+                        count: QuantityExpr::Fixed { value: 1 },
                         filter: nonland_filter(),
                     },
                 },
@@ -1650,6 +1814,7 @@ mod tests {
             Effect::ExileFromTopUntil {
                 player: TargetFilter::Controller,
                 until: UntilCondition::NextMatches {
+                    count: QuantityExpr::Fixed { value: 1 },
                     filter: nonland_filter(),
                 },
             },
@@ -1826,6 +1991,51 @@ mod tests {
             Zone::Library,
             "card after the threshold was reached should remain in the library"
         );
+    }
+
+    /// CR 107.3a: an X threshold reads the X announced for the resolving
+    /// ability. No printed card parses an X threshold, so this drives the
+    /// resolver directly.
+    #[test]
+    fn cumulative_threshold_reads_the_announced_x() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "X Threshold".to_string(),
+            Zone::Battlefield,
+        );
+        let c1 = add_library_card_with_mv(&mut state, PlayerId(0), "Three", 3);
+        let c2 = add_library_card_with_mv(&mut state, PlayerId(0), "Four", 4);
+        let c3 = add_library_card_with_mv(&mut state, PlayerId(0), "Five", 5);
+        state.players[0].library = crate::im::vector![c1, c2, c3];
+
+        let mut ability = ResolvedAbility::new(
+            Effect::ExileFromTopUntil {
+                player: TargetFilter::Controller,
+                until: UntilCondition::CumulativeThreshold {
+                    property: ObjectProperty::ManaValue,
+                    comparator: Comparator::GE,
+                    threshold: QuantityExpr::Ref {
+                        qty: crate::types::ability::QuantityRef::Variable {
+                            name: "X".to_string(),
+                        },
+                    },
+                },
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        ability.chosen_x = Some(7);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // 3 + 4 = 7 reaches X = 7; with X read as zero only the first card moves.
+        assert_eq!(state.objects[&c1].zone, Zone::Exile);
+        assert_eq!(state.objects[&c2].zone, Zone::Exile);
+        assert_eq!(state.objects[&c3].zone, Zone::Library);
     }
 
     /// CR 202.3 + CR 107.3e: When the library cannot reach the threshold even
@@ -2098,6 +2308,7 @@ mod tests {
             Effect::ExileFromTopUntil {
                 player: TargetFilter::Controller,
                 until: UntilCondition::NextMatches {
+                    count: QuantityExpr::Fixed { value: 1 },
                     filter: legendary_nonland_filter(),
                 },
             },
@@ -2393,5 +2604,151 @@ mod tests {
             !has_unimplemented(exec),
             "the Jodah trigger chain must contain no Unimplemented effects"
         );
+    }
+
+    fn counted_until(count: i32) -> Effect {
+        Effect::ExileFromTopUntil {
+            player: TargetFilter::Controller,
+            until: UntilCondition::NextMatches {
+                filter: nonland_filter(),
+                count: QuantityExpr::Fixed { value: count },
+            },
+        }
+    }
+
+    /// The hand-off a counted loop's sub-ability sees: "put them into your hand".
+    fn hits_to_hand() -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Exile),
+                destination: Zone::Hand,
+                target: TargetFilter::ParentTarget,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+    }
+
+    fn counted_source(state: &mut GameState) -> ObjectId {
+        create_object(
+            state,
+            CardId(100),
+            PlayerId(0),
+            "Counted Source".to_string(),
+            Zone::Battlefield,
+        )
+    }
+
+    /// CR 608.2c: "until you exile two nonland cards" passes the first match,
+    /// stops on the second, and hands BOTH matches to the next instruction.
+    #[test]
+    fn counted_loop_stops_on_the_nth_match_and_hands_on_every_match() {
+        let mut state = GameState::new_two_player(42);
+        let source = counted_source(&mut state);
+        let land = add_library_card(&mut state, PlayerId(0), "Forest", true);
+        let first = add_library_card(&mut state, PlayerId(0), "First Bear", false);
+        let second = add_library_card(&mut state, PlayerId(0), "Second Bear", false);
+        let unreached = add_library_card(&mut state, PlayerId(0), "Unreached Bear", false);
+        state.players[0].library = crate::im::vector![land, first, second, unreached];
+
+        let mut ability = ResolvedAbility::new(counted_until(2), vec![], source, PlayerId(0));
+        ability.sub_ability = Some(Box::new(hits_to_hand()));
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.objects[&land].zone, Zone::Exile);
+        assert_eq!(state.objects[&first].zone, Zone::Hand);
+        assert_eq!(state.objects[&second].zone, Zone::Hand);
+        assert_eq!(state.objects[&unreached].zone, Zone::Library);
+    }
+
+    /// CR 608.2c: with fewer matches than the count, the loop runs out of
+    /// library and hands on the matches it found.
+    #[test]
+    fn counted_loop_hands_on_the_matches_found_when_the_library_runs_out() {
+        let mut state = GameState::new_two_player(42);
+        let source = counted_source(&mut state);
+        let land = add_library_card(&mut state, PlayerId(0), "Forest", true);
+        let only = add_library_card(&mut state, PlayerId(0), "Only Bear", false);
+        let last_land = add_library_card(&mut state, PlayerId(0), "Mountain", true);
+        state.players[0].library = crate::im::vector![land, only, last_land];
+
+        let mut ability = ResolvedAbility::new(counted_until(2), vec![], source, PlayerId(0));
+        ability.sub_ability = Some(Box::new(hits_to_hand()));
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.objects[&only].zone, Zone::Hand);
+        assert_eq!(state.objects[&land].zone, Zone::Exile);
+        assert_eq!(state.objects[&last_land].zone, Zone::Exile);
+        assert!(state.players[0].library.is_empty());
+    }
+
+    /// CR 608.2c: a count of zero is met before the first card moves.
+    #[test]
+    fn counted_loop_with_a_zero_count_exiles_nothing() {
+        let mut state = GameState::new_two_player(42);
+        let source = counted_source(&mut state);
+        let land = add_library_card(&mut state, PlayerId(0), "Forest", true);
+        let bear = add_library_card(&mut state, PlayerId(0), "Bear", false);
+        state.players[0].library = crate::im::vector![land, bear];
+
+        let ability = ResolvedAbility::new(counted_until(0), vec![], source, PlayerId(0));
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.objects[&land].zone, Zone::Library);
+        assert_eq!(state.objects[&bear].zone, Zone::Library);
+        // Yes-partner: the same board with a count of one exiles down to the bear.
+        let ability = ResolvedAbility::new(counted_until(1), vec![], source, PlayerId(0));
+        resolve(&mut state, &ability, &mut events).unwrap();
+        assert_eq!(state.objects[&bear].zone, Zone::Exile);
+    }
+
+    /// CR 616.1 + CR 608.2c: a loop paused for a replacement choice keeps the
+    /// matches it already found, so the resumed loop stops on the count.
+    #[test]
+    fn a_resumed_counted_loop_keeps_the_matches_found_before_the_pause() {
+        let mut state = GameState::new_two_player(42);
+        let source = counted_source(&mut state);
+        let first = add_library_card(&mut state, PlayerId(0), "First Bear", false);
+        let paused = add_library_card(&mut state, PlayerId(0), "Paused Bear", false);
+        let unreached = add_library_card(&mut state, PlayerId(0), "Unreached Bear", false);
+        state.players[0].library = crate::im::vector![unreached];
+        // The first match was exiled before the pause; the paused card's
+        // replacement-resolved move already put it into exile.
+        for id in [first, paused] {
+            let mut events = Vec::new();
+            crate::game::zones::move_to_zone(&mut state, id, Zone::Exile, &mut events);
+        }
+        state.pending_exile_from_top_until = Some(Box::new(
+            crate::types::game_state::PendingExileFromTopUntil {
+                pending_card: paused,
+                remaining: vec![unreached],
+                linked_batch: Vec::new(),
+                cumulative: 0,
+                hits: vec![first],
+            },
+        ));
+
+        let mut ability = ResolvedAbility::new(counted_until(2), vec![], source, PlayerId(0));
+        ability.sub_ability = Some(Box::new(hits_to_hand()));
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.objects[&first].zone, Zone::Hand);
+        assert_eq!(state.objects[&paused].zone, Zone::Hand);
+        assert_eq!(state.objects[&unreached].zone, Zone::Library);
     }
 }

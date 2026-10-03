@@ -491,6 +491,7 @@ mod integration_adventure;
 mod integration_bending;
 mod integration_landfall;
 mod interaction_contract;
+mod invasion_of_alara_8750;
 mod invoke_calamity_free_cast;
 mod ir_spell_node_readers;
 mod ironsoul_enforcer_commander_attacks_alone;

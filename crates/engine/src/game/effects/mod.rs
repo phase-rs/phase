@@ -14713,23 +14713,19 @@ fn is_bound_attach_remainder_for(pending: &PendingContinuation, ability: &Resolv
 /// - `CreateDelayedTrigger` — Helmut Zemo, driven in
 ///   `cast_this_way_gate_8721::zemo_pays_out_the_counter_once_the_granted_spell_is_actually_cast`.
 ///
-/// Absent on purpose: `PutAtLibraryPosition` (Invasion of Alara) and `CopySpell`
-/// (Finale of Promise). Both are single-link tails, so the rule above would
-/// admit them — and for both, admitting them is measurably WRONG, not merely
-/// unmeasured. That is the first reason and it is stated first, because "no
-/// runtime evidence" alone would be the excuse rule L3 rejects:
+/// Absent on purpose: `PutAtLibraryPosition` and `CopySpell` (Finale of
+/// Promise). Both are single-link tails, so the rule above would admit them:
 ///
-/// - Invasion of Alara's tail is `PutAtLibraryPosition { target: ExiledBySource,
-///   count: Ref(CardsExiledBySource) }` — it names EVERY card the source exiled,
-///   not "the other cards", so running it would also bottom the card the player
-///   may still cast under the permission it just granted.
+/// - `PutAtLibraryPosition`: no card reaches this branch with it. Invasion of
+///   Alara, the one that did, casts from a window over the cards its exile loop
+///   found and bottoms the rest itself (issue #8750), so there is no card to
+///   drive this family with.
 /// - Finale of Promise's tail targets `TrackedSetFiltered { id: 0 }`, the
 ///   parser's sentinel, whose documented fallback in
 ///   `targeting::resolve_tracked_set_id` is the latest non-empty published set —
-///   so it can copy an unrelated set from earlier in the same resolution.
+///   so it can copy an unrelated set from earlier in the same resolution, and
+///   it could not be driven to its tail in a `GameScenario` (issue #8750).
 ///
-/// The second reason is that neither could be driven to its tail in a
-/// `GameScenario`, so neither repair can be measured here either (issue #8750).
 /// Adding a variant to this list without a test that fails when the branch is
 /// reverted is the mistake it was introduced to prevent.
 /// CR 603.7 + CR 608.2g: after a `CastFromZone` head's tail ran inline behind
@@ -21619,9 +21615,9 @@ mod tests {
         let helmut_zemo = effect(
             r#"{"type":"CreateDelayedTrigger","condition":{"type":"WhenNextEvent","trigger":{"mode":"SpellCast","valid_card":{"type":"ParentTarget"},"valid_target":{"type":"Controller"}},"or_trigger":null},"effect":{"kind":"Spell","effect":{"type":"PutCounter","counter_type":"P1P1","count":{"type":"Fixed","value":1},"target":{"type":"SelfRef"}}},"uses_tracked_set":false}"#,
         );
-        // Invasion of Alara — reaches the branch, but could not be driven to its
-        // tail in a `GameScenario`, so its behaviour must stay as it is on main.
-        let invasion_of_alara = effect(
+        // A bottom-of-library tail: no card reaches the branch with one since
+        // Invasion of Alara's cast became a window (issue #8750).
+        let bottom_of_library = effect(
             r#"{"type":"PutAtLibraryPosition","target":{"type":"ExiledBySource"},"count":{"type":"Ref","qty":{"type":"CardsExiledBySource"}},"position":{"type":"Bottom"}}"#,
         );
         // Finale of Promise — likewise, and its `TrackedSetFiltered` target reads
@@ -21639,9 +21635,8 @@ mod tests {
             "CreateDelayedTrigger is driven end to end and must stay in the allowlist"
         );
         assert!(
-            !tail_family_has_runtime_evidence(&invasion_of_alara),
-            "PutAtLibraryPosition has no test that fails when the branch is reverted — \
-             admitting it would change Invasion of Alara on an unmeasured path (issue #8750)"
+            !tail_family_has_runtime_evidence(&bottom_of_library),
+            "PutAtLibraryPosition has no test that fails when the branch is reverted"
         );
         assert!(
             !tail_family_has_runtime_evidence(&finale_of_promise),
@@ -32730,6 +32725,7 @@ mod tests {
             Effect::ExileFromTopUntil {
                 player: TargetFilter::Controller,
                 until: UntilCondition::NextMatches {
+                    count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
                     filter: TargetFilter::Any,
                 },
             },

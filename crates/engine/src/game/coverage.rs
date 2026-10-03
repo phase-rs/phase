@@ -3968,8 +3968,12 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::ExileFromTopUntil { player, until } => {
             d.push(("player".into(), fmt_target(player)));
             match until {
-                crate::types::ability::UntilCondition::NextMatches { filter } => {
+                crate::types::ability::UntilCondition::NextMatches { filter, count } => {
                     d.push(("until".into(), fmt_target(filter)));
+                    // Mirrors the serde default: a one-card loop shows no count.
+                    if *count != (crate::types::ability::QuantityExpr::Fixed { value: 1 }) {
+                        d.push(("count".into(), fmt_quantity(count)));
+                    }
                 }
                 crate::types::ability::UntilCondition::CumulativeThreshold {
                     property,

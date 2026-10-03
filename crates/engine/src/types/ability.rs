@@ -187,6 +187,15 @@ pub enum ZoneChoiceCandidateSource {
     /// cost-paid object that has since left that zone is simply not offered and an
     /// unrelated object that happens to sit in the zone can never be.
     CostPaidObjects,
+    /// Read only the objects the preceding instruction handed this one as its
+    /// targets, filtered to the declared zone(s).
+    ///
+    /// CR 608.2c + CR 608.2d: "Put one of them into your hand" after "exile
+    /// cards … until you exile two nonland cards …" (Invasion of Alara) names
+    /// the batch that instruction found, not every card it exiled and not a
+    /// tracked set an earlier clause published. A member of the batch that has
+    /// since left the zone (cast from exile onto the stack) is not offered.
+    ParentTargets,
 }
 
 impl ZoneChoiceCandidateSource {
@@ -10112,9 +10121,22 @@ pub enum ObjectProperty {
 #[serde(tag = "type")]
 pub enum UntilCondition {
     /// CR 702.85a / CR 701.57a: Loop terminates when the just-exiled card
-    /// satisfies the filter. The matching card is exposed to the sub_ability
-    /// chain as an injected target.
-    NextMatches { filter: TargetFilter },
+    /// satisfies the filter and `count` cards have matched so far. The
+    /// matching cards are exposed to the sub_ability chain as injected
+    /// targets.
+    NextMatches {
+        filter: TargetFilter,
+        /// CR 608.2c: How many matching cards end the loop — "until you exile
+        /// two nonland cards with mana value 4 or less" (Invasion of Alara).
+        /// Defaults to one ("until you exile a nonland card"), so every
+        /// single-hit form and on-disk record keeps its meaning. When the
+        /// library runs out first, the loop ends with the matches found so far.
+        #[serde(
+            default = "default_quantity_one",
+            skip_serializing_if = "is_default_quantity_one"
+        )]
+        count: QuantityExpr,
+    },
     /// CR 202.3 + CR 107.3e: Loop terminates when the cumulative `property`
     /// summed over every card exiled this resolution satisfies
     /// `comparator(sum, threshold)`.
@@ -23558,11 +23580,11 @@ impl Effect {
                 )
                 | None => {}
             },
-            // CR 202.3 + CR 107.3e: the cumulative-threshold quantity is
-            // resolved up-front when the until-loop starts
+            // CR 202.3 + CR 107.3e: the cumulative-threshold quantity and the
+            // match count are resolved up-front when the until-loop starts
             // (`game/effects/exile_from_top_until.rs`).
             Effect::ExileFromTopUntil { until, .. } => match until {
-                UntilCondition::NextMatches { .. } => {}
+                UntilCondition::NextMatches { count, .. } => f(count),
                 UntilCondition::CumulativeThreshold { threshold, .. } => f(threshold),
             },
             // A proposition guess resolves both comparison sides live
@@ -28267,6 +28289,12 @@ pub struct SpellContext {
     pub forwarded_result_context: Option<Box<ForwardedResultContext>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_forwarded_zone_result: Option<PendingForwardedZoneResult>,
+    /// CR 400.7j + CR 608.2c: every card an "exile cards … until …" loop moved
+    /// to exile in this resolution, handed down the rest of its chain. "The
+    /// other cards exiled this way" (Invasion of Alara) are found among exactly
+    /// these cards. Empty outside such a chain.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exile_until_batch: Vec<crate::types::identifiers::ObjectIncarnationRef>,
     /// CR 610.3b: specified duration events observed after a triggered ability
     /// triggered but before this initial zone-change effect occurred.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
