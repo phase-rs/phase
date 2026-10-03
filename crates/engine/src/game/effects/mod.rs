@@ -4964,7 +4964,8 @@ fn instruction_outlives_declined_gate(
         activation_record: _,
     } = node;
     let unbound = condition.is_none()
-        && declares_chosen_group.is_none()
+        && declares_chosen_group
+            .is_none_or(crate::types::ability::ChosenGroupId::is_declared_player)
         && reads_chosen_group.is_none()
         && declares_return_result.is_none()
         && reads_return_result.is_none()
@@ -5625,9 +5626,12 @@ fn referent_exists_without_gated_action(
                     ) => false,
                 }
         }
-        TargetFilter::ParentTarget
-        | TargetFilter::ParentTargetSlot { index: _ }
-        | TargetFilter::DeclaredPlayer { .. } => parent_target_is_declared,
+        TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { index: _ } => {
+            parent_target_is_declared
+        }
+        // CR 601.2c + CR 602.2b + CR 603.3d: a declared player is announced as the
+        // spell or ability is put on the stack, whether or not the gated action happens.
+        TargetFilter::DeclaredPlayer { .. } => true,
         TargetFilter::Not { filter } => {
             referent_exists_without_gated_action(filter, parent_target_is_declared)
         }
@@ -11214,7 +11218,8 @@ pub(crate) enum OptionalFeasibility {
 /// would re-base every metered row's pinned spend and make neither number readable.
 pub(crate) struct UpfrontOptionalGate {
     /// CR 608.2d: [`optional_prompt_player`] names who ANNOUNCES it — not always the controller.
-    pub prompt_player: PlayerId,
+    /// `None`: the instruction is addressed to no one, so it is declined unprompted.
+    pub prompt_player: Option<PlayerId>,
     /// `None` ⇒ the ability carries no `may_trigger_origin`, so no stored preference can key
     /// on it. That is not the same as "no preference stored": it is "no key exists".
     pub key: Option<MayTriggerAutoChoiceKey>,
@@ -11284,8 +11289,9 @@ pub(crate) fn upfront_optional_gate(
         key: ability
             .may_trigger_origin
             .clone()
-            .map(|origin| MayTriggerAutoChoiceKey {
-                player: prompt_player,
+            .zip(prompt_player)
+            .map(|(origin, player)| MayTriggerAutoChoiceKey {
+                player,
                 source_id: ability.source_id,
                 origin,
             }),
@@ -11990,12 +11996,15 @@ fn resolve_context_player(
 /// acting subject (the target permanent's controller). This mirrors the
 /// `resolve_library_owner` logic in `search_library.rs` but applies generally
 /// to any optional effect whose embedded player-scope target is a context-ref.
-pub(crate) fn optional_prompt_player(state: &GameState, ability: &ResolvedAbility) -> PlayerId {
+pub(crate) fn optional_prompt_player(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Option<PlayerId> {
     if let Effect::PayCost { payer, .. } = &ability.effect {
         if let Some(player) =
             crate::game::targeting::resolve_effect_player_ref(state, ability, payer)
         {
-            return player;
+            return Some(player);
         }
     }
     // CR 608.2d: a parser-stamped subject such as "they may" names the player
@@ -12005,7 +12014,12 @@ pub(crate) fn optional_prompt_player(state: &GameState, ability: &ResolvedAbilit
         if let Some(player) =
             crate::game::targeting::resolve_effect_player_ref(state, ability, optional_player)
         {
-            return player;
+            return Some(player);
+        }
+        // CR 608.2b: an instruction addressed to an illegal or unannounced declared
+        // player is offered to no one.
+        if matches!(optional_player, TargetFilter::DeclaredPlayer { .. }) {
+            return None;
         }
     }
     if let Effect::Sacrifice { target, .. } = &ability.effect {
@@ -12015,7 +12029,7 @@ pub(crate) fn optional_prompt_player(state: &GameState, ability: &ResolvedAbilit
                 ability,
                 &TargetFilter::ParentTargetController,
             ) {
-                return player;
+                return Some(player);
             }
         }
     }
@@ -12031,7 +12045,7 @@ pub(crate) fn optional_prompt_player(state: &GameState, ability: &ResolvedAbilit
                 ability,
                 &TargetFilter::ParentTargetController,
             ) {
-                return player;
+                return Some(player);
             }
         }
     }
@@ -12046,7 +12060,7 @@ pub(crate) fn optional_prompt_player(state: &GameState, ability: &ResolvedAbilit
             TargetRef::Player(player) => Some(*player),
             TargetRef::Object(_) => None,
         }) {
-            return player;
+            return Some(player);
         }
     }
 
@@ -12069,7 +12083,7 @@ pub(crate) fn optional_prompt_player(state: &GameState, ability: &ResolvedAbilit
             ability,
             &TargetFilter::ParentTargetController,
         ) {
-            return player;
+            return Some(player);
         }
     }
 
@@ -12079,7 +12093,7 @@ pub(crate) fn optional_prompt_player(state: &GameState, ability: &ResolvedAbilit
     if let Some(scoped) = ability.scoped_player {
         if let Effect::ChangeZone { target, .. } = &ability.effect {
             if filter_uses_relative_controller_scoped(target) {
-                return scoped;
+                return Some(scoped);
             }
         }
         if ability
@@ -12087,11 +12101,11 @@ pub(crate) fn optional_prompt_player(state: &GameState, ability: &ResolvedAbilit
             .target_filter()
             .is_some_and(filter_uses_relative_controller_scoped)
         {
-            return scoped;
+            return Some(scoped);
         }
     }
 
-    ability.controller
+    Some(ability.controller)
 }
 
 fn ability_with_event_context_targets(
@@ -15903,6 +15917,18 @@ fn resolve_chain_body(
             prompt_player,
             key: may_trigger_key,
         } = gate;
+        // CR 608.2b: an instruction addressed to no one is not performed, which is
+        // how a declined "may" resolves.
+        let Some(prompt_player) = prompt_player else {
+            resolve_optional_effect_decision(
+                state,
+                ability.clone(),
+                AutoMayChoice::Decline,
+                events,
+                depth + 1,
+            )?;
+            return Ok(());
+        };
         // The executable half of the `optional_for` coupling note above: this branch is
         // reachable only because the CR 101.4 fan-out already returned, so the authority's
         // `optional_for.is_some() ⇒ None` conjunct can never be the thing that admits an

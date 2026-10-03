@@ -26004,6 +26004,16 @@ impl ChosenGroupId {
     /// Ids the parser mints for a player-declaring clause start here, disjoint
     /// from the `ClauseId`-derived ids of `TargetOnly` producers.
     pub const DECLARED_PLAYER_BASE: u32 = 1 << 31;
+
+    /// The id of the `ordinal`-th player-declaring clause of one ability.
+    pub fn declared_player(ordinal: u32) -> Self {
+        Self(Self::DECLARED_PLAYER_BASE + ordinal)
+    }
+
+    /// Whether the parser minted this id for a player-declaring clause.
+    pub fn is_declared_player(self) -> bool {
+        self.0 >= Self::DECLARED_PLAYER_BASE
+    }
 }
 
 /// Identity of one return instruction in a parsed ability chain.

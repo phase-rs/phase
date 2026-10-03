@@ -22779,7 +22779,7 @@ mod tests {
         };
         assert_eq!(
             crate::game::effects::optional_prompt_player(&state, ability),
-            PlayerId(0),
+            Some(PlayerId(0)),
             "(a) reach-guard: the `PayCost` branch really routes through \
              `resolve_effect_player_ref`'s `Controller` arm and returns the proposer"
         );
@@ -22796,7 +22796,7 @@ mod tests {
         };
         assert_ne!(
             crate::game::effects::optional_prompt_player(&state, ability),
-            PlayerId(0),
+            Some(PlayerId(0)),
             "(a′) reach-guard: the `Opponent` arm resolves to a seat that is NOT the proposer"
         );
         assert!(

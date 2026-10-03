@@ -1861,4 +1861,5 @@ mod welcome_the_dead;
 #[cfg(feature = "test-support")]
 mod owned_you_target_authority;
 
+mod declared_player_gate_arms;
 mod exile_origin_target_acquisition;

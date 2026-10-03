@@ -3990,7 +3990,7 @@ fn entry_announces(
         ability,
         crate::game::effects::OptionalFeasibility::Probe,
     )
-    .filter(|gate| gate.prompt_player == proposer)
+    .filter(|gate| gate.prompt_player == Some(proposer))
     .filter(|gate| {
         gate.key
             .as_ref()
@@ -4082,7 +4082,7 @@ fn entry_announces(
     //   `collect_target_slots`' own `player != ability.controller` filter: it keys on the seat
     //   the CONSUMER reads, which is `entry.controller`, and those two coincide in production
     //   but are separate fields. Same shape as the sibling `may` mint's
-    //   `.filter(|gate| gate.prompt_player == proposer)` — direction: strictly FEWER offers.
+    //   `.filter(|gate| gate.prompt_player == Some(proposer))` — direction: strictly FEWER offers.
     // * `TargetSelectionMode` other than `Chosen` — CR 115.1's "require their controller to
     //   choose" is overridden and the GAME selects. `triggers::prepare_trigger_targets` sends
     //   this to `random_select_targets_for_ability` and then to `AutoAssigned`, so no prompt
@@ -22403,7 +22403,7 @@ mod stage2_injector_tests {
         scoped.scoped_player = Some(P1);
         assert_eq!(
             crate::game::effects::optional_prompt_player(&state, &scoped),
-            P1,
+            Some(P1),
             "reach-guard: the recipient authority must really route this entry to the OTHER \
              seat, or the negative below is about nothing"
         );
@@ -22417,7 +22417,7 @@ mod stage2_injector_tests {
         let unscoped = shape_b(src, scoped_put_counter());
         assert_eq!(
             crate::game::effects::optional_prompt_player(&state, &unscoped),
-            P0,
+            Some(P0),
             "reach-guard: with no scoped player the gate asks the controller = proposer"
         );
         let positive = shape_b_entry(941, src, unscoped);
@@ -22452,6 +22452,39 @@ mod stage2_injector_tests {
             points[0].slot.index, 1,
             "index 1 is the may slot in BOTH shapes"
         );
+    }
+
+    /// CR 608.2b: an optional addressed to a declared player nobody was announced as is asked
+    /// of no one, so its `may` gate carries no recipient and the entry publishes no slot.
+    #[test]
+    fn a_may_slot_is_not_minted_for_an_unannounced_declared_player() {
+        use crate::types::ability::{ChosenGroupId, TargetFilter};
+        let (state, src) = u2_board();
+
+        let mut unannounced = shape_b(src, scoped_put_counter());
+        unannounced.optional_player = Some(TargetFilter::DeclaredPlayer {
+            group: ChosenGroupId::declared_player(0),
+        });
+        assert_eq!(
+            crate::game::effects::optional_prompt_player(&state, &unannounced),
+            None,
+            "reach-guard: no declared player resolves, so the gate has no recipient"
+        );
+        assert!(
+            entry_publishes_pin_slots(&state, &shape_b_entry(942, src, unannounced), P0).is_none(),
+            "a gate with no recipient mints no `may` slot for any proposer"
+        );
+
+        let addressed_to_nobody = shape_b(src, scoped_put_counter());
+        assert_eq!(
+            crate::game::effects::optional_prompt_player(&state, &addressed_to_nobody),
+            Some(P0),
+            "reach-guard: the same entry with no `optional_player` asks the controller"
+        );
+        let published =
+            entry_publishes_pin_slots(&state, &shape_b_entry(943, src, addressed_to_nobody), P0)
+                .expect("the matched positive must reach the mint and publish");
+        assert!(published.may.is_some(), "the matched positive mints `may`");
     }
 
     /// The CR 603.5 prompt sites in ONE source text: `(producers, readers, in_test)`.

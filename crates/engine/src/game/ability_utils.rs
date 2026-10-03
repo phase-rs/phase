@@ -24403,7 +24403,7 @@ mod tests {
 
         assert_eq!(
             crate::game::effects::optional_prompt_player(&state, &delayed),
-            countered_controller,
+            Some(countered_controller),
             "CR 608.2d: the countered spell's controller announces the may and draws"
         );
 
@@ -24412,7 +24412,7 @@ mod tests {
         delayed.optional_player = None;
         assert_eq!(
             crate::game::effects::optional_prompt_player(&state, &delayed),
-            caster,
+            Some(caster),
             "without the stamp the gate falls back to the ability's controller — the \
              wrong seat this change exists to correct"
         );
@@ -25247,5 +25247,33 @@ mod tests {
             delegator.context.additional_cost_paid = true;
             delegator.sub_ability(instead.sub_ability(tagged))
         });
+    }
+
+    /// CR 601.2c + CR 115.10a: a branch under an inheriting rider declares its own slots, so the
+    /// walk numbers an `else_ability` whether or not its parent's entries are inherited.
+    #[test]
+    fn declared_slot_walk_numbers_the_else_branch_of_an_inheriting_rider() {
+        use crate::types::ability::ChosenGroupId;
+        let group = ChosenGroupId(ChosenGroupId::DECLARED_PLAYER_BASE);
+        let a = ObjectId(77);
+        let mut declaring = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Player,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        declaring.declares_chosen_group = Some(group);
+        let rider = gain_life_anaphor_rider(vec![TargetRef::Object(a)]).else_ability(declaring);
+        let root = change_zone_head(Zone::Exile, vec![TargetRef::Object(a)]).sub_ability(rider);
+        assert_eq!(
+            declared_targets_in_chain(&root),
+            vec![TargetRef::Object(a), TargetRef::Player(PlayerId(1))]
+        );
+        assert_eq!(
+            declared_group_player_slot(&root, group),
+            Some(Some((1, PlayerId(1))))
+        );
     }
 }
