@@ -19684,7 +19684,7 @@ pub(crate) fn evaluate_condition(
                 // (unattached Equipment) leaves "it" without one, so the
                 // condition is false rather than falling through to an unrelated
                 // trigger-event subject. An Equipment or Aura has at most one host
-                // (CR 301.5c, CR 303.4b); two or more can only come from a
+                // (CR 301.5c, CR 303.4d); two or more can only come from a
                 // non-attachment source's filter fallback, which no card in this
                 // class reaches, and likewise has no unique referent. CR 603.4
                 // does not apply — the "if" does not follow the trigger
