@@ -43295,8 +43295,21 @@ fn parse_effect_chain_ir_body(
                 // pile. `RevealUntilKept` is never bound across clauses: its "put it" /
                 // "put that card" anaphor names the nearest referent, and its application
                 // patches only the immediately preceding definition.
+                // A conditional "instead" override of an intervening damage
+                // instruction ("If the revealed land card was a Mountain, ~ deals
+                // double that damage instead") is lookback-transparent: it restates
+                // the instruction it replaces and neither selects nor re-binds the
+                // reveal's cards, so its placeholder does not end the scan.
                 non_absorbed
                     .iter()
+                    .filter(|c| {
+                        !matches!(
+                            c.disposition,
+                            ClauseDisposition::ReplaceMeaning {
+                                kind: ReplaceMeaningKind::Instead(_)
+                            }
+                        )
+                    })
                     .map(|c| effective_effect_of(c))
                     .take_while(|effect| !matches!(effect, Effect::Unimplemented { .. }))
                     .find_map(|deeper| match deeper {
@@ -44077,7 +44090,27 @@ fn try_parse_put_zone_change_parts(
             let is_mass = is_mass || pool_bound;
             let target = match plural_pool {
                 Some(pool) => pool,
-                None => parse_target(target_text).0,
+                None => {
+                    let parsed = parse_target(target_text).0;
+                    // CR 608.2c: a definite plural subject ("the nonland cards
+                    // revealed this way") restricts the anaphor's set to its named
+                    // type. The determiner is not part of the type phrase, so when
+                    // the bare parse found nothing, retry without it.
+                    if matches!(parsed, TargetFilter::Any) {
+                        let lower = target_text.to_lowercase();
+                        match nom_on_lower(target_text, &lower, |i| {
+                            value((), tag::<_, _, OracleError<'_>>("the ")).parse(i)
+                        }) {
+                            Some(((), rest)) => match parse_target(rest).0 {
+                                TargetFilter::Any => parsed,
+                                restricted => restricted,
+                            },
+                            None => parsed,
+                        }
+                    } else {
+                        parsed
+                    }
+                }
             };
             let multi_origin_zones = put_hand_graveyard_origin_zones(before.lower);
             let target = match multi_origin_zones.as_ref() {

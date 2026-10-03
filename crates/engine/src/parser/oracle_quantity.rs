@@ -172,6 +172,17 @@ pub(crate) fn parse_quantity_ref_with_context(
         }
     }
 
+    // CR 608.2c + CR 701.20b: "the number of [type] cards revealed this way" —
+    // the same revealed-set count the "for each [type] card revealed this way"
+    // form resolves, reached through the "the number of" lead-in (Goblin
+    // Charbelcher: "damage equal to the number of nonland cards revealed this
+    // way").
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("the number of ").parse(trimmed) {
+        if let Some(qty) = parse_filtered_revealed_this_way(&rest.to_lowercase()) {
+            return Some(qty);
+        }
+    }
+
     if let Some(qty) = parse_milled_this_way_count(trimmed) {
         return Some(qty);
     }

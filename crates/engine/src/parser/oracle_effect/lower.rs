@@ -9432,10 +9432,14 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
         } else {
             return None;
         }
-    } else if let Ok((rem, _)) =
-        tag::<_, _, OracleError<'_>>("twice that much damage").parse(after_lower)
+    } else if let Ok((rem, _)) = alt((
+        tag::<_, _, OracleError<'_>>("twice that much damage"),
+        tag("double that damage"),
+    ))
+    .parse(after_lower)
     {
-        // CR 120.8: "twice that much damage" → Multiply { factor: 2, inner: EventContextAmount }
+        // CR 120.8: "twice that much damage" / "double that damage" →
+        // Multiply { factor: 2, inner: EventContextAmount }
         let consumed = after_lower.len() - rem.len();
         (
             QuantityExpr::Multiply {

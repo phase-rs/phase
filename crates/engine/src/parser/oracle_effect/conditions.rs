@@ -1987,6 +1987,40 @@ pub(super) fn strip_card_type_conditional(text: &str) -> (Option<AbilityConditio
     (Some(condition), text[offset..].to_string())
 }
 
+/// CR 608.2c + CR 205.3: "the revealed [<core type>] card was a[n] <subtype>"
+/// — a past-tense subtype gate on the card a preceding reveal instruction
+/// revealed (Goblin Charbelcher: "If the revealed land card was a Mountain, …").
+/// The optional core-type word is the printed noun restating the reveal's own
+/// until-filter; it is carried as `card_types` so the gate fails closed for a
+/// revealed card of a different type. Lowers to the `RevealedHasCardType`
+/// subtype axis that the "it's a <type> card" family already uses.
+fn parse_revealed_card_was_subtype(input: &str) -> OracleResult<'_, AbilityCondition> {
+    let (input, _) = tag::<_, _, OracleError<'_>>("the revealed ").parse(input)?;
+    let (input, card_type) =
+        opt(terminated(nom_primitives::parse_core_type, tag(" "))).parse(input)?;
+    let (input, _) = tag("card was ").parse(input)?;
+    let (input, _) = alt((tag("an "), tag("a "))).parse(input)?;
+    let (subtype, consumed) = parse_subtype(input).ok_or_else(|| oracle_err(input))?;
+    let (input, _) = eof(&input[consumed..])?;
+    Ok((
+        input,
+        AbilityCondition::RevealedHasCardType {
+            card_types: card_type.into_iter().collect(),
+            additional_filter: None,
+            subtype_filter: Some(Box::new(TargetFilter::Typed(
+                TypedFilter::default().subtype(subtype),
+            ))),
+        },
+    ))
+}
+
+fn parse_revealed_card_was_subtype_condition_text(text: &str) -> Option<AbilityCondition> {
+    nom_parse_lower(
+        text.trim().trim_end_matches('.'),
+        parse_revealed_card_was_subtype,
+    )
+}
+
 fn parse_its_a_type_condition(
     condition_text: &str,
     ctx: &mut ParseContext,
@@ -4693,6 +4727,10 @@ pub(super) fn parse_condition_text(text: &str) -> Option<AbilityCondition> {
     }
 
     if let Some(condition) = parse_target_color_condition_text(text) {
+        return Some(condition);
+    }
+
+    if let Some(condition) = parse_revealed_card_was_subtype_condition_text(text) {
         return Some(condition);
     }
 
