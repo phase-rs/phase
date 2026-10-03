@@ -25249,7 +25249,7 @@ mod tests {
         });
     }
 
-    /// CR 601.2c + CR 115.10a: a branch under an inheriting rider declares its own slots, so the
+    /// CR 601.2c: a branch under an inheriting rider declares its own slots, so the
     /// walk numbers an `else_ability` whether or not its parent's entries are inherited.
     #[test]
     fn declared_slot_walk_numbers_the_else_branch_of_an_inheriting_rider() {

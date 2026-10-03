@@ -11996,6 +11996,8 @@ fn resolve_context_player(
 /// acting subject (the target permanent's controller). This mirrors the
 /// `resolve_library_owner` logic in `search_library.rs` but applies generally
 /// to any optional effect whose embedded player-scope target is a context-ref.
+/// `None`: addressed to an illegal or unannounced `DeclaredPlayer` (CR 608.2b), so no one is
+/// asked and the optional resolves as declined.
 pub(crate) fn optional_prompt_player(
     state: &GameState,
     ability: &ResolvedAbility,
