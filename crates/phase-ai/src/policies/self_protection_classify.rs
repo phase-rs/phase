@@ -32,10 +32,10 @@ use crate::ability_chain::collect_chain_effects;
 use crate::eval::threat_level;
 use crate::features::landfall::ability_searches_library_for_land;
 use crate::features::mana_ramp::target_filter_references_land;
-use crate::policies::context::collect_ability_effects;
 use crate::policies::effect_classify::{
     effect_polarity, extract_target_filter, lethal_to_creature, EffectPolarity,
 };
+use crate::policies::stack_awareness::{damage_kills, node_damage, nodes_acting_on};
 
 /// Threat-level threshold above which protection casts/activations are unblocked.
 pub(crate) const THREAT_FLOOR: f64 = 0.45;
@@ -394,44 +394,59 @@ fn any_stack_harmful_answerable_by_grants(
         if entry.controller == ai_player {
             return false;
         }
-        let Some(ability) = entry.ability() else {
-            return false;
-        };
-        ability.targets.iter().any(|t| {
-            let TargetRef::Object(obj_id) = t else {
-                return false;
-            };
-            let Some(obj) = state.objects.get(obj_id) else {
-                return false;
-            };
-            if obj.controller != ai_player
-                || !obj.card_types.core_types.contains(&CoreType::Creature)
-            {
-                return false;
-            }
-            collect_ability_effects(ability).iter().any(|effect| {
+        let reaches = engine::game::effects::stack_reach::stack_entry_node_reach(state, entry);
+        reaches.iter().any(|reach| {
+            reach.acted_on.iter().any(|t| {
+                let TargetRef::Object(obj_id) = t else {
+                    return false;
+                };
+                let Some(obj) = state.objects.get(obj_id) else {
+                    return false;
+                };
+                if obj.controller != ai_player
+                    || !obj.card_types.core_types.contains(&CoreType::Creature)
+                {
+                    return false;
+                }
+                // Whether the stack's damage kills the creature: `None` when a
+                // damage node's amount is not fixed.
+                let lethal = nodes_acting_on(state, *obj_id)
+                    .iter()
+                    .filter(|other| matches!(other.node.effect, Effect::DealDamage { .. }))
+                    .map(|other| node_damage(state, other.node, obj))
+                    .collect::<Option<Vec<_>>>()
+                    .map(|dealt| damage_kills(obj, &dealt, 0));
                 harmful_effect_answerable_by_grants(
-                    effect,
+                    state,
+                    &reach.node.effect,
                     grants,
                     obj,
                     state.objects.get(&entry.source_id),
+                    lethal,
                 )
             })
         })
     })
 }
 
+/// Whether a grant `protected` does not already have answers the harmful
+/// `effect`. A prevention grant answers damage unless `lethal` says the damage
+/// does not kill `protected`.
 fn harmful_effect_answerable_by_grants(
+    state: &GameState,
     effect: &Effect,
     grants: &[DefensiveGrant],
     protected: &engine::game::game_object::GameObject,
     source: Option<&engine::game::game_object::GameObject>,
+    lethal: Option<bool>,
 ) -> bool {
     if !matches!(effect_polarity(effect), EffectPolarity::Harmful) {
         return false;
     }
     grants
         .iter()
+        .filter(|grant| !grant_already_effective(state, protected.id, grant))
+        .filter(|grant| !matches!(grant, DefensiveGrant::PreventDamage) || lethal != Some(false))
         .any(|grant| grant_answers_harmful_effect(grant, effect, protected, source))
 }
 
@@ -860,7 +875,7 @@ fn grant_answers_targeted_effect(
 
 /// CR 702.2b + CR 704.5h: damage from a deathtouch source destroys a
 /// positive-toughness creature as an SBA, which indestructible can prevent.
-fn source_has_effective_deathtouch(
+pub(super) fn source_has_effective_deathtouch(
     state: &GameState,
     source: Option<&engine::game::game_object::GameObject>,
 ) -> bool {
@@ -882,7 +897,7 @@ fn damage_may_make_indestructible_relevant(
 /// CR 120.3d-e: wither/infect damage to creatures becomes -1/-1 counters;
 /// other creature damage is marked. CR 702.12b does not let indestructible
 /// prevent a creature from dying for having toughness 0 or less.
-fn damage_becomes_marked(
+pub(super) fn damage_becomes_marked(
     state: &GameState,
     source: Option<&engine::game::game_object::GameObject>,
 ) -> Option<bool> {
@@ -2020,5 +2035,208 @@ mod tests {
             None,
             "double strike blocker still participates in regular damage"
         );
+    }
+
+    #[test]
+    fn shroud_answers_a_fight_that_reaches_the_creature_through_a_later_slot() {
+        use engine::game::scenario::{GameScenario, P0, P1};
+        use engine::types::game_state::WaitingFor;
+        use engine::types::mana::{ManaColor, ManaCost};
+        const TAIL_SWIPE: &str = "Choose target creature you control and target creature you don't control. If you cast this spell during your main phase, the creature you control gets +1/+1 until end of turn. Then those creatures fight each other. (Each deals damage equal to its power to the other.)";
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let theirs = scenario.add_creature(P1, "Theirs", 3, 3).id();
+        let ai_creature = scenario.add_creature(P0, "Ai", 2, 2).id();
+        let swipe = scenario
+            .add_spell_to_hand_from_oracle(P1, "Tail Swipe", true, TAIL_SWIPE)
+            .with_mana_cost(ManaCost::generic(1))
+            .id();
+        scenario.add_basic_land(P1, ManaColor::Green);
+        let mut runner = scenario.build();
+        {
+            let state = runner.state_mut();
+            state.active_player = P1;
+            state.priority_player = P1;
+            state.waiting_for = WaitingFor::Priority { player: P1 };
+        }
+        runner
+            .cast(swipe)
+            .target_objects(&[theirs, ai_creature])
+            .commit();
+        let state = runner.state();
+        let entry = state.stack.back().expect("Tail Swipe");
+        assert_eq!(entry.controller, P1, "reach guard: an opposing entry");
+        assert!(
+            !entry
+                .ability()
+                .is_some_and(|root| root.targets.contains(&TargetRef::Object(ai_creature))),
+            "reach guard: the root does not target the AI's creature"
+        );
+        assert!(any_stack_harmful_answerable_by_grants(
+            state,
+            P0,
+            &[DefensiveGrant::CantBeTargeted]
+        ));
+    }
+
+    /// P1 casts `text` at P0's creature (`toughness`, `keywords`).
+    fn opponent_spell_at_ai_creature(
+        name: &str,
+        text: &str,
+        cost: engine::types::mana::ManaCost,
+        toughness: i32,
+        keywords: &[Keyword],
+        targets_own_creature_first: bool,
+    ) -> (engine::game::scenario::GameRunner, ObjectId) {
+        use engine::game::scenario::{GameScenario, P0, P1};
+        use engine::types::game_state::WaitingFor;
+        use engine::types::mana::ManaColor;
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let ai_creature = {
+            let mut builder = scenario.add_creature(P0, "Ai", 3, toughness);
+            for keyword in keywords {
+                builder.with_keyword(keyword.clone());
+            }
+            builder.id()
+        };
+        let own = scenario.add_creature(P1, "Own", 3, 3).id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P1, name, true, text)
+            .with_mana_cost(cost)
+            .id();
+        for _ in 0..2 {
+            scenario.add_basic_land(P1, ManaColor::Black);
+        }
+        let mut runner = scenario.build();
+        {
+            let state = runner.state_mut();
+            state.active_player = P1;
+            state.priority_player = P1;
+            state.waiting_for = WaitingFor::Priority { player: P1 };
+        }
+        let targets: &[ObjectId] = if targets_own_creature_first {
+            &[own, ai_creature]
+        } else {
+            &[ai_creature]
+        };
+        runner.cast(spell).target_objects(targets).commit();
+        (runner, ai_creature)
+    }
+
+    const MURDER: &str = "Destroy target creature.";
+    const SHOCK: &str = "Shock deals 2 damage to any target.";
+    const SELF_DESTRUCT: &str = "Target creature you control deals X damage to any other target and X damage to itself, where X is its power.";
+
+    #[test]
+    fn a_grant_the_creature_already_has_answers_nothing() {
+        use engine::game::scenario::P0;
+        use engine::types::mana::ManaCost;
+        for indestructible in [false, true] {
+            let keywords: &[Keyword] = if indestructible {
+                &[Keyword::Indestructible]
+            } else {
+                &[]
+            };
+            let (runner, _) = opponent_spell_at_ai_creature(
+                "Murder",
+                MURDER,
+                ManaCost::generic(2),
+                3,
+                keywords,
+                false,
+            );
+            assert_eq!(
+                any_stack_harmful_answerable_by_grants(
+                    runner.state(),
+                    P0,
+                    &[DefensiveGrant::Indestructible]
+                ),
+                !indestructible
+            );
+        }
+    }
+
+    #[test]
+    fn prevention_answers_only_damage_that_would_kill_the_creature() {
+        use engine::game::scenario::P0;
+        use engine::types::mana::ManaCost;
+        let answerable = |runner: &engine::game::scenario::GameRunner| {
+            any_stack_harmful_answerable_by_grants(
+                runner.state(),
+                P0,
+                &[DefensiveGrant::PreventDamage],
+            )
+        };
+        let (runner, _) =
+            opponent_spell_at_ai_creature("Shock", SHOCK, ManaCost::generic(1), 2, &[], false);
+        assert!(
+            answerable(&runner),
+            "control: 2 damage kills a 2-toughness creature"
+        );
+        let (runner, _) =
+            opponent_spell_at_ai_creature("Shock", SHOCK, ManaCost::generic(1), 3, &[], false);
+        assert!(!answerable(&runner));
+        // Self-Destruct's damage is X, which is not judged, so the grant
+        // still answers it.
+        let (runner, _) = opponent_spell_at_ai_creature(
+            "Self-Destruct",
+            SELF_DESTRUCT,
+            ManaCost::generic(2),
+            4,
+            &[],
+            true,
+        );
+        assert!(answerable(&runner));
+    }
+
+    #[test]
+    fn prevention_is_judged_against_the_damage_of_every_stack_entry() {
+        use engine::game::effects::stack_reach::stack_entry_node_reach;
+        use engine::game::scenario::{GameScenario, P0, P1};
+        use engine::types::game_state::WaitingFor;
+        use engine::types::mana::{ManaColor, ManaCost};
+        // P1 casts two Shocks at P0's creature, each its own stack entry.
+        for toughness in [3, 5] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let ai_creature = scenario.add_creature(P0, "Ai", 3, toughness).id();
+            let shocks: Vec<ObjectId> = (0..2)
+                .map(|_| {
+                    scenario
+                        .add_spell_to_hand_from_oracle(P1, "Shock", true, SHOCK)
+                        .with_mana_cost(ManaCost::generic(1))
+                        .id()
+                })
+                .collect();
+            for _ in 0..2 {
+                scenario.add_basic_land(P1, ManaColor::Red);
+            }
+            let mut runner = scenario.build();
+            {
+                let state = runner.state_mut();
+                state.active_player = P1;
+                state.priority_player = P1;
+                state.waiting_for = WaitingFor::Priority { player: P1 };
+            }
+            for shock in shocks {
+                runner.cast(shock).target_object(ai_creature).commit();
+            }
+            let state = runner.state();
+            assert!(
+                state.stack.len() == 2
+                    && state.stack.iter().all(|entry| {
+                        stack_entry_node_reach(state, entry)
+                            .iter()
+                            .any(|reach| reach.acted_on == vec![TargetRef::Object(ai_creature)])
+                    }),
+                "reach guard: each Shock is its own stack entry acting on the creature"
+            );
+            assert_eq!(
+                any_stack_harmful_answerable_by_grants(state, P0, &[DefensiveGrant::PreventDamage]),
+                toughness == 3,
+                "4 damage kills a 3-toughness creature and not a 5-toughness one"
+            );
+        }
     }
 }
