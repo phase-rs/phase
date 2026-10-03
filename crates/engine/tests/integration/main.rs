@@ -1247,6 +1247,7 @@ mod reveal_until_simultaneous_kept_delivery;
 mod reveal_until_that_many;
 mod revealed_card_type_disjunction_518;
 mod rhys_evermore_remove_counters;
+mod ring_equipped_creature_color_condition;
 mod riot_control_regression;
 mod ripples_of_undeath_regression;
 mod riptide_gearhulk_5994;

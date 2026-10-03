@@ -27490,8 +27490,10 @@ pub enum AbilityCondition {
         /// CR 608.2c: When `Some(n)`, the anaphoric subject tests the object in
         /// declared chain slot `n` (resolved from the flattened root chain via
         /// `resolve_live_parent_slot_from_root`) rather than this node's local
-        /// most-recent target. `None` (default) preserves the legacy
-        /// first-object / `TriggeringSource` behavior. Set by the two-target
+        /// most-recent target. `None` (default) tests the gated node's
+        /// resolution-bound attachment-host recipient
+        /// (`targeting::resolution_bound_attachment_hosts`), else its first
+        /// object target, else `TriggeringSource`. Set by the two-target
         /// counter-chain rewrite in `lower_effect_chain_ir` so a condition on the
         /// first-declared fighter (Malamet: "if the creature you control entered
         /// this turn") reads slot 0 under most-recent-only chain propagation.

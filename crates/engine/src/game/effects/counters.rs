@@ -2474,11 +2474,10 @@ pub(super) fn resolve_defined_or_targets(
                 })
                 .collect();
         }
-        if ability.target_choice_timing == TargetChoiceTiming::Resolution
-            && ability.targets.is_empty()
-            && filter.contains_source_attachment_host()
+        if let Some(hosts) =
+            crate::game::targeting::resolution_bound_attachment_hosts(state, ability, filter)
         {
-            return crate::game::targeting::resolved_object_ids_for_filter(state, ability, filter);
+            return hosts;
         }
     }
 

@@ -1,5 +1,6 @@
 use crate::types::ability::{
-    ControllerRef, FilterProp, ResolvedAbility, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+    ControllerRef, FilterProp, ResolvedAbility, TargetChoiceTiming, TargetFilter, TargetRef,
+    TypeFilter, TypedFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
@@ -1387,6 +1388,27 @@ pub(crate) fn resolved_object_ids_for_filter(
 ) -> Vec<ObjectId> {
     let ctx = super::filter::FilterContext::from_ability(ability);
     resolved_object_ids_for_filter_with_context(state, ability, filter, &ctx)
+}
+
+/// CR 301.5a + CR 301.5f + CR 303.4b + CR 115.10a: an untargeted "equipped
+/// creature" / "enchanted creature" recipient of a resolution-timed instruction
+/// is whatever the source is attached to as that instruction resolves. No target
+/// slot was announced for it (`ability.targets` is empty), so the host is read
+/// from the attachment relationship. Single authority for both the instruction's
+/// recipient (`counters::resolve_defined_or_targets`) and a condition whose
+/// anaphor names that recipient (`evaluate_condition`'s `TargetMatchesFilter`),
+/// so the two can never disagree about which object "it" is.
+/// `None` when this node does not name such a recipient.
+pub(crate) fn resolution_bound_attachment_hosts(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    recipient: &TargetFilter,
+) -> Option<Vec<ObjectId>> {
+    let names_resolution_bound_host = ability.target_choice_timing
+        == TargetChoiceTiming::Resolution
+        && ability.targets.is_empty()
+        && recipient.contains_source_attachment_host();
+    names_resolution_bound_host.then(|| resolved_object_ids_for_filter(state, ability, recipient))
 }
 
 /// Resolve a filter with a caller-supplied semantic context. This preserves the

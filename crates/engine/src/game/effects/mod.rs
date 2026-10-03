@@ -19658,17 +19658,39 @@ pub(crate) fn evaluate_condition(
             // part of the effect requires information about an illegal target,
             // it fails to determine any such information", so a slot that was
             // an illegal target at resolution tests as unmatched.
-            // CR 109.4 + CR 603.2: without a slot, "that creature" / "it" is the
-            // ability's first object target, OR — for subject-based triggers that
-            // carry no chosen target — the triggering event's subject object.
-            // Mirror the `ParentTargetController` fallback (targeting.rs): when
-            // `targets` has no object, resolve the anaphor against
-            // `TriggeringSource` from the current trigger event.
+            // CR 109.4 + CR 603.2: without a slot, "that creature" / "it" is, in
+            // order: the node's own resolution-bound attachment-host recipient;
+            // else the ability's first object target; else — for subject-based
+            // triggers that carry no chosen target — the triggering event's
+            // subject object. The last tier mirrors the `ParentTargetController`
+            // fallback (targeting.rs): when `targets` has no object, resolve the
+            // anaphor against `TriggeringSource` from the current trigger event.
             let target_id = if let Some(index) = subject_slot {
                 match crate::game::targeting::resolve_live_parent_slot_from_root(
                     state, ability, *index,
                 ) {
                     Some(TargetRef::Object(id)) => Some(id),
+                    _ => None,
+                }
+            } else if let Some(hosts) = ability.effect.target_filter().and_then(|recipient| {
+                crate::game::targeting::resolution_bound_attachment_hosts(state, ability, recipient)
+            }) {
+                // CR 608.2c + CR 301.5a + CR 301.5f: "put a +1/+1 counter on
+                // equipped creature if it's red" — the anaphor names this
+                // instruction's own recipient, the source's attachment host bound
+                // as the instruction resolves (CR 115.10a: not a target, so no
+                // slot carries it). Read it from the same authority the effect
+                // uses. A singular anaphor needs a unique referent: no host
+                // (unattached Equipment) leaves "it" without one, so the
+                // condition is false rather than falling through to an unrelated
+                // trigger-event subject. An Equipment or Aura has at most one host
+                // (CR 301.5c, CR 303.4b); two or more can only come from a
+                // non-attachment source's filter fallback, which no card in this
+                // class reaches, and likewise has no unique referent. CR 603.4
+                // does not apply — the "if" does not follow the trigger
+                // condition, so it is checked only here, on resolution.
+                match hosts.as_slice() {
+                    [host] => Some(*host),
                     _ => None,
                 }
             } else {
