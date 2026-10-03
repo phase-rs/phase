@@ -114,4 +114,23 @@ describe("MayTriggerAutoChoiceList", () => {
     });
     expect(screen.queryByText("Clear all")).not.toBeInTheDocument();
   });
+  it("shows engine replacement summaries and echoes their exact removal key", () => {
+    seed([]);
+    act(() => useGameStore.setState((state) => ({ gameState: {
+      ...state.gameState!,
+      replacement_auto_choices: [{
+        key: { player: 0, event: "LoseMana", kind: { type: "Order" }, candidates: [] },
+        choice: { type: "Order", data: { order: [1, 0] } },
+        descriptions: ["Convert to red", "Keep mana"],
+      }],
+    } })));
+    render(<MayTriggerAutoChoiceList />);
+    fireEvent.click(screen.getByRole("button", { name: /auto-deciding/i }));
+    expect(screen.getByText("Replacement: Convert to red → Keep mana")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("Remove"));
+    expect(dispatchActionMock).toHaveBeenCalledWith({ type: "SetReplacementAutoChoice", data: { selector: useGameStore.getState().gameState!.replacement_auto_choices![0].key } });
+    fireEvent.click(screen.getByText("Clear all"));
+    expect(dispatchActionMock).toHaveBeenCalledWith({ type: "SetReplacementAutoChoice", data: { selector: null } });
+  });
+
 });

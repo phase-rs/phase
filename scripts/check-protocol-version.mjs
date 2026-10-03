@@ -80,7 +80,8 @@ const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
 // +32: v103 removes FormatConfig.allow_experimental_dungeons for the format-derived dungeon pool.
 // +33: v104 moves delve fuel to total-cost payment (PendingCast.delved_cards,
 // the FinalizeDelvedCast completion; DelveManaPayment removed).
-const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 33;
+// +34: v105 adds exact replacement-choice preferences and remembered response actions.
+const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 34;
 // The LOBBY message-set version, not derived from the full-game number above.
 // The classifier below refuses an expression only on the SOURCE constants; this
 // script never reads itself, so its own EXPECTED_* must stay literals.
@@ -138,7 +139,8 @@ const PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION = 54;
 // +30: wire 84 moves with full-game v102 for SharedCardTypes.
 // +31: wire 85 moves with full-game v103 for the format-derived dungeon pool.
 // +32: wire 86 moves with full-game v104 for the delve payment state shape.
-const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 32;
+// +33: wire 87 moves with full-game v105 for remembered replacement choices.
+const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 33;
 // The P2P DRAFT wire version. A FIFTH independent surface, and the one this
 // script previously did not read at all: `DRAFT_PROTOCOL_VERSION` is an
 // EXACT-MATCH first-contact gate (p2p-draft-host.ts / p2p-draft-guest.ts refuse

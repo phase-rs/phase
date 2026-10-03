@@ -17,10 +17,11 @@ import { PopoverMenu } from "../menu/PopoverMenu.tsx";
  */
 export function MayTriggerAutoChoiceList() {
   const { t } = useTranslation("game");
-  const choices = useGameStore((s) => s.gameState?.may_trigger_auto_choices);
+  const choices = useGameStore((s) => s.gameState?.may_trigger_auto_choices) ?? [];
+  const replacementChoices = useGameStore((s) => s.gameState?.replacement_auto_choices) ?? [];
   const objects = useGameStore((s) => s.gameState?.objects);
 
-  if (!choices || choices.length === 0) return null;
+  if (choices.length + replacementChoices.length === 0) return null;
 
   const rowKey = (selector: MayTriggerAutoChoiceSelector) => JSON.stringify(selector);
 
@@ -42,7 +43,7 @@ export function MayTriggerAutoChoiceList() {
           }`}
         >
           <span>{t("mayTriggerAutoChoice.menuButtonShortActive")}</span>
-          <span className="rounded-full bg-black/25 px-1.5 leading-tight">{choices.length}</span>
+          <span className="rounded-full bg-black/25 px-1.5 leading-tight">{choices.length + replacementChoices.length}</span>
         </button>
       )}
     >
@@ -60,6 +61,7 @@ export function MayTriggerAutoChoiceList() {
                   type: "SetMayTriggerAutoChoice",
                   data: { op: { type: "ClearAll" } },
                 });
+                dispatchAction({ type: "SetReplacementAutoChoice", data: { selector: null } });
                 close();
               }}
             >
@@ -104,6 +106,17 @@ export function MayTriggerAutoChoiceList() {
                 </li>
               );
             })}
+            {replacementChoices.map((record) => (
+              <li key={JSON.stringify(record.key)} className="flex items-center justify-between gap-2 px-3 py-1.5">
+                <span className="text-sm text-gray-200">
+                  {t("replacement.savedChoice", { choice: record.descriptions.join(" → ") })}
+                </span>
+                <button type="button" className="shrink-0 rounded px-1.5 py-0.5 text-xs font-semibold text-sky-200 transition-colors hover:bg-white/10"
+                  onClick={() => dispatchAction({ type: "SetReplacementAutoChoice", data: { selector: record.key } })}>
+                  {t("mayTriggerAutoChoice.remove")}
+                </button>
+              </li>
+            ))}
           </ul>
         </>
       )}

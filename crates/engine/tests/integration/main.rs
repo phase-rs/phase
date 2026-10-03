@@ -1236,6 +1236,7 @@ mod refurbished_familiar;
 mod rejoin_the_fight_choose_pool;
 mod relic_of_progenitus_6446;
 mod render_silent_cant_cast;
+mod replacement_choice_remember;
 mod replacement_choice_trigger_gating;
 mod replacement_mill_double_application;
 mod repro_pilot_crew;

@@ -1,10 +1,11 @@
 // @generated-style: maintained by action enum structure; update when GameAction grows.
 //
 // Issue #4878: allocation-free total order for deterministic AI / legal-action
-// sorting. Every payload field type used below derives `Ord`, so payload
+// sorting. Ordinary generated payloads derive `Ord`, so their
 // comparison reduces to `cmp_val` (a thin `Ord::cmp` wrapper) chained with
-// `then_with`. The single exception is `GameAction::Debug`, whose payload
-// (`DebugAction`) transitively contains non-`Ord` types (`Keyword`,
+// `then_with`. Cold replacement-preference actions compare serialized definition
+// snapshots. `GameAction::Debug` also has a payload (`DebugAction`) that
+// transitively contains non-`Ord` types (`Keyword`,
 // `TokenCharacteristics`); it is a cold path (debug actions are never in
 // `legal_actions()`) handled by the exhaustive `cmp_debug_action`. No `Debug`
 // string formatting is used for ordering.
@@ -13,7 +14,8 @@ use std::cmp::Ordering;
 use super::ability::LibraryPosition;
 use super::actions::{DebugAction, DebugTokenRequest, GameAction, GameActionKind};
 
-/// Total, allocation-free order over `GameAction`: variant discriminant first
+/// Total order over `GameAction`, allocation-free for generated gameplay actions:
+/// variant discriminant first
 /// (`GameActionKind`, declaration order), then payload fields.
 pub fn cmp_game_actions(a: &GameAction, b: &GameAction) -> Ordering {
     GameActionKind::from(a)
@@ -311,6 +313,22 @@ fn cmp_payload(a: &GameAction, b: &GameAction) -> Ordering {
             {
                 cmp_val(a0, b0)
             }
+        }
+        GameAction::ChooseReplacementAndRemember { choice: a0 } => {
+            let GameAction::ChooseReplacementAndRemember { choice: b0 } = b else {
+                unreachable!("same variant")
+            };
+            cmp_val(a0, b0)
+        }
+        GameAction::SetReplacementAutoChoice { selector: a0 } => {
+            let GameAction::SetReplacementAutoChoice { selector: b0 } = b else {
+                unreachable!("same variant")
+            };
+            // Cold preference actions are never generated as AI/legal candidates.
+            // Exact definition snapshots are non-Ord; compare their wire identity.
+            serde_json::to_vec(a0)
+                .expect("replacement key serializes")
+                .cmp(&serde_json::to_vec(b0).expect("replacement key serializes"))
         }
         GameAction::ChooseReplacement { index: a0 } => {
             let GameAction::ChooseReplacement { index: b0 } = b else {
@@ -1742,16 +1760,54 @@ mod tests {
         DecisionGroupKey, DecisionKind, DecisionTemplate, IterationCount, ReplayMode,
     };
     use crate::game::combat::AttackTarget;
+    use crate::types::ability::ReplacementDefinition;
     use crate::types::actions::ResolveAllScope;
     use crate::types::actions::{
         MayTriggerAutoChoiceOp, PrecastCopyShortcutResponse, ResolveAllConsentDecision,
     };
     use crate::types::game_state::{
         EndEffectGroupId, MayTriggerAutoChoiceKey, MayTriggerAutoChoiceSelector, MayTriggerOrigin,
+        ReplacementAutoChoiceIdentity, ReplacementAutoChoiceKey, ReplacementChoiceKind,
     };
-    use crate::types::identifiers::ObjectId;
+    use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
     use crate::types::mana::{ManaCost, ManaCostShard};
     use crate::types::player::PlayerId;
+    use crate::types::replacements::ReplacementEvent;
+
+    #[test]
+    fn replacement_removal_orders_exact_definition_snapshots() {
+        let key = ReplacementAutoChoiceKey {
+            player: PlayerId(0),
+            event: ReplacementEvent::GainLife,
+            kind: ReplacementChoiceKind::Order,
+            candidates: vec![ReplacementAutoChoiceIdentity::Definition {
+                source: ObjectIncarnationRef::of(ObjectId(1), 0),
+                index: 0,
+                definition: Box::new(ReplacementDefinition::new(ReplacementEvent::GainLife)),
+            }],
+        };
+        let mut changed_key = key.clone();
+        let ReplacementAutoChoiceIdentity::Definition { definition, .. } =
+            &mut changed_key.candidates[0]
+        else {
+            unreachable!();
+        };
+        definition.description = Some("Changed definition".into());
+        assert_distinct_order(
+            GameAction::SetReplacementAutoChoice {
+                selector: Some(key.clone()),
+            },
+            GameAction::SetReplacementAutoChoice {
+                selector: Some(changed_key),
+            },
+        );
+        assert_distinct_order(
+            GameAction::SetReplacementAutoChoice {
+                selector: Some(key),
+            },
+            GameAction::SetReplacementAutoChoice { selector: None },
+        );
+    }
 
     fn assert_distinct_order(a: GameAction, b: GameAction) {
         assert_ne!(a.cmp_stable(&b), Ordering::Equal);

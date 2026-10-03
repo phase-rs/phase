@@ -526,6 +526,8 @@ pub enum InteractionActionCode {
     SelectTargets,
     ChooseTarget,
     ChooseReplacement,
+    ChooseReplacementAndRemember,
+    SetReplacementAutoChoice,
     ChooseEntryController,
     OrderTriggers,
     OrderCostReductions,

@@ -2348,6 +2348,8 @@
     "confirm": "Confirmar"
   },
   "replacement": {
+    "remember": "Lembrar esta escolha nesta partida",
+    "savedChoice": "Substituição: {{choice}}",
     "eyebrow": "Ordem de Resolução",
     "title": "Efeitos de Substituição",
     "orderSubtitle": "Todos estes efeitos alteram como este evento acontece. Arraste para definir a ordem de aplicação — o último aplicado é o que prevalece (CR 616.1).",
