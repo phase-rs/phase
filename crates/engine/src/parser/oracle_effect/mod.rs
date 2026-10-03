@@ -22154,6 +22154,20 @@ fn try_parse_verb_and_target<'a>(
             .then_some(crate::types::zones::Zone::Exile)
         });
         let target = add_inferred_origin_constraints_to_target(target, origin, rest_lower);
+        // CR 608.2c: a "this way" participle inside the TARGET span ("a
+        // creature card put into a graveyard this way", Danse Macabre)
+        // restricts membership to the producing effect's tracked set. When
+        // the built target carries no such restriction, the participle was
+        // silently dropped (unit 8e, unimplemented) and the bare filter
+        // would resolve over-broad (any graveyard creature, not Danse's
+        // victims). Refuse the line so it lowers honestly Unimplemented
+        // instead of wrong. Targets that DID bind the anaphor
+        // (`TrackedSetFiltered`, `InTrackedSet`) pass through untouched.
+        if scan_contains_phrase(&target_text.to_ascii_lowercase(), "this way")
+            && !target.references_tracked_set()
+        {
+            return None;
+        }
         // CR 115.1: A bounce resolves at-resolution iff the Oracle text omitted
         // the word "target" AND the filter has a controller scope to enumerate
         // against. Computed here so both Hand-destined and default-None
@@ -37254,6 +37268,8 @@ fn def_slots_reference_triggering_batch(def: &AbilityDefinition) -> bool {
                 let complete = aggregate.source().try_for_each_member(
                     crate::types::ability::UNION_DEPTH_BUDGET,
                     &mut |leaf| {
+                        // Keys on `set` alone: a member filter does not
+                        // change which leaves are batch-keyed.
                         found |= matches!(
                             leaf,
                             CardTypeSetSource::TrackedSet {
@@ -37310,6 +37326,8 @@ fn rebind_tracked_aggregate_expr(expr: &mut QuantityExpr) {
             let complete = source.try_for_each_member_mut(
                 crate::types::ability::UNION_DEPTH_BUDGET,
                 &mut |leaf| {
+                    // Rebinds `set` only; `..` preserves `caused_by` and
+                    // any member filter, which are orthogonal to the key.
                     if let CardTypeSetSource::TrackedSet { set, .. } = leaf {
                         if *set == TrackedAnaphorSource::TriggeringBatch {
                             *set = TrackedAnaphorSource::ChainSet;

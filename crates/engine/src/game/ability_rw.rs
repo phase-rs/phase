@@ -4113,9 +4113,20 @@ fn characteristic_source_read(source: &CardTypeSetSource) -> RwProfile {
         // rule is about following a spell's instructions in the order written,
         // which is why a "this way" reference HAS a referent at all — it says
         // nothing about reading membership.
-        CardTypeSetSource::Zone { .. }
-        | CardTypeSetSource::ExiledBySource
-        | CardTypeSetSource::TrackedSet { .. } => reads_zone_membership(),
+        CardTypeSetSource::Zone { .. } | CardTypeSetSource::ExiledBySource => {
+            reads_zone_membership()
+        }
+        // CR 608.2i (look-back membership, as above) plus the member filter's
+        // own board read when present: an OMITTED read is FAIL-OPEN for the
+        // CR 603.3b gate, so a filter that names controller-scoped members
+        // must merge its profile rather than ride on the zone default.
+        CardTypeSetSource::TrackedSet { filter, .. } => {
+            let mut profile = reads_zone_membership();
+            if let Some(filter) = filter {
+                profile.merge(board_membership_read(filter));
+            }
+            profile
+        }
         // CR 608.2i: the cast journal is read by looking BACK at actions already
         // taken this turn — the recorded spells have left the stack (CR 400.7)
         // and are read from their snapshots, not from the board. That is why
@@ -6622,6 +6633,8 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
                 crate::types::ability::UNION_DEPTH_BUDGET,
                 &mut |leaf| match leaf {
                     CardTypeSetSource::TurnJournal { .. } => {}
+                    // A member filter narrows which members resolve, not
+                    // whether the leaf reads tracked-set membership.
                     CardTypeSetSource::TrackedSet { .. } => {
                         reads_live_object = true;
                         reads_tracked = true;
@@ -7719,6 +7732,8 @@ mod tests {
             source.try_for_each_member(crate::types::ability::UNION_DEPTH_BUDGET, &mut |leaf| {
                 match leaf {
                     CardTypeSetSource::TurnJournal { .. } => {}
+                    // Test mirror of the production arm above: membership
+                    // flags, unaffected by member narrowing.
                     CardTypeSetSource::TrackedSet { .. } => {
                         live = true;
                         tracked = true;
@@ -7756,10 +7771,12 @@ mod tests {
             CardTypeSetSource::TrackedSet {
                 set: TrackedAnaphorSource::ChainSet,
                 caused_by: None,
+                filter: None,
             },
             CardTypeSetSource::TrackedSet {
                 set: TrackedAnaphorSource::TriggeringBatch,
                 caused_by: None,
+                filter: None,
             },
             journal.clone(),
             CardTypeSetSource::any_of(vec![objects, journal]).unwrap(),

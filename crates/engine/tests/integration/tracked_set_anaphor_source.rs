@@ -22,14 +22,15 @@
 //! Oracle text is quoted from Scryfall, not from memory.
 
 use engine::game::combat::AttackTarget;
-use engine::game::quantity::resolve_quantity;
+use engine::game::quantity::{resolve_quantity, resolve_quantity_with_ctx, QuantityContext};
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::parser::parse_oracle_text;
 use engine::types::ability::{
-    AggregateFunction, CardTypeSetSource, Effect, ObjectProperty, QuantityExpr, QuantityRef,
-    TrackedAnaphorSource,
+    AggregateFunction, CardTypeSetSource, ControllerRef, Effect, ObjectProperty, QuantityExpr,
+    QuantityRef, TargetFilter, TrackedAnaphorSource, TypedFilter,
 };
 use engine::types::events::GameEvent;
+use engine::types::game_state::WaitingFor;
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -65,6 +66,8 @@ fn aggregates(
                     let qty: QuantityRef = serde_json::from_value(value.clone())
                         .expect("PropertyAggregate round-trips");
                     if let QuantityRef::PropertyAggregate(aggregate) = qty {
+                        // Test census collects the `set` key only; member
+                        // narrowing does not change the tally.
                         if let CardTypeSetSource::TrackedSet { set, .. } = aggregate.source() {
                             out.push((aggregate.function(), aggregate.property(), *set));
                         }
@@ -338,6 +341,7 @@ fn witch_king_state_is_red_under_the_chain_set_binding() {
                 engine::types::ability::CardTypeSetSource::TrackedSet {
                     set: TrackedAnaphorSource::TriggeringBatch,
                     caused_by: None,
+                    filter: None,
                 },
             )
             .expect("statically valid property aggregate"),
@@ -351,6 +355,7 @@ fn witch_king_state_is_red_under_the_chain_set_binding() {
                 engine::types::ability::CardTypeSetSource::TrackedSet {
                     set: TrackedAnaphorSource::ChainSet,
                     caused_by: None,
+                    filter: None,
                 },
             )
             .expect("statically valid property aggregate"),
@@ -418,6 +423,7 @@ fn kylox_state_is_red_under_the_triggering_batch_binding() {
                 engine::types::ability::CardTypeSetSource::TrackedSet {
                     set: TrackedAnaphorSource::ChainSet,
                     caused_by: None,
+                    filter: None,
                 },
             )
             .expect("statically valid property aggregate"),
@@ -431,6 +437,7 @@ fn kylox_state_is_red_under_the_triggering_batch_binding() {
                 engine::types::ability::CardTypeSetSource::TrackedSet {
                     set: TrackedAnaphorSource::TriggeringBatch,
                     caused_by: None,
+                    filter: None,
                 },
             )
             .expect("statically valid property aggregate"),
@@ -486,5 +493,386 @@ fn kylox_exile_top_is_recognized_as_a_tracked_set_consumer() {
         matches!(*sub.effect, Effect::ExileTop { .. }),
         "the consumer clause is the ExileTop, got {:?}",
         sub.effect
+    );
+}
+
+// ===========================================================================
+// Unit 8c — agent-interposed "this way" anaphors narrow the tracked set (B-2..B-6)
+// ===========================================================================
+//
+// "the toughness of the creature YOU sacrificed this way" (Danse Macabre) and
+// "the total power of the creatures THEY exiled this way" (Grand Ossuary) name
+// an agent between the noun and the participle. The agent threads into the
+// tracked-set aggregate as a member `filter` so the resolver counts only that
+// agent's members. B-1 (in-crate, `agent_interposed_anaphor_threads_member_filter`)
+// pins the combinator; these pin the card-level parse, the runtime resolution,
+// and the honest-red refusal of the sibling put-into-zone rows (unit 8e,
+// Option 1: Danse's rows stay Unimplemented until Phase 7 wires them).
+
+const DANSE: &str = "Each player sacrifices a nontoken creature of their choice. Roll a d20 and add the toughness of the creature you sacrificed this way.\n1—14 | Return a creature card put into a graveyard this way to the battlefield under your control.\n15+ | Return up to two creature cards put into graveyards this way to the battlefield under your control.";
+const OSSUARY: &str = "Whenever a creature dies, its controller distributes a number of +1/+1 counters equal to its power among any number of target creatures they control.\nWhenever chaos ensues, each player exiles all creatures they control and creates X 1/1 green Saproling creature tokens, where X is the total power of the creatures they exiled this way. Then planeswalk.";
+const DANSE_ROW_1: &str =
+    "Return a creature card put into a graveyard this way to the battlefield under your control.";
+const DANSE_ROW_2: &str =
+    "Return up to two creature cards put into graveyards this way to the battlefield under your control.";
+const ROW_BASELINE: &str = "Return a creature card to the battlefield under your control.";
+const ROW_NOPARTICLE: &str =
+    "Return a creature card put into a graveyard to the battlefield under your control.";
+
+/// Every `TrackedSetAggregate` reachable in a card's parse, as
+/// `(function, property, source, filter controller)`. The 8c extension of the
+/// [`aggregates`] census above: the member filter's controller is part of the
+/// binding, so it is part of the tally.
+fn filtered_aggregates(
+    name: &str,
+    oracle: &str,
+    types: &[String],
+) -> Vec<(
+    AggregateFunction,
+    ObjectProperty,
+    TrackedAnaphorSource,
+    Option<ControllerRef>,
+)> {
+    let parsed = parse_oracle_text(oracle, name, &[], types, &[]);
+    let json = serde_json::to_value(&parsed).expect("ParsedAbilities serializes");
+    let mut out = Vec::new();
+    collect(&json, &mut out);
+    return out;
+
+    fn collect(
+        value: &serde_json::Value,
+        out: &mut Vec<(
+            AggregateFunction,
+            ObjectProperty,
+            TrackedAnaphorSource,
+            Option<ControllerRef>,
+        )>,
+    ) {
+        match value {
+            serde_json::Value::Object(map) => {
+                if map.get("type").and_then(|t| t.as_str()) == Some("PropertyAggregate") {
+                    let qty: QuantityRef = serde_json::from_value(value.clone())
+                        .expect("PropertyAggregate round-trips");
+                    if let QuantityRef::PropertyAggregate(aggregate) = qty {
+                        if let CardTypeSetSource::TrackedSet { set, filter, .. } =
+                            aggregate.source()
+                        {
+                            let controller = filter.as_ref().and_then(|filter| match filter {
+                                TargetFilter::Typed(typed) => typed.controller.clone(),
+                                _ => None,
+                            });
+                            out.push((
+                                aggregate.function(),
+                                aggregate.property(),
+                                *set,
+                                controller,
+                            ));
+                        }
+                    }
+                }
+                for v in map.values() {
+                    collect(v, out);
+                }
+            }
+            serde_json::Value::Array(items) => items.iter().for_each(|v| collect(v, out)),
+            _ => {}
+        }
+    }
+}
+
+/// Count honest-failure markers in a card's parse.
+fn unimplemented_count(name: &str, oracle: &str, types: &[String]) -> usize {
+    let parsed = parse_oracle_text(oracle, name, &[], types, &[]);
+    serde_json::to_string(&parsed)
+        .expect("serializes")
+        .matches("\"type\":\"Unimplemented\"")
+        .count()
+}
+
+/// B-2 — RUNTIME cast drive. Danse Macabre resolves end to end: both players
+/// sacrifice (mandatory fast path — one eligible creature each, so no prompt),
+/// the d20 rolls with the filtered toughness bonus, and the winning die row
+/// resolves to an honest no-op recorded in `unimplemented_oracle_ids`.
+///
+/// The lying green this guards: before the Option-1 refusal, row 1 parsed as
+/// an over-broad "return any creature card from a graveyard" and would have
+/// reanimated here. Post-refusal nothing leaves either graveyard.
+#[test]
+fn danse_macabre_cast_sacrifices_both_sides_and_honestly_no_ops_the_row() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let oak = scenario.add_creature(P0, "Oak", 2, 3).id();
+    let elm = scenario.add_creature(P1, "Elm", 1, 7).id();
+    let danse = scenario
+        .add_spell_to_hand_from_oracle(P0, "Danse Macabre", false, DANSE)
+        .id();
+    let mut runner = scenario.build();
+
+    let outcome = runner.cast(danse).resolve();
+
+    // Both edicts paid: the sacrificed creatures rest in their owners' graveyards.
+    outcome.assert_zone(&[oak, elm], Zone::Graveyard);
+    // The sorcery itself resolved to its owner's graveyard (CR 608.2n).
+    outcome.assert_zone(&[danse], Zone::Graveyard);
+    // Nothing reanimated: no creature is on the battlefield.
+    assert!(
+        outcome.state().battlefield.is_empty(),
+        "no row may reanimate while the put-into-zone anaphor is unwired; \
+         battlefield holds {:?}",
+        outcome.state().battlefield
+    );
+    // No `unimplemented_oracle_ids` assertion: `resolve_ability_chain` skips
+    // `Effect::Unimplemented` nodes without recording the telemetry marker
+    // (effects/mod.rs) — the marker only fires on the direct `resolve_effect`
+    // path. That under-reporting is a pre-existing telemetry gap, out of scope
+    // for unit 8c; the honest behavior pinned here is the no-op itself
+    // (battlefield empty above) plus the clean halt below.
+    // Clean halt: resolution finished with no dangling prompt.
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "expected a clean return to priority, got {:?}",
+        outcome.final_waiting_for()
+    );
+}
+
+/// B-3 — SHAPE. The interposed agent is part of the card-level binding, not
+/// just the combinator: Danse's "you" and Ossuary's "they" each narrow the
+/// chain set to that agent's members.
+#[test]
+fn agent_interposed_anaphor_binds_chain_set_with_member_filter_at_card_level() {
+    let sorcery = vec!["Sorcery".to_string()];
+    assert_eq!(
+        filtered_aggregates("Danse Macabre", DANSE, &sorcery),
+        vec![(
+            AggregateFunction::Sum,
+            ObjectProperty::Toughness,
+            TrackedAnaphorSource::ChainSet,
+            Some(ControllerRef::You)
+        )],
+        "Danse's roll bonus is the toughness of the creature YOU sacrificed — \
+         the chain set narrowed to the caster's members"
+    );
+
+    // Grand Ossuary's "the total power of the creatures they exiled this way"
+    // is the `they` leaf's measured corpus fragment, but the card itself stays
+    // red: its enclosing "creates X ... tokens, where X is ..." clause is
+    // Unimplemented for the unrelated token-creation reason (verified by dump —
+    // the chaos trigger's sub-ability is `Unimplemented { name: "creates" }`),
+    // so no aggregate reaches the census. Token-clause support is out of scope
+    // for unit 8c; B-1 pins the `they` combinator shape and B-5 pins its
+    // runtime scoping directly.
+    let plane = vec!["Plane".to_string()];
+    assert_eq!(
+        filtered_aggregates("Grand Ossuary", OSSUARY, &plane),
+        Vec::new(),
+        "Ossuary contributes no supported aggregate while its token clause is red"
+    );
+    // Reach-guards so the empty census above is not vacuous: the exile
+    // preamble parses supported and the red node is specifically the token
+    // clause — not a total parse collapse.
+    let ossuary_json = serde_json::to_string(&parse_oracle_text(
+        OSSUARY,
+        "Grand Ossuary",
+        &[],
+        &plane,
+        &[],
+    ))
+    .expect("serializes");
+    assert!(
+        ossuary_json.contains("\"type\":\"ChangeZoneAll\""),
+        "the exile preamble must stay supported, got {ossuary_json}"
+    );
+    assert!(
+        ossuary_json.contains("\"name\":\"creates\""),
+        "the red node must be specifically the token clause, got {ossuary_json}"
+    );
+}
+
+/// B-4 — RESOLVER + MUTUAL DESTRUCTION. A chain set holding both players'
+/// sacrificed creatures (read from LKI — both members have left the
+/// battlefield) resolves 3 under Danse's `You` filter and 10 unfiltered.
+/// The unfiltered 10 is the over-count the filter exists to prevent.
+#[test]
+fn filtered_tracked_set_aggregate_counts_only_the_named_agents_members_via_lki() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let oak = scenario.add_creature_to_graveyard(P0, "Oak", 2, 3).id();
+    let elm = scenario.add_creature_to_graveyard(P1, "Elm", 1, 7).id();
+    let runner = scenario.build();
+
+    // LKI as the sacrifice publisher would have captured it at zone-change time.
+    let mut state = runner.state().clone();
+    for oid in [oak, elm] {
+        let snapshot = state
+            .objects
+            .get(&oid)
+            .expect("tracked member exists")
+            .snapshot_public_characteristics();
+        state.lki_cache.insert(oid, snapshot);
+    }
+    let set_id = engine::types::identifiers::TrackedSetId(state.next_tracked_set_id);
+    state.next_tracked_set_id += 1;
+    state.tracked_object_sets.insert(set_id, vec![oak, elm]);
+
+    let aggregate = |filter: Option<TargetFilter>| QuantityExpr::Ref {
+        qty: QuantityRef::PropertyAggregate(
+            engine::types::ability::PropertyAggregate::new(
+                AggregateFunction::Sum,
+                ObjectProperty::Toughness,
+                CardTypeSetSource::TrackedSet {
+                    set: TrackedAnaphorSource::ChainSet,
+                    caused_by: None,
+                    filter,
+                },
+            )
+            .expect("statically valid property aggregate"),
+        ),
+    };
+    let filtered = aggregate(Some(TargetFilter::Typed(
+        TypedFilter::card().controller(ControllerRef::You),
+    )));
+    let unfiltered = aggregate(None);
+
+    assert_eq!(
+        resolve_quantity(&state, &filtered, P0, oak),
+        3,
+        "Danse's filter admits only the caster's sacrificed creature (toughness 3)"
+    );
+    assert_eq!(
+        resolve_quantity(&state, &unfiltered, P0, oak),
+        10,
+        "without the member filter the opponent's toughness 7 leaks in — the \
+         over-count that makes the restriction load-bearing, not decorative"
+    );
+
+    // The no-LKI fallback arm: with the snapshots gone (the cache clears on
+    // phase/step transitions), the same members resolve from their live
+    // objects to the same answers.
+    state.lki_cache.clear();
+    assert_eq!(
+        resolve_quantity(&state, &filtered, P0, oak),
+        3,
+        "filter over live objects without LKI still admits only the caster's member"
+    );
+    assert_eq!(
+        resolve_quantity(&state, &unfiltered, P0, oak),
+        10,
+        "unfiltered over live objects without LKI still over-counts to 10"
+    );
+}
+
+/// B-5 — RESOLVER. Ossuary's `they` (ScopedPlayer) follows the resolution
+/// scope: scoped to P1 it counts only P1's exiled member; with no scope
+/// active it falls back to the ability controller.
+#[test]
+fn scoped_player_member_filter_follows_the_resolution_scope() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let oak = scenario.add_creature_to_graveyard(P0, "Oak", 2, 3).id();
+    let elm = scenario.add_creature_to_graveyard(P1, "Elm", 1, 7).id();
+    let runner = scenario.build();
+
+    let mut state = runner.state().clone();
+    for oid in [oak, elm] {
+        let snapshot = state
+            .objects
+            .get(&oid)
+            .expect("tracked member exists")
+            .snapshot_public_characteristics();
+        state.lki_cache.insert(oid, snapshot);
+    }
+    let set_id = engine::types::identifiers::TrackedSetId(state.next_tracked_set_id);
+    state.next_tracked_set_id += 1;
+    state.tracked_object_sets.insert(set_id, vec![oak, elm]);
+
+    let expr = QuantityExpr::Ref {
+        qty: QuantityRef::PropertyAggregate(
+            engine::types::ability::PropertyAggregate::new(
+                AggregateFunction::Sum,
+                ObjectProperty::Toughness,
+                CardTypeSetSource::TrackedSet {
+                    set: TrackedAnaphorSource::ChainSet,
+                    caused_by: None,
+                    filter: Some(TargetFilter::Typed(
+                        TypedFilter::card().controller(ControllerRef::ScopedPlayer),
+                    )),
+                },
+            )
+            .expect("statically valid property aggregate"),
+        ),
+    };
+    let ctx_with = |scoped_player| QuantityContext {
+        entering: None,
+        source: oak,
+        trigger_source: None,
+        recipient: None,
+        scoped_player,
+        damage_source: None,
+        event_amount: None,
+    };
+
+    assert_eq!(
+        resolve_quantity_with_ctx(&state, &expr, P0, ctx_with(Some(P1))),
+        7,
+        "scoped to P1, only P1's exiled member (toughness 7) counts"
+    );
+    assert_eq!(
+        resolve_quantity_with_ctx(&state, &expr, P0, ctx_with(None)),
+        3,
+        "with no scope active the filter falls back to the controller's members"
+    );
+}
+
+/// B-6 — SHAPE. Danse's put-into-zone rows refuse honestly (unit 8e, Option 1)
+/// while the neighboring shapes keep parsing: the particle-less and bare
+/// forms still reach `ChangeZone`, and Danse's own sacrifice + roll preamble
+/// stays supported — only the two rows are red.
+#[test]
+fn danse_put_into_zone_rows_refuse_honestly_while_neighbors_parse() {
+    let sorcery = vec!["Sorcery".to_string()];
+    // The two FULL bodies — singular "a graveyard" and "up to two" plural
+    // "graveyards" — both surface as Unimplemented.
+    assert_eq!(
+        unimplemented_count("Probe Row", DANSE_ROW_1, &sorcery),
+        1,
+        "row 1 names a put-into-zone set the engine cannot execute"
+    );
+    assert_eq!(
+        unimplemented_count("Probe Row", DANSE_ROW_2, &sorcery),
+        1,
+        "row 2 (up to two, plural graveyards) refuses the same way"
+    );
+
+    // Reach-guards against over-refusal: without "this way" both shapes parse
+    // to an honest ChangeZone with no red marker.
+    for (label, text) in [("baseline", ROW_BASELINE), ("no-particle", ROW_NOPARTICLE)] {
+        let parsed = parse_oracle_text(text, "Probe Row", &[], &sorcery, &[]);
+        let json = serde_json::to_string(&parsed).expect("serializes");
+        assert!(
+            json.contains("\"type\":\"ChangeZone\""),
+            "{label} must still reach ChangeZone, got {json}"
+        );
+        assert!(
+            !json.contains("Unimplemented"),
+            "{label} must stay fully supported, got {json}"
+        );
+    }
+
+    // Danse itself: the sacrifice preamble and the d20 roll stay supported —
+    // exactly the two die rows are red, no more.
+    let parsed = parse_oracle_text(DANSE, "Danse Macabre", &[], &sorcery, &[]);
+    let json = serde_json::to_string(&parsed).expect("serializes");
+    assert!(
+        json.contains("\"type\":\"Sacrifice\""),
+        "the edict preamble must stay supported, got {json}"
+    );
+    assert!(
+        json.contains("\"type\":\"RollDie\""),
+        "the d20 roll must stay supported, got {json}"
+    );
+    assert_eq!(
+        json.matches("\"type\":\"Unimplemented\"").count(),
+        2,
+        "exactly the two die rows may be red, got {json}"
     );
 }

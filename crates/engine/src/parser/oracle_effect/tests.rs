@@ -386,6 +386,8 @@ fn assert_tracked_mana_value_source(def: &AbilityDefinition, expected: TrackedAn
     };
     assert_eq!(aggregate.function(), AggregateFunction::Sum);
     assert_eq!(aggregate.property(), ObjectProperty::ManaValue);
+    // Test helper asserts the `set` key only; a member filter would not
+    // change the expected answer.
     assert!(matches!(
         aggregate.source(),
         CardTypeSetSource::TrackedSet { set, .. } if *set == expected
@@ -670,6 +672,7 @@ fn nested_batch_aggregate() -> PropertyAggregate {
                 CardTypeSetSource::TrackedSet {
                     set: TrackedAnaphorSource::TriggeringBatch,
                     caused_by: None,
+                    filter: None,
                 },
                 CardTypeSetSource::Zone {
                     zone: ZoneRef::Graveyard,
@@ -716,6 +719,8 @@ fn nested_triggering_batch_aggregate_is_rebound_through_the_source_visitor() {
         &mut |leaf| {
             leaves += 1;
             match leaf {
+                // Test census counts leaves by `set` key; member
+                // narrowing does not change the tally.
                 CardTypeSetSource::TrackedSet { set, .. } => match set {
                     TrackedAnaphorSource::TriggeringBatch => batch += 1,
                     TrackedAnaphorSource::ChainSet => chain += 1,
@@ -62290,7 +62295,8 @@ fn ensnared_by_the_mara_damage_amount_is_tracked_set_aggregate() {
         aggregate.source(),
         crate::types::ability::CardTypeSetSource::TrackedSet {
             set: crate::types::ability::TrackedAnaphorSource::ChainSet,
-            caused_by: None
+            caused_by: None,
+            filter: None
         }
     ));
 

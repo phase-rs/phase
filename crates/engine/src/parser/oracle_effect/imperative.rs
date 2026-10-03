@@ -2412,6 +2412,19 @@ pub(super) fn parse_targeted_action_ast(
         } else {
             target
         };
+        // CR 608.2c: Fail closed on a dropped "this way" back-reference. When
+        // the target text still carries "this way" but the parsed filter does
+        // not reference the tracked set, the anaphor was silently dropped and
+        // the filter would enumerate the whole origin zone instead of the
+        // instruction's own moved set (Danse Macabre's "a creature card put
+        // into a graveyard this way"). Returning None surfaces the line as
+        // Unimplemented rather than claiming support. Mirrors the sibling
+        // guard in `try_parse_verb_and_target` (`mod.rs`).
+        if nom_primitives::scan_contains(&target_text.to_ascii_lowercase(), "this way")
+            && !target.references_tracked_set()
+        {
+            return None;
+        }
 
         // CR 400.7: Single-object battlefield destinations use ChangeZone;
         // mass destinations use ChangeZoneAll. Only pure mass-bounce

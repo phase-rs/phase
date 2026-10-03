@@ -7450,9 +7450,10 @@ fn filter_target_slot_filter(filter: &TargetFilter) -> Option<QuantitySlotDeriva
 /// The first target-slot filter reachable through a [`CardTypeSetSource`]
 /// population.
 ///
-/// Only the object-filter and journal-filter arms carry a `TargetFilter` that
-/// could name a target slot; the zone / linked-exile / tracked-set arms are
-/// fixed-vocabulary. `AnyOf` recurses so a union member's slot is not dropped.
+/// Only the object-filter, journal-filter, and tracked-set-filter arms carry
+/// a `TargetFilter` that could name a target slot; the zone / linked-exile
+/// arms are fixed-vocabulary. `AnyOf` recurses so a union member's slot is not
+/// dropped.
 ///
 /// Deliberately UNCITED. This is a structural query over the AST — which arms
 /// hold a filter — not a rule implementation. It previously cited CR 109.2,
@@ -7477,9 +7478,11 @@ fn characteristic_source_target_slot_filter(
             CardTypeSetSource::TurnJournal { filter, .. } => {
                 filter.as_ref().and_then(filter_target_slot_filter)
             }
+            CardTypeSetSource::TrackedSet { filter, .. } => {
+                filter.as_ref().and_then(filter_target_slot_filter)
+            }
             CardTypeSetSource::Zone { .. }
             | CardTypeSetSource::ExiledBySource
-            | CardTypeSetSource::TrackedSet { .. }
             | CardTypeSetSource::AnyOf { .. } => None,
         };
     });

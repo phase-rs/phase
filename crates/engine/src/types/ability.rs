@@ -7837,6 +7837,18 @@ impl FilterProp {
     pub fn same_kind(&self, other: &Self) -> bool {
         std::mem::discriminant(self) == std::mem::discriminant(other)
     }
+
+    /// True when this property restricts membership to a resolution-chain
+    /// tracked set, at any nesting depth. See
+    /// [`TargetFilter::references_tracked_set`](TargetFilter::references_tracked_set).
+    pub fn references_tracked_set(&self) -> bool {
+        match self {
+            FilterProp::InTrackedSet { .. } => true,
+            FilterProp::Not { prop } => prop.references_tracked_set(),
+            FilterProp::AnyOf { props } => props.iter().any(FilterProp::references_tracked_set),
+            _ => false,
+        }
+    }
 }
 
 /// Named fields for the `TargetFilter::Typed` variant, extracted for builder ergonomics.
@@ -9191,11 +9203,16 @@ pub enum CardTypeSetSource {
     /// Mirrors `QuantityRef::FilteredTrackedSetSize { caused_by }`: a merged
     /// Draw->Discard set is disambiguated by CAUSE (drawn members are unstamped),
     /// so Some(Discarded) counts only discarded members. None counts all.
+    /// `filter` narrows to members matching a `TargetFilter` (e.g. the agent
+    /// named by an agent-interposed "this way" anaphor); `None` admits every
+    /// member. Mirrors the `filter` on the `TurnJournal` peer.
     TrackedSet {
         #[serde(default, skip_serializing_if = "TrackedAnaphorSource::is_chain_set")]
         set: TrackedAnaphorSource,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         caused_by: Option<ThisWayCause>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<TargetFilter>,
     },
     /// CR 601.2a + CR 112.1: The members of a per-turn action journal for the
     /// scoped players ("spells you've cast this turn").
@@ -9325,9 +9342,11 @@ impl CardTypeSetSource {
                 CardTypeSetSource::TurnJournal { filter, .. } => filter
                     .as_ref()
                     .is_some_and(TargetFilter::references_cost_paid_object),
+                CardTypeSetSource::TrackedSet { filter, .. } => filter
+                    .as_ref()
+                    .is_some_and(TargetFilter::references_cost_paid_object),
                 CardTypeSetSource::Zone { .. }
                 | CardTypeSetSource::ExiledBySource
-                | CardTypeSetSource::TrackedSet { .. }
                 | CardTypeSetSource::AnyOf { .. } => false,
             };
         });
@@ -9400,6 +9419,9 @@ impl CardTypeSetSource {
             CardTypeSetSource::ExiledBySource => vec![crate::types::zones::Zone::Exile],
             CardTypeSetSource::Objects { filter } => filter.population_zones(),
             // Not zone reads — see the doc comment on `population_zones`.
+            // A member `filter` on either arm narrows members of an
+            // already-materialized set and declares no zone, so it does not
+            // change this answer; `TurnJournal` has carried one all along.
             CardTypeSetSource::TrackedSet { .. } | CardTypeSetSource::TurnJournal { .. } => {
                 Vec::new()
             }
@@ -9782,6 +9804,7 @@ fn quantity_ref_from_value<E: serde::de::Error>(
                     CardTypeSetSource::TrackedSet {
                         set: source,
                         caused_by: None,
+                        filter: None,
                     },
                 ),
             };
@@ -23091,6 +23114,28 @@ impl TargetFilter {
                 .any(TargetFilter::references_cost_paid_object),
             TargetFilter::Not { filter } => filter.references_cost_paid_object(),
             TargetFilter::TrackedSetFiltered { filter, .. } => filter.references_cost_paid_object(),
+            _ => false,
+        }
+    }
+
+    /// True when this filter restricts membership to a resolution-chain
+    /// tracked set at any structural position: the `TrackedSet` /
+    /// `TrackedSetFiltered` selectors or the `InTrackedSet` property form
+    /// (including nested under `Not` / `AnyOf`, where the destroy-the-rest
+    /// producer wraps it). A target span naming "this way" that yields a
+    /// filter WITHOUT such a restriction has silently dropped the anaphor
+    /// (unit 8e); callers use this to refuse the line honestly instead of
+    /// resolving over-broad.
+    pub fn references_tracked_set(&self) -> bool {
+        match self {
+            TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. } => true,
+            TargetFilter::Typed(TypedFilter { properties, .. }) => {
+                properties.iter().any(FilterProp::references_tracked_set)
+            }
+            TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+                filters.iter().any(TargetFilter::references_tracked_set)
+            }
+            TargetFilter::Not { filter } => filter.references_tracked_set(),
             _ => false,
         }
     }
@@ -40777,6 +40822,7 @@ mod tests {
         let leaf = |n: u32| CardTypeSetSource::TrackedSet {
             set: TrackedAnaphorSource::ChainSet,
             caused_by: (n > 0).then_some(ThisWayCause::Discarded),
+            filter: None,
         };
         let union = CardTypeSetSource::any_of(vec![
             leaf(0),
@@ -40866,6 +40912,7 @@ mod tests {
             CardTypeSetSource::TrackedSet {
                 set: TrackedAnaphorSource::ChainSet,
                 caused_by: None,
+                filter: None,
             },
             CardTypeSetSource::TurnJournal {
                 journal: TurnJournalKind::SpellsCast,
@@ -41099,6 +41146,7 @@ mod tests {
             CardTypeSetSource::TrackedSet {
                 set: TrackedAnaphorSource::ChainSet,
                 caused_by: None,
+                filter: None,
             },
             objects.clone(),
             CardTypeSetSource::any_of(vec![
@@ -41142,6 +41190,7 @@ mod tests {
                 CardTypeSetSource::TrackedSet {
                     set: TrackedAnaphorSource::TriggeringBatch,
                     caused_by: None,
+                    filter: None,
                 },
             ),
             (
@@ -41149,6 +41198,7 @@ mod tests {
                 CardTypeSetSource::TrackedSet {
                     set: TrackedAnaphorSource::ChainSet,
                     caused_by: None,
+                    filter: None,
                 },
             ),
         ] {

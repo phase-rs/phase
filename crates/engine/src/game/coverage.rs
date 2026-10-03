@@ -1837,7 +1837,13 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 ObjectProperty::ManaValue => "mana value",
                 ObjectProperty::ManaSymbolCount(_) => "mana symbols",
             };
-            let population = if matches!(aggregate.source(), CardTypeSetSource::TrackedSet { .. }) {
+            // The "those cards" short-circuit holds only for the UNFILTERED
+            // tracked set: with a member filter present that string omits the
+            // restriction, so fall through to the renderer that names it.
+            let population = if matches!(
+                aggregate.source(),
+                CardTypeSetSource::TrackedSet { filter: None, .. }
+            ) {
                 "those cards".into()
             } else {
                 fmt_characteristic_population_bounded(aggregate.source())
@@ -1863,6 +1869,8 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             }
             CardTypeSetSource::ExiledBySource
             | CardTypeSetSource::Objects { .. }
+            // A member filter renders through the bounded population
+            // renderer below, which names the restriction.
             | CardTypeSetSource::TrackedSet { .. }
             | CardTypeSetSource::TurnJournal { .. }
             | CardTypeSetSource::AnyOf { .. } => {
@@ -2729,26 +2737,37 @@ fn fmt_characteristic_population(source: &CardTypeSetSource) -> String {
         }
         CardTypeSetSource::ExiledBySource => "cards exiled with source".into(),
         CardTypeSetSource::Objects { filter } => fmt_target(filter),
-        CardTypeSetSource::TrackedSet { caused_by, .. } => match caused_by {
-            Some(cause) => {
-                use crate::types::ability::ThisWayCause;
-                let verb = match cause {
-                    ThisWayCause::OwnerLibraryShuffleSubject => {
-                        "designated for an owner-library shuffle"
-                    }
-                    ThisWayCause::Discarded => "discarded",
-                    ThisWayCause::Exiled => "exiled",
-                    ThisWayCause::Milled => "milled",
-                    ThisWayCause::Destroyed => "destroyed",
-                    ThisWayCause::Sacrificed => "sacrificed",
-                    ThisWayCause::Returned => "returned",
-                    ThisWayCause::Bounced => "bounced",
-                    ThisWayCause::PutIntoGraveyard => "put into a graveyard",
-                };
-                format!("cards {verb} this way")
+        CardTypeSetSource::TrackedSet {
+            caused_by, filter, ..
+        } => {
+            let base = match caused_by {
+                Some(cause) => {
+                    use crate::types::ability::ThisWayCause;
+                    let verb = match cause {
+                        ThisWayCause::OwnerLibraryShuffleSubject => {
+                            "designated for an owner-library shuffle"
+                        }
+                        ThisWayCause::Discarded => "discarded",
+                        ThisWayCause::Exiled => "exiled",
+                        ThisWayCause::Milled => "milled",
+                        ThisWayCause::Destroyed => "destroyed",
+                        ThisWayCause::Sacrificed => "sacrificed",
+                        ThisWayCause::Returned => "returned",
+                        ThisWayCause::Bounced => "bounced",
+                        ThisWayCause::PutIntoGraveyard => "put into a graveyard",
+                    };
+                    format!("cards {verb} this way")
+                }
+                None => "tracked cards".into(),
+            };
+            // A filtered source must render its restriction: the bare base
+            // string would claim every member while the resolver counts a
+            // subset — a coverage lie. Mirrors the `TurnJournal` arm below.
+            match filter {
+                Some(filter) => format!("{base} matching {}", fmt_target(filter)),
+                None => base,
             }
-            None => "tracked cards".into(),
-        },
+        }
         // CR 601.2a: the per-turn cast journal, not a live board census.
         CardTypeSetSource::TurnJournal {
             journal,

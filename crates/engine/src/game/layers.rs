@@ -4449,9 +4449,11 @@ fn characteristic_source_reads_life_total(source: &CardTypeSetSource) -> bool {
                 CardTypeSetSource::TurnJournal { filter, .. } => {
                     filter.as_ref().is_some_and(target_filter_reads_life_total)
                 }
+                CardTypeSetSource::TrackedSet { filter, .. } => {
+                    filter.as_ref().is_some_and(target_filter_reads_life_total)
+                }
                 CardTypeSetSource::Zone { .. }
                 | CardTypeSetSource::ExiledBySource
-                | CardTypeSetSource::TrackedSet { .. }
                 | CardTypeSetSource::AnyOf { .. } => false,
             };
         });

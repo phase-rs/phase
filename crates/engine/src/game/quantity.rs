@@ -488,6 +488,7 @@ fn visit_characteristic_leaf<'s>(
         // `targeting::resolve_tracked_set_id`: that authority SKIPS empty sets, and
         // under mode scoping not skipping is the correct semantics here.
         CardTypeSetSource::TrackedSet {
+<<<<<<< HEAD
             set: TrackedAnaphorSource::TriggeringBatch,
             caused_by,
         } => {
@@ -527,7 +528,11 @@ fn visit_characteristic_leaf<'s>(
             }
             let _ = caused_by;
         }
-        CardTypeSetSource::TrackedSet { set, caused_by } => {
+        CardTypeSetSource::TrackedSet {
+            set,
+            caused_by,
+            filter,
+        } => {
             let tracked: Vec<(Option<crate::types::identifiers::TrackedSetId>, ObjectId)> =
                 match set {
                     TrackedAnaphorSource::ChainSet => state
@@ -551,7 +556,33 @@ fn visit_characteristic_leaf<'s>(
                             .is_some_and(|member_cause| member_cause == cause)
                     }),
                 };
-                if cause_ok {
+                // CR 608.2h + CR 608.2i: a member the producer moved off the
+                // battlefield is read from last known information, exactly as
+                // the `FilteredTrackedSetSize` count sibling reads it.
+                let filter_ok = match filter {
+                    None => true,
+                    Some(filter) => {
+                        if !state.battlefield.contains(&oid) {
+                            state.lki_cache.get(&oid).map_or_else(
+                                || {
+                                    crate::game::filter::matches_target_filter(
+                                        state, oid, filter, filter_ctx,
+                                    )
+                                },
+                                |lki| {
+                                    crate::game::filter::matches_target_filter_on_lki_snapshot(
+                                        state, oid, lki, filter, filter_ctx,
+                                    )
+                                },
+                            )
+                        } else {
+                            crate::game::filter::matches_target_filter(
+                                state, oid, filter, filter_ctx,
+                            )
+                        }
+                    }
+                };
+                if cause_ok && filter_ok {
                     let view = characteristic_view_for_object(state, oid);
                     if let Some(view) = view {
                         visit(CharacteristicMember::Object(oid), view, false);
@@ -3042,9 +3073,14 @@ fn characteristic_leaf_reads_at(source: &CardTypeSetSource, depth: u32) -> Chara
         // this arm has already been walked; contributing EMPTY here keeps the
         // fold identity correct rather than double-counting.
         CardTypeSetSource::AnyOf { .. } => CharacteristicKinds::EMPTY,
-        CardTypeSetSource::Zone { .. }
-        | CardTypeSetSource::ExiledBySource
-        | CardTypeSetSource::TrackedSet { .. } => CharacteristicKinds::EMPTY,
+        CardTypeSetSource::TrackedSet { filter, .. } => filter
+            .as_ref()
+            .map_or(CharacteristicKinds::EMPTY, |filter| {
+                target_filter_characteristic_reads_at(filter, depth)
+            }),
+        CardTypeSetSource::Zone { .. } | CardTypeSetSource::ExiledBySource => {
+            CharacteristicKinds::EMPTY
+        }
     }
 }
 
@@ -3337,6 +3373,8 @@ fn characteristic_leaf_perturbed_by_entry(
         }
         // Unrolled by the bounded walker below; a union never reaches this arm.
         CardTypeSetSource::AnyOf { .. } => false,
+        // A member filter narrows the published set; a battlefield entry
+        // adds no members to it, so the verdict stands with or without one.
         CardTypeSetSource::Zone { .. }
         | CardTypeSetSource::ExiledBySource
         | CardTypeSetSource::TrackedSet { .. }
@@ -21281,6 +21319,7 @@ mod tests {
                     CardTypeSetSource::TrackedSet {
                         set,
                         caused_by: None,
+                        filter: None,
                     },
                 )
                 .unwrap(),
@@ -21459,6 +21498,7 @@ mod tests {
                     CardTypeSetSource::TrackedSet {
                         set: TrackedAnaphorSource::ChainSet,
                         caused_by: None,
+                        filter: None,
                     },
                 )
                 .unwrap(),
@@ -25103,6 +25143,7 @@ mod tests {
                     source: CardTypeSetSource::TrackedSet {
                         set: TrackedAnaphorSource::ChainSet,
                         caused_by,
+                        filter: None,
                     },
                 },
             };
@@ -25179,6 +25220,7 @@ mod tests {
                 source: CardTypeSetSource::TrackedSet {
                     set: TrackedAnaphorSource::ChainSet,
                     caused_by: Some(ThisWayCause::Discarded),
+                    filter: None,
                 },
             },
         };

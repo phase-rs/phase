@@ -12974,7 +12974,8 @@ fn card_type_set_source_binding_diverges(source: &CardTypeSetSource) -> bool {
                 }
                 // CR 607.2a + CR 608.2i: the same two resolution-scoped
                 // populations `CardsExiledBySource` / `TrackedSetSize` are
-                // declined for.
+                // declined for. Declining is fail-closed; a member filter
+                // cannot make the hoist safe.
                 CardTypeSetSource::ExiledBySource | CardTypeSetSource::TrackedSet { .. } => true,
                 // Unrolled by the walker; never reaches this arm.
                 CardTypeSetSource::AnyOf { .. } => false,
@@ -24946,6 +24947,7 @@ pub mod tests {
             CardTypeSetSource::TrackedSet {
                 set: crate::types::ability::TrackedAnaphorSource::ChainSet,
                 caused_by: None,
+                filter: None,
             },
         ] {
             assert!(
