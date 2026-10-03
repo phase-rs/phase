@@ -1636,3 +1636,191 @@ fn surging_flame_ripple_no_match_routes_through_bottom_order() {
     // Rejecting a bad permutation.
     // (fresh state check omitted — validation is unit-covered in engine_resolution_choices)
 }
+
+/// CR 702.60a + CR 701.20a: when a Ripple-found Rat Colony's own Ripple trigger
+/// reveals cards, every viewer — including the controller ordering them —
+/// sees the revealed pile face-up at the bottom-order step.
+#[test]
+fn nested_ripple_bottom_order_cards_are_visible_to_controller() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    red_pool(&mut scenario, 2);
+    scenario.add_creature_from_oracle(P0, "Thrumming Stone", 1, 1, THRUMMING_STONE_ORACLE);
+    let rat_a = scenario
+        .add_creature_to_hand_from_oracle(P0, "Rat Colony", 2, 1, RAT_COLONY_ORACLE)
+        .with_mana_cost(ManaCost::generic(2))
+        .id();
+    let rat_b = scenario
+        .add_creature_to_hand_from_oracle(P0, "Rat Colony", 2, 1, RAT_COLONY_ORACLE)
+        .with_mana_cost(ManaCost::generic(2))
+        .id();
+    let misses: Vec<ObjectId> = ["Miss One", "Miss Two", "Miss Three"]
+        .iter()
+        .map(|name| {
+            scenario
+                .add_spell_to_hand_from_oracle(P0, name, true, "Draw a card.")
+                .id()
+        })
+        .collect();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        for id in std::iter::once(rat_b).chain(misses.iter().copied()) {
+            engine::game::zones::remove_from_zone(state, id, Zone::Hand, P0);
+            engine::game::zones::add_to_zone(state, id, Zone::Library, P0);
+            state.objects.get_mut(&id).expect("library card").zone = Zone::Library;
+        }
+    }
+
+    let card_id = runner.state().objects[&rat_a].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: rat_a,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast first Rat Colony");
+    runner.act(GameAction::PassPriority).expect("p0 pass");
+    runner.act(GameAction::PassPriority).expect("p1 pass");
+    accept_ripple_reveal(&mut runner);
+    runner
+        .act(GameAction::RippleChoice {
+            choice: CastChoice::Cast,
+        })
+        .expect("cast revealed Rat Colony");
+
+    // Drive past the parent's bottom-order prompt to the nested Ripple's.
+    let mut bottom_orders = 0;
+    for _ in 0..20 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::RippleBottomOrder { cards, .. } => {
+                let view = engine::game::visibility::filter_state_for_viewer(runner.state(), P0);
+                for id in &cards {
+                    assert!(
+                        !view.objects[id].face_down,
+                        "revealed Ripple card {id:?} must not be hidden from its controller"
+                    );
+                }
+                let opp = engine::game::visibility::filter_state_for_viewer(runner.state(), P1);
+                for id in &cards {
+                    assert!(!opp.objects[id].face_down, "{id:?} hidden from opponent");
+                }
+                bottom_orders += 1;
+                if bottom_orders == 2 {
+                    return;
+                }
+                runner
+                    .act(GameAction::SelectCards { cards })
+                    .expect("order parent's bottom pile");
+            }
+            WaitingFor::RippleRevealChoice { .. } => {
+                accept_ripple_reveal(&mut runner);
+            }
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                runner
+                    .act(GameAction::OrderTriggers {
+                        order: (0..triggers.len()).collect(),
+                    })
+                    .expect("order triggers");
+            }
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass");
+            }
+            other => panic!("unexpected prompt {other:?}"),
+        }
+    }
+    panic!("never reached a nested RippleBottomOrder");
+}
+
+/// CR 702.60a + CR 701.20a: a Ripple free cast that pauses for target
+/// selection must not hide the still-revealed pile once the bottom-order
+/// prompt opens.
+#[test]
+fn ripple_cast_with_target_pause_keeps_bottom_pile_revealed() {
+    const SHOCK: &str = "Shock deals 2 damage to any target.";
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    red_pool(&mut scenario, 2);
+    scenario.add_creature_from_oracle(P0, "Thrumming Stone", 1, 1, THRUMMING_STONE_ORACLE);
+    let shock_a = scenario
+        .add_spell_to_hand_from_oracle(P0, "Shock", true, SHOCK)
+        .id();
+    let shock_b = scenario
+        .add_spell_to_hand_from_oracle(P0, "Shock", true, SHOCK)
+        .id();
+    let misses: Vec<ObjectId> = ["Miss One", "Miss Two", "Miss Three"]
+        .iter()
+        .map(|name| {
+            scenario
+                .add_spell_to_hand_from_oracle(P0, name, true, "Draw a card.")
+                .id()
+        })
+        .collect();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        for id in std::iter::once(shock_b).chain(misses.iter().copied()) {
+            engine::game::zones::remove_from_zone(state, id, Zone::Hand, P0);
+            engine::game::zones::add_to_zone(state, id, Zone::Library, P0);
+            state.objects.get_mut(&id).expect("library card").zone = Zone::Library;
+        }
+    }
+    let card_id = runner.state().objects[&shock_a].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: shock_a,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast first Shock");
+    for _ in 0..6 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::TargetSelection { .. } => {
+                runner
+                    .act(GameAction::SelectTargets {
+                        targets: vec![TargetRef::Player(P1)],
+                    })
+                    .expect("target first Shock");
+            }
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass");
+            }
+            WaitingFor::RippleRevealChoice { .. } => break,
+            other => panic!("unexpected prompt {other:?}"),
+        }
+    }
+    accept_ripple_reveal(&mut runner);
+    runner
+        .act(GameAction::RippleChoice {
+            choice: CastChoice::Cast,
+        })
+        .expect("cast revealed Shock");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ),
+        "free Ripple cast must pause for its target, got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Player(P1)],
+        })
+        .expect("target revealed Shock");
+    let WaitingFor::RippleBottomOrder { cards, .. } = runner.state().waiting_for.clone() else {
+        panic!(
+            "expected RippleBottomOrder, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    let view = engine::game::visibility::filter_state_for_viewer(runner.state(), P0);
+    for id in &cards {
+        assert!(
+            !view.objects[id].face_down,
+            "revealed Ripple card {id:?} must stay face-up after the cast's target pause"
+        );
+    }
+}

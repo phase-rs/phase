@@ -10504,6 +10504,30 @@ fn revoke_resolve_all_consent(
     restore_resolve_all_priority_snapshot(state)
 }
 
+/// CR 702.60a + CR 701.20a: a Ripple free cast of a same-named revealed card
+/// can pause mid-announcement (targets, modes, X, payment of additional costs)
+/// before the remaining hits or the bottom-order step. The un-cast revealed
+/// cards are still revealed through those pauses, so the reveal must survive
+/// them. The in-flight cast is identified by the resolution-owned permission
+/// carrying `RippleOfferRemaining` cleanup on the hit card.
+fn ripple_resolution_cast_in_flight(state: &GameState) -> bool {
+    !state.revealed_cards.is_empty()
+        && state.objects.values().any(|obj| {
+            obj.casting_permissions.iter().any(|permission| {
+            matches!(
+                permission,
+                crate::types::ability::CastingPermission::ExileWithAltCost {
+                    resolution_cleanup: Some(cleanup),
+                    ..
+                } if matches!(
+                    cleanup.success_action,
+                    crate::types::ability::ResolutionCastSuccessAction::RippleOfferRemaining { .. }
+                )
+            )
+        })
+        })
+}
+
 fn apply_action(
     state: &mut GameState,
     actor: PlayerId,
@@ -10542,7 +10566,8 @@ fn apply_action(
             }
             | WaitingFor::RippleBottomOrder { .. }
             | WaitingFor::RevealUntilBottomOrder { .. }
-    ) {
+    ) && !ripple_resolution_cast_in_flight(state)
+    {
         state.revealed_cards.clear();
     }
 
