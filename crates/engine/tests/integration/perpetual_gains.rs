@@ -44,6 +44,7 @@ const ROOFTOP_STORM: &str =
 const INDRIS: &str = "When Indris, the Hydrostatic Surge enters, conjure four cards named Lightning Bolt into your library. They perpetually gain storm. Then shuffle.\nWhenever you cast an instant or sorcery spell, draw a card.";
 const JEWEL_MINE: &str = "When Jewel Mine Overseer enters, conjure seven cards named Seven Dwarves on top of your library. They perpetually gain \"When this creature enters, draw a card.\" Then shuffle.\nAt the beginning of your upkeep, exile the top card of your library. You may play that card this turn.";
 const OGLOR: &str = "At the beginning of your upkeep, look at the top two cards of your library, then put one of them into your graveyard.\nWhenever a creature card is put into your graveyard from your library or hand, it perpetually gains \"When this card leaves your graveyard, create a tapped 2/2 black Zombie creature token.\"";
+const OPPONENT_UNION_SENTINEL: &str = "Whenever a creature card is put into an opponent's graveyard from an opponent's library or hand, create a tapped 2/2 black Zombie creature token.";
 
 fn mana(color: ManaType, n: usize) -> Vec<ManaUnit> {
     (0..n)
@@ -1379,5 +1380,66 @@ fn oglor_repeated_grants_retain_multiplicity_across_zone_cycles() {
         zombie_tokens(&runner, P0).len(),
         8,
         "leaving the graveyard with three instances must create three more Zombies"
+    );
+}
+
+/// CR 109.5 + CR 400.3 (runtime discriminator): an ACCEPTED opponent-qualified
+/// union ("...put into an opponent's graveyard from an opponent's library or
+/// hand") fires on the opponent's library/hand → opponent's-graveyard events
+/// and stays silent on the controller's own hand → own-graveyard event.
+/// Mirrors the Oglor test structure (full-pipeline `move_zone_simulated` +
+/// `settle_stack`, never raw resolve).
+///
+/// Revert-failing in both directions: if the union failed to parse (Unknown),
+/// nothing would ever fire; if the destination narrowing were dropped, the
+/// own-graveyard move would fire too.
+#[test]
+fn opponent_qualified_union_fires_on_opponent_events_only() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let watcher = scenario
+        .add_creature_to_hand(P0, "Union Sentinel", 2, 2)
+        .from_oracle_text(OPPONENT_UNION_SENTINEL)
+        .id();
+    let enemy_bears = scenario.add_creature_to_hand(P1, "Enemy Bears", 2, 2).id();
+    let enemy_cub = scenario.add_creature_to_hand(P1, "Enemy Cub", 2, 2).id();
+    let own_bears = scenario
+        .add_creature_to_hand(P0, "Grizzly Bears", 2, 2)
+        .id();
+
+    let mut runner = scenario.build();
+    runner.state_mut().debug_mode = true;
+    assert_fully_parsed(&runner, watcher, "Union Sentinel");
+
+    move_zone_simulated(&mut runner, watcher, Zone::Battlefield);
+    settle_stack(&mut runner);
+
+    // Opponent's library -> opponent's graveyard fires the accepted trigger.
+    // The hand -> library hop matches nothing (destination is not the graveyard).
+    move_zone_simulated(&mut runner, enemy_bears, Zone::Library);
+    move_zone_simulated(&mut runner, enemy_bears, Zone::Graveyard);
+    settle_stack(&mut runner);
+    assert_eq!(
+        zombie_tokens(&runner, P0).len(),
+        1,
+        "opponent library -> opponent graveyard must fire the opponent-qualified union"
+    );
+
+    // The ellipsis disjunct (hand, inheriting the opponent qualifier) fires too.
+    move_zone_simulated(&mut runner, enemy_cub, Zone::Graveyard);
+    settle_stack(&mut runner);
+    assert_eq!(
+        zombie_tokens(&runner, P0).len(),
+        2,
+        "opponent hand -> opponent graveyard must fire the ellipsis disjunct"
+    );
+
+    // The controller's own hand -> own graveyard must NOT fire it.
+    move_zone_simulated(&mut runner, own_bears, Zone::Graveyard);
+    settle_stack(&mut runner);
+    assert_eq!(
+        zombie_tokens(&runner, P0).len(),
+        2,
+        "own hand -> own graveyard must not fire the opponent-qualified union"
     );
 }

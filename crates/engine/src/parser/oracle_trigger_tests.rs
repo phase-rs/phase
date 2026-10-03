@@ -22945,6 +22945,138 @@ fn trigger_one_or_more_put_into_your_graveyard_with_unconsumed_origin_tail_stays
     );
 }
 
+/// CR 109.5 + CR 400.3: opponent-qualified union against an opponent-owned
+/// destination — the mirror of the Oglor (You+You) accept shape. The
+/// bare-ellipsis second disjunct inherits the head's `Opponent` qualifier, so
+/// the union is uniformly opponent-owned and consistent with the destination.
+#[test]
+fn trigger_put_into_opponent_graveyard_from_opponent_library_or_hand_union() {
+    let def = parse_trigger_line(
+        "Whenever a creature card is put into an opponent's graveyard from an opponent's library or hand, draw a card.",
+        "Some Card",
+    );
+    assert_eq!(def.mode, TriggerMode::ChangesZone);
+    assert_eq!(def.origin, None);
+    assert_eq!(def.origin_zones, vec![Zone::Library, Zone::Hand]);
+    assert_eq!(def.destination, Some(Zone::Graveyard));
+    // CR 109.5: the union must not disturb the graveyard-possessive narrowing.
+    if let Some(TargetFilter::Typed(tf)) = &def.valid_card {
+        assert_eq!(tf.controller, Some(ControllerRef::Opponent));
+    } else {
+        panic!(
+            "Expected Typed valid_card with controller=Opponent, got {:?}",
+            def.valid_card
+        );
+    }
+}
+
+/// CR 109.5 + CR 400.3 (fail-closed): an opponent-qualified union against an
+/// UNQUALIFIED destination would silently drop the owner qualifier (the
+/// matcher keys on the zone-only set), so the arm fails honestly instead of
+/// over-firing on the controller's own library/hand → graveyard events.
+#[test]
+fn trigger_put_into_a_graveyard_from_opponent_library_or_hand_stays_unknown() {
+    let def = parse_trigger_line(
+        "Whenever a creature card is put into a graveyard from an opponent's library or hand, draw a card.",
+        "Some Card",
+    );
+    assert!(
+        matches!(def.mode, TriggerMode::Unknown(_)),
+        "an opponent-qualified union against an unqualified destination must fail the arm, got {:?}",
+        def.mode
+    );
+}
+
+/// CR 109.5 + CR 400.3 (fail-closed, paired own control): a you-qualified
+/// union against an unqualified destination fails for the same reason.
+#[test]
+fn trigger_put_into_a_graveyard_from_your_library_or_hand_stays_unknown() {
+    let def = parse_trigger_line(
+        "Whenever a creature card is put into a graveyard from your library or hand, draw a card.",
+        "Some Card",
+    );
+    assert!(
+        matches!(def.mode, TriggerMode::Unknown(_)),
+        "a you-qualified union against an unqualified destination must fail the arm, got {:?}",
+        def.mode
+    );
+}
+
+/// CR 109.5 + CR 400.3: fully unqualified union ("a library", bare "hand"
+/// inheriting the unowned head) against an unqualified destination — zone-only
+/// is exact, so the union parses to the disjunctive set with no narrowing.
+#[test]
+fn trigger_put_into_a_graveyard_from_a_library_or_hand_union() {
+    let def = parse_trigger_line(
+        "Whenever a creature card is put into a graveyard from a library or hand, draw a card.",
+        "Some Card",
+    );
+    assert_eq!(def.mode, TriggerMode::ChangesZone);
+    assert_eq!(def.origin, None);
+    assert_eq!(def.origin_zones, vec![Zone::Library, Zone::Hand]);
+    assert_eq!(def.destination, Some(Zone::Graveyard));
+}
+
+/// CR 109.5 + CR 400.3 (fail-closed, batched): the batched caller shares the
+/// union gate — a mismatched batched union fails the arm and falls through to
+/// `Unknown` rather than over-firing.
+#[test]
+fn trigger_one_or_more_put_into_a_graveyard_from_opponent_library_or_hand_stays_unknown() {
+    let def = parse_trigger_line(
+        "Whenever one or more creature cards are put into a graveyard from an opponent's library or hand, draw a card.",
+        "Some Card",
+    );
+    assert!(
+        matches!(def.mode, TriggerMode::Unknown(_)),
+        "a mismatched batched union must fail the arm, got {:?}",
+        def.mode
+    );
+}
+
+/// CR 109.5 (fail-closed): mixed member qualifiers admit no single owner
+/// reading, so the union fails even against a qualified destination.
+#[test]
+fn trigger_put_into_your_graveyard_from_mixed_owner_union_stays_unknown() {
+    let def = parse_trigger_line(
+        "Whenever a creature card is put into your graveyard from your library or an opponent's library, draw a card.",
+        "Some Card",
+    );
+    assert!(
+        matches!(def.mode, TriggerMode::Unknown(_)),
+        "a mixed-qualifier union must fail the arm, got {:?}",
+        def.mode
+    );
+}
+
+/// CR 109.5 (fail-closed): the `their`-anaphor binds to the destination owner,
+/// so against an unqualified destination it dangles and the union fails.
+#[test]
+fn trigger_put_into_a_graveyard_from_their_library_or_hand_stays_unknown() {
+    let def = parse_trigger_line(
+        "Whenever a creature card is put into a graveyard from their library or hand, draw a card.",
+        "Some Card",
+    );
+    assert!(
+        matches!(def.mode, TriggerMode::Unknown(_)),
+        "a their-anaphor union against an unqualified destination must fail the arm, got {:?}",
+        def.mode
+    );
+}
+
+/// CR 109.5: the `their`-anaphor resolves to a qualified destination owner,
+/// so the union is consistent and parses to the disjunctive set.
+#[test]
+fn trigger_put_into_your_graveyard_from_their_library_or_hand_union() {
+    let def = parse_trigger_line(
+        "Whenever a creature card is put into your graveyard from their library or hand, draw a card.",
+        "Some Card",
+    );
+    assert_eq!(def.mode, TriggerMode::ChangesZone);
+    assert_eq!(def.origin, None);
+    assert_eq!(def.origin_zones, vec![Zone::Library, Zone::Hand]);
+    assert_eq!(def.destination, Some(Zone::Graveyard));
+}
+
 /// Dreadhound's two-way disjunctive zone-change trigger: "a creature dies or
 /// a creature card is put into a graveyard from a library". The `a library`
 /// arm lands in the shared origin parser, so the clause path yields dies +
