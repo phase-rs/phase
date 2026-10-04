@@ -65,7 +65,6 @@ Replace `<changed-crate>` with the package name of each crate you changed. See
 ## Pull requests
 
 - Target `origin/main` (`phase-rs/phase`).
-  PRs that only touch them are rejected.
 - If you used an LLM, use `.github/PULL_REQUEST_TEMPLATE.md` for the PR body,
   fill every section, and report the model on its canonical `Model:` line; see
   `docs/AI-CONTRIBUTOR.md`.
