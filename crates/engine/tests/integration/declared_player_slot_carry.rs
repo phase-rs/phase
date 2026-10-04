@@ -3,12 +3,16 @@
 //! Three players: caster P0, declared/searched player P1 (P2 in the name-hate rows), bystander.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::TargetRef;
+use engine::types::ability::{
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ChosenGroupId, Effect,
+    QuantityExpr, SubAbilityLink, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+};
 use engine::types::actions::GameAction;
 use engine::types::card_type::{CoreType, Supertype};
 use engine::types::counter::CounterType;
 use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
+use engine::types::mana::{ManaColor, ManaCost};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -37,6 +41,7 @@ struct Seen {
     reveal_by: Vec<PlayerId>,
     discard_by: Vec<PlayerId>,
     searches: Vec<(PlayerId, Option<PlayerId>)>,
+    optional_by: Vec<PlayerId>,
 }
 
 impl Seen {
@@ -60,6 +65,7 @@ struct Plan<'a> {
     prefs: &'a [TargetRef],
     name: &'a str,
     eliminate_on_stack: Option<usize>,
+    decline_optional: bool,
 }
 
 fn cast(r: &mut GameRunner, id: ObjectId) -> Vec<GameEvent> {
@@ -146,6 +152,16 @@ fn drive(r: &mut GameRunner, plan: &Plan) -> Seen {
                     r.act(GameAction::SelectCards { cards })
                         .expect("discard")
                         .events,
+                );
+            }
+            WaitingFor::OptionalEffectChoice { player, .. } => {
+                seen.optional_by.push(player);
+                seen.events.extend(
+                    r.act(GameAction::DecideOptionalEffect {
+                        accept: !plan.decline_optional,
+                    })
+                    .expect("decide")
+                    .events,
                 );
             }
             WaitingFor::Priority { .. } => {
@@ -511,4 +527,133 @@ fn capitalize(clause: &str) -> String {
         .next()
         .map(|c| c.to_uppercase().collect::<String>() + chars.as_str())
         .unwrap_or_default()
+}
+
+const MAY_PAY_UP_TO_THREE: &str = "Choose target player. That player may pay {1} up to three times. When you do, you draw a card.";
+
+/// CR 608.2d + CR 603.12a: every "may pay" offer of a repeated optional payment goes to the named
+/// player, who also pays and may stop at any offer (reach guard: the accepted payments happen).
+#[test]
+fn each_repeated_payment_offer_goes_to_the_player_who_may_pay() {
+    let run_with = |decline_optional| {
+        let mut sc = three_player(7);
+        let spell = sc
+            .add_spell_to_hand_from_oracle(P0, "Row", false, MAY_PAY_UP_TO_THREE)
+            .id();
+        seat_all(&mut sc);
+        let lands: Vec<ObjectId> = (0..3)
+            .map(|_| sc.add_basic_land(P1, ManaColor::Green))
+            .collect();
+        let mut r = sc.build();
+        cast(&mut r, spell);
+        let seen = drive(
+            &mut r,
+            &Plan {
+                prefs: &[TargetRef::Player(P1)],
+                decline_optional,
+                ..Default::default()
+            },
+        );
+        let tapped = lands
+            .iter()
+            .filter(|id| r.state().objects[id].tapped)
+            .count();
+        (seen.optional_by, tapped)
+    };
+    assert_eq!(
+        run_with(false),
+        (vec![P1, P1, P1], 3),
+        "three offers, three payments by P1"
+    );
+    assert_eq!(run_with(true), (vec![P1], 0), "P1 declined the first offer");
+}
+
+/// CR 608.2b + CR 603.12a: a repeated "may pay" addressed to a declared player who is gone is offered
+/// to no one, so no payment is made. Hand-built because a text with a lone player target fizzles
+/// before the driver is reached.
+#[test]
+fn a_repeated_payment_addressed_to_a_gone_declared_player_is_offered_to_no_one() {
+    let declared = TargetFilter::DeclaredPlayer {
+        group: ChosenGroupId::declared_player(0),
+    };
+    let def = || {
+        let mut reflexive = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+        reflexive.condition = Some(AbilityCondition::WhenYouDo);
+        let mut pay = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PayCost {
+                cost: AbilityCost::Mana {
+                    cost: ManaCost::generic(1),
+                },
+                scale: None,
+                payer: declared.clone(),
+            },
+        );
+        pay.optional = true;
+        pay.optional_player = Some(declared.clone());
+        pay.repeat_for = Some(QuantityExpr::Fixed { value: 3 });
+        let mut pay = pay.sub_ability(reflexive);
+        pay.sub_link = SubAbilityLink::SequentialSibling;
+        let mut creature_pick = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::TargetOnly {
+                target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+            },
+        );
+        creature_pick.sub_link = SubAbilityLink::SequentialSibling;
+        let creature_pick = creature_pick.sub_ability(pay);
+        let mut pick = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::TargetOnly {
+                target: TargetFilter::Player,
+            },
+        );
+        pick.declares_chosen_group = Some(ChosenGroupId::declared_player(0));
+        pick.sub_link = SubAbilityLink::SequentialSibling;
+        pick.sub_ability(creature_pick)
+    };
+    let run_with = |eliminate| {
+        let mut sc = three_player(7);
+        let creature = sc.add_creature(P0, "C0", 3, 9).id();
+        let spell = sc
+            .add_spell_to_hand(P0, "Row", false)
+            .with_ability_definition(def())
+            .id();
+        seat_all(&mut sc);
+        let lands: Vec<ObjectId> = [P0, P0, P0, P1, P1, P1]
+            .into_iter()
+            .map(|p| sc.add_basic_land(p, ManaColor::Green))
+            .collect();
+        let mut r = sc.build();
+        cast(&mut r, spell);
+        let seen = drive(
+            &mut r,
+            &Plan {
+                prefs: &[TargetRef::Player(P1), TargetRef::Object(creature)],
+                eliminate_on_stack: eliminate,
+                ..Default::default()
+            },
+        );
+        let tapped = lands
+            .iter()
+            .filter(|id| r.state().objects[id].tapped)
+            .count();
+        (seen.optional_by, tapped)
+    };
+    assert_eq!(
+        run_with(None),
+        (vec![P1, P1, P1], 3),
+        "reach: a legal declared player is offered three payments and makes them"
+    );
+    assert_eq!(
+        run_with(Some(1)),
+        (Vec::<PlayerId>::new(), 0),
+        "gone: no offer to anyone, no payment by anyone"
+    );
 }
