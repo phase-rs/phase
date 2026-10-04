@@ -26099,6 +26099,84 @@ fn become_creature_type_of_choice_in_addition_to_other_types() {
     );
 }
 
+// CR 205.1a + CR 613.1d: without the "in addition to its other types" marker
+// (Mistform Stalker) the chosen creature type REPLACES the object's creature
+// types — RemoveAllSubtypes then AddChosenSubtype, in the order written.
+#[test]
+fn become_creature_type_of_choice_sets_creature_type() {
+    let clause = parse_effect_clause(
+        "~ becomes the creature type of your choice until end of turn",
+        &mut ParseContext::default(),
+    );
+    assert!(
+        matches!(
+            clause.effect,
+            Effect::Choose {
+                choice_type: ChoiceType::CreatureType { .. },
+                ..
+            }
+        ),
+        "Expected Choose {{ CreatureType }}, got {:?}",
+        clause.effect
+    );
+    let apply = clause
+        .sub_ability
+        .as_ref()
+        .expect("choice must chain an apply sub-ability");
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = &*apply.effect
+    else {
+        panic!("expected GenericEffect apply half, got {:?}", apply.effect);
+    };
+    assert_eq!(
+        static_abilities[0].modifications,
+        vec![
+            ContinuousModification::RemoveAllSubtypes {
+                set: crate::types::card_type::SubtypeSet::Creature,
+            },
+            ContinuousModification::AddChosenSubtype {
+                kind: ChosenSubtypeKind::CreatureType,
+            },
+        ]
+    );
+}
+
+// CR 305.7: without the marker (Jinx) the chosen basic land type SETS the
+// land's type — SetChosenBasicLandType, not the additive AddChosenSubtype.
+#[test]
+fn become_basic_land_type_of_choice_sets_land_type() {
+    let clause = parse_effect_clause(
+        "target land becomes the basic land type of your choice until end of turn",
+        &mut ParseContext::default(),
+    );
+    assert!(
+        matches!(
+            clause.effect,
+            Effect::Choose {
+                choice_type: ChoiceType::BasicLandType,
+                ..
+            }
+        ),
+        "Expected Choose {{ BasicLandType }}, got {:?}",
+        clause.effect
+    );
+    let apply = clause
+        .sub_ability
+        .as_ref()
+        .expect("choice must chain an apply sub-ability");
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = &*apply.effect
+    else {
+        panic!("expected GenericEffect apply half, got {:?}", apply.effect);
+    };
+    assert_eq!(
+        static_abilities[0].modifications,
+        vec![ContinuousModification::SetChosenBasicLandType]
+    );
+}
+
 // No-regression guard: the pre-existing "and <keyword grant>" trailing form
 // (Mondo Gecko) must still parse — the new marker-strip must not interfere
 // when no "in addition to its other types" marker is present.

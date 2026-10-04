@@ -1505,6 +1505,7 @@ mod barbarian_class_die_roll_replacement;
 mod baron_helmut_zemo_boast;
 mod bartz_and_boko_each_source_damage;
 mod base_pt_dynamic_set_std_base_pt;
+mod become_chosen_subtype;
 mod become_color_set_std_batch;
 mod behold_chosen_object_power_damage;
 mod bre_of_clan_stoutarm_endstep;

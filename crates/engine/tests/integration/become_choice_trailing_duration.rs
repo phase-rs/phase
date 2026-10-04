@@ -23,20 +23,19 @@
 //! sibling: a clause that prints NO window keeps the CR 611.2a `Permanent`
 //! default and survives the boundary. It passes at BASE by design.
 //!
-//! What is NOT asserted: that the chosen creature type / basic land type is
-//! visible on the object. The `persist: false` subtype choosers write the answer
-//! only to `state.last_named_choice`, which the `AddChosenSubtype` layer arm does
-//! not read — a separate defect tracked as follow-up F1-subtype in
-//! `docs/parser-misparse-backlog.md`. These tests pin the installed effect and
-//! its window, which is what this fix changes.
+//! The installed effect is located by its LATCHED payload: the `persist: false`
+//! answer is fixed into the modification when the effect is applied (CR 608.2h,
+//! `effects/effect.rs::snapshot_transient_modifications`), so Mistform Stalker's
+//! effect carries `AddSubtype { "Elf" }` and Jinx's `SetBasicLandType { Island }`.
+//! R1/R2 also check the chosen type is visible before cleanup, so the window
+//! assertions are about an effect that actually applies; set-versus-retain
+//! semantics are covered by `become_chosen_subtype.rs`.
 //!
 //! Every card is built from VERBATIM Oracle text (`/card-test`).
 
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::{
-    ChosenSubtypeKind, ColorChangeMode, ContinuousModification, Duration,
-};
+use engine::types::ability::{BasicLandType, ColorChangeMode, ContinuousModification, Duration};
 use engine::types::actions::GameAction;
 use engine::types::game_state::{GameState, TransientContinuousEffect, WaitingFor};
 use engine::types::identifiers::ObjectId;
@@ -73,6 +72,14 @@ fn effects_with<'a>(
         .iter()
         .filter(|e| e.modifications.contains(modification))
         .collect()
+}
+
+/// CR 613.1: re-derive the object's characteristics from all live continuous
+/// effects, then read its subtypes back.
+fn subtypes_after_layers(runner: &mut GameRunner, id: ObjectId) -> Vec<String> {
+    runner.state_mut().layers_dirty.mark_full();
+    evaluate_layers(runner.state_mut());
+    runner.state().objects[&id].card_types.subtypes.clone()
 }
 
 /// Seed both libraries so the turn walk below never decks a player.
@@ -133,8 +140,9 @@ fn mistform_stalker_creature_type_choice_ends_at_cleanup() {
 
     runner.activate(stalker, 0).choose_option("Elf").resolve();
 
-    let creature_type = ContinuousModification::AddChosenSubtype {
-        kind: ChosenSubtypeKind::CreatureType,
+    // CR 608.2h: the chosen creature type is latched into the payload.
+    let creature_type = ContinuousModification::AddSubtype {
+        subtype: "Elf".to_string(),
     };
     let installed = effects_with(runner.state(), &creature_type);
     // POSITIVE REACH GUARD: the apply half resolved and installed its effect.
@@ -149,6 +157,11 @@ fn mistform_stalker_creature_type_choice_ends_at_cleanup() {
         installed[0].duration,
         Duration::UntilEndOfTurn,
         "CR 611.2a: the printed `until end of turn` must reach the apply half"
+    );
+    let before_cleanup = subtypes_after_layers(&mut runner, stalker);
+    assert!(
+        before_cleanup.iter().any(|t| t == "Elf"),
+        "CR 205.1a: the chosen creature type must apply before cleanup: {before_cleanup:?}"
     );
 
     cross_turn_boundary(&mut runner);
@@ -183,8 +196,9 @@ fn jinx_basic_land_type_choice_ends_at_cleanup() {
         .choose_option("Island")
         .resolve();
 
-    let land_type = ContinuousModification::AddChosenSubtype {
-        kind: ChosenSubtypeKind::BasicLandType,
+    // CR 608.2h: the chosen basic land type is latched into the payload.
+    let land_type = ContinuousModification::SetBasicLandType {
+        land_type: BasicLandType::Island,
     };
     let installed = effects_with(runner.state(), &land_type);
     // POSITIVE REACH GUARD: the apply half resolved and installed its effect.
@@ -199,6 +213,11 @@ fn jinx_basic_land_type_choice_ends_at_cleanup() {
         installed[0].duration,
         Duration::UntilEndOfTurn,
         "CR 611.2a: the printed `until end of turn` must reach the apply half"
+    );
+    let before_cleanup = subtypes_after_layers(&mut runner, forest);
+    assert!(
+        before_cleanup.iter().any(|t| t == "Island"),
+        "CR 305.7: the chosen basic land type must apply before cleanup: {before_cleanup:?}"
     );
 
     cross_turn_boundary(&mut runner);
