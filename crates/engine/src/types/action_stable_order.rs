@@ -3,8 +3,8 @@
 // Issue #4878: allocation-free total order for deterministic AI / legal-action
 // sorting. Ordinary generated payloads derive `Ord`, so their
 // comparison reduces to `cmp_val` (a thin `Ord::cmp` wrapper) chained with
-// `then_with`. Cold replacement-preference actions compare serialized definition
-// snapshots. `GameAction::Debug` also has a payload (`DebugAction`) that
+// `then_with`. Cold replacement-preference actions compare opaque selectors via
+// `cmp_val`. `GameAction::Debug` also has a payload (`DebugAction`) that
 // transitively contains non-`Ord` types (`Keyword`,
 // `TokenCharacteristics`); it is a cold path (debug actions are never in
 // `legal_actions()`) handled by the exhaustive `cmp_debug_action`. No `Debug`
