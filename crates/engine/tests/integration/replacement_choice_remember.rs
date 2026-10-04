@@ -110,12 +110,29 @@ fn full_order_is_replayed_after_cast_resolution_and_ordinary_choices_are_not_sav
     let (mut runner, sources, spells) = life_scenario(false);
     runner.cast(spells[0]).resolve();
     assert_prompt(runner.state(), ReplacementChoiceKind::Order, true);
+    let WaitingFor::ReplacementChoice { candidates, .. } = &runner.state().waiting_for else {
+        unreachable!();
+    };
+    let descriptions: Vec<_> = [sources[1], sources[0], sources[2]]
+        .iter()
+        .map(|source| {
+            let candidate = candidates
+                .iter()
+                .find(|candidate| candidate.source_id == *source)
+                .unwrap();
+            format!("{} — {}", candidate.source_name, candidate.description)
+        })
+        .collect();
     runner
         .act(remember_source_order(
             runner.state(),
             &[sources[1], sources[0], sources[2]],
         ))
         .unwrap();
+    assert_eq!(
+        runner.state().replacement_auto_choices[0].descriptions,
+        descriptions
+    );
     assert_eq!(runner.state().players[0].life, 27, "(1 + 1) * 2 + 3");
     assert!(!matches!(
         runner.state().waiting_for,
@@ -204,10 +221,22 @@ fn matching_sources_with_changed_definition_or_incarnation_or_set_prompt_again()
 #[test]
 fn plain_optional_accept_and_decline_are_distinct_and_recur_after_restore() {
     for index in 0..2 {
-        let (mut runner, _, spells) = life_scenario(true);
+        let (mut runner, sources, spells) = life_scenario(true);
         runner.cast(spells[0]).resolve();
         assert_prompt(runner.state(), ReplacementChoiceKind::OptionalBranch, true);
+        let WaitingFor::ReplacementChoice { candidates, .. } = &runner.state().waiting_for else {
+            unreachable!();
+        };
+        let candidate = &candidates[index];
+        let descriptions = vec![format!(
+            "{} — {}",
+            candidate.source_name, candidate.description
+        )];
         runner.act(remember_optional(index)).unwrap();
+        assert_eq!(
+            runner.state().replacement_auto_choices[0].descriptions,
+            descriptions
+        );
         let gain = if index == 0 { 0 } else { 1 };
         assert_eq!(runner.state().players[0].life, 20 + gain);
         let encoded =
@@ -238,6 +267,11 @@ fn plain_optional_accept_and_decline_are_distinct_and_recur_after_restore() {
             WaitingFor::ReplacementChoice { .. }
         ));
         assert_eq!(restored.players[0].life, 20 + 2 * gain);
+        engine::game::zones::move_to_zone(&mut restored, sources[0], Zone::Exile, &mut Vec::new());
+        assert_eq!(
+            restored.replacement_auto_choices[0].descriptions,
+            descriptions
+        );
         let mut raw = serde_json::to_value(&restored).unwrap();
         raw.as_object_mut()
             .unwrap()
@@ -277,6 +311,72 @@ fn ordering_an_optional_effect_cancels_tail_and_never_accepts_its_branch() {
     runner.cast(spells[1]).resolve();
     assert_prompt(runner.state(), ReplacementChoiceKind::OptionalBranch, true);
     assert_eq!(runner.state().players[0].life, 25);
+}
+
+fn assert_saved_optional_replays_after_order(order: [usize; 3]) {
+    for index in 0..2 {
+        let (mut runner, sources, spells) = life_scenario(false);
+        let definition = ReplacementDefinition::new(ReplacementEvent::GainLife)
+            .quantity_modification(QuantityModification::Prevent)
+            .mode(ReplacementMode::Optional { decline: None });
+        let object = runner.state_mut().objects.get_mut(&sources[0]).unwrap();
+        object.replacement_definitions[0] = definition.clone();
+        Arc::make_mut(&mut object.base_replacement_definitions)[0] = definition;
+        mark_layers_full(runner.state_mut());
+
+        runner.cast(spells[0]).resolve();
+        assert_prompt(runner.state(), ReplacementChoiceKind::Order, true);
+        let ordered_sources: Vec<_> = order.iter().map(|position| sources[*position]).collect();
+        runner
+            .act(remember_source_order(runner.state(), &ordered_sources))
+            .unwrap();
+        // CR 616.1: ordering alone cannot decide the optional branch.
+        assert_prompt(runner.state(), ReplacementChoiceKind::OptionalBranch, true);
+        assert_eq!(runner.state().players[0].life, 20);
+        assert_eq!(runner.state().replacement_auto_choices.len(), 1);
+        assert!(runner.state().replacement_auto_choice_tail.is_none());
+
+        runner.act(remember_optional(index)).unwrap();
+        let gain = if index == 0 { 0 } else { 5 };
+        assert_eq!(runner.state().players[0].life, 20 + gain);
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        assert_eq!(runner.state().replacement_auto_choices.len(), 2);
+        assert_eq!(
+            runner.state().replacement_auto_choices[0].key.kind,
+            ReplacementChoiceKind::Order
+        );
+        assert_eq!(
+            runner.state().replacement_auto_choices[1].key.kind,
+            ReplacementChoiceKind::OptionalBranch
+        );
+        assert_eq!(
+            runner.state().replacement_auto_choices[1].choice,
+            ReplacementAutoChoice::Optional { index }
+        );
+        let saved = runner.state().replacement_auto_choices.clone();
+
+        let outcome = runner.cast(spells[1]).resolve();
+        outcome.assert_life_delta(P0, gain);
+        assert!(matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::Priority { .. }
+        ));
+        assert_eq!(outcome.state().replacement_auto_choices, saved);
+        assert!(outcome.state().replacement_auto_choice_tail.is_none());
+    }
+}
+
+#[test]
+fn saved_optional_decision_replays_when_order_selects_it_first() {
+    assert_saved_optional_replays_after_order([0, 1, 2]);
+}
+
+#[test]
+fn saved_optional_decision_replays_as_last_singleton_of_an_order() {
+    assert_saved_optional_replays_after_order([1, 2, 0]);
 }
 
 #[test]

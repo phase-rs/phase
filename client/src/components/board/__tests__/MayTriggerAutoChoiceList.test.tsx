@@ -197,6 +197,38 @@ describe("MayTriggerAutoChoiceList", () => {
     expect(screen.getByText("Saved conversion 29")).not.toBeVisible();
   });
 
+  it("distinguishes identical saved decisions by source and removes only the second exact key", () => {
+    const replacements: ReplacementAutoChoiceRecord[] = ["First prevention", "Second prevention"].map((source, index) => ({
+      key: { player: 0, event: "GainLife", kind: { type: "OptionalBranch" }, candidates: [{ source_id: 100 + index }] },
+      choice: { type: "Optional", data: { index: 1 } },
+      descriptions: [`${source} — Decline`],
+    }));
+    seed([], replacements);
+    render(<MayTriggerAutoChoiceList />);
+    fireEvent.click(screen.getByRole("button", { name: "Auto-deciding 2" }));
+
+    for (const record of replacements) {
+      expect(screen.getByText(`Replacement: ${record.descriptions[0]}`)).toBeVisible();
+      expect(screen.getByText(record.descriptions[0])).not.toBeVisible();
+    }
+    fireEvent.click(screen.getByText("Replacement: First prevention — Decline"));
+    expect(screen.getByText("First prevention — Decline")).toBeVisible();
+    expect(screen.getByText("Second prevention — Decline")).not.toBeVisible();
+    fireEvent.click(screen.getByText("Replacement: Second prevention — Decline"));
+    expect(screen.getByText("Second prevention — Decline")).toBeVisible();
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Remove" })[1]);
+    expect(dispatchActionMock).toHaveBeenCalledExactlyOnceWith({
+      type: "SetReplacementAutoChoice",
+      data: { selector: replacements[1].key },
+    });
+    seed([], [replacements[0]]);
+    expect(screen.queryByText("Replacement: Second prevention — Decline")).not.toBeInTheDocument();
+    expect(screen.getByText("Replacement: First prevention — Decline")).toBeVisible();
+    expect(screen.getByText("First prevention — Decline")).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Replacement choices (1)" })).toBeInTheDocument();
+  });
+
   it.each(["Escape", "Close"])("dismisses with %s and restores chip focus", (method) => {
     seed([], [replacementRecord]);
     render(<MayTriggerAutoChoiceList />);

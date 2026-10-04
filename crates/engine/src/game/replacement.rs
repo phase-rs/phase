@@ -11429,6 +11429,10 @@ pub(crate) fn remember_replacement_choice(
     let WaitingFor::ReplacementChoice { candidates, .. } = summaries else {
         unreachable!()
     };
+    let description = |index: usize| {
+        let candidate = &candidates[index];
+        format!("{} — {}", candidate.source_name, candidate.description)
+    };
     let (first, descriptions) = match &choice {
         ReplacementAutoChoice::Order { order } => {
             let mut remaining: Vec<_> = order
@@ -11443,15 +11447,10 @@ pub(crate) fn remember_replacement_choice(
             });
             (
                 order[0],
-                order
-                    .iter()
-                    .map(|index| candidates[*index].description.clone())
-                    .collect(),
+                order.iter().map(|index| description(*index)).collect(),
             )
         }
-        ReplacementAutoChoice::Optional { index } => {
-            (*index, vec![candidates[*index].description.clone()])
-        }
+        ReplacementAutoChoice::Optional { index } => (*index, vec![description(*index)]),
     };
     state.replacement_auto_choices.retain(|record| {
         !(record.key.player == key.player
@@ -11475,6 +11474,15 @@ fn replay_pending_replacement(
     player: PlayerId,
     events: &mut Vec<GameEvent>,
 ) -> ReplacementResult {
+    // CR 616.1: choosing an optional effect's turn is separate from its may
+    // decision. Discard ordering automation before looking up that saved decision.
+    if state
+        .pending_replacement
+        .as_ref()
+        .is_some_and(|pending| pending.is_optional)
+    {
+        state.replacement_auto_choice_tail = None;
+    }
     let had_tail = state.replacement_auto_choice_tail.is_some();
     let key = replacement_auto_choice_key(state);
     let index = if let Some(tail) = state.replacement_auto_choice_tail.take() {
@@ -12360,7 +12368,7 @@ fn continue_replacement_impl(
         pending.is_optional = true;
         pending.choice_player = Some(affected);
         state.pending_replacement = Some(pending);
-        return ReplacementResult::NeedsChoice(affected);
+        return replay_pending_replacement(state, affected, events);
     }
 
     let mut proposed = pending.proposed.clone();
