@@ -10670,10 +10670,10 @@ fn apply_action(
     }
 
     if let GameAction::SetReplacementAutoChoice { selector } = &action {
-        // An echoed key names the displayed record even when earlier removals
-        // change the list. A changed record or another owner's key matches nothing.
+        // The stored opaque selector names the record across earlier removals.
+        // Unknown selectors and records belonging to another actor are preserved.
         state.replacement_auto_choices.retain(|record| {
-            record.key.player != actor || selector.as_ref().is_some_and(|key| record.key != *key)
+            record.key.player != actor || selector.as_ref().is_some_and(|id| record.id != *id)
         });
         return Ok(ActionResult::applied(vec![], state.waiting_for.clone()));
     }

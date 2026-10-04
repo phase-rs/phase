@@ -2390,6 +2390,7 @@ export interface ReplacementAutoChoiceKey {
 }
 
 export interface ReplacementAutoChoiceRecord {
+  id: string;
   key: ReplacementAutoChoiceKey;
   choice: ReplacementAutoChoice;
   descriptions: string[];
@@ -3118,7 +3119,7 @@ export type GameAction =
   | { type: "ChoosePair"; data: { partner: ObjectId | null } }
   | { type: "ChooseReplacement"; data: { index: number } }
   | { type: "ChooseReplacementAndRemember"; data: { choice: ReplacementAutoChoice } }
-  | { type: "SetReplacementAutoChoice"; data: { selector: ReplacementAutoChoiceKey | null } }
+  | { type: "SetReplacementAutoChoice"; data: { selector: string | null } }
   | { type: "ChooseEntryController"; data: { opponent: PlayerId } }
   | { type: "OrderTriggers"; data: { order: number[] } }
   // CR 601.2f: the caster's elected cost-reduction order — a permutation of

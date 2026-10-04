@@ -133,7 +133,7 @@ export function MayTriggerAutoChoiceList() {
               </h3>
               <ul className="flex flex-col">
                 {replacementChoices.map((record) => (
-                  <li key={JSON.stringify(record.key)} className="flex items-start gap-2 px-3 py-1.5">
+                  <li key={record.id} className="flex items-start gap-2 px-3 py-1.5">
                     <details className="group min-w-0 flex-1">
                       <summary className="flex cursor-pointer list-none items-start gap-1.5 text-sm text-gray-200">
                         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0 group-open:rotate-90">
@@ -152,7 +152,7 @@ export function MayTriggerAutoChoiceList() {
                     <button
                       type="button"
                       className="shrink-0 rounded px-1.5 py-0.5 text-xs font-semibold text-sky-200 transition-colors hover:bg-white/10"
-                      onClick={() => dispatchAction({ type: "SetReplacementAutoChoice", data: { selector: record.key } })}
+                      onClick={() => dispatchAction({ type: "SetReplacementAutoChoice", data: { selector: record.id } })}
                     >
                       {t("mayTriggerAutoChoice.remove")}
                     </button>

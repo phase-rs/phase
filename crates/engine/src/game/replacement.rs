@@ -1,4 +1,5 @@
 use indexmap::IndexMap;
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
@@ -23,9 +24,10 @@ use super::filter::{
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     DrainStatus, GameState, LiminalEntry, LiminalEntryKind, PendingReplacement,
-    PostReplacementDrain, ReplacementAutoChoiceIdentity, ReplacementAutoChoiceKey,
-    ReplacementAutoChoiceRecord, ReplacementAutoChoiceTail, ReplacementCandidateSummary,
-    ReplacementChoiceKind, ReplacementIndexEntry, ResidentDrainPolicy, WaitingFor,
+    PostReplacementDrain, ReplacementAutoChoiceId, ReplacementAutoChoiceIdentity,
+    ReplacementAutoChoiceKey, ReplacementAutoChoiceRecord, ReplacementAutoChoiceTail,
+    ReplacementCandidateSummary, ReplacementChoiceKind, ReplacementIndexEntry, ResidentDrainPolicy,
+    WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::mana::{StepEndManaAction, UnitDisposition};
@@ -11466,9 +11468,12 @@ pub(crate) fn remember_replacement_choice(
             && record.key.kind == key.kind
             && same_identity_set(&record.key.candidates, &key.candidates))
     });
+    let encoded = serde_json::to_vec(&key).expect("replacement key serializes");
+    let id = ReplacementAutoChoiceId(format!("r{:x}", Sha256::digest(encoded)));
     state
         .replacement_auto_choices
         .push(ReplacementAutoChoiceRecord {
+            id,
             key,
             choice,
             descriptions,

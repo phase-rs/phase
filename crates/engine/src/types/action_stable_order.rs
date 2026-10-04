@@ -324,11 +324,7 @@ fn cmp_payload(a: &GameAction, b: &GameAction) -> Ordering {
             let GameAction::SetReplacementAutoChoice { selector: b0 } = b else {
                 unreachable!("same variant")
             };
-            // Cold preference actions are never generated as AI/legal candidates.
-            // Exact definition snapshots are non-Ord; compare their wire identity.
-            serde_json::to_vec(a0)
-                .expect("replacement key serializes")
-                .cmp(&serde_json::to_vec(b0).expect("replacement key serializes"))
+            cmp_val(a0, b0)
         }
         GameAction::ChooseReplacement { index: a0 } => {
             let GameAction::ChooseReplacement { index: b0 } = b else {
@@ -1760,51 +1756,31 @@ mod tests {
         DecisionGroupKey, DecisionKind, DecisionTemplate, IterationCount, ReplayMode,
     };
     use crate::game::combat::AttackTarget;
-    use crate::types::ability::ReplacementDefinition;
     use crate::types::actions::ResolveAllScope;
     use crate::types::actions::{
         MayTriggerAutoChoiceOp, PrecastCopyShortcutResponse, ResolveAllConsentDecision,
     };
     use crate::types::game_state::{
         EndEffectGroupId, MayTriggerAutoChoiceKey, MayTriggerAutoChoiceSelector, MayTriggerOrigin,
-        ReplacementAutoChoiceIdentity, ReplacementAutoChoiceKey, ReplacementChoiceKind,
+        ReplacementAutoChoiceId,
     };
-    use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
+    use crate::types::identifiers::ObjectId;
     use crate::types::mana::{ManaCost, ManaCostShard};
     use crate::types::player::PlayerId;
-    use crate::types::replacements::ReplacementEvent;
 
     #[test]
-    fn replacement_removal_orders_exact_definition_snapshots() {
-        let key = ReplacementAutoChoiceKey {
-            player: PlayerId(0),
-            event: ReplacementEvent::GainLife,
-            kind: ReplacementChoiceKind::Order,
-            candidates: vec![ReplacementAutoChoiceIdentity::Definition {
-                source: ObjectIncarnationRef::of(ObjectId(1), 0),
-                index: 0,
-                definition: Box::new(ReplacementDefinition::new(ReplacementEvent::GainLife)),
-            }],
-        };
-        let mut changed_key = key.clone();
-        let ReplacementAutoChoiceIdentity::Definition { definition, .. } =
-            &mut changed_key.candidates[0]
-        else {
-            unreachable!();
-        };
-        definition.description = Some("Changed definition".into());
+    fn replacement_removal_orders_opaque_selectors() {
+        let id = ReplacementAutoChoiceId("r".to_owned() + &"a".repeat(64));
         assert_distinct_order(
             GameAction::SetReplacementAutoChoice {
-                selector: Some(key.clone()),
+                selector: Some(id.clone()),
             },
             GameAction::SetReplacementAutoChoice {
-                selector: Some(changed_key),
+                selector: Some(ReplacementAutoChoiceId("r".to_owned() + &"b".repeat(64))),
             },
         );
         assert_distinct_order(
-            GameAction::SetReplacementAutoChoice {
-                selector: Some(key),
-            },
+            GameAction::SetReplacementAutoChoice { selector: Some(id) },
             GameAction::SetReplacementAutoChoice { selector: None },
         );
     }

@@ -28,8 +28,8 @@ pub const MAX_ACTION_LIST_LEN: usize = 10_000;
 /// name.
 pub const MAX_CHOICE_LEN: usize = 256;
 
-/// Max serialized size for nested AST payloads, including echoed replacement
-/// keys and debug bodies. Client-supplied strings, vectors, or filters must not
+/// Max serialized size for nested AST payloads in debug bodies.
+/// Client-supplied strings, vectors, or filters must not
 /// forward arbitrarily large payloads into the engine reducers.
 pub const MAX_DEBUG_AST_JSON_LEN: usize = 16 * 1024;
 
@@ -434,9 +434,8 @@ fn guard_debug_action_payload(action: &DebugAction) -> Result<(), String> {
 pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
     match action {
         GameAction::SetReplacementAutoChoice { selector } => {
-            if let Some(key) = selector {
-                bound_list("SetReplacementAutoChoice.selector.candidates", key.candidates.len())?;
-                bound_serialized_json("SetReplacementAutoChoice.selector", key)?;
+            if let Some(id) = selector {
+                bound_string("SetReplacementAutoChoice.selector", &id.0)?;
             }
         }
         GameAction::ChooseReplacementAndRemember { choice } => {
@@ -797,30 +796,16 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
 mod tests {
     use super::*;
     use engine::game::combat::AttackTarget;
-    use engine::types::ability::ReplacementDefinition;
-    use engine::types::game_state::{
-        ReplacementAutoChoiceIdentity, ReplacementAutoChoiceKey, ReplacementChoiceKind,
-    };
-    use engine::types::identifiers::{ObjectId, ObjectIncarnationRef};
+    use engine::types::game_state::ReplacementAutoChoiceId;
+    use engine::types::identifiers::ObjectId;
     use engine::types::mana::{ManaCost, ManaCostShard};
     use engine::types::player::PlayerId;
-    use engine::types::replacements::ReplacementEvent;
 
     #[test]
-    fn echoed_replacement_key_bounds_nested_definition_payloads() {
-        let mut key = ReplacementAutoChoiceKey {
-            player: PlayerId(0),
-            event: ReplacementEvent::GainLife,
-            kind: ReplacementChoiceKind::Order,
-            candidates: vec![ReplacementAutoChoiceIdentity::Definition {
-                source: ObjectIncarnationRef::of(ObjectId(1), 0),
-                index: 0,
-                definition: Box::new(ReplacementDefinition::new(ReplacementEvent::GainLife)),
-            }],
-        };
+    fn replacement_removal_bounds_opaque_selector_strings() {
         assert_eq!(
             guard_game_action_payload(&GameAction::SetReplacementAutoChoice {
-                selector: Some(key.clone())
+                selector: Some(ReplacementAutoChoiceId("r".to_owned() + &"a".repeat(64)))
             }),
             Ok(())
         );
@@ -828,14 +813,9 @@ mod tests {
             guard_game_action_payload(&GameAction::SetReplacementAutoChoice { selector: None }),
             Ok(())
         );
-        let ReplacementAutoChoiceIdentity::Definition { definition, .. } = &mut key.candidates[0]
-        else {
-            unreachable!();
-        };
-        definition.description = Some("x".repeat(MAX_DEBUG_AST_JSON_LEN + 1));
         assert!(
             guard_game_action_payload(&GameAction::SetReplacementAutoChoice {
-                selector: Some(key)
+                selector: Some(ReplacementAutoChoiceId("x".repeat(MAX_CHOICE_LEN + 1)))
             })
             .is_err()
         );

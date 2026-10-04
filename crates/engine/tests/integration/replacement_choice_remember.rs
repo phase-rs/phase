@@ -14,7 +14,8 @@ use engine::types::ability::{
 };
 use engine::types::actions::{GameAction, ReplacementAutoChoice};
 use engine::types::game_state::{
-    GameState, PersistedGameState, ReplacementAutoChoiceIdentity, ReplacementChoiceKind, WaitingFor,
+    GameState, PersistedGameState, ReplacementAutoChoiceId, ReplacementAutoChoiceRecord,
+    ReplacementChoiceKind, WaitingFor,
 };
 use engine::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use engine::types::mana::{ManaType, ManaUnit, StepEndManaAction};
@@ -533,20 +534,18 @@ fn invalid_responses_and_wrong_actors_cannot_record_and_reset_is_owner_scoped() 
     assert!(filter_state_for_unseated_viewer(runner.state())
         .replacement_auto_choices
         .is_empty());
-    let key = runner.state().replacement_auto_choices[0].key.clone();
+    let id = runner.state().replacement_auto_choices[0].id.clone();
     apply(
         runner.state_mut(),
         P1,
         GameAction::SetReplacementAutoChoice {
-            selector: Some(key.clone()),
+            selector: Some(id.clone()),
         },
     )
     .unwrap();
     assert_eq!(runner.state().replacement_auto_choices.len(), 1);
     runner
-        .act(GameAction::SetReplacementAutoChoice {
-            selector: Some(key),
-        })
+        .act(GameAction::SetReplacementAutoChoice { selector: Some(id) })
         .unwrap();
     assert!(runner.state().replacement_auto_choices.is_empty());
 }
@@ -557,9 +556,9 @@ fn split_actor_boundary_removes_and_clears_only_authenticated_players_preference
     runner.cast(spells[0]).resolve();
     runner.act(remember_order(&[1, 0, 2])).unwrap();
     let saved = runner.state().clone();
-    let key = saved.replacement_auto_choices[0].key.clone();
+    let id = saved.replacement_auto_choices[0].id.clone();
 
-    for selector in [Some(key), None] {
+    for selector in [Some(id), None] {
         let action = GameAction::SetReplacementAutoChoice { selector };
         let mut state = saved.clone();
         let result = apply_interaction(&mut state, P1, P0, action.clone()).unwrap();
@@ -1151,9 +1150,9 @@ fn interactive_modifier_prefix_in_mixed_decline_is_ineligible_and_resolves_norma
 }
 
 #[test]
-fn exact_record_removal_survives_prior_removals_and_rejects_changed_or_foreign_keys() {
+fn opaque_removal_survives_prior_removals_restore_and_recreated_exact_keys() {
     let (mut runner, sources, spells) = life_scenario(false);
-    let mut keys = Vec::new();
+    let mut records = Vec::new();
     for (index, factor) in [2, 3, 4].into_iter().enumerate() {
         if index > 0 {
             let object = runner.state_mut().objects.get_mut(&sources[0]).unwrap();
@@ -1166,61 +1165,124 @@ fn exact_record_removal_survives_prior_removals_and_rejects_changed_or_foreign_k
         runner.cast(spells[index]).resolve();
         assert_prompt(runner.state(), ReplacementChoiceKind::Order, true);
         runner.act(remember_order(&[1, 0, 2])).unwrap();
-        keys.push(
-            runner
-                .state()
-                .replacement_auto_choices
-                .last()
-                .unwrap()
-                .key
-                .clone(),
-        );
+        let record = runner
+            .state()
+            .replacement_auto_choices
+            .last()
+            .unwrap()
+            .clone();
+        assert_eq!(record.id.0.len(), 65);
+        assert!(record.id.0.starts_with('r'));
+        assert!(record.id.0[1..]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit()));
+        assert_eq!(serde_json::to_value(&record.id).unwrap(), record.id.0);
+        assert!(records
+            .iter()
+            .all(|prior: &ReplacementAutoChoiceRecord| prior.id != record.id));
+        records.push(record);
     }
-    assert_eq!(runner.state().replacement_auto_choices.len(), 3);
+    assert_eq!(runner.state().replacement_auto_choices, records);
     runner
         .act(GameAction::SetReplacementAutoChoice {
-            selector: Some(keys[0].clone()),
+            selector: Some(records[0].id.clone()),
         })
         .unwrap();
-    runner
-        .act(GameAction::SetReplacementAutoChoice {
-            selector: Some(keys[1].clone()),
-        })
-        .unwrap();
-    assert_eq!(runner.state().replacement_auto_choices.len(), 1);
-    assert_eq!(runner.state().replacement_auto_choices[0].key, keys[2]);
+    assert_eq!(runner.state().replacement_auto_choices, records[1..]);
 
-    let mut changed_key = keys[2].clone();
-    let ReplacementAutoChoiceIdentity::Definition { definition, .. } =
-        &mut changed_key.candidates[0]
-    else {
-        unreachable!();
-    };
-    definition.quantity_modification = Some(QuantityModification::Times { factor: 5 });
+    let encoded = serde_json::to_vec(&PersistedGameState::capture(runner.state().clone())).unwrap();
+    let restored = serde_json::from_slice::<PersistedGameState>(&encoded)
+        .unwrap()
+        .into_game_state()
+        .unwrap();
+    assert_eq!(restored.replacement_auto_choices, records[1..]);
+    runner = GameRunner::from_state(restored);
     runner
         .act(GameAction::SetReplacementAutoChoice {
-            selector: Some(changed_key),
+            selector: Some(records[1].id.clone()),
         })
         .unwrap();
-    let mut reordered_key = keys[2].clone();
-    reordered_key.candidates.reverse();
+    assert_eq!(runner.state().replacement_auto_choices, records[2..]);
+
     runner
         .act(GameAction::SetReplacementAutoChoice {
-            selector: Some(reordered_key),
+            selector: Some(ReplacementAutoChoiceId("unknown".into())),
         })
         .unwrap();
-    apply(
-        runner.state_mut(),
-        P1,
-        GameAction::SetReplacementAutoChoice {
-            selector: Some(keys[2].clone()),
-        },
-    )
-    .unwrap();
-    assert_eq!(runner.state().replacement_auto_choices.len(), 1);
-    assert_eq!(runner.state().replacement_auto_choices[0].key, keys[2]);
+    for selector in [Some(records[2].id.clone()), None] {
+        apply(
+            runner.state_mut(),
+            P1,
+            GameAction::SetReplacementAutoChoice { selector },
+        )
+        .unwrap();
+        assert_eq!(runner.state().replacement_auto_choices, records[2..]);
+    }
+    // A new key saved after restore and an identical key re-created after
+    // deletion can both be removed without affecting the surviving record.
+    for (spell, factor) in [(spells[3], 5), (spells[4], 2)] {
+        let object = runner.state_mut().objects.get_mut(&sources[0]).unwrap();
+        object.replacement_definitions[0].quantity_modification =
+            Some(QuantityModification::Times { factor });
+        Arc::make_mut(&mut object.base_replacement_definitions)[0].quantity_modification =
+            Some(QuantityModification::Times { factor });
+        mark_layers_full(runner.state_mut());
+        runner.cast(spell).resolve();
+        assert_prompt(runner.state(), ReplacementChoiceKind::Order, true);
+        runner.act(remember_order(&[0, 1, 2])).unwrap();
+        let recreated = runner.state().replacement_auto_choices.last().unwrap();
+        if factor == 2 {
+            assert_eq!(recreated.key, records[0].key);
+            assert_eq!(recreated.id, records[0].id);
+            assert_ne!(recreated.choice, records[0].choice);
+        } else {
+            assert!(records.iter().all(|record| record.id != recreated.id));
+        }
+        let id = recreated.id.clone();
+        runner
+            .act(GameAction::SetReplacementAutoChoice { selector: Some(id) })
+            .unwrap();
+        assert_eq!(runner.state().replacement_auto_choices, records[2..]);
+    }
     runner
         .act(GameAction::SetReplacementAutoChoice { selector: None })
         .unwrap();
     assert!(runner.state().replacement_auto_choices.is_empty());
+}
+
+#[test]
+fn opaque_id_depends_on_the_exact_key_and_not_the_saved_choice() {
+    let (mut runner, _, spells) = life_scenario(false);
+    runner.cast(spells[0]).resolve();
+    assert_prompt(runner.state(), ReplacementChoiceKind::Order, true);
+    let prompt = runner.state().clone();
+    runner.act(remember_order(&[1, 0, 2])).unwrap();
+    let original = runner.state().replacement_auto_choices[0].clone();
+    let mut same_key = GameRunner::from_state(prompt.clone());
+    same_key.act(remember_order(&[0, 1, 2])).unwrap();
+    let changed_choice = &same_key.state().replacement_auto_choices[0];
+    assert_eq!(changed_choice.key, original.key);
+    assert_eq!(changed_choice.id, original.id);
+    assert_ne!(changed_choice.choice, original.choice);
+
+    // The key's candidate order remains part of its removal identity even
+    // though replay matches the same set of exact source definitions.
+    let mut reordered = prompt;
+    reordered
+        .pending_replacement
+        .as_mut()
+        .unwrap()
+        .candidates
+        .reverse();
+    let mut reordered = GameRunner::from_state(reordered);
+    reordered.act(remember_order(&[1, 2, 0])).unwrap();
+    let changed_key = &reordered.state().replacement_auto_choices[0];
+    let mut expected_key = original.key.clone();
+    expected_key.candidates.reverse();
+    assert_eq!(changed_key.key, expected_key);
+    assert_ne!(changed_key.id, original.id);
+
+    let mut missing_id = serde_json::to_value(&original).unwrap();
+    assert!(missing_id.as_object_mut().unwrap().remove("id").is_some());
+    assert!(serde_json::from_value::<ReplacementAutoChoiceRecord>(missing_id).is_err());
 }

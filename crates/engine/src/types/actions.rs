@@ -6,7 +6,7 @@ use super::game_state::{
     AutoMayChoice, AutoPassRequest, CastPaymentMode, CombatDamageAssignmentMode,
     CompanionDeclaration, CounterCostChoice, CounterMoveChoice, CounterRemoveChoice,
     MayTriggerAutoChoiceScope, MayTriggerAutoChoiceSelector, PriorityPassingMode,
-    ReplacementAutoChoiceKey, ShardChoice, YieldScope, YieldTarget,
+    ReplacementAutoChoiceId, ShardChoice, YieldScope, YieldTarget,
 };
 use super::identifiers::{CardId, ObjectId};
 use super::keywords::Keyword;
@@ -343,7 +343,7 @@ pub enum GameAction {
     },
     /// Forget only the authenticated actor's replacement preferences.
     SetReplacementAutoChoice {
-        selector: Option<ReplacementAutoChoiceKey>,
+        selector: Option<ReplacementAutoChoiceId>,
     },
     /// CR 614.12a: choose which eligible opponent controls an entering
     /// permanent. This is distinct from CR 616 replacement ordering.

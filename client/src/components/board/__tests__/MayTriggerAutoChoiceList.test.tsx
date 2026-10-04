@@ -35,6 +35,7 @@ function seed(records: MayTriggerAutoChoiceRecord[], replacements: ReplacementAu
 }
 
 const replacementRecord: ReplacementAutoChoiceRecord = {
+  id: `r${"a".repeat(64)}`,
   key: { player: 0, event: "LoseMana", kind: { type: "Order" }, candidates: [] },
   choice: { type: "Order", data: { order: [1, 0] } },
   descriptions: ["Convert to red", "Keep mana"],
@@ -128,7 +129,7 @@ describe("MayTriggerAutoChoiceList", () => {
     expect(screen.queryByRole("button", { name: /auto-deciding/i })).not.toBeInTheDocument();
   });
 
-  it("shows engine replacement summaries and echoes their exact removal key", () => {
+  it("shows engine replacement summaries and echoes their opaque removal ID", () => {
     seed([], [replacementRecord]);
     render(<MayTriggerAutoChoiceList />);
     fireEvent.click(screen.getByRole("button", { name: /auto-deciding/i }));
@@ -136,7 +137,7 @@ describe("MayTriggerAutoChoiceList", () => {
     expect(screen.getByRole("heading", { name: "Replacement choices (1)" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: /optional triggers/i })).not.toBeInTheDocument();
     fireEvent.click(screen.getByText("Remove"));
-    expect(dispatchActionMock).toHaveBeenCalledWith({ type: "SetReplacementAutoChoice", data: { selector: replacementRecord.key } });
+    expect(dispatchActionMock).toHaveBeenCalledWith({ type: "SetReplacementAutoChoice", data: { selector: replacementRecord.id } });
     fireEvent.click(screen.getByText("Clear all"));
     expect(dispatchActionMock).toHaveBeenCalledWith({ type: "SetReplacementAutoChoice", data: { selector: null } });
   });
@@ -158,6 +159,7 @@ describe("MayTriggerAutoChoiceList", () => {
   it("keeps many orders collapsed, reveals saved order, and preserves expansion after exact removal", () => {
     const replacements: ReplacementAutoChoiceRecord[] = Array.from({ length: 30 }, (_, index) => ({
       ...replacementRecord,
+      id: `r${index.toString(16).padStart(64, "0")}`,
       key: { ...replacementRecord.key, candidates: [{ source_id: 100 + index }] },
       descriptions: [`Saved conversion ${index}`, `Saved preservation ${index}`],
     }));
@@ -184,7 +186,7 @@ describe("MayTriggerAutoChoiceList", () => {
     fireEvent.click(screen.getAllByRole("button", { name: "Remove" })[28]);
     expect(dispatchActionMock).toHaveBeenCalledExactlyOnceWith({
       type: "SetReplacementAutoChoice",
-      data: { selector: replacements[28].key },
+      data: { selector: replacements[28].id },
     });
     expect(screen.getByText("Saved conversion 28")).not.toBeVisible();
     seed([], replacements.filter((_, index) => index !== 28));
@@ -197,8 +199,9 @@ describe("MayTriggerAutoChoiceList", () => {
     expect(screen.getByText("Saved conversion 29")).not.toBeVisible();
   });
 
-  it("distinguishes identical saved decisions by source and removes only the second exact key", () => {
+  it("distinguishes identical saved decisions by source and removes only the second opaque ID", () => {
     const replacements: ReplacementAutoChoiceRecord[] = ["First prevention", "Second prevention"].map((source, index) => ({
+      id: `r${index.toString(16).padStart(64, "0")}`,
       key: { player: 0, event: "GainLife", kind: { type: "OptionalBranch" }, candidates: [{ source_id: 100 + index }] },
       choice: { type: "Optional", data: { index: 1 } },
       descriptions: [`${source} — Decline`],
@@ -220,7 +223,7 @@ describe("MayTriggerAutoChoiceList", () => {
     fireEvent.click(screen.getAllByRole("button", { name: "Remove" })[1]);
     expect(dispatchActionMock).toHaveBeenCalledExactlyOnceWith({
       type: "SetReplacementAutoChoice",
-      data: { selector: replacements[1].key },
+      data: { selector: replacements[1].id },
     });
     seed([], [replacements[0]]);
     expect(screen.queryByText("Replacement: Second prevention — Decline")).not.toBeInTheDocument();

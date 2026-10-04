@@ -9489,8 +9489,14 @@ pub struct ReplacementAutoChoiceKey {
     pub candidates: Vec<ReplacementAutoChoiceIdentity>,
 }
 
+/// Stable opaque selector for an exact replacement preference key.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ReplacementAutoChoiceId(pub String);
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplacementAutoChoiceRecord {
+    pub id: ReplacementAutoChoiceId,
     pub key: ReplacementAutoChoiceKey,
     pub choice: crate::types::actions::ReplacementAutoChoice,
     /// Engine-provided descriptions in the chosen order (one for an optional branch).

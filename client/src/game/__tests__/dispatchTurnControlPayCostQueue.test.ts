@@ -172,6 +172,7 @@ describe("turn-control PayCost queueing (#6431)", () => {
         choice: { type: "Accept" },
       }],
       replacement_auto_choices: [{
+        id: `r${"a".repeat(64)}`,
         key: { player: 0, event: "LoseMana", kind: { type: "Order" }, candidates: [] },
         choice: { type: "Order", data: { order: [0, 1] } },
         descriptions: ["Convert to red", "Keep mana"],
@@ -214,6 +215,7 @@ describe("turn-control PayCost queueing (#6431)", () => {
 
   it("removes the two selected preferences when rapid clicks queue across snapshots", async () => {
     const records = ["A", "B", "C"].map((description, source) => ({
+      id: `r${source.toString(16).padStart(64, "0")}`,
       key: { player: 0, event: "LoseMana", kind: { type: "Order" as const }, candidates: [{ source }] },
       choice: { type: "Order" as const, data: { order: [0] } },
       descriptions: [description],
@@ -224,7 +226,7 @@ describe("turn-control PayCost queueing (#6431)", () => {
       ...baseAdapter(),
       submitAction: vi.fn(async (action: GameAction): Promise<SubmitResult> => {
         if (action.type === "SetReplacementAutoChoice") {
-          state = { ...state, replacement_auto_choices: state.replacement_auto_choices?.filter((record) => JSON.stringify(record.key) !== JSON.stringify(action.data.selector)) };
+          state = { ...state, replacement_auto_choices: state.replacement_auto_choices?.filter((record) => record.id !== action.data.selector) };
         }
         return { events: [], log_entries: [] };
       }),
@@ -238,11 +240,11 @@ describe("turn-control PayCost queueing (#6431)", () => {
     };
     seedStore(adapter);
     useGameStore.setState({ gameState: state, waitingFor: state.waiting_for, legalActions: [] });
-    const first = dispatchAction({ type: "SetReplacementAutoChoice", data: { selector: records[0].key } }, 0);
-    const second = dispatchAction({ type: "SetReplacementAutoChoice", data: { selector: records[1].key } }, 0);
+    const first = dispatchAction({ type: "SetReplacementAutoChoice", data: { selector: records[0].id } }, 0);
+    const second = dispatchAction({ type: "SetReplacementAutoChoice", data: { selector: records[1].id } }, 0);
     await Promise.all([first, second]);
-    expect(adapter.submitAction).toHaveBeenCalledWith({ type: "SetReplacementAutoChoice", data: { selector: records[0].key } }, 0);
-    expect(adapter.submitAction).toHaveBeenCalledWith({ type: "SetReplacementAutoChoice", data: { selector: records[1].key } }, 0);
+    expect(adapter.submitAction).toHaveBeenCalledWith({ type: "SetReplacementAutoChoice", data: { selector: records[0].id } }, 0);
+    expect(adapter.submitAction).toHaveBeenCalledWith({ type: "SetReplacementAutoChoice", data: { selector: records[1].id } }, 0);
     expect(adapter.submitAction).toHaveBeenCalledTimes(2);
     expect(useGameStore.getState().gameState?.replacement_auto_choices).toEqual([records[2]]);
   });
