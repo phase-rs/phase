@@ -595,8 +595,8 @@ fn compact_selector_removes_a_real_saved_key_larger_than_the_ast_wire_budget() {
     let target = scenario.add_creature(P0, "Counter recipient", 1, 1).id();
     let mut sources = Vec::new();
     for index in 0..50 {
-        let modification = if index == 49 {
-            QuantityModification::Times { factor: 2 }
+        let modification = if index == 0 {
+            QuantityModification::Minus { value: 1 }
         } else {
             QuantityModification::Plus { value: 1 }
         };
@@ -681,12 +681,9 @@ fn compact_selector_removes_a_real_saved_key_larger_than_the_ast_wire_budget() {
         record.id.0.len()
     );
     assert_eq!(record.id.0.len(), 65);
-    // CR 616.1f + CR 122.1a: forty-nine additive replacements followed by the
-    // doubler deliver (1 + 49) * 2 +1/+1 counters through the ordinary pipeline.
-    assert_eq!(
-        runner.state().objects[&target].counters[&CounterType::Plus1Plus1],
-        100
-    );
+    // CR 616.1f: subtracting the initial counter reduces the count to zero,
+    // leaving no other applicable replacements when the event is rescanned.
+    assert!(runner.state().objects[&target].counters.is_empty());
     assert!(matches!(
         runner.state().waiting_for,
         WaitingFor::Priority { .. }
@@ -710,9 +707,6 @@ fn compact_selector_removes_a_real_saved_key_larger_than_the_ast_wire_budget() {
     assert!(runner.state().replacement_auto_choices.is_empty());
     assert_eq!(runner.state().waiting_for, waiting_for);
     assert!(result.events.is_empty());
-    assert_eq!(
-        runner.state().objects[&target].counters[&CounterType::Plus1Plus1],
-        100
-    );
+    assert!(runner.state().objects[&target].counters.is_empty());
     assert!(runner.state().replacement_auto_choice_tail.is_none());
 }
