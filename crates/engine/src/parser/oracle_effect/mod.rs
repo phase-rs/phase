@@ -1116,19 +1116,14 @@ fn classify_population_walk_step(
         || *optional
         || unless_pay.is_some()
         || unlowered_guard.is_some();
-    if clause_guarded
-        || parsed_guarded
-        || !sub_ability
-            .as_deref()
-            .is_none_or(is_unguarded_shuffle_chain)
-    {
+    if clause_guarded || parsed_guarded || sub_ability.is_some() {
         return PopulationWalkStep::Stop;
     }
     let unpatched = patches.is_empty() && intrinsic.is_none();
     match effect {
         // CR 701.24a: a library shuffle names no population.
         Effect::Shuffle { .. } if unpatched => PopulationWalkStep::Transparent,
-        // CR 608.2c + CR 611.2a: a grant whose every affected set is the
+        // CR 608.2c + CR 611.2c: a grant whose every affected set is the
         // anaphor's own population acts on it without redefining it.
         Effect::GenericEffect {
             target,
@@ -1190,21 +1185,6 @@ fn reveal_until_kept_on_battlefield(
     } else {
         PopulationWalkStep::Stop
     }
-}
-
-/// Whether a nested `sub_ability` chain is only unguarded library shuffles —
-/// the one non-publishing instruction the population walk may look through
-/// when it is nested under a clause rather than emitted as its own.
-fn is_unguarded_shuffle_chain(def: &AbilityDefinition) -> bool {
-    let mut bare = AbilityDefinition::new(def.kind, (*def.effect).clone());
-    bare.sub_ability = def.sub_ability.clone();
-    bare.sub_link = def.sub_link;
-    matches!(*def.effect, Effect::Shuffle { .. })
-        && *def == bare
-        && def
-            .sub_ability
-            .as_deref()
-            .is_none_or(is_unguarded_shuffle_chain)
 }
 
 /// CR 603.12: a zone-change "this way" gate (`ZoneChangedThisWay`) that is not a
@@ -47273,5 +47253,120 @@ mod choose_different_player_tests {
                 ..
             }
         )));
+    }
+}
+
+#[cfg(test)]
+mod population_walk_destination_tests {
+    use super::*;
+
+    /// The walk's input when the for-each clause is reached: every clause
+    /// before it. Reach-guard: the for-each clause itself kept its honest gap.
+    fn walk_input(text: &str) -> Vec<ClauseIr> {
+        let mut ctx = ParseContext::default();
+        let mut ir = parse_effect_chain_ir(text, AbilityKind::Spell, &mut ctx);
+        let for_each = ir.clauses.pop().expect("the for-each clause");
+        assert!(
+            matches!(
+                &for_each.parsed.effect,
+                Effect::Unimplemented { name, .. } if name == "unparsed_quantity"
+            ),
+            "{text}: {:?}",
+            for_each.parsed.effect
+        );
+        ir.clauses
+    }
+
+    /// The reveal-until clause's own filter, asserting the clause is the
+    /// classified shape (emitted, each match kept, no optional or conditional
+    /// destination).
+    fn reveal_until_filter(clause: &ClauseIr) -> TargetFilter {
+        assert!(matches!(
+            clause.disposition,
+            ClauseDisposition::Emit {
+                followup: None,
+                intrinsic: None
+            }
+        ));
+        match &clause.parsed.effect {
+            Effect::RevealUntil {
+                filter,
+                matched_disposition: RevealUntilDisposition::KeepEach,
+                kept_destination: Zone::Hand,
+                kept_optional_to: None,
+                kept_destination_if: None,
+                ..
+            } => filter.clone(),
+            other => panic!("expected the classified reveal-until, got {other:?}"),
+        }
+    }
+
+    /// V2.1d(v) IR reach-guard (CR 701.20a): the walk reaches the reveal-until
+    /// classification and declines only because the kept destination is not
+    /// the battlefield. The same IR with that destination set to the
+    /// battlefield is admitted, so nothing else in the chain stops the walk.
+    #[test]
+    fn population_walk_declines_only_for_the_kept_destination() {
+        // A kept-destination patch ("Put that card into your hand").
+        let patched = walk_input(
+            "Reveal cards from the top of your library until you reveal two creature cards. \
+             Put that card into your hand, then shuffle. For each of those creatures, put a \
+             +1/+1 counter on that creature.",
+        );
+        assert_eq!(patched.len(), 3, "{patched:?}");
+        let filter = reveal_until_filter(&patched[0]);
+        assert!(matches!(
+            patched[1].disposition,
+            ClauseDisposition::Continue {
+                continuation: Some(ContinuationAst::RevealUntilKept {
+                    destination: Zone::Hand,
+                    any_number: false,
+                    optional_decline: None,
+                    ..
+                })
+            }
+        ));
+        assert!(matches!(patched[2].parsed.effect, Effect::Shuffle { .. }));
+        assert_eq!(admitted_population_producer(&patched), None);
+        let mut to_battlefield = patched.clone();
+        if let ClauseDisposition::Continue {
+            continuation: Some(ContinuationAst::RevealUntilKept { destination, .. }),
+        } = &mut to_battlefield[1].disposition
+        {
+            *destination = Zone::Battlefield;
+        }
+        assert_eq!(
+            admitted_population_producer(&to_battlefield),
+            Some(AdmittedPopulationProducer::RevealUntilKeptOnBattlefield {
+                filter: filter.clone()
+            })
+        );
+
+        // The reveal's own destination, with only the rest pile patched.
+        let own = walk_input(
+            "Reveal cards from the top of your library until you reveal two creature cards. \
+             Put those cards into your hand and the rest on the bottom of your library in a \
+             random order. For each of those creatures, put a +1/+1 counter on that creature.",
+        );
+        assert_eq!(own.len(), 2, "{own:?}");
+        assert_eq!(reveal_until_filter(&own[0]), filter);
+        assert!(matches!(
+            own[1].disposition,
+            ClauseDisposition::Continue {
+                continuation: Some(ContinuationAst::PutRest { .. })
+            }
+        ));
+        assert_eq!(admitted_population_producer(&own), None);
+        let mut to_battlefield = own.clone();
+        if let Effect::RevealUntil {
+            kept_destination, ..
+        } = &mut to_battlefield[0].parsed.effect
+        {
+            *kept_destination = Zone::Battlefield;
+        }
+        assert_eq!(
+            admitted_population_producer(&to_battlefield),
+            Some(AdmittedPopulationProducer::RevealUntilKeptOnBattlefield { filter })
+        );
     }
 }

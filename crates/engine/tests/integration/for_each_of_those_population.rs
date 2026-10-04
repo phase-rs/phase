@@ -27,7 +27,7 @@ use engine::types::ability::{
 };
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
-use engine::types::identifiers::ObjectId;
+use engine::types::identifiers::{ObjectId, TrackedSetId};
 use engine::types::keywords::Keyword;
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
@@ -40,6 +40,19 @@ pub(crate) const REVEAL_MUSTER: &str = "Reveal cards from the top of your librar
      that creature.";
 
 const REVEAL_MUSTER_NAME: &str = "Reveal Muster";
+
+/// V2.1d: the instrument with its kept cards sent to hand by a kept-destination
+/// patch ("Put that card into your hand").
+const REVEAL_MUSTER_HAND_PATCH: &str = "Reveal cards from the top of your library until you \
+     reveal two creature cards. Put that card into your hand, then shuffle. For each of those \
+     creatures, put a +1/+1 counter on that creature.";
+
+/// V2.1d: the instrument with no kept-destination patch — the reveal's own
+/// destination (hand) stands, and only the rest pile is patched.
+const REVEAL_MUSTER_HAND_OWN: &str = "Reveal cards from the top of your library until you \
+     reveal two creature cards. Put those cards into your hand and the rest on the bottom of \
+     your library in a random order. For each of those creatures, put a +1/+1 counter on that \
+     creature.";
 
 /// One staged library card for the instrument's board.
 #[derive(Clone, Copy)]
@@ -333,16 +346,28 @@ fn population_walk_stops_at_unimplemented_and_other_producers() {
 
 /// V2.1d (C2.2): the producer must put each of its matches onto the
 /// battlefield — a hand destination or a chosen subset is not admitted.
+/// The two hand variants are the shapes the walk classifies as a reveal-until
+/// (the kept-destination patch, and the reveal's own destination under a
+/// rest-pile patch); `population_walk_declines_only_for_the_kept_destination`
+/// (oracle_effect/mod.rs) is their IR reach-guard.
 #[test]
 fn reveal_until_shapes_other_than_kept_onto_battlefield_are_declined() {
-    let hand = REVEAL_MUSTER
-        .replace("onto the battlefield", "into your hand")
-        .replace(" They gain haste until end of turn.", "");
-    assert!(
-        matches!(&*lowered(&hand)[0].effect, Effect::RevealUntil { .. }),
-        "reach-guard: the reveal-until producer is present"
-    );
-    assert_for_each_stays_unparsed(&hand);
+    for hand in [
+        REVEAL_MUSTER_HAND_PATCH.to_string(),
+        REVEAL_MUSTER_HAND_OWN.to_string(),
+    ] {
+        assert!(
+            matches!(
+                &*lowered(&hand)[0].effect,
+                Effect::RevealUntil {
+                    kept_destination: Zone::Hand,
+                    ..
+                }
+            ),
+            "reach-guard: the reveal-until producer keeps its matches in hand: {hand}"
+        );
+        assert_for_each_stays_unparsed(&hand);
+    }
 
     let any_number = REVEAL_MUSTER
         .replace(
@@ -622,7 +647,9 @@ fn reveal_muster_with_one_creature_iterates_once() {
 }
 
 /// V2.2c (CR 609.3): no creature found — zero iterations, and the
-/// resolution still completes.
+/// resolution still completes. A non-empty tracked set from an earlier
+/// resolution is already in the game, so the zero holds only if the reveal
+/// publishes its own fresh (empty) set rather than nothing.
 #[test]
 fn reveal_muster_with_no_creature_iterates_zero_times() {
     let library = [
@@ -631,8 +658,40 @@ fn reveal_muster_with_no_creature_iterates_zero_times() {
         MusterCard::Sorcery("Miss Three"),
     ];
     let mut board = muster_board(REVEAL_MUSTER, &library);
+    // An earlier resolution's published set, allocated the way
+    // `publish_tracked_set` allocates one: the next id, then the counter bump.
+    let earlier = {
+        let state = board.runner.state_mut();
+        assert_eq!(state.chain_tracked_set_id, None, "no resolution in flight");
+        let id = TrackedSetId(state.next_tracked_set_id);
+        state.next_tracked_set_id += 1;
+        state
+            .tracked_object_sets
+            .insert(id, vec![board.bystander_p0]);
+        id
+    };
     board.runner.cast(board.spell).resolve();
     let runner = &board.runner;
+    // Reach-guard: the earlier non-empty set is still in the game, and the
+    // reveal published a newer, empty one — the set the iteration counts.
+    assert_eq!(
+        runner.state().tracked_object_sets.get(&earlier),
+        Some(&vec![board.bystander_p0]),
+        "the earlier non-empty set persists"
+    );
+    let (latest, members) = runner
+        .state()
+        .tracked_object_sets
+        .iter()
+        .max_by_key(|(id, _)| id.0)
+        .expect("a tracked set exists");
+    assert!(latest.0 > earlier.0, "the reveal published a fresh set");
+    assert!(members.is_empty(), "the fresh set has no members");
+    assert_eq!(
+        p1p1(runner, board.bystander_p0),
+        0,
+        "the earlier set's member is not iterated"
+    );
     for name in ["Miss One", "Miss Two", "Miss Three"] {
         assert!(
             in_p0_library(runner, board.card(name)),

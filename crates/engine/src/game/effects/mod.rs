@@ -4337,9 +4337,9 @@ pub(crate) fn apply_parent_chain_context(
         child.ability_index = parent.ability_index;
     }
     // CR 608.2c + CR 109.4: Carry the resolution-scoped chosen-players list
-    // down the chain so `ControllerRef::ChosenPlayer { index }` and later
-    // `Choose(Player)` instructions resolve against players chosen by earlier
-    // `Choose(Player)` instructions in the same resolution. Only propagate
+    // down the chain so `ControllerRef::ChosenPlayer { index }` resolves against
+    // players chosen by earlier `Choose(Player)` instructions in the same resolution
+    // (distinctness reads `SpellContext::prior_player_choices` instead). Only propagate
     // when the parent has accumulated choices and the child has not already
     // received a longer list (the `NamedChoice` answer handler appends to the
     // continuation chain directly, which can run ahead of this copy).

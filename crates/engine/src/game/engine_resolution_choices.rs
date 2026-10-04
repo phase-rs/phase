@@ -7718,8 +7718,8 @@ pub(super) fn handle_resolution_choice(
             // CR 608.2c + CR 109.4: A `Choose(Player)`/`Choose(Opponent)`
             // answer binds a resolution-scoped chosen player. Append it to the
             // pending continuation chain's `chosen_players` so the dependent
-            // effect (`ControllerRef::ChosenPlayer { index }`) and any later
-            // `Choose(Player)` in the same resolution see this choice. The
+            // effect (`ControllerRef::ChosenPlayer { index }`) sees this choice (a later
+            // `Choose(Player)` reads the reference set recorded below, not this list). The
             // continuation chain carries the list because it is a
             // `ResolvedAbility` — unlike `last_named_choice`, which is a
             // single GameState slot cleared after every drain.

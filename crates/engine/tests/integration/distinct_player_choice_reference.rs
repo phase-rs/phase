@@ -392,6 +392,7 @@ fn hand_size(runner: &GameRunner, player: PlayerId) -> usize {
 /// V2.5b (integration): the random answer site feeds the reference set —
 /// the following interactive `DistinctFromPriorChoices` prompt excludes the
 /// game-selected player, and "the second player" draws.
+/// Base-green (PHASE_BASE read the anaphor binding, which also held the random pick); it discriminates the reference-set record at the candidate (mutation-checked), not a revert to base.
 #[test]
 fn random_choice_is_excluded_from_a_following_distinct_choice() {
     let mut scenario = GameScenario::new_n_player(3, 701);
