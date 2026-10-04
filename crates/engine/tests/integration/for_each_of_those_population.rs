@@ -31,6 +31,7 @@ use engine::types::identifiers::{ObjectId, TrackedSetId};
 use engine::types::keywords::Keyword;
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
 /// The synthetic A2.2 instrument (see the module doc).
@@ -63,12 +64,23 @@ pub(crate) enum MusterCard {
     Land(&'static str),
     /// A 2/2 creature card (a reveal hit).
     Creature(&'static str),
+    /// A creature card carrying its verbatim Oracle text (and the MTGJSON
+    /// keyword names its keyword lines need), e.g. True-Name Nemesis's
+    /// "As this creature enters, choose a player." replacement.
+    OracleCreature {
+        name: &'static str,
+        oracle: &'static str,
+        keywords: &'static [&'static str],
+        power: i32,
+        toughness: i32,
+    },
 }
 
 impl MusterCard {
     fn name(self) -> &'static str {
         match self {
             MusterCard::Sorcery(name) | MusterCard::Land(name) | MusterCard::Creature(name) => name,
+            MusterCard::OracleCreature { name, .. } => name,
         }
     }
 }
@@ -112,40 +124,111 @@ pub(crate) fn muster_board(oracle: &str, library_top_first: &[MusterCard]) -> Mu
         .add_spell_to_hand_from_oracle(P0, REVEAL_MUSTER_NAME, false, oracle)
         .with_mana_cost(ManaCost::generic(0))
         .id();
-    let mut library = Vec::new();
-    for card in library_top_first.iter().rev() {
-        let id = match card {
-            MusterCard::Sorcery(name) => scenario.add_spell_to_library_top(P0, name, false).id(),
-            MusterCard::Land(name) => scenario.add_land_to_library_top(P0, name).id(),
-            MusterCard::Creature(name) => scenario.add_card_to_library_top(P0, name),
-        };
-        library.push((card.name(), id));
-    }
-    library.reverse();
+    let library = stage_muster_library(&mut scenario, P0, library_top_first);
     let bystander_p0 = scenario.add_creature(P0, "Bystander Zero", 1, 1).id();
     let bystander_p1 = scenario.add_creature(P1, "Bystander One", 1, 1).id();
     let mut runner = scenario.build();
-    for (card, (_, id)) in library_top_first.iter().zip(library.iter()) {
-        if let MusterCard::Creature(_) = card {
-            let obj = runner
-                .state_mut()
-                .objects
-                .get_mut(id)
-                .expect("staged creature card");
-            obj.card_types.core_types.push(CoreType::Creature);
-            obj.base_card_types = obj.card_types.clone();
-            obj.power = Some(2);
-            obj.toughness = Some(2);
-            obj.base_power = Some(2);
-            obj.base_toughness = Some(2);
-        }
-    }
+    finish_muster_library(&mut runner, P0, library_top_first, &library);
     MusterBoard {
         runner,
         spell,
         library,
         bystander_p0,
         bystander_p1,
+    }
+}
+
+/// Stages `cards` (top first) into `owner`'s library and returns each card's
+/// name and id in the same order. An `OracleCreature` is built in the
+/// graveyard (the only Oracle-text creature builder) and relocated into its
+/// library position by [`finish_muster_library`].
+pub(crate) fn stage_muster_library(
+    scenario: &mut GameScenario,
+    owner: PlayerId,
+    cards: &[MusterCard],
+) -> Vec<(&'static str, ObjectId)> {
+    let mut library = Vec::new();
+    for card in cards.iter().rev() {
+        let id = match *card {
+            MusterCard::Sorcery(name) => scenario.add_spell_to_library_top(owner, name, false).id(),
+            MusterCard::Land(name) => scenario.add_land_to_library_top(owner, name).id(),
+            MusterCard::Creature(name) => scenario.add_card_to_library_top(owner, name),
+            MusterCard::OracleCreature {
+                name,
+                oracle,
+                keywords,
+                power,
+                toughness,
+            } => scenario
+                .add_creature_to_graveyard(owner, name, power, toughness)
+                .from_oracle_text_with_keywords(keywords, oracle)
+                .id(),
+        };
+        library.push((card.name(), id));
+    }
+    library.reverse();
+    library
+}
+
+/// Completes [`stage_muster_library`] after the build: a `Creature` card
+/// becomes a 2/2 creature card, and an `OracleCreature` moves from the
+/// graveyard to its staged library index. Reach-guard: every staged card is
+/// in `owner`'s library at its staged index.
+pub(crate) fn finish_muster_library(
+    runner: &mut GameRunner,
+    owner: PlayerId,
+    cards: &[MusterCard],
+    library: &[(&'static str, ObjectId)],
+) {
+    for (index, (card, (_, id))) in cards.iter().zip(library.iter()).enumerate() {
+        match card {
+            MusterCard::Creature(_) => {
+                let obj = runner
+                    .state_mut()
+                    .objects
+                    .get_mut(id)
+                    .expect("staged creature card");
+                obj.card_types.core_types.push(CoreType::Creature);
+                obj.base_card_types = obj.card_types.clone();
+                obj.power = Some(2);
+                obj.toughness = Some(2);
+                obj.base_power = Some(2);
+                obj.base_toughness = Some(2);
+            }
+            MusterCard::OracleCreature { .. } => {
+                // Insertion in increasing staged index lands every relocated
+                // card at its staged position among the already-placed cards.
+                let state = runner.state_mut();
+                let player = state
+                    .players
+                    .iter_mut()
+                    .find(|p| p.id == owner)
+                    .expect("library owner exists");
+                player.graveyard.retain(|card| card != id);
+                player.library.insert(index, *id);
+                state
+                    .objects
+                    .get_mut(id)
+                    .expect("staged Oracle creature")
+                    .zone = Zone::Library;
+            }
+            MusterCard::Sorcery(_) | MusterCard::Land(_) => {}
+        }
+    }
+    let staged = &runner
+        .state()
+        .players
+        .iter()
+        .find(|p| p.id == owner)
+        .expect("library owner exists")
+        .library;
+    for (index, (name, id)) in library.iter().enumerate() {
+        assert_eq!(
+            staged.get(index),
+            Some(id),
+            "reach-guard: {name} is in the library at its staged index"
+        );
+        assert_eq!(runner.state().objects[id].zone, Zone::Library, "{name}");
     }
 }
 

@@ -184,10 +184,7 @@ pub(crate) fn resolve_random_in_chain(
     // `chosen_players` so the dependent sub (`ControllerRef::ChosenPlayer`) and
     // any later `Choose(Player)` in this resolution see it; the chain propagates
     // it to the sub via `apply_parent_chain_context`.
-    if matches!(
-        choice_type,
-        ChoiceType::Player { .. } | ChoiceType::Opponent { .. }
-    ) {
+    if choice_type.chooses_player() {
         if let Ok(pid) = chosen.parse::<u8>() {
             let mut updated = ability.chosen_players.clone();
             updated.push(PlayerId(pid));
@@ -195,7 +192,8 @@ pub(crate) fn resolve_random_in_chain(
             // CR 608.2c + CR 608.2d: the game-selected answer is this
             // ability's own choice (the random site mutates the resolving
             // ability itself), so it joins the reference set a later
-            // "different"/ordinal choice excludes.
+            // "different"/ordinal choice excludes and, when it settles a
+            // bound per-object member, the ability's assignment.
             ability.record_prior_player_choice(PlayerId(pid));
         }
     }
@@ -397,6 +395,52 @@ pub(crate) fn named_choice_answer_owned_by(
     holder: &ResolvedAbility,
 ) -> bool {
     source.is_none_or(|source| source.prompt.identity.reference.object_id == holder.source_id)
+}
+
+/// CR 608.2c + CR 608.2d: the frame holding a resolving ability's pending
+/// player answer — the active frame, when it is that ability's parked
+/// continuation or its parked repeat template. The repeat driver binds a
+/// per-object member here and the answer site records here, through this one
+/// selection, so a member is bound on exactly the frame its answer reaches.
+pub(crate) enum PlayerChoiceHolder<'a> {
+    Continuation(&'a mut ResolvedAbility),
+    RepeatTemplate(&'a mut ResolvedAbility),
+}
+
+impl PlayerChoiceHolder<'_> {
+    /// The held ability, whichever frame kind holds it.
+    pub(crate) fn ability_mut(&mut self) -> &mut ResolvedAbility {
+        match self {
+            PlayerChoiceHolder::Continuation(ability)
+            | PlayerChoiceHolder::RepeatTemplate(ability) => ability,
+        }
+    }
+}
+
+/// Selects the [`PlayerChoiceHolder`] whose ability `owns` accepts. Both frame
+/// accessors read the stack top only, so at most one arm can match and a
+/// frame below the top is never selected.
+pub(crate) fn player_choice_holder_mut(
+    state: &mut GameState,
+    owns: impl Fn(&ResolvedAbility) -> bool,
+) -> Option<PlayerChoiceHolder<'_>> {
+    if state
+        .active_ability_continuation_frame()
+        .is_some_and(|frame| owns(&frame.pending.chain))
+    {
+        return state
+            .active_ability_continuation_frame_mut()
+            .map(|frame| PlayerChoiceHolder::Continuation(frame.pending.chain.as_mut()));
+    }
+    if state
+        .active_repeat_for()
+        .is_some_and(|repeat| owns(&repeat.ability))
+    {
+        return state
+            .active_repeat_for_mut()
+            .map(|repeat| PlayerChoiceHolder::RepeatTemplate(repeat.ability.as_mut()));
+    }
+    None
 }
 
 pub(crate) fn named_choice_authority(
@@ -2012,6 +2056,186 @@ mod tests {
                 .context
                 .prior_player_choices,
             vec![pick]
+        );
+    }
+
+    /// V3a.8 (unit; CR 608.2c + CR 608.2d): the random answer site records
+    /// through the one recording authority — with a per-object member bound,
+    /// the game-selected player is recorded for that member on the ability and
+    /// its sub, and the binding is consumed; without one, only the reference
+    /// set grows. (A repeated random choice resolves once, before the repeat
+    /// loop, so this site is never reached once per member at runtime — a
+    /// disclosed residual.)
+    #[test]
+    fn random_player_choice_records_the_bound_member_assignment() {
+        use crate::types::ability::ObjectPlayerAssignment;
+        let random_choose = || {
+            ResolvedAbility::new(
+                Effect::Choose {
+                    choice_type: ChoiceType::opponent_distinct_from_prior(),
+                    persist: false,
+                    selection: TargetSelectionMode::Random,
+                },
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            )
+            .sub_ability(ResolvedAbility::new(
+                Effect::Draw {
+                    count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                    target: crate::types::ability::TargetFilter::Controller,
+                },
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            ))
+        };
+        let member = ObjectId(9);
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 4, 42);
+        let mut ability = random_choose();
+        ability.bind_pending_choice_member(member);
+        let mut events = Vec::new();
+        assert!(resolve_random_in_chain(
+            &mut state,
+            &mut ability,
+            &mut events
+        ));
+        let pick = *ability.chosen_players.first().expect("the pick is bound");
+        assert!(
+            [PlayerId(1), PlayerId(2), PlayerId(3)].contains(&pick),
+            "the pick is a legal option"
+        );
+        let sub = ability.sub_ability.as_ref().expect("sub");
+        for context in [&ability.context, &sub.context] {
+            assert_eq!(
+                context.object_player_assignment,
+                [ObjectPlayerAssignment {
+                    object: member,
+                    player: pick
+                }]
+            );
+            assert_eq!(
+                context.pending_choice_member, None,
+                "the binding is consumed"
+            );
+            assert_eq!(context.prior_player_choices, [pick]);
+        }
+
+        // Sibling: no member bound — only the reference set grows.
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 4, 42);
+        let mut unbound = random_choose();
+        assert!(resolve_random_in_chain(
+            &mut state,
+            &mut unbound,
+            &mut events
+        ));
+        let pick = *unbound.chosen_players.first().expect("the pick is bound");
+        assert!(unbound.context.object_player_assignment.is_empty());
+        assert_eq!(unbound.context.prior_player_choices, [pick]);
+    }
+
+    /// V3a.9c (N1): the holder selection the repeat driver binds through and
+    /// the answer site records through reads only the stack top, and only an
+    /// owned frame — an owned continuation on top, an owned repeat template
+    /// on top, never a frame below a non-owned top.
+    #[test]
+    fn player_choice_holder_is_the_owned_stack_top_only() {
+        use crate::types::game_state::{PendingContinuation, PendingRepeatIteration};
+        let ability = |source: u64, index: usize| {
+            let mut ability = ResolvedAbility::new(
+                Effect::Choose {
+                    choice_type: ChoiceType::opponent(),
+                    persist: false,
+                    selection: TargetSelectionMode::Chosen,
+                },
+                vec![],
+                ObjectId(source),
+                PlayerId(0),
+            );
+            ability.ability_index = Some(index);
+            ability
+        };
+        let owner = ability(100, 0);
+        let owns = |holder: &ResolvedAbility| holder.shares_resolution_owner(&owner);
+        let repeat = |template: ResolvedAbility| PendingRepeatIteration {
+            ability: Box::new(template),
+            tracked_members: vec![],
+            iterated_counter_kinds: vec![],
+            next_iteration: 1,
+            total_iterations: 2,
+        };
+        let held = |holder: Option<PlayerChoiceHolder<'_>>| match holder {
+            Some(PlayerChoiceHolder::Continuation(chain)) => {
+                Some(("continuation", chain.source_id, chain.ability_index))
+            }
+            Some(PlayerChoiceHolder::RepeatTemplate(template)) => {
+                Some(("repeat", template.source_id, template.ability_index))
+            }
+            None => None,
+        };
+
+        let mut state = GameState::new_two_player(42);
+        assert!(held(player_choice_holder_mut(&mut state, owns)).is_none());
+
+        // (a) An owned continuation on top of an owned repeat frame.
+        state.push_repeat_for(repeat(ability(100, 0)));
+        let pending = PendingContinuation::new(Box::new(ability(100, 0)), &state);
+        state.park_ability_continuation(pending);
+        assert_eq!(
+            held(player_choice_holder_mut(&mut state, owns)),
+            Some(("continuation", ObjectId(100), Some(0)))
+        );
+        player_choice_holder_mut(&mut state, owns)
+            .expect("owned continuation")
+            .ability_mut()
+            .bind_pending_choice_member(ObjectId(7));
+        assert_eq!(
+            state
+                .active_ability_continuation()
+                .expect("continuation")
+                .chain
+                .context
+                .pending_choice_member,
+            Some(ObjectId(7)),
+            "binding through the holder reaches that frame"
+        );
+
+        // (b) An owned repeat frame on top of an owned continuation.
+        let mut state = GameState::new_two_player(42);
+        let pending = PendingContinuation::new(Box::new(ability(100, 0)), &state);
+        state.park_ability_continuation(pending);
+        state.push_repeat_for(repeat(ability(100, 0)));
+        assert_eq!(
+            held(player_choice_holder_mut(&mut state, owns)),
+            Some(("repeat", ObjectId(100), Some(0)))
+        );
+        player_choice_holder_mut(&mut state, owns)
+            .expect("owned repeat template")
+            .ability_mut()
+            .bind_pending_choice_member(ObjectId(8));
+        assert_eq!(
+            state
+                .active_repeat_for()
+                .expect("repeat")
+                .ability
+                .context
+                .pending_choice_member,
+            Some(ObjectId(8))
+        );
+
+        // (c) A non-owned top frame above an owned frame selects nothing.
+        let mut state = GameState::new_two_player(42);
+        state.push_repeat_for(repeat(ability(100, 0)));
+        let foreign = PendingContinuation::new(Box::new(ability(200, 0)), &state);
+        state.park_ability_continuation(foreign);
+        assert!(held(player_choice_holder_mut(&mut state, owns)).is_none());
+        let mut state = GameState::new_two_player(42);
+        let pending = PendingContinuation::new(Box::new(ability(100, 0)), &state);
+        state.park_ability_continuation(pending);
+        state.push_repeat_for(repeat(ability(100, 1)));
+        assert!(
+            held(player_choice_holder_mut(&mut state, owns)).is_none(),
+            "a different ability of the same source is not the owner"
         );
     }
 

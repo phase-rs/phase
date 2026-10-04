@@ -19,9 +19,10 @@ use crate::types::ability::{
     NameStickerSet, ObjectSelectionCardinality, OpponentMayScope, PlayerFilter, PlayerRelation,
     PlayerScope, PossessionAxis, PtValue, QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole,
     RepeatContinuation, ResolvedAbility, RevealUntilDisposition, SacrificeCost,
-    SacrificeRequirement, SharedQuality, SharedQualityRelation, SiblingCondition, StaticDefinition,
-    SubAbilityLink, TapStateChange, TargetChoiceTiming, TargetDamageSourceBinding, TargetFilter,
-    TargetRef, ThisWayCause, TypedFilter, ZoneChoiceCandidateSource, ZoneChoiceChooser,
+    SacrificeRequirement, SharedQuality, SharedQualityRelation, SiblingCondition, SpellContext,
+    StaticDefinition, SubAbilityLink, TapStateChange, TargetChoiceTiming,
+    TargetDamageSourceBinding, TargetFilter, TargetRef, ThisWayCause, TypedFilter,
+    ZoneChoiceCandidateSource, ZoneChoiceChooser,
 };
 #[cfg(test)]
 use crate::types::ability::{AttackSubject, CombatHistoryScope};
@@ -1279,7 +1280,7 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
             } else {
                 let _ = resolve_ability_chain(state, &chain, events, 1);
             }
-            hand_back_prior_player_choices(state, &chain);
+            hand_back_player_choice_records(state, &chain);
         }
         // The exile-choice tracking belongs only to a tail that consumes the
         // linked-exile channel — the same predicate that installed it.
@@ -1377,28 +1378,25 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
     }
 }
 
-/// CR 608.2c + CR 608.2d: a drained continuation's own player choices belong
-/// to the same resolving ability's next active holder — its parked repeat
-/// template or its parked continuation — so a later "different"/ordinal
-/// choice of that ability (a following repeat iteration included) excludes
-/// them. Active frame only: repeat consumers never search below a nested
-/// continuation. A re-paused chain's new top is its own child, which already
-/// inherited the set, so the union is idempotent there.
-fn hand_back_prior_player_choices(state: &mut GameState, chain: &ResolvedAbility) {
-    let choices = &chain.context.prior_player_choices;
-    if choices.is_empty() {
+/// CR 608.2c + CR 608.2d: a drained continuation's own player choice records
+/// (its reference set and its per-object assignment) belong to the same
+/// resolving ability's next active holder — its parked repeat template or its
+/// parked continuation — so a later "different"/ordinal choice of that ability
+/// (a following repeat iteration included) excludes them and a later reader
+/// of the assignment finds them. Active frame only: repeat consumers never
+/// search below a nested continuation. A re-paused chain's new top is its own
+/// child, which already inherited the records, so the union is idempotent
+/// there.
+fn hand_back_player_choice_records(state: &mut GameState, chain: &ResolvedAbility) {
+    if !chain.context.has_player_choice_records() {
         return;
     }
-    if let Some(repeat) = state
-        .active_repeat_for_mut()
-        .filter(|repeat| repeat.ability.shares_resolution_owner(chain))
+    if let Some(mut holder) =
+        choose::player_choice_holder_mut(state, |holder| holder.shares_resolution_owner(chain))
     {
-        repeat.ability.absorb_prior_player_choices(choices);
-    } else if let Some(frame) = state
-        .active_ability_continuation_frame_mut()
-        .filter(|frame| frame.pending.chain.shares_resolution_owner(chain))
-    {
-        frame.pending.chain.absorb_prior_player_choices(choices);
+        holder
+            .ability_mut()
+            .absorb_player_choice_records(&chain.context);
     }
 }
 
@@ -2516,6 +2514,13 @@ fn drain_active_repeat_for(state: &mut GameState, events: &mut Vec<GameEvent>) {
             next_iteration,
             total_iterations,
         } = pending;
+        // CR 608.2c + CR 608.2d (E1′): a per-object player choice — members
+        // snapshotted and the repeated process the choice alone. The
+        // template's `repeat_for` is cleared, so the member snapshot (which
+        // other member-driven loops also carry) together with the
+        // `Choose(Player | Opponent)` head selects the shape.
+        let per_object = !tracked_members.is_empty()
+            && repeats_per_object_player_choice(&ability.effect, ability.sub_ability.as_deref());
         let initial_waiting_for = state.waiting_for.clone();
         let initial_continuation_present = state.active_ability_continuation().is_some();
         let mut iteration = next_iteration;
@@ -2529,7 +2534,13 @@ fn drain_active_repeat_for(state: &mut GameState, events: &mut Vec<GameEvent>) {
             let kind = iterated_counter_kinds.get(iteration).cloned();
             let iter_effective: &ResolvedAbility = if member.is_some() || kind.is_some() {
                 iter_ability = (*ability).clone();
-                if let Some(member) = member {
+                if per_object {
+                    // CR 608.2c: each repetition resolves the choice alone —
+                    // the following instruction belongs to the end of the
+                    // repetition, and the member keys the answer, not a
+                    // parent target.
+                    iter_ability.sub_ability = None;
+                } else if let Some(member) = member {
                     rebind_member_driven_parent_target(&mut iter_ability, member);
                 }
                 if let Some(kind) = kind {
@@ -2583,10 +2594,46 @@ fn drain_active_repeat_for(state: &mut GameState, events: &mut Vec<GameEvent>) {
                         stack_depth_before_iteration,
                     );
                 }
+                if per_object {
+                    // CR 608.2c: the last repetition's pause parks the
+                    // following instruction to run once, after its answer.
+                    if next == total_iterations {
+                        if let Some(sibling) = ability
+                            .sub_ability
+                            .as_deref()
+                            .filter(|sub| sub.sub_link == SubAbilityLink::SequentialSibling)
+                        {
+                            park_following_instruction_after_repetition(
+                                state,
+                                iter_effective,
+                                sibling,
+                            );
+                        }
+                    }
+                    if let Some(member) = member {
+                        bind_per_object_choice_member(state, &ability, member);
+                    }
+                    return;
+                }
                 paused = true;
                 break;
             }
             iteration += 1;
+        }
+        if per_object {
+            // CR 608.2c + CR 609.3: every remaining repetition resolved
+            // without a prompt (an impossible choice does nothing), so the
+            // following instruction runs once, now.
+            if let Some(sibling) = ability
+                .sub_ability
+                .as_deref()
+                .filter(|sub| sub.sub_link == SubAbilityLink::SequentialSibling)
+            {
+                let mut following = sibling.clone();
+                apply_parent_chain_context(&mut following, &ability, None, state);
+                let _ = resolve_ability_chain(state, &following, events, 1);
+            }
+            return;
         }
         if paused {
             // Loop paused mid-iteration; the next call to
@@ -4254,8 +4301,13 @@ pub(crate) fn apply_parent_chain_context(
     // CR 608.2c + CR 608.2d: the NamedChoice answer handler records this
     // ability's own player choices directly onto the parked continuation,
     // which can run ahead of this hand-off (as with `chosen_players` below),
-    // so the child's own reference set is unioned back, never erased.
-    let child_prior_player_choices = std::mem::take(&mut child.context.prior_player_choices);
+    // so the child's own player choice records — its reference set and its
+    // per-object assignment — are unioned back, never erased.
+    let child_player_choice_records = SpellContext {
+        prior_player_choices: std::mem::take(&mut child.context.prior_player_choices),
+        object_player_assignment: std::mem::take(&mut child.context.object_player_assignment),
+        ..SpellContext::default()
+    };
     child.context = parent.context.clone();
     child.context.face_down_in_exile |= child_face_down_in_exile;
     for event in child_duration_events {
@@ -4263,11 +4315,9 @@ pub(crate) fn apply_parent_chain_context(
             child.context.duration_events.push(event);
         }
     }
-    for player in child_prior_player_choices {
-        if !child.context.prior_player_choices.contains(&player) {
-            child.context.prior_player_choices.push(player);
-        }
-    }
+    child
+        .context
+        .union_player_choice_records(&child_player_choice_records);
     // CR 120.1 + CR 608.2b: The damage-subject binding names the object THIS
     // hand-off supplies (or fails to supply) to the immediate child's damage
     // clause. It is one-hop by construction — a grandchild's subject slot is a
@@ -11178,6 +11228,50 @@ fn rebind_member_driven_parent_target(ability: &mut ResolvedAbility, member: Obj
     }
 }
 
+/// CR 608.2c + CR 608.2d: a per-object player choice — a choice of a player
+/// repeated once per member of a published population whose repeated
+/// process is the choice alone (its sub, if any, is the following
+/// instruction). Each answer belongs to that repetition's member.
+fn repeats_per_object_player_choice(effect: &Effect, sub: Option<&ResolvedAbility>) -> bool {
+    matches!(effect, Effect::Choose { choice_type, .. } if choice_type.chooses_player())
+        && sub.is_none_or(|sub| sub.sub_link == SubAbilityLink::SequentialSibling)
+}
+
+/// CR 608.2c + CR 608.2d: bind the member of a per-object repetition whose
+/// player prompt just paused onto the holder of that pending answer — the
+/// frame the answer site records into, selected through the same
+/// `choose::player_choice_holder_mut`. No owned holder (the final repetition
+/// with no following instruction) binds nothing.
+fn bind_per_object_choice_member(
+    state: &mut GameState,
+    iteration: &ResolvedAbility,
+    member: ObjectId,
+) {
+    if let Some(mut holder) =
+        choose::player_choice_holder_mut(state, |holder| holder.shares_resolution_owner(iteration))
+    {
+        holder.ability_mut().bind_pending_choice_member(member);
+    }
+}
+
+/// CR 608.2c: the instruction following a per-object repetition runs once,
+/// after the repetition's last choice, never inside a repetition. When that
+/// last choice pauses, park the following instruction (with the iteration's
+/// chain context, its player choice records included) to resume after the
+/// answer.
+fn park_following_instruction_after_repetition(
+    state: &mut GameState,
+    iteration: &ResolvedAbility,
+    sibling: &ResolvedAbility,
+) {
+    let mut following = sibling.clone();
+    if should_propagate_parent_targets(iteration, &following) {
+        following.targets = iteration.targets.clone();
+    }
+    apply_parent_chain_context(&mut following, iteration, None, state);
+    prepend_to_pending_continuation(state, following);
+}
+
 /// CR 122.1 + CR 608.2c: Rebind a counter-kind-driven `ChooseOneOf` to the
 /// current iteration's counter kind. For each branch tagged
 /// `iteration_kind_binding == Some(RebindToIteratedKind)`, rewrites that
@@ -14589,18 +14683,19 @@ pub fn resolve_ability_chain(
     // before it begins a new resolution; nested producers replace the context
     // after this node's effect completes.
     // CR 608.2c: a new top-level resolution starts with no prior player
-    // choices of its own. The reference set is cleared over this ability's
-    // OWN tree (every node, on an owned clone) — never another chain's — and
-    // over every node, not the root alone, because the hand-off in
-    // `apply_parent_chain_context` unions a child's own set back in.
+    // choices, no per-object assignment and no pending member of its own.
+    // The records are cleared over this ability's OWN tree (every node, on an
+    // owned clone) — never another chain's — and over every node, not the
+    // root alone, because the hand-off in `apply_parent_chain_context` unions
+    // a child's own records back in.
     let root_context_owned;
     let ability = if depth == 0
         && (ability.context.forwarded_result_context.is_some()
-            || ability.has_prior_player_choices_recursive())
+            || ability.has_player_choice_records_recursive())
     {
         let mut owned = ability.clone();
         owned.context.forwarded_result_context = None;
-        owned.clear_prior_player_choices_recursive();
+        owned.clear_player_choice_records_recursive();
         root_context_owned = owned;
         &root_context_owned
     } else {
@@ -16671,11 +16766,24 @@ fn resolve_chain_body(
             // including the empty case (0 members ⇒ 0 iterations). The
             // `TrackedSetSize` path keeps the existing quantity-driven count.
             let mut member_driven = false;
+            // CR 608.2c + CR 608.2d (E1′): a per-object player choice over a
+            // published population ("For each of those permanents, choose a
+            // different opponent") snapshots the same members, so each
+            // repetition's answer is recorded for its own member.
+            let per_object = matches!(
+                ability.repeat_for,
+                Some(QuantityExpr::Ref {
+                    qty: QuantityRef::TrackedSetSize,
+                })
+            ) && repeats_per_object_player_choice(
+                &effective.effect,
+                effective.sub_ability.as_deref(),
+            );
             let iter_tracked_members: Vec<crate::types::identifiers::ObjectId> =
                 match &ability.repeat_for {
                     Some(QuantityExpr::Ref {
                         qty: QuantityRef::TrackedSetSize,
-                    }) if effect_refs_parent_target(&effective.effect) => state
+                    }) if effect_refs_parent_target(&effective.effect) || per_object => state
                         .chain_tracked_set_id
                         .and_then(|id| state.tracked_object_sets.get(&id).cloned())
                         .unwrap_or_default(),
@@ -16825,7 +16933,9 @@ fn resolve_chain_body(
                 let iter_effective: &ResolvedAbility =
                     if member.is_some() || is_replacement_added_copy || kind_driven {
                         iter_ability = effective.clone();
-                        if let Some(member) = member {
+                        // A per-object choice names no parent target: its
+                        // member keys the answer, not a target.
+                        if let Some(member) = member.filter(|_| !per_object) {
                             rebind_member_driven_parent_target(&mut iter_ability, member);
                         }
                         // CR 122.1 + CR 608.2c: rebind this iteration's dynamic
@@ -16985,6 +17095,30 @@ fn resolve_chain_body(
                             },
                             stack_depth_before_iteration,
                         );
+                    }
+                    if per_object {
+                        // CR 608.2c: the following instruction is owned by the
+                        // repetition's final iteration — parked by the resumed
+                        // loop, or here when this paused repetition is the last
+                        // — and never falls through to the generic sub tail,
+                        // which would run it inside a repetition.
+                        if next_iteration == iterations {
+                            if let Some(sibling) = iter_effective
+                                .sub_ability
+                                .as_deref()
+                                .filter(|sub| sub.sub_link == SubAbilityLink::SequentialSibling)
+                            {
+                                park_following_instruction_after_repetition(
+                                    state,
+                                    iter_effective,
+                                    sibling,
+                                );
+                            }
+                        }
+                        if let Some(member) = member {
+                            bind_per_object_choice_member(state, iter_effective, member);
+                        }
+                        return Ok(());
                     }
                     break;
                 }
@@ -32484,6 +32618,198 @@ mod tests {
             "reach-guard: the root's life gain resolved before the sub's choice"
         );
         assert_eq!(options, ["1", "2", "3"]);
+    }
+
+    /// V3a.7 (CR 608.2c): a new top-level resolution starts with no
+    /// per-object assignment and no pending member of its own. A plain
+    /// `Choose` whose dependent life gain is parked as its continuation when
+    /// the prompt pauses: the parked holder inherits nothing stale — from the
+    /// root and sub (i), from the sub alone (ii), or a lone stale binding on
+    /// the root (iii).
+    #[test]
+    fn top_level_resolution_clears_a_stale_assignment_and_binding() {
+        use crate::types::ability::ObjectPlayerAssignment;
+        use crate::types::format::FormatConfig;
+        let stale = ObjectPlayerAssignment {
+            object: ObjectId(9),
+            player: PlayerId(1),
+        };
+        let chain = || {
+            let mut gain = ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            );
+            gain.sub_link = SubAbilityLink::ContinuationStep;
+            ResolvedAbility::new(
+                Effect::Choose {
+                    choice_type: ChoiceType::opponent(),
+                    persist: false,
+                    selection: TargetSelectionMode::Chosen,
+                },
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            )
+            .sub_ability(gain)
+        };
+        let holder_context = |root: &ResolvedAbility| {
+            let mut state = GameState::new(FormatConfig::standard(), 4, 42);
+            let mut events = Vec::new();
+            resolve_ability_chain(&mut state, root, &mut events, 0).unwrap();
+            assert!(
+                matches!(state.waiting_for, WaitingFor::NamedChoice { .. }),
+                "reach-guard: the choice raised its prompt, got {:?}",
+                state.waiting_for
+            );
+            state
+                .active_ability_continuation()
+                .expect("reach-guard: the dependent life gain is parked")
+                .chain
+                .context
+                .clone()
+        };
+
+        // (i) Stale on the root and its sub.
+        let mut root = chain();
+        root.context.object_player_assignment = vec![stale];
+        root.sub_ability
+            .as_mut()
+            .expect("sub")
+            .context
+            .object_player_assignment = vec![stale];
+        assert!(holder_context(&root).object_player_assignment.is_empty());
+
+        // (ii) Stale on the sub alone: a root-only clear would let the
+        // hand-off union bring it back.
+        let mut root = chain();
+        root.sub_ability
+            .as_mut()
+            .expect("sub")
+            .context
+            .object_player_assignment = vec![stale];
+        assert!(holder_context(&root).object_player_assignment.is_empty());
+
+        // (iii) A lone stale binding on the root, no records: the wholesale
+        // hand-off would copy it onto the holder.
+        let mut root = chain();
+        root.bind_pending_choice_member(ObjectId(9));
+        assert_eq!(holder_context(&root).pending_choice_member, None);
+    }
+
+    /// V3a.9 (CR 608.2c + CR 608.2d): the drained-continuation hand-back
+    /// carries both player choice records — the reference set and the
+    /// per-object assignment — to the same ability's owned top holder (a
+    /// repeat template or a continuation), and leaves a non-owned top frame
+    /// untouched.
+    #[test]
+    fn hand_back_carries_both_player_choice_records_to_the_owned_holder() {
+        use crate::types::ability::ObjectPlayerAssignment;
+        use crate::types::game_state::PendingRepeatIteration;
+        let entry = ObjectPlayerAssignment {
+            object: ObjectId(7),
+            player: PlayerId(2),
+        };
+        let node = |source: u64| {
+            ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+                vec![],
+                ObjectId(source),
+                PlayerId(0),
+            )
+        };
+        let mut drained = node(100);
+        drained.context.prior_player_choices = vec![PlayerId(2)];
+        drained.context.object_player_assignment = vec![entry];
+        let repeat = |template: ResolvedAbility| PendingRepeatIteration {
+            ability: Box::new(template),
+            tracked_members: vec![],
+            iterated_counter_kinds: vec![],
+            next_iteration: 1,
+            total_iterations: 2,
+        };
+
+        // An owned repeat template on top.
+        let mut state = GameState::new_two_player(42);
+        state.push_repeat_for(repeat(node(100)));
+        hand_back_player_choice_records(&mut state, &drained);
+        let template = &state.active_repeat_for().expect("repeat").ability;
+        assert_eq!(template.context.prior_player_choices, [PlayerId(2)]);
+        assert_eq!(template.context.object_player_assignment, [entry]);
+
+        // An owned continuation on top.
+        let mut state = GameState::new_two_player(42);
+        let pending = PendingContinuation::new(Box::new(node(100)), &state);
+        state.park_ability_continuation(pending);
+        hand_back_player_choice_records(&mut state, &drained);
+        let chain = &state
+            .active_ability_continuation()
+            .expect("continuation")
+            .chain;
+        assert_eq!(chain.context.prior_player_choices, [PlayerId(2)]);
+        assert_eq!(chain.context.object_player_assignment, [entry]);
+
+        // A non-owned top frame is untouched.
+        let mut state = GameState::new_two_player(42);
+        state.push_repeat_for(repeat(node(200)));
+        hand_back_player_choice_records(&mut state, &drained);
+        let foreign = &state.active_repeat_for().expect("repeat").ability;
+        assert!(!foreign.context.has_player_choice_records());
+    }
+
+    /// V3a.9b (CR 608.2c + CR 608.2d): the parent→child context hand-off
+    /// replaces the child's context wholesale but unions back the child's
+    /// OWN player choice records — its per-object assignment as well as its
+    /// reference set — after the parent's.
+    #[test]
+    fn parent_to_child_hand_off_unions_back_the_childs_own_assignment() {
+        use crate::types::ability::ObjectPlayerAssignment;
+        let entry = |object: u64, player: u8| ObjectPlayerAssignment {
+            object: ObjectId(object),
+            player: PlayerId(player),
+        };
+        let node = || {
+            ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            )
+        };
+        let mut parent = node();
+        parent.context.prior_player_choices = vec![PlayerId(1)];
+        parent.context.object_player_assignment = vec![entry(5, 1)];
+        parent.context.additional_cost_paid = true;
+        let mut child = node();
+        child.context.prior_player_choices = vec![PlayerId(2)];
+        child.context.object_player_assignment = vec![entry(7, 2)];
+        assert!(!child.context.additional_cost_paid);
+
+        let mut state = GameState::new_two_player(42);
+        apply_parent_chain_context(&mut child, &parent, None, &mut state);
+
+        assert!(
+            child.context.additional_cost_paid,
+            "reach-guard: the wholesale hand-off carried the parent's context"
+        );
+        assert_eq!(
+            child.context.object_player_assignment,
+            [entry(5, 1), entry(7, 2)]
+        );
+        assert_eq!(
+            child.context.prior_player_choices,
+            [PlayerId(1), PlayerId(2)]
+        );
     }
 
     /// CR 608.2c + CR 109.5: Direct unit test of the synchronous-continuation

@@ -7715,42 +7715,13 @@ pub(super) fn handle_resolution_choice(
                 });
             }
 
-            // CR 608.2c + CR 109.4: A `Choose(Player)`/`Choose(Opponent)`
-            // answer binds a resolution-scoped chosen player. Append it to the
-            // pending continuation chain's `chosen_players` so the dependent
-            // effect (`ControllerRef::ChosenPlayer { index }`) sees this choice (a later
-            // `Choose(Player)` reads the reference set recorded below, not this list). The
-            // continuation chain carries the list because it is a
-            // `ResolvedAbility` — unlike `last_named_choice`, which is a
-            // single GameState slot cleared after every drain.
-            // CR 608.2c + CR 608.2d: the same answer joins the chain's
-            // reference set (`SpellContext::prior_player_choices`), which a
-            // later "different"/ordinal choice of this ability excludes.
-            // CR 614.12a + CR 607.2d: only an answer to the holder's OWN
-            // instruction does either — an entering permanent's "As ~ enters,
-            // choose a player" answered mid-resolution is that object's linked
-            // choice and must not shift the holder's `ChosenPlayer` index.
-            if matches!(
-                choice_type,
-                ChoiceType::Player { .. } | ChoiceType::Opponent { .. }
-            ) {
+            if choice_type.chooses_player() {
                 if let Ok(pid) = choice.parse::<u8>() {
-                    if let Some(frame) =
-                        state
-                            .active_ability_continuation_frame_mut()
-                            .filter(|frame| {
-                                effects::choose::named_choice_answer_owned_by(
-                                    source.as_ref(),
-                                    &frame.pending.chain,
-                                )
-                            })
-                    {
-                        let pid = crate::types::player::PlayerId(pid);
-                        let mut chosen = frame.pending.chain.chosen_players.clone();
-                        chosen.push(pid);
-                        frame.pending.chain.set_chosen_players_recursive(&chosen);
-                        frame.pending.chain.record_prior_player_choice(pid);
-                    }
+                    record_own_player_choice(
+                        state,
+                        source.as_ref(),
+                        crate::types::player::PlayerId(pid),
+                    );
                 }
             }
 
@@ -9433,6 +9404,50 @@ pub(crate) fn withdraw_resolution_cast_delayed_triggers(
         );
     }
     Ok(())
+}
+
+/// CR 608.2c + CR 608.2d: record an answered `Choose(Player | Opponent)` into
+/// the holder of this ability's pending player answer, selected through the
+/// one selection the repeat driver binds a per-object member through
+/// (`effects::choose::player_choice_holder_mut`).
+///
+/// - A parked continuation: the answer binds a resolution-scoped chosen
+///   player (CR 608.2c + CR 109.4) — appended to the chain's `chosen_players`
+///   so the dependent effect (`ControllerRef::ChosenPlayer { index }`) sees it
+///   (a later `Choose(Player)` reads the reference set, not this list); the
+///   chain carries the list because it is a `ResolvedAbility`, unlike
+///   `last_named_choice`, a single GameState slot cleared after every drain —
+///   and it joins the chain's player choice records.
+/// - A parked repeat template: the answer joins the template's player choice
+///   records only; the template keeps its pre-loop chosen-player list.
+///
+/// Either way the answer joins the reference set a later "different"/ordinal
+/// choice of this ability excludes and, when it settles a per-object
+/// repetition, the ability's object→player assignment. CR 614.12a +
+/// CR 607.2d: only an answer to the holder's OWN instruction is recorded — an
+/// entering permanent's "As ~ enters, choose a player" answered
+/// mid-resolution is that object's linked choice and must not shift the
+/// holder's `ChosenPlayer` index or join its records.
+fn record_own_player_choice(
+    state: &mut GameState,
+    source: Option<&crate::types::game_state::NamedChoiceSource>,
+    pid: crate::types::player::PlayerId,
+) {
+    use effects::choose::PlayerChoiceHolder;
+    match effects::choose::player_choice_holder_mut(state, |holder| {
+        effects::choose::named_choice_answer_owned_by(source, holder)
+    }) {
+        Some(PlayerChoiceHolder::Continuation(chain)) => {
+            let mut chosen = chain.chosen_players.clone();
+            chosen.push(pid);
+            chain.set_chosen_players_recursive(&chosen);
+            chain.record_prior_player_choice(pid);
+        }
+        Some(PlayerChoiceHolder::RepeatTemplate(template)) => {
+            template.record_prior_player_choice(pid);
+        }
+        None => {}
+    }
 }
 
 fn finish_with_continuation(
