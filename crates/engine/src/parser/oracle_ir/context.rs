@@ -558,9 +558,16 @@ pub(crate) struct ParseContext {
     /// immediately before that one call; the callee `take`s it on entry, so it is
     /// `None` everywhere else. Never serialized.
     pub enclosing_declared_player: Option<TargetFilter>,
-    /// CR 601.2c: whether the enclosing chain had already declared any target
-    /// when it set `enclosing_declared_player`; same set/`take` lifetime.
-    pub enclosing_declares_target: bool,
+    /// Ordinal of the next player-declaring clause's `ChosenGroupId`
+    /// (`ChosenGroupId::declared_player`). `parse_effect_chain_ir_body` owns the
+    /// running count in a chain-level local and hands it across a nested chain
+    /// and each per-chunk context, so ids stay unique across one ability.
+    pub next_declared_player_group: u32,
+    /// CR 608.2c: the chain's nearest earlier clause announced exactly one player, so
+    /// a bare "they" subject names that player (`ParentTargetController`, the
+    /// spelling "that player" takes) instead of an earlier object. Seeded per chunk
+    /// from the chain; `false` on every standalone parse.
+    pub prior_player_declaration: bool,
     /// CR 608.2c + CR 400.7: Source zone of the tracked set that a downstream
     /// "put those cards / put them onto the battlefield" anaphor (a
     /// `TargetFilter::TrackedSet`) must scan. Set by a producer clause that

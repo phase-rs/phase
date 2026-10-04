@@ -33550,7 +33550,7 @@ fn mishras_command_they_may_discard_binds_to_chosen_player_and_is_optional() {
 /// the second Discard's target was `Any` (unbound) and non-optional, so the
 /// "if they don't" branch's condition was unreachable in practice.
 #[test]
-fn undercity_plunder_they_may_discard_additional_binds_to_parent_target() {
+fn undercity_plunder_they_may_discard_additional_binds_to_the_declared_player() {
     let parsed = parse_oracle_text(
         "Target opponent discards a card. Then they may discard an additional card. If they don't, conjure a duplicate of a random card from their library into your hand. It perpetually gains \"You may spend mana as though it were mana of any color to cast this spell.\"",
         "Undercity Plunder",
@@ -33566,11 +33566,15 @@ fn undercity_plunder_they_may_discard_additional_binds_to_parent_target() {
         .sub_ability
         .as_ref()
         .expect("\"they may discard an additional card\" must remain chained");
+    let declared = TargetFilter::DeclaredPlayer {
+        group: head
+            .declares_chosen_group
+            .expect("the declaring clause carries its tag"),
+    };
     match &*second_discard.effect {
         Effect::Discard { target, .. } => {
             assert_eq!(
-                target,
-                &TargetFilter::ParentTarget,
+                target, &declared,
                 "the additional discard must bind to the same targeted opponent"
             );
         }
@@ -33579,6 +33583,11 @@ fn undercity_plunder_they_may_discard_additional_binds_to_parent_target() {
     assert!(
         second_discard.optional,
         "\"they may discard an additional card\" must be optional"
+    );
+    assert_eq!(
+        second_discard.optional_player.as_ref(),
+        Some(&declared),
+        "the opponent, not the caster, is offered the additional discard"
     );
     let conjure_gate = second_discard
         .sub_ability

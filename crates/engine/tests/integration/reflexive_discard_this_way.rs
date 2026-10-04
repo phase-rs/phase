@@ -361,12 +361,14 @@ fn the_ancient_one_mills_equal_to_discarded_card_mana_value() {
     let opp_lib_before = runner.state().players[P1.0 as usize].library.len();
 
     let def = parse_effect_chain(ANCIENT_BODY, AbilityKind::Spell);
-    // The reflexive sub targets "target player"; supply the opponent up front.
-    let ability = build_resolved_from_def(&def, source, P0);
-    let ability = ResolvedAbility {
-        targets: vec![TargetRef::Player(P1)],
-        ..ability
-    };
+    let mut ability = build_resolved_from_def(&def, source, P0);
+    // The declaring sub announces its own player slot.
+    let declaring = ability
+        .sub_ability
+        .as_mut()
+        .and_then(|discard| discard.sub_ability.as_mut())
+        .expect("draw, discard, then the declaring mill");
+    declaring.targets = vec![TargetRef::Player(P1)];
 
     let mut events = Vec::new();
     resolve_ability_chain(runner.state_mut(), &ability, &mut events, 0)
@@ -504,11 +506,14 @@ fn the_ancient_one_interactive_discard_mills_discarded_card_mana_value() {
     let opp_lib_before = runner.state().players[P1.0 as usize].library.len();
 
     let def = parse_effect_chain(ANCIENT_BODY, AbilityKind::Spell);
-    let ability = build_resolved_from_def(&def, source, P0);
-    let ability = ResolvedAbility {
-        targets: vec![TargetRef::Player(P1)],
-        ..ability
-    };
+    let mut ability = build_resolved_from_def(&def, source, P0);
+    // The declaring sub announces its own player slot.
+    let declaring = ability
+        .sub_ability
+        .as_mut()
+        .and_then(|discard| discard.sub_ability.as_mut())
+        .expect("draw, discard, then the declaring mill");
+    declaring.targets = vec![TargetRef::Player(P1)];
 
     let mut events = Vec::new();
     resolve_ability_chain(runner.state_mut(), &ability, &mut events, 0)

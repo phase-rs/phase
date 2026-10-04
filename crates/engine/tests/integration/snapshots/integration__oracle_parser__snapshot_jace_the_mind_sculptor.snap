@@ -26,6 +26,7 @@ expression: result
         "enter_tapped": false,
         "enters_attacking": false
       },
+      "declares_chosen_group": 2147483648,
       "cost": {
         "type": "Loyalty",
         "amount": 2

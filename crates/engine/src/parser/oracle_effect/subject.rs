@@ -4205,6 +4205,9 @@ fn resolve_they_pronoun(ctx: &mut ParseContext) -> TargetFilter {
             .chain_prior_mass_population
             .clone()
             .unwrap_or(TargetFilter::TriggeringSource),
+        // CR 608.2c: the nearest earlier clause announced a player; "they" is that
+        // player, spelled as "that player" is.
+        _ if ctx.prior_player_declaration => TargetFilter::ParentTargetController,
         // No trigger context — anaphoric reference to previously mentioned objects
         _ => TargetFilter::ParentTarget,
     }

@@ -1661,23 +1661,20 @@ fn parse_card(
 
 /// CR 608.2c + CR 701.24a: "that player shuffles" names the searched opponent.
 #[test]
-fn search_target_opponent_then_that_player_shuffles_binds_the_search_slot() {
+fn search_target_opponent_then_that_player_shuffles_names_the_declared_player() {
     let parsed = parse_card(
         "Search target opponent's library for a card and exile it face down. Then that player shuffles. You may play that card for as long as it remains exiled.",
         "Praetor's Grasp",
         &[],
         &["Sorcery"],
     );
-    assert_eq!(
-        chain_shuffle_target(&parsed.abilities[0]),
-        &TargetFilter::ParentTargetSlot { index: 0 }
-    );
+    assert_eq!(chain_shuffle_target(&parsed.abilities[0]), &declared());
 }
 
 /// CR 608.2c + CR 701.24a: a trigger's "that player shuffles" names the searched opponent,
 /// not the triggering player.
 #[test]
-fn trigger_search_then_that_player_shuffles_binds_the_search_slot() {
+fn trigger_search_then_that_player_shuffles_names_the_declared_player() {
     let parsed = parse_card(
         "Prowl {2}{B} (You may cast this for its prowl cost if you dealt combat damage to a player this turn with a Goblin or Rogue.)\nWhen this creature enters, if its prowl cost was paid, search target opponent's library for three cards and exile them. Then that player shuffles.",
         "Earwig Squad",
@@ -1685,10 +1682,7 @@ fn trigger_search_then_that_player_shuffles_binds_the_search_slot() {
         &["Creature"],
     );
     let execute = parsed.triggers[0].execute.as_deref().expect("trigger body");
-    assert_eq!(
-        chain_shuffle_target(execute),
-        &TargetFilter::ParentTargetSlot { index: 0 }
-    );
+    assert_eq!(chain_shuffle_target(execute), &declared());
 }
 
 /// CR 608.2c: a search of a scoped player, not a declared target, keeps its shuffle on that player.
@@ -1711,8 +1705,10 @@ fn scoped_player_search_then_shuffles_keeps_the_scoped_player() {
     assert_eq!(chain_shuffle_target(execute), &TargetFilter::ScopedPlayer);
 }
 
-fn slot0() -> TargetFilter {
-    TargetFilter::ParentTargetSlot { index: 0 }
+fn declared() -> TargetFilter {
+    TargetFilter::DeclaredPlayer {
+        group: ChosenGroupId::declared_player(0),
+    }
 }
 
 fn card_effects(parsed: &crate::parser::oracle::ParsedAbilities) -> Vec<&Effect> {
@@ -1807,15 +1803,15 @@ fn search_declared_player_carries_its_slot_to_shuffle_and_draw() {
             )),
             "{name}: declaring search present, got {effects:?}"
         );
-        assert_eq!(shuffle_target(&effects), &slot0(), "{name}");
-        assert_eq!(last_draw(&effects), &slot0(), "{name}");
+        assert_eq!(shuffle_target(&effects), &declared(), "{name}");
+        assert_eq!(last_draw(&effects), &declared(), "{name}");
         assert_eq!(declared_player_fields(&effects), 1, "{name}: {effects:?}");
     }
 }
 
 /// CR 115.1 + CR 701.24a: a declared "target player searches ... then shuffles" shuffles that slot.
 #[test]
-fn declared_player_search_shuffle_is_the_slot() {
+fn declared_player_search_shuffle_names_the_declared_player() {
     for (name, oracle, keywords, types) in [
         (
             "Fertilid's Favor",
@@ -1844,13 +1840,13 @@ fn declared_player_search_shuffle_is_the_slot() {
                 .any(|e| matches!(e, Effect::SearchLibrary { .. })),
             "{name}: search present, got {effects:?}"
         );
-        assert_eq!(shuffle_target(&effects), &slot0(), "{name}");
+        assert_eq!(shuffle_target(&effects), &declared(), "{name}");
     }
 }
 
 /// CR 111.2 + CR 115.1: the tokens go to the searched player's slot, not the caster.
 #[test]
-fn necromentia_tokens_belong_to_the_searched_player_slot() {
+fn necromentia_tokens_belong_to_the_searched_player() {
     let parsed = parse_card(
         "Choose a card name other than a basic land card name. Search target opponent's graveyard, hand, and library for any number of cards with that name and exile them. That player shuffles, then creates a 2/2 black Zombie creature token for each card exiled from their hand this way.",
         "Necromentia",
@@ -1868,7 +1864,7 @@ fn necromentia_tokens_belong_to_the_searched_player_slot() {
             _ => None,
         })
         .expect("chain creates tokens");
-    assert_eq!(owner, &slot0());
+    assert_eq!(owner, &declared());
 }
 
 /// CR 115.1 + CR 701.23a: a carried declared player that searches its own library is the
@@ -1892,28 +1888,28 @@ fn restorative_technique_declared_player_searches_and_shuffles_its_own_library()
     assert!(effects.iter().any(|e| matches!(
         e,
         Effect::SearchLibrary {
-            target_player: Some(TargetFilter::ParentTargetController),
+            target_player: Some(TargetFilter::DeclaredPlayer { .. }),
             ..
         }
     )));
-    assert_eq!(
-        shuffle_target(&effects),
-        &TargetFilter::ParentTargetController
-    );
+    assert_eq!(shuffle_target(&effects), &declared());
     assert_eq!(declared_player_fields(&effects), 1, "{effects:?}");
 }
 
-/// CR 608.2c: "gains life" after a declared player gains life names that player.
+/// CR 608.2c: "gains life" after a declared player gains life names that player; a declaring
+/// effect with no player filter (Devour Flesh's sacrifice) keeps the `ParentTarget` read.
 #[test]
 fn declared_player_gains_life_continuation_names_the_declared_player() {
-    for (name, oracle) in [
+    for (name, oracle, expected) in [
         (
             "Life Burst",
             "Target player gains 4 life, then gains 4 life for each card named Life Burst in each graveyard.",
+            declared(),
         ),
         (
             "Devour Flesh",
             "Target player sacrifices a creature of their choice, then gains life equal to that creature's toughness.",
+            TargetFilter::ParentTarget,
         ),
     ] {
         let parsed = parse_card(oracle, name, &[], &["Instant"]);
@@ -1928,7 +1924,7 @@ fn declared_player_gains_life_continuation_names_the_declared_player() {
         assert!(!gains.is_empty(), "{name}: {effects:?}");
         assert_eq!(
             *gains.last().unwrap(),
-            &TargetFilter::ParentTarget,
+            &expected,
             "{name}: {effects:?}"
         );
     }
@@ -1937,7 +1933,7 @@ fn declared_player_gains_life_continuation_names_the_declared_player() {
 /// CR 608.2c + CR 115.1: after a reflexive "choose a card from it" the node's own targets are the
 /// chosen card, so "that player ... then draws/discards" names the declared player's slot.
 #[test]
-fn reflexive_choice_continuation_names_the_declared_player_slot() {
+fn reflexive_choice_continuation_names_the_declared_player() {
     for (name, oracle, keywords, types) in [
         (
             "Oildeep Gearhulk",
@@ -1974,7 +1970,7 @@ fn reflexive_choice_continuation_names_the_declared_player_slot() {
             "{name}: declaring node present, got {effects:?}"
         );
         assert!(no_unimplemented(&effects), "{name}: {effects:?}");
-        assert_eq!(last_draw(&effects), &slot0(), "{name}: {effects:?}");
+        assert_eq!(last_draw(&effects), &declared(), "{name}: {effects:?}");
         if name != "Memory Worm" {
             let chosen_card = effects
                 .iter()
@@ -1994,7 +1990,7 @@ fn reflexive_choice_continuation_names_the_declared_player_slot() {
 
 /// CR 608.2c: Tourach's Canticle's second discard is the revealed opponent's, not the caster's.
 #[test]
-fn tourachs_canticle_second_discard_names_the_declared_player_slot() {
+fn tourachs_canticle_second_discard_names_the_declared_player() {
     let parsed = parse_card(
         "Target opponent reveals their hand. You choose a card from it. That player discards that card, then discards a card at random.",
         "Tourach's Canticle",
@@ -2014,12 +2010,12 @@ fn tourachs_canticle_second_discard_names_the_declared_player_slot() {
             _ => None,
         })
         .expect("chain discards at random");
-    assert_eq!(discard, &slot0());
+    assert_eq!(discard, &declared());
 }
 
 /// CR 608.2c: Vendilion Clique's chain is coverage-red by design; only its `Draw` is asserted.
 #[test]
-fn vendilion_clique_draw_names_the_declared_player_slot() {
+fn vendilion_clique_draw_names_the_declared_player() {
     let parsed = parse_card(
         "Flash\nFlying\nWhen Vendilion Clique enters, look at target player's hand. You may choose a nonland card from it. If you do, that player reveals the chosen card, puts it on the bottom of their library, then draws a card.",
         "Vendilion Clique",
@@ -2030,7 +2026,7 @@ fn vendilion_clique_draw_names_the_declared_player_slot() {
     assert!(effects
         .iter()
         .any(|e| matches!(e, Effect::RevealHand { .. })));
-    assert_eq!(last_draw(&effects), &slot0());
+    assert_eq!(last_draw(&effects), &declared());
 }
 
 /// CR 608.2c: an anaphor that names an event player, and no declaring clause, keeps that
@@ -2088,7 +2084,7 @@ fn ob_nixilis_life_loss_names_the_searching_player() {
 /// CR 608.2c: "that player" names the printed subject, not a player an earlier clause declared,
 /// when the continuation's own subject is a different anaphor. Constructed text.
 #[test]
-fn a_different_anaphor_subject_does_not_take_the_declared_slot() {
+fn a_different_anaphor_subject_does_not_take_the_declared_player() {
     let parsed = parse_card(
         "Target player draws a card. Defending player discards a card, then draws a card.",
         "Synthetic",
@@ -2174,7 +2170,7 @@ fn player_reference_controls_keep_their_lowering() {
     assert!(looter_effects.iter().any(|e| matches!(
         e,
         Effect::Discard {
-            target: TargetFilter::ParentTarget,
+            target: TargetFilter::DeclaredPlayer { .. },
             ..
         }
     )));
@@ -2185,7 +2181,7 @@ fn player_reference_controls_keep_their_lowering() {
         &["Prowl"],
         &["Kindred", "Sorcery"],
     );
-    assert_eq!(shuffle_target(&card_effects(&knowledge)), &slot0());
+    assert_eq!(shuffle_target(&card_effects(&knowledge)), &declared());
 
     let betrayal = parse_card(
         "Exile all opponents' graveyards. You may cast spells from among those cards this turn, and mana of any type can be spent to cast them. At the beginning of the next end step, if any of those cards remain exiled, return them to their owners' graveyards.\nExile Mnemonic Betrayal.",
@@ -2210,10 +2206,10 @@ fn player_reference_controls_keep_their_lowering() {
     )));
 }
 
-/// CR 601.2c: slot 0 names the chain's first declared target, so a player declared after an
-/// object target must not be referenced as `ParentTargetSlot { 0 }` (that slot is the creature).
+/// CR 608.2c + CR 115.1: "that player" names the declaring clause whatever target slot it
+/// occupies, so a player declared after an object target is not read through slot 0 (the creature).
 #[test]
-fn player_declared_after_an_object_target_is_not_slot_zero() {
+fn player_declared_after_an_object_target_names_the_declared_player() {
     let parsed = parse_card(
         "Destroy target creature. This spell deals 2 damage to target player. That player discards a card, then draws a card.",
         "Object First Anaphor",
@@ -2232,16 +2228,12 @@ fn player_declared_after_an_object_target_is_not_slot_zero() {
         "player declaration reached: {effects:?}"
     );
     assert!(no_unimplemented(&effects), "{effects:?}");
-    assert!(
-        !matches!(last_draw(&effects), TargetFilter::ParentTargetSlot { .. }),
-        "{effects:?}"
-    );
-    assert_eq!(declared_player_fields(&effects), 0, "{effects:?}");
+    assert_eq!(last_draw(&effects), &declared(), "{effects:?}");
 }
 
-/// CR 601.2c: a search-declared player after an object target is likewise not slot 0.
+/// CR 608.2c: a search-declared player after an object target is likewise named, not slot-read.
 #[test]
-fn search_declared_player_after_an_object_target_is_not_slot_zero() {
+fn search_declared_player_after_an_object_target_names_the_declared_player() {
     let parsed = parse_card(
         "Destroy target creature. Search target opponent's library for a card and exile it. That player shuffles.",
         "Object First Search",
@@ -2259,13 +2251,13 @@ fn search_declared_player_after_an_object_target_is_not_slot_zero() {
         )),
         "declaring search reached: {effects:?}"
     );
-    assert_ne!(shuffle_target(&effects), &slot0(), "{effects:?}");
+    assert_eq!(shuffle_target(&effects), &declared(), "{effects:?}");
 }
 
-/// CR 115.1 + CR 601.2c: a non-targeting earlier clause (Sacrifice) declares no slot, so the
-/// declared player is still slot 0.
+/// CR 115.1 + CR 601.2c: a non-targeting earlier clause (Sacrifice) declares nothing, so the
+/// declared player is the only one named.
 #[test]
-fn player_declared_after_a_non_targeting_clause_is_slot_zero() {
+fn player_declared_after_a_non_targeting_clause_names_the_declared_player() {
     let parsed = parse_card(
         "You sacrifice a creature. Target player gains 2 life. That player discards a card, then draws a card.",
         "Sacrifice First Anaphor",
@@ -2274,13 +2266,13 @@ fn player_declared_after_a_non_targeting_clause_is_slot_zero() {
     );
     let effects = card_effects(&parsed);
     assert!(no_unimplemented(&effects), "{effects:?}");
-    assert_eq!(last_draw(&effects), &slot0(), "{effects:?}");
+    assert_eq!(last_draw(&effects), &declared(), "{effects:?}");
     assert_eq!(declared_player_fields(&effects), 1, "{effects:?}");
 }
 
 /// CR 115.1 + CR 601.2c: the same holds when the declaring clause is a search.
 #[test]
-fn search_declared_player_after_a_non_targeting_clause_is_slot_zero() {
+fn search_declared_player_after_a_non_targeting_clause_names_the_declared_player() {
     let parsed = parse_card(
         "Sacrifice a creature. Target opponent searches their library for a card and exiles it. That player shuffles.",
         "Sacrifice First Search",
@@ -2298,13 +2290,13 @@ fn search_declared_player_after_a_non_targeting_clause_is_slot_zero() {
         )),
         "declaring search reached: {effects:?}"
     );
-    assert_eq!(shuffle_target(&effects), &slot0(), "{effects:?}");
+    assert_eq!(shuffle_target(&effects), &declared(), "{effects:?}");
     assert_eq!(declared_player_fields(&effects), 1, "{effects:?}");
 }
 
-/// Control: the same anaphor shape with the player declared first still names slot 0.
+/// Control: the same anaphor shape with the player declared first names the declared player.
 #[test]
-fn player_declared_first_is_slot_zero_for_the_anaphor() {
+fn player_declared_first_names_the_declared_player() {
     let parsed = parse_card(
         "Target player gains 2 life. That player discards a card, then draws a card.",
         "Player First Anaphor",
@@ -2313,6 +2305,6 @@ fn player_declared_first_is_slot_zero_for_the_anaphor() {
     );
     let effects = card_effects(&parsed);
     assert!(no_unimplemented(&effects), "{effects:?}");
-    assert_eq!(last_draw(&effects), &slot0(), "{effects:?}");
+    assert_eq!(last_draw(&effects), &declared(), "{effects:?}");
     assert_eq!(declared_player_fields(&effects), 1, "{effects:?}");
 }

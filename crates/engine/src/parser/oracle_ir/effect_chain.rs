@@ -14,11 +14,11 @@ use crate::parser::oracle_effect::lower::strip_trailing_duration;
 use crate::parser::oracle_nom::filter::ChosenColorGrantReference;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
-    ActivationManaPaymentRestriction, ActivationRestriction, ChoiceType, ControllerRef,
-    CostReduction, DelayedTriggerCondition, Duration, Effect, ManaSpendPermission, MultiTargetSpec,
-    OpponentMayScope, PlayerFilter, QuantityExpr, QuantityRef, ReturnResultReadSpec, RoundingMode,
-    SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetReadOrigin, TargetSelectionMode,
-    UnlessPayModifier,
+    ActivationManaPaymentRestriction, ActivationRestriction, ChoiceType, ChosenGroupId,
+    ControllerRef, CostReduction, DelayedTriggerCondition, Duration, Effect, ManaSpendPermission,
+    MultiTargetSpec, OpponentMayScope, PlayerFilter, QuantityExpr, QuantityRef,
+    ReturnResultReadSpec, RoundingMode, SubAbilityLink, TargetChoiceTiming, TargetFilter,
+    TargetReadOrigin, TargetSelectionMode, UnlessPayModifier,
 };
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaExpiry;
@@ -961,6 +961,16 @@ pub(crate) struct ClauseIr {
     /// chooser injected — a fail-closed, match-NOTHING filter.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) printed_color_choice: Option<ChoiceType>,
+    /// CR 608.2c: the group a later clause's `TargetFilter::DeclaredPlayer` names
+    /// this clause by; lowered onto its node's `declares_chosen_group`. Set by the
+    /// chunk loop after the clause is pushed, and propagated by `absorb_clause`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) declared_player_group: Option<ChosenGroupId>,
+    /// CR 608.2d: the player a subject-anchored "may" names when the effect's own
+    /// slot holds another spelling (a collision reader keeps `ParentTarget`
+    /// there). Set by the chunk loop after the clause is pushed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) optional_actor: Option<TargetFilter>,
     /// CR 607.2d + CR 608.2d: which KIND of chosen-colour
     /// reference this clause's KEYWORD GRANT printed, DERIVED ONCE from this
     /// clause's own verbatim `source_text` at `ClauseDraft::push` — the sealed
@@ -1034,6 +1044,8 @@ impl ClauseIr {
             target_chooser,
             declared_target_choice_timing,
             printed_color_choice,
+            declared_player_group,
+            optional_actor,
             chosen_color_grant,
             placement,
             _sealed: _,
@@ -1063,6 +1075,8 @@ impl ClauseIr {
         *target_chooser = None;
         *declared_target_choice_timing = None;
         *printed_color_choice = None;
+        *declared_player_group = None;
+        *optional_actor = None;
         *chosen_color_grant = None;
         *placement = ClausePlacement::Sibling;
     }
@@ -1237,6 +1251,8 @@ impl ClauseIrBuilder {
             target_chooser: None,
             declared_target_choice_timing: None,
             printed_color_choice: None,
+            declared_player_group: None,
+            optional_actor: None,
             placement: ClausePlacement::Sibling,
         }
     }
@@ -1314,6 +1330,8 @@ impl ClauseIrBuilder {
         .target_chooser(c.target_chooser)
         .declared_target_choice_timing(c.declared_target_choice_timing)
         .printed_color_choice(c.printed_color_choice)
+        .declared_player_group(c.declared_player_group)
+        .optional_actor(c.optional_actor)
         .push();
         if let Some(absorbed) = self.clauses.last_mut() {
             absorbed.target_reads = c.target_reads;
@@ -1351,6 +1369,8 @@ pub(crate) struct ClauseDraft<'a> {
     target_chooser: Option<TargetFilter>,
     declared_target_choice_timing: Option<TargetChoiceTiming>,
     printed_color_choice: Option<ChoiceType>,
+    declared_player_group: Option<ChosenGroupId>,
+    optional_actor: Option<TargetFilter>,
     placement: ClausePlacement,
 }
 
@@ -1436,6 +1456,14 @@ impl ClauseDraft<'_> {
     /// filter with no `Effect::Unimplemented` and no parse warning.
     pub(crate) fn printed_color_choice(mut self, v: Option<ChoiceType>) -> Self {
         self.printed_color_choice = v;
+        self
+    }
+    pub(crate) fn declared_player_group(mut self, v: Option<ChosenGroupId>) -> Self {
+        self.declared_player_group = v;
+        self
+    }
+    pub(crate) fn optional_actor(mut self, v: Option<TargetFilter>) -> Self {
+        self.optional_actor = v;
         self
     }
 
@@ -1682,6 +1710,8 @@ impl ClauseDraft<'_> {
             chosen_color_grant: crate::parser::oracle_nom::filter::classify_chosen_color_grant(
                 &self.source_text,
             ),
+            declared_player_group: self.declared_player_group,
+            optional_actor: self.optional_actor,
             placement: self.placement,
             _sealed: (),
         });

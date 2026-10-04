@@ -79,7 +79,8 @@ expression: "&ir"
                 "prefix_delayed_condition": null,
                 "multi_target": null,
                 "where_x_expression": null,
-                "unless_pay": null
+                "unless_pay": null,
+                "declared_player_group": 2147483648
               }
             ],
             "kind": "Activated",
@@ -202,7 +203,8 @@ expression: "&ir"
                 "prefix_delayed_condition": null,
                 "multi_target": null,
                 "where_x_expression": null,
-                "unless_pay": null
+                "unless_pay": null,
+                "declared_player_group": 2147483649
               }
             ],
             "kind": "Activated",

@@ -77379,7 +77379,7 @@ fn revealed_this_way_arm_ignores_mass_and_from_it_forms() {
     );
     assert_json_eq(
         &fall.abilities[0],
-        r#"{"kind":"Spell","effect":{"type":"RevealHand","target":{"type":"Player"},"card_filter":{"type":"None"},"count":null,"reveal":true},"cost":null,"sub_ability":{"kind":"Spell","effect":{"type":"Unimplemented","name":"unparsed_verb_arguments","description":"discard each nonland card revealed this way"},"cost":null,"sub_ability":null,"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false},"duration":null,"description":"Target player reveals two cards at random from their hand, then discards each nonland card revealed this way.","target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false}"#,
+        r#"{"kind":"Spell","effect":{"type":"RevealHand","target":{"type":"Player"},"card_filter":{"type":"None"},"count":null,"reveal":true},"declares_chosen_group":2147483648,"cost":null,"sub_ability":{"kind":"Spell","effect":{"type":"Unimplemented","name":"unparsed_verb_arguments","description":"discard each nonland card revealed this way"},"cost":null,"sub_ability":null,"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false},"duration":null,"description":"Target player reveals two cards at random from their hand, then discards each nonland card revealed this way.","target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false}"#,
         "Fall",
     );
 
@@ -77416,7 +77416,7 @@ fn kitesail_freebooter_unscoped_from_it_choice_is_unchanged() {
     assert!(non_controller_gaps(execute).is_empty());
     assert_json_eq(
         execute,
-        r#"{"kind":"Spell","effect":{"type":"RevealHand","target":{"type":"Typed","type_filters":[],"controller":"Opponent","properties":[]},"card_filter":{"type":"Typed","type_filters":[{"Non":"Creature"},{"Non":"Land"}],"controller":null,"properties":[]},"count":null,"reveal":true},"cost":null,"sub_ability":{"kind":"Spell","effect":{"type":"ChangeZone","origin":null,"destination":"Exile","target":{"type":"ParentTarget"},"owner_library":false,"enter_transformed":false,"enter_tapped":false,"enters_attacking":false},"cost":null,"sub_ability":null,"duration":"UntilHostLeavesPlay","description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false,"sub_link":"SequentialSibling"},"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false}"#,
+        r#"{"kind":"Spell","effect":{"type":"RevealHand","target":{"type":"Typed","type_filters":[],"controller":"Opponent","properties":[]},"card_filter":{"type":"Typed","type_filters":[{"Non":"Creature"},{"Non":"Land"}],"controller":null,"properties":[]},"count":null,"reveal":true},"declares_chosen_group":2147483648,"cost":null,"sub_ability":{"kind":"Spell","effect":{"type":"ChangeZone","origin":null,"destination":"Exile","target":{"type":"ParentTarget"},"owner_library":false,"enter_transformed":false,"enter_tapped":false,"enters_attacking":false},"cost":null,"sub_ability":null,"duration":"UntilHostLeavesPlay","description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false,"sub_link":"SequentialSibling"},"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false}"#,
         "Kitesail Freebooter's ETB",
     );
 }
@@ -80442,8 +80442,10 @@ mod carried_player_reference_tests {
     use crate::types::ability::TypedFilter;
     use crate::types::zones::Zone;
 
-    fn slot0() -> TargetFilter {
-        TargetFilter::ParentTargetSlot { index: 0 }
+    fn declared() -> TargetFilter {
+        TargetFilter::DeclaredPlayer {
+            group: ChosenGroupId::declared_player(0),
+        }
     }
 
     fn opponent_filter() -> TargetFilter {
@@ -80482,18 +80484,24 @@ mod carried_player_reference_tests {
         }
     }
 
-    /// CR 115.1: only a search converts to the slot form; a Shuffle or ChangeZoneAll
-    /// player filter is not a declaration and is returned unchanged.
+    /// CR 115.1: only a declaring search names the declared player (consulting the builder
+    /// once); a Shuffle or ChangeZoneAll player filter is not a declaration, is returned
+    /// unchanged, and never consults it.
     #[test]
     fn extract_player_anchor_converts_only_a_declaring_search() {
-        for declared in [TargetFilter::Player, opponent_filter()] {
+        let mut consulted = 0;
+        let mut declare = || {
+            consulted += 1;
+            declared()
+        };
+        for filter in [TargetFilter::Player, opponent_filter()] {
             assert_eq!(
-                extract_player_anchor(&search(declared), true),
-                Some(slot0())
+                extract_player_anchor(&search(filter), &mut declare),
+                Some(declared())
             );
         }
         assert_eq!(
-            extract_player_anchor(&search(TargetFilter::ParentTargetController), true),
+            extract_player_anchor(&search(TargetFilter::ParentTargetController), &mut declare),
             Some(TargetFilter::ParentTargetController)
         );
         assert_eq!(
@@ -80501,7 +80509,7 @@ mod carried_player_reference_tests {
                 &Effect::Shuffle {
                     target: TargetFilter::Player
                 },
-                true
+                &mut declare
             ),
             Some(TargetFilter::Player)
         );
@@ -80513,35 +80521,42 @@ mod carried_player_reference_tests {
         if let Effect::ChangeZoneAll { target, .. } = &mut sweep {
             *target = opponent_filter();
         }
-        assert_eq!(extract_player_anchor(&sweep, true), Some(opponent_filter()));
+        assert_eq!(
+            extract_player_anchor(&sweep, &mut declare),
+            Some(opponent_filter())
+        );
+        assert_eq!(
+            consulted, 2,
+            "one consultation per declaring search, none otherwise"
+        );
     }
 
     /// One row per carry form: the reference, the phrase it re-supplies, its lifetime.
     #[test]
     fn carry_forms_supply_their_reference_and_lifetime() {
-        let declared = CarriedPlayerSubject::Declared;
-        assert_eq!(declared.reference(), &TargetFilter::ParentTarget);
-        let phrase = declared.subject_phrase();
+        let carried = CarriedPlayerSubject::Declared;
+        assert_eq!(carried.reference(), &TargetFilter::ParentTarget);
+        let phrase = carried.subject_phrase(None);
         assert_eq!(phrase.affected, Some(TargetFilter::ParentTarget));
         assert_eq!(phrase.target, Some(TargetFilter::ParentTarget));
         assert!(phrase.inherits_parent);
-        assert!(!declared.persists_across_sentences());
-        assert_eq!(declared.chain_reference(), None);
+        assert!(!carried.persists_across_sentences());
+        assert_eq!(carried.chain_reference(), None);
 
         let scoped = CarriedPlayerSubject::from_leading_subject(&application(
             TargetFilter::ScopedPlayer,
             None,
         ))
         .expect("a scoped player subject carries");
-        let phrase = scoped.subject_phrase();
+        let phrase = scoped.subject_phrase(None);
         assert_eq!(phrase.affected, Some(TargetFilter::ScopedPlayer));
         assert_eq!(phrase.target, None);
         assert!(!phrase.inherits_parent);
         assert!(!scoped.persists_across_sentences());
 
-        for antecedent in [slot0(), TargetFilter::ParentTarget] {
+        for antecedent in [declared(), TargetFilter::ParentTarget] {
             let carry = CarriedPlayerSubject::antecedent(antecedent.clone());
-            let phrase = carry.subject_phrase();
+            let phrase = carry.subject_phrase(None);
             assert_eq!(phrase.affected, Some(antecedent.clone()));
             assert_eq!(phrase.target, None);
             assert!(!phrase.inherits_parent);
@@ -80554,9 +80569,9 @@ mod carried_player_reference_tests {
     fn anaphoric_subject_carry_prefers_the_declared_slot() {
         let event_player = application(TargetFilter::TriggeringPlayer, None);
         assert_eq!(
-            CarriedPlayerSubject::from_anaphoric_subject(&event_player, Some(slot0())),
+            CarriedPlayerSubject::from_anaphoric_subject(&event_player, Some(declared())),
             Some(CarriedPlayerSubject::Reference {
-                filter: slot0(),
+                filter: declared(),
                 lifetime: CarryLifetime::Sentence,
             })
         );
@@ -80574,7 +80589,7 @@ mod carried_player_reference_tests {
             application(TargetFilter::ScopedPlayer, None),
         ] {
             assert_eq!(
-                CarriedPlayerSubject::from_anaphoric_subject(&refused, Some(slot0())),
+                CarriedPlayerSubject::from_anaphoric_subject(&refused, Some(declared())),
                 None
             );
         }
@@ -80586,10 +80601,10 @@ mod carried_player_reference_tests {
     fn carried_phrase_rewrites_player_arms_a_printed_object_reference_does_not() {
         let carries = [
             CarriedPlayerSubject::Declared,
-            CarriedPlayerSubject::antecedent(slot0()),
+            CarriedPlayerSubject::antecedent(declared()),
         ];
         for carry in &carries {
-            let phrase = carry.subject_phrase();
+            let phrase = carry.subject_phrase(None);
             let mut gain = gain_life_controller();
             inject_subject_target(&mut gain, &phrase, "that player gains 1 life");
             assert_eq!(
@@ -80604,12 +80619,13 @@ mod carried_player_reference_tests {
                 *target_player = None;
             }
             inject_subject_target(&mut lib, &phrase, "that player searches their library");
+            let expected = match carry {
+                CarriedPlayerSubject::Declared => TargetFilter::ParentTargetController,
+                CarriedPlayerSubject::Reference { filter, .. } => filter.clone(),
+            };
             assert!(matches!(
                 lib,
-                Effect::SearchLibrary {
-                    target_player: Some(TargetFilter::ParentTargetController),
-                    ..
-                }
+                Effect::SearchLibrary { target_player: Some(ref searched), .. } if *searched == expected
             ));
         }
         let printed_object = SubjectPhraseAst {
