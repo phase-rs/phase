@@ -117,6 +117,8 @@
     "coverageThresholdHint": "このエンジン対応率未満のデッキを除外",
     "bracket": "ブラケット",
     "bracketHint": "このブラケットからAIがランダムに選びます。フィルター時はタグなしデッキを除外します。",
+    "bracketPoolEmpty": "選択したブラケットに合うデッキがありません。ランダムAIはすべての使用可能なデッキから選びます。",
+    "cedhPoolEmpty": "ブラケット5のデッキがありません。ランダムAIにデッキを割り当てられません。",
     "opponentLabel": "対戦相手{{number}}",
     "deck": "デッキ",
     "difficulty": "難易度",

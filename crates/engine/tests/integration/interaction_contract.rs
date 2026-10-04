@@ -7525,12 +7525,34 @@ fn activate_mana_source_labels_fixed_and_flexible_sacrificial_sources() {
         projected_mana_source_labels(runner.state_mut(), flexible, "flexible-mana-source");
     assert_eq!(
         flexible_labels,
-        vec![vec!["R".to_string(), "R".to_string()]],
-        "a flexible source is offered as ONE deferred-color candidate whose label \
-         still carries both produced units; `manual_selection_for_option` collapses \
-         it to Colorless + DeferredColorChoice, so resolving it through the land \
-         authority (the #6944 bug) would drop this label entirely"
+        vec![Vec::<String>::new()],
+        "a deferred source has no selected mana type to project as ProducedMana"
     );
+    let view = viewer_interaction(runner.state(), P0);
+    let InteractionOpportunityResponse::ExactChoices { choices } = &view.opportunities[0].response
+    else {
+        panic!("the deferred mana-source prompt retains exact choices");
+    };
+    assert!(choices.iter().any(|choice| {
+        choice.surfaces.iter().any(|surface| {
+            matches!(
+                surface,
+                InteractionPresentationSurface::Action {
+                    code: InteractionActionCode::ActivateManaSource,
+                    action_id: Some(_),
+                }
+            )
+        }) && choice.surfaces.iter().any(|surface| {
+            matches!(
+                surface,
+                InteractionPresentationSurface::Object {
+                    role: InteractionRoleCode::Source,
+                    reference,
+                    ..
+                } if reference == &flexible.0.to_string()
+            )
+        })
+    }));
 }
 
 // ═════════════════════════════════════════════════════════════════════════════════════════

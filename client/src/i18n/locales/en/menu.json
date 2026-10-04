@@ -117,6 +117,8 @@
     "coverageThresholdHint": "Exclude decks below this engine-support threshold",
     "bracket": "Bracket",
     "bracketHint": "Random AI picks from these brackets. Untagged decks are excluded when filtering.",
+    "bracketPoolEmpty": "No decks match the selected brackets. Random AI will draw from all legal decks.",
+    "cedhPoolEmpty": "No bracket-5 decks available. Random AI seats cannot be filled.",
     "opponentLabel": "Opponent {{number}}",
     "deck": "Deck",
     "difficulty": "Difficulty",

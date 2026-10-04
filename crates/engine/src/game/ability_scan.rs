@@ -251,6 +251,7 @@ fn resolved_ability_axes(a: &ResolvedAbility, mode: ScanMode) -> Axes {
         target_incarnations: _,    // CR 400.7 referent pins, no dynamic read
         selected_target_incarnations: _, // CR 400.7 selected-target pins, no dynamic read
         illegal_target_slots: _,   // CR 608.2b resolution legality stamp, no dynamic read
+        illegal_local_target_slots: _, // CR 608.2b node-local legality stamp, no dynamic read
         controller: _,             // player id
         original_controller: _,    // player id
         scoped_player: _,          // player id (iteration binding)
@@ -1910,15 +1911,19 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             acc
         }
         Effect::AdditionalPhase {
-            target,
+            recipient,
             count,
-            phase: _,
+            segment: _,
             after: _,
             followed_by: _,
             attacker_restriction: _,
         } => {
             let mut acc = Axes::NONE;
-            acc = acc.or(scan_target_filter(target, target_ctx, mode));
+            acc = acc.or(scan_target_filter(
+                recipient.as_target_filter(),
+                target_ctx,
+                mode,
+            ));
             acc = acc.or(scan_quantity_expr(count, mode));
             acc
         }
@@ -2390,6 +2395,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
         // pattern can only over-report, never under-report. The population axis is
         // not decomposed here because no caller needs a narrower answer.
         QuantityRef::DistinctCardTypes { .. } => Axes::CONSERVATIVE,
+        QuantityRef::SharedCardTypes { .. } => Axes::CONSERVATIVE,
         QuantityRef::DistinctSubtypes { .. } => Axes::CONSERVATIVE,
         QuantityRef::CardsExiledBySource => Axes::NONE,
         QuantityRef::ExiledCardPower { index: _ } => Axes::NONE,
@@ -2440,9 +2446,10 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
         // `last_effect_excess_amount` / `last_effect_counts_by_player` /
         // `clause_minimum_snapshot`, the last read FIRST (`game/quantity.rs`,
         // the `PreviousEffectAmount` arm) as the CR 608.2h frozen value. All are
-        // cleared at depth-0 chain entry (`resolve_ability_chain`); `apply()`
-        // additionally clears `last_effect_count` and the per-player table at
-        // every player action. None is a triggering-event characteristic
+        // cleared at depth-0 chain entry (`resolve_ability_chain`);
+        // `stack::resolve_top` additionally clears `last_effect_count` and the
+        // per-player table as each stack object begins resolving, and `apply()`
+        // at every player action. None is a triggering-event characteristic
         // (event), a board-scoped mutable aggregate a sibling copy could mutate
         // (sibling), or a player-level per-turn projected resource (projected).
         // Destructured without `..` so a future field forces re-classification.
@@ -2904,7 +2911,8 @@ fn scan_quantity_expr(x: &QuantityExpr, mode: ScanMode) -> Axes {
 
 fn scan_ability_condition(x: &AbilityCondition, mode: ScanMode) -> Axes {
     match x {
-        AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn => Axes {
+        AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
+        | AbilityCondition::TriggerEventTargetExploitedBySource => Axes {
             event: true,
             sibling: false,
             projected: false,

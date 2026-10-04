@@ -501,24 +501,6 @@ export function GameSetupPage() {
                     />
                   </label>
 
-                  <label
-                    className="flex items-center justify-between"
-                    title={t("gameSetup.config.experimentalDungeonsHelp")}
-                  >
-                    <span className="text-xs text-slate-400">{t("gameSetup.config.experimentalDungeons")}</span>
-                    <input
-                      type="checkbox"
-                      checked={formatConfig.allow_experimental_dungeons}
-                      onChange={(e) =>
-                        setFormatConfig({
-                          ...formatConfig,
-                          allow_experimental_dungeons: e.target.checked,
-                        })
-                      }
-                      className="h-4 w-4 accent-sky-500"
-                    />
-                  </label>
-
                   {!formatConfig.team_based && formatConfig.max_players > 2 && (
                     <label className="flex flex-col gap-1">
                       <div className="flex items-center justify-between">

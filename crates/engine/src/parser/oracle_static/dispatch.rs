@@ -952,6 +952,16 @@ pub(crate) fn parse_static_line_inner(
             if let Some(def) = try_parse_inverted_attached_subject_grant(&split, &text) {
                 return Some(def);
             }
+            // CR 611.3a + CR 607.2a: the persistent exile-cast permission reads
+            // its own leading gate (`strip_leading_permission_condition`) — "As
+            // long as <condition>, you may cast the exiled card, and mana of any
+            // type can be spent to cast that spell" (Null Summoner). The canonical
+            // rewrite below would put the gate after the concession conjunct,
+            // where no permission grammar reads it, and the generic fallback
+            // would keep only the gate.
+            if let Some(def) = try_parse_persistent_exile_play_permission(&text, &lower) {
+                return Some(def);
+            }
             // CR 400.2 + CR 701.20a: "As long as <condition>, all players
             // play with their hands revealed." The generic continuous fallback
             // can otherwise accept the canonical rewrite before this data-

@@ -10408,9 +10408,60 @@ pub(crate) fn parse_zone_suffix(
     let leading_ws = text.len() - trimmed.len();
     let lower = trimmed.to_lowercase();
 
-    let (rest, (props, ctrl)) = parse_zone_suffix_nom(&lower).ok()?;
+    let (rest, (props, ctrl, _qual)) = parse_zone_suffix_nom(&lower).ok()?;
     let consumed = lower.len() - rest.len();
     Some((props, ctrl, leading_ws + consumed))
+}
+
+/// Recover a single graveyard source using the shared zone grammar, without
+/// changing the public zone-suffix adapter's controller/consumption contract.
+pub(crate) fn parse_exile_graveyard_source(text: &str) -> Option<(Vec<FilterProp>, usize)> {
+    let trimmed = text.trim_start();
+    let leading_ws = text.len() - trimmed.len();
+    let lower = trimmed.to_lowercase();
+    peek(tag::<_, _, OracleError<'_>>("from "))
+        .parse(lower.as_str())
+        .ok()?;
+    let (rest, (mut props, controller, qualifier)) = parse_zone_suffix_nom(&lower).ok()?;
+    if !props.iter().any(|prop| {
+        matches!(
+            prop,
+            FilterProp::InZone {
+                zone: Zone::Graveyard
+            }
+        )
+    }) || props
+        .iter()
+        .any(|prop| matches!(prop, FilterProp::InAnyZone { .. }))
+    {
+        return None;
+    }
+    match qualifier {
+        ZoneQual::OtherPoss | ZoneQual::TargetPlayer => return None,
+        ZoneQual::Plain => {
+            // This adapter admits only the singular unowned object form. The
+            // shared grammar still owns adjective/plural/selection spellings.
+            peek((
+                tag::<_, _, OracleError<'_>>("from "),
+                alt((tag("a "), tag("the "), tag(""))),
+                tag("graveyard"),
+                peek_zone_boundary,
+            ))
+            .parse(lower.as_str())
+            .ok()?;
+        }
+        ZoneQual::You | ZoneQual::ChosenPlayer => {
+            // CR 108.3 + CR 108.4a + CR 109.4 + CR 109.5 + CR 400.1 + CR 400.3:
+            // a player's graveyard contains their owned cards; You remains the
+            // declaring ability's symbolic authority, not a card controller.
+            props.push(FilterProp::Owned {
+                controller: controller?,
+            });
+        }
+        // CR 108.3 + CR 404.1: retain the shared grammar's opponent/iteration owner.
+        ZoneQual::Opponent | ZoneQual::Their => {}
+    }
+    Some((props, leading_ws + lower.len() - rest.len()))
 }
 
 /// CR 601.2a: The zones a spell can be cast from, excluding the named allowed
@@ -10431,7 +10482,8 @@ pub(crate) fn cast_capable_zones_except(allowed: Zone) -> Vec<Zone> {
 
 fn parse_zone_suffix_nom(
     i: &str,
-) -> super::oracle_nom::error::OracleResult<'_, (Vec<FilterProp>, Option<ControllerRef>)> {
+) -> super::oracle_nom::error::OracleResult<'_, (Vec<FilterProp>, Option<ControllerRef>, ZoneQual)>
+{
     let (i, _) = opt(alt((tag("cards "), tag("card ")))).parse(i)?;
     let (i, prep) = alt((
         value(ZonePrep::From, tag("from ")),
@@ -10580,7 +10632,7 @@ fn parse_zone_suffix_nom(
         }
     };
 
-    Ok((i, out))
+    Ok((i, (out.0, out.1, qual)))
 }
 
 fn parse_zone_qual(i: &str) -> super::oracle_nom::error::OracleResult<'_, ZoneQual> {
@@ -22504,5 +22556,115 @@ mod tests {
             ChosenColorQualifierScope::Unbound,
             "a freshly defaulted context leaves the gate closed"
         );
+    }
+}
+
+#[cfg(test)]
+mod exile_graveyard_source_shape {
+    use super::*;
+
+    #[test]
+    fn shape_shared_adapter_preserves_public_zone_contract() {
+        for (phrase, owner) in [
+            ("from your graveyard", Some(ControllerRef::You)),
+            (
+                "from the chosen player's graveyard",
+                Some(ControllerRef::SourceChosenPlayer),
+            ),
+        ] {
+            let (public, ctrl, count) = parse_zone_suffix(phrase).unwrap();
+            assert_eq!(
+                public,
+                vec![FilterProp::InZone {
+                    zone: Zone::Graveyard
+                }]
+            );
+            assert_eq!(ctrl, owner);
+            assert_eq!(count, phrase.len());
+            let (recovered, used) = parse_exile_graveyard_source(phrase).unwrap();
+            assert_eq!(used, count);
+            assert_eq!(
+                recovered,
+                vec![
+                    public[0].clone(),
+                    FilterProp::Owned {
+                        controller: owner.unwrap()
+                    }
+                ]
+            );
+        }
+        for (phrase, owner) in [
+            ("from an opponent's graveyard", ControllerRef::Opponent),
+            ("from each opponent's graveyard", ControllerRef::Opponent),
+            ("from their graveyard", ControllerRef::ScopedPlayer),
+        ] {
+            let (public, ctrl, count) = parse_zone_suffix(phrase).unwrap();
+            assert_eq!(ctrl, None);
+            assert!(public.contains(&FilterProp::Owned { controller: owner }));
+            assert_eq!(parse_exile_graveyard_source(phrase), Some((public, count)));
+        }
+        for phrase in ["from a graveyard", "from the graveyard", "from graveyard"] {
+            assert_eq!(
+                parse_exile_graveyard_source(phrase),
+                Some((
+                    vec![FilterProp::InZone {
+                        zone: Zone::Graveyard
+                    }],
+                    phrase.len()
+                ))
+            );
+        }
+        let phrase = "  From Your Graveyard. remainder";
+        let (props, ctrl, count) = parse_zone_suffix(phrase).unwrap();
+        assert_eq!(ctrl, Some(ControllerRef::You));
+        assert_eq!(
+            props,
+            vec![FilterProp::InZone {
+                zone: Zone::Graveyard
+            }]
+        );
+        assert_eq!(&phrase[count..], ". remainder");
+        assert_eq!(parse_exile_graveyard_source(phrase).unwrap().1, count);
+        let (props, ctrl, count) =
+            parse_zone_suffix("from your graveyard or from your hand").unwrap();
+        assert_eq!(ctrl, Some(ControllerRef::You));
+        assert_eq!(
+            props,
+            vec![FilterProp::InAnyZone {
+                zones: vec![Zone::Graveyard, Zone::Hand]
+            }]
+        );
+        assert_eq!(count, "from your graveyard or from your hand".len());
+    }
+
+    #[test]
+    fn shape_adapter_declines_other_zones_owners_prepositions_and_selections() {
+        assert!(parse_exile_graveyard_source("from your graveyard").is_some());
+        for phrase in [
+            "from your hand",
+            "from your library",
+            "from exile",
+            "from the command zone",
+            "from target player's graveyard",
+            "from its owner's graveyard",
+            "from that player's graveyard",
+            "from defending player's graveyard",
+            "from each player's graveyard",
+            "from a player's graveyard",
+            "in your graveyard",
+            "on your graveyard",
+            "cards from your graveyard",
+            "from all graveyards",
+            "from each graveyard",
+            "from a single graveyard",
+            "from a random graveyard",
+            "from graveyards",
+            "from a graveyardkeeper",
+            "from your graveyard or from your hand",
+            "from your graveyard or from your graveyard",
+            "from each opponent's hand",
+        ] {
+            assert!(parse_exile_graveyard_source(phrase).is_none(), "{phrase}");
+        }
     }
 }

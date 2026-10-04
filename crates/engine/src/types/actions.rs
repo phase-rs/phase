@@ -5,8 +5,8 @@ use super::counter::CounterType;
 use super::game_state::{
     AutoMayChoice, AutoPassRequest, CastPaymentMode, CombatDamageAssignmentMode,
     CompanionDeclaration, CounterCostChoice, CounterMoveChoice, CounterRemoveChoice,
-    MayTriggerAutoChoiceScope, MayTriggerAutoChoiceSelector, PriorityPassingMode, ShardChoice,
-    YieldScope, YieldTarget,
+    MayTriggerAutoChoiceScope, MayTriggerAutoChoiceSelector, PriorityPassingMode,
+    ReplacementAutoChoiceId, ShardChoice, YieldScope, YieldTarget,
 };
 use super::identifiers::{CardId, ObjectId};
 use super::keywords::Keyword;
@@ -336,6 +336,14 @@ pub enum GameAction {
     },
     ChooseReplacement {
         index: usize,
+    },
+    /// CR 616.1: remember the complete ordering or plain optional decision.
+    ChooseReplacementAndRemember {
+        choice: ReplacementAutoChoice,
+    },
+    /// Forget only the authenticated actor's replacement preferences.
+    SetReplacementAutoChoice {
+        selector: Option<ReplacementAutoChoiceId>,
     },
     /// CR 614.12a: choose which eligible opponent controls an entering
     /// permanent. This is distinct from CR 616 replacement ordering.
@@ -1075,6 +1083,14 @@ pub enum PriorityYieldOp {
         target: YieldTarget,
     },
     ClearAll,
+}
+
+/// CR 616.1: a complete ordering and an optional branch are distinct decisions.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum ReplacementAutoChoice {
+    Order { order: Vec<usize> },
+    Optional { index: usize },
 }
 
 /// CR 603.5: The mutation a `GameAction::SetMayTriggerAutoChoice` performs on the
@@ -1854,6 +1870,7 @@ impl GameAction {
                 | GameAction::SetPriorityPassingMode { .. }
                 | GameAction::SetPriorityYield { .. }
                 | GameAction::SetMayTriggerAutoChoice { .. }
+                | GameAction::SetReplacementAutoChoice { .. }
                 | GameAction::SetTriggerOrderTemplate { .. }
                 | GameAction::ReorderHand { .. }
         )
@@ -1947,6 +1964,8 @@ impl GameAction {
             | Self::SelectCoinFlips { .. }
             | Self::SelectDieRolls { .. }
             | Self::ChooseReplacement { .. }
+            | Self::ChooseReplacementAndRemember { .. }
+            | Self::SetReplacementAutoChoice { .. }
             | Self::ChooseEntryController { .. }
             | Self::OrderTriggers { .. }
             | Self::OrderCostReductions { .. }
@@ -2287,6 +2306,7 @@ impl GameAction {
             | GameAction::SelectTargets { .. }
             | GameAction::ChooseTarget { .. }
             | GameAction::ChooseReplacement { .. }
+            | GameAction::ChooseReplacementAndRemember { .. }
             | GameAction::ChooseEntryController { .. }
             | GameAction::OrderTriggers { .. }
             | GameAction::OrderCostReductions { .. }
@@ -2345,6 +2365,7 @@ impl GameAction {
             | GameAction::SetPriorityPassingMode { .. }
             | GameAction::SetPriorityYield { .. }
             | GameAction::SetMayTriggerAutoChoice { .. }
+                | GameAction::SetReplacementAutoChoice { .. }
             | GameAction::SetTriggerOrderTemplate { .. }
             | GameAction::AssignCombatDamage { .. }
             | GameAction::AssignBlockerDamage { .. }

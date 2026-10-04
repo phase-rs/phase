@@ -6591,6 +6591,36 @@ fn static_spells_cost_less() {
     ));
 }
 
+// Cemetery Prowler #6898: "for each card type they share with cards exiled with ~"
+// must lower to a SharedCardTypes(ExiledBySource) multiplier (the spell/exile
+// intersection), NOT an ObjectCount over every card or a population-only
+// DistinctCardTypes. Before the fix the "they share with" separator routed the
+// whole clause into an ObjectCount over a bare "Card" filter (no zone).
+#[test]
+fn static_spells_cost_less_for_each_card_type_shared_with_exiled() {
+    let def = parse_static_line(
+        "Spells you cast cost {1} less to cast for each card type they share with cards exiled with this creature.",
+    )
+    .unwrap();
+    let StaticMode::ModifyCost {
+        mode: CostModifyMode::Reduce,
+        dynamic_count: Some(QuantityRef::SharedCardTypes { source }),
+        ..
+    } = &def.mode
+    else {
+        panic!("expected Reduce + SharedCardTypes, got {:?}", def.mode);
+    };
+    assert_eq!(source, &CardTypeSetSource::ExiledBySource);
+    assert!(matches!(
+        def.mode,
+        StaticMode::ModifyCost {
+            amount: ManaCost::Cost { generic: 1, .. },
+            spell_filter: None,
+            ..
+        }
+    ));
+}
+
 // CR 118.7b/c/d: "This effect reduces only the amount of colored mana you pay"
 // is a card-level override of the default spillover, so it must survive parsing
 // as a `CostReductionReach` on the emitted reducer. Covers all seven printed
@@ -15503,6 +15533,67 @@ fn persistent_exile_play_permission_evendo_sacrificed_permanent_gate() {
         "full Oracle dispatch must route Evendo's line to the same static, got {:?}",
         parsed.statics
     );
+}
+
+/// CR 607.2a + CR 609.4b: "the exiled card" names the pool the card's own
+/// trigger exiled into (Null Summoner), the same pool as "cards exiled with ~".
+/// The threshold gate and the any-type concession ride the permission.
+#[test]
+fn persistent_exile_cast_permission_the_exiled_card_null_summoner() {
+    let card_text = "When this creature enters, if you cast it, target opponent reveals their hand. You choose a nonland card from it. Exile that card.\nThreshold — As long as there are seven or more cards in your graveyard, you may cast the exiled card, and mana of any type can be spent to cast that spell.";
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        card_text,
+        "Null Summoner",
+        &[],
+        &["Creature".to_string()],
+        &["Phyrexian".to_string(), "Wizard".to_string()],
+    );
+    let [def] = parsed.statics.as_slice() else {
+        panic!("expected exactly one static, got {:?}", parsed.statics);
+    };
+    assert_eq!(
+        def.mode,
+        StaticMode::ExileCastPermission {
+            frequency: CastFrequency::Unlimited,
+            play_mode: CardPlayMode::Cast,
+            cost: ExileCastCost::PayNormalCost,
+            pool: ExileCardPool::Persistent,
+            timing: ExileCastTiming::AnyTime,
+            mana_spend_permission: Some(crate::types::ability::ManaSpendPermission::AnyTypeOrColor),
+            grants_flash: false,
+            extra_cost: None,
+            enters_with_counter: None,
+            grantee: crate::types::statics::ExileCastGrantee::SourceController,
+        }
+    );
+    assert!(
+        matches!(
+            def.condition,
+            Some(StaticCondition::QuantityComparison {
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 7 },
+                ..
+            })
+        ),
+        "the threshold gate must stay on the permission, got {:?}",
+        def.condition
+    );
+
+    // The plural names the same pool.
+    assert!(matches!(
+        parse_static_line("You may cast the exiled cards.").map(|d| d.mode),
+        Some(StaticMode::ExileCastPermission {
+            pool: ExileCardPool::Persistent,
+            ..
+        })
+    ));
+
+    // A possessive object is not the pool: the "'s copy" tail is left over and
+    // the permission declines (green on main too, where the anchor was absent).
+    assert!(!matches!(
+        parse_static_line("You may cast the exiled card's copy.").map(|d| d.mode),
+        Some(StaticMode::ExileCastPermission { .. })
+    ));
 }
 
 /// CR 601.3f + CR 305.1: The "you may look at cards exiled with ~, and you may

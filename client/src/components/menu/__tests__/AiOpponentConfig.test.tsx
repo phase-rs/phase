@@ -225,4 +225,45 @@ describe("AiOpponentConfig — bracket filter", () => {
       expect(screen.getByRole("button", { name: /^Deck$/i })).toHaveTextContent(/Random \(2\)/);
     });
   });
+
+  it("warns when the filter matches nothing but keeps Start available (soft gate)", async () => {
+    const user = userEvent.setup();
+    render(<AiOpponentConfig selectedFormat="Commander" opponentCount={1} />);
+
+    // No bracket-5 candidate in the pool — the filter matches nothing.
+    await user.click(screen.getByRole("button", { name: "5 cEDH" }));
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("No decks match the selected brackets. Random AI will draw from all legal decks."),
+      ).toBeInTheDocument();
+    });
+  });
+
+  it("shows no warning when the filter matches at least one deck", async () => {
+    const user = userEvent.setup();
+    render(<AiOpponentConfig selectedFormat="Commander" opponentCount={1} />);
+
+    await user.click(screen.getByRole("button", { name: "2 Core" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /^Deck$/i })).toHaveTextContent(/Random \(1\)/);
+    });
+    expect(
+      screen.queryByText("No decks match the selected brackets. Random AI will draw from all legal decks."),
+    ).not.toBeInTheDocument();
+  });
+
+  it("warns with the cEDH text when cEDH mode has no bracket-5 decks", async () => {
+    const user = userEvent.setup();
+    render(<AiOpponentConfig selectedFormat="Commander" opponentCount={1} />);
+
+    await user.click(screen.getByRole("switch", { name: /cEDH mode/i }));
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("No bracket-5 decks available. Random AI seats cannot be filled."),
+      ).toBeInTheDocument();
+    });
+  });
 });

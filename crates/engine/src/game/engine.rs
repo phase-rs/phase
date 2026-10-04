@@ -16,12 +16,12 @@ use crate::types::events::{BendingType, ContestRound, GameEvent, ManaTapState};
 use crate::types::game_state::{
     ActionResult, AssistState, AutoMayChoice, AutoPassMode, AutoPassRequest, CastOfferKind,
     CastingVariant, ConvokeMode, CostResume, GameState, LandPlayRecord, LoopDetectionMode,
-    ManaAbilityResume, MayTriggerAutoChoiceKey, PayCostKind, PendingCostMoveResume,
-    PendingCounterPostAction, PendingEffectResolved, PersistedRestoreError, PriorityPassingMode,
-    ResolveAllConsentParticipant, ResolveAllConsentRun, ResolveAllPrioritySnapshot, RetargetScope,
-    RetargetSlotAddress, StackEntry, StackEntryKind, StackResolutionAutoPassOverlay,
-    StackResolutionBudget, StackResolutionEntryFence, StackResolutionPolicy,
-    StackResolutionSession, WaitingFor,
+    ManaAbilityResume, MayTriggerAutoChoiceKey, PayCostKind, PendingCostMoveCompletion,
+    PendingCostMoveResume, PendingCounterPostAction, PendingEffectResolved, PersistedRestoreError,
+    PriorityPassingMode, ResolveAllConsentParticipant, ResolveAllConsentRun,
+    ResolveAllPrioritySnapshot, RetargetScope, RetargetSlotAddress, StackEntry, StackEntryKind,
+    StackResolutionAutoPassOverlay, StackResolutionBudget, StackResolutionEntryFence,
+    StackResolutionPolicy, StackResolutionSession, WaitingFor,
 };
 use crate::types::identifiers::{CardId, DelayedTriggerOrigin, ObjectId, ObjectIncarnationRef};
 use crate::types::match_config::MatchType;
@@ -70,6 +70,7 @@ use super::public_state::{
     bump_state_revision, finalize_display_state, finalize_public_state, finalize_rules_state,
     mark_public_state_all_dirty, mark_public_state_from_events, sync_waiting_for,
 };
+use super::replacement;
 use super::room;
 use super::sba;
 use super::splice;
@@ -77,7 +78,7 @@ use super::transform;
 use super::triggers;
 use super::turn_control;
 use super::turns;
-use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
+
 #[cfg(test)]
 use super::zones;
 
@@ -1556,7 +1557,14 @@ fn apply_action_boundary_core(
         // transaction module remains the sole commit/abort authority.
         payment_transaction::apply_pending_action(state, authenticated_actor, action)
     } else {
-        apply_action(state, semantic_owner, action, stack_resolution_limit)
+        // CR 723.5b: controlling another player's decisions does not confer
+        // authority over their UI preferences or submitter-scoped capabilities.
+        let reducer_actor = if action.is_submitter_scoped() {
+            authenticated_actor
+        } else {
+            semantic_owner
+        };
+        apply_action(state, reducer_actor, action, stack_resolution_limit)
     } {
         Ok(result) => result,
         // CR 601.2h + CR 733.1: a typed reversal, restored below like any other.
@@ -7742,6 +7750,7 @@ fn seed_representative_fodder(
             display_source: crate::game::game_object::DisplaySource::Token,
             printed_ref: None,
             token_image_ref: None,
+            token_art: None,
             extra_keywords: vec![],
             additional_modifications: vec![],
             tapped,
@@ -8474,7 +8483,6 @@ pub(crate) fn drain_pending_cost_move_resume(
                     | PendingCostMoveResume::ReplacementMayCost { .. }
                     | PendingCostMoveResume::CollectEvidencePayment { .. }
                     | PendingCostMoveResume::UnlessBouncePayment { .. }
-                    | PendingCostMoveResume::DelveManaPayment { .. }
                     | PendingCostMoveResume::ManaAbilityPayment { .. }
                     | PendingCostMoveResume::ActivationMillPayment { .. }
                     | PendingCostMoveResume::LoyaltyActivation { .. }
@@ -8500,7 +8508,6 @@ pub(crate) fn drain_pending_cost_move_resume(
                     | PendingCostMoveResume::Foretell { .. }
                     | PendingCostMoveResume::CollectEvidencePayment { .. }
                     | PendingCostMoveResume::UnlessBouncePayment { .. }
-                    | PendingCostMoveResume::DelveManaPayment { .. }
                     | PendingCostMoveResume::ManaAbilityPayment { .. }
                     | PendingCostMoveResume::ActivationMillPayment { .. }
                     | PendingCostMoveResume::LoyaltyActivation { .. }
@@ -8511,8 +8518,10 @@ pub(crate) fn drain_pending_cost_move_resume(
         CostMoveDrainBoundary::PriorityBoundary => matches!(
             state.pending_cost_move_resume,
             Some(
-                PendingCostMoveResume::DelveManaPayment { .. }
-                    | PendingCostMoveResume::ManaAbilityPayment { .. }
+                PendingCostMoveResume::Cast {
+                    completion: PendingCostMoveCompletion::FinalizeDelvedCast { .. },
+                    ..
+                } | PendingCostMoveResume::ManaAbilityPayment { .. }
             )
         ),
     };
@@ -8557,11 +8566,6 @@ pub(crate) fn drain_pending_cost_move_resume(
         Some(PendingCostMoveResume::UnlessBouncePayment { .. })
     ) {
         engine_payment_choices::resume_unless_bounce_cost_move(state, events)?
-    } else if matches!(
-        state.pending_cost_move_resume,
-        Some(PendingCostMoveResume::DelveManaPayment { .. })
-    ) {
-        resume_delve_mana_payment(state)
     } else if matches!(
         state.pending_cost_move_resume,
         Some(PendingCostMoveResume::ManaAbilityPayment { .. })
@@ -8911,40 +8915,6 @@ fn drain_pending_deferred_life_cost_resume(
         state.pending_deferred_life_cost_resume = Some(resume_for_restore);
     }
     result
-}
-
-/// CR 702.66a: Finish one Delve payment after its graveyard-to-exile cost move
-/// was delivered or fully replaced. The move's `TrackBySource` delivery tail
-/// records only cards actually delivered to exile; this typed root restores the
-/// exact Delve payment prompt and its one-generic cost reduction without
-/// finalizing the pending cast.
-pub(super) fn resume_delve_mana_payment(state: &mut GameState) -> WaitingFor {
-    let Some(PendingCostMoveResume::DelveManaPayment { player, fuel_id }) =
-        state.pending_cost_move_resume.take()
-    else {
-        unreachable!("delve cost-move resume requires its typed continuation")
-    };
-    // CR 118.3a: The generic-only marker is consumed by the shared mana-payment
-    // finalizer and cannot be pinned or spent on a colored cost.
-    let _ = state.add_mana_to_pool(
-        player,
-        crate::types::mana::ManaUnit::convoke_payment(
-            crate::types::mana::ManaType::Colorless,
-            fuel_id,
-        ),
-    );
-    let convoke_mode = state.pending_cast.as_ref().and_then(|pending| {
-        super::casting::spell_tap_payment_mode_for(
-            state,
-            player,
-            pending.object_id,
-            pending.casting_variant == CastingVariant::Fuse,
-        )
-    });
-    WaitingFor::ManaPayment {
-        player,
-        convoke_mode: convoke_mode.or(Some(ConvokeMode::Delve)),
-    }
 }
 
 /// Decision emitted by the auto-pass loop's per-iteration check.
@@ -10699,6 +10669,15 @@ fn apply_action(
         return Ok(ActionResult::applied(vec![], state.waiting_for.clone()));
     }
 
+    if let GameAction::SetReplacementAutoChoice { selector } = &action {
+        // The stored opaque selector names the record across earlier removals.
+        // Unknown selectors and records belonging to another actor are preserved.
+        state.replacement_auto_choices.retain(|record| {
+            record.key.player != actor || selector.as_ref().is_some_and(|id| record.id != *id)
+        });
+        return Ok(ActionResult::applied(vec![], state.waiting_for.clone()));
+    }
+
     // CR 603.5: SetMayTriggerAutoChoice propagates the actor's stored "don't ask
     // again" auto-choices for optional ("may") triggers. Pure preference state,
     // routed by `actor`, and — like SetPriorityYield — handled before the
@@ -11026,6 +11005,112 @@ fn apply_action(
     )
 }
 
+/// CR 502.3: completes the untap step after an untap-choice or untap-subset
+/// answer, with the permanents chosen not to untap, and returns the waiting
+/// state that follows. A deferred leave (CR 500.1 + CR 500.8: the step is the
+/// final step of a unit added after the cleanup step, and leaving it ends the
+/// turn while a resolution is live) must not run the untap again. Like the
+/// deferred cleanup-discard answer, it settles a resolution that has finished
+/// (a completed resolution-cast marker, then the carrier) and retries the
+/// guarded leave once, returning the retry's own waiting state when the leave
+/// commits. A carrier it cannot settle keeps the provisional Priority window;
+/// the enclosing action's post-action pipeline then runs at that window, and
+/// the step is left when the players next pass priority. CR 502.4 gives no
+/// player priority during the untap step; this window is the handler's
+/// departure from it.
+fn untap_completion_waiting_for(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    chosen_not_to_untap: HashSet<ObjectId>,
+) -> WaitingFor {
+    // CR 500.1 + CR 500.8: the untap step's leave can end the turn, and the
+    // next turn begins from a settled Priority window
+    // (`turns::start_next_turn`), so the answered prompt is replaced by the
+    // active player's provisional window first. CR 502.4: that window is not
+    // handed to a player here. The subset prompt, or the waiting state of the
+    // run after a committed leave, replaces it; a deferred leave goes to
+    // `settle_deferred_phase_transition`, which synchronizes the same window
+    // and keeps it only for a carrier it cannot settle.
+    sync_waiting_for(
+        state,
+        &WaitingFor::Priority {
+            player: state.active_player,
+        },
+    );
+    match turns::begin_untap_or_subset_prompt(state, events, chosen_not_to_untap) {
+        turns::UntapCompletion::ChooseSubset(prompt) => *prompt,
+        // CR 500.8 + CR 500.9: a later step the interpreter reaches without
+        // priority (another added untap step, or the cleanup step after a
+        // step added after the end step) can defer its own transition. The
+        // waiting state standing then is this answered prompt, which must not
+        // be offered again, so that deferral is settled here too.
+        turns::UntapCompletion::Advanced => auto_advance_settling_deferral(state, events),
+        turns::UntapCompletion::LeaveDeferred => settle_deferred_phase_transition(state, events),
+    }
+}
+
+/// Settles a transition the turn interpreter deferred at an untap step's
+/// turn-ending leave or at the cleanup step's entry, and retries it once. Its
+/// callers are the untap-choice answers (see [`untap_completion_waiting_for`])
+/// and, through [`auto_advance_settling_deferral`], the loop-collapse and
+/// cleanup-discard answers in `engine_resolution_choices` and the resume a
+/// completed phase entry owes
+/// (`turns::resume_deferred_step_triggers`). A carrier it cannot settle keeps the
+/// provisional Priority window at the step where the transition deferred. In
+/// an untap step, that departs from CR 502.4. At the cleanup step's entry,
+/// before the step's actions, it departs from CR 514.3 ("Normally, no player
+/// receives priority during the cleanup step"); that is the window the
+/// priority reducer already leaves when a pass defers there.
+pub(super) fn settle_deferred_phase_transition(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> WaitingFor {
+    // The settlement calls below act only at a Priority boundary, so
+    // synchronize the provisional window first, as the cleanup-discard answer
+    // does. Unlike that answer, the handler runs no post-action pipeline
+    // before the retry: CR 502.4 holds the untap step's triggers, and CR 704.3
+    // checks state-based actions, only when a player would receive priority.
+    let provisional = WaitingFor::Priority {
+        player: state.active_player,
+    };
+    sync_waiting_for(state, &provisional);
+    // CR 608.2g + CR 502.4: retire a completed resolution-cast marker and its
+    // carrier, as the pipeline's settlement step would, but leave the triggers
+    // it parked held for the next time a player would receive priority.
+    engine_priority::settle_pending_resolution_completion(state);
+    // CR 608.2c: a carrier whose resolution has finished settles before the
+    // transition is retried.
+    settle_resolving_stack_entry_after_continuation_resume(state);
+    if state.stack.is_empty() && !turns::phase_transition_requires_settlement(state) {
+        // CR 514.1 + CR 514.2: a transition deferred as the cleanup step began
+        // came before the step's actions, so the interpreter resumes the step.
+        // Any other deferred step has performed its actions and is left.
+        if state.phase == Phase::Cleanup {
+            return turns::auto_advance(state, events);
+        }
+        match turns::advance_phase_once(state, events) {
+            turns::AdvancePhaseOnce::Deferred => {}
+            turns::AdvancePhaseOnce::Entry(_) | turns::AdvancePhaseOnce::Skipped => {
+                return turns::auto_advance(state, events);
+            }
+        }
+    }
+    provisional
+}
+
+/// Runs the turn interpreter and, when it defers a transition, settles and
+/// retries that transition through [`settle_deferred_phase_transition`]
+/// instead of returning the waiting state that was standing before the run.
+pub(super) fn auto_advance_settling_deferral(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> WaitingFor {
+    match turns::auto_advance_reporting_deferral(state, events) {
+        (waiting_for, false) => waiting_for,
+        (_, true) => settle_deferred_phase_transition(state, events),
+    }
+}
+
 fn apply_non_priority_pass_action(
     state: &mut GameState,
     actor: PlayerId,
@@ -11268,11 +11353,7 @@ fn apply_non_priority_pass_action(
                     && mana_sources::object_mana_ability_penalty(state, source_id, &ability_def)
                         .is_undoable()
                 {
-                    state
-                        .lands_tapped_for_mana
-                        .entry(*player)
-                        .or_default()
-                        .push(source_id);
+                    mana_sources::record_undoable_mana_tap(state, *player, source_id, &events);
                 }
                 // P7 v3 (CR 605.3b + CR 732.2a): this off-stack activation is the opener of a
                 // multi-activation loop period. The shared recorder also owns semantic
@@ -13642,7 +13723,7 @@ fn apply_non_priority_pass_action(
                 object_id,
                 mana_type,
             },
-        ) if state.objects.get(&object_id).is_some_and(|object| object.is_delve_eligible(*player))
+        ) if state.is_delve_selectable(*player, object_id)
             && state.pending_cast.as_ref().is_some_and(|pending| {
                 super::casting::spell_has_delve_payment_for(
                     state,
@@ -13657,28 +13738,30 @@ fn apply_non_priority_pass_action(
                     "Delve can only pay generic mana".to_string(),
                 ));
             }
-            let spell_id = state
-                .pending_cast
-                .as_ref()
-                .map(|pending| pending.object_id)
-                .ok_or_else(|| {
-                    EngineError::InvalidAction("No pending cast for delve".to_string())
-                })?;
-            state.pending_cost_move_resume = Some(PendingCostMoveResume::DelveManaPayment {
+            // CR 601.2h: the card stays in the graveyard; it is exiled when the
+            // total cost is paid. The marker stands in for the generic mana it pays.
+            let pending = state.pending_cast.as_mut().ok_or_else(|| {
+                EngineError::InvalidAction("No pending cast for delve".to_string())
+            })?;
+            pending.delved_cards.push(object_id);
+            let _ = state.add_mana_to_pool(
                 player,
-                fuel_id: object_id,
+                crate::types::mana::ManaUnit::convoke_payment(
+                    crate::types::mana::ManaType::Colorless,
+                    object_id,
+                ),
+            );
+            let convoke_mode = state.pending_cast.as_ref().and_then(|pending| {
+                super::casting::spell_tap_payment_mode_for(
+                    state,
+                    player,
+                    pending.object_id,
+                    pending.casting_variant == CastingVariant::Fuse,
+                )
             });
-            match zone_pipeline::move_object(
-                state,
-                ZoneMoveRequest::cost(object_id, Zone::Exile, spell_id)
-                    .track_exiled_by_source(),
-                &mut events,
-            ) {
-                ZoneMoveResult::Done => resume_delve_mana_payment(state),
-                ZoneMoveResult::NeedsChoice(_) => state.waiting_for.clone(),
-                ZoneMoveResult::NeedsAuraAttachmentChoice => {
-                    unreachable!("a delve cost move to exile cannot require an Aura attachment")
-                }
+            WaitingFor::ManaPayment {
+                player,
+                convoke_mode: convoke_mode.or(Some(ConvokeMode::Delve)),
             }
         }
         // CR 702.51a / Waterbend: Tap a creature or artifact to pay mana.
@@ -13910,14 +13993,9 @@ fn apply_non_priority_pass_action(
             } else {
                 // CR 502.3: Declines are recorded; now either surface the
                 // required bounded `ChooseUntapSubset` prompt (a MaxUntapPerType
-                // cap is over its limit after declines) or untap + advance. The
-                // bridge advances the phase itself when it untaps, so only
-                // resume `auto_advance` when no subset prompt was raised.
+                // cap is over its limit after declines) or untap + advance.
                 let skipped: std::collections::HashSet<ObjectId> = declined.into_iter().collect();
-                match turns::begin_untap_or_subset_prompt(state, &mut events, skipped) {
-                    Some(prompt) => prompt,
-                    None => turns::auto_advance(state, &mut events),
-                }
+                untap_completion_waiting_for(state, &mut events, skipped)
             }
         }
         // CR 502.3: The active player directly determines which permanents untap
@@ -13965,10 +14043,7 @@ fn apply_non_priority_pass_action(
                     skipped.insert(*id);
                 }
             }
-            match turns::begin_untap_or_subset_prompt(state, &mut events, skipped) {
-                Some(prompt) => prompt,
-                None => turns::auto_advance(state, &mut events),
-            }
+            untap_completion_waiting_for(state, &mut events, skipped)
         }
         // CR 508.1g + CR 701.43d: the active player decides whether to pay the
         // optional "exert as it attacks" cost for the prompted attacker, one
@@ -14039,6 +14114,18 @@ fn apply_non_priority_pass_action(
                 waiting_for
             } else {
                 engine_combat::finish_declare_attackers(state, &mut events, false)?
+            }
+        }
+        (WaitingFor::ReplacementChoice { .. }, GameAction::ChooseReplacementAndRemember { choice }) => {
+            // CR 616.1: validate the full response and eligibility before any mutation.
+            if !replacement::validate_remembered_replacement(state, &choice) {
+                return Err(EngineError::InvalidAction("Invalid remembered replacement choice".into()));
+            }
+            if let Some(waiting_for) = casting_costs::abandon_stale_resolution_sacrifice_cursor(state, &mut events) {
+                waiting_for
+            } else {
+                let index = replacement::remember_replacement_choice(state, choice);
+                engine_replacement::handle_replacement_choice(state, index, &mut events)?
             }
         }
         (WaitingFor::ReplacementChoice { .. }, GameAction::ChooseReplacement { index }) => {
@@ -15420,17 +15507,32 @@ fn apply_non_priority_pass_action(
                     // `DistributeAmong` action would then fall through to the
                     // resolution-time continuation branch below instead of being cleanly
                     // rejected.
+                    let mut pending = pending;
                     let pending_for_restore = pending.clone();
-                    let ability = pending.ability.clone();
-                    let cost = pending.cost.clone();
-                    match casting_costs::finish_pending_cast_cost_or_pay(
+                    // CR 601.2h + CR 702.66a: the delve exile is paid with the rest of the
+                    // total cost, after the division is announced.
+                    let paid = casting_costs::pay_delve_after_distribution(
                         state,
                         p,
-                        *pending,
-                        *ability,
-                        cost,
+                        &mut pending,
                         &mut events,
-                    ) {
+                    )
+                    .and_then(|parked| match parked {
+                        Some(waiting_for) => Ok(waiting_for),
+                        None => {
+                            let ability = pending.ability.clone();
+                            let cost = pending.cost.clone();
+                            casting_costs::finish_pending_cast_cost_or_pay(
+                                state,
+                                p,
+                                *pending,
+                                *ability,
+                                cost,
+                                &mut events,
+                            )
+                        }
+                    });
+                    match paid {
                         Ok(waiting_for) => waiting_for,
                         Err(err) => {
                             state.pending_cast = Some(pending_for_restore);
@@ -26009,7 +26111,7 @@ mod cost_move_drain_priority_boundary_tests {
 
     /// `engine_payment_choices::resume_counter_addition_unless_payment` maps
     /// `CostMoveDrainBoundary::PriorityBoundary` to `unreachable!`, and nothing but
-    /// this eligibility table makes that true: it admits only `DelveManaPayment` and
+    /// this eligibility table makes that true: it admits only a Delve-commit `Cast` and
     /// `ManaAbilityPayment` at that boundary. Nothing else in the crate pinned that
     /// premise, so widening the table would leave the suite green and abort a live
     /// session instead.

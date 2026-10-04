@@ -819,7 +819,6 @@ describe("WebSocketAdapter", () => {
         default_deck_copy_limit: { type: "UpTo", data: 1 },
         uses_commander: true,
         allow_debug_actions: false,
-        allow_experimental_dungeons: false,
       };
       const nativeAdapter = new WebSocketAdapter(
         "native-engine",
@@ -938,7 +937,6 @@ describe("WebSocketAdapter", () => {
         default_deck_copy_limit: { type: "UpTo", data: 1 },
         uses_commander: true,
         allow_debug_actions: false,
-        allow_experimental_dungeons: false,
       };
       const pregameAdapter = new WebSocketAdapter(
         "native-engine",
@@ -1883,6 +1881,19 @@ describe("WebSocketAdapter", () => {
           data: { action: { type: "PassPriority" } },
         }),
       );
+    });
+
+    it("sends only the compact replacement selector and settles ActionNoOp", async () => {
+      const selector = `r${"a".repeat(64)}`;
+      const action: GameAction = { type: "SetReplacementAutoChoice", data: { selector } };
+      ws.send.mockClear();
+      const pending = adapter.submitAction(action, 0);
+      expect(JSON.parse(ws.send.mock.lastCall![0] as string)).toEqual({
+        type: "Action",
+        data: { action: { type: "SetReplacementAutoChoice", data: { selector } } },
+      });
+      ws.dispatchSynthetic("message", JSON.stringify({ type: "ActionNoOp" }));
+      await pending;
     });
 
     it.each(["Card", "Token"] as const)(

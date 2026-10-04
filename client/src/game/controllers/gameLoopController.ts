@@ -113,7 +113,7 @@ export function createGameLoopController(config: GameLoopConfig): GameLoopContro
       // escapes as an unhandled rejection: a P2P guest sitting in auto-pass now
       // rejects on `action_rejected` / `action_failed` / host disconnect AND on
       // the guest adapter's submission timeout (`SUBMISSION_TIMEOUT_MS`).
-      void dispatchAction({ type: "PassPriority" }).catch(() => undefined);
+      void dispatchAction({ type: "PassPriority" }, getPlayerId(), { automated: true }).catch(() => undefined);
     }, beat);
   }
 

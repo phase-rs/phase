@@ -1817,30 +1817,6 @@ pub(crate) fn record_and_emit_entry_from_no_zone(
     Some(record)
 }
 
-/// CR 601.2 + CR 733.1: Restore an object while reversing an incomplete action.
-/// This intentionally uses the raw mover rather than the replacement-consulting
-/// pipeline: an undone action does not apply replacement effects, but preserves
-/// the prior raw move's event and ordering behavior.
-pub(crate) fn restore_after_rollback(
-    state: &mut GameState,
-    object_id: ObjectId,
-    to: Zone,
-    events: &mut Vec<GameEvent>,
-) {
-    move_to_zone(state, object_id, to, events);
-    // CR 601.2 + CR 733.1: reversing an incomplete action needs full
-    // reconciliation regardless of which mark move_to_zone's own
-    // axis-gated internal logic picked — an undone action is rare
-    // (not gameplay-hot) and can leave board state in a shape the
-    // entry-only incremental-flush safety classifier was never designed to
-    // reason about, so there is no perf case for trusting it here. This is
-    // conservatively at-or-above today's marking, not byte-for-byte
-    // identical to it: some rollback transitions `move_to_zone` marks
-    // nothing for today (e.g. Stack->Library) become `Full` here, which is
-    // strictly safe, never a behavior change a test could observe as wrong.
-    crate::game::layers::mark_layers_full(state);
-}
-
 /// CR 603.10a: Record that every member of `group` left the battlefield in the
 /// SAME simultaneous event, so leaves-the-battlefield / dies observers that are
 /// themselves in the group observe each other via last-known information (the
@@ -5659,43 +5635,6 @@ mod tests {
                 )
             }),
             "SBA zone movement must still publish the unattach event for triggers"
-        );
-    }
-
-    /// pod-lab loop-3 Q5, row 5: `restore_after_rollback` targeting the
-    /// battlefield must still force a full layers re-evaluation
-    /// unconditionally — CR 601.2 + CR 733.1, reversing an incomplete action
-    /// is rare (not gameplay-hot) and can leave board state in a shape the
-    /// entry-only incremental-flush safety classifier was never designed to
-    /// reason about, so there is no perf case for trusting `move_to_zone`'s
-    /// own (now axis-gated) internal decision here. Today's only production
-    /// caller targets Graveyard, not Battlefield, so this exercises the
-    /// function's general contract directly rather than replaying an
-    /// existing call site.
-    #[test]
-    fn restore_after_rollback_to_battlefield_marks_full() {
-        let mut state = setup();
-        let id = create_object(
-            &mut state,
-            CardId(1),
-            PlayerId(0),
-            "Rolled Back Spell".to_string(),
-            Zone::Stack,
-        );
-        state.layers_dirty = crate::types::game_state::LayersDirty::Clean;
-
-        let mut events = Vec::new();
-        restore_after_rollback(&mut state, id, Zone::Battlefield, &mut events);
-
-        assert_eq!(state.objects[&id].zone, Zone::Battlefield);
-        assert!(
-            matches!(
-                state.layers_dirty,
-                crate::types::game_state::LayersDirty::Full
-            ),
-            "restore_after_rollback targeting the battlefield must \
-             unconditionally force a full re-evaluation, got {:?}",
-            state.layers_dirty
         );
     }
 }

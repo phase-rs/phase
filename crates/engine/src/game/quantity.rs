@@ -72,6 +72,13 @@ pub struct QuantityContext {
     /// (`resolve_quantity_with_targets_and_damage_source`); `None` in every
     /// non-batch context (a null read → 0, fail-closed).
     pub damage_source: Option<ObjectId>,
+    /// CR 205.2a + CR 607.2a: The spell being cost-modified, whose own card
+    /// types are intersected against a `QuantityRef::SharedCardTypes` population
+    /// (Cemetery Prowler: "for each card type they share with cards exiled with
+    /// ~"). `None` outside cast-time cost-modifier resolution. A
+    /// [`QuantityRef::SharedCardTypes`] read without this authority fails closed
+    /// to zero rather than treating the static source as the grammatical subject.
+    pub spell: Option<ObjectId>,
     /// CR 121.2a + CR 614.1a: The amount carried by the proposed event a
     /// replacement condition is being evaluated against — the draw count a
     /// count-form antecedent ("would draw two or more cards") compares. Set
@@ -641,6 +648,7 @@ pub(crate) fn source_defending_player_for_context_for_test(
             scoped_player: None,
             damage_source: None,
             event_amount: None,
+            spell: None,
         },
     )
 }
@@ -684,6 +692,7 @@ pub fn resolve_quantity(
             scoped_player: None,
             damage_source: None,
             event_amount: None,
+            spell: None,
         },
     )
 }
@@ -1644,6 +1653,35 @@ pub fn resolve_quantity_with_recipient(
             scoped_player: None,
             damage_source: None,
             event_amount: None,
+            spell: None,
+        },
+    )
+}
+
+/// CR 205.2a + CR 607.2a: Resolve a quantity for a cast-time cost modifier,
+/// carrying the spell being cast as the `SharedCardTypes` intersection subject.
+/// `source_id` remains the static's source permanent (the exile link anchor),
+/// while `spell_id` supplies the spell-side card types.
+pub fn resolve_quantity_with_spell(
+    state: &GameState,
+    expr: &QuantityExpr,
+    controller: PlayerId,
+    source_id: ObjectId,
+    spell_id: ObjectId,
+) -> i32 {
+    resolve_quantity_with_ctx(
+        state,
+        expr,
+        controller,
+        QuantityContext {
+            entering: None,
+            source: source_id,
+            trigger_source: None,
+            recipient: None,
+            scoped_player: None,
+            damage_source: None,
+            event_amount: None,
+            spell: Some(spell_id),
         },
     )
 }
@@ -1688,6 +1726,9 @@ pub(crate) fn quantity_expr_uses_recipient(expr: &QuantityExpr) -> bool {
             | QuantityRef::ObjectCountDistinct { filter, .. }
             | QuantityRef::ObjectCountBySharedQuality { filter, .. }
             | QuantityRef::DistinctCardTypes {
+                source: CardTypeSetSource::Objects { filter },
+            }
+            | QuantityRef::SharedCardTypes {
                 source: CardTypeSetSource::Objects { filter },
             }
             | QuantityRef::DistinctSubtypes {
@@ -2031,6 +2072,7 @@ pub(crate) fn quantity_expr_missing_resolution_only_referent(
             scoped_player: ability.scoped_player,
             damage_source: None,
             event_amount: None,
+            spell: None,
         };
         !resolution_only_scope_referent_present(state, scope, ctx, &ability.targets, ability)
     }
@@ -2176,6 +2218,7 @@ fn quantity_ref_uses_unspent_mana(qty: &QuantityRef) -> bool {
         | QuantityRef::TargetZoneCardCount { .. }
         | QuantityRef::Devotion { .. }
         | QuantityRef::DistinctCardTypes { .. }
+        | QuantityRef::SharedCardTypes { .. }
         | QuantityRef::DistinctSubtypes { .. }
         | QuantityRef::CardsExiledBySource
         | QuantityRef::ExiledCardPower { .. }
@@ -2474,6 +2517,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         // "does this entered object join the population?", which is what keeps
         // the two functions' `false` arms aligned.
         QuantityRef::DistinctCardTypes { source }
+        | QuantityRef::SharedCardTypes { source }
         | QuantityRef::DistinctSubtypes { source, .. }
         | QuantityRef::DistinctColorsAmong { source } => {
             characteristic_source_reads_object_count(source)
@@ -2722,6 +2766,7 @@ fn quantity_ref_characteristic_reads(qty: &QuantityRef, depth: u32) -> Character
         // CR 205.2a / CR 205.3: the object-filter and journal-filter sources read
         // a live filter; the zone / linked-exile / tracked-set sources do not.
         QuantityRef::DistinctCardTypes { source }
+        | QuantityRef::SharedCardTypes { source }
         | QuantityRef::DistinctSubtypes { source, .. } => {
             CharacteristicKinds::CARD_TYPES.union(characteristic_source_reads_at(source, depth))
         }
@@ -3017,6 +3062,7 @@ fn entered_object_perturbs_quantity_ref(
             matches_target_filter(state, entered.id, filter, ctx)
         }
         QuantityRef::DistinctCardTypes { source }
+        | QuantityRef::SharedCardTypes { source }
         | QuantityRef::DistinctSubtypes { source, .. }
         | QuantityRef::DistinctColorsAmong { source } => {
             characteristic_source_perturbed_by_entry(state, entered, ctx, source)
@@ -3302,6 +3348,7 @@ pub(crate) fn resolve_quantity_for_trigger_check(
         scoped_player,
         damage_source: None,
         event_amount: None,
+        spell: None,
     };
 
     // Fast path: when current_trigger_event is already set (resolution-time
@@ -3401,6 +3448,7 @@ pub(crate) fn resolve_player_scope_for_trigger_check(
         scoped_player,
         damage_source: None,
         event_amount: None,
+        spell: None,
     };
 
     match event {
@@ -3466,8 +3514,8 @@ pub fn detection_trigger_event() -> Option<crate::types::events::GameEvent> {
 // construction (`build_target_slots`) and subject-count freezing
 // (`freeze_reflexive_event_count`) in one shot, regardless of which of the
 // ~7 `resolve_quantity*` entry points either path happens to use, because the
-// gate lives in `resolve_ref`'s `EventContextAmount` arm — the single shared
-// consumption point all of them funnel into.
+// gate lives in the `EventContextAmount` cascade (`event_context_amount`) — the
+// single shared consumption point all of them funnel into.
 std::thread_local! {
     static SUPPRESS_ENCLOSING_TRIGGER_EVENT_AMOUNT: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
@@ -3698,15 +3746,7 @@ pub fn resolve_quantity_with_targets(
             state,
             qty,
             controller,
-            QuantityContext {
-                entering: None,
-                source: ability.source_id,
-                trigger_source: ability.trigger_source.clone(),
-                recipient: None,
-                scoped_player: ability.scoped_player,
-                damage_source: None,
-                event_amount: None,
-            },
+            ability_quantity_context(ability),
             &ability.targets,
             ability.chosen_x,
             Some(ability),
@@ -3715,6 +3755,38 @@ pub fn resolve_quantity_with_targets(
             resolve_quantity_with_targets(state, inner, ability)
         }),
     }
+}
+
+/// The quantity context `resolve_quantity_with_targets` resolves `ability`'s
+/// quantities in.
+fn ability_quantity_context(ability: &ResolvedAbility) -> QuantityContext {
+    QuantityContext {
+        entering: None,
+        source: ability.source_id,
+        trigger_source: ability.trigger_source.clone(),
+        recipient: None,
+        scoped_player: ability.scoped_player,
+        damage_source: None,
+        event_amount: None,
+        spell: None,
+    }
+}
+
+/// CR 603.7a + CR 608.2h: The amount "that many" / "that much"
+/// (`QuantityRef::EventContextAmount`) names in `ability`'s resolution, read
+/// exactly as `resolve_quantity_with_targets` reads it but without the 0 default:
+/// `Some` when the resolution determined an amount (zero included), `None` when
+/// it determined none.
+pub(crate) fn determined_event_context_amount(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Option<i32> {
+    event_context_amount(
+        state,
+        &ability_quantity_context(ability),
+        ability.chosen_x,
+        Some(ability),
+    )
 }
 
 /// CR 608.2c: Resolve a condition quantity from the printed ability controller's
@@ -3760,6 +3832,7 @@ pub(crate) fn resolve_quantity_with_targets_and_recipient(
                 scoped_player: ability.scoped_player,
                 damage_source: None,
                 event_amount: None,
+                spell: None,
             },
             &ability.targets,
             ability.chosen_x,
@@ -3798,6 +3871,7 @@ pub(crate) fn resolve_quantity_with_targets_and_damage_source(
                 scoped_player: ability.scoped_player,
                 damage_source: Some(damage_source),
                 event_amount: None,
+                spell: None,
             },
             &ability.targets,
             ability.chosen_x,
@@ -3835,6 +3909,7 @@ pub fn resolve_quantity_with_targets_slice(
                 scoped_player: None,
                 damage_source: None,
                 event_amount: None,
+                spell: None,
             },
             targets,
             None,
@@ -3918,6 +3993,7 @@ pub(crate) fn resolve_quantity_scoped_with_targets(
                 scoped_player: Some(scope_player),
                 damage_source: None,
                 event_amount: None,
+                spell: None,
             },
             targets,
             None,
@@ -5226,6 +5302,43 @@ fn resolve_ref(
             );
             usize_to_i32_saturating(seen.len())
         }
+        // CR 205.2a + CR 607.2a: Count the distinct card types the spell being
+        // cost-modified (carried in `ctx.spell`) shares with the population — the
+        // intersection "they share with" requires, not the population's own
+        // distinct-type count (Cemetery Prowler #6898). This quantity has no
+        // grammatical subject outside cast-time cost determination, so it fails
+        // closed before scanning when that authority is absent.
+        QuantityRef::SharedCardTypes { source } => {
+            let Some(subject_id) = ctx.spell else {
+                return 0;
+            };
+            let subject_types: HashSet<CoreType> =
+                characteristic_view_for_object(state, subject_id)
+                    .map(|view| view.core_types().to_vec())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect();
+            let mut shared = HashSet::new();
+            visit_characteristic_source(
+                state,
+                source,
+                ctx.clone(),
+                CharacteristicFilterContexts {
+                    base: &filter_ctx,
+                    scoped_owned_exile: None,
+                },
+                controller,
+                controller,
+                &mut |_, view, _| {
+                    for ct in view.core_types() {
+                        if subject_types.contains(ct) {
+                            shared.insert(*ct);
+                        }
+                    }
+                },
+            );
+            usize_to_i32_saturating(shared.len())
+        }
         // CR 205.3 + CR 604.3: Count distinct subtype VALUES across the same
         // `CardTypeSetSource` scan as `DistinctCardTypes`, but reading
         // `card_types.subtypes` (CR 205.3) rather than `core_types` (CR 205.2).
@@ -5506,94 +5619,11 @@ fn resolve_ref(
         QuantityRef::ExiledFromHandThisResolution => {
             u32_to_i32_saturating(state.exiled_from_hand_this_resolution)
         }
-        // CR 603.2c: Numeric value carried by the triggering event,
-        // resolution-precedence ordered:
-        //
-        //   1. `current_trigger_match_count` — the filtered subject count of a
-        // batched trigger ("one or more <FILTER> <verb>"), set by
-        // `stack::resolve_top` for the resolution. This is the canonical
-        // "that many" for Ur-Dragon-style batched triggers; without it
-        // the `extract_amount_from_event` cascade below falls through to
-        // 0 on `AttackersDeclared` and similar batched events.
-        //   2. CR 706.4: `die_result_this_resolution` — die results recorded
-        // earlier in THIS resolution (no results table) outrank the
-        // triggering event's own amount, so "roll one or more dice.
-        // <effect> equal to the result(s)" consumes the roll total, not
-        // the combat damage / life change that triggered it.
-        //   3. `last_effect_counts_by_player` — APNAP per-player counts from
-        // the preceding effect in the same resolution.
-        //   4. `extract_amount_from_event(current_trigger_event)` — scalar
-        // events with an inherent amount (damage dealt, life changed,
-        // cards drawn, counters added/removed, die rolls).
-        //   5. `last_effect_count` / `last_effect_amount` — sub_ability
-        // continuation fallbacks (e.g. "discard up to N, then draw that
-        // many"; "dealt excess damage this way, add that much {R}").
-        //   6. `0` — undefined.
-        QuantityRef::EventContextAmount => ctx
-            // CR 121.2a + CR 614.1a: a replacement condition evaluated against a
-            // proposed event reads that event's own amount ("would draw two or
-            // more cards" compares the pending draw's count). `Some` only in the
-            // replacement-condition context, so every other caller falls through
-            // to the cascade below unchanged.
-            .event_amount
-            // CR 614.1a: Moonlit-scoped "that many" copy count — highest priority
-            // after the proposed event's own amount, which is never set while a
-            // substitution continuation resolves. `Some` only while a
-            // `CopyTokenOf` substitution continuation resolves (Moonlit
-            // Meditation); `None` otherwise, so it falls straight through to the
-            // existing trigger/effect cascade.
-            .or(state.post_replacement_token_substitution_count)
-            .or_else(|| enclosing_trigger_match_count(state))
-            // CR 706.4: Die results recorded earlier in THIS resolution
-            // outrank the triggering event's own amount, so "roll one or more
-            // dice. <effect> equal to the result(s)" consumes the roll total,
-            // not the combat damage / life change that triggered it.
-            .or(state.die_result_this_resolution)
-            // CR 608.2c + CR 109.5: A scoped continuation's per-player
-            // accounting binds "that many" to its current recipient before a
-            // scalar enclosing trigger/event can shadow the recipient's own
-            // result. A present map deliberately returns 0 for a player with
-            // no counted events.
-            .or_else(|| {
-                ctx.scoped_player.and_then(|player| {
-                    (!state.last_effect_counts_by_player.is_empty()).then(|| {
-                        state
-                            .last_effect_counts_by_player
-                            .get(&player)
-                            .copied()
-                            .unwrap_or(0)
-                    })
-                })
-            })
-            // CR 603.2c: The triggering event's own scalar amount (damage,
-            // life change, cards drawn, counters, die results), plus the CR
-            // 603.4 detection-time fallback for intervening-`if` re-checks
-            // where `current_trigger_event` is still `None`. Both tiers are
-            // suppressed inside `with_reflexive_resolution_scope` (CR 603.12) so
-            // a reflexive ability's "that many" never reads the enclosing
-            // trigger's event while that trigger's resolution is paused.
-            .or_else(|| enclosing_trigger_event_amount(state))
-            .or(state.last_effect_count)
-            .or(state.last_effect_amount)
-            // CR 107.3a + CR 601.2b + CR 602.2b: If "that many" has no live
-            // trigger/effect context, it may refer to the variable count chosen
-            // for the spell or activated ability's cost (for example, "Remove
-            // any number of counters: Create that many tokens.").
-            .or_else(|| chosen_x.map(u32_to_i32_saturating))
-            // CR 603.10 + CR 608.2h + CR 122.2: A "leaves the battlefield / dies,
-            // if it had one or more <X> counters on it, put that many <X> counters
-            // on …" look-back (Reyhan, Last of the Abzan) resolves "that many" to
-            // the count of `<X>` counters the triggering object had as it left
-            // (kind taken from the resolving counter effect). Counters cease to
-            // exist on the zone change (CR 122.2), so the live object's map is
-            // empty — the count comes from the leaving object's last-known
-            // information. Sits LAST and fires only for counter-placing effects:
-            // a dies/leaves trigger whose "that many" is produced by a preceding
-            // effect (Whirlpool Drake: "shuffle the cards from your hand into your
-            // library, then draw that many cards") is a non-counter effect, so it
-            // resolves via `last_effect_count`/`last_effect_amount` above.
-            .or_else(|| event_context_counter_count_from_lki(state, ability))
-            .unwrap_or(0),
+        // CR 603.2c: Numeric value carried by the triggering event (see
+        // `event_context_amount`); an undetermined amount reads as 0.
+        QuantityRef::EventContextAmount => {
+            event_context_amount(state, &ctx, chosen_x, ability).unwrap_or(0)
+        }
         // CR 608.2c: If an earlier effect in this same resolution captured an
         // explicit object context, use that object before the original trigger
         // event. This covers "sacrifice another creature. ... that creature's
@@ -7313,6 +7343,105 @@ fn battlefield_departure_counter_context(
     }
 }
 
+/// CR 603.2c + CR 608.2c: The `EventContextAmount` ("that many" / "that much")
+/// cascade — the single authority for which amount it names, or `None` when no
+/// tier determined one. `resolve_ref` reads `None` as 0; callers that must tell an
+/// undetermined amount from a determined zero (a delayed trigger freezing its
+/// creation-time amount, CR 603.7a) use `determined_event_context_amount`.
+/// Resolution-precedence ordered:
+///
+///   1. `current_trigger_match_count` — the filtered subject count of a
+///      batched trigger ("one or more <FILTER> <verb>"), set by
+///      `stack::resolve_top` for the resolution. This is the canonical
+///      "that many" for Ur-Dragon-style batched triggers; without it
+///      the `extract_amount_from_event` cascade below falls through to
+///      0 on `AttackersDeclared` and similar batched events.
+///   2. CR 706.4: `die_result_this_resolution` — die results recorded
+///      earlier in THIS resolution (no results table) outrank the
+///      triggering event's own amount, so "roll one or more dice.
+///      <effect> equal to the result(s)" consumes the roll total, not
+///      the combat damage / life change that triggered it.
+///   3. `last_effect_counts_by_player` — APNAP per-player counts from
+///      the preceding effect in the same resolution.
+///   4. `extract_amount_from_event(current_trigger_event)` — scalar
+///      events with an inherent amount (damage dealt, life changed,
+///      cards drawn, counters added/removed, die rolls).
+///   5. `last_effect_count` / `last_effect_amount` — sub_ability
+///      continuation fallbacks (e.g. "discard up to N, then draw that
+///      many"; "dealt excess damage this way, add that much {R}").
+///   6. `None` — undetermined.
+fn event_context_amount(
+    state: &GameState,
+    ctx: &QuantityContext,
+    chosen_x: Option<u32>,
+    ability: Option<&ResolvedAbility>,
+) -> Option<i32> {
+    ctx
+        // CR 121.2a + CR 614.1a: a replacement condition evaluated against a
+        // proposed event reads that event's own amount ("would draw two or
+        // more cards" compares the pending draw's count). `Some` only in the
+        // replacement-condition context, so every other caller falls through
+        // to the cascade below unchanged.
+        .event_amount
+        // CR 614.1a: Moonlit-scoped "that many" copy count — highest priority
+        // after the proposed event's own amount, which is never set while a
+        // substitution continuation resolves. `Some` only while a
+        // `CopyTokenOf` substitution continuation resolves (Moonlit
+        // Meditation); `None` otherwise, so it falls straight through to the
+        // existing trigger/effect cascade.
+        .or(state.post_replacement_token_substitution_count)
+        .or_else(|| enclosing_trigger_match_count(state))
+        // CR 706.4: Die results recorded earlier in THIS resolution
+        // outrank the triggering event's own amount, so "roll one or more
+        // dice. <effect> equal to the result(s)" consumes the roll total,
+        // not the combat damage / life change that triggered it.
+        .or(state.die_result_this_resolution)
+        // CR 608.2c + CR 109.5: A scoped continuation's per-player
+        // accounting binds "that many" to its current recipient before a
+        // scalar enclosing trigger/event can shadow the recipient's own
+        // result. A present map deliberately returns 0 for a player with
+        // no counted events.
+        .or_else(|| {
+            ctx.scoped_player.and_then(|player| {
+                (!state.last_effect_counts_by_player.is_empty()).then(|| {
+                    state
+                        .last_effect_counts_by_player
+                        .get(&player)
+                        .copied()
+                        .unwrap_or(0)
+                })
+            })
+        })
+        // CR 603.2c: The triggering event's own scalar amount (damage,
+        // life change, cards drawn, counters, die results), plus the CR
+        // 603.4 detection-time fallback for intervening-`if` re-checks
+        // where `current_trigger_event` is still `None`. Both tiers are
+        // suppressed inside `with_reflexive_resolution_scope` (CR 603.12) so
+        // a reflexive ability's "that many" never reads the enclosing
+        // trigger's event while that trigger's resolution is paused.
+        .or_else(|| enclosing_trigger_event_amount(state))
+        .or(state.last_effect_count)
+        .or(state.last_effect_amount)
+        // CR 107.3a + CR 601.2b + CR 602.2b: If "that many" has no live
+        // trigger/effect context, it may refer to the variable count chosen
+        // for the spell or activated ability's cost (for example, "Remove
+        // any number of counters: Create that many tokens.").
+        .or_else(|| chosen_x.map(u32_to_i32_saturating))
+        // CR 603.10 + CR 608.2h + CR 122.2: A "leaves the battlefield / dies,
+        // if it had one or more <X> counters on it, put that many <X> counters
+        // on …" look-back (Reyhan, Last of the Abzan) resolves "that many" to
+        // the count of `<X>` counters the triggering object had as it left
+        // (kind taken from the resolving counter effect). Counters cease to
+        // exist on the zone change (CR 122.2), so the live object's map is
+        // empty — the count comes from the leaving object's last-known
+        // information. Sits LAST and fires only for counter-placing effects:
+        // a dies/leaves trigger whose "that many" is produced by a preceding
+        // effect (Whirlpool Drake: "shuffle the cards from your hand into your
+        // library, then draw that many cards") is a non-counter effect, so it
+        // resolves via `last_effect_count`/`last_effect_amount` above.
+        .or_else(|| event_context_counter_count_from_lki(state, ability))
+}
+
 /// CR 603.10 + CR 608.2h + CR 122.2: For a battlefield-departure look-back
 /// counter effect ("Whenever a creature you control dies/leaves the battlefield,
 /// if it had one or more <X> counters on it, put that many <X> counters on …" —
@@ -8819,6 +8948,7 @@ pub(crate) fn defending_player_for_quantity_context_for_test(
             scoped_player: None,
             damage_source: None,
             event_amount: None,
+            spell: None,
         },
     )
 }
@@ -11571,9 +11701,44 @@ mod tests {
                     scoped_player: None,
                     damage_source: None,
                     event_amount: None,
+                    spell: None,
                 },
             ),
             1
+        );
+    }
+
+    /// CR 205.2a + CR 611.3a: `SharedCardTypes` over an `Objects { filter }`
+    /// population is recipient-dependent when its filter reads the recipient
+    /// (e.g. `AttachedToRecipient`), mirroring its `DistinctCardTypes` sibling.
+    /// The wildcard `quantity_expr_uses_recipient` classifier must include it so
+    /// the layer evaluator re-resolves per recipient instead of reusing one
+    /// value for every affected object.
+    #[test]
+    fn shared_card_types_over_recipient_filter_uses_recipient() {
+        let recipient_relative = QuantityExpr::Ref {
+            qty: QuantityRef::SharedCardTypes {
+                source: CardTypeSetSource::Objects {
+                    filter: TargetFilter::Typed(
+                        TypedFilter::card().properties(vec![FilterProp::AttachedToRecipient]),
+                    ),
+                },
+            },
+        };
+        assert!(
+            quantity_expr_uses_recipient(&recipient_relative),
+            "SharedCardTypes over Objects{{AttachedToRecipient}} is recipient-dependent"
+        );
+
+        // Paired negative: ExiledBySource is fixed per source, never recipient-relative.
+        let source_fixed = QuantityExpr::Ref {
+            qty: QuantityRef::SharedCardTypes {
+                source: CardTypeSetSource::ExiledBySource,
+            },
+        };
+        assert!(
+            !quantity_expr_uses_recipient(&source_fixed),
+            "SharedCardTypes over ExiledBySource reads no recipient and must not force re-resolution"
         );
     }
 
@@ -15693,6 +15858,65 @@ mod tests {
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 2);
     }
 
+    /// CR 205.2a + CR 607.2a + CR 601.2f: `SharedCardTypes` has two distinct
+    /// authorities. The static source selects its linked-exile population, while
+    /// the spell being cast supplies the other side of the card-type intersection.
+    #[test]
+    fn shared_card_types_requires_explicit_spell_authority() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Cemetery Prowler".to_string(),
+            Zone::Battlefield,
+        );
+        let linked = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(0),
+            "Linked Creature".to_string(),
+            Zone::Exile,
+        );
+        let spell = create_object(
+            &mut state,
+            CardId(12),
+            PlayerId(0),
+            "Creature Spell".to_string(),
+            Zone::Hand,
+        );
+        for object_id in [linked, spell] {
+            state
+                .objects
+                .get_mut(&object_id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+        state.exile_links.push(ExileLink {
+            source_id: source,
+            exiled_id: linked,
+            kind: ExileLinkKind::TrackedBySource,
+        });
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::SharedCardTypes {
+                source: CardTypeSetSource::ExiledBySource,
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(0), source),
+            0,
+            "without a spell subject, SharedCardTypes must fail closed rather than use the source"
+        );
+        assert_eq!(
+            resolve_quantity_with_spell(&state, &expr, PlayerId(0), source, spell),
+            1,
+            "the exact spell subject shares Creature with the source-linked exile population"
+        );
+    }
+
     // CR 406.6 + CR 607.1: CardsExiledBySource counts distinct exiled objects
     // linked to the source, ignoring links to other sources and cards that have
     // left exile.
@@ -19320,6 +19544,7 @@ mod tests {
             scoped_player: None,
             damage_source: None,
             event_amount: None,
+            spell: None,
         };
         assert_eq!(
             resolve_ref(
@@ -19424,6 +19649,7 @@ mod tests {
                     scoped_player: None,
                     damage_source: None,
                     event_amount: None,
+                    spell: None,
                 },
                 &[],
                 None,
@@ -19724,6 +19950,48 @@ mod tests {
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 0);
     }
 
+    /// CR 603.7a + CR 608.2h: `determined_event_context_amount` tells an amount
+    /// the resolution did not determine (`None`) from a determined zero
+    /// (`Some(0)`), while `EventContextAmount` resolved as a quantity still reads
+    /// both as 0.
+    #[test]
+    fn determined_event_context_amount_distinguishes_undetermined_from_zero() {
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        };
+        let ability = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let mut state = GameState::new_two_player(42);
+        for (last_effect_count, determined, resolved) in [
+            (None, None, 0),
+            (Some(0), Some(0), 0),
+            (Some(3), Some(3), 3),
+        ] {
+            state.last_effect_count = last_effect_count;
+            assert_eq!(
+                determined_event_context_amount(&state, &ability),
+                determined,
+                "determined amount for last_effect_count {last_effect_count:?}"
+            );
+            assert_eq!(
+                resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)),
+                resolved,
+                "resolve_quantity for last_effect_count {last_effect_count:?}"
+            );
+            assert_eq!(
+                resolve_quantity_with_targets(&state, &expr, &ability),
+                resolved,
+                "resolve_quantity_with_targets for last_effect_count {last_effect_count:?}"
+            );
+        }
+    }
+
     /// CR 603.2c: When the batched-trigger subject count is set,
     /// `EventContextAmount` reads it ahead of any event-extracted amount
     /// (issue #707).
@@ -19789,6 +20057,7 @@ mod tests {
                     scoped_player: Some(scoped_player),
                     damage_source: None,
                     event_amount: None,
+                    spell: None,
                 },
             ),
             9,
@@ -22597,6 +22866,7 @@ mod tests {
             scoped_player: None,
             damage_source: None,
             event_amount: None,
+            spell: None,
         };
         let got =
             resolve_object_mana_value(&state, ObjectScope::AmassedArmy, ctx, &[], Some(&ability));
@@ -22665,6 +22935,7 @@ mod tests {
             scoped_player: None,
             damage_source: None,
             event_amount: None,
+            spell: None,
         };
         let got =
             resolve_object_mana_value(&state, ObjectScope::AmassedArmy, ctx, &[], Some(&ability));
@@ -22727,6 +22998,7 @@ mod tests {
             recipient: None,
             scoped_player: None,
             damage_source: None,
+            spell: None,
             event_amount: None,
         }
     }
@@ -23527,6 +23799,7 @@ mod tests {
             scoped_player: None,
             damage_source: None,
             event_amount: None,
+            spell: None,
         };
 
         assert!(

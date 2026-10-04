@@ -20,6 +20,10 @@ In every engine-implementer mode, use the supplied original task and scope/attem
 
 When execution is permitted, use an isolated `CARGO_TARGET_DIR` and the worktree's absolute path; never build in a checkout another process (e.g. Tilt) owns; serialize probe activity behind any active implementation executor.
 
+## Scout fact pack
+
+A scout fact pack may accompany the plan, the same one the planner received. Treat it as unverified leads: check anything you rely on, and look beyond it. A missing fact is not evidence of absence, and the pack never bounds a sweep: check 3's `rg` of existing instances and check 9's construction/consumption enumeration are yours to run in full.
+
 ## Required Checks
 
 0. **Probe the plan, don't just read it**

@@ -10,6 +10,9 @@
   "manaSourceSelection": {
     "title": "Manaquelle wählen",
     "description": "Diese Manafähigkeit erfordert das Opfern einer bleibenden Karte.",
+    "baseOutput_one": "Grundmenge: {{count}} Mana",
+    "baseOutput_other": "Grundmenge: {{count}} Mana",
+    "baseOutputVariable": "Grundmenge wird bei Aktivierung bestimmt",
     "sacrifice": "Opfern",
     "back": "Zurück zur Manabezahlung",
     "unknownSource": "Manaquelle"
@@ -1348,8 +1351,6 @@
     },
     "config": {
       "startingLife": "Startleben",
-      "experimentalDungeons": "Experimentelle Dungeons",
-      "experimentalDungeonsHelp": "Baldur's Gate Wilderness bei Dungeon-Optionen und Initiative anbieten. Experimentell und inoffiziell.",
       "players": "Spieler",
       "whoGoesFirst": "Wer beginnt",
       "firstPlayer": {
@@ -2270,7 +2271,9 @@
     "accept": "Ja",
     "decline": "Nein",
     "sourceFallback": "Effekt",
-    "entryLabel": "{{source}} – {{decision}}"
+    "entryLabel": "{{source}} – {{decision}}",
+    "optionalTriggers": "Optionale ausgelöste Fähigkeiten ({{count, number}})",
+    "replacementChoices": "Ersetzungsentscheidungen ({{count, number}})"
   },
   "optionalEffect": {
     "sourceFallback": "Effekt",
@@ -2350,6 +2353,8 @@
     "confirm": "Bestätigen"
   },
   "replacement": {
+    "remember": "Diese Wahl für dieses Spiel merken",
+    "savedChoice": "Ersatzeffekt: {{choice}}",
     "eyebrow": "Auflösungsreihenfolge",
     "title": "Ersatzeffekte",
     "orderSubtitle": "Diese Effekte ändern alle, wie dieses Ereignis abläuft. Ziehe, um die Reihenfolge festzulegen — der zuletzt angewendete Effekt ist der wirksame (CR 616.1).",

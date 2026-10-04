@@ -16,13 +16,13 @@ use crate::game::filter::{
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
     ActivationManaPaymentRestriction, ActivationRestriction, AdditionalCost, CardPlayMode,
-    CastTimingPermission, CastingPermission, CastingRestriction, ChoiceType, ChosenSubtypeKind,
-    ContinuousModification, ControllerRef, CostReduction, CounterSourceRider, DamageRedirectTarget,
-    DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp, GuardReading,
-    ManaProduction, ModalChoice, ParsedCondition, PlayerFilter, QuantityExpr, QuantityRef,
-    ReplacementDefinition, ReplacementMode, SolveCondition, SpellCastingOption, StaticCondition,
-    StaticDefinition, TapStateChange, TargetFilter, TriggerCondition, TriggerDefinition,
-    TypeFilter, TypedFilter, UnloweredGuard, VoteSubject,
+    CastManaSpentMetric, CastTimingPermission, CastingPermission, CastingRestriction, ChoiceType,
+    ChosenSubtypeKind, ContinuousModification, ControllerRef, CostReduction, CounterSourceRider,
+    DamageRedirectTarget, DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp,
+    GuardReading, ManaProduction, ModalChoice, ParsedCondition, PlayerFilter, QuantityExpr,
+    QuantityRef, ReplacementDefinition, ReplacementMode, SolveCondition, SpellCastingOption,
+    StaticCondition, StaticDefinition, TapStateChange, TargetFilter, TriggerCondition,
+    TriggerDefinition, TypeFilter, TypedFilter, UnloweredGuard, VoteSubject,
 };
 use crate::types::ability_visit::{visit_ability_def_scoped, ResolutionScope};
 use crate::types::card::DraftEffect;
@@ -33,7 +33,7 @@ use crate::types::mana::{ManaCost, ManaSpellGrant};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::replacements::ReplacementEvent;
-use crate::types::statics::{CastFrequency, StaticMode};
+use crate::types::statics::{CastFrequency, GraveyardPermissionPool, StaticMode};
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 
@@ -1809,6 +1809,11 @@ fn quantity_ref_uses_filter_prop(qty: &QuantityRef, pred: &impl Fn(&FilterProp) 
         | QuantityRef::ControlledByEachPlayer { filter, .. }
         | QuantityRef::DistinctCounterKindsAmong { filter }
         | QuantityRef::EnteredThisTurn { filter }
+        | QuantityRef::SacrificedThisTurn { filter, .. }
+        | QuantityRef::ZoneChangeCountThisTurn { filter, .. }
+        | QuantityRef::ZoneChangeAggregateThisTurn { filter, .. }
+        | QuantityRef::CounterAddedThisTurn { target: filter, .. }
+        | QuantityRef::TokensCreatedThisTurn { filter, .. }
         // CR 608.2i: the look-back sibling carries a `TargetFilter` too, and this
         // predicate's question ("does any `TargetFilter` reachable from this
         // quantity use `pred`?") is variant-agnostic — so it must recurse rather
@@ -1816,10 +1821,36 @@ fn quantity_ref_uses_filter_prop(qty: &QuantityRef, pred: &impl Fn(&FilterProp) 
         | QuantityRef::BattlefieldEntriesThisTurn { filter, .. } => {
             target_filter_uses_filter_prop(filter, pred)
         }
+        QuantityRef::TargetObjectManaValue { filter }
+        | QuantityRef::FilteredTrackedSetSize { filter, .. } => {
+            target_filter_uses_filter_prop(filter, pred)
+        }
+        QuantityRef::ZoneCardCount { filter, .. }
+        | QuantityRef::SpellsCastThisTurn { filter, .. }
+        | QuantityRef::SpellsCastBeforeTriggeringSpell { filter, .. }
+        | QuantityRef::AttackedThisTurn { filter, .. }
+        | QuantityRef::SpellsCastThisGame { filter, .. } => filter
+            .as_ref()
+            .is_some_and(|filter| target_filter_uses_filter_prop(filter, pred)),
+        // CR 120.4: damage history has independent source and recipient filters;
+        // both are reachable from the quantity and must be inspected.
+        QuantityRef::DamageDealtThisTurn { source, target, .. } => {
+            target_filter_uses_filter_prop(source, pred)
+                || target_filter_uses_filter_prop(target, pred)
+        }
+        QuantityRef::ManaSpentToCast { metric, .. } => match metric {
+            CastManaSpentMetric::FromSource { source_filter } => {
+                target_filter_uses_filter_prop(source_filter, pred)
+            }
+            CastManaSpentMetric::Total
+            | CastManaSpentMetric::DistinctColors
+            | CastManaSpentMetric::OfColor { .. } => false,
+        },
         // CR 109.2: the three distinct-characteristic counts embed their filters
         // through the shared population enum; recurse over it so a union member
         // or a journal's narrowing filter is not dropped.
         QuantityRef::DistinctCardTypes { source }
+        | QuantityRef::SharedCardTypes { source }
         | QuantityRef::DistinctSubtypes { source, .. }
         | QuantityRef::DistinctColorsAmong { source } => {
             characteristic_source_uses_filter_prop(source, pred)
@@ -1827,7 +1858,73 @@ fn quantity_ref_uses_filter_prop(qty: &QuantityRef, pred: &impl Fn(&FilterProp) 
         QuantityRef::PropertyAggregate(aggregate) => {
             characteristic_source_uses_filter_prop(aggregate.source(), pred)
         }
-        _ => false,
+        QuantityRef::PlayerCount { filter } | QuantityRef::EventContextPlayerCount { filter } => {
+            player_filter_uses_filter_prop(filter, pred)
+        }
+        QuantityRef::HandSize { .. }
+        | QuantityRef::LifeTotal { .. }
+        | QuantityRef::GraveyardSize { .. }
+        | QuantityRef::LifeAboveStarting
+        | QuantityRef::StartingLifeTotal { .. }
+        | QuantityRef::TriggeringDiscoverValue
+        | QuantityRef::TriggeringScryLookCount
+        | QuantityRef::TriggeringScryBottomCount
+        | QuantityRef::CountersOn { .. }
+        | QuantityRef::PlayerCounter { .. }
+        | QuantityRef::TargetControllerCounter { .. }
+        | QuantityRef::Variable { .. }
+        | QuantityRef::Power { .. }
+        | QuantityRef::BasePower { .. }
+        | QuantityRef::Intensity { .. }
+        | QuantityRef::Toughness { .. }
+        | QuantityRef::ObjectManaValue { .. }
+        | QuantityRef::ObjectColorCount { .. }
+        | QuantityRef::ObjectNameWordCount { .. }
+        | QuantityRef::NameStickerLetterCount { .. }
+        | QuantityRef::ObjectTypelineComponentCount { .. }
+        | QuantityRef::ManaSymbolsInManaCost { .. }
+        | QuantityRef::SelfManaValue
+        | QuantityRef::TargetZoneCardCount { .. }
+        | QuantityRef::Devotion { .. }
+        | QuantityRef::CardsExiledBySource
+        | QuantityRef::ExiledCardPower { .. }
+        | QuantityRef::BasicLandTypeCount { .. }
+        | QuantityRef::TrackedSetSize
+        | QuantityRef::ExiledFromHandThisResolution
+        | QuantityRef::PreviousEffectAmount { .. }
+        | QuantityRef::PreviousEffectCount
+        | QuantityRef::LifeLostThisTurn { .. }
+        | QuantityRef::PartySize { .. }
+        | QuantityRef::UnspentMana { .. }
+        | QuantityRef::Speed { .. }
+        | QuantityRef::AttachmentsOnLeavingObject { .. }
+        | QuantityRef::EventContextAmount
+        | QuantityRef::EventContextSourceCostX
+        | QuantityRef::EventContextSourceModesChosen
+        | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::BendTypesThisTurn
+        | QuantityRef::LifeGainedThisTurn { .. }
+        | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::LandsPlayedThisTurn { .. }
+        | QuantityRef::TurnsTaken
+        | QuantityRef::ChosenNumber
+        | QuantityRef::PlayerChosenNumber { .. }
+        | QuantityRef::DescendedThisTurn
+        | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
+        | QuantityRef::SpellsCastLastTurn
+        | QuantityRef::CardsDiscardedThisTurn { .. }
+        | QuantityRef::PlayerActionsThisTurn { .. }
+        | QuantityRef::DungeonsCompleted
+        | QuantityRef::CostXPaid
+        | QuantityRef::KickerCount
+        | QuantityRef::AdditionalCostPaymentCount
+        | QuantityRef::AdditionalCostPaymentCountFor { .. }
+        | QuantityRef::ConvokedCreatureCount
+        | QuantityRef::TimesCostPaidThisResolution
+        | QuantityRef::ColorsInCommandersColorIdentity
+        | QuantityRef::CommanderCastFromCommandZoneCount
+        | QuantityRef::CommanderManaValue { .. }
+        | QuantityRef::VoteCount { .. } => false,
     }
 }
 
@@ -1861,6 +1958,52 @@ fn characteristic_source_uses_filter_prop(
     // A truncated walk claims the prop: this feeds parse-time capability
     // reporting, where over-reporting a dependency is the harmless direction.
     found || !complete
+}
+
+/// CR 109.4 + CR 608.2c: Player-level quantity filters can cross back into
+/// object filters and quantity expressions. Preserve chosen-property
+/// dependencies through both arms of a nested player predicate.
+fn player_filter_uses_filter_prop(
+    filter: &PlayerFilter,
+    pred: &impl Fn(&FilterProp) -> bool,
+) -> bool {
+    match filter {
+        PlayerFilter::OpponentDealtDamage { source, .. } => source
+            .as_deref()
+            .is_some_and(|source| target_filter_uses_filter_prop(source, pred)),
+        PlayerFilter::ControlsCount { filter, count, .. } => {
+            target_filter_uses_filter_prop(filter, pred)
+                || quantity_expr_uses_filter_prop(count, pred)
+        }
+        PlayerFilter::PlayerAttribute { attr, value, .. } => {
+            quantity_ref_uses_filter_prop(attr, pred) || quantity_expr_uses_filter_prop(value, pred)
+        }
+        PlayerFilter::TrackedSetPossessor { filter, .. } => {
+            target_filter_uses_filter_prop(filter, pred)
+        }
+        PlayerFilter::AllExcept { exclude } => player_filter_uses_filter_prop(exclude, pred),
+        PlayerFilter::Controller
+        | PlayerFilter::Opponent
+        | PlayerFilter::DefendingPlayer
+        | PlayerFilter::OpponentLostLife
+        | PlayerFilter::OpponentGainedLife
+        | PlayerFilter::HasLostTheGame
+        | PlayerFilter::OpponentAttacked { .. }
+        | PlayerFilter::OpponentAttackingEnchantedPlayer
+        | PlayerFilter::All
+        | PlayerFilter::HighestSpeed
+        | PlayerFilter::ZoneChangedThisWay
+        | PlayerFilter::PerformedActionThisWay { .. }
+        | PlayerFilter::OwnersOfCardsExiledBySource
+        | PlayerFilter::TriggeringPlayer
+        | PlayerFilter::OpponentOtherThanTriggering
+        | PlayerFilter::OpponentOfTriggeringPlayer
+        | PlayerFilter::OpponentOfTriggeringPlayerNotAttacked
+        | PlayerFilter::VotedFor { .. }
+        | PlayerFilter::ParentObjectTargetController
+        | PlayerFilter::ChosenPlayer { .. }
+        | PlayerFilter::ParentObjectTargetOwner => false,
+    }
 }
 
 fn target_filter_uses_filter_prop(
@@ -2349,6 +2492,18 @@ fn deliver_coordinated_graveyard_permission_in_ability(def: &mut AbilityDefiniti
             .as_deref()
             .filter(|_| sentence_is_fully_modelled)
             .and_then(|sub| match &*sub.effect {
+                // CR 601.3 + CR 611.2c: "cast spells from your graveyard" now
+                // lowers on its own to the graveyard permission
+                // (`oracle_effect::try_parse_class_wide_graveyard_cast_grant`);
+                // widen that grant to the land half as well. Only a plain grant
+                // is widened: a rider already folded into it would be lost.
+                effect @ Effect::GenericEffect {
+                    duration: Some(window),
+                    ..
+                } => plain_own_graveyard_cast_grant_filter(effect).and_then(|target| {
+                    coordinated_graveyard_permission(target)
+                        .map(|permission| (window.clone(), permission))
+                }),
                 Effect::CastFromZone {
                     target, duration, ..
                 } => duration
@@ -2365,21 +2520,12 @@ fn deliver_coordinated_graveyard_permission_in_ability(def: &mut AbilityDefiniti
                     .and_then(|window| {
                         coordinated_graveyard_permission(target)
                             .map(|permission| (window.clone(), permission))
-                    })
-                    .map(|(window, permission)| Effect::GenericEffect {
-                        static_abilities: vec![StaticDefinition::continuous()
-                            .affected(TargetFilter::Controller)
-                            .modifications(vec![ContinuousModification::GrantStaticAbility {
-                                definition: Box::new(permission),
-                            }])],
-                        // CR 611.2a: one stated window scopes both halves;
-                        // `layers::prune_end_of_turn_effects` ends it at cleanup
-                        // (CR 514.2).
-                        duration: Some(window),
-                        target: Some(TargetFilter::Controller),
-                        end_cost: None,
                     }),
                 _ => None,
+            })
+            // CR 611.2a: one stated window scopes both halves.
+            .map(|(window, permission)| {
+                crate::parser::oracle_effect::graveyard_permission_grant(permission, Some(window))
             });
 
         if let Some(effect) = recovered {
@@ -2461,6 +2607,38 @@ fn parse_graveyard_anchor_sentence_tail(input: &str) -> OracleResult<'_, &str> {
     take_till(|c: char| c == '.').parse(rest)
 }
 
+/// CR 601.3: the card filter of a plain "cast <class> spells from your
+/// graveyard" permission grant — unlimited, cast-only, own graveyard, no rider —
+/// or `None` for any other effect.
+fn plain_own_graveyard_cast_grant_filter(effect: &Effect) -> Option<&TargetFilter> {
+    if !crate::parser::oracle_ir::ast::is_graveyard_permission_grant(effect) {
+        return None;
+    }
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = effect
+    else {
+        return None;
+    };
+    let [ContinuousModification::GrantStaticAbility { definition }] =
+        static_abilities.first()?.modifications.as_slice()
+    else {
+        return None;
+    };
+    match &definition.mode {
+        StaticMode::GraveyardCastPermission {
+            frequency: CastFrequency::Unlimited,
+            play_mode: CardPlayMode::Cast,
+            graveyard_destination_replacement: None,
+            extra_cost: None,
+            enters_with_counter: None,
+            required_cast_keyword: None,
+            pool: GraveyardPermissionPool::OwnGraveyard,
+        } => definition.affected.as_ref(),
+        _ => None,
+    }
+}
+
 /// CR 116.2a + CR 601.2a: build the two-part permission from the cast half of the
 /// sentence -- the land axis and the card axis under ONE grant, because the
 /// printed sentence is one permission naming two actions.
@@ -2518,6 +2696,7 @@ fn coordinated_graveyard_permission(cast_target: &TargetFilter) -> Option<Static
             extra_cost: None,
             enters_with_counter: None,
             required_cast_keyword: None,
+            pool: GraveyardPermissionPool::OwnGraveyard,
         })
         // CR 611.2c: class-wide and re-evaluated live, so cards that reach the
         // graveyard later this turn are covered.

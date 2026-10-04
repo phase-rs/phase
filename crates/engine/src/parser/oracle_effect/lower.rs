@@ -45,7 +45,7 @@ use crate::types::ability::{
 use crate::types::counter::CounterType;
 use crate::types::game_state::{DistributionUnit, TargetSelectionConstraint};
 use crate::types::phase::Phase;
-use crate::types::statics::CostModifyMode;
+use crate::types::statics::{CostModifyMode, StaticMode};
 use crate::types::zones::{EtbTapState, Zone};
 
 // Parse-phase functions from the parent module (oracle_effect/mod.rs).
@@ -1043,6 +1043,52 @@ pub(super) fn attach_graveyard_redirect_rider_to_prior_cast_from_zone(
     let mut rider = AbilityDefinition::new(AbilityKind::Spell, rider_effect);
     rider.sub_link = SubAbilityLink::SequentialSibling;
     prev.sub_ability = Some(Box::new(rider));
+    true
+}
+
+/// CR 614.1a: absorb an exact "a spell cast this way" destination rider into
+/// the immediately preceding class-wide graveyard cast permission ("Until end of
+/// turn, you may cast instant and sorcery spells from any graveyard. If a spell
+/// cast this way would be put into a graveyard, exile it instead." — The Great
+/// Work). "Cast this way" names every spell cast under that permission, which is
+/// what `GraveyardCastPermission::graveyard_destination_replacement` scopes:
+/// the redirect applies to the stack-to-graveyard move of a spell cast through
+/// it (`casting` stamps it when the spell is cast).
+///
+/// The field carries a zone, so only the exile destination is representable;
+/// any other destination is left to the routes after this one.
+pub(super) fn attach_graveyard_redirect_rider_to_prior_graveyard_cast_grant(
+    defs: &mut [AbilityDefinition],
+    dest: &SpellStackToGraveyardReplacement,
+) -> bool {
+    if !matches!(dest, SpellStackToGraveyardReplacement::Exile) {
+        return false;
+    }
+    let Some(prev) = defs.last_mut() else {
+        return false;
+    };
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = &mut *prev.effect
+    else {
+        return false;
+    };
+    let [grant] = static_abilities.as_mut_slice() else {
+        return false;
+    };
+    let [ContinuousModification::GrantStaticAbility { definition }] =
+        grant.modifications.as_mut_slice()
+    else {
+        return false;
+    };
+    let StaticMode::GraveyardCastPermission {
+        graveyard_destination_replacement: slot @ None,
+        ..
+    } = &mut definition.mode
+    else {
+        return false;
+    };
+    *slot = Some(Zone::Exile);
     true
 }
 
@@ -6862,8 +6908,14 @@ pub(crate) fn strip_trailing_duration(text: &str) -> (&str, Option<Duration>) {
     // (for example, "where X is the number of tokens you created this turn"),
     // in which case it belongs to the quantity grammar, not to the outer
     // effect duration.
+    // CR 113.1a: a duration inside a quoted granted ability is that ability's
+    // own text (Predators' Hour: `gain menace and "… You may look at and play
+    // that card for as long as it remains exiled, …"`), never the granting
+    // clause's. Both scans below run over the quote-masked text; the mask keeps
+    // byte offsets, so `before.len()` still slices `lower` and `duration_text`.
+    let scan = nom_primitives::mask_double_quoted_spans_preserving_len(&lower);
     if let Some((before, duration, _)) =
-        nom_primitives::scan_preceded(&lower, |i| terminated(parse_duration, eof).parse(i))
+        nom_primitives::scan_preceded(&scan, |i| terminated(parse_duration, eof).parse(i))
     {
         let quantity_owns_suffix = all_consuming(tag::<_, _, OracleError<'_>>("this turn"))
             .parse(&lower[before.len()..])
@@ -6887,7 +6939,7 @@ pub(crate) fn strip_trailing_duration(text: &str) -> (&str, Option<Duration>) {
     // Do NOT treat " unless " as a boundary here — unless-pay parsers
     // (`try_parse_unless_player_have_deal_damage`, `extract_resolution_unless_pay_modifier`)
     // own that tail and must see the full phrase.
-    if let Some((before, duration, _)) = nom_primitives::scan_preceded(&lower, |i| {
+    if let Some((before, duration, _)) = nom_primitives::scan_preceded(&scan, |i| {
         terminated(
             parse_duration,
             peek(alt((
@@ -9452,10 +9504,14 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
         } else {
             return None;
         }
-    } else if let Ok((rem, _)) =
-        tag::<_, _, OracleError<'_>>("twice that much damage").parse(after_lower)
+    } else if let Ok((rem, _)) = alt((
+        tag::<_, _, OracleError<'_>>("twice that much damage"),
+        tag("double that damage"),
+    ))
+    .parse(after_lower)
     {
-        // CR 120.8: "twice that much damage" → Multiply { factor: 2, inner: EventContextAmount }
+        // CR 701.10g: doubling damage replaces it with twice that amount —
+        // Multiply { factor: 2, inner: EventContextAmount }.
         let consumed = after_lower.len() - rem.len();
         (
             QuantityExpr::Multiply {
@@ -14639,7 +14695,7 @@ mod tests {
 }
 #[cfg(test)]
 mod where_x_tests {
-    use super::parse_where_x_quantity_expression;
+    use super::{parse_where_x_quantity_expression, strip_trailing_duration};
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, Comparator, ContinuousModification, ControllerRef,
         DigSource, Duration, Effect, FilterProp, ObjectScope, PlayerScope, PtValue, QuantityExpr,
@@ -14719,6 +14775,47 @@ mod where_x_tests {
             "quantity tracker must not become a duration"
         );
         assert_eq!(stripped, text);
+    }
+
+    /// CR 113.1a: a duration inside a quoted granted ability belongs to that
+    /// ability (Predators' Hour); the same duration outside the quote is the
+    /// granting clause's own.
+    #[test]
+    fn strip_trailing_duration_leaves_a_quoted_abilitys_duration_alone() {
+        let quoted = "creatures you control gain \"Whenever ~ deals combat damage to a player, exile the top card of that player's library. You may play that card for as long as it remains exiled.\"";
+        let (stripped, duration) = strip_trailing_duration(quoted);
+        assert_eq!(duration, None, "the quoted ability keeps its duration");
+        assert_eq!(stripped, quoted);
+
+        // The mid-clause form (a duration before ", where …") inside a quote.
+        let quoted_mid = "creatures you control gain \"Whenever ~ attacks, it gets +X/+0 until end of turn, where X is the number of cards in your hand.\"";
+        let (stripped, duration) = strip_trailing_duration(quoted_mid);
+        assert_eq!(duration, None, "the quoted ability keeps its duration");
+        assert_eq!(stripped, quoted_mid);
+
+        // Green on main too: the first duration here sits after the quote.
+        let outside = "creatures you control gain \"Whenever ~ deals combat damage to a player, draw a card.\" for as long as you control ~.";
+        let (stripped, duration) = strip_trailing_duration(outside);
+        assert!(
+            duration.is_some(),
+            "a duration after the closing quote is still the clause's: {duration:?}"
+        );
+        assert_eq!(
+            stripped,
+            "creatures you control gain \"Whenever ~ deals combat damage to a player, draw a card.\""
+        );
+
+        // A quoted duration does not hide the clause's own after the quote.
+        let both = "creatures you control gain \"You may play that card for as long as it remains exiled.\" for as long as you control ~.";
+        let (stripped, duration) = strip_trailing_duration(both);
+        assert!(
+            duration.is_some(),
+            "the duration after the quote is found past the quoted one: {duration:?}"
+        );
+        assert_eq!(
+            stripped,
+            "creatures you control gain \"You may play that card for as long as it remains exiled.\""
+        );
     }
 
     #[test]

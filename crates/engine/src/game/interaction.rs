@@ -58,8 +58,8 @@ use crate::types::interaction::{
     MAX_INTERACTION_LIST_LEN, MAX_SHORTCUT_PREVIEW_ELEMENTS,
 };
 use crate::types::mana::{
-    AbilityActivationScope, ManaColor, ManaCost, ManaRestriction, ManaSourceSelection, ManaType,
-    SpecialAction, SpellCostCriterion, ZoneSpendPolarity,
+    AbilityActivationScope, ManaColor, ManaCost, ManaRestriction, ManaSourceOutput,
+    ManaSourceSelection, ManaType, SpecialAction, SpellCostCriterion, ZoneSpendPolarity,
 };
 use crate::types::match_config::DeckCardCount;
 use crate::types::player::PlayerId;
@@ -900,6 +900,7 @@ pub(crate) fn action_preserves_interaction(action: &GameAction) -> bool {
             | GameAction::SetPriorityPassingMode { .. }
             | GameAction::SetPriorityYield { .. }
             | GameAction::SetMayTriggerAutoChoice { .. }
+            | GameAction::SetReplacementAutoChoice { .. }
             | GameAction::SetTriggerOrderTemplate { .. }
             | GameAction::CancelAutoPass
             | GameAction::GrantDebugPermission { .. }
@@ -2159,8 +2160,8 @@ fn mana_payment_direct_actions(
     );
     if has_delve {
         actions.extend(state.objects.values().filter_map(|object| {
-            object
-                .is_delve_eligible(player)
+            state
+                .is_delve_selectable(player, object.id)
                 .then_some(GameAction::TapForConvoke {
                     object_id: object.id,
                     mana_type: ManaType::Colorless,
@@ -5560,6 +5561,14 @@ fn push_produced_mana_surfaces(
     let Ok(option) = resolve(state, player, selection) else {
         return;
     };
+    // CR 106.1a + CR 106.1b: A deferred activation has no selected type yet. The
+    // post-cost mana-choice resolver remains the authority for its output.
+    if matches!(
+        selection.output,
+        ManaSourceOutput::DeferredColorChoice { .. }
+    ) {
+        return;
+    }
     for (index, unit) in mana_sources::live_mana_output_for_option(state, player, &option)
         .into_iter()
         .enumerate()
@@ -5813,6 +5822,16 @@ fn project_action_payload(
                 push_value_surface(surfaces, InteractionRoleCode::Target, "none");
             }
         }
+        GameAction::ChooseReplacementAndRemember { choice } => match choice {
+            crate::types::actions::ReplacementAutoChoice::Order { order } => {
+                for index in order {
+                    push_value_surface(surfaces, InteractionRoleCode::OptionIndex, index);
+                }
+            }
+            crate::types::actions::ReplacementAutoChoice::Optional { index } => {
+                push_value_surface(surfaces, InteractionRoleCode::OptionIndex, index)
+            }
+        },
         GameAction::ChooseReplacement { index }
         | GameAction::ChooseBranch { index }
         | GameAction::ChooseCastingVariant { index }
@@ -6118,6 +6137,7 @@ fn project_action_payload(
         | GameAction::SetPriorityPassingMode { .. }
         | GameAction::SetPriorityYield { .. }
         | GameAction::SetMayTriggerAutoChoice { .. }
+        | GameAction::SetReplacementAutoChoice { .. }
         | GameAction::SetTriggerOrderTemplate { .. } => {}
         GameAction::AssignCombatDamage {
             assignments,
@@ -6498,6 +6518,12 @@ fn action_code(action: &GameAction) -> InteractionActionCode {
         GameAction::SelectTargets { .. } => InteractionActionCode::SelectTargets,
         GameAction::ChooseTarget { .. } => InteractionActionCode::ChooseTarget,
         GameAction::ChooseReplacement { .. } => InteractionActionCode::ChooseReplacement,
+        GameAction::ChooseReplacementAndRemember { .. } => {
+            InteractionActionCode::ChooseReplacementAndRemember
+        }
+        GameAction::SetReplacementAutoChoice { .. } => {
+            InteractionActionCode::SetReplacementAutoChoice
+        }
         GameAction::ChooseEntryController { .. } => InteractionActionCode::ChooseEntryController,
         GameAction::OrderTriggers { .. } => InteractionActionCode::OrderTriggers,
         GameAction::OrderCostReductions { .. } => InteractionActionCode::OrderCostReductions,

@@ -154,6 +154,42 @@ impl<'a> TextPair<'a> {
         }
     }
 
+    /// Map a lowercase remainder slice back to its original-case counterpart.
+    ///
+    /// `lower_rest` must be a suffix of `self.lower` (typically a nom remainder
+    /// from a lowercase-only parse, e.g. `parse_perpetual_self_subject`'s
+    /// return). Walks original-case chars and sums each char's lowercase byte
+    /// length until the consumed prefix is accounted for, so the boundary stays
+    /// correct even when Unicode lowercasing changed byte length (e.g. U+0130
+    /// `İ`, 2 bytes, lowercases to 3-byte `i̇`) — the case the naive
+    /// `original[lower.len() - rest.len()..]` slice gets wrong.
+    ///
+    /// Returns `None` when `lower_rest` is not a suffix of `self.lower`, or
+    /// when the boundary falls mid-expansion of a single original char (no
+    /// original boundary corresponds) — callers fail the arm closed.
+    pub fn original_remainder(&self, lower_rest: &str) -> Option<&'a str> {
+        let lower_start = self.lower.as_ptr() as usize;
+        let rest_start = lower_rest.as_ptr() as usize;
+        let lower_end = lower_start + self.lower.len();
+        if rest_start < lower_start || rest_start + lower_rest.len() != lower_end {
+            return None;
+        }
+        let consumed_lower = rest_start - lower_start;
+        let mut accounted = 0;
+        for (idx, c) in self.original.char_indices() {
+            if accounted == consumed_lower {
+                return Some(&self.original[idx..]);
+            }
+            accounted += c.to_lowercase().map(|lc| lc.len_utf8()).sum::<usize>();
+            if accounted > consumed_lower {
+                // The lower-side boundary splits one original char's
+                // lowercased expansion — no original boundary corresponds.
+                return None;
+            }
+        }
+        (accounted == consumed_lower).then_some(&self.original[self.original.len()..])
+    }
+
     /// Find `needle` in the lowered text and return both slices advanced past it.
     ///
     /// Equivalent to `self.find(needle)` + `self.split_at(pos + needle.len()).1`
@@ -2553,8 +2589,20 @@ pub fn normalize_card_name_refs(text: &str, card_name: &str) -> String {
     // Part-Time Mutant" (full form, inside an except clause). The earlier
     // `replace_all_words` is word-boundary-aware, so re-running on the
     // residue cannot re-touch a `~` produced by the prior pass.
+    //
+    // CR 201.5c: only instances of the shortened name used to refer to the
+    // card are treated as its name. A single-word short name is matched
+    // case-sensitively, like a single-word full name above, so the same word in
+    // another case stays ordinary rules text, such as a step name ("an
+    // additional untap step" on Untap, Upkeep, Draw) or a keyword ("has storm"
+    // on Storm, Force of Nature; CR 702.40a). A multi-word short name stays
+    // case-insensitive, like a multi-word full name.
     if let Some(short_name) = comma_short_self_name(card_name) {
-        result = replace_all_words(&result, short_name, "~");
+        result = if short_name.contains(' ') {
+            replace_all_words(&result, short_name, "~")
+        } else {
+            replace_all_words_case_sensitive(&result, short_name, "~")
+        };
     }
 
     // "Of"-based short name: "Rosie Cotton of South Lane" → "Rosie Cotton"
@@ -2822,6 +2870,40 @@ mod tests {
 
     fn tp(text: &str) -> (String, String) {
         (text.to_string(), text.to_lowercase())
+    }
+
+    #[test]
+    fn original_remainder_maps_lower_suffix_to_original_case() {
+        // ASCII: the boundary is a plain byte offset.
+        let (o, l) = tp("Ab \"Quoted\"");
+        let pair = TextPair::new(&o, &l);
+        assert_eq!(pair.original_remainder(&l[3..]), Some("\"Quoted\""));
+        assert_eq!(pair.original_remainder(&l[..]), Some(&o[..]));
+        assert_eq!(pair.original_remainder(&l[l.len()..]), Some(""));
+        // A non-suffix (even an empty one from another allocation) fails closed.
+        assert_eq!(pair.original_remainder(""), None);
+        assert_eq!(pair.original_remainder("quoted"), None);
+    }
+
+    #[test]
+    fn original_remainder_survives_unicode_lowercase_expansion() {
+        // U+0130 `İ` (2 bytes) lowercases to 3-byte `i̇`, so the lower/upper
+        // byte lengths differ and a naive lower-derived offset lands mid-word
+        // (`original[5..]` is "est", not "rest"). `TextPair::new`'s
+        // equal-length debug assert cannot construct this pair, so build it
+        // literally — the mapper (unlike the struct's other slicers) makes no
+        // equal-length assumption.
+        let original = "Aİ rest";
+        let lower = original.to_lowercase();
+        assert_eq!(lower, "ai̇ rest");
+        let pair = TextPair {
+            original,
+            lower: &lower,
+        };
+        assert_eq!(pair.original_remainder(&lower[5..]), Some("rest"));
+        // A lower-side boundary mid-expansion of one original char (between
+        // the `i` and its combining dot) has no original counterpart.
+        assert_eq!(pair.original_remainder(&lower[2..]), None);
     }
 
     /// CR 604.1: the building block, exercised across its documented contract
@@ -3418,6 +3500,67 @@ mod tests {
                 "Haliya, Guided by Light"
             ),
             "Whenever ~ or another creature enters"
+        );
+    }
+
+    /// CR 201.5c + CR 702.40a: a single-word comma short name is matched only
+    /// in its printed case; the same word in lowercase is the storm keyword and
+    /// stays.
+    #[test]
+    fn single_word_comma_short_name_keeps_a_lowercase_keyword() {
+        // Reach guard in the same input: the printed "Storm" becomes `~`.
+        assert_eq!(
+            normalize_card_name_refs(
+                "Whenever Storm deals combat damage to a player, the next instant or sorcery spell you cast this turn has storm.",
+                "Storm, Force of Nature",
+            ),
+            "Whenever ~ deals combat damage to a player, the next instant or sorcery spell you cast this turn has storm."
+        );
+    }
+
+    /// CR 201.5c: a single-word comma short name in lowercase that names a
+    /// step is rules text and stays.
+    #[test]
+    fn single_word_comma_short_name_keeps_a_lowercase_step_name() {
+        // Reach guard: this name has the single-word short name "Untap", so
+        // the unchanged text below is not the absence of a short name.
+        assert_eq!(comma_short_self_name("Untap, Upkeep, Draw"), Some("Untap"));
+        const UNTAP_UPKEEP_DRAW: &str = "Choose one —\n\
+            • After this phase, there is an additional untap step.\n\
+            • After this phase, there is an additional upkeep step.\n\
+            • After this phase, there is an additional draw step.\n\
+            Entwine {3} (Choose all of them if you pay the entwine cost.)";
+        assert_eq!(
+            normalize_card_name_refs(UNTAP_UPKEEP_DRAW, "Untap, Upkeep, Draw"),
+            UNTAP_UPKEEP_DRAW
+        );
+    }
+
+    /// CR 201.5c: the sibling name forms keep their case rules. A multi-word
+    /// comma short name matches in any case; a single-word full name matches
+    /// only as printed.
+    #[test]
+    fn multi_word_comma_short_name_and_single_word_full_name_keep_their_case_rules() {
+        assert_eq!(
+            normalize_card_name_refs(
+                "Whenever Agrus Kos attacks, attacking red creatures get +2/+0 and attacking white creatures get +0/+2 until end of turn.",
+                "Agrus Kos, Wojek Veteran",
+            ),
+            "Whenever ~ attacks, attacking red creatures get +2/+0 and attacking white creatures get +0/+2 until end of turn."
+        );
+        assert_eq!(
+            normalize_card_name_refs(
+                "Whenever agrus kos attacks, draw a card.",
+                "Agrus Kos, Wojek Veteran",
+            ),
+            "Whenever ~ attacks, draw a card."
+        );
+        assert_eq!(
+            normalize_card_name_refs(
+                "Whenever a player says \"sorry\" at any other time, Sorry deals 2 damage to that player.",
+                "Sorry",
+            ),
+            "Whenever a player says \"sorry\" at any other time, ~ deals 2 damage to that player."
         );
     }
 

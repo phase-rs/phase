@@ -6,27 +6,40 @@ use engine::analysis::decision_template::{
     IterationCount, MayChoiceOption, PinnedDecision, Ranking, ReplayMode, TargetPin,
     TargetSchedule,
 };
+use engine::game::engine::apply;
+use engine::game::scenario::{GameScenario, P0};
 use engine::types::ability::{
-    Comparator, TriggerBaseSetInstanceRef, TriggerDefinitionOccurrenceRef,
+    Comparator, Effect, QuantityExpr, QuantityModification, ReplacementDefinition, TargetFilter,
+    TriggerBaseSetInstanceRef, TriggerDefinitionOccurrenceRef, TypedFilter,
 };
-use engine::types::actions::{DebugAction, DebugTokenRequest, MAX_DEBUG_CREATE_COUNT};
-use engine::types::counter::CounterType;
-use engine::types::game_state::{ManaChoice, ProductionOverride, ShardChoice, YieldTarget};
+use engine::types::actions::{
+    DebugAction, DebugTokenRequest, ReplacementAutoChoice, MAX_DEBUG_CREATE_COUNT,
+};
+use engine::types::counter::{CounterMatch, CounterType};
+use engine::types::game_state::{
+    ManaChoice, ProductionOverride, ReplacementAutoChoiceIdentity, ShardChoice, WaitingFor,
+    YieldTarget,
+};
 use engine::types::identifiers::{CardId, ObjectIncarnationRef};
 use engine::types::keywords::Keyword;
 use engine::types::mana::{
-    ManaRestriction, ManaSourcePenalty, ManaSourceSelection, ManaType, SpellCostCriterion,
-    TapsForManaSelection,
+    ManaRestriction, ManaSourceOutput, ManaSourcePenalty, ManaSourceQuantity, ManaSourceSelection,
+    ManaType, SpellCostCriterion, TapsForManaSelection,
 };
 use engine::types::match_config::DeckCardCount;
+use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::proposed_event::TokenCharacteristics;
+use engine::types::replacements::ReplacementEvent;
 use engine::types::zones::Zone;
 use engine::types::{GameAction, ObjectId};
 use server_core::game_action_payload_guard::{
     guard_game_action_payload, MAX_ACTION_LIST_LEN, MAX_CHOICE_LEN, MAX_DEBUG_AST_JSON_LEN,
     MAX_MANA_SELECTION_STRING_BYTES,
 };
+
+use server_core::guard_client_message_before_dispatch;
+use server_core::protocol::{ClientMessage, ServerMode};
 
 fn mana_source_selection() -> ManaSourceSelection {
     ManaSourceSelection {
@@ -108,6 +121,17 @@ fn accepts_realistic_tap_land_semantic_selection() {
 
     guard_game_action_payload(&GameAction::TapLandForMana { selection })
         .expect("a realistic semantic mana-source selection stays within every budget");
+}
+
+#[test]
+fn accepts_scalar_deferred_mana_quantity_without_new_collection_budget() {
+    for quantity in [ManaSourceQuantity::Fixed(3), ManaSourceQuantity::Variable] {
+        let mut selection = mana_source_selection();
+        selection.mana_type = ManaType::Colorless;
+        selection.output = ManaSourceOutput::DeferredColorChoice { quantity };
+        guard_game_action_payload(&GameAction::ActivateManaSource { selection })
+            .expect("the scalar descriptor adds no list or string payload");
+    }
 }
 
 #[test]
@@ -573,4 +597,127 @@ fn rejects_over_cap_shortcut_ranking_on_every_scheduled_arm() {
         "and an in-bounds nested schedule passes, so the nested refusals above are the LENGTH \
          and not the nesting"
     );
+}
+
+#[test]
+fn compact_selector_removes_a_real_saved_key_larger_than_the_ast_wire_budget() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let target = scenario.add_creature(P0, "Counter recipient", 1, 1).id();
+    let mut sources = Vec::new();
+    for index in 0..50 {
+        let modification = if index == 0 {
+            QuantityModification::Minus { value: 1 }
+        } else {
+            QuantityModification::Plus { value: 1 }
+        };
+        sources.push(
+            scenario
+                .add_creature(P0, "Counter modifier", 1, 1)
+                .with_replacement_definition(
+                    ReplacementDefinition::new(ReplacementEvent::AddCounter)
+                        .valid_card(TargetFilter::Typed(TypedFilter::creature()))
+                        .counter_match(CounterMatch::OfType(CounterType::Plus1Plus1))
+                        .quantity_modification(modification),
+                )
+                .id(),
+        );
+    }
+    let spell = scenario
+        .add_spell_to_hand(P0, "Counter spell", true)
+        .with_ability(Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Typed(TypedFilter::creature()),
+        })
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(spell).target_object(target).resolve();
+    let WaitingFor::ReplacementChoice {
+        candidate_count,
+        candidates,
+        remember_identity: Some(key),
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("all 50 counter modifiers must offer an eligible replacement ordering");
+    };
+    assert_eq!(*candidate_count, 50);
+    assert_eq!(candidates.len(), 50);
+    assert_eq!(key.candidates.len(), 50);
+    for identity in &key.candidates {
+        let ReplacementAutoChoiceIdentity::Definition {
+            source: saved_source,
+            definition,
+            ..
+        } = identity
+        else {
+            panic!("counter modifiers must snapshot their real definitions");
+        };
+        // The scan can differ from the requested order; every identity must
+        // still reference one of the real applicable source definitions.
+        assert!(sources.contains(&saved_source.object_id));
+        assert_eq!(
+            definition.as_ref(),
+            &runner.state().objects[&saved_source.object_id].replacement_definitions[0]
+        );
+        assert_eq!(
+            definition.as_ref(),
+            &runner.state().objects[&saved_source.object_id].base_replacement_definitions[0]
+        );
+    }
+    let order = sources
+        .iter()
+        .map(|source| {
+            candidates
+                .iter()
+                .position(|candidate| candidate.source_id == *source)
+                .unwrap()
+        })
+        .collect();
+    runner
+        .act(GameAction::ChooseReplacementAndRemember {
+            choice: ReplacementAutoChoice::Order { order },
+        })
+        .unwrap();
+    assert_eq!(runner.state().replacement_auto_choices.len(), 1);
+    let record = &runner.state().replacement_auto_choices[0];
+    let key_bytes = serde_json::to_vec(&record.key).unwrap().len();
+    assert!(
+        key_bytes > MAX_DEBUG_AST_JSON_LEN,
+        "real stored key is {key_bytes} bytes"
+    );
+    println!(
+        "real stored replacement key: {key_bytes} bytes; compact selector: {} bytes",
+        record.id.0.len()
+    );
+    assert_eq!(record.id.0.len(), 65);
+    // CR 616.1f: subtracting the initial counter reduces the count to zero,
+    // leaving no other applicable replacements when the event is rescanned.
+    assert!(runner.state().objects[&target].counters.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().replacement_auto_choice_tail.is_none());
+
+    let frame = serde_json::to_string(&ClientMessage::Action {
+        action: GameAction::SetReplacementAutoChoice {
+            selector: Some(record.id.clone()),
+        },
+    })
+    .unwrap();
+    let decoded: ClientMessage = serde_json::from_str(&frame).unwrap();
+    guard_client_message_before_dispatch(&decoded, ServerMode::Full)
+        .expect("a legitimate saved preference removal must pass the real transport guard");
+    let ClientMessage::Action { action } = decoded else {
+        unreachable!()
+    };
+    let waiting_for = runner.state().waiting_for.clone();
+    let result = apply(runner.state_mut(), P0, action).unwrap();
+    assert!(runner.state().replacement_auto_choices.is_empty());
+    assert_eq!(runner.state().waiting_for, waiting_for);
+    assert!(result.events.is_empty());
+    assert!(runner.state().objects[&target].counters.is_empty());
+    assert!(runner.state().replacement_auto_choice_tail.is_none());
 }

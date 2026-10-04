@@ -1308,6 +1308,7 @@ fn a_granted_counter_rider_is_latched_when_the_grant_ends_mid_payment() {
         extra_cost: None,
         enters_with_counter: Some(CounterType::Finality),
         required_cast_keyword: None,
+        pool: engine::types::statics::GraveyardPermissionPool::OwnGraveyard,
     })
     .affected(TargetFilter::Typed(TypedFilter::creature()));
     let grant = StaticDefinition::continuous()
@@ -1418,6 +1419,7 @@ fn land_permission(
             extra_cost: None,
             enters_with_counter: None,
             required_cast_keyword: None,
+            pool: engine::types::statics::GraveyardPermissionPool::OwnGraveyard,
         },
     )
     .affected(engine::types::ability::TargetFilter::Typed(affected))

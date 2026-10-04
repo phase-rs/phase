@@ -214,3 +214,72 @@ fn production_change_zone_pipeline_records_the_transition_command() {
     );
     assert_eq!(runner.state().objects[&target].zone, Zone::Exile);
 }
+
+const TREASURE_CRUISE_ORACLE: &str =
+    "Delve (Each card you exile from your graveyard while casting this spell pays for {1}.)\nDraw three cards.";
+
+/// CR 733.1 + CR 601.2h: a cancelled delve cast journals no zone change for the
+/// selected cards, so replaying every journaled command from the pre-cast state
+/// reproduces the live turn ledger and zones, including a later real move.
+#[test]
+fn cancelled_delve_cast_leaves_a_replayable_zone_change_journal() {
+    use engine::types::actions::GameAction;
+    use engine::types::game_state::CastPaymentMode;
+    use engine::types::mana::ManaType;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Delve Cruise", false, TREASURE_CRUISE_ORACLE)
+        .from_oracle_text_with_keywords(&["Delve"], TREASURE_CRUISE_ORACLE)
+        .with_mana_cost(ManaCost::generic(3))
+        .id();
+    let fuel: Vec<_> = ["Fuel A", "Fuel B", "Fuel C"]
+        .into_iter()
+        .map(|name| scenario.add_spell_to_graveyard(P0, name, true).id())
+        .collect();
+    let later = scenario.add_spell_to_hand(P0, "Later Card", true).id();
+    let mut runner = scenario.build();
+    let pre_cast = runner.state().clone();
+
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("begin the delve cast");
+    for id in &fuel {
+        runner
+            .act(GameAction::TapForConvoke {
+                object_id: *id,
+                mana_type: ManaType::Colorless,
+            })
+            .expect("select delve fuel");
+    }
+    runner.act(GameAction::CancelCast).expect("cancel the cast");
+    let mut events = Vec::new();
+    move_to_zone(runner.state_mut(), later, Zone::Graveyard, &mut events);
+
+    let live = runner.state();
+    let mut replay = pre_cast;
+    for command in live
+        .resolved_rules_journal
+        .entries()
+        .iter()
+        .filter_map(|entry| entry.command.as_ref())
+    {
+        if let ResolvedRulesCommand::ZoneChange(command) = command {
+            apply_resolved_zone_change(&mut replay, command)
+                .expect("every journaled zone change replays in order");
+        }
+    }
+
+    assert_eq!(replay.zone_changes_this_turn, live.zone_changes_this_turn);
+    for id in fuel.iter().chain([&spell, &later]) {
+        assert_eq!(replay.objects[id].zone, live.objects[id].zone, "{id:?}");
+        assert_eq!(replay.objects[id].incarnation, live.objects[id].incarnation);
+    }
+}

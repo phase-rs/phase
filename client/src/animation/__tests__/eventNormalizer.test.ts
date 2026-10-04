@@ -92,6 +92,20 @@ describe("normalizeEvents", () => {
     expect(normalizeEvents(events)).toEqual([]);
   });
 
+  // CR 605.3b: a mana ability's activation is presented like the mana it adds
+  // (non-visual, so no activation sound plays per land tap), while an ordinary
+  // activation keeps its step — the one the activation SFX is scheduled from.
+  it("skips mana-ability activations but keeps ordinary activations", () => {
+    const mana: GameEvent = { type: "AbilityActivated", data: { player_id: 0, source_id: 1, kind: "Mana" } };
+    const normal: GameEvent = { type: "AbilityActivated", data: { player_id: 0, source_id: 2, kind: "Normal" } };
+    const legacy: GameEvent = { type: "AbilityActivated", data: { player_id: 0, source_id: 3 } };
+
+    expect(normalizeEvents([mana])).toEqual([]);
+    const steps = normalizeEvents([normal, legacy]);
+    const activations = steps.flatMap((step) => step.effects.map(({ event }) => event));
+    expect(activations).toEqual([normal, legacy]);
+  });
+
   describe("Melded", () => {
     const melded: GameEvent = {
       type: "Melded",

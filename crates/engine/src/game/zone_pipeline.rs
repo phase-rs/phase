@@ -1370,11 +1370,10 @@ fn deliver_batch(
             ZoneMoveTerminalResult::NeedsAuraAttachmentChoice => {
                 // CR 303.4f: an aura-host choice flows through
                 // `WaitingFor::ReturnAsAuraTarget`, not the replacement-choice
-                // resume path. No batch flow targets a battlefield aura entry
-                // today (mill destinations are graveyard/exile/hand; mass bounce
-                // returns to hand/library), so this arm is unreachable for the
-                // current batch callers; stop and stash the tail so a future
-                // battlefield-entry batch does not silently drop its remainder.
+                // resume path. Battlefield-entry batches (reveal-until kept
+                // delivery, Dig mass put-all) reach this arm when an entering
+                // Aura needs a host; stop and stash the tail so the remainder is
+                // delivered when the attachment choice resumes the batch.
                 //
                 // The stashed tail IS drained correctly on resume: the
                 // `ReturnAsAuraTarget` handler (engine.rs:3608-3611) and its
@@ -3930,6 +3929,13 @@ pub(crate) fn deliver_replaced_zone_change(
                     display_source: copy.display_source,
                     printed_ref: copy.printed_ref,
                     token_image_ref: copy.token_image_ref,
+                    // The recipient keeps its own base (Clone is a 0/0
+                    // Shapeshifter underneath), so it rides the source's
+                    // captured descriptor — or the legacy live-field search
+                    // when the source had none — exactly like the exact refs
+                    // above. Created copy-tokens never pass through here;
+                    // their descriptor is derived by the creation injectors.
+                    token_art: copy.token_art,
                     additional_modifications: copy.additional_modifications,
                     effect_kind: EffectKind::BecomeCopy,
                 };

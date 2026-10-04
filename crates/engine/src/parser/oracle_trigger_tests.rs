@@ -26,6 +26,7 @@ use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::game_state::WaitingFor;
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
+use crate::types::phase::{PhaseGroup, TurnSegment};
 use crate::types::replacements::ReplacementEvent;
 use crate::types::statics::{CastFrequency, StaticMode};
 use crate::types::zones::Zone;
@@ -20485,8 +20486,8 @@ fn phase_trigger_enchanted_players_first_upkeep() {
     assert!(matches!(
         def.execute.as_ref().map(|ability| ability.effect.as_ref()),
         Some(Effect::AdditionalPhase {
-            target: TargetFilter::TriggeringPlayer,
-            phase: Phase::Upkeep,
+            recipient: crate::types::ability::ExtraPhaseRecipient::TriggeringPlayer,
+            segment: TurnSegment::Step(Phase::Upkeep),
             after: crate::types::ability::ExtraPhaseAnchor::ThisStep,
             followed_by,
             ..
@@ -22906,6 +22907,290 @@ fn trigger_put_into_your_graveyard_from_library() {
     );
 }
 
+/// CR 603.1 + CR 603.6c: Oglor, Devoted Assistant — a disjunctive origin
+/// union ("from your library or hand", with the second-disjunct possessive
+/// elided) populates `origin_zones` with `origin` unset.
+#[test]
+fn trigger_put_into_your_graveyard_from_library_or_hand_union() {
+    let def = parse_trigger_line(
+        "Whenever a creature card is put into your graveyard from your library or hand, draw a card.",
+        "Oglor, Devoted Assistant",
+    );
+    assert_eq!(def.mode, TriggerMode::ChangesZone);
+    assert_eq!(def.origin, None);
+    assert_eq!(def.origin_zones, vec![Zone::Library, Zone::Hand]);
+    assert_eq!(def.destination, Some(Zone::Graveyard));
+    // CR 109.5: the union must not disturb the graveyard-possessive narrowing.
+    if let Some(TargetFilter::Typed(tf)) = &def.valid_card {
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+    } else {
+        panic!(
+            "Expected Typed valid_card with controller=You, got {:?}",
+            def.valid_card
+        );
+    }
+}
+
+/// The full-form union ("from your library or your hand") lowers to the same
+/// zone set as the ellipsis form.
+#[test]
+fn trigger_put_into_your_graveyard_from_library_or_your_hand_union() {
+    let def = parse_trigger_line(
+        "Whenever a creature card is put into your graveyard from your library or your hand, draw a card.",
+        "Some Card",
+    );
+    assert_eq!(def.mode, TriggerMode::ChangesZone);
+    assert_eq!(def.origin, None);
+    assert_eq!(def.origin_zones, vec![Zone::Library, Zone::Hand]);
+    assert_eq!(def.destination, Some(Zone::Graveyard));
+}
+
+/// Single origins keep the scalar `origin` shape with an empty `origin_zones`
+/// set after the union refactor.
+#[test]
+fn trigger_put_into_your_graveyard_from_library_single_shape_unchanged() {
+    let def = parse_trigger_line(
+        "Whenever a creature card is put into your graveyard from your library, draw a card.",
+        "Some Card",
+    );
+    assert_eq!(def.mode, TriggerMode::ChangesZone);
+    assert_eq!(def.origin, Some(Zone::Library));
+    assert!(
+        def.origin_zones.is_empty(),
+        "single origins must not populate origin_zones, got {:?}",
+        def.origin_zones
+    );
+    assert_eq!(def.destination, Some(Zone::Graveyard));
+}
+
+/// Bare "anywhere" stays unconstrained (no scalar origin, no zone set).
+#[test]
+fn trigger_put_into_your_graveyard_from_anywhere_stays_unconstrained() {
+    let def = parse_trigger_line(
+        "Whenever a creature card is put into your graveyard from anywhere, draw a card.",
+        "Some Card",
+    );
+    assert_eq!(def.mode, TriggerMode::ChangesZone);
+    assert_eq!(def.origin, None);
+    assert!(
+        def.origin_zones.is_empty(),
+        "bare anywhere must not populate origin_zones, got {:?}",
+        def.origin_zones
+    );
+    assert_eq!(def.destination, Some(Zone::Graveyard));
+}
+
+/// CR 109.5: bare "a library" (Dreadhound) is an unowned single origin —
+/// same scalar shape as every other library possessive.
+#[test]
+fn trigger_put_into_a_graveyard_from_a_library() {
+    let def = parse_trigger_line(
+        "Whenever a creature card is put into a graveyard from a library, draw a card.",
+        "Some Card",
+    );
+    assert_eq!(def.mode, TriggerMode::ChangesZone);
+    assert_eq!(def.origin, Some(Zone::Library));
+    assert!(
+        def.origin_zones.is_empty(),
+        "single origins must not populate origin_zones, got {:?}",
+        def.origin_zones
+    );
+    assert_eq!(def.destination, Some(Zone::Graveyard));
+}
+
+/// Honest-red: an origin tail the union grammar cannot fully consume fails
+/// the arm instead of silently dropping the second disjunct.
+#[test]
+fn trigger_put_into_your_graveyard_with_unconsumed_origin_tail_stays_unknown() {
+    let def = parse_trigger_line(
+        "Whenever a creature card is put into your graveyard from your library or exile, draw a card.",
+        "Some Card",
+    );
+    assert!(
+        matches!(def.mode, TriggerMode::Unknown(_)),
+        "an unconsumed origin remainder must fail the arm, got {:?}",
+        def.mode
+    );
+}
+
+/// Honest-red (batched): an origin tail the union grammar cannot fully
+/// consume fails the batched arm instead of silently dropping the disjunct.
+#[test]
+fn trigger_one_or_more_put_into_your_graveyard_with_unconsumed_origin_tail_stays_unknown() {
+    let def = parse_trigger_line(
+        "Whenever one or more creature cards are put into your graveyard from your library or exile, draw a card.",
+        "Some Card",
+    );
+    assert!(
+        matches!(def.mode, TriggerMode::Unknown(_)),
+        "an unconsumed batched origin remainder must fail the arm, got {:?}",
+        def.mode
+    );
+}
+
+/// CR 109.5 + CR 400.3: opponent-qualified union against an opponent-owned
+/// destination — the mirror of the Oglor (You+You) accept shape. The
+/// bare-ellipsis second disjunct inherits the head's `Opponent` qualifier, so
+/// the union is uniformly opponent-owned and consistent with the destination.
+#[test]
+fn trigger_put_into_opponent_graveyard_from_opponent_library_or_hand_union() {
+    let def = parse_trigger_line(
+        "Whenever a creature card is put into an opponent's graveyard from an opponent's library or hand, draw a card.",
+        "Some Card",
+    );
+    assert_eq!(def.mode, TriggerMode::ChangesZone);
+    assert_eq!(def.origin, None);
+    assert_eq!(def.origin_zones, vec![Zone::Library, Zone::Hand]);
+    assert_eq!(def.destination, Some(Zone::Graveyard));
+    // CR 109.5: the union must not disturb the graveyard-possessive narrowing.
+    if let Some(TargetFilter::Typed(tf)) = &def.valid_card {
+        assert_eq!(tf.controller, Some(ControllerRef::Opponent));
+    } else {
+        panic!(
+            "Expected Typed valid_card with controller=Opponent, got {:?}",
+            def.valid_card
+        );
+    }
+}
+
+/// CR 109.5 + CR 400.3 (fail-closed): an opponent-qualified union against an
+/// UNQUALIFIED destination would silently drop the owner qualifier (the
+/// matcher keys on the zone-only set), so the arm fails honestly instead of
+/// over-firing on the controller's own library/hand → graveyard events.
+#[test]
+fn trigger_put_into_a_graveyard_from_opponent_library_or_hand_stays_unknown() {
+    let def = parse_trigger_line(
+        "Whenever a creature card is put into a graveyard from an opponent's library or hand, draw a card.",
+        "Some Card",
+    );
+    assert!(
+        matches!(def.mode, TriggerMode::Unknown(_)),
+        "an opponent-qualified union against an unqualified destination must fail the arm, got {:?}",
+        def.mode
+    );
+}
+
+/// CR 109.5 + CR 400.3 (fail-closed, paired own control): a you-qualified
+/// union against an unqualified destination fails for the same reason.
+#[test]
+fn trigger_put_into_a_graveyard_from_your_library_or_hand_stays_unknown() {
+    let def = parse_trigger_line(
+        "Whenever a creature card is put into a graveyard from your library or hand, draw a card.",
+        "Some Card",
+    );
+    assert!(
+        matches!(def.mode, TriggerMode::Unknown(_)),
+        "a you-qualified union against an unqualified destination must fail the arm, got {:?}",
+        def.mode
+    );
+}
+
+/// CR 109.5 + CR 400.3: fully unqualified union ("a library", bare "hand"
+/// inheriting the unowned head) against an unqualified destination — zone-only
+/// is exact, so the union parses to the disjunctive set with no narrowing.
+#[test]
+fn trigger_put_into_a_graveyard_from_a_library_or_hand_union() {
+    let def = parse_trigger_line(
+        "Whenever a creature card is put into a graveyard from a library or hand, draw a card.",
+        "Some Card",
+    );
+    assert_eq!(def.mode, TriggerMode::ChangesZone);
+    assert_eq!(def.origin, None);
+    assert_eq!(def.origin_zones, vec![Zone::Library, Zone::Hand]);
+    assert_eq!(def.destination, Some(Zone::Graveyard));
+}
+
+/// CR 109.5 + CR 400.3 (fail-closed, batched): the batched caller shares the
+/// union gate — a mismatched batched union fails the arm and falls through to
+/// `Unknown` rather than over-firing.
+#[test]
+fn trigger_one_or_more_put_into_a_graveyard_from_opponent_library_or_hand_stays_unknown() {
+    let def = parse_trigger_line(
+        "Whenever one or more creature cards are put into a graveyard from an opponent's library or hand, draw a card.",
+        "Some Card",
+    );
+    assert!(
+        matches!(def.mode, TriggerMode::Unknown(_)),
+        "a mismatched batched union must fail the arm, got {:?}",
+        def.mode
+    );
+}
+
+/// CR 109.5 (fail-closed): mixed member qualifiers admit no single owner
+/// reading, so the union fails even against a qualified destination.
+#[test]
+fn trigger_put_into_your_graveyard_from_mixed_owner_union_stays_unknown() {
+    let def = parse_trigger_line(
+        "Whenever a creature card is put into your graveyard from your library or an opponent's library, draw a card.",
+        "Some Card",
+    );
+    assert!(
+        matches!(def.mode, TriggerMode::Unknown(_)),
+        "a mixed-qualifier union must fail the arm, got {:?}",
+        def.mode
+    );
+}
+
+/// CR 109.5 (fail-closed): the `their`-anaphor binds to the destination owner,
+/// so against an unqualified destination it dangles and the union fails.
+#[test]
+fn trigger_put_into_a_graveyard_from_their_library_or_hand_stays_unknown() {
+    let def = parse_trigger_line(
+        "Whenever a creature card is put into a graveyard from their library or hand, draw a card.",
+        "Some Card",
+    );
+    assert!(
+        matches!(def.mode, TriggerMode::Unknown(_)),
+        "a their-anaphor union against an unqualified destination must fail the arm, got {:?}",
+        def.mode
+    );
+}
+
+/// CR 109.5: the `their`-anaphor resolves to a qualified destination owner,
+/// so the union is consistent and parses to the disjunctive set.
+#[test]
+fn trigger_put_into_your_graveyard_from_their_library_or_hand_union() {
+    let def = parse_trigger_line(
+        "Whenever a creature card is put into your graveyard from their library or hand, draw a card.",
+        "Some Card",
+    );
+    assert_eq!(def.mode, TriggerMode::ChangesZone);
+    assert_eq!(def.origin, None);
+    assert_eq!(def.origin_zones, vec![Zone::Library, Zone::Hand]);
+    assert_eq!(def.destination, Some(Zone::Graveyard));
+}
+
+/// Dreadhound's two-way disjunctive zone-change trigger: "a creature dies or
+/// a creature card is put into a graveyard from a library". The `a library`
+/// arm lands in the shared origin parser, so the clause path yields dies +
+/// Library→Graveyard — the printed disjunction (previously the put-half fell
+/// back to a split with an unconstrained origin).
+#[test]
+fn trigger_dreadhound_dies_or_library_to_graveyard_two_clauses() {
+    let def = parse_trigger_line(
+        "Whenever a creature dies or a creature card is put into a graveyard from a library, each opponent loses 1 life.",
+        "Dreadhound",
+    );
+    assert_eq!(def.mode, TriggerMode::ChangesZone);
+    assert_eq!(
+        def.zone_change_clauses.len(),
+        2,
+        "expected 2 disjunctive clauses, got {:?}",
+        def.zone_change_clauses
+    );
+
+    // Clause 1: a creature dies (battlefield -> graveyard).
+    let c1 = &def.zone_change_clauses[0];
+    assert_eq!(c1.origin, OriginConstraint::Equals(Zone::Battlefield));
+    assert_eq!(c1.destination, Some(Zone::Graveyard));
+
+    // Clause 2: creature card put into a graveyard from a library.
+    let c2 = &def.zone_change_clauses[1];
+    assert_eq!(c2.origin, OriginConstraint::Equals(Zone::Library));
+    assert_eq!(c2.destination, Some(Zone::Graveyard));
+    assert!(c2.valid_card.is_some());
+}
+
 /// Regression for issue #311: Undead Alchemist class. "Whenever a creature
 /// card is put into an opponent's graveyard from their library" must:
 ///   - set origin = Library (CR 603.6c: from-library zone constraint)
@@ -24535,6 +24820,36 @@ fn trigger_dies_trailing_if_dealt_damage_stays_resolution_time() {
         execute.condition,
         Some(AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn),
         "the trailing condition must stay on the resolving effect"
+    );
+}
+
+#[test]
+fn trigger_dies_if_source_exploited_that_creature() {
+    // CR 702.110b + CR 608.2c: "Whenever another creature you control dies, put a +1/+1 counter on this creature. It gains haste until end of turn if it exploited that creature."
+    let def = parse_trigger_line(
+        "Whenever another creature you control dies, put a +1/+1 counter on this creature. It gains haste until end of turn if it exploited that creature.",
+        "Silumgar Scavenger",
+    );
+    assert_eq!(def.mode, TriggerMode::ChangesZone);
+    assert_eq!(def.origin, Some(Zone::Battlefield));
+    assert_eq!(def.destination, Some(Zone::Graveyard));
+    assert_eq!(
+        def.condition, None,
+        "a trailing resolution-time `if` must NOT be hoisted to an intervening-if (CR 603.4)"
+    );
+    let execute = def
+        .execute
+        .as_deref()
+        .expect("trigger must parse an execute");
+    // The chain has two parts: +1/+1 counter, then grant haste gated by TriggerEventTargetExploitedBySource
+    let sub = execute
+        .sub_ability
+        .as_deref()
+        .expect("must have sub_ability for haste");
+    assert_eq!(
+        sub.condition,
+        Some(AbilityCondition::TriggerEventTargetExploitedBySource),
+        "the trailing condition must stay on the haste effect"
     );
 }
 
@@ -31502,7 +31817,7 @@ fn triggered_additional_combat_folds_land_creature_attacker_restriction() {
             "no Unimplemented node may remain after the fold"
         );
         if let Effect::AdditionalPhase {
-            phase: Phase::BeginCombat,
+            segment: TurnSegment::Phase(PhaseGroup::Combat),
             attacker_restriction: Some(TargetFilter::Typed(tf)),
             ..
         } = ability.effect.as_ref()
@@ -36265,4 +36580,242 @@ fn card_parking_hand_reveal_is_a_chosen_object_boundary_for_the_event_source_lif
         TargetFilter::None,
         false
     )));
+}
+
+#[test]
+fn rohgahh_plural_control_transfer_preserves_parent_operand() {
+    let parsed = parse_oracle_text(
+        "At the beginning of your upkeep, you may pay {R}{R}{R}. If you don't, tap Rohgahh and all creatures named Kobolds of Kher Keep, then an opponent gains control of them.",
+        "Rohgahh of Kher Keep",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    assert_eq!(parsed.triggers.len(), 1);
+    let execute = parsed.triggers[0].execute.as_ref().expect("upkeep execute");
+    let mut pending = vec![execute.as_ref()];
+    let mut transfers = 0;
+    while let Some(ability) = pending.pop() {
+        if let Effect::GainControl { target } = ability.effect.as_ref() {
+            assert_eq!(target, &TargetFilter::ParentTarget);
+            transfers += 1;
+        }
+        if let Some(sub) = ability.sub_ability.as_deref() {
+            pending.push(sub);
+        }
+        if let Some(otherwise) = ability.else_ability.as_deref() {
+            pending.push(otherwise);
+        }
+    }
+    assert_eq!(
+        transfers, 1,
+        "printed plural control transfer must be reached"
+    );
+}
+
+#[test]
+fn akroan_horse_etb_parsed_trigger() {
+    let parsed = parse_oracle_text(
+        "Defender\nWhen this creature enters, an opponent gains control of it.\nAt the beginning of your upkeep, each opponent creates a 1/1 white Soldier creature token.",
+        "Akroan Horse",
+        &["Defender".to_string()],
+        &["Artifact".to_string(), "Creature".to_string()],
+        &["Horse".to_string()],
+    );
+    assert_eq!(parsed.extracted_keywords, vec![Keyword::Defender]);
+    assert_eq!(parsed.triggers.len(), 2);
+
+    let etb_trigger = &parsed.triggers[0];
+    assert_eq!(etb_trigger.mode, TriggerMode::ChangesZone);
+    assert_eq!(etb_trigger.destination, Some(Zone::Battlefield));
+    assert_eq!(etb_trigger.valid_card, Some(TargetFilter::SelfRef));
+    let etb_exec = etb_trigger.execute.as_ref().expect("ETB execute");
+    assert_eq!(
+        etb_exec.effect.as_ref(),
+        &Effect::Choose {
+            choice_type: crate::types::ability::ChoiceType::opponent(),
+            persist: false,
+            selection: crate::types::ability::TargetSelectionMode::Chosen,
+        }
+    );
+    let sub = etb_exec
+        .sub_ability
+        .as_ref()
+        .expect("GainControl sub-ability");
+    assert_eq!(
+        sub.effect.as_ref(),
+        &Effect::GainControl {
+            target: TargetFilter::SelfRef,
+        }
+    );
+
+    let upkeep_trigger = &parsed.triggers[1];
+    assert_eq!(upkeep_trigger.mode, TriggerMode::Phase);
+    assert_eq!(upkeep_trigger.phase, Some(Phase::Upkeep));
+    assert_eq!(
+        upkeep_trigger.constraint,
+        Some(TriggerConstraint::OnlyDuringYourTurn)
+    );
+    let upkeep_exec = upkeep_trigger.execute.as_ref().expect("Upkeep execute");
+    assert!(matches!(
+        upkeep_exec.effect.as_ref(),
+        Effect::Token {
+            name,
+            ref colors,
+            ..
+        } if name == "Soldier" && colors == &vec![ManaColor::White]
+    ));
+    assert_eq!(upkeep_exec.player_scope, Some(PlayerFilter::Opponent));
+}
+
+fn assert_block_count_shape(condition: &TriggerCondition, minimum: i32, noun: &str) {
+    let TriggerCondition::EventTime { condition } = condition else {
+        panic!("expected event-time predicate: {condition:?}");
+    };
+    let TriggerCondition::QuantityComparison {
+        lhs:
+            QuantityExpr::Ref {
+                qty:
+                    QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(filter),
+                    },
+            },
+        comparator: Comparator::GE,
+        rhs: QuantityExpr::Fixed { value },
+    } = condition.as_ref()
+    else {
+        panic!("expected filtered minimum count: {condition:?}");
+    };
+    assert_eq!(*value, minimum);
+    let TargetFilter::Typed(mut expected) = parse_type_phrase_folding(noun).0 else {
+        panic!("expected typed noun");
+    };
+    expected
+        .properties
+        .push(FilterProp::Attacking { defender: None });
+    expected.properties.push(FilterProp::CombatRelation {
+        relation: CombatRelation::BlockingOrBlockedBy,
+        subject: CombatRelationSubject::Source,
+    });
+    assert_eq!(filter, &expected);
+}
+
+// SHAPE: public lowering preserves the event predicate and source-level cardinality.
+#[test]
+fn count_qualified_blocks_lowered_shape() {
+    for (name, text, keywords, threshold, noun) in [
+        ("Lairwatch Giant", "This creature can block an additional creature each combat.\nWhenever this creature blocks two or more creatures, it gains first strike until end of turn.", vec![], 2, "creatures"),
+        ("Rashka the Slayer", "Reach (This creature can block creatures with flying.)\nWhenever Rashka blocks one or more black creatures, Rashka gets +1/+2 until end of turn.", vec!["Reach".to_string()], 1, "black creatures"),
+    ] {
+        let parsed = parse_oracle_text(text, name, &keywords, &["Creature".to_string()], &[]);
+        assert_eq!(parsed.triggers.len(), 1);
+        let trigger = &parsed.triggers[0];
+        assert_eq!(trigger.mode, TriggerMode::Blocks);
+        assert_eq!(trigger.valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(trigger.valid_target, None);
+        assert!(trigger.batched);
+        assert_block_count_shape(trigger.condition.as_ref().unwrap(), threshold, noun);
+        assert_no_unimplemented(trigger.execute.as_deref().unwrap());
+    }
+}
+
+// SHAPE: numerical and characteristic axes share the complete noun parser.
+#[test]
+fn count_qualified_blocks_numeric_properties_and_strict_tail() {
+    for (count, noun) in [
+        (1, "creatures"),
+        (3, "black creatures"),
+        (2, "creatures with flying"),
+        (2147483647, "creatures"),
+    ] {
+        let text = format!("Whenever this creature blocks {count} or more {noun}, it gains first strike until end of turn.");
+        let parsed = parse_oracle_text(&text, "Guard", &[], &["Creature".to_string()], &[]);
+        assert_eq!(parsed.triggers.len(), 1);
+        let trigger = &parsed.triggers[0];
+        assert_eq!(trigger.mode, TriggerMode::Blocks);
+        assert_block_count_shape(trigger.condition.as_ref().unwrap(), count, noun);
+        assert!(trigger.batched);
+        assert_eq!(trigger.valid_target, None);
+        assert_no_unimplemented(trigger.execute.as_deref().unwrap());
+    }
+    // Paired positive above reaches the same public parse/lower route.
+    for event in [
+        "this creature blocks two or more",
+        "this creature blocks two or more artifacts",
+        "this creature blocks two or more creatures with teamwork",
+        "this creature blocks two or more creatures during your turn",
+        "this creature blocks exactly two creatures",
+        "this creature blocks two creatures",
+        "this creature blocks 2147483648 or more creatures",
+        "this creature blocks 4294967296 or more creatures",
+        "this creature blocks 999999999999999999999999 or more creatures",
+        "a creature you control blocks two or more creatures",
+    ] {
+        let text = format!("Whenever {event}, it gains first strike until end of turn.");
+        let parsed = parse_oracle_text(&text, "Guard", &[], &["Creature".to_string()], &[]);
+        assert_eq!(parsed.triggers.len(), 1, "{event}");
+        assert!(
+            matches!(parsed.triggers[0].mode, TriggerMode::Unknown(_)),
+            "{event}: {:?}",
+            parsed.triggers[0]
+        );
+        assert_eq!(
+            parsed.triggers[0].description.as_deref(),
+            Some(normalize_card_name_refs(&text, "Guard").as_str()),
+            "rejected event text is preserved"
+        );
+    }
+}
+
+// SHAPE: a genuine intervening-if must coexist with the event-time count.
+#[test]
+fn count_qualified_blocks_intervening_if_preserves_count() {
+    let parsed = parse_oracle_text("Whenever this creature blocks two or more creatures, if you control a Forest, it gains first strike until end of turn.", "Guard", &[], &["Creature".to_string()], &[]);
+    assert_eq!(parsed.triggers.len(), 1);
+    let trigger = &parsed.triggers[0];
+    assert_eq!(trigger.mode, TriggerMode::Blocks);
+    assert!(trigger.batched);
+    assert_eq!(trigger.valid_target, None);
+    assert_no_unimplemented(trigger.execute.as_deref().unwrap());
+    let Some(TriggerCondition::And { conditions }) = &trigger.condition else {
+        panic!("count and if must both survive: {:?}", trigger.condition);
+    };
+    assert_eq!(conditions.len(), 2);
+    let count = conditions
+        .iter()
+        .find(|condition| matches!(condition, TriggerCondition::EventTime { .. }))
+        .unwrap();
+    assert_block_count_shape(count, 2, "creatures");
+    let (rest, static_if) = parse_inner_condition("you control a forest").unwrap();
+    assert!(rest.is_empty());
+    let expected_if = static_condition_to_trigger_condition(&static_if).unwrap();
+    assert!(matches!(expected_if, TriggerCondition::ControlsType { .. }));
+    assert!(
+        conditions.iter().any(|condition| condition == &expected_if),
+        "{conditions:?}"
+    );
+}
+
+// SHAPE: articles retain the adjacent per-attacker route, including filters.
+#[test]
+fn count_qualified_blocks_preserves_article_qualified_shapes() {
+    for noun in ["creature", "creature with flying", "artifact creature"] {
+        let article = if noun == "artifact creature" {
+            "an"
+        } else {
+            "a"
+        };
+        let text = format!("Whenever this creature blocks {article} {noun}, it gains first strike until end of turn.");
+        let parsed = parse_oracle_text(&text, "Guard", &[], &["Creature".to_string()], &[]);
+        assert_eq!(parsed.triggers.len(), 1);
+        let trigger = &parsed.triggers[0];
+        assert_eq!(trigger.mode, TriggerMode::Blocks);
+        assert_eq!(trigger.valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(
+            trigger.valid_target,
+            Some(parse_type_phrase_folding(noun).0)
+        );
+        assert_eq!(trigger.condition, None);
+        assert_no_unimplemented(trigger.execute.as_deref().unwrap());
+    }
 }

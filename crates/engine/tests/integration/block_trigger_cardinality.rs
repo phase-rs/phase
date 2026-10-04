@@ -6,8 +6,10 @@ use engine::types::events::GameEvent;
 use engine::types::game_state::{StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
+use engine::types::mana::ManaColor;
 use engine::types::phase::Phase;
 use engine::types::triggers::TriggerMode;
+use engine::types::zones::Zone;
 
 const HIGH_GROUND: &str = "Each creature you control can block an additional creature each combat.";
 const SUSTAINER: &str = "Flying\nWhenever this creature blocks, it gets +0/+2 until end of turn.";
@@ -454,4 +456,583 @@ fn bare_player_target_nonparticipating_source_does_not_fire() {
         .stack
         .iter()
         .all(|entry| entry.source_id != sources[1]));
+}
+
+const LAIRWATCH: &str = "This creature can block an additional creature each combat.\nWhenever this creature blocks two or more creatures, it gains first strike until end of turn.";
+const RASHKA: &str = "Reach (This creature can block creatures with flying.)\nWhenever Rashka blocks one or more black creatures, Rashka gets +1/+2 until end of turn.";
+
+fn count_qualified_setup(
+    oracle: &str,
+    name: &str,
+    black: &[bool],
+) -> (GameRunner, Vec<ObjectId>, ObjectId) {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let attackers: Vec<_> = black
+        .iter()
+        .enumerate()
+        .map(|(index, is_black)| {
+            scenario
+                .add_creature(P0, &format!("Attacker {index}"), 1, 1)
+                .with_color(vec![if *is_black {
+                    ManaColor::Black
+                } else {
+                    ManaColor::Green
+                }])
+                .id()
+        })
+        .collect();
+    let source = scenario
+        .add_creature(P1, name, 4, 4)
+        .from_oracle_text_with_keywords(
+            if name == "Rashka the Slayer" {
+                &["Reach"]
+            } else {
+                &[]
+            },
+            oracle,
+        )
+        .with_color(vec![ManaColor::White])
+        .id();
+    if name == "Rashka the Slayer" {
+        scenario.add_enchantment_from_oracle(P1, "High Ground", HIGH_GROUND);
+    }
+    let runner = scenario.build();
+    let object = &runner.state().objects[&source];
+    assert_eq!(object.controller, P1);
+    assert_eq!(object.color, vec![ManaColor::White]);
+    assert_eq!(object.trigger_definitions.len(), 1);
+    assert_eq!(
+        object.trigger_definitions[0].definition.mode,
+        TriggerMode::Blocks
+    );
+    assert!(!serde_json::to_string(object)
+        .unwrap()
+        .contains("Unimplemented"));
+    for (attacker, is_black) in attackers.iter().zip(black) {
+        let object = &runner.state().objects[attacker];
+        assert_eq!(object.controller, P0);
+        assert_eq!(
+            object.color,
+            vec![if *is_black {
+                ManaColor::Black
+            } else {
+                ManaColor::Green
+            }]
+        );
+    }
+    (runner, attackers, source)
+}
+
+fn actual_source_stack_count(runner: &GameRunner, source: ObjectId) -> usize {
+    for entry in runner
+        .state()
+        .stack
+        .iter()
+        .filter(|entry| entry.source_id == source)
+    {
+        assert_eq!(entry.controller, P1);
+        assert!(matches!(
+            entry.kind,
+            StackEntryKind::TriggeredAbility { .. }
+        ));
+    }
+    runner
+        .state()
+        .stack
+        .iter()
+        .filter(|entry| entry.source_id == source)
+        .count()
+}
+
+#[test]
+fn count_qualified_lairwatch_one_attacker_does_not_trigger() {
+    let (mut runner, attackers, source) =
+        count_qualified_setup(LAIRWATCH, "Lairwatch Giant", &[false]);
+    declare(&mut runner, &attackers, &[source]);
+    let observed = actual_source_stack_count(&runner, source);
+    runner.advance_until_stack_empty();
+    let first_strike = engine::game::keywords::has_keyword(
+        &runner.state().objects[&source],
+        &Keyword::FirstStrike,
+    );
+    eprintln!("MEASURED Lairwatch one attacker triggers={observed}, first_strike={first_strike}");
+    // CR 509.3e: one blocked attacker does not meet the printed minimum of two.
+    assert_eq!((observed, first_strike), (0, false));
+    count_qualified_lairwatch_two_attackers_triggers_once();
+}
+
+#[test]
+fn count_qualified_lairwatch_two_attackers_triggers_once() {
+    let (mut runner, attackers, source) =
+        count_qualified_setup(LAIRWATCH, "Lairwatch Giant", &[false, false]);
+    declare(&mut runner, &attackers, &[source]);
+    let observed = actual_source_stack_count(&runner, source);
+    runner.advance_until_stack_empty();
+    let first_strike = engine::game::keywords::has_keyword(
+        &runner.state().objects[&source],
+        &Keyword::FirstStrike,
+    );
+    eprintln!("MEASURED Lairwatch two attackers triggers={observed}, first_strike={first_strike}");
+    // CR 509.3e + CR 603.2: meeting the minimum triggers once for this declaration.
+    assert_eq!((observed, first_strike), (1, true));
+}
+
+fn rashka_count_qualified_case(black: &[bool], expected: usize) {
+    let (mut runner, attackers, source) = count_qualified_setup(RASHKA, "Rashka the Slayer", black);
+    declare(&mut runner, &attackers, &[source]);
+    let observed = actual_source_stack_count(&runner, source);
+    runner.advance_until_stack_empty();
+    let object = &runner.state().objects[&source];
+    eprintln!(
+        "MEASURED Rashka black={black:?}, triggers={observed}, resolved P/T={:?}/{:?}",
+        object.power, object.toughness
+    );
+    // CR 603.1 + CR 603.2: the printed trigger requires at least one black blocked creature.
+    // CR 509.3e: the matching count is evaluated for this block declaration.
+    assert_eq!(
+        (observed, object.power, object.toughness),
+        (
+            expected,
+            Some(4 + expected as i32),
+            Some(4 + 2 * expected as i32)
+        )
+    );
+}
+
+#[test]
+fn count_qualified_rashka_nonblack_does_not_trigger() {
+    rashka_count_qualified_case(&[false], 0);
+    rashka_count_qualified_case(&[true], 1);
+}
+
+#[test]
+fn count_qualified_rashka_mixed_attackers_triggers_once() {
+    rashka_count_qualified_case(&[false, true], 1);
+}
+
+#[test]
+fn count_qualified_rashka_two_black_attackers_triggers_once() {
+    rashka_count_qualified_case(&[true, true], 1);
+}
+
+fn rashka_same_name_sources_case(second_black: bool) {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let black = scenario
+        .add_creature(P0, "Black attacker", 1, 1)
+        .with_color(vec![ManaColor::Black])
+        .id();
+    let green = scenario
+        .add_creature(P0, "Second attacker", 1, 1)
+        .with_color(vec![if second_black {
+            ManaColor::Black
+        } else {
+            ManaColor::Green
+        }])
+        .id();
+    let sources: Vec<_> = (0..2)
+        .map(|_| {
+            scenario
+                .add_creature(P1, "Rashka the Slayer", 4, 4)
+                .from_oracle_text_with_keywords(&["Reach"], RASHKA)
+                .with_color(vec![ManaColor::White])
+                .id()
+        })
+        .collect();
+    let mut runner = scenario.build();
+    assert_ne!(sources[0], sources[1]);
+    for source in &sources {
+        let object = &runner.state().objects[source];
+        assert_eq!(object.controller, P1);
+        assert_eq!(object.trigger_definitions.len(), 1);
+        assert_eq!(
+            object.trigger_definitions[0].definition.mode,
+            TriggerMode::Blocks
+        );
+        assert!(!serde_json::to_string(object)
+            .unwrap()
+            .contains("Unimplemented"));
+    }
+    assert_eq!(runner.state().objects[&black].color, vec![ManaColor::Black]);
+    assert_eq!(
+        runner.state().objects[&green].color,
+        vec![if second_black {
+            ManaColor::Black
+        } else {
+            ManaColor::Green
+        }]
+    );
+    priority_to(&mut runner, false);
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![
+                (black, AttackTarget::Player(P1)),
+                (green, AttackTarget::Player(P1)),
+            ],
+            bands: vec![],
+        })
+        .unwrap();
+    priority_to(&mut runner, true);
+    runner
+        .act(GameAction::DeclareBlockers {
+            assignments: vec![(sources[0], black), (sources[1], green)],
+        })
+        .unwrap();
+    let combat = runner.state().combat.as_ref().unwrap();
+    assert_eq!(combat.blocker_to_attacker[&sources[0]], vec![black]);
+    assert_eq!(combat.blocker_to_attacker[&sources[1]], vec![green]);
+    assert_eq!(combat.blocker_assignments[&black], vec![sources[0]]);
+    assert_eq!(combat.blocker_assignments[&green], vec![sources[1]]);
+    if let WaitingFor::OrderTriggers { triggers, .. } = &runner.state().waiting_for {
+        let order = (0..triggers.len()).collect();
+        runner.act(GameAction::OrderTriggers { order }).unwrap();
+    }
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    let observed: Vec<_> = sources
+        .iter()
+        .map(|source| actual_source_stack_count(&runner, *source))
+        .collect();
+    runner.advance_until_stack_empty();
+    let stats: Vec<_> = sources
+        .iter()
+        .map(|source| {
+            let object = &runner.state().objects[source];
+            (object.power, object.toughness)
+        })
+        .collect();
+    eprintln!("MEASURED same-name Rashkas triggers={observed:?}, P/T={stats:?}");
+    // CR 603.1 + CR 603.2: each source checks the creatures it actually blocks.
+    assert_eq!(observed, vec![1, usize::from(second_black)]);
+    assert_eq!(
+        stats,
+        vec![
+            (Some(5), Some(6)),
+            if second_black {
+                (Some(5), Some(6))
+            } else {
+                (Some(4), Some(4))
+            }
+        ]
+    );
+}
+
+#[test]
+fn count_qualified_rashka_same_name_sources_match_their_own_groups() {
+    rashka_same_name_sources_case(false);
+    // Same-test positive: both independently qualifying identities fire once.
+    rashka_same_name_sources_case(true);
+}
+
+fn public_count_qualified_removal_case(initial_attackers: usize, oracle: &str, name: &str) {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let attackers: Vec<_> = (0..initial_attackers)
+        .map(|index| {
+            scenario
+                .add_creature(P0, &format!("Removal attacker {index}"), 1, 1)
+                .with_color(vec![if index == 0 {
+                    ManaColor::Black
+                } else {
+                    ManaColor::Green
+                }])
+                .id()
+        })
+        .collect();
+    let source = scenario
+        .add_creature(P1, name, 4, 4)
+        .from_oracle_text_with_keywords(
+            if name == "Rashka the Slayer" {
+                &["Reach"]
+            } else {
+                &[]
+            },
+            oracle,
+        )
+        .with_color(vec![ManaColor::White])
+        .id();
+    scenario.add_enchantment_from_oracle(P1, "High Ground", HIGH_GROUND);
+    // Stage a zero-cost instant: this fixture measures removal, not payment.
+    // Oracle verified from the same pinned AtomicCards as the combat sources.
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Unsummon",
+            true,
+            "Return target creature to its owner's hand.",
+        )
+        .id();
+    let mut runner = scenario.build();
+    for id in [source, spell] {
+        assert!(!serde_json::to_string(&runner.state().objects[&id])
+            .unwrap()
+            .contains("Unimplemented"));
+    }
+    assert_eq!(runner.state().objects[&source].controller, P1);
+    assert_eq!(runner.state().objects[&source].trigger_definitions.len(), 1);
+    assert_eq!(
+        runner.state().objects[&source].trigger_definitions[0]
+            .definition
+            .mode,
+        TriggerMode::Blocks
+    );
+    declare(&mut runner, &attackers, &[source]);
+    assert_eq!(actual_source_stack_count(&runner, source), 1);
+    let entry = runner
+        .state()
+        .stack
+        .iter()
+        .find(|entry| entry.source_id == source)
+        .unwrap();
+    assert_eq!(entry.controller, P1);
+    // CR 603.4: event-time count is consumed before the independent stack entry.
+    assert!(matches!(
+        entry.kind,
+        StackEntryKind::TriggeredAbility {
+            condition: None,
+            ..
+        }
+    ));
+    let mut cast = runner.cast(spell).target_object(attackers[0]).commit();
+    assert_eq!(
+        cast.state()
+            .stack
+            .iter()
+            .filter(|entry| entry.source_id == source)
+            .count(),
+        1
+    );
+    for _ in 0..16 {
+        if !cast
+            .state()
+            .stack
+            .iter()
+            .any(|entry| entry.source_id == spell)
+        {
+            break;
+        }
+        assert!(matches!(
+            cast.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        cast.act(GameAction::PassPriority).unwrap();
+    }
+    assert_eq!(cast.state().objects[&attackers[0]].zone, Zone::Hand);
+    assert!(!cast
+        .state()
+        .stack
+        .iter()
+        .any(|entry| entry.source_id == spell));
+    let remaining = &cast.state().combat.as_ref().unwrap().blocker_to_attacker[&source];
+    assert_eq!(remaining.len(), initial_attackers - 1);
+    assert!(!remaining.contains(&attackers[0]));
+    let after_removal = cast
+        .state()
+        .stack
+        .iter()
+        .filter(|entry| entry.source_id == source)
+        .count();
+    assert!(!engine::game::keywords::has_keyword(
+        &cast.state().objects[&source],
+        &Keyword::FirstStrike
+    ));
+    if name == "Rashka the Slayer" {
+        let object = &cast.state().objects[&source];
+        assert_eq!((object.power, object.toughness), (Some(4), Some(4)));
+    }
+    eprintln!("MEASURED {name} {initial_attackers}→{} public Unsummon: unresolved source triggers={after_removal}", initial_attackers - 1);
+    // CR 603.3: removal preserves the already-triggered stack object.
+    // CR 509.3e: this removal does not newly meet the at-least-two threshold.
+    assert_eq!(after_removal, 1);
+    let outcome = cast.resolve();
+    outcome.assert_zone(&[attackers[0]], Zone::Hand);
+    assert!(outcome.state().stack.is_empty());
+    // CR 603.1 + CR 603.3: the event qualification is not an intervening-if recheck.
+    if name == "Rashka the Slayer" {
+        let object = &outcome.state().objects[&source];
+        assert_eq!((object.power, object.toughness), (Some(5), Some(6)));
+    } else {
+        assert!(engine::game::keywords::has_keyword(
+            &outcome.state().objects[&source],
+            &Keyword::FirstStrike
+        ));
+    }
+}
+
+#[test]
+fn count_qualified_lairwatch_removal_two_to_one_preserves_trigger() {
+    public_count_qualified_removal_case(2, LAIRWATCH, "Lairwatch Giant");
+    count_qualified_lairwatch_two_attackers_triggers_once();
+}
+
+#[test]
+fn count_qualified_lairwatch_removal_three_to_two_does_not_retrigger() {
+    public_count_qualified_removal_case(3, LAIRWATCH, "Lairwatch Giant");
+    count_qualified_lairwatch_two_attackers_triggers_once();
+}
+
+#[test]
+fn count_qualified_rashka_removal_of_sole_black_preserves_trigger() {
+    public_count_qualified_removal_case(2, RASHKA, "Rashka the Slayer");
+    rashka_count_qualified_case(&[true, false], 1);
+}
+
+// CR 201.5 + CR 509.3e: only this source's blocked attackers count.
+#[test]
+fn count_qualified_lairwatch_unrelated_and_unassigned_attackers_do_not_count() {
+    for source_assignments in [0, 1] {
+        let (mut runner, attackers, source) =
+            count_qualified_setup(LAIRWATCH, "Lairwatch Giant", &[false, false]);
+        priority_to(&mut runner, false);
+        runner
+            .act(GameAction::DeclareAttackers {
+                attacks: attackers
+                    .iter()
+                    .map(|id| (*id, AttackTarget::Player(P1)))
+                    .collect(),
+                bands: vec![],
+            })
+            .unwrap();
+        priority_to(&mut runner, true);
+        runner
+            .act(GameAction::DeclareBlockers {
+                assignments: attackers
+                    .iter()
+                    .take(source_assignments)
+                    .map(|id| (source, *id))
+                    .collect(),
+            })
+            .unwrap();
+        let combat = runner.state().combat.as_ref().unwrap();
+        assert_eq!(
+            combat.blocker_to_attacker.get(&source).map_or(0, Vec::len),
+            source_assignments
+        );
+        assert_eq!(actual_source_stack_count(&runner, source), 0);
+        runner.advance_until_stack_empty();
+        assert!(!engine::game::keywords::has_keyword(
+            &runner.state().objects[&source],
+            &Keyword::FirstStrike
+        ));
+    }
+    count_qualified_lairwatch_two_attackers_triggers_once();
+}
+
+#[test]
+fn count_qualified_three_attacker_threshold_runs_through_public_combat() {
+    let oracle = "This creature can block an additional creature each combat.\nWhenever this creature blocks three or more creatures, it gains first strike until end of turn.";
+    // Synthetic threshold parameter; printed Lairwatch remains verbatim elsewhere.
+    for (number, expected) in [(2, 0), (3, 1)] {
+        let mut scenario = GameScenario::new_n_player(2, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        let attackers: Vec<_> = (0..number)
+            .map(|i| {
+                scenario
+                    .add_creature(P0, &format!("Threshold attacker {i}"), 1, 1)
+                    .id()
+            })
+            .collect();
+        let source = scenario
+            .add_creature_from_oracle(P1, "Threshold Guard", 4, 4, oracle)
+            .id();
+        scenario.add_enchantment_from_oracle(P1, "High Ground", HIGH_GROUND);
+        let mut runner = scenario.build();
+        assert_eq!(runner.state().objects[&source].trigger_definitions.len(), 1);
+        assert!(!serde_json::to_string(&runner.state().objects[&source])
+            .unwrap()
+            .contains("Unimplemented"));
+        declare(&mut runner, &attackers, &[source]);
+        assert_eq!(actual_source_stack_count(&runner, source), expected);
+        runner.advance_until_stack_empty();
+        assert_eq!(
+            engine::game::keywords::has_keyword(
+                &runner.state().objects[&source],
+                &Keyword::FirstStrike
+            ),
+            expected == 1
+        );
+    }
+}
+
+// CR 201.5 + CR 509.3e: another blocker's group cannot satisfy this source.
+#[test]
+fn count_qualified_lairwatch_empty_source_ignores_other_blocker_group() {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let attackers: Vec<_> = (0..2)
+        .map(|i| {
+            scenario
+                .add_creature(P0, &format!("Other group attacker {i}"), 1, 1)
+                .id()
+        })
+        .collect();
+    let source = scenario
+        .add_creature_from_oracle(P1, "Lairwatch Giant", 4, 4, LAIRWATCH)
+        .with_color(vec![engine::types::mana::ManaColor::White])
+        .id();
+    let other = scenario
+        .add_creature_from_oracle(P1, "Lairwatch Giant", 4, 4, LAIRWATCH)
+        .with_color(vec![engine::types::mana::ManaColor::White])
+        .id();
+    let mut runner = scenario.build();
+    for id in [source, other] {
+        assert_eq!(runner.state().objects[&id].trigger_definitions.len(), 1);
+        assert!(!serde_json::to_string(&runner.state().objects[&id])
+            .unwrap()
+            .contains("Unimplemented"));
+    }
+    declare(&mut runner, &attackers, &[other]);
+    assert!(!runner
+        .state()
+        .combat
+        .as_ref()
+        .unwrap()
+        .blocker_to_attacker
+        .contains_key(&source));
+    assert_eq!(actual_source_stack_count(&runner, source), 0);
+    assert_eq!(actual_source_stack_count(&runner, other), 1);
+    runner.advance_until_stack_empty();
+    assert!(!engine::game::keywords::has_keyword(
+        &runner.state().objects[&source],
+        &Keyword::FirstStrike
+    ));
+    assert!(engine::game::keywords::has_keyword(
+        &runner.state().objects[&other],
+        &Keyword::FirstStrike
+    ));
+}
+
+// CR 509.3e + CR 509.3f: an unassigned black attacker cannot satisfy Rashka.
+#[test]
+fn count_qualified_rashka_unassigned_black_attacker_does_not_count() {
+    let (mut runner, attackers, source) =
+        count_qualified_setup(RASHKA, "Rashka the Slayer", &[false, true]);
+    priority_to(&mut runner, false);
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: attackers
+                .iter()
+                .map(|id| (*id, AttackTarget::Player(P1)))
+                .collect(),
+            bands: vec![],
+        })
+        .unwrap();
+    priority_to(&mut runner, true);
+    runner
+        .act(GameAction::DeclareBlockers {
+            assignments: vec![(source, attackers[0])],
+        })
+        .unwrap();
+    assert_eq!(
+        runner.state().combat.as_ref().unwrap().blocker_to_attacker[&source],
+        vec![attackers[0]]
+    );
+    assert_eq!(actual_source_stack_count(&runner, source), 0);
+    runner.advance_until_stack_empty();
+    let object = &runner.state().objects[&source];
+    assert_eq!((object.power, object.toughness), (Some(4), Some(4)));
+    rashka_count_qualified_case(&[false, true], 1);
 }

@@ -2520,7 +2520,7 @@ pub(super) fn resume_ward_sacrifice_payment(
 /// The exhaustive `match` on `CostMoveDrainBoundary` is kept as an ELIGIBILITY
 /// ASSERTION, not a verdict producer. It holds `PriorityBoundary` at
 /// `unreachable!` — `drain_pending_cost_move_resume` admits only
-/// `DelveManaPayment`/`ManaAbilityPayment` at that boundary and dispatches both
+/// a Delve-commit `Cast`/`ManaAbilityPayment` at that boundary and dispatches both
 /// ahead of this root — and it turns any future widening of the boundary enum or
 /// of that eligibility table into a compile error at the one site whose rules
 /// reasoning would have to be re-derived.

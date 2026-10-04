@@ -1714,6 +1714,7 @@ fn build_all_direct_numeric_maps_state() -> GameState {
                 activator: PlayerId(0),
                 source: ObjectId(1),
                 source_lki: first_lki.clone(),
+                source_zone: engine::types::zones::Zone::Battlefield,
                 ability_tag: None,
                 is_loyalty_ability: false,
                 targets: vec![ActivationTargetFact::Object {
@@ -1728,6 +1729,7 @@ fn build_all_direct_numeric_maps_state() -> GameState {
                 activator: PlayerId(1),
                 source: ObjectId(2),
                 source_lki: second_lki.clone(),
+                source_zone: engine::types::zones::Zone::Battlefield,
                 ability_tag: None,
                 is_loyalty_ability: true,
                 targets: vec![ActivationTargetFact::Player(PlayerId(0))],

@@ -282,6 +282,10 @@ pub fn apply_face_down_creature_characteristics(
     obj.base_printed_loyalty = None;
     obj.defense = None;
     obj.base_defense = None;
+    // Face-down install rewrites the printed base: restore the derived art
+    // baseline (a face-down token renders its face-down body, never the
+    // face-up descriptor it carried before).
+    obj.restore_token_art_baseline();
 }
 
 /// CR 702.37a: A face-down permanent is a 2/2 creature with no name, mana cost, creature types, or abilities.

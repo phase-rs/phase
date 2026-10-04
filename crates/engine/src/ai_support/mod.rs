@@ -236,7 +236,9 @@ pub(crate) fn structurally_valid_tap_for_convoke_payment(
     };
 
     match mode {
-        ConvokeMode::Delve => obj.is_delve_eligible(*player) && *mana_type == ManaType::Colorless,
+        ConvokeMode::Delve => {
+            state.is_delve_selectable(*player, *object_id) && *mana_type == ManaType::Colorless
+        }
         ConvokeMode::Convoke => {
             if !obj.is_convoke_eligible(*player) {
                 return false;
@@ -365,6 +367,9 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
             },
             GameAction::ChooseReplacement { index },
         ) => *index >= *candidate_count,
+        (WaitingFor::ReplacementChoice { .. }, GameAction::ChooseReplacementAndRemember { choice }) => {
+            !crate::game::replacement::validate_remembered_replacement(state, choice)
+        }
         // CR 603.3b: Order must be a permutation of 0..triggers.len() — same
         // validity check the engine handler enforces. Reject early so the
         // simulation filter never fires a known-rejected action.
@@ -1055,6 +1060,7 @@ fn resolve_mana_option_for_trigger_probe(
     option: &mana_sources::ManaSourceOption,
 ) -> bool {
     let mut probe = state.clone();
+    let deferred_before = probe.deferred_triggers.len();
     let mut events = Vec::new();
 
     for (trigger_ref, override_value) in &option.taps_for_mana_overrides {
@@ -1117,7 +1123,7 @@ fn resolve_mana_option_for_trigger_probe(
         });
     }
 
-    triggers::events_would_queue_non_mana_trigger(&mut probe, &events)
+    triggers::simulated_action_would_queue_non_mana_trigger(&mut probe, deferred_before, &events)
 }
 
 fn activate_mana_action_would_queue_non_mana_trigger(
@@ -1155,6 +1161,7 @@ fn activate_mana_action_would_queue_non_mana_trigger(
         return false;
     };
     let mut probe = state.clone();
+    let deferred_before = probe.deferred_triggers.len();
     let mut events = Vec::new();
     if mana_abilities::resolve_mana_ability(
         &mut probe,
@@ -1168,7 +1175,7 @@ fn activate_mana_action_would_queue_non_mana_trigger(
     {
         return false;
     }
-    triggers::events_would_queue_non_mana_trigger(&mut probe, &events)
+    triggers::simulated_action_would_queue_non_mana_trigger(&mut probe, deferred_before, &events)
 }
 
 fn tap_land_action_would_queue_non_mana_trigger(
@@ -1318,6 +1325,7 @@ fn classify_flat_priority_action(action: &GameAction) -> FlatPriorityActionClass
         | GameAction::SelectTargets { .. }
         | GameAction::ChooseTarget { .. }
         | GameAction::ChooseReplacement { .. }
+        | GameAction::ChooseReplacementAndRemember { .. }
         | GameAction::ChooseEntryController { .. }
         | GameAction::OrderTriggers { .. }
         | GameAction::OrderCostReductions { .. }
@@ -1388,6 +1396,7 @@ fn classify_flat_priority_action(action: &GameAction) -> FlatPriorityActionClass
         | GameAction::SetPriorityPassingMode { .. }
         | GameAction::SetPriorityYield { .. }
         | GameAction::SetMayTriggerAutoChoice { .. }
+        | GameAction::SetReplacementAutoChoice { .. }
         | GameAction::SetTriggerOrderTemplate { .. }
         | GameAction::AssignCombatDamage { .. }
         | GameAction::AssignBlockerDamage { .. }
@@ -4200,6 +4209,7 @@ mod tests {
             candidates: Vec::new(),
             kind: Default::default(),
             last_applied_decides: false,
+            remember_identity: None,
         };
 
         assert!(cheap_reject_candidate(
@@ -7116,8 +7126,8 @@ mod tests {
         );
         let strict_mana_readiness_clones =
             strict_baseline.strict_fast_path_mana_readiness_state_clones;
-        assert_eq!(strict_mana_readiness_clones, 5);
-        assert_eq!(strict_baseline.strict_fast_path_state_clones, 7);
+        assert_eq!(strict_mana_readiness_clones, 2);
+        assert_eq!(strict_baseline.strict_fast_path_state_clones, 4);
         assert_eq!(
             strict_baseline.strict_fast_path_state_clones,
             strict_baseline.strict_fast_path_auto_payment_wrapper_calls

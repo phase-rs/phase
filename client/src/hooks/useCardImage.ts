@@ -21,6 +21,10 @@ import {
 import type { ImageSize, PrintingEntry, TokenSearchFilters } from "../services/scryfall.ts";
 import type { CardImageAsset } from "../services/scryfall.ts";
 import { applyChain } from "../services/artSelection.ts";
+import {
+  decodeTokenFilterKeywords,
+  encodeTokenFilterKeywords,
+} from "../services/cardImageLookup.ts";
 import type { TokenImageRef } from "../adapter/types.ts";
 import {
   cardBackCandidate,
@@ -571,6 +575,7 @@ function imagePresentationKey(
   filterColors: string,
   filterSubtypes: string,
   filterHasAbilities: boolean | null,
+  filterKeywords: string,
   tokenImageRefKey: string,
   oracleId: string,
   faceName: string,
@@ -601,6 +606,7 @@ function imagePresentationKey(
     filterColors,
     filterSubtypes,
     String(filterHasAbilities),
+    filterKeywords,
     tokenImageRefKey,
     artLocaleKey,
     repositoryRevision,
@@ -621,6 +627,7 @@ function imageRequestKey(
   filterColors: string,
   filterSubtypes: string,
   filterHasAbilities: boolean | null,
+  filterKeywords: string,
   tokenImageRefKey: string,
   oracleId: string,
   faceName: string,
@@ -644,6 +651,7 @@ function imageRequestKey(
     filterColors,
     filterSubtypes,
     filterHasAbilities,
+    filterKeywords,
     tokenImageRefKey,
     oracleId,
     faceName,
@@ -678,6 +686,7 @@ async function acquireCachedImageSrc(
   filterColors: string,
   filterSubtypes: string,
   filterHasAbilities: boolean | null,
+  filterKeywords: string,
   tokenImageRef: TokenImageRef | null,
   oracleId: string,
   faceName: string,
@@ -717,6 +726,9 @@ async function acquireCachedImageSrc(
         colors: filterColors ? filterColors.split(",") : undefined,
         subtypes: filterSubtypes ? filterSubtypes.split(",") : undefined,
         hasAbilities: filterHasAbilities ?? undefined,
+        keywords: filterKeywords
+          ? decodeTokenFilterKeywords(filterKeywords)
+          : undefined,
       });
       asset = remoteAsset(
         remoteSrc,
@@ -812,6 +824,11 @@ export function useCardImage(
   const filterSubtypes = tokenFilters?.subtypes?.join(",") ?? "";
   const filterColors = tokenFilters?.colors?.join(",") ?? "";
   const filterHasAbilities = tokenFilters?.hasAbilities ?? null;
+  // JSON codec (not comma-joined): an `Unknown` keyword payload is an
+  // arbitrary string that may itself contain commas.
+  const filterKeywords = tokenFilters?.keywords
+    ? encodeTokenFilterKeywords(tokenFilters.keywords)
+    : "";
 
   const artOverrides = usePreferencesStore((s) => s.artOverrides);
   const artChain = usePreferencesStore((s) => s.artChain);
@@ -899,6 +916,7 @@ export function useCardImage(
     filterColors,
     filterSubtypes,
     filterHasAbilities,
+    filterKeywords,
     tokenImageRefKey,
     oracleId,
     faceName,
@@ -922,6 +940,7 @@ export function useCardImage(
     filterColors,
     filterSubtypes,
     filterHasAbilities,
+    filterKeywords,
     tokenImageRefKey,
     oracleId,
     faceName,
@@ -1094,6 +1113,7 @@ export function useCardImage(
               filterColors,
               filterSubtypes,
               filterHasAbilities,
+              filterKeywords,
               stableTokenImageRef,
               oracleId,
               faceName,

@@ -10,7 +10,7 @@ use super::ability::{
     ContinuousModification, CopiableValues, DieRollIgnoreRule, Duration, FaceDownProfile,
     StaticDefinition, TargetRef,
 };
-use super::card::{PrintedCardRef, TokenImageRef};
+use super::card::{PrintedCardRef, TokenArtDescriptor, TokenImageRef};
 use super::card_type::{CoreType, Supertype};
 use super::events::EventObjectSnapshot;
 use super::identifiers::{ObjectId, ObjectIncarnationRef};
@@ -478,6 +478,16 @@ pub struct CopyTokenSpec {
     /// back to a name+filter Scryfall search. `None` for printed-card sources.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_image_ref: Option<TokenImageRef>,
+    /// Intrinsic token-art body of the copy source, captured alongside
+    /// `token_image_ref` by the enter-as-copy replacement selection. Carried
+    /// so an enter-as-copy recipient (which keeps its own base and never
+    /// runs the token creation injectors) renders from the source's printed
+    /// shape even when no exact ref matched. `None` for printed-card
+    /// sources, departed (LKI) sources, and created copy-tokens — the
+    /// latter derive their descriptor from their own base at injection,
+    /// which also reflects copy exceptions the source never had.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_art: Option<TokenArtDescriptor>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extra_keywords: Vec<Keyword>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

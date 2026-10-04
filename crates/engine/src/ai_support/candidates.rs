@@ -5701,8 +5701,8 @@ fn mana_payment_actions(
         Some(player),
     ));
     if has_delve {
-        for (&obj_id, obj) in &state.objects {
-            if obj.is_delve_eligible(player) {
+        for &obj_id in state.objects.keys() {
+            if state.is_delve_selectable(player, obj_id) {
                 actions.push(candidate(
                     GameAction::TapForConvoke {
                         object_id: obj_id,

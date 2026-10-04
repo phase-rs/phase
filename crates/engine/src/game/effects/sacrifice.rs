@@ -316,6 +316,25 @@ pub fn resolve(
         Some(ControllerRef::ParentTargetController)
     ) {
         Vec::new()
+    } else if ability.targets.is_empty()
+        && (crate::game::targeting::is_pure_event_context_filter(filter)
+            || matches!(
+                filter,
+                TargetFilter::ParentTarget | TargetFilter::AttachedTo
+            ))
+    {
+        // CR 603.2 + CR 608.2k: An untargeted object anaphor on a triggered ability
+        // (e.g. Slow Motion's "that player sacrifices that creature") names an object
+        // carried by event context or attached host, not a target the controller chose,
+        // so `ability.targets` is empty. Resolve through `resolve_event_context_target`
+        // without falling back to `source_id` for unresolved ParentTarget.
+        crate::game::targeting::resolve_event_context_target(state, filter, ability.source_id)
+            .into_iter()
+            .filter_map(|t| match t {
+                TargetRef::Object(id) => Some(id),
+                TargetRef::Player(_) => None,
+            })
+            .collect()
     } else {
         // CR 400.7 + CR 603.7c: `effect_object_targets` indexes ParentTargetSlot
         // by DECLARED position, so a pin-filtered slice would renumber every
@@ -583,23 +602,41 @@ pub fn resolve(
         }
 
         // CR 701.21a: Defense-in-depth — a player can only sacrifice permanents
-        // they control. The primary fix is that Sacrifice no longer creates
-        // target slots (see extract_target_filter_from_effect), but if this
-        // path is ever reached, enforce controller ownership.
+        // they control.
         //
-        // CR 701.21a: "To sacrifice a permanent, its controller moves it..." — for an
-        // explicit anaphoric target (ParentTarget/ParentTargetSlot, e.g. Animate
-        // Dead's "that creature's controller sacrifices it"), the acting player is
-        // the object's OWN current controller, unconditionally, even if control
-        // changed since the ability (e.g. a delayed leaves-battlefield trigger) was
-        // created. The equality check below remains a valid defense-in-depth guard
-        // for every OTHER filter shape reaching this path.
-        if obj.controller != ability.controller
-            && !matches!(
-                filter,
-                TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. }
-            )
-        {
+        // CR 701.21a + CR 109.5: "To sacrifice a permanent, its controller moves it..."
+        // Determine the player authorized / instructed to perform the sacrifice:
+        // 1. If the filter carries an explicit controller scope (e.g. ParentTargetController,
+        //    Opponent, TargetPlayer, ScopedPlayer), resolve that authorized player scope.
+        // 2. For ParentTarget / ParentTargetSlot (e.g. Slow Motion or Animate Dead):
+        //    - If the ability carries an explicit scoped player from an upkeep/phase trigger
+        //      (e.g. Slow Motion's "At the beginning of the upkeep of enchanted creature's controller,
+        //      that player sacrifices that creature"), that specific player was instructed to sacrifice.
+        //      If that player no longer controls the permanent at resolution time, CR 701.21a prohibits
+        //      them from sacrificing it, and no other player was instructed to do so.
+        //    - If no scoped player is present (e.g. Animate Dead's leaves-battlefield delayed trigger:
+        //      "that creature's controller sacrifices it"), the permanent's current controller is instructed.
+        // 3. For implicit "you" instructions and all other filters (e.g. Breath of Fury's
+        //    TriggeringSource, SelfRef, CostPaidObject), CR 109.5 binds the instruction to
+        //    ability.controller regardless of any event-context scoped player (e.g. a damaged player
+        //    from a combat damage trigger). If the object is not controlled by ability.controller,
+        //    it cannot be sacrificed.
+        let authorized_sacrificers = if sacrifice_controller_scope(filter).is_some() {
+            resolve_sacrifice_scope(state, ability, filter)
+        } else if matches!(
+            filter,
+            TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. }
+        ) {
+            if let Some(scoped_player) = ability.scoped_player {
+                vec![scoped_player]
+            } else {
+                vec![obj.controller]
+            }
+        } else {
+            vec![ability.controller]
+        };
+
+        if !authorized_sacrificers.contains(&obj.controller) {
             continue;
         }
 

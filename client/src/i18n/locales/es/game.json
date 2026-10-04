@@ -10,6 +10,9 @@
   "manaSourceSelection": {
     "title": "Elige una fuente de maná",
     "description": "Esta habilidad de maná requiere sacrificar un permanente.",
+    "baseOutput_one": "Producción base: {{count}} maná",
+    "baseOutput_other": "Producción base: {{count}} manás",
+    "baseOutputVariable": "La cantidad base se determina al activar",
     "sacrifice": "Sacrificar",
     "back": "Volver al pago de maná",
     "unknownSource": "Fuente de maná"
@@ -1348,8 +1351,6 @@
     },
     "config": {
       "startingLife": "Vida inicial",
-      "experimentalDungeons": "Mazmorras experimentales",
-      "experimentalDungeonsHelp": "Ofrecer Baldur's Gate Wilderness en las opciones de mazmorra y al tomar la iniciativa. Experimental y no oficial.",
       "players": "Jugadores",
       "whoGoesFirst": "Quién empieza",
       "firstPlayer": {
@@ -2270,7 +2271,9 @@
     "accept": "Sí",
     "decline": "No",
     "sourceFallback": "Efecto",
-    "entryLabel": "{{source}} — {{decision}}"
+    "entryLabel": "{{source}} — {{decision}}",
+    "optionalTriggers": "Habilidades disparadas opcionales ({{count, number}})",
+    "replacementChoices": "Decisiones de reemplazo ({{count, number}})"
   },
   "optionalEffect": {
     "sourceFallback": "Efecto",
@@ -2350,6 +2353,8 @@
     "confirm": "Confirmar"
   },
   "replacement": {
+    "remember": "Recordar esta elección durante esta partida",
+    "savedChoice": "Reemplazo: {{choice}}",
     "eyebrow": "Orden de resolución",
     "title": "Efectos de reemplazo",
     "orderSubtitle": "Todos estos efectos cambian cómo ocurre este evento. Arrastra para establecer el orden en que se aplican: el último aplicado es el que surte efecto (CR 616.1).",

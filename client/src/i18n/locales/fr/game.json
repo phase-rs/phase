@@ -10,6 +10,9 @@
   "manaSourceSelection": {
     "title": "Choisir une source de mana",
     "description": "Cette capacité de mana demande de sacrifier un permanent.",
+    "baseOutput_one": "Production de base : {{count}} mana",
+    "baseOutput_other": "Production de base : {{count}} manas",
+    "baseOutputVariable": "Quantité de base déterminée à l’activation",
     "sacrifice": "Sacrifier",
     "back": "Retour au paiement de mana",
     "unknownSource": "Source de mana"
@@ -1348,8 +1351,6 @@
     },
     "config": {
       "startingLife": "Points de vie de départ",
-      "experimentalDungeons": "Donjons expérimentaux",
-      "experimentalDungeonsHelp": "Proposer Baldur's Gate Wilderness dans les donjons et à la prise d'initiative. Expérimental et non officiel.",
       "players": "Joueurs",
       "whoGoesFirst": "Qui commence",
       "firstPlayer": {
@@ -2270,7 +2271,9 @@
     "accept": "Oui",
     "decline": "Non",
     "sourceFallback": "Effet",
-    "entryLabel": "{{source}} — {{decision}}"
+    "entryLabel": "{{source}} — {{decision}}",
+    "optionalTriggers": "Capacités déclenchées facultatives ({{count, number}})",
+    "replacementChoices": "Choix de remplacement ({{count, number}})"
   },
   "optionalEffect": {
     "sourceFallback": "Effet",
@@ -2350,6 +2353,8 @@
     "confirm": "Confirmer"
   },
   "replacement": {
+    "remember": "Mémoriser ce choix pour cette partie",
+    "savedChoice": "Remplacement : {{choice}}",
     "eyebrow": "Ordre de résolution",
     "title": "Effets de remplacement",
     "orderSubtitle": "Ces effets modifient tous la façon dont cet événement se produit. Faites glisser pour définir l'ordre d'application : le dernier appliqué est celui qui prend effet (CR 616.1).",

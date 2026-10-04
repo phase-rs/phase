@@ -1,7 +1,7 @@
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::character::complete::{alpha1, one_of, space1};
+use nom::character::complete::{alpha1, digit1, multispace0, one_of, space1};
 use nom::combinator::{
     all_consuming, consumed, eof, fail, map, not, opt, peek, recognize, rest, value,
 };
@@ -61,16 +61,16 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
     AdditionalCostOrigin, AdditionalCostPaymentSource, AggregateFunction, AttachmentKind,
     AttackersDeclaredCountSubject, CardSelectionMode, CardTypeSetSource, CastManaObjectScope,
-    CastManaSpentMetric, CastVariantPaid, CoinFlipResult, Comparator, ControllerRef, CountScope,
-    CounterTriggerFilter, DamageAmountScope, DamageAmountThreshold, DamageChannel,
-    DamageKindFilter, DelayedTriggerCondition, DestinationConstraint, DieResultFilter, Effect,
-    EffectScope, FilterProp, ManaAbilityProducedFilter, NameStickerSet, ObjectScope,
-    OriginConstraint, ParsedCondition, PlayerFilter, PlayerRelation, PlayerScope,
-    PropertyAggregate, PtStat, PtValueScope, QuantityExpr, QuantityRef, RenownSubject,
-    SacrificeAggregateStat, SacrificeCost, SacrificeRequirement, SharedQuality, StaticCondition,
-    SubAbilityLink, TapCreaturesRequirement, TapStateChange, TargetFilter, TriggerCondition,
-    TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
-    ZoneChangeClause,
+    CastManaSpentMetric, CastVariantPaid, CoinFlipResult, CombatRelation, CombatRelationSubject,
+    Comparator, ControllerRef, CountScope, CounterTriggerFilter, DamageAmountScope,
+    DamageAmountThreshold, DamageChannel, DamageKindFilter, DelayedTriggerCondition,
+    DestinationConstraint, DieResultFilter, Effect, EffectScope, FilterProp,
+    ManaAbilityProducedFilter, NameStickerSet, ObjectScope, OriginConstraint, ParsedCondition,
+    PlayerFilter, PlayerRelation, PlayerScope, PropertyAggregate, PtStat, PtValueScope,
+    QuantityExpr, QuantityRef, RenownSubject, SacrificeAggregateStat, SacrificeCost,
+    SacrificeRequirement, SharedQuality, StaticCondition, SubAbilityLink, TapCreaturesRequirement,
+    TapStateChange, TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition,
+    TypeFilter, TypedFilter, UnlessPayModifier, ZoneChangeClause,
 };
 use crate::types::card_type::{is_land_subtype, CoreType};
 use crate::types::counter::CounterType;
@@ -549,6 +549,7 @@ fn rewrite_cost_x_in_condition(cond: &mut crate::types::ability::AbilityConditio
         AbilityCondition::Not { condition } => rewrite_cost_x_in_condition(condition),
         // Carry no `QuantityExpr` and nest no condition — nothing to bind.
         AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
+        | AbilityCondition::TriggerEventTargetExploitedBySource
         | AbilityCondition::AdditionalCostPaid { .. }
         | AbilityCondition::AdditionalCostPaidInstead
         | AbilityCondition::AlternativeManaCostPaid
@@ -2449,6 +2450,26 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
                 *execute.effect = Effect::unimplemented(
                     "cost_x_sibling_slot",
                     "X in a target-selection slot was left unbound by the cost-X rewrite",
+                );
+            }
+        }
+    }
+
+    // CR 605.1b + CR 605.4a: an activation trigger that can observe a mana
+    // ability's activation (no "that isn't a mana ability" exclusion) and whose
+    // own untargeted resolution could add mana is a triggered mana ability: it
+    // must resolve immediately, without the stack. The engine does not route
+    // `AbilityActivated` triggers inline, so this shape stays honestly
+    // unsupported rather than silently waiting for priority.
+    if def.mode == TriggerMode::AbilityActivated
+        && !trigger_condition_excludes_mana_activations(def.condition.as_ref())
+    {
+        if let Some(execute) = def.execute.as_deref_mut() {
+            if crate::game::mana_abilities::could_be_triggered_mana_ability_body(execute) {
+                *execute.effect = Effect::unimplemented(
+                    "activation_triggered_mana_ability",
+                    "a mana-producing trigger on activating a mana ability resolves \
+                     immediately (CR 605.4a)",
                 );
             }
         }
@@ -9079,6 +9100,20 @@ fn try_parse_keyword_activation_trigger(lower: &str) -> Option<(TriggerMode, Tri
     None
 }
 
+/// CR 605.1a + CR 605.1b: Does this trigger condition exclude mana-ability
+/// activations ("that isn't a mana ability" / "if it isn't a mana ability")?
+/// Such a trigger can't trigger from a mana ability's activation, so its body is
+/// never a triggered mana ability.
+fn trigger_condition_excludes_mana_activations(condition: Option<&TriggerCondition>) -> bool {
+    match condition {
+        Some(TriggerCondition::ActivatedAbilityIsNonMana) => true,
+        Some(TriggerCondition::And { conditions }) => conditions
+            .iter()
+            .any(|condition| trigger_condition_excludes_mana_activations(Some(condition))),
+        _ => false,
+    }
+}
+
 /// CR 602.1 + CR 603.2 + CR 605.1a: Parse "Whenever <player_scope> activates
 /// an ability [that isn't a mana ability]" triggers — the generic activated-
 /// ability trigger class covering Burning-Tree Shaman ("a player"),
@@ -9092,29 +9127,45 @@ fn try_parse_keyword_activation_trigger(lower: &str) -> Option<(TriggerMode, Tri
 ///   the ability"). "a player" leaves `valid_target` unset so
 ///   `valid_player_matches` accepts every player (Burning-Tree Shaman).
 /// - **non-mana qualifier**: optional " that isn't a mana ability" (CR
-///   605.1a). Sets `TriggerCondition::ActivatedAbilityIsNonMana` so the
-///   qualifier is preserved in the AST even though `GameEvent::AbilityActivated`
-///   already excludes mana abilities (CR 605.3b).
+///   605.1a). Sets `TriggerCondition::ActivatedAbilityIsNonMana`, checked
+///   against the activation event's `kind` (mana abilities emit
+///   `GameEvent::AbilityActivated` too, CR 605.3).
 ///
 /// Nesting by prefix dispatch avoids enumerating the 6-way prefix × subject
 /// permutation as separate `tag` arms.
 fn try_parse_ability_activation_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
+    /// The grammatical person of the activating subject. Only a third-person
+    /// subject ("a player", "an opponent") is the antecedent of a later "they".
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum SubjectPerson {
+        Second,
+        Third,
+    }
+
     // Pair subject with its verb conjugation: third-person-singular subjects
     // ("a player", "an opponent") take "activates"; second-person ("you")
     // takes "activate". Each arm carries the typed `valid_target` filter so
     // the activating player is matched correctly via `valid_player_matches`.
-    fn parse_subject_and_verb(input: &str) -> OracleResult<'_, Option<TargetFilter>> {
+    fn parse_subject_and_verb(
+        input: &str,
+    ) -> OracleResult<'_, (Option<TargetFilter>, SubjectPerson)> {
         alt((
             // CR 602.2a: "a player" — leave `valid_target` unset so every
             // player's activation matches (Burning-Tree Shaman).
-            value(None, tag("a player activates ")),
+            value((None, SubjectPerson::Third), tag("a player activates ")),
             value(
-                Some(TargetFilter::Typed(
-                    TypedFilter::default().controller(ControllerRef::Opponent),
-                )),
+                (
+                    Some(TargetFilter::Typed(
+                        TypedFilter::default().controller(ControllerRef::Opponent),
+                    )),
+                    SubjectPerson::Third,
+                ),
                 tag("an opponent activates "),
             ),
-            value(Some(TargetFilter::Controller), tag("you activate ")),
+            value(
+                (Some(TargetFilter::Controller), SubjectPerson::Second),
+                tag("you activate "),
+            ),
         ))
         .parse(input)
     }
@@ -9123,24 +9174,42 @@ fn try_parse_ability_activation_trigger(lower: &str) -> Option<(TriggerMode, Tri
     // article + optional modifier + noun so the grammar accepts both "an
     // ability" and "an activated ability". An optional "of <source>" suffix
     // narrows the trigger to abilities whose source matches a type filter.
-    // The matcher already consults `def.valid_card` via `valid_card_matches`,
-    // so the source-object filter is propagated directly.
+    // The matcher consults `def.valid_card` for the activated source.
     // Cards: Crackdown Construct, Ashnod the Uncaring, Wizened Mentor,
-    // Runic Armasaur, Ceaseless Searblades.
-    fn parse_ability_object(input: &str) -> OracleResult<'_, Option<TargetFilter>> {
+    // Runic Armasaur, Ceaseless Searblades, Avalanche of Sector 7.
+    fn parse_ability_object(
+        input: &str,
+        person: SubjectPerson,
+    ) -> OracleResult<'_, Option<TargetFilter>> {
         let (rest, _) = (tag("an "), opt(tag("activated ")), tag("ability")).parse(input)?;
         // CR 602.1a + CR 113.7: Optional source-object filter narrows the
         // trigger to abilities whose source matches a type filter ("of an
         // artifact or creature", "of a creature or land", "of a permanent").
-        opt(preceded(
+        let (rest, source) = opt(preceded(
             tag(" of "),
-            terminated(
-                preceded(alt((tag("a "), tag("an "))), parse_source_type_disjunction),
-                opt(tag(" on the battlefield")),
-            ),
+            preceded(alt((tag("a "), tag("an "))), parse_source_type_disjunction),
         ))
-        .map(|filter| filter.map(source_object_filter))
-        .parse(rest)
+        .parse(rest)?;
+        let Some(type_filters) = source else {
+            return Ok((rest, None));
+        };
+        // CR 602.2a + CR 109.4: "<source> they control" — "they" is the
+        // activating player, so the source's controller is the triggering
+        // player (Avalanche of Sector 7). Only a third-person subject can be its
+        // antecedent.
+        let (rest, they_control) = if person == SubjectPerson::Third {
+            opt(value((), tag(" they control"))).parse(rest)?
+        } else {
+            (rest, None)
+        };
+        let (rest, _) = opt(tag(" on the battlefield")).parse(rest)?;
+        let mut filter = source_object_filter(type_filters);
+        if they_control.is_some() {
+            if let TargetFilter::Typed(typed) = &mut filter {
+                typed.controller = Some(ControllerRef::TriggeringPlayer);
+            }
+        }
+        Ok((rest, Some(filter)))
     }
 
     fn source_object_filter(type_filters: Vec<TypeFilter>) -> TargetFilter {
@@ -9208,14 +9277,22 @@ fn try_parse_ability_activation_trigger(lower: &str) -> Option<(TriggerMode, Tri
         .parse(input)
     }
 
-    let parse_line = preceded(
-        alt((tag("whenever "), tag("when "))),
+    fn parse_line(
+        input: &str,
+    ) -> OracleResult<
+        '_,
         (
-            parse_subject_and_verb,
-            parse_ability_object,
-            parse_qualifier,
+            Option<TargetFilter>,
+            Option<TargetFilter>,
+            Option<TriggerCondition>,
         ),
-    );
+    > {
+        let (rest, _) = alt((tag("whenever "), tag("when "))).parse(input)?;
+        let (rest, (subject, person)) = parse_subject_and_verb(rest)?;
+        let (rest, source_filter) = parse_ability_object(rest, person)?;
+        let (rest, qualifier) = parse_qualifier(rest)?;
+        Ok((rest, (subject, source_filter, qualifier)))
+    }
 
     if let Ok((_, (subject, source_filter, qualifier))) = all_consuming(parse_line).parse(lower) {
         let mut def = make_base();
@@ -14102,6 +14179,41 @@ fn try_parse_event(
     // "a <filter> creature" attacker-side qualifier so a filtered "blocks"
     // trigger fires only against a matching attacker.
     if let Ok((after_blocks, _)) = tag::<_, _, OracleError<'_>>("blocks").parse(rest) {
+        // CR 509.3e: a minimum blocked-creature count is part of the event,
+        // not the source's permission to block additional creatures.
+        // Keep recognized but unrepresentable counts terminally unsupported.
+        if peek(preceded(
+            space1,
+            preceded(
+                // The shared number authority also recognizes articles as one;
+                // those belong to the existing per-attacker grammar below.
+                not(alt((tag("a "), tag("an ")))),
+                alt((
+                    value((), nom_primitives::parse_number),
+                    value((), digit1),
+                    value((), tag("exactly ")),
+                )),
+            ),
+        ))
+        .parse(after_blocks)
+        .is_ok()
+        {
+            let parsed = preceded(space1, parse_count_qualified_block_filter).parse(after_blocks);
+            let Ok((_, (minimum, filter))) = parsed else {
+                return Some(unknown_trigger_definition(full_lower));
+            };
+            if !matches!(subject, TargetFilter::SelfRef) {
+                return Some(unknown_trigger_definition(full_lower));
+            }
+            let mut def = make_base();
+            def.mode = TriggerMode::Blocks;
+            def.valid_card = Some(subject.clone());
+            def.valid_target = None;
+            // CR 603.2c: one source-level trigger for this qualifying occurrence.
+            def.batched = true;
+            def.condition = Some(source_block_count_condition(filter, minimum));
+            return Some((TriggerMode::Blocks, def));
+        }
         let mut def = make_base();
         def.mode = TriggerMode::Blocks;
         def.valid_card = Some(subject.clone());
@@ -16552,6 +16664,48 @@ fn subject_attack_scope(subject_scope: Option<&ControllerRef>) -> Option<Subject
     }
 }
 
+/// CR 509.3e + CR 509.3f: parse the full count and creature characteristics
+/// for a source's blocking event; unsupported comparators and tails fail closed.
+fn parse_count_qualified_block_filter(input: &str) -> OracleResult<'_, (i32, TargetFilter)> {
+    let (noun, (comparator, minimum)) = parse_event_amount_quantifier(input)?;
+    if !matches!(comparator, Comparator::GE) {
+        return Err(oracle_err(input));
+    }
+    let minimum = i32::try_from(minimum).map_err(|_| oracle_err(input))?;
+    let (filter, remainder) = parse_type_phrase_folding(noun);
+    let creature_filter = matches!(&filter, TargetFilter::Typed(typed)
+        if typed.type_filters.iter().any(|kind| matches!(kind, TypeFilter::Creature)));
+    if !creature_filter {
+        return Err(oracle_err(noun));
+    }
+    let (remainder, _) = all_consuming(multispace0).parse(remainder)?;
+    Ok((remainder, (minimum, filter)))
+}
+
+/// CR 509.3e + CR 509.3f: count matching attackers actually blocked by this
+/// source at the event. The attacking conjunct excludes the inverse relation.
+/// CR 603.4: this event qualifier is not an intervening-if and must not be
+/// rechecked when the ability resolves; EventTime is stripped when stacking.
+fn source_block_count_condition(filter: TargetFilter, minimum: i32) -> TriggerCondition {
+    let filter = add_property(filter, FilterProp::Attacking { defender: None });
+    let filter = add_property(
+        filter,
+        FilterProp::CombatRelation {
+            relation: CombatRelation::BlockingOrBlockedBy,
+            subject: CombatRelationSubject::Source,
+        },
+    );
+    TriggerCondition::EventTime {
+        condition: Box::new(TriggerCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { filter },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: minimum },
+        }),
+    }
+}
+
 /// CR 508.1a + CR 603.2: the trigger-event count qualifier of a subject-led
 /// "N or more <subject> attack" trigger (N > 1). A player-anchored subject
 /// keeps the player-relative declaration count — the same
@@ -17094,13 +17248,27 @@ fn try_parse_one_or_more_leave_graveyard(lower: &str) -> Option<(TriggerMode, Tr
     None
 }
 
+/// Bare-zone ellipsis in a disjunctive origin's second disjunct ("from your
+/// library or hand" — Oglor, Devoted Assistant): the possessive is elided and
+/// inherited from the first disjunct. Shared by the exile-path zone tokens and
+/// the graveyard-origin zone tokens so the ellipsis grammar lives in one
+/// place. (Templated Oracle text grammar, not a CR-specified construct.)
+fn parse_bare_zone_token(input: &str) -> OracleResult<'_, Zone> {
+    alt((
+        value(Zone::Hand, tag("hand")),
+        value(Zone::Library, tag("library")),
+    ))
+    .parse(input)
+}
+
 /// Parse a single zone token: "your library" → Zone::Library, "your graveyard" → Zone::Graveyard.
 /// Returns the typed zone and the remaining input. Used by the disjunctive
 /// source-zone combinator below.
 fn parse_your_zone_token(input: &str) -> nom::IResult<&str, Zone, OracleError<'_>> {
     alt((
-        value(Zone::Library, tag("your library")),
+        value(Zone::Library, tag::<_, _, OracleError<'_>>("your library")),
         value(Zone::Graveyard, tag("your graveyard")),
+        value(Zone::Hand, tag("your hand")),
         // CR 400.1: source zones expressed player-agnostically — bare plural
         // "graveyards"/"libraries" (any player's), "a graveyard", or "the
         // battlefield" (Ketramose, the New Dawn: "…from graveyards and/or the
@@ -17112,25 +17280,43 @@ fn parse_your_zone_token(input: &str) -> nom::IResult<&str, Zone, OracleError<'_
         value(Zone::Battlefield, tag("the battlefield")),
     ))
     .parse(input)
+    .or_else(|_| parse_bare_zone_token(input))
+}
+
+/// Parse a one-or-two zone union ("<zone>" or "<zone> and/or|or|and <zone>")
+/// with the caller's zone-token combinator. Returns the zones in reading order
+/// with the unconsumed remainder; callers enforce their own tail discipline.
+///
+/// Composable: one token invocation per alternative, joined by the shared
+/// "and/or" (canonical) / "or" / "and" disjunction combinator.
+fn parse_disjunctive_zone_pair<'a, F>(input: &'a str, mut token: F) -> OracleResult<'a, Vec<Zone>>
+where
+    F: FnMut(&'a str) -> OracleResult<'a, Zone>,
+{
+    let (input, first) = token(input)?;
+    // Optional second zone joined by "and/or" (canonical), "or", or "and".
+    let second = alt((
+        tag::<_, _, OracleError<'_>>(" and/or "),
+        tag(" or "),
+        tag(" and "),
+    ))
+    .parse(input)
+    .ok()
+    .and_then(|(after_sep, _)| token(after_sep).ok());
+    match second {
+        Some((rest, second)) => Ok((rest, vec![first, second])),
+        None => Ok((input, vec![first])),
+    }
 }
 
 /// Parse a zone-set phrase such as "your library", "your graveyard",
 /// or "your library and/or your graveyard" / "your graveyard and/or your library".
 /// Returns the list of source zones in reading order.
 ///
-/// Composable: one `parse_your_zone_token` invocation per alternative, joined
-/// by an optional "and/or" / "or" / "and" disjunction combinator.
+/// The exile-path instantiation of [`parse_disjunctive_zone_pair`] over
+/// [`parse_your_zone_token`].
 fn parse_disjunctive_zone_set(input: &str) -> nom::IResult<&str, Vec<Zone>, OracleError<'_>> {
-    let (input, first) = parse_your_zone_token(input)?;
-    // Optional second zone joined by "and/or" (canonical), "or", or "and".
-    let rest_parser = |i| -> nom::IResult<&str, Zone, OracleError<'_>> {
-        let (i, _) = alt((tag(" and/or "), tag(" or "), tag(" and "))).parse(i)?;
-        parse_your_zone_token(i)
-    };
-    match rest_parser(input) {
-        Ok((rest, second)) => Ok((rest, vec![first, second])),
-        Err(_) => Ok((input, vec![first])),
-    }
+    parse_disjunctive_zone_pair(input, parse_your_zone_token)
 }
 
 /// Parse "whenever one or more cards are put into exile from <zone-set>" — a batched
@@ -20579,19 +20765,29 @@ fn try_parse_put_into_graveyard(
 
     // Parse optional "from [zone]" clause
     let after_gy = after_gy.trim_start();
-    let origin = if let Ok((after_from, ())) =
+    let (origin, origin_zones, union_qualifier) = if let Ok((after_from, ())) =
         value((), tag::<_, _, OracleError<'_>>("from ")).parse(after_gy)
     {
         let after_from = after_from.trim_start();
-        parse_graveyard_origin_zone
-            .parse(after_from)
-            .ok()
-            .map(|(_, z)| z)
-            .unwrap_or(None)
+        parse_graveyard_origin_union(after_from)?
     } else {
-        // No "from" clause -- no origin restriction (any zone to graveyard)
-        None
+        // No "from" clause -- no origin restriction (any zone to graveyard).
+        // Strict tail (mirrors the exile sibling): anything else here is
+        // unmodeled — fail the arm rather than silently truncate.
+        if !after_gy.trim().is_empty() {
+            return None;
+        }
+        (None, Vec::new(), OriginUnionQualifier::Unqualified)
     };
+
+    // CR 109.5 + CR 400.3: gate ONLY the two-member union on owner-qualifier
+    // consistency with the destination possessive (shared predicate with the
+    // batched path); singles keep pre-existing behavior.
+    if origin_zones.len() == 2
+        && !union_qualifier_consistent_with_destination(union_qualifier, possessive.clone())
+    {
+        return None;
+    }
 
     let valid_card = match possessive.clone() {
         Some(ctrl) => Some(add_controller(subject.clone(), ctrl)),
@@ -20604,6 +20800,7 @@ fn try_parse_put_into_graveyard(
     def.mode = TriggerMode::ChangesZone;
     def.destination = Some(Zone::Graveyard);
     def.origin = origin;
+    def.origin_zones = origin_zones;
     def.valid_card = valid_card;
     def.valid_target = valid_target;
     Some((TriggerMode::ChangesZone, def))
@@ -20651,9 +20848,224 @@ fn parse_graveyard_origin_zone(input: &str) -> OracleResult<'_, Option<Zone>> {
         value(Some(Zone::Library), tag("an opponent's library")),
         value(Some(Zone::Library), tag("a player's library")),
         value(Some(Zone::Library), tag("any library")),
+        // CR 109.5: bare "a library" (Dreadhound: "…put into a graveyard
+        // from a library") — unowned, like "any library".
+        value(Some(Zone::Library), tag("a library")),
         value(Some(Zone::Hand), tag("your hand")),
     ))
     .parse(input)
+}
+
+/// CR 109.5: owner qualifier carried by one member of a put-into-graveyard
+/// origin union ("an opponent's library", "your hand", "their library", "a
+/// library", ...). The matcher has no origin-owner axis (`OriginConstraint`
+/// in `types/ability.rs` is zone-only: `Any`/`Equals`/`NotEquals`/`OneOf`, and
+/// `match_changes_zone` builds a zone-only `OneOf` from `origin_zones`), so a
+/// qualified union is representable only when its owner reading is provably
+/// equivalent to the zone-only set — otherwise the union fails closed to
+/// `TriggerMode::Unknown` (see [`union_qualifier_consistent_with_destination`]).
+/// No new engine surface is added for this synthetic no-printed-witness case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OriginOwnerQualifier {
+    You,
+    Opponent,
+    AnaphorTheir,
+    Unqualified,
+}
+
+/// Resolved owner qualifier of a put-into-graveyard origin union: the single
+/// qualifier shared by every member, or `Mixed` when members disagree (in
+/// which case no single owner reading exists and the union fails closed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OriginUnionQualifier {
+    You,
+    Opponent,
+    AnaphorTheir,
+    Unqualified,
+    Mixed,
+}
+
+/// CR 109.5 + CR 603.6c: one constrained member of a put-into-graveyard
+/// origin union as a `(Zone, owner-qualifier)` pair — every constrained arm of
+/// [`parse_graveyard_origin_zone`] with its owner qualifier. The bare
+/// "anywhere" leaf is unconstrained, so it is malformed as a union member
+/// (mirroring [`parse_zone_list`]'s treatment of a bare `None` inside a zone
+/// list); "the battlefield" is a shared zone and resolves unowned.
+///
+/// Must stay in lockstep with [`parse_graveyard_origin_zone`]: every new
+/// constrained origin arm needs a qualifier arm here, or unions using it fail
+/// closed to `TriggerMode::Unknown`.
+fn parse_qualified_graveyard_origin_zone(
+    input: &str,
+) -> OracleResult<'_, (Zone, OriginOwnerQualifier)> {
+    alt((
+        value(
+            (Zone::Battlefield, OriginOwnerQualifier::Unqualified),
+            tag::<_, _, OracleError<'_>>("the battlefield"),
+        ),
+        value(
+            (Zone::Library, OriginOwnerQualifier::You),
+            tag("your library"),
+        ),
+        value(
+            (Zone::Library, OriginOwnerQualifier::AnaphorTheir),
+            tag("their library"),
+        ),
+        value(
+            (Zone::Library, OriginOwnerQualifier::Opponent),
+            tag("an opponent's library"),
+        ),
+        value(
+            (Zone::Library, OriginOwnerQualifier::Unqualified),
+            tag("a player's library"),
+        ),
+        value(
+            (Zone::Library, OriginOwnerQualifier::Unqualified),
+            tag("any library"),
+        ),
+        value(
+            (Zone::Library, OriginOwnerQualifier::Unqualified),
+            tag("a library"),
+        ),
+        value((Zone::Hand, OriginOwnerQualifier::You), tag("your hand")),
+    ))
+    .parse(input)
+}
+
+/// CR 603.6c: one member of a put-into-graveyard origin union — every
+/// constrained possessive arm plus the bare-zone ellipsis disjunct ("hand" /
+/// "library", shared with the exile path via [`parse_bare_zone_token`]). Bare
+/// members yield `None` and inherit the head member's qualifier at the pair
+/// level (standard MTG ellipsis: "an opponent's library or hand" = "an
+/// opponent's library or [an opponent's] hand"). The bare-"hand" precedent is
+/// [`parse_hand_possessive`]'s own bare `"hand"` arm.
+fn parse_qualified_graveyard_origin_zone_token(
+    input: &str,
+) -> OracleResult<'_, (Zone, Option<OriginOwnerQualifier>)> {
+    parse_qualified_graveyard_origin_zone
+        .parse(input)
+        .map(|(rest, (zone, qualifier))| (rest, (zone, Some(qualifier))))
+        .or_else(|_| parse_bare_zone_token(input).map(|(rest, zone)| (rest, (zone, None))))
+}
+
+/// CR 603.6c: qualified one-or-two member union over
+/// [`parse_qualified_graveyard_origin_zone_token`]. Mirrors
+/// [`parse_disjunctive_zone_pair`]'s separator grammar ("and/or" / "or" /
+/// "and") in a graveyard-private helper rather than genericizing the shared
+/// combinator, so the exile batched path that instantiates it stays
+/// byte-identical.
+fn parse_qualified_graveyard_origin_pair(
+    input: &str,
+) -> OracleResult<'_, Vec<(Zone, Option<OriginOwnerQualifier>)>> {
+    let (input, first) = parse_qualified_graveyard_origin_zone_token(input)?;
+    // Optional second member joined by "and/or" (canonical), "or", or "and".
+    let second = alt((
+        tag::<_, _, OracleError<'_>>(" and/or "),
+        tag(" or "),
+        tag(" and "),
+    ))
+    .parse(input)
+    .ok()
+    .and_then(|(after_sep, _)| parse_qualified_graveyard_origin_zone_token(after_sep).ok());
+    match second {
+        Some((rest, second)) => Ok((rest, vec![first, second])),
+        None => Ok((input, vec![first])),
+    }
+}
+
+/// Resolve the two member qualifiers of an origin union to one
+/// [`OriginUnionQualifier`]. The bare-ellipsis second disjunct inherits the
+/// head member's qualifier (standard MTG ellipsis); a bare head has nothing
+/// to inherit from and resolves unowned (forward-only). Uniform members yield
+/// their shared qualifier; disagreement yields `Mixed`.
+fn resolve_origin_union_qualifier(
+    head: Option<OriginOwnerQualifier>,
+    second: Option<OriginOwnerQualifier>,
+) -> OriginUnionQualifier {
+    let head = head.unwrap_or(OriginOwnerQualifier::Unqualified);
+    let second = second.unwrap_or(head);
+    if head != second {
+        return OriginUnionQualifier::Mixed;
+    }
+    match head {
+        OriginOwnerQualifier::You => OriginUnionQualifier::You,
+        OriginOwnerQualifier::Opponent => OriginUnionQualifier::Opponent,
+        OriginOwnerQualifier::AnaphorTheir => OriginUnionQualifier::AnaphorTheir,
+        OriginOwnerQualifier::Unqualified => OriginUnionQualifier::Unqualified,
+    }
+}
+
+/// CR 109.5 + CR 400.3: shared accept/reject gate for qualified
+/// put-into-graveyard origin unions — called by BOTH the single-card
+/// (`try_parse_put_into_graveyard`) and batched
+/// (`try_parse_one_or_more_put_into_graveyard`) paths so the class stays in
+/// lockstep. Accept iff the union's owner reading is provably equivalent to
+/// the zone-only `origin_zones` set the matcher keys on:
+/// - all members unqualified → zone-only is exact (any destination);
+/// - uniformly `You`/`Opponent` → only against the matching destination owner
+///   (CR 400.3: library/hand/graveyard are per-player zones, so a mismatched
+///   owner pair would over-fire);
+/// - `their`-anaphor → only against a qualified destination (the anaphor binds
+///   to the destination owner; an unqualified destination leaves it dangling);
+/// - `Mixed` → fail closed (no single owner reading exists).
+fn union_qualifier_consistent_with_destination(
+    qualifier: OriginUnionQualifier,
+    destination_possessive: Option<ControllerRef>,
+) -> bool {
+    match qualifier {
+        OriginUnionQualifier::Unqualified => true,
+        OriginUnionQualifier::You => destination_possessive == Some(ControllerRef::You),
+        OriginUnionQualifier::Opponent => destination_possessive == Some(ControllerRef::Opponent),
+        OriginUnionQualifier::AnaphorTheir => destination_possessive.is_some(),
+        OriginUnionQualifier::Mixed => false,
+    }
+}
+
+/// CR 603.1 + CR 603.6c: Parse the "from \<zone-set\>" tail of a
+/// put-into-graveyard trigger into `(origin, origin_zones, union_qualifier)`.
+/// A two-zone union ("from your library or hand" — Oglor, Devoted Assistant)
+/// populates `origin_zones` with `origin` unset (the runtime matcher keys on
+/// the set, ignoring `origin`, when the set is non-empty); a single zone keeps
+/// the scalar `origin` shape; bare "anywhere" stays unconstrained. The
+/// qualifier is meaningful only for the two-member case — callers gate ONLY
+/// `[_, _]` on [`union_qualifier_consistent_with_destination`], so `[single]`
+/// and "anywhere" keep their historical shapes ungated. The tail must be FULLY
+/// consumed — any unconsumed remainder fails the arm (`None`) so the line
+/// falls through to an honest `TriggerMode::Unknown` instead of silently
+/// dropping the constraint.
+fn parse_graveyard_origin_union(
+    input: &str,
+) -> Option<(Option<Zone>, Vec<Zone>, OriginUnionQualifier)> {
+    // Bare "anywhere" single: explicitly unconstrained (CR 603.6c: an ability
+    // that triggers on a card put into a zone "from anywhere" is never a
+    // leaves-the-battlefield ability). Strict tail — "anywhere other than X"
+    // belongs to the zone-change-clause path, not here.
+    if let Ok((tail, _)) = tag::<_, _, OracleError<'_>>("anywhere").parse(input) {
+        return tail.trim().is_empty().then_some((
+            None,
+            Vec::new(),
+            OriginUnionQualifier::Unqualified,
+        ));
+    }
+    let (tail, members) = parse_qualified_graveyard_origin_pair(input).ok()?;
+    if !tail.trim().is_empty() {
+        return None;
+    }
+    match members.as_slice() {
+        // A single member is trivially uniform; callers ignore the qualifier
+        // for singles (pre-existing single-path behavior is out of scope).
+        [(single, qualifier)] => Some((
+            Some(*single),
+            Vec::new(),
+            resolve_origin_union_qualifier(*qualifier, *qualifier),
+        )),
+        [(head_zone, head), (second_zone, second)] => Some((
+            None,
+            vec![*head_zone, *second_zone],
+            resolve_origin_union_qualifier(*head, *second),
+        )),
+        _ => None,
+    }
 }
 
 /// CR 400.3: Shared parser for possessive hand forms in zone-change triggers.
@@ -20869,18 +21281,30 @@ fn try_parse_one_or_more_put_into_graveyard(
 
         // Parse optional "from [zone]" clause using nom
         let after_gy = after_gy.trim_start();
-        let origin = if let Ok((after_from, ())) =
+        let (origin, origin_zones, union_qualifier) = if let Ok((after_from, ())) =
             value((), tag::<_, _, OracleError<'_>>("from ")).parse(after_gy)
         {
             let after_from = after_from.trim_start();
-            parse_graveyard_origin_zone
-                .parse(after_from)
-                .ok()
-                .map(|(_, z)| z)
-                .unwrap_or(None)
+            let Some(parsed) = parse_graveyard_origin_union(after_from) else {
+                continue;
+            };
+            parsed
+        } else if after_gy.trim().is_empty() {
+            (None, Vec::new(), OriginUnionQualifier::Unqualified)
         } else {
-            None
+            // Unknown trailing text — bail rather than silently truncate.
+            continue;
         };
+
+        // CR 109.5 + CR 400.3: gate ONLY the two-member union on
+        // owner-qualifier consistency with the destination possessive (shared
+        // predicate with the single-card path); singles keep pre-existing
+        // behavior.
+        if origin_zones.len() == 2
+            && !union_qualifier_consistent_with_destination(union_qualifier, possessive.clone())
+        {
+            continue;
+        }
 
         // Parse the subject type filter: "creature cards", "land cards", "cards"
         let base_filter = if subject_text == "cards" {
@@ -20913,6 +21337,7 @@ fn try_parse_one_or_more_put_into_graveyard(
         def.mode = TriggerMode::ChangesZoneAll;
         def.destination = Some(Zone::Graveyard);
         def.origin = origin;
+        def.origin_zones = origin_zones;
         def.valid_card = valid_card;
         def.valid_target = valid_target;
         def.batched = true;

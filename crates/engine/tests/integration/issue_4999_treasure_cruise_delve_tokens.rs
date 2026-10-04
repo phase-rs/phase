@@ -107,7 +107,14 @@ fn delve_eligibility_and_actions_exclude_stale_noncard_graveyard_residents() {
             mana_type: ManaType::Colorless,
         })
         .expect("a real card in the caster's graveyard can pay Delve");
-    assert_eq!(runner.state().objects[&real].zone, Zone::Exile);
+    assert_eq!(runner.state().objects[&real].zone, Zone::Graveyard);
+    assert!(!legal_actions_full(runner.state())
+        .0
+        .iter()
+        .any(|action| matches!(
+            action,
+            GameAction::TapForConvoke { object_id, .. } if *object_id == real
+        )));
     assert_eq!(
         runner.state().players[P0.0 as usize].mana_pool.mana.len(),
         1
