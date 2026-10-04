@@ -594,8 +594,8 @@ fn compact_selector_removes_a_real_saved_key_larger_than_the_ast_wire_budget() {
     scenario.at_phase(Phase::PreCombatMain);
     let target = scenario.add_creature(P0, "Counter recipient", 1, 1).id();
     let mut sources = Vec::new();
-    for index in 0..41 {
-        let modification = if index == 40 {
+    for index in 0..50 {
+        let modification = if index == 49 {
             QuantityModification::Times { factor: 2 }
         } else {
             QuantityModification::Plus { value: 1 }
@@ -629,11 +629,11 @@ fn compact_selector_removes_a_real_saved_key_larger_than_the_ast_wire_budget() {
         ..
     } = &runner.state().waiting_for
     else {
-        panic!("all 41 counter modifiers must offer an eligible replacement ordering");
+        panic!("all 50 counter modifiers must offer an eligible replacement ordering");
     };
-    assert_eq!(*candidate_count, 41);
-    assert_eq!(candidates.len(), 41);
-    assert_eq!(key.candidates.len(), 41);
+    assert_eq!(*candidate_count, 50);
+    assert_eq!(candidates.len(), 50);
+    assert_eq!(key.candidates.len(), 50);
     for identity in &key.candidates {
         let ReplacementAutoChoiceIdentity::Definition {
             source: saved_source,
@@ -681,11 +681,11 @@ fn compact_selector_removes_a_real_saved_key_larger_than_the_ast_wire_budget() {
         record.id.0.len()
     );
     assert_eq!(record.id.0.len(), 65);
-    // CR 616.1f + CR 122.1a: forty additive replacements followed by the
-    // doubler deliver (1 + 40) * 2 +1/+1 counters through the ordinary pipeline.
+    // CR 616.1f + CR 122.1a: forty-nine additive replacements followed by the
+    // doubler deliver (1 + 49) * 2 +1/+1 counters through the ordinary pipeline.
     assert_eq!(
         runner.state().objects[&target].counters[&CounterType::Plus1Plus1],
-        82
+        100
     );
     assert!(matches!(
         runner.state().waiting_for,
@@ -712,7 +712,7 @@ fn compact_selector_removes_a_real_saved_key_larger_than_the_ast_wire_budget() {
     assert!(result.events.is_empty());
     assert_eq!(
         runner.state().objects[&target].counters[&CounterType::Plus1Plus1],
-        82
+        100
     );
     assert!(runner.state().replacement_auto_choice_tail.is_none());
 }
