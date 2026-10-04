@@ -1883,6 +1883,19 @@ describe("WebSocketAdapter", () => {
       );
     });
 
+    it("sends only the compact replacement selector and settles ActionNoOp", async () => {
+      const selector = `r${"a".repeat(64)}`;
+      const action: GameAction = { type: "SetReplacementAutoChoice", data: { selector } };
+      ws.send.mockClear();
+      const pending = adapter.submitAction(action, 0);
+      expect(JSON.parse(ws.send.mock.lastCall![0] as string)).toEqual({
+        type: "Action",
+        data: { action: { type: "SetReplacementAutoChoice", data: { selector } } },
+      });
+      ws.dispatchSynthetic("message", JSON.stringify({ type: "ActionNoOp" }));
+      await pending;
+    });
+
     it.each(["Card", "Token"] as const)(
       "preserves the %s creation kind in a nonzero debug CreateCard action frame",
       async (creationKind) => {

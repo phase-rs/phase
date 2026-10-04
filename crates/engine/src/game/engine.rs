@@ -70,6 +70,7 @@ use super::public_state::{
     bump_state_revision, finalize_display_state, finalize_public_state, finalize_rules_state,
     mark_public_state_all_dirty, mark_public_state_from_events, sync_waiting_for,
 };
+use super::replacement;
 use super::room;
 use super::sba;
 use super::splice;
@@ -1556,7 +1557,14 @@ fn apply_action_boundary_core(
         // transaction module remains the sole commit/abort authority.
         payment_transaction::apply_pending_action(state, authenticated_actor, action)
     } else {
-        apply_action(state, semantic_owner, action, stack_resolution_limit)
+        // CR 723.5b: controlling another player's decisions does not confer
+        // authority over their UI preferences or submitter-scoped capabilities.
+        let reducer_actor = if action.is_submitter_scoped() {
+            authenticated_actor
+        } else {
+            semantic_owner
+        };
+        apply_action(state, reducer_actor, action, stack_resolution_limit)
     } {
         Ok(result) => result,
         // CR 601.2h + CR 733.1: a typed reversal, restored below like any other.
@@ -10661,6 +10669,15 @@ fn apply_action(
         return Ok(ActionResult::applied(vec![], state.waiting_for.clone()));
     }
 
+    if let GameAction::SetReplacementAutoChoice { selector } = &action {
+        // The stored opaque selector names the record across earlier removals.
+        // Unknown selectors and records belonging to another actor are preserved.
+        state.replacement_auto_choices.retain(|record| {
+            record.key.player != actor || selector.as_ref().is_some_and(|id| record.id != *id)
+        });
+        return Ok(ActionResult::applied(vec![], state.waiting_for.clone()));
+    }
+
     // CR 603.5: SetMayTriggerAutoChoice propagates the actor's stored "don't ask
     // again" auto-choices for optional ("may") triggers. Pure preference state,
     // routed by `actor`, and — like SetPriorityYield — handled before the
@@ -14097,6 +14114,18 @@ fn apply_non_priority_pass_action(
                 waiting_for
             } else {
                 engine_combat::finish_declare_attackers(state, &mut events, false)?
+            }
+        }
+        (WaitingFor::ReplacementChoice { .. }, GameAction::ChooseReplacementAndRemember { choice }) => {
+            // CR 616.1: validate the full response and eligibility before any mutation.
+            if !replacement::validate_remembered_replacement(state, &choice) {
+                return Err(EngineError::InvalidAction("Invalid remembered replacement choice".into()));
+            }
+            if let Some(waiting_for) = casting_costs::abandon_stale_resolution_sacrifice_cursor(state, &mut events) {
+                waiting_for
+            } else {
+                let index = replacement::remember_replacement_choice(state, choice);
+                engine_replacement::handle_replacement_choice(state, index, &mut events)?
             }
         }
         (WaitingFor::ReplacementChoice { .. }, GameAction::ChooseReplacement { index }) => {

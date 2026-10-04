@@ -1,16 +1,145 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { useState } from "react";
+import { act, useState } from "react";
 
 import { PopoverMenu } from "../PopoverMenu.tsx";
 import { FolderActionsMenu } from "../FolderActionsMenu.tsx";
 import { ConfirmDialog } from "../../ui/ConfirmDialog.tsx";
+import { useKeyboardShortcuts } from "../../../hooks/useKeyboardShortcuts.ts";
+import { useGameStore } from "../../../stores/gameStore.ts";
+import { useUiStore } from "../../../stores/uiStore.ts";
+import { gameStateFactory } from "../../../test/factories/gameStateFactory.ts";
+import { setGameStoreForTest } from "../../../test/helpers/gameStoreHelpers.ts";
+
+const { dispatchActionMock } = vi.hoisted(() => ({ dispatchActionMock: vi.fn() }));
+vi.mock("../../../game/dispatch.ts", () => ({ dispatchAction: dispatchActionMock }));
 
 afterEach(() => {
   cleanup();
 });
 
 describe("PopoverMenu", () => {
+  describe("keyboard boundary", () => {
+    function KeyboardPopoverHarness({ variant = "dialog" }: { variant?: "menu" | "dialog" }) {
+      useKeyboardShortcuts();
+      return (
+        <>
+          <button type="button">Outside control</button>
+          <PopoverMenu ariaLabel="Keyboard controls" variant={variant}>
+            {(close) => (
+              <>
+                <details>
+                  <summary>Saved variants</summary>
+                  <p>First replacement, then second replacement</p>
+                </details>
+                <button type="button" onClick={close}>Close panel</button>
+              </>
+            )}
+          </PopoverMenu>
+        </>
+      );
+    }
+
+    beforeEach(() => {
+      dispatchActionMock.mockClear();
+      useGameStore.getState().reset();
+      act(() => {
+        useUiStore.setState({ helpSheetOpen: false, flexEditMode: false, fullControl: false, selectedCardIds: [10] });
+      });
+    });
+
+    afterEach(() => {
+      cleanup();
+      useGameStore.getState().reset();
+      act(() => useUiStore.setState({ selectedCardIds: [], fullControl: false }));
+    });
+
+    it.each(["Enter", " "])("blocks the active game shortcut for %j inside a dialog", (key) => {
+      const { dispatch } = setGameStoreForTest({ gameState: gameStateFactory.priority().build() });
+      render(<KeyboardPopoverHarness />);
+
+      // Paired control proves the real hook and both dispatch paths are active.
+      fireEvent.keyDown(screen.getByRole("button", { name: "Outside control" }), { key });
+      if (key === "Enter") {
+        expect(dispatchActionMock).toHaveBeenCalledWith({
+          type: "SetAutoPass",
+          data: { mode: { type: "UntilTurnBoundary", until: "EndOfCurrentTurn" } },
+        });
+      } else {
+        expect(dispatch).toHaveBeenCalledWith({ type: "PassPriority" });
+      }
+      dispatchActionMock.mockClear();
+      vi.mocked(dispatch).mockClear();
+
+      fireEvent.click(screen.getByRole("button", { name: "Keyboard controls" }));
+      const summary = screen.getByText("Saved variants");
+      const button = screen.getByRole("button", { name: "Close panel" });
+      for (const control of [summary, button]) {
+        control.focus();
+        const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+        fireEvent(control, event);
+        expect(event.defaultPrevented).toBe(false);
+      }
+
+      expect(dispatchActionMock).not.toHaveBeenCalled();
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(screen.getByRole("dialog", { name: "Keyboard controls" })).toBeInTheDocument();
+    });
+
+    it.each(["Tab", "F"])("keeps %j local without preventing its default", (key) => {
+      render(<KeyboardPopoverHarness />);
+      fireEvent.click(screen.getByRole("button", { name: "Keyboard controls" }));
+      const documentKeyDown = vi.fn();
+      const windowKeyDown = vi.fn();
+      document.addEventListener("keydown", documentKeyDown);
+      window.addEventListener("keydown", windowKeyDown);
+      try {
+        const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+        fireEvent(screen.getByText("Saved variants"), event);
+
+        expect(event.defaultPrevented).toBe(false);
+        expect(documentKeyDown).not.toHaveBeenCalled();
+        expect(windowKeyDown).not.toHaveBeenCalled();
+        expect(useUiStore.getState().fullControl).toBe(false);
+      } finally {
+        document.removeEventListener("keydown", documentKeyDown);
+        window.removeEventListener("keydown", windowKeyDown);
+      }
+    });
+
+    it("closes on Escape from a dialog control and restores focus without canceling game input", () => {
+      render(<KeyboardPopoverHarness />);
+      const trigger = screen.getByRole("button", { name: "Keyboard controls" });
+      fireEvent.click(trigger);
+      const button = screen.getByRole("button", { name: "Close panel" });
+      button.focus();
+
+      fireEvent.keyDown(button, { key: "Escape" });
+
+      expect(screen.queryByRole("dialog", { name: "Keyboard controls" })).not.toBeInTheDocument();
+      expect(trigger).toHaveFocus();
+      expect(useUiStore.getState().selectedCardIds).toEqual([10]);
+      expect(dispatchActionMock).not.toHaveBeenCalled();
+    });
+
+    it("preserves game shortcut bubbling from the default menu variant", () => {
+      const { dispatch } = setGameStoreForTest({ gameState: gameStateFactory.priority().build() });
+      render(<KeyboardPopoverHarness variant="menu" />);
+      fireEvent.click(screen.getByRole("button", { name: "Keyboard controls" }));
+      const button = screen.getByRole("button", { name: "Close panel" });
+
+      fireEvent.keyDown(button, { key: "Enter" });
+      fireEvent.keyDown(button, { key: " " });
+
+      expect(dispatchActionMock).toHaveBeenCalledWith({
+        type: "SetAutoPass",
+        data: { mode: { type: "UntilTurnBoundary", until: "EndOfCurrentTurn" } },
+      });
+      expect(dispatch).toHaveBeenCalledWith({ type: "PassPriority" });
+      expect(screen.getByRole("menu", { name: "Keyboard controls" })).toBeInTheDocument();
+    });
+  });
+
   function openDialog() {
     render(
       <PopoverMenu ariaLabel="Layout" variant="dialog">

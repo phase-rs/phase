@@ -208,6 +208,7 @@ pub(super) fn note_meaningful_action(state: &mut GameState, actor: PlayerId, act
                 | GameAction::SetPriorityPassingMode { .. }
                 | GameAction::SetPriorityYield { .. }
                 | GameAction::SetMayTriggerAutoChoice { .. }
+                | GameAction::SetReplacementAutoChoice { .. }
                 | GameAction::SetTriggerOrderTemplate { .. }
                 | GameAction::ReorderHand { .. }
                 | GameAction::PrecastCopyShortcut { .. }

@@ -9464,6 +9464,53 @@ pub enum ReplacementChoiceKind {
     SearchFoundDestination,
 }
 
+/// CR 400.7 + CR 616.1: exact source and definition, independent of scan order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum ReplacementAutoChoiceIdentity {
+    Definition {
+        source: ObjectIncarnationRef,
+        index: usize,
+        definition: Box<crate::types::ability::ReplacementDefinition>,
+    },
+    Mana {
+        source: ObjectIncarnationRef,
+        controller: PlayerId,
+        filter: Option<ManaColor>,
+        action: crate::types::mana::StepEndManaAction,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplacementAutoChoiceKey {
+    pub player: PlayerId,
+    pub event: crate::types::replacements::ReplacementEvent,
+    pub kind: ReplacementChoiceKind,
+    pub candidates: Vec<ReplacementAutoChoiceIdentity>,
+}
+
+/// Stable opaque selector for an exact replacement preference key.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ReplacementAutoChoiceId(pub String);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplacementAutoChoiceRecord {
+    pub id: ReplacementAutoChoiceId,
+    pub key: ReplacementAutoChoiceKey,
+    pub choice: crate::types::actions::ReplacementAutoChoice,
+    /// Engine-provided descriptions in the chosen order (one for an optional branch).
+    pub descriptions: Vec<String>,
+}
+
+/// CR 616.1f: expected remaining identities for this event only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplacementAutoChoiceTail {
+    pub player: PlayerId,
+    pub event: crate::types::replacements::ReplacementEvent,
+    pub remaining: Vec<ReplacementAutoChoiceIdentity>,
+}
+
 /// CR 603.3b + CR 603.7: One completed normal-plus-delayed trigger collection
 /// for a single raw event batch, produced before any live occurrence is claimed.
 ///
@@ -13163,13 +13210,20 @@ impl GameState {
             return;
         }
         let rederived = crate::game::replacement::replacement_choice_waiting_for(player, self);
-        if let WaitingFor::ReplacementChoice { kind, .. } = rederived {
+        if let WaitingFor::ReplacementChoice {
+            kind,
+            remember_identity,
+            ..
+        } = rederived
+        {
             if let WaitingFor::ReplacementChoice {
                 kind: restored_kind,
+                remember_identity: restored_identity,
                 ..
             } = &mut self.waiting_for
             {
                 *restored_kind = kind;
+                *restored_identity = remember_identity;
             }
         }
     }
@@ -14080,6 +14134,9 @@ pub enum WaitingFor {
         /// layer must not assume last-write-wins; this is the engine's answer.
         #[serde(default)]
         last_applied_decides: bool,
+        /// Engine-owned conservative eligibility and identity; absent for payment/search prompts.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        remember_identity: Option<ReplacementAutoChoiceKey>,
     },
     /// CR 614.12a: choose the opponent that a permanent enters under before
     /// the zone change is delivered. `candidates` is captured at replacement
@@ -21464,6 +21521,10 @@ declare_game_state! {
     pub pending_die_roll_instruction: Option<Box<PendingDieRollInstruction>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub may_trigger_auto_choices: Vec<MayTriggerAutoChoiceRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub replacement_auto_choices: Vec<ReplacementAutoChoiceRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replacement_auto_choice_tail: Option<ReplacementAutoChoiceTail>,
 
     /// CR 603.3b (TriggerOrdering) / CR 732.2a (LoopChoice): captured recurring
     /// decisions (PR-7). Two lifetimes share this Vec, distinguished by their
@@ -27591,6 +27652,8 @@ impl GameState {
             pending_search_found_batch: None,
             pending_die_roll_instruction: None,
             may_trigger_auto_choices: Vec::new(),
+            replacement_auto_choices: Vec::new(),
+            replacement_auto_choice_tail: None,
             decision_templates: Vec::new(),
             priority_yields: Vec::new(),
             pending_begin_game_abilities: Vec::new(),
@@ -29982,6 +30045,8 @@ fn _gamestate_partition_is_total(s: &GameState) {
         merged_card_component_route: _,
         resolution_coin_flip: _,
         may_trigger_auto_choices: _,
+        replacement_auto_choices: _,
+        replacement_auto_choice_tail: _,
         decision_templates: _,
         priority_yields: _,
         pending_begin_game_abilities: _,
@@ -30356,6 +30421,8 @@ impl PartialEq for GameState {
             && self.pending_triggered_mana_resume == other.pending_triggered_mana_resume
             && self.pending_trigger_construction_priority_recipient
                 == other.pending_trigger_construction_priority_recipient
+            && self.replacement_auto_choices == other.replacement_auto_choices
+            && self.replacement_auto_choice_tail == other.replacement_auto_choice_tail
             && self.may_trigger_auto_choices == other.may_trigger_auto_choices
             && self.decision_templates == other.decision_templates
             && self.priority_yields == other.priority_yields
@@ -33764,6 +33831,7 @@ mod tests {
             candidates: Vec::new(),
             kind: Default::default(),
             last_applied_decides: false,
+            remember_identity: None,
         };
         assert!(
             !matches!(state.waiting_for, WaitingFor::Priority { .. }),
@@ -33933,6 +34001,7 @@ mod tests {
             candidates: Vec::new(),
             kind: Default::default(),
             last_applied_decides: false,
+            remember_identity: None,
         };
         assert!(
             !matches!(state.waiting_for, WaitingFor::Priority { .. }),
@@ -40062,6 +40131,7 @@ mod tests {
             candidates: vec![],
             kind: Default::default(),
             last_applied_decides: false,
+            remember_identity: None,
         }));
         variants.push(Box::new(WaitingFor::ExploreChoice {
             player: PlayerId(0),

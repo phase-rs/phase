@@ -210,6 +210,10 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 106 — Full-game replacement-choice preferences, exact source/definition
+ *       identities, remembered ordering/optional actions, and prompt
+ *       eligibility metadata. P2P moves in lockstep (wire 88); lobby-only
+ *       messages are unchanged.
  * 105 — Deferred mana-source selections carry a nominal base quantity.
  *      Full-game peers must agree on the tagged output shape; P2P moves in
  *      lockstep (wire 87). Lobby-only messages are unchanged.
@@ -690,7 +694,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 105;
+export const PROTOCOL_VERSION = 106;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

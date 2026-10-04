@@ -1795,8 +1795,15 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // redacts the underlying object. Keep that display payload consistent with
     // the filtered object view, while the player making the choice retains the
     // real source identity needed by the action round-trip.
-    if let WaitingFor::ReplacementChoice { candidates, .. } = &mut filtered.waiting_for {
+    if let WaitingFor::ReplacementChoice {
+        candidates,
+        remember_identity,
+        ..
+    } = &mut filtered.waiting_for
+    {
         if !replacement_choice_authorized {
+            // CR 400.2: definition snapshots can disclose hidden-origin source identities.
+            *remember_identity = None;
             for candidate in candidates {
                 let source_is_hidden = candidate.source_id != ObjectId(0)
                     && (hidden_replacement_candidate_source_ids.contains(&candidate.source_id)
@@ -2715,6 +2722,11 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     filtered
         .priority_passing_modes
         .retain(|pid, _| viewer.is_some_and(|viewer| *pid == viewer));
+    filtered
+        .replacement_auto_choices
+        .retain(|record| viewer == Some(record.key.player));
+    // A replay cursor is internal to the event, not a viewer preference.
+    filtered.replacement_auto_choice_tail = None;
     filtered
         .may_trigger_auto_choices
         .retain(|record| viewer.is_some_and(|viewer| record.selector.player() == viewer));
