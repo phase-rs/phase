@@ -8226,6 +8226,43 @@ mod tests {
         );
     }
 
+    /// CR 608.2c: "they" after a declared player is that player, but every scope and
+    /// trigger reading of "they" keeps its own value.
+    #[test]
+    fn they_after_a_declared_player_yields_to_scope_and_trigger_readings() {
+        let they = |scope: Option<ControllerRef>, subject: Option<TargetFilter>, declared| {
+            resolve_they_pronoun(&mut ParseContext {
+                prior_player_declaration: declared,
+                relative_player_scope: scope,
+                subject,
+                ..Default::default()
+            })
+        };
+        assert_eq!(they(None, None, true), TargetFilter::ParentTargetController);
+        assert_eq!(they(None, None, false), TargetFilter::ParentTarget);
+        for (scope, expected) in [
+            (ControllerRef::ScopedPlayer, TargetFilter::ScopedPlayer),
+            (
+                ControllerRef::ParentTargetOwner,
+                TargetFilter::ParentTargetOwner,
+            ),
+            (
+                ControllerRef::DefendingPlayer,
+                TargetFilter::DefendingPlayer,
+            ),
+            (
+                ControllerRef::TriggeringPlayer,
+                TargetFilter::TriggeringPlayer,
+            ),
+        ] {
+            assert_eq!(they(Some(scope), None, true), expected);
+        }
+        assert_eq!(
+            they(None, Some(TargetFilter::Player), true),
+            TargetFilter::TriggeringPlayer
+        );
+    }
+
     /// CR 105.3 + CR 106.1a: "becomes that color" (Foraging Wickermaw) maps to the
     /// same `AddChosenColor` reader as "the chosen color" (Puca's Eye) — only the
     /// upstream writer differs (mana production vs `Effect::Choose`). Regression-

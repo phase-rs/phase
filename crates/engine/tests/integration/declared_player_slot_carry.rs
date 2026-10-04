@@ -60,9 +60,16 @@ impl Seen {
     }
 }
 
+/// Picks one slot's target from its legal set; `last` is whether it is the final slot.
+type Picker = fn(&[TargetRef], bool) -> Option<TargetRef>;
+
 #[derive(Default)]
 struct Plan<'a> {
     prefs: &'a [TargetRef],
+    /// Slot `i` takes `slots[i]` (absent: none chosen); overrides `prefs`.
+    slots: &'a [Option<TargetRef>],
+    /// Overrides `prefs` and `slots` for every slot.
+    picker: Option<Picker>,
     name: &'a str,
     eliminate_on_stack: Option<usize>,
     decline_optional: bool,
@@ -97,11 +104,19 @@ fn drive(r: &mut GameRunner, plan: &Plan) -> Seen {
                 ..
             } => {
                 seen.first_slot_count.get_or_insert(target_slots.len());
-                let target = target_slots[selection.current_slot]
-                    .legal_targets
-                    .iter()
-                    .find(|t| plan.prefs.contains(t))
-                    .cloned();
+                let legal = &target_slots[selection.current_slot].legal_targets;
+                let last = selection.current_slot + 1 == target_slots.len();
+                let target = if let Some(pick) = plan.picker {
+                    pick(legal, last)
+                } else if plan.slots.is_empty() {
+                    legal.iter().find(|t| plan.prefs.contains(t)).cloned()
+                } else {
+                    plan.slots
+                        .get(selection.current_slot)
+                        .cloned()
+                        .flatten()
+                        .filter(|t| legal.contains(t))
+                };
                 seen.events.extend(
                     r.act(GameAction::ChooseTarget { target })
                         .expect("target")
@@ -529,6 +544,307 @@ fn capitalize(clause: &str) -> String {
         .unwrap_or_default()
 }
 
+const GAIN_DISCARD_DRAW: &str =
+    "Target player gains 2 life. That player discards a card, then draws a card.";
+const TWO_DECLARATIONS: &str =
+    "Target player gains 2 life. Target opponent loses 2 life. That player discards a card.";
+const GAIN_DISCARD_DRAW_THEN_COUNTER: &str = "Target player gains 2 life. That player discards a card, then draws a card. Put a +1/+1 counter on up to one target creature.";
+const OBJECT_FIRST_SEARCH: &str = "Destroy target creature. Target player gains 2 life. That player searches their library for a basic land card, puts it onto the battlefield tapped, then shuffles.";
+const DRAW_THEN_OPPONENT_LOSES: &str = "Target player draws a card. Target opponent loses 2 life.";
+const DRAW_THEN_UP_TO_OPPONENT_LOSES: &str =
+    "Target player draws a card. Up to one target opponent loses 2 life.";
+
+/// A spell in P0's hand, a P0 creature `C0`, and two hand and six library cards per seat.
+fn setup_row(text: &str) -> (GameRunner, ObjectId, ObjectId) {
+    let mut sc = three_player(7);
+    let creature = sc.add_creature(P0, "C0", 3, 9).id();
+    let spell = sc
+        .add_spell_to_hand_from_oracle(P0, "Row", false, text)
+        .id();
+    seat_all(&mut sc);
+    (sc.build(), spell, creature)
+}
+
+/// Casts `text` and drives it with `plan`.
+fn run_row(text: &str, plan: &Plan) -> (GameRunner, Seen, ObjectId) {
+    let (mut r, spell, creature) = setup_row(text);
+    cast(&mut r, spell);
+    let seen = drive(&mut r, plan);
+    (r, seen, creature)
+}
+
+/// Player-only slots take P2, except the last slot, which takes P1 (the declaring clause's
+/// player in every text that uses this picker); object slots take the first object.
+fn declared_player_last(legal: &[TargetRef], last: bool) -> Option<TargetRef> {
+    if legal.iter().all(|t| matches!(t, TargetRef::Player(_))) {
+        Some(TargetRef::Player(if last { P1 } else { P2 }))
+    } else {
+        legal
+            .iter()
+            .find(|t| matches!(t, TargetRef::Object(_)))
+            .cloned()
+    }
+}
+
+/// CR 608.2c + CR 115.1: "that player" names the clause that announced the player, however many
+/// engine target slots (players or objects) the chain announces before or inside it.
+#[test]
+fn that_player_after_earlier_target_slots_acts_on_the_declared_player() {
+    let cases = [
+        (GAIN_DISCARD_DRAW.to_string(), 0),
+        (
+            format!("You draw cards equal to the number of cards in target opponent's hand. {GAIN_DISCARD_DRAW}"),
+            2,
+        ),
+        (
+            format!("Exchange control of two target creatures. {GAIN_DISCARD_DRAW}"),
+            0,
+        ),
+        (
+            format!("Destroy all creatures target player controls. {GAIN_DISCARD_DRAW}"),
+            0,
+        ),
+        (
+            "Target player loses life equal to target creature's power. That player discards a card, then draws a card.".to_string(),
+            0,
+        ),
+    ];
+    for (text, caster_draws) in cases {
+        let (r, seen, _) = run_row(
+            &text,
+            &Plan {
+                picker: Some(declared_player_last),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            seen.discard_by,
+            vec![P1],
+            "{text}: the discard prompt reached P1"
+        );
+        assert_eq!(
+            hands(&r),
+            vec![2 + caster_draws, 2, 2],
+            "{text}: P1's discard and draw net out; no other seat draws"
+        );
+        assert_eq!(
+            libraries(&r),
+            vec![6 - caster_draws, 5, 6],
+            "{text}: only P1 drew its card"
+        );
+    }
+}
+
+/// CR 608.2c: with two declaring clauses, "that player" names the nearer one.
+#[test]
+fn that_player_names_the_nearest_declaring_clause() {
+    let (r, seen, _) = run_row(
+        TWO_DECLARATIONS,
+        &Plan {
+            slots: &[Some(TargetRef::Player(P2)), Some(TargetRef::Player(P1))],
+            ..Default::default()
+        },
+    );
+    assert_eq!(lives(&r), vec![20, 18, 22], "P2 gained, P1 lost");
+    assert_eq!(
+        seen.discard_by,
+        vec![P1],
+        "the nearer declaration, target opponent"
+    );
+}
+
+/// CR 608.2b: the declared player is gone, so "that player" affects no one; the creature target
+/// stays legal, so the chain still resolves its last clause.
+#[test]
+fn an_illegal_declared_player_affects_no_one_while_the_rest_of_the_chain_resolves() {
+    let (mut r, spell, creature) = setup_row(GAIN_DISCARD_DRAW_THEN_COUNTER);
+    cast(&mut r, spell);
+    let seen = drive(
+        &mut r,
+        &Plan {
+            prefs: &[TargetRef::Player(P1), TargetRef::Object(creature)],
+            eliminate_on_stack: Some(1),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        r.state().objects[&creature]
+            .counters
+            .get(&CounterType::Plus1Plus1),
+        Some(&1),
+        "the chain ran to its last clause"
+    );
+    assert!(seen.discard_by.is_empty(), "no one discards");
+    assert_eq!(hands(&r), vec![2, 2, 2]);
+    assert_eq!(libraries(&r), vec![6, 6, 6], "no one draws");
+}
+
+/// CR 608.2c: an anaphoric search after an object target and a declared player searches the
+/// declared player's library.
+#[test]
+fn an_anaphoric_search_after_an_object_target_searches_the_declared_player() {
+    let mut sc = three_player(7);
+    let bear = sc.add_creature(P2, "Bear", 2, 2).id();
+    let spell = sc
+        .add_spell_to_hand_from_oracle(P0, "Row", false, OBJECT_FIRST_SEARCH)
+        .id();
+    let forests = [P0, P1, P2].map(|p| sc.add_card_to_library_top(p, "Forest"));
+    let mut r = sc.build();
+    for id in forests {
+        make_basic_land(&mut r, id);
+    }
+    cast(&mut r, spell);
+    let seen = drive(
+        &mut r,
+        &Plan {
+            prefs: &[TargetRef::Object(bear), TargetRef::Player(P1)],
+            ..Default::default()
+        },
+    );
+    assert_eq!(seen.searches, vec![(P1, Some(P1))]);
+    assert_eq!(r.state().objects[&forests[1]].zone, Zone::Battlefield);
+    assert_eq!(seen.shuffled(), vec![P1], "only P1's library is shuffled");
+    assert_eq!(lives(&r), vec![20, 22, 20]);
+}
+
+/// CR 608.2b: the declaring clause itself affects no one when its player is illegal; the first
+/// declaration's draw lands.
+#[test]
+fn a_second_declared_player_that_is_gone_affects_no_one() {
+    let plan = |eliminate| Plan {
+        slots: &[Some(TargetRef::Player(P2)), Some(TargetRef::Player(P1))],
+        eliminate_on_stack: eliminate,
+        ..Default::default()
+    };
+    let (r, _, _) = run_row(DRAW_THEN_OPPONENT_LOSES, &plan(None));
+    assert_eq!(hands(&r)[2], 3, "the first player drew");
+    assert_eq!(lives(&r), vec![20, 18, 20], "the declared opponent lost");
+    let (r, _, _) = run_row(DRAW_THEN_OPPONENT_LOSES, &plan(Some(1)));
+    assert_eq!(hands(&r)[2], 3, "the first player's draw landed");
+    assert_eq!(lives(&r), vec![20, 20, 20], "no one lost life");
+}
+
+/// CR 115.6: "up to one target opponent" with none chosen declares no player; the continuation
+/// must not fall onto the first declaration's player.
+#[test]
+fn an_unchosen_up_to_declaration_affects_no_one() {
+    let plan = |slots| Plan {
+        slots,
+        ..Default::default()
+    };
+    let (r, _, _) = run_row(
+        DRAW_THEN_UP_TO_OPPONENT_LOSES,
+        &plan(&[Some(TargetRef::Player(P2))]),
+    );
+    assert_eq!(hands(&r)[2], 3, "the first player drew");
+    assert_eq!(lives(&r), vec![20, 20, 20], "no one lost life");
+    let (r, _, _) = run_row(
+        DRAW_THEN_UP_TO_OPPONENT_LOSES,
+        &plan(&[Some(TargetRef::Player(P2)), Some(TargetRef::Player(P1))]),
+    );
+    assert_eq!(
+        lives(&r),
+        vec![20, 18, 20],
+        "chosen: the declared opponent lost"
+    );
+}
+
+const MAY_DRAW_THEN_COUNTER: &str = "Target player gains 2 life. That player may draw a card. Put a +1/+1 counter on up to one target creature.";
+
+/// CR 608.2d + CR 608.2b: "that player may ..." is offered to the declared player, and to no one
+/// when that player is gone (the creature target keeps the spell resolving).
+#[test]
+fn an_optional_that_player_instruction_is_offered_to_the_declared_player() {
+    let drive_with = |eliminate, decline_optional| {
+        let (mut r, spell, creature) = setup_row(MAY_DRAW_THEN_COUNTER);
+        cast(&mut r, spell);
+        let seen = drive(
+            &mut r,
+            &Plan {
+                prefs: &[TargetRef::Player(P1), TargetRef::Object(creature)],
+                eliminate_on_stack: eliminate,
+                decline_optional,
+                ..Default::default()
+            },
+        );
+        let counters = r.state().objects[&creature]
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .copied();
+        (hands(&r), counters, seen.optional_by)
+    };
+    let (hands_after, counters, offered_to) = drive_with(None, false);
+    assert_eq!(
+        offered_to,
+        vec![P1],
+        "the declared player is offered the draw"
+    );
+    assert_eq!(hands_after, vec![2, 3, 2], "accepted: P1 drew");
+    assert_eq!(counters, Some(1));
+    let (hands_after, _, offered_to) = drive_with(None, true);
+    assert_eq!(offered_to, vec![P1]);
+    assert_eq!(hands_after, vec![2, 2, 2], "declined: no one drew");
+    let (hands_after, counters, offered_to) = drive_with(Some(1), false);
+    assert_eq!(
+        counters,
+        Some(1),
+        "the spell still resolved its last clause"
+    );
+    assert!(offered_to.is_empty(), "no one is offered the draw");
+    assert_eq!(hands_after, vec![2, 2, 2]);
+}
+
+const GATE_THEN_TWO_DECLARATIONS: &str = "You may discard a card. If you do, you gain 5 life. Target player gains 2 life. Target opponent gains 2 life.";
+const DECLARE_THEN_CHOOSE_OPPONENT: &str = "Target player draws a card. Choose target opponent who has more life than you do as you cast this spell. This spell deals 2 damage to that player.";
+
+/// CR 118.12 + CR 608.2c: the "if you do" rider governs only its own sentence, so declining the
+/// discard still leaves both later declarations in force.
+#[test]
+fn declining_an_if_you_do_gate_keeps_the_later_declaring_clauses() {
+    let (mut r, spell, _) = setup_row(GATE_THEN_TWO_DECLARATIONS);
+    cast(&mut r, spell);
+    let seen = drive(
+        &mut r,
+        &Plan {
+            slots: &[Some(TargetRef::Player(P2)), Some(TargetRef::Player(P1))],
+            decline_optional: true,
+            ..Default::default()
+        },
+    );
+    assert_eq!(seen.optional_by, vec![P0], "the decline path was taken");
+    assert_eq!(lives(&r), vec![20, 22, 22], "both declared players gained");
+}
+
+/// A declaring clause that already owns a chosen-clause group keeps `ParentTarget` readers; its
+/// reader acts on the chosen opponent and, once that opponent is gone, on no one.
+#[test]
+fn a_chosen_clause_declaration_affects_no_one_once_its_player_is_gone() {
+    let run_with = |eliminate| {
+        let (mut r, spell, _) = setup_row(DECLARE_THEN_CHOOSE_OPPONENT);
+        r.state_mut().players[1].life = 25;
+        cast(&mut r, spell);
+        drive(
+            &mut r,
+            &Plan {
+                slots: &[Some(TargetRef::Player(P2)), Some(TargetRef::Player(P1))],
+                eliminate_on_stack: eliminate,
+                ..Default::default()
+            },
+        );
+        (hands(&r)[2], lives(&r))
+    };
+    assert_eq!(
+        run_with(None),
+        (3, vec![20, 23, 20]),
+        "the chosen opponent took 2"
+    );
+    assert_eq!(
+        run_with(Some(1)),
+        (3, vec![20, 25, 20]),
+        "the first player's draw landed; no one took damage"
+    );
+}
+
 const MAY_PAY_UP_TO_THREE: &str = "Choose target player. That player may pay {1} up to three times. When you do, you draw a card.";
 
 /// CR 608.2d + CR 603.12a: every "may pay" offer of a repeated optional payment goes to the named
@@ -566,6 +882,125 @@ fn each_repeated_payment_offer_goes_to_the_player_who_may_pay() {
         "three offers, three payments by P1"
     );
     assert_eq!(run_with(true), (vec![P1], 0), "P1 declined the first offer");
+}
+
+const UNDERCITY_CLAUSE: &str = "Target opponent discards a card. Then they may discard an additional card. Put a +1/+1 counter on up to one target creature.";
+const GAIN_THEY_DRAW: &str =
+    "Target player gains 2 life. They draw a card. Put a +1/+1 counter on up to one target creature.";
+
+fn counters_on(r: &GameRunner, id: ObjectId) -> Option<u32> {
+    r.state().objects[&id]
+        .counters
+        .get(&CounterType::Plus1Plus1)
+        .copied()
+}
+
+/// CR 608.2c + CR 608.2d: a bare "they" after a declared player is that player, who is also the one
+/// offered the "may"; once that player is gone the instruction reaches no one (CR 608.2b).
+#[test]
+fn a_they_instruction_after_a_declared_player_belongs_to_that_player() {
+    let run_with = |eliminate| {
+        let (mut r, spell, creature) = setup_row(UNDERCITY_CLAUSE);
+        cast(&mut r, spell);
+        let seen = drive(
+            &mut r,
+            &Plan {
+                prefs: &[TargetRef::Player(P1), TargetRef::Object(creature)],
+                eliminate_on_stack: eliminate,
+                ..Default::default()
+            },
+        );
+        (seen, hands(&r), counters_on(&r, creature))
+    };
+    let (seen, hands_after, counters) = run_with(None);
+    assert_eq!(
+        seen.optional_by,
+        vec![P1],
+        "the declared player is offered the may"
+    );
+    assert_eq!(seen.discard_by, vec![P1]);
+    assert_eq!(hands_after, vec![2, 0, 2]);
+    assert_eq!(counters, Some(1));
+    let (seen, hands_after, counters) = run_with(Some(1));
+    assert!(seen.optional_by.is_empty(), "no one is offered the may");
+    assert!(seen.discard_by.is_empty());
+    assert_eq!(hands_after, vec![2, 2, 2]);
+    assert_eq!(counters, Some(1), "the rest of the spell resolved");
+
+    let run_draw = |eliminate| {
+        let (mut r, spell, creature) = setup_row(GAIN_THEY_DRAW);
+        cast(&mut r, spell);
+        drive(
+            &mut r,
+            &Plan {
+                prefs: &[TargetRef::Player(P1), TargetRef::Object(creature)],
+                eliminate_on_stack: eliminate,
+                ..Default::default()
+            },
+        );
+        (hands(&r), counters_on(&r, creature))
+    };
+    assert_eq!(
+        run_draw(None),
+        (vec![2, 3, 2], Some(1)),
+        "the declared player drew"
+    );
+    assert_eq!(run_draw(Some(1)), (vec![2, 2, 2], Some(1)), "no one drew");
+}
+
+const CHOOSE_THEN_THEY_MAY: &str =
+    "Choose target player. They may discard up to two cards. Then they draw a card for each card discarded this way.";
+const DECLARE_CHOOSE_THEN_THEY_MAY: &str = "Target player draws a card. Choose target opponent who has more life than you do as you cast this spell. They may discard a card.";
+
+/// CR 608.2d: a reader of a chosen-clause declaration keeps `ParentTarget` in its effect slot, but
+/// its "may" is offered to the chosen player.
+#[test]
+fn a_they_may_after_a_chosen_clause_declaration_is_offered_to_the_chosen_player() {
+    let (mut r, spell, _) = setup_row(CHOOSE_THEN_THEY_MAY);
+    cast(&mut r, spell);
+    let seen = drive(
+        &mut r,
+        &Plan {
+            prefs: &[TargetRef::Player(P1)],
+            ..Default::default()
+        },
+    );
+    assert_eq!(seen.optional_by, vec![P1]);
+    assert_eq!(seen.discard_by, vec![P1]);
+    assert_eq!(hands(&r), vec![2, 2, 2], "P1 discarded two and drew two");
+
+    let (r, seen, _) = run_row(
+        CHOOSE_THEN_THEY_MAY,
+        &Plan {
+            prefs: &[TargetRef::Player(P1)],
+            eliminate_on_stack: Some(1),
+            ..Default::default()
+        },
+    );
+    assert!(
+        seen.optional_by.is_empty(),
+        "the chosen player is gone: no prompt"
+    );
+    assert!(seen.discard_by.is_empty());
+    assert_eq!(hands(&r), vec![2, 2, 2]);
+
+    let (mut r, spell, _) = setup_row(DECLARE_CHOOSE_THEN_THEY_MAY);
+    r.state_mut().players[1].life = 25;
+    cast(&mut r, spell);
+    let seen = drive(
+        &mut r,
+        &Plan {
+            slots: &[Some(TargetRef::Player(P2)), Some(TargetRef::Player(P1))],
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        seen.optional_by,
+        vec![P1],
+        "the chosen opponent, not the declared player"
+    );
+    assert_eq!(seen.discard_by, vec![P1]);
+    assert_eq!(hands(&r), vec![2, 1, 3]);
 }
 
 /// CR 608.2b + CR 603.12a: a repeated "may pay" addressed to a declared player who is gone is offered

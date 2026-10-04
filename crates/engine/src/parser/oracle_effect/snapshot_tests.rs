@@ -2308,3 +2308,191 @@ fn player_declared_first_names_the_declared_player() {
     assert_eq!(last_draw(&effects), &declared(), "{effects:?}");
     assert_eq!(declared_player_fields(&effects), 1, "{effects:?}");
 }
+
+/// Every `DeclaredPlayer` group and every declaring-node tag in `value`, counted per group id.
+fn declared_player_groups(
+    value: &serde_json::Value,
+    reads: &mut std::collections::BTreeMap<u64, usize>,
+    tags: &mut std::collections::BTreeMap<u64, usize>,
+) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if map.get("type").and_then(|t| t.as_str()) == Some("DeclaredPlayer") {
+                *reads.entry(map["group"].as_u64().unwrap()).or_default() += 1;
+            }
+            if let Some(group) = map.get("declares_chosen_group").and_then(|g| g.as_u64()) {
+                if ChosenGroupId(group as u32).is_declared_player() {
+                    *tags.entry(group).or_default() += 1;
+                }
+            }
+            map.values()
+                .for_each(|v| declared_player_groups(v, reads, tags));
+        }
+        serde_json::Value::Array(items) => items
+            .iter()
+            .for_each(|v| declared_player_groups(v, reads, tags)),
+        _ => {}
+    }
+}
+
+/// CR 608.2c + CR 115.1: each ability's `DeclaredPlayer` reads name groups that exactly one
+/// tagged declaring node carries, modal modes and reflexive, search and else-branch shapes included.
+#[test]
+fn declared_player_reads_name_exactly_one_tagged_declaration() {
+    let mut reads_seen = 0;
+    for (name, types, oracle) in [
+        ("Unmoored Ego", &["Sorcery"][..], "Choose a card name. Search target opponent's graveyard, hand, and library for up to four cards with that name and exile them. That player shuffles, then draws a card for each card exiled from their hand this way."),
+        ("Fertilid's Favor", &["Instant"][..], "Target player searches their library for a basic land card, puts it onto the battlefield tapped, then shuffles. Put two +1/+1 counters on up to one target artifact or creature."),
+        ("Chain of Smog", &["Sorcery"], "Target player discards two cards. That player may copy this spell and may choose a new target for that copy."),
+        ("The Ancient One", &["Creature"], "Descend 8 — The Ancient One can't attack or block unless there are eight or more permanent cards in your graveyard.\n{2}{U}{B}: Draw a card, then discard a card. When you discard a card this way, target player mills cards equal to its mana value."),
+        ("Shadrix Silverquill", &["Creature"], "Flying, double strike\nAt the beginning of combat on your turn, you may choose two. Each mode must target a different player.\n• Target player creates a 2/1 white and black Inkling creature token with flying.\n• Target player draws a card and loses 1 life.\n• Target player puts a +1/+1 counter on each creature they control."),
+        ("Browbeat", &["Sorcery"], "Any player may have Browbeat deal 5 damage to them. If no one does, target player draws three cards."),
+        ("Praetor's Grasp", &["Sorcery"], "Search target opponent's library for a card and exile it face down. Then that player shuffles. You may play that card for as long as it remains exiled."),
+        ("Oildeep Gearhulk", &["Artifact", "Creature"], "Lifelink, ward {1}\nWhen this creature enters, look at target player's hand. You may choose a card from it. If you do, that player discards that card, then draws a card."),
+        ("Careful Consideration", &["Instant"], "Target player draws four cards, then discards three cards. If you cast this spell during your main phase, instead that player draws four cards, then discards two cards."),
+        ("Restorative Technique", &["Sorcery"], "Target player gains 2 life, then searches their library for a basic land card, puts it onto the battlefield tapped, then shuffles. Put a +1/+1 counter on up to one target creature."),
+        ("Eternal Dominion", &["Sorcery"], "Search target opponent's library for an artifact, creature, enchantment, or land card. Put that card onto the battlefield under your control. Then that player shuffles.\nEpic (For the rest of the game, you can't cast spells. At the beginning of each of your upkeeps, copy this spell except for its epic ability. You may choose a new target for the copy.)"),
+        ("Necromentia", &["Sorcery"], "Choose a card name other than a basic land card name. Search target opponent's graveyard, hand, and library for any number of cards with that name and exile them. That player shuffles, then creates a 2/2 black Zombie creature token for each card exiled from their hand this way."),
+        ("Vendilion Clique", &["Creature"], "Flash\nFlying\nWhen Vendilion Clique enters, look at target player's hand. You may choose a nonland card from it. If you do, that player reveals the chosen card, puts it on the bottom of their library, then draws a card."),
+        ("Book Burning", &["Sorcery"], "Any player may have Book Burning deal 6 damage to them. If no one does, target player mills six cards."),
+        ("Revealing Eye", &["Creature"], "Menace\nWhen this creature transforms into Revealing Eye, target opponent reveals their hand. You may choose a nonland card from it. If you do, that player discards that card, then draws a card."),
+        ("Salt Vampire", &["Creature"], "Lifelink\nWhen this creature enters, look at target opponent's hand. You may choose a nonland card from it. If you do, that player exiles that card, then draws a card."),
+        ("Kitesail Freebooter", &["Creature"], "Flying\nWhen this creature enters, target opponent reveals their hand. You choose a noncreature, nonland card from it. Exile that card until this creature leaves the battlefield."),
+        ("Ghost-Lit Stalker", &["Creature"], "{4}{B}, {T}: Target player discards two cards. Activate only as a sorcery.\nChannel — {5}{B}{B}, Discard this card: Target player discards four cards. Activate only as a sorcery."),
+        ("Undercity Plunder", &["Sorcery"], "Target opponent discards a card. Then they may discard an additional card. If they don't, conjure a duplicate of a random card from their library into your hand. It perpetually gains \"You may spend mana as though it were mana of any color to cast this spell.\""),
+    ] {
+        let parsed = serde_json::to_value(parse_card(oracle, name, &[], types)).unwrap();
+        for key in ["abilities", "triggers"] {
+            for (index, root) in parsed[key].as_array().unwrap().iter().enumerate() {
+                let (mut reads, mut tags) = Default::default();
+                declared_player_groups(root, &mut reads, &mut tags);
+                reads_seen += reads.len();
+                for group in reads.keys() {
+                    assert_eq!(tags.get(group), Some(&1), "{name} {key}[{index}] group {group}");
+                }
+                assert!(tags.values().all(|&count| count == 1), "{name} {key}[{index}]: {tags:?}");
+            }
+        }
+    }
+    assert!(
+        reads_seen >= 10,
+        "the class texts reach DeclaredPlayer readers"
+    );
+}
+
+/// CR 608.2c: a declaring effect with no player filter, or one already carrying a chosen-clause
+/// group, keeps its `ParentTarget` read instead of taking a second declaration.
+#[test]
+fn declared_player_reference_is_refused_where_the_declaration_cannot_be_tagged() {
+    for (name, types, oracle) in [
+        (
+            "Keeper of the Flame",
+            &["Creature"][..],
+            "{R}, {T}: Choose target opponent who has more life than you do as you activate this ability. This creature deals 2 damage to that player.",
+        ),
+        (
+            "Devour Flesh",
+            &["Instant"][..],
+            "Target player sacrifices a creature of their choice, then gains life equal to that creature's toughness.",
+        ),
+    ] {
+        let parsed = serde_json::to_value(parse_card(oracle, name, &[], types)).unwrap();
+        let (mut reads, mut tags) = Default::default();
+        declared_player_groups(&parsed, &mut reads, &mut tags);
+        assert!(reads.is_empty(), "{name}: {reads:?}");
+    }
+}
+
+/// CR 608.2c + CR 608.2d: a bare "they" after a declared player reads that player's group, as
+/// reader and as the "may" actor.
+#[test]
+fn a_they_after_a_declared_player_reads_the_declaring_clause() {
+    let parsed = serde_json::to_value(parse_card(
+        "Target opponent discards a card. Then they may discard an additional card.",
+        "Row",
+        &[],
+        &["Sorcery"],
+    ))
+    .unwrap();
+    let declaring = &parsed["abilities"][0];
+    let reader = &declaring["sub_ability"];
+    let group = &declaring["declares_chosen_group"];
+    assert!(group.is_u64(), "the declaring clause is tagged");
+    for slot in [&reader["effect"]["target"], &reader["optional_player"]] {
+        assert_eq!(slot["type"], "DeclaredPlayer");
+        assert_eq!(&slot["group"], group);
+    }
+}
+
+/// CR 608.2d: a "may" reading a chosen-clause declaration keeps its `ParentTarget` slot and names the
+/// chosen player as its actor.
+#[test]
+fn a_they_may_reading_a_chosen_clause_declaration_names_the_chosen_player_as_actor() {
+    let parsed = serde_json::to_value(parse_card(
+        "Choose target player. They may discard up to X cards. Then they draw a card for each card discarded this way.",
+        "Mode",
+        &[],
+        &["Sorcery"],
+    ))
+    .unwrap();
+    let reader = &parsed["abilities"][0]["sub_ability"];
+    assert_eq!(reader["effect"]["target"]["type"], "ParentTarget");
+    assert_eq!(reader["optional_player"]["type"], "ParentTargetController");
+    assert!(reader["optional"].as_bool().unwrap());
+}
+
+/// CR 608.2c: a bare "they" names one declared player only when the clause before it announces
+/// exactly one; two target players ("Parker Luck") and "any other target" (Screaming Nemesis) leave
+/// "they" unlinked.
+#[test]
+fn a_they_after_a_plural_or_any_target_declaration_is_not_a_declared_player_reader() {
+    // (linked `DeclaredPlayer` reads, `ParentTargetController` fallbacks)
+    let counts = |name: &str, types: &[&str], oracle: &str| {
+        let parsed = serde_json::to_value(parse_card(oracle, name, &[], types)).unwrap();
+        let (mut reads, mut tags) = Default::default();
+        declared_player_groups(&parsed, &mut reads, &mut tags);
+        (
+            reads.values().sum::<usize>(),
+            parsed.to_string().matches("ParentTargetController").count(),
+        )
+    };
+    let (reach_reads, _) = counts(
+        "Reach Guard",
+        &["Sorcery"],
+        "Target player gains 2 life. They draw a card.",
+    );
+    assert!(
+        reach_reads > 0,
+        "one declared player: the they-reader is linked"
+    );
+    // An unlinked "they" parses to `ParentTargetController`, not a `DeclaredPlayer` read.
+    let (reads, ptc) = counts(
+        "Parker Luck",
+        &["Enchantment"],
+        "At the beginning of your end step, two target players each reveal the top card of their library. They each lose life equal to the mana value of the card revealed by the other player. Then they each put the card they revealed into their hand.",
+    );
+    assert_eq!(reads + ptc, 0);
+    let (reads, ptc) = counts(
+        "Screaming Nemesis",
+        &["Creature"],
+        "Haste\nWhenever this creature is dealt damage, it deals that much damage to any other target. If a player is dealt damage this way, they can't gain life for the rest of the game.",
+    );
+    assert_eq!(reads + ptc, 0);
+}
+
+/// CR 608.2c + CR 115.1: a player-declaring clause carries its tag whether or not a later clause
+/// reads it; the runtime keys "this node declares its own player" on the tag alone.
+#[test]
+fn every_player_declaring_clause_carries_a_distinct_tag() {
+    let parsed = serde_json::to_value(parse_card(
+        "Target player draws a card. Target opponent loses 2 life.",
+        "Two Slots",
+        &[],
+        &["Sorcery"],
+    ))
+    .unwrap();
+    let (mut reads, mut tags) = Default::default();
+    declared_player_groups(&parsed, &mut reads, &mut tags);
+    assert!(reads.is_empty());
+    assert_eq!(tags.len(), 2, "{tags:?}");
+}
