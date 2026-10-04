@@ -26099,6 +26099,84 @@ fn become_creature_type_of_choice_in_addition_to_other_types() {
     );
 }
 
+// CR 205.1a + CR 613.1d: without the "in addition to its other types" marker
+// (Mistform Stalker) the chosen creature type REPLACES the object's creature
+// types — RemoveAllSubtypes then AddChosenSubtype, in the order written.
+#[test]
+fn become_creature_type_of_choice_sets_creature_type() {
+    let clause = parse_effect_clause(
+        "~ becomes the creature type of your choice until end of turn",
+        &mut ParseContext::default(),
+    );
+    assert!(
+        matches!(
+            clause.effect,
+            Effect::Choose {
+                choice_type: ChoiceType::CreatureType { .. },
+                ..
+            }
+        ),
+        "Expected Choose {{ CreatureType }}, got {:?}",
+        clause.effect
+    );
+    let apply = clause
+        .sub_ability
+        .as_ref()
+        .expect("choice must chain an apply sub-ability");
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = &*apply.effect
+    else {
+        panic!("expected GenericEffect apply half, got {:?}", apply.effect);
+    };
+    assert_eq!(
+        static_abilities[0].modifications,
+        vec![
+            ContinuousModification::RemoveAllSubtypes {
+                set: crate::types::card_type::SubtypeSet::Creature,
+            },
+            ContinuousModification::AddChosenSubtype {
+                kind: ChosenSubtypeKind::CreatureType,
+            },
+        ]
+    );
+}
+
+// CR 305.7: without the marker (Jinx) the chosen basic land type SETS the
+// land's type — SetChosenBasicLandType, not the additive AddChosenSubtype.
+#[test]
+fn become_basic_land_type_of_choice_sets_land_type() {
+    let clause = parse_effect_clause(
+        "target land becomes the basic land type of your choice until end of turn",
+        &mut ParseContext::default(),
+    );
+    assert!(
+        matches!(
+            clause.effect,
+            Effect::Choose {
+                choice_type: ChoiceType::BasicLandType,
+                ..
+            }
+        ),
+        "Expected Choose {{ BasicLandType }}, got {:?}",
+        clause.effect
+    );
+    let apply = clause
+        .sub_ability
+        .as_ref()
+        .expect("choice must chain an apply sub-ability");
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = &*apply.effect
+    else {
+        panic!("expected GenericEffect apply half, got {:?}", apply.effect);
+    };
+    assert_eq!(
+        static_abilities[0].modifications,
+        vec![ContinuousModification::SetChosenBasicLandType]
+    );
+}
+
 // No-regression guard: the pre-existing "and <keyword grant>" trailing form
 // (Mondo Gecko) must still parse — the new marker-strip must not interfere
 // when no "in addition to its other types" marker is present.
@@ -26148,6 +26226,214 @@ fn become_color_of_choice_still_chains_trailing_keyword_grant() {
         "trailing keyword grant must still chain: {:?}",
         static_abilities[0].modifications
     );
+}
+
+/// The apply half's two windows below the `Choose` link of a become-choice
+/// chain: the apply definition's own `duration` and the `GenericEffect`'s
+/// embedded one.
+fn become_choice_apply_windows(def: &AbilityDefinition) -> (Option<Duration>, Option<Duration>) {
+    let choose = std::iter::successors(Some(def), |link| link.sub_ability.as_deref())
+        .find(|link| matches!(*link.effect, Effect::Choose { .. }))
+        .unwrap_or_else(|| panic!("reach guard: the chain must carry a Choose link: {def:?}"));
+    let apply = choose
+        .sub_ability
+        .as_deref()
+        .expect("choice must chain an apply sub-ability");
+    let Effect::GenericEffect { duration, .. } = &*apply.effect else {
+        panic!("expected GenericEffect apply half, got {:?}", apply.effect);
+    };
+    (apply.duration.clone(), duration.clone())
+}
+
+/// CR 611.2a: the printed trailing window of a "becomes the <axis> of your
+/// choice" clause reaches the APPLY half — its own definition and the
+/// `GenericEffect`'s embedded duration — not only the `Choose` head. The
+/// resolver reads the apply half's definition before its embedded window, so a
+/// window stamped on the head alone installed a permanent effect (Mistform
+/// Stalker, backlog §25). Runtime pin:
+/// `tests/integration/become_choice_trailing_duration.rs`.
+#[test]
+fn become_choice_trailing_window_reaches_apply_half() {
+    let rows = [
+        (
+            "Target creature becomes the creature type of your choice until end of turn",
+            Duration::UntilEndOfTurn,
+        ),
+        (
+            "Target land becomes the basic land type of your choice until end of turn",
+            Duration::UntilEndOfTurn,
+        ),
+        (
+            "Target creature becomes the color or colors of your choice until end of turn",
+            Duration::UntilEndOfTurn,
+        ),
+        (
+            "target creature becomes the creature type of your choice in addition to its other \
+             types until end of turn",
+            Duration::UntilEndOfTurn,
+        ),
+        (
+            "Target creature becomes the color of your choice and gains hexproof from that color \
+             until end of turn",
+            Duration::UntilEndOfTurn,
+        ),
+        (
+            "Target creature becomes the color of your choice until your next turn",
+            Duration::UntilNextTurnOf {
+                player: PlayerScope::Controller,
+            },
+        ),
+    ];
+    for (text, expected) in rows {
+        let clause = parse_effect_clause(text, &mut ParseContext::default());
+        assert!(
+            matches!(clause.effect, Effect::Choose { .. }),
+            "reach guard: {text:?} must head on Choose, got {:?}",
+            clause.effect
+        );
+        let apply = clause
+            .sub_ability
+            .as_ref()
+            .expect("choice must chain an apply sub-ability");
+        let Effect::GenericEffect { duration, .. } = &*apply.effect else {
+            panic!("expected GenericEffect apply half, got {:?}", apply.effect);
+        };
+        assert_eq!(
+            apply.duration,
+            Some(expected.clone()),
+            "{text:?}: apply-half definition window"
+        );
+        assert_eq!(
+            *duration,
+            Some(expected.clone()),
+            "{text:?}: apply-half embedded window"
+        );
+        assert_eq!(
+            clause.duration,
+            Some(expected),
+            "{text:?}: Choose head window"
+        );
+    }
+
+    // CR 611.2a: the LEADING position reaches the apply half too (both the
+    // context channel and `with_clause_chain_duration` carry it) — a regression
+    // pin, not a revert discriminator.
+    let def = parse_effect_chain(
+        "Until end of turn, target creature becomes the color of your choice and gains hexproof \
+         from that color.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        !ability_chain_has_unimplemented(&def),
+        "reach guard: the leading form must lower without a gap: {def:?}"
+    );
+    let (apply_window, embedded_window) = become_choice_apply_windows(&def);
+    assert_eq!(apply_window, Some(Duration::UntilEndOfTurn));
+    assert_eq!(embedded_window, Some(Duration::UntilEndOfTurn));
+}
+
+/// CR 611.2a: "If no duration is stated, it lasts until the end of the game" —
+/// a become-choice clause that prints no window leaves the apply definition
+/// unset and keeps the embedded `Permanent` default (Alchor's Tomb).
+#[test]
+fn become_choice_without_window_stays_permanent() {
+    let clause = parse_effect_clause(
+        "Target permanent you control becomes the color of your choice",
+        &mut ParseContext::default(),
+    );
+    assert!(
+        matches!(
+            clause.effect,
+            Effect::Choose {
+                choice_type: ChoiceType::Color { .. },
+                ..
+            }
+        ),
+        "reach guard: expected Choose {{ Color }}, got {:?}",
+        clause.effect
+    );
+    let apply = clause
+        .sub_ability
+        .as_ref()
+        .expect("choice must chain an apply sub-ability");
+    let Effect::GenericEffect { duration, .. } = &*apply.effect else {
+        panic!("expected GenericEffect apply half, got {:?}", apply.effect);
+    };
+    assert_eq!(apply.duration, None);
+    assert_eq!(*duration, Some(Duration::Permanent));
+    assert_eq!(clause.duration, Some(Duration::Permanent));
+}
+
+/// CR 611.2a: a window printed by an EARLIER sentence of the same chain is that
+/// sentence's own; it must not reach a later become-choice clause that prints
+/// none (`ParseContext::stated_clause_duration` is save/restore per clause).
+#[test]
+fn become_choice_does_not_inherit_a_previous_clauses_window() {
+    let def = parse_effect_chain(
+        "Target creature gets +1/+1 until end of turn. Target permanent you control becomes \
+         the color of your choice.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        !ability_chain_has_unimplemented(&def),
+        "reach guard: the chain must lower without a gap: {def:?}"
+    );
+    assert!(
+        matches!(*def.effect, Effect::Pump { .. }),
+        "reach guard: expected the Pump head, got {:?}",
+        def.effect
+    );
+    assert_eq!(
+        def.duration,
+        Some(Duration::UntilEndOfTurn),
+        "reach guard: the first sentence carries its own window"
+    );
+    let (apply_window, embedded_window) = become_choice_apply_windows(&def);
+    assert_eq!(apply_window, None);
+    assert_eq!(embedded_window, Some(Duration::Permanent));
+}
+
+/// CR 611.2a + CR 700.2: Trickery Charm's creature-type mode keeps its printed
+/// "until end of turn" on the apply half when parsed as one mode of a modal
+/// spell.
+#[test]
+fn trickery_charm_creature_type_mode_window_reaches_apply_half() {
+    let parsed = parse_oracle_text(
+        "Choose one —\n\
+         • Target creature gains flying until end of turn.\n\
+         • Target creature becomes the creature type of your choice until end of turn.\n\
+         • Look at the top four cards of your library, then put them back in any order.",
+        "Trickery Charm",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    assert_eq!(
+        parsed.abilities.len(),
+        3,
+        "reach guard: the three modes lower to three top-level abilities"
+    );
+    assert!(
+        !parsed.abilities.iter().any(ability_chain_has_unimplemented),
+        "reach guard: no mode may lower to a gap: {:?}",
+        parsed.abilities
+    );
+    let mode = parsed
+        .abilities
+        .iter()
+        .find(|ability| {
+            matches!(
+                *ability.effect,
+                Effect::Choose {
+                    choice_type: ChoiceType::CreatureType { .. },
+                    ..
+                }
+            )
+        })
+        .expect("reach guard: the creature-type mode must head on Choose { CreatureType }");
+    let (apply_window, embedded_window) = become_choice_apply_windows(mode);
+    assert_eq!(apply_window, Some(Duration::UntilEndOfTurn));
+    assert_eq!(embedded_window, Some(Duration::UntilEndOfTurn));
 }
 
 #[test]

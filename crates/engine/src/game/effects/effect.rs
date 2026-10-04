@@ -1184,6 +1184,42 @@ fn snapshot_transient_modifications(
                 // Symmetric with the Protection arm above: CR 609.3 + F1.
                 None => modification.clone(),
             },
+            // CR 608.2d + CR 608.2h: "becomes the creature type / basic land type of
+            // your choice" announces its answer while the effect is applied
+            // (`persist: false`, so it lives only in `last_named_choice`), and CR 608.2h
+            // fixes that answer ONCE, when the effect is applied. Latch it into the
+            // payload so each resolution's type change carries its own answer — a
+            // second activation (Mistform Stalker), or the same ability on another
+            // target, can no longer read or overwrite it.
+            //
+            // CR 611.3a: only resolution-created effects are latched — a printed
+            // static's `AddChosenSubtype` / `SetChosenBasicLandType` (Metallic Mimic,
+            // Phantasmal Terrain) never reaches this function and stays a live read in
+            // `game/layers.rs`.
+            ContinuousModification::AddChosenSubtype { kind } => {
+                match crate::game::effects::choose::resolution_chosen_subtype(
+                    state,
+                    ability.source_id,
+                    kind,
+                ) {
+                    Some(subtype) => ContinuousModification::AddSubtype { subtype },
+                    // CR 609.3: nothing was chosen; leave the payload untouched so
+                    // the existing live layer read stays byte-identical.
+                    None => modification.clone(),
+                }
+            }
+            // CR 305.7: the bare land form sets the land's subtype to the chosen basic
+            // land type, latched exactly as above (CR 608.2d + CR 608.2h).
+            ContinuousModification::SetChosenBasicLandType => {
+                match crate::game::effects::choose::resolution_chosen_basic_land_type(
+                    state,
+                    ability.source_id,
+                ) {
+                    Some(land_type) => ContinuousModification::SetBasicLandType { land_type },
+                    // CR 609.3: as above.
+                    None => modification.clone(),
+                }
+            }
             _ => modification.clone(),
         })
         .collect()
@@ -1356,10 +1392,10 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        ContinuousModification, ControllerRef, Duration, QuantityExpr, QuantityRef,
-        StaticDefinition, TargetFilter, TypedFilter,
+        BasicLandType, ChoiceValue, ChosenSubtypeKind, ContinuousModification, ControllerRef,
+        Duration, QuantityExpr, QuantityRef, StaticDefinition, TargetFilter, TypedFilter,
     };
-    use crate::types::card_type::CoreType;
+    use crate::types::card_type::{CoreType, SubtypeSet};
     use crate::types::events::GameEvent;
     use crate::types::game_state::{StackEntry, StackEntryKind};
     use crate::types::identifiers::{CardId, ObjectIncarnationRef, TrackedSetId};
@@ -1410,6 +1446,96 @@ mod tests {
             vec![ContinuousModification::AddKeyword {
                 keyword: Keyword::Flying,
             }]
+        );
+    }
+
+    /// CR 608.2d + CR 608.2h: a resolution-created chosen-subtype type change
+    /// latches THIS resolution's `persist: false` answer into a fixed payload;
+    /// with no answer anywhere the payload is left untouched (CR 609.3).
+    #[test]
+    fn snapshot_latches_this_resolutions_chosen_subtype() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: None,
+                end_cost: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let set_creature_type = vec![
+            ContinuousModification::RemoveAllSubtypes {
+                set: SubtypeSet::Creature,
+            },
+            ContinuousModification::AddChosenSubtype {
+                kind: ChosenSubtypeKind::CreatureType,
+            },
+        ];
+
+        // Creature type: the set pair keeps its RemoveAllSubtypes and the chosen
+        // half becomes a fixed AddSubtype.
+        state.last_named_choice = Some(ChoiceValue::CreatureType("Elf".to_string()));
+        assert_eq!(
+            snapshot_transient_modifications(&state, &ability, &set_creature_type),
+            vec![
+                ContinuousModification::RemoveAllSubtypes {
+                    set: SubtypeSet::Creature,
+                },
+                ContinuousModification::AddSubtype {
+                    subtype: "Elf".to_string(),
+                },
+            ]
+        );
+
+        // Basic land type: the set form becomes a fixed SetBasicLandType; the
+        // retain form becomes a fixed AddSubtype.
+        state.last_named_choice = Some(ChoiceValue::BasicLandType(BasicLandType::Island));
+        assert_eq!(
+            snapshot_transient_modifications(
+                &state,
+                &ability,
+                &[ContinuousModification::SetChosenBasicLandType],
+            ),
+            vec![ContinuousModification::SetBasicLandType {
+                land_type: BasicLandType::Island,
+            }]
+        );
+        assert_eq!(
+            snapshot_transient_modifications(
+                &state,
+                &ability,
+                &[ContinuousModification::AddChosenSubtype {
+                    kind: ChosenSubtypeKind::BasicLandType,
+                }],
+            ),
+            vec![ContinuousModification::AddSubtype {
+                subtype: "Island".to_string(),
+            }]
+        );
+
+        // No answer and a bare source: nothing to latch, payload unchanged.
+        state.last_named_choice = None;
+        assert_eq!(
+            snapshot_transient_modifications(&state, &ability, &set_creature_type),
+            set_creature_type
+        );
+        assert_eq!(
+            snapshot_transient_modifications(
+                &state,
+                &ability,
+                &[ContinuousModification::SetChosenBasicLandType],
+            ),
+            vec![ContinuousModification::SetChosenBasicLandType]
         );
     }
 
