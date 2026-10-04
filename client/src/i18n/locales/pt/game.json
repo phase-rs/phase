@@ -2268,7 +2268,9 @@
     "accept": "Sim",
     "decline": "Não",
     "sourceFallback": "Efeito",
-    "entryLabel": "{{source}} — {{decision}}"
+    "entryLabel": "{{source}} — {{decision}}",
+    "optionalTriggers": "Habilidades desencadeadas opcionais ({{count, number}})",
+    "replacementChoices": "Escolhas de substituição ({{count, number}})"
   },
   "optionalEffect": {
     "sourceFallback": "Efeito",
@@ -2348,6 +2350,8 @@
     "confirm": "Confirmar"
   },
   "replacement": {
+    "remember": "Lembrar esta escolha nesta partida",
+    "savedChoice": "Substituição: {{choice}}",
     "eyebrow": "Ordem de Resolução",
     "title": "Efeitos de Substituição",
     "orderSubtitle": "Todos estes efeitos alteram como este evento acontece. Arraste para definir a ordem de aplicação — o último aplicado é o que prevalece (CR 616.1).",

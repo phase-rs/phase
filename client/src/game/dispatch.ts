@@ -257,6 +257,8 @@ function queuedLocalActionStillApplies(next: PendingLocalAction): boolean {
     next.action.type === "SetPhaseStops"
     || next.action.type === "SetPriorityPassingMode"
     || next.action.type === "CancelAutoPass"
+    || next.action.type === "SetMayTriggerAutoChoice"
+    || next.action.type === "SetReplacementAutoChoice"
   ) {
     return true;
   }

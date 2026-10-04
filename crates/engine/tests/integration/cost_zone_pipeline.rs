@@ -996,6 +996,8 @@ fn stage_prevented_cost_move(state: &mut GameState, source: engine::types::ident
         candidates: vec![],
         kind: Default::default(),
         last_applied_decides: false,
+        remember_available: false,
+        remember_identity: None,
     };
 }
 
@@ -4941,6 +4943,8 @@ fn effect_pay_cost_composite_mana_life_prevention_serializes_and_rides_once() {
         candidates: vec![],
         kind: Default::default(),
         last_applied_decides: false,
+        remember_available: false,
+        remember_identity: None,
     };
 
     let json = serde_json::to_string(runner.state())

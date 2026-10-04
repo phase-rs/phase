@@ -536,7 +536,8 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 86 as const;
+/** v87: full-game v105 replacement-choice preferences and remembered responses. */
+export const WIRE_PROTOCOL_VERSION = 87 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {
