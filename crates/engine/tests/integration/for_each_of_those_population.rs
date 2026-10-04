@@ -22,16 +22,18 @@
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::parse_oracle_text;
 use engine::types::ability::{
-    AbilityDefinition, ChoiceType, Effect, PlayerChoiceDistinctness, QuantityExpr, QuantityRef,
-    RevealUntilDisposition, TargetFilter,
+    AbilityDefinition, ChoiceType, ContinuousModification, Duration, Effect,
+    PlayerChoiceDistinctness, QuantityExpr, QuantityRef, RevealUntilDisposition, TargetFilter,
 };
-use engine::types::card_type::CoreType;
+use engine::types::card_type::{CoreType, Supertype};
 use engine::types::counter::CounterType;
+use engine::types::game_state::GameState;
 use engine::types::identifiers::{ObjectId, TrackedSetId};
 use engine::types::keywords::Keyword;
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::statics::StaticMode;
 use engine::types::zones::Zone;
 
 /// The synthetic A2.2 instrument (see the module doc).
@@ -64,6 +66,9 @@ pub(crate) enum MusterCard {
     Land(&'static str),
     /// A 2/2 creature card (a reveal hit).
     Creature(&'static str),
+    /// A 2/2 legendary creature card (a reveal hit sharing its name with
+    /// another staged card — the legend rule's subject, CR 704.5j).
+    Legendary(&'static str),
     /// A creature card carrying its verbatim Oracle text (and the MTGJSON
     /// keyword names its keyword lines need), e.g. True-Name Nemesis's
     /// "As this creature enters, choose a player." replacement.
@@ -79,7 +84,10 @@ pub(crate) enum MusterCard {
 impl MusterCard {
     fn name(self) -> &'static str {
         match self {
-            MusterCard::Sorcery(name) | MusterCard::Land(name) | MusterCard::Creature(name) => name,
+            MusterCard::Sorcery(name)
+            | MusterCard::Land(name)
+            | MusterCard::Creature(name)
+            | MusterCard::Legendary(name) => name,
             MusterCard::OracleCreature { name, .. } => name,
         }
     }
@@ -152,7 +160,9 @@ pub(crate) fn stage_muster_library(
         let id = match *card {
             MusterCard::Sorcery(name) => scenario.add_spell_to_library_top(owner, name, false).id(),
             MusterCard::Land(name) => scenario.add_land_to_library_top(owner, name).id(),
-            MusterCard::Creature(name) => scenario.add_card_to_library_top(owner, name),
+            MusterCard::Creature(name) | MusterCard::Legendary(name) => {
+                scenario.add_card_to_library_top(owner, name)
+            }
             MusterCard::OracleCreature {
                 name,
                 oracle,
@@ -182,12 +192,15 @@ pub(crate) fn finish_muster_library(
 ) {
     for (index, (card, (_, id))) in cards.iter().zip(library.iter()).enumerate() {
         match card {
-            MusterCard::Creature(_) => {
+            MusterCard::Creature(_) | MusterCard::Legendary(_) => {
                 let obj = runner
                     .state_mut()
                     .objects
                     .get_mut(id)
                     .expect("staged creature card");
+                if let MusterCard::Legendary(_) = card {
+                    obj.card_types.supertypes.push(Supertype::Legendary);
+                }
                 obj.card_types.core_types.push(CoreType::Creature);
                 obj.base_card_types = obj.card_types.clone();
                 obj.power = Some(2);
@@ -232,7 +245,7 @@ pub(crate) fn finish_muster_library(
     }
 }
 
-fn p1p1(runner: &GameRunner, id: ObjectId) -> u32 {
+pub(crate) fn p1p1(runner: &GameRunner, id: ObjectId) -> u32 {
     runner
         .state()
         .objects
@@ -241,7 +254,7 @@ fn p1p1(runner: &GameRunner, id: ObjectId) -> u32 {
         .unwrap_or(0)
 }
 
-fn total_p1p1(runner: &GameRunner) -> u32 {
+pub(crate) fn total_p1p1(runner: &GameRunner) -> u32 {
     runner
         .state()
         .objects
@@ -250,11 +263,11 @@ fn total_p1p1(runner: &GameRunner) -> u32 {
         .sum()
 }
 
-fn zone_of(runner: &GameRunner, id: ObjectId) -> Zone {
+pub(crate) fn zone_of(runner: &GameRunner, id: ObjectId) -> Zone {
     runner.state().objects.get(&id).expect("object exists").zone
 }
 
-fn has_haste(runner: &GameRunner, id: ObjectId) -> bool {
+pub(crate) fn has_haste(runner: &GameRunner, id: ObjectId) -> bool {
     runner
         .state()
         .objects
@@ -262,7 +275,7 @@ fn has_haste(runner: &GameRunner, id: ObjectId) -> bool {
         .is_some_and(|obj| obj.has_keyword(&Keyword::Haste))
 }
 
-fn in_p0_library(runner: &GameRunner, id: ObjectId) -> bool {
+pub(crate) fn in_p0_library(runner: &GameRunner, id: ObjectId) -> bool {
     runner
         .state()
         .players
@@ -403,9 +416,10 @@ fn population_heads_restating_the_kept_set_are_claimed() {
 /// instruction; the for-each clause then keeps its prior parse.
 #[test]
 fn population_walk_stops_at_unimplemented_and_other_producers() {
-    // (ii) An Unimplemented grant. A later unit converts this row into its
-    // positive look-through once the plural goad grant parses.
-    let goaded = with_intervening("They're goaded for the rest of the game.");
+    // (ii) An Unimplemented grant: the plural goad with no stated duration
+    // keeps its prior parse (A3.1-i; its positive look-through is
+    // `population_walk_looks_through_the_plural_goad_grant`).
+    let goaded = with_intervening("They're goaded.");
     assert!(
         any_node(&lowered(&goaded), |node| matches!(
             &*node.effect,
@@ -430,6 +444,51 @@ fn population_walk_stops_at_unimplemented_and_other_producers() {
         Effect::LoseLife { .. }
     )));
     assert_for_each_stays_unparsed(&lose_life);
+}
+
+/// The instrument with its haste grant replaced by "They're goaded for the
+/// rest of the game." (A3.1).
+fn reveal_muster_goaded() -> String {
+    with_intervening("They're goaded for the rest of the game.")
+}
+
+/// A3.1-i (U2 + C3.6, SHAPE): CR 608.2c + CR 701.15a — with the plural goad
+/// parsed (every copula spelling), the walk looks through the grant to the
+/// reveal-until producer: the chain is RevealUntil → Shuffle → the `Goaded`
+/// graft over `ParentTarget` for the rest of the game → the body repeated over
+/// the tracked set, with no gap. Reach-guard: the haste instrument itself has
+/// the admitted shape.
+#[test]
+fn population_walk_looks_through_the_plural_goad_grant() {
+    assert_admitted_shape(REVEAL_MUSTER);
+    for sentence in [
+        "They're goaded for the rest of the game.",
+        "They\u{2019}re goaded for the rest of the game.",
+        "They are goaded for the rest of the game.",
+    ] {
+        let oracle = with_intervening(sentence);
+        assert_admitted_shape(&oracle);
+        let abilities = lowered(&oracle);
+        let grant = chain_nodes(&abilities[0])[2];
+        assert!(
+            matches!(
+                &*grant.effect,
+                Effect::GenericEffect {
+                    static_abilities,
+                    duration: Some(Duration::Permanent),
+                    target: None,
+                    ..
+                } if static_abilities.len() == 1
+                    && static_abilities[0].affected == Some(TargetFilter::ParentTarget)
+                    && static_abilities[0].modifications
+                        == vec![ContinuousModification::AddStaticMode {
+                            mode: StaticMode::Goaded,
+                        }]
+            ),
+            "{sentence}: {:?}",
+            grant.effect
+        );
+    }
 }
 
 /// V2.1d (C2.2): the producer must put each of its matches onto the
@@ -998,4 +1057,66 @@ fn reveal_muster_it_body_counters_exactly_the_kept_creatures() {
 
     // Parse reach-guard: the cast card is the admitted shape.
     assert_admitted_shape(&oracle);
+}
+
+/// The resolution-installed goad effects on `id`: `(effect controller,
+/// duration)` of every transient effect adding `StaticMode::Goaded` to exactly
+/// that object.
+pub(crate) fn goad_tces(state: &GameState, id: ObjectId) -> Vec<(PlayerId, Duration)> {
+    state
+        .transient_continuous_effects
+        .iter()
+        .filter(|tce| {
+            tce.affected == TargetFilter::SpecificObject { id }
+                && tce.modifications.iter().any(|m| {
+                    matches!(
+                        m,
+                        ContinuousModification::AddStaticMode {
+                            mode: StaticMode::Goaded
+                        }
+                    )
+                })
+        })
+        .map(|tce| (tce.controller, tce.duration.clone()))
+        .collect()
+}
+
+/// A3.1-r (U2 + C3.1, runtime building block): CR 701.15a + CR 701.15b +
+/// CR 608.2c + CR 611.2a — "They're goaded for the rest of the game" goads
+/// exactly the kept creatures, by the caster, for the rest of the game; the
+/// per-member body still runs once for each of them.
+#[test]
+fn reveal_muster_plural_goad_reaches_exactly_the_kept_creatures() {
+    let oracle = reveal_muster_goaded();
+    let mut board = muster_board(&oracle, MUSTER_LIBRARY);
+    board.runner.cast(board.spell).resolve();
+    let runner = &board.runner;
+    let a = board.card("Creature A");
+    let b = board.card("Creature B");
+
+    // Reach-guard: the kept creatures entered under the caster.
+    for kept in [a, b] {
+        assert_eq!(zone_of(runner, kept), Zone::Battlefield);
+        assert_eq!(runner.state().objects[&kept].controller, P0);
+    }
+    for kept in [a, b] {
+        assert_eq!(
+            goad_tces(runner.state(), kept),
+            vec![(P0, Duration::Permanent)],
+            "CR 701.15b + CR 611.2a: one goad by the caster, for the rest of the game"
+        );
+        assert_eq!(p1p1(runner, kept), 1, "the body ran once for the member");
+    }
+    for name in ["Miss One", "Miss Two", "Creature C", "Miss Three"] {
+        let id = board.card(name);
+        assert!(in_p0_library(runner, id), "{name} stays in the library");
+        assert!(
+            goad_tces(runner.state(), id).is_empty(),
+            "{name} is not goaded"
+        );
+    }
+    for bystander in [board.bystander_p0, board.bystander_p1] {
+        assert!(goad_tces(runner.state(), bystander).is_empty());
+    }
+    assert_eq!(total_p1p1(runner), 2);
 }

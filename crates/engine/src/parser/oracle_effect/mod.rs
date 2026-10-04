@@ -1036,8 +1036,10 @@ enum PopulationWalkStep {
 ///   life") stops the walk — a narrower, fail-closed realization; a later arm
 ///   extends the allowlist with its own runtime evidence.
 /// - An `Unimplemented` instruction stops the walk, as does any other
-///   population producer. The plural goad grant ("They're goaded …") is
-///   classified by a later unit; while it is `Unimplemented` it stops here.
+///   population producer. The plural goad grant ("They're goaded for the
+///   rest of the game") lowers to a `GenericEffect` over `ParentTarget` and is
+///   transparent through the grant arm below; its no-duration form stays
+///   `Unimplemented` and stops the walk.
 /// - Every disposition that rewrites an earlier definition (absorb, otherwise
 ///   branch, keyword replication, prior modifier, meaning replacement, the
 ///   search fold, the drawn-this-turn follow-up) is opaque and stops the walk.
@@ -31246,6 +31248,27 @@ pub(super) fn effect_installs_continuous_effect(effect: &Effect) -> bool {
     )
 }
 
+/// CR 608.2c + CR 608.2d: whether `clause` records the resolving ability's
+/// object→player assignment — an interactive choice of a player repeated once
+/// per member of a published population, with no step of its own after the
+/// choice. The parse-side mirror of the repeat driver's per-object gate
+/// (`effects::repeats_per_object_player_choice`), which binds a member only to
+/// a repetition that pauses for its answer.
+fn clause_records_choice_assignment(clause: &ClauseIr) -> bool {
+    matches!(
+        clause.repeat_for,
+        Some(QuantityExpr::Ref {
+            qty: QuantityRef::TrackedSetSize
+        })
+    ) && clause.player_scope.is_none()
+        && clause.parsed.sub_ability.is_none()
+        && matches!(
+            &clause.parsed.effect,
+            Effect::Choose { choice_type, selection: TargetSelectionMode::Chosen, .. }
+                if choice_type.chooses_player()
+        )
+}
+
 /// Membership mirror for `AntecedentRole::DigOrMill` — the "look at / mill the top N"
 /// anchor a `DigFromAmong` continuation binds back to.
 ///
@@ -43281,6 +43304,20 @@ fn parse_effect_chain_ir_body(
                 clause.effect =
                     Effect::unimplemented("non_controller_reveal_choice", normalized_text);
             }
+        }
+        // CR 608.2c + CR 608.2d: "the permanent for which they were chosen" reads the
+        // per-object assignment, which only an interactive player choice repeated over
+        // a published population records. After any other choice the sentence names
+        // an assignment no instruction records: honest gap.
+        if matches!(
+            followup_continuation,
+            Some(ContinuationAst::ChoiceAssignmentGainsControl)
+        ) && !non_absorbed
+            .first()
+            .is_some_and(|previous| clause_records_choice_assignment(previous))
+        {
+            followup_continuation = None;
+            clause.effect = Effect::unimplemented("choice_assignment_antecedent", normalized_text);
         }
         // CR 608.2c + CR 109.5: a clause that itself runs per player makes its own
         // reveal choice as that player; the resolver's reveal chooser inside a

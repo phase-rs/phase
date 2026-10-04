@@ -199,8 +199,10 @@ pub(super) fn try_parse_subject_predicate_ast(
     // past-participle state assignment. The contraction "it's" fuses subject +
     // copula and cannot be split by `find_predicate_start`, so intercept the
     // pattern early and lower it to `Effect::Goad` with the pronoun-resolved
-    // target. Covers Jon Irenicus, Vislor Turlough, and any future card that
-    // sets the goaded state via copula rather than the imperative "goad it".
+    // target; the plural "they're goaded <duration>" lowers to the `Goaded`
+    // graft over the anaphor's population. Covers Jon Irenicus, Vislor
+    // Turlough, Dack Fayden, Helping Hand, and any future card that sets the
+    // goaded state via copula rather than the imperative "goad it".
     if let Some(clause) = try_parse_copula_goaded_clause(text, ctx) {
         return Some(subject_predicate_ast_from_clause(
             text,
@@ -6516,10 +6518,10 @@ fn build_restriction_clause(
             // Champions of Minas Tirith. Most of the remaining variants are
             // player references or event/replacement references with no
             // fixed object set at parse time, but not all — `AttachedTo`,
-            // `AmassedArmy`, `ChosenCard`, `ExiledBySource`, `LastCreated`, and
-            // `TrackedSetFiltered` are fixed object references whose
-            // fixed-vs-live adjudication for THIS branch has not been made
-            // (`TrackedSetFiltered`'s sibling `TrackedSet` sits in the fixed
+            // `AmassedArmy`, `ChosenCard`, `ExiledBySource`, `LastCreated`,
+            // `TrackedSetFiltered`, and `ChoiceAssignment { side: Objects }`
+            // are fixed object references whose fixed-vs-live adjudication
+            // for THIS branch has not been made (`TrackedSetFiltered`'s sibling `TrackedSet` sits in the fixed
             // arm above and `additive_type_subject_application` treats the two
             // identically as an anaphoric subject kind, but that does not by
             // itself settle whether this branch's freeze-vs-broadcast choice
@@ -7220,27 +7222,41 @@ fn extract_pump_modifiers(
 /// This helper catches the pattern early and lowers it to `Effect::Goad` with the
 /// pronoun-resolved target and an optional trailing duration.
 ///
+/// The plural copula ("they're goaded <duration>" / "they are goaded
+/// <duration>") is the same state assignment over every member of the anaphor's
+/// population: it lowers to the `Goaded` graft over `ParentTarget`, and only
+/// with a stated duration.
+///
 /// Covers: Jon Irenicus, Shattered One ("it's goaded for the rest of the game"),
-/// Vislor Turlough ("it's goaded for as long as they control it"), and the
-/// non-contracted form ("it is goaded").
+/// Vislor Turlough ("it's goaded for as long as they control it"), the
+/// non-contracted form ("it is goaded"), and Dack Fayden, Helping Hand
+/// (plural: "They're goaded for the rest of the game").
 fn try_parse_copula_goaded_clause(
     text: &str,
     ctx: &mut ParseContext,
 ) -> Option<ParsedEffectClause> {
     let lower = text.to_lowercase();
-    // Strip subject + copula: "it's goaded ..." / "it is goaded ..."
-    let after_subject = alt((
-        preceded(
-            tag::<_, _, OracleError<'_>>("it's "),
-            tag::<_, _, OracleError<'_>>("goaded"),
-        ),
-        preceded(tag::<_, _, OracleError<'_>>("it is "), tag("goaded")),
-    ))
+    // Strip subject + copula: "it's goaded ..." / "it is goaded ..." /
+    // "they're goaded ..." / "they are goaded ...". The pronoun's grammatical
+    // number selects the lowering below.
+    let (after_subject, number) = terminated(
+        alt((
+            value(
+                AnaphorNumber::Singular,
+                alt((tag::<_, _, OracleError<'_>>("it's "), tag("it is "))),
+            ),
+            value(
+                AnaphorNumber::Plural,
+                alt((tag("they're "), tag("they\u{2019}re "), tag("they are "))),
+            ),
+        )),
+        tag("goaded"),
+    )
     .parse(lower.as_str())
     .ok()?;
-    let remainder = after_subject.0.trim_start().trim_end_matches('.').trim();
+    let remainder = after_subject.trim_start().trim_end_matches('.').trim();
     // Parse optional trailing duration ("for the rest of the game", "for as long as ...").
-    let duration = if remainder.is_empty() {
+    let inline_duration = if remainder.is_empty() {
         // CR 701.15a: Default goad duration is until the goading player's next turn.
         None
     } else {
@@ -7256,10 +7272,50 @@ fn try_parse_copula_goaded_clause(
         }
         Some(d)
     };
-    let target = resolve_it_pronoun(ctx);
+    let (effect, duration) = match number {
+        AnaphorNumber::Singular => (
+            Effect::Goad {
+                target: resolve_it_pronoun(ctx),
+            },
+            inline_duration,
+        ),
+        AnaphorNumber::Plural => {
+            // CR 701.15a: a plural copula with no stated duration has no printed
+            // card; decline (honest red) rather than guess the default-duration
+            // lowering.
+            let duration = inline_duration.or_else(|| ctx.stated_clause_duration.clone())?;
+            let application =
+                parse_subject_application_for("they", ctx, AnaphorConsumer::AffectedObject)?;
+            let affected = static_affected_for_application(&application);
+            // CR 608.2c: bind only the population anaphor (ParentTarget); any
+            // other referent declines.
+            if !matches!(affected, TargetFilter::ParentTarget) {
+                return None;
+            }
+            // CR 701.15a + CR 701.15b + CR 611.2a: "they're goaded <duration>" —
+            // the plural copula designates every member of the anaphor's
+            // population, goaded by the ability's controller, for the stated
+            // duration (CR 101.1: the card's duration overrides the CR 701.15a
+            // default).
+            (
+                Effect::GenericEffect {
+                    static_abilities: vec![StaticDefinition::continuous()
+                        .affected(affected)
+                        .modifications(vec![ContinuousModification::AddStaticMode {
+                            mode: StaticMode::Goaded,
+                        }])
+                        .description("goaded".to_string())],
+                    duration: Some(duration.clone()),
+                    target: None,
+                    end_cost: None,
+                },
+                Some(duration),
+            )
+        }
+    };
     Some(ParsedEffectClause {
         unlowered_guard: None,
-        effect: Effect::Goad { target },
+        effect,
         duration,
         sub_ability: None,
         distribute: None,
@@ -11581,6 +11637,103 @@ mod tests {
         // remainder is not discarded.
         let mut ctx = ParseContext::default();
         assert!(try_parse_copula_goaded_clause("it's goaded and draws a card", &mut ctx).is_none());
+    }
+
+    /// The `Goaded` graft over the anaphor's population with `duration`, the
+    /// shape the plural copula lowers to.
+    fn assert_plural_goad_graft(clause: &ParsedEffectClause, duration: Duration) {
+        match &clause.effect {
+            Effect::GenericEffect {
+                static_abilities,
+                duration: effect_duration,
+                target: None,
+                end_cost: None,
+            } => {
+                assert_eq!(static_abilities.len(), 1, "{static_abilities:?}");
+                let grant = &static_abilities[0];
+                assert_eq!(grant.affected, Some(TargetFilter::ParentTarget));
+                assert_eq!(
+                    grant.modifications,
+                    vec![ContinuousModification::AddStaticMode {
+                        mode: StaticMode::Goaded,
+                    }]
+                );
+                assert_eq!(effect_duration.as_ref(), Some(&duration));
+            }
+            other => panic!("expected the Goaded graft, got {other:?}"),
+        }
+        assert_eq!(clause.duration, Some(duration));
+    }
+
+    /// A3.1-u (SHAPE): CR 701.15a + CR 701.15b + CR 611.2a — every plural
+    /// copula spelling with "for the rest of the game" lowers to the `Goaded`
+    /// graft over `ParentTarget` with a permanent duration.
+    #[test]
+    fn copula_goaded_plural_lowers_to_the_population_graft() {
+        for text in [
+            "they're goaded for the rest of the game",
+            "they\u{2019}re goaded for the rest of the game",
+            "they are goaded for the rest of the game",
+        ] {
+            let mut ctx = ParseContext::default();
+            let clause = try_parse_copula_goaded_clause(text, &mut ctx)
+                .unwrap_or_else(|| panic!("{text} should parse"));
+            assert_plural_goad_graft(&clause, Duration::Permanent);
+        }
+    }
+
+    /// A3.1-u (SHAPE): the clause shell's peeled trailing duration
+    /// (`ParseContext::stated_clause_duration`) is the plural copula's duration.
+    #[test]
+    fn copula_goaded_plural_reads_the_stated_clause_duration() {
+        let mut ctx = ParseContext {
+            stated_clause_duration: Some(Duration::Permanent),
+            ..Default::default()
+        };
+        let clause =
+            try_parse_copula_goaded_clause("they're goaded", &mut ctx).expect("should parse");
+        assert_plural_goad_graft(&clause, Duration::Permanent);
+    }
+
+    /// A3.1-u: CR 701.15a — a plural copula with no stated duration, a
+    /// swallowed trailing conjunct, and a non-goad predicate are declined.
+    /// Reach-guard: the singular no-duration form still parses (the subject
+    /// axis reached the singular arm unchanged).
+    #[test]
+    fn copula_goaded_plural_declines_without_a_stated_duration() {
+        let mut ctx = ParseContext::default();
+        assert!(try_parse_copula_goaded_clause("they're goaded", &mut ctx).is_none());
+        assert!(try_parse_copula_goaded_clause(
+            "they're goaded for the rest of the game and gain haste",
+            &mut ctx,
+        )
+        .is_none());
+        assert!(try_parse_copula_goaded_clause("they're attacking", &mut ctx).is_none());
+        let singular =
+            try_parse_copula_goaded_clause("it's goaded", &mut ctx).expect("singular parses");
+        assert!(matches!(singular.effect, Effect::Goad { .. }));
+    }
+
+    /// A3.1-u: CR 608.2c — when "they" names a player (a chosen player is in
+    /// scope), the plural copula declines rather than goad a non-population
+    /// referent. Reach-guard: the same text under a default context parses.
+    #[test]
+    fn copula_goaded_plural_declines_a_player_referent() {
+        let mut player_scope = ParseContext {
+            relative_player_scope: Some(ControllerRef::ChosenPlayer { index: 0 }),
+            ..Default::default()
+        };
+        assert!(try_parse_copula_goaded_clause(
+            "they're goaded for the rest of the game",
+            &mut player_scope,
+        )
+        .is_none());
+        let mut ctx = ParseContext::default();
+        assert!(try_parse_copula_goaded_clause(
+            "they're goaded for the rest of the game",
+            &mut ctx
+        )
+        .is_some());
     }
 
     // CR 509.1h: "Target unblocked attacking creature becomes blocked." parses to
