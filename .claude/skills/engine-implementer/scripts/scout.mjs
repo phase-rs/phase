@@ -3,7 +3,8 @@
 //   verify  checks a scout agent's JSON-lines report against the repository and prints the fact pack.
 //   run     launches the scout from the command line when the orchestrator has no native sub-agent:
 //           GPT-6 Luna through `codex exec` when codex is installed, otherwise Sonnet 5.5 through `claude -p`.
-// Only facts whose quoted line is actually at (or within a few lines of) the cited location are kept.
+// Only facts whose quote is the whole line at (or within a few lines of) the cited location are kept.
+// A launched scout that has not finished after --timeout seconds (default one hour) is stopped and reported as failed.
 import { spawn, spawnSync } from 'node:child_process';
 import { appendFileSync, readFileSync } from 'node:fs';
 import { isAbsolute, relative, resolve } from 'node:path';
@@ -14,8 +15,6 @@ const LINE_SLACK = 3;
 const BACKENDS = {
   codex: {
     model: 'gpt-6-luna',
-    // Luna list price per 1M tokens (input, cached input, output); codex reports no cost itself.
-    price: { input: 0.1, cached: 0.005, output: 0.25 },
     args: ({ repo, model, effort }) => [
       'exec', '--ignore-user-config', '--ephemeral', '--skip-git-repo-check', '-s', 'read-only',
       '-m', model, '-c', `model_reasoning_effort="${effort}"`, '-C', repo, '--json', '-',
@@ -41,6 +40,7 @@ const { positionals: [command], values } = parseArgs({
     backend: { type: 'string' },
     model: { type: 'string' },
     effort: { type: 'string', default: 'low' },
+    timeout: { type: 'string', default: '3600' },
     label: { type: 'string', default: '' },
   },
 });
@@ -52,7 +52,7 @@ if (command === 'verify' && values['report-file']) {
   emit(...await launch(readFileSync(values['task-file'], 'utf8')));
 } else {
   console.error(`usage: scout.mjs verify --report-file FILE [--repo DIR] [--label L]
-       scout.mjs run --task-file FILE [--repo DIR] [--backend codex|claude] [--model ID] [--effort LEVEL] [--label L]`);
+       scout.mjs run --task-file FILE [--repo DIR] [--backend codex|claude] [--model ID] [--effort LEVEL] [--timeout SECONDS] [--label L]`);
   process.exit(2);
 }
 
@@ -67,8 +67,13 @@ async function launch(task) {
     stdio: ['pipe', 'pipe', 'inherit'],
   });
   child.stdin.end(backend.prompt(task));
+  // Exit here rather than wait for `close`: a descendant holding the pipe open would keep it from firing.
+  const deadline = setTimeout(() => {
+    child.kill('SIGKILL');
+    fail(`${name} did not finish within ${values.timeout} seconds`);
+  }, Number(values.timeout) * 1000);
 
-  const usage = { input: 0, output: 0, cacheRead: 0, costUsd: 0 };
+  const usage = { input: 0, output: 0, cacheRead: 0 };
   let report = '';
   let pending = '';
   const onRecord = record => {
@@ -80,14 +85,12 @@ async function launch(task) {
       usage.input += input - cached;
       usage.cacheRead += cached;
       usage.output += output;
-      usage.costUsd += ((input - cached) * backend.price.input + cached * backend.price.cached + output * backend.price.output) / 1e6;
     }
     if (event.type === 'result') {
       report = event.result;
       usage.input += event.usage.input_tokens + event.usage.cache_creation_input_tokens;
       usage.cacheRead += event.usage.cache_read_input_tokens;
       usage.output += event.usage.output_tokens;
-      usage.costUsd += event.total_cost_usd;
     }
   };
   child.stdout.setEncoding('utf8');
@@ -98,6 +101,7 @@ async function launch(task) {
     for (const record of records) onRecord(record.replace(/\r$/, ''));
   });
   const exitCode = await new Promise(done => child.on('close', done));
+  clearTimeout(deadline);
   onRecord(pending);
   if (exitCode !== 0) fail(`${name} exited with ${exitCode}`);
   return [report, { backend: name, model, usage, durationMs: Date.now() - started }];
@@ -147,7 +151,7 @@ function verify(fact) {
   const cited = Number(fact.line) - 1;
   for (let offset = 0; offset <= LINE_SLACK; offset++) {
     for (const index of new Set([cited - offset, cited + offset])) {
-      if (lines[index]?.includes(quote)) {
+      if (lines[index]?.trim() === quote) {
         fact.line = index + 1;
         return undefined;
       }

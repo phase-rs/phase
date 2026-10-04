@@ -6,7 +6,7 @@ A scout reports located facts only. It has no verdict authority, is not a review
 
 ## What the pack is
 
-The scout's prompt is [the scout contract](references/scout-contract.md) followed by a task file. Every fact quotes one verbatim line at a cited path and line. `scripts/scout.mjs` keeps a fact only when that quote is at the cited line or within three lines of it, corrects the line number, and lists everything else under `rejected`. The result is one JSON object: `facts`, `rejected`, `unknowns` (things the scout looked for and did not find), and the run's model, duration and usage.
+The scout's prompt is [the scout contract](references/scout-contract.md) followed by a task file. Every fact quotes one verbatim line at a cited path and line. `scripts/scout.mjs` keeps a fact only when that quote is the whole line, ignoring indentation, at the cited line or within three lines of it, corrects the line number, and lists everything else under `rejected`. The result is one JSON object: `facts`, `rejected`, `unknowns` (things the scout looked for and did not find), and the run's model, duration and usage.
 
 Running a scout is a documented command, so it is not [verification machinery](SKILL.md#task-scope-and-verification-work), is not a design round, and needs no expansion case. Do not extend the script or build tooling around it during a run.
 
@@ -64,7 +64,7 @@ Use the first launch that applies:
 3. A Claude Code orchestrator without `codex` dispatches a native `Explore` agent with the `sonnet` model.
 4. Otherwise, the same `run` command falls back to Sonnet through `claude -p`.
 
-The `run` command already prints the verified pack. A native scout (launches 1 and 3) returns only its raw report: save its final message to a file and check its quotes against the cited lines:
+The `run` command gives the scout up to an hour by default (`--timeout SECONDS`), so that a slow scout is not cut short and a hung one still ends as a failure. Run it in the background or with a command timeout at least that long. It already prints the verified pack. A native scout (launches 1 and 3) returns only its raw report: save its final message to a file and check its quotes against the cited lines:
 
 ```bash
 node .claude/skills/engine-implementer/scripts/scout.mjs verify --repo <worktree> --report-file <file> --label <step>
