@@ -8409,6 +8409,7 @@ pub(crate) enum EventContextSeedTiming {
 }
 
 pub(crate) fn seed_event_context_parent_targets(
+    state: &GameState,
     ability: &mut ResolvedAbility,
     trigger_event: Option<&GameEvent>,
     timing: EventContextSeedTiming,
@@ -8444,7 +8445,42 @@ pub(crate) fn seed_event_context_parent_targets(
         // PUBLIC zone, so a card diverted to hand or library seeds no parent target
         // rather than binding the trigger to an object no effect may find.
         GameEvent::Milled { object_id, to, .. } if to.is_public() => (Some(*object_id), None),
-        _ => (None, None),
+        _ => {
+            // CR 301.5a + CR 303.4b + CR 608.2k: Aura/Equipment triggers referencing ParentTarget/AttachedTo
+            // (e.g. Slow Motion's upkeep sacrifice trigger) bind to the source's attached host permanent
+            // captured in trigger_source at trigger instantiation time.
+            if let Some(host_id) = ability
+                .trigger_source
+                .as_ref()
+                .and_then(|ctx| ctx.attached_to)
+                .and_then(|target| match target {
+                    crate::game::game_object::AttachTarget::Object(id) => Some(id),
+                    crate::game::game_object::AttachTarget::Player(_) => None,
+                })
+                .or_else(|| {
+                    state
+                        .objects
+                        .get(&ability.source_id)
+                        .and_then(|o| o.attached_to)
+                        .and_then(|target| match target {
+                            crate::game::game_object::AttachTarget::Object(id) => Some(id),
+                            crate::game::game_object::AttachTarget::Player(_) => None,
+                        })
+                })
+            {
+                let pin = if timing == EventContextSeedTiming::StackPush {
+                    state
+                        .objects
+                        .get(&host_id)
+                        .map(ObjectIncarnationRef::from_object)
+                } else {
+                    None
+                };
+                (Some(host_id), pin)
+            } else {
+                (None, None)
+            }
+        }
     };
     if let Some(id) = parent_id {
         ability.targets = vec![TargetRef::Object(id)];
@@ -8496,7 +8532,10 @@ fn zone_change_parent_target_pin(event: &GameEvent) -> Option<ObjectIncarnationR
 fn effect_uses_parent_target(effect: &Effect) -> bool {
     match effect {
         Effect::Pump { target, .. } | Effect::PumpAll { target, .. } => {
-            matches!(target, TargetFilter::ParentTarget)
+            matches!(
+                target,
+                TargetFilter::ParentTarget | TargetFilter::AttachedTo
+            )
         }
         // CR 608.2c: "those creatures gain <keyword> until end of turn" lowers to a
         // `GenericEffect` whose granted static ability is `affected: ParentTarget`
@@ -8509,14 +8548,19 @@ fn effect_uses_parent_target(effect: &Effect) -> bool {
             static_abilities,
             ..
         } => {
-            matches!(target, Some(TargetFilter::ParentTarget))
-                || static_abilities
-                    .iter()
-                    .any(|s| matches!(s.affected, Some(TargetFilter::ParentTarget)))
+            matches!(
+                target,
+                Some(TargetFilter::ParentTarget | TargetFilter::AttachedTo)
+            ) || static_abilities.iter().any(|s| {
+                matches!(
+                    s.affected,
+                    Some(TargetFilter::ParentTarget | TargetFilter::AttachedTo)
+                )
+            })
         }
         _ => effect
             .target_filter()
-            .is_some_and(|f| matches!(f, TargetFilter::ParentTarget)),
+            .is_some_and(|f| matches!(f, TargetFilter::ParentTarget | TargetFilter::AttachedTo)),
     }
 }
 
@@ -8590,6 +8634,7 @@ fn push_pending_trigger_to_stack_with_firing_and_duration_events(
     ability.context.triggering_spell = triggering_spell_pin(state, trigger_event.as_ref());
     seed_batched_attack_parent_targets(&mut ability, trigger_event.as_ref());
     seed_event_context_parent_targets(
+        state,
         &mut ability,
         trigger_event.as_ref(),
         EventContextSeedTiming::StackPush,
@@ -18315,6 +18360,7 @@ pub mod tests {
     fn seed_event_context_parent_targets_binds_a_milled_card() {
         use crate::types::ability::PerpetualModification;
 
+        let state = GameState::default();
         let source = ObjectId(1);
         let milled = ObjectId(2);
         let make_ability = || {
@@ -18333,6 +18379,7 @@ pub mod tests {
 
         let mut ability = make_ability();
         seed_event_context_parent_targets(
+            &state,
             &mut ability,
             Some(&GameEvent::Milled {
                 player_id: PlayerId(1),
@@ -18350,6 +18397,7 @@ pub mod tests {
         // and in nothing else.
         let mut hidden = make_ability();
         seed_event_context_parent_targets(
+            &state,
             &mut hidden,
             Some(&GameEvent::Milled {
                 player_id: PlayerId(1),
@@ -18368,6 +18416,7 @@ pub mod tests {
         // leaves the pre-existing targets alone, so a blanket overwrite fails.
         let mut untouched = make_ability();
         seed_event_context_parent_targets(
+            &state,
             &mut untouched,
             Some(&GameEvent::PermanentTapped {
                 object_id: milled,
@@ -18382,6 +18431,7 @@ pub mod tests {
     fn seed_event_context_parent_targets_overwrites_source_only_fallback() {
         use crate::types::ability::PerpetualModification;
 
+        let state = GameState::default();
         let spacecraft = ObjectId(1);
         let creature = ObjectId(2);
         let mut ability = ResolvedAbility::new(
@@ -18401,6 +18451,7 @@ pub mod tests {
             counters_added: 1,
         };
         seed_event_context_parent_targets(
+            &state,
             &mut ability,
             Some(&event),
             EventContextSeedTiming::StackPush,
@@ -18442,6 +18493,7 @@ pub mod tests {
             PlayerId(0),
         );
         seed_event_context_parent_targets(
+            &state,
             &mut ability,
             Some(event),
             EventContextSeedTiming::StackPush,
@@ -18478,6 +18530,7 @@ pub mod tests {
             PlayerId(0),
         );
         seed_event_context_parent_targets(
+            &state,
             &mut ability,
             Some(&event),
             EventContextSeedTiming::ResolutionFallback,
@@ -18538,6 +18591,7 @@ pub mod tests {
             PlayerId(0),
         );
         seed_event_context_parent_targets(
+            &state,
             &mut ability,
             Some(event),
             EventContextSeedTiming::StackPush,
@@ -18545,6 +18599,7 @@ pub mod tests {
         assert_eq!(ability.target_incarnations, vec![event_pin]);
 
         seed_event_context_parent_targets(
+            &state,
             &mut ability,
             Some(event),
             EventContextSeedTiming::ResolutionFallback,
@@ -18616,6 +18671,7 @@ pub mod tests {
             PlayerId(0),
         );
         seed_event_context_parent_targets(
+            &state,
             &mut ability,
             Some(event),
             EventContextSeedTiming::StackPush,
