@@ -1686,6 +1686,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
             record
         })
         .collect();
+    redact_hidden_identity_side_tables(&mut filtered, &hidden_zone_change_ids);
 
     // Source-bound named choices carry complete source contexts in authoritative
     // state. The client needs only the exact public prompt projection, never its
@@ -3533,6 +3534,223 @@ fn redact_hidden_zone_change_event(event: &mut GameEvent, hidden_ids: &HashSet<O
     }
 }
 
+/// CR 400.2 + CR 400.7: id-keyed history that names an object the viewer cannot identify.
+///
+/// `hide_card` blanks the object itself, but the engine keeps the `ObjectId` stable across
+/// zone moves, so every side table keyed by (or recording) that id would otherwise let an
+/// observer holding a single snapshot read the hidden card's name or mana value.
+///
+/// Policy, per table:
+/// - id-keyed LKI (`lki_cache`, `lki_by_incarnation`, `lki_copiable_values`,
+///   `departed_stack_spells`, and `linked_exile_lki` keyed by a hidden source) is dropped;
+/// - a hidden `linked_exile_lki` member keeps its slot (the per-source count is read) but
+///   loses its mana value;
+/// - cast-history records keep every characteristic the cast-history cost and count readers
+///   filter on, and lose only the name and the id link (`redact_spell_cast_record`);
+/// - the turn's entry, sacrifice, damage and attack-declaration ledgers keep every record
+///   (counts are preserved) with the hidden object's identifying fields blanked.
+///
+/// Accepted limitation: the battlefield-entry, sacrifice and damage ledgers are blanked
+/// projection-wide, including the characteristic columns (`core_types`, mana value) their
+/// cost and condition readers filter on. A derived view computed on the projected state
+/// (`derive_views`, e.g. a displayed cost reduced by "a creature entered under your
+/// control this turn") can therefore differ from the authoritative value when the only
+/// matching record names a hidden id. The divergence is limited to DISPLAY-only derived
+/// views over a hidden-id record; rules decisions read authoritative state. This follows
+/// the accepted `zone_changes_this_turn` / `redact_zone_change_record` precedent.
+///
+/// Projection only: authoritative state keeps the full records the engine reads for
+/// look-back (CR 608.2h, CR 603.10a).
+fn redact_hidden_identity_side_tables(state: &mut GameState, hidden_ids: &HashSet<ObjectId>) {
+    for id in hidden_ids {
+        state.lki_cache.remove(id);
+        state.lki_by_incarnation.remove(id);
+        // CR 707.2: copiable values are the hidden card's printed identity.
+        state.lki_copiable_values.remove(id);
+        state.departed_stack_spells.remove(id);
+        state.linked_exile_lki.remove(id);
+    }
+    for members in state.linked_exile_lki.values_mut() {
+        for member in members.iter_mut() {
+            if hidden_ids.contains(&member.exiled_id) {
+                redact_linked_exile_snapshot(member);
+            }
+        }
+    }
+
+    for records in state
+        .spells_cast_this_turn_by_player
+        .values_mut()
+        .chain(state.spells_cast_this_game_by_player.values_mut())
+    {
+        for record in records.iter_mut() {
+            if record
+                .spell_object_id
+                .is_some_and(|id| hidden_ids.contains(&id))
+            {
+                redact_spell_cast_record(record);
+            }
+        }
+    }
+
+    for record in state.battlefield_entries_this_turn.iter_mut() {
+        if hidden_ids.contains(&record.object_id) {
+            redact_battlefield_entry_record(record);
+        }
+    }
+    for record in state.sacrificed_permanents_this_turn.iter_mut() {
+        if hidden_ids.contains(&record.object_id) {
+            redact_zone_change_record(record);
+        }
+    }
+    for record in state.damage_dealt_this_turn.iter_mut() {
+        if hidden_ids.contains(&record.source_id) {
+            redact_damage_record_source(record);
+        }
+    }
+    for record in state.attacker_declarations_this_turn.iter_mut() {
+        if hidden_ids.contains(&record.object_id) {
+            redact_lki_snapshot(&mut record.lki);
+        }
+    }
+}
+
+/// A hidden linked-exile member keeps its slot so the per-source count stays correct; only
+/// its mana value identifies the card.
+fn redact_linked_exile_snapshot(member: &mut crate::types::game_state::LinkedExileSnapshot) {
+    let crate::types::game_state::LinkedExileSnapshot {
+        exiled_id: _,
+        owner: _,
+        mana_value,
+    } = member;
+    *mana_value = 0;
+}
+
+/// CR 400.7: the record is kept (storm and cast counts read its length) together with every
+/// characteristic the cast-history cost and count readers filter on, which were public when
+/// the spell was cast. Only the name and the id link that ties the record to the now-hidden
+/// object are cleared; with no id the record is an anonymous history entry. A same-id record
+/// for a hidden object denotes a prior object, so clearing the link never changes an
+/// own-cast exclusion for a spell still on the stack.
+fn redact_spell_cast_record(record: &mut crate::types::game_state::SpellCastRecord) {
+    let crate::types::game_state::SpellCastRecord {
+        name,
+        core_types: _,
+        supertypes: _,
+        subtypes: _,
+        keywords: _,
+        colors: _,
+        mana_value: _,
+        has_x_in_cost: _,
+        has_adventure: _,
+        from_zone: _,
+        cast_variant: _,
+        was_kicked: _,
+        spell_object_id,
+    } = record;
+    *name = HIDDEN_CARD_NAME.to_string();
+    *spell_object_id = None;
+}
+
+/// The entry ledger's id is a non-optional key, so the record keeps its id and controller
+/// (the count is preserved) and loses every characteristic that identifies the card.
+fn redact_battlefield_entry_record(record: &mut crate::types::game_state::BattlefieldEntryRecord) {
+    let crate::types::game_state::BattlefieldEntryRecord {
+        object_id: _,
+        name,
+        core_types,
+        subtypes,
+        supertypes,
+        colors,
+        keywords,
+        controller: _,
+    } = record;
+    *name = HIDDEN_CARD_NAME.to_string();
+    core_types.clear();
+    subtypes.clear();
+    supertypes.clear();
+    colors.clear();
+    keywords.clear();
+}
+
+/// The damage ledger keeps who dealt how much to what; the hidden source's characteristics
+/// snapshot is blanked.
+fn redact_damage_record_source(record: &mut crate::types::game_state::DamageRecord) {
+    let crate::types::game_state::DamageRecord {
+        source_id: _,
+        source_controller: _,
+        target: _,
+        target_controller: _,
+        target_incarnation: _,
+        source_incarnation: _,
+        amount: _,
+        is_combat: _,
+        source_name,
+        source_core_types,
+        source_subtypes,
+        source_supertypes,
+        source_keywords,
+        source_power,
+        source_toughness,
+        source_colors,
+        source_mana_value,
+        source_controller_snapshot: _,
+        source_owner: _,
+        source_zone: _,
+        excess: _,
+    } = record;
+    *source_name = HIDDEN_CARD_NAME.to_string();
+    source_core_types.clear();
+    source_subtypes.clear();
+    source_supertypes.clear();
+    source_keywords.clear();
+    *source_power = None;
+    *source_toughness = None;
+    source_colors.clear();
+    *source_mana_value = 0;
+}
+
+/// An LKI snapshot of a now-hidden object keeps controller, owner and status flags and loses
+/// every characteristic that identifies the card.
+fn redact_lki_snapshot(snapshot: &mut crate::types::game_state::LKISnapshot) {
+    let crate::types::game_state::LKISnapshot {
+        name,
+        token_image_ref,
+        power,
+        toughness,
+        base_power,
+        base_toughness,
+        mana_value,
+        controller: _,
+        owner: _,
+        card_types,
+        subtypes,
+        supertypes,
+        keywords,
+        colors,
+        chosen_attributes,
+        counters,
+        tapped: _,
+        is_suspected: _,
+        attachments,
+    } = snapshot;
+    *name = HIDDEN_CARD_NAME.to_string();
+    *token_image_ref = None;
+    *power = None;
+    *toughness = None;
+    *base_power = None;
+    *base_toughness = None;
+    *mana_value = 0;
+    card_types.clear();
+    subtypes.clear();
+    supertypes.clear();
+    keywords.clear();
+    colors.clear();
+    chosen_attributes.clear();
+    counters.clear();
+    attachments.clear();
+}
+
 fn redact_zone_change_record(record: &mut crate::types::game_state::ZoneChangeRecord) {
     record.name = HIDDEN_CARD_NAME.to_string();
     record.core_types.clear();
@@ -3842,6 +4060,237 @@ mod tests {
     use crate::types::resolution::OptionalEffectFrame;
     use crate::types::zones::{ExileCostSourceZone, Zone};
     use rand::RngCore;
+
+    /// CR 400.2 + CR 400.7: a permanent that returns to its owner's hand leaves id-keyed LKI
+    /// behind. The opponent's projection must not name it, in any table, while the owner's
+    /// own view keeps the history the engine needs.
+    #[test]
+    fn hidden_zone_move_leaves_no_name_in_opponent_side_tables() {
+        for destination in [Zone::Hand, Zone::Library] {
+            let mut state = GameState::new_two_player(42);
+            let owner = PlayerId(0);
+            let secret = create_object(
+                &mut state,
+                CardId(7),
+                owner,
+                "Sentinel Bears".to_string(),
+                Zone::Battlefield,
+            );
+            let mut events = Vec::new();
+            crate::game::zones::move_to_zone(&mut state, secret, destination, &mut events);
+
+            assert!(
+                state.lki_cache.contains_key(&secret),
+                "precondition: the departure recorded LKI for the {destination:?} move"
+            );
+
+            let opponent = serde_json::to_string(&filter_state_for_viewer(&state, PlayerId(1)))
+                .expect("opponent projection serializes");
+            assert!(
+                !opponent.contains("Sentinel Bears"),
+                "opponent projection names the hidden card after a move to {destination:?}"
+            );
+
+            // The owner can see their own hand, but not their own library, so only the hand
+            // move leaves the card identified to them and keeps its LKI.
+            let owner_view = filter_state_for_viewer(&state, owner);
+            assert_eq!(
+                owner_view.lki_cache.contains_key(&secret),
+                destination == Zone::Hand,
+                "owner LKI retention after a move to {destination:?}"
+            );
+        }
+    }
+
+    /// CR 400.2 + CR 400.7: the cast-history, entry, sacrifice, damage and attack-declaration
+    /// ledgers and the linked-exile LKI record a hidden object by id. The opponent's
+    /// projection blanks the identifying fields but keeps every record, so the counts those
+    /// ledgers answer are unchanged. Cast records keep the characteristics cost and count
+    /// readers filter on and lose only the name and the id link. SHAPE test: the records are
+    /// seeded, not written by their production writers (those are driven in
+    /// tests/integration/issue_9377_hidden_identity_side_tables.rs).
+    #[test]
+    fn hidden_object_ledger_records_are_blanked_but_counted_for_opponent() {
+        use crate::types::game_state::{
+            BattlefieldEntryRecord, DamageRecord, LinkedExileSnapshot, SpellCastRecord,
+            ZoneChangeRecord,
+        };
+
+        let mut state = GameState::new_two_player(42);
+        let owner = PlayerId(0);
+        let opponent_id = PlayerId(1);
+        let secret = create_object(
+            &mut state,
+            CardId(7),
+            owner,
+            "Ledger Sentinel".to_string(),
+            Zone::Hand,
+        );
+        let public_member = create_object(
+            &mut state,
+            CardId(8),
+            owner,
+            "Public Exile Member".to_string(),
+            Zone::Exile,
+        );
+        let cast = SpellCastRecord {
+            name: "Ledger Sentinel".to_string(),
+            core_types: vec![CoreType::Creature],
+            mana_value: 4,
+            spell_object_id: Some(secret),
+            ..Default::default()
+        };
+        state
+            .spells_cast_this_turn_by_player
+            .entry(owner)
+            .or_default()
+            .push_back(cast.clone());
+        state
+            .spells_cast_this_game_by_player
+            .entry(owner)
+            .or_default()
+            .push_back(cast);
+        state
+            .battlefield_entries_this_turn
+            .push(BattlefieldEntryRecord {
+                object_id: secret,
+                name: "Ledger Sentinel".to_string(),
+                core_types: vec![CoreType::Creature],
+                subtypes: Vec::new(),
+                supertypes: Vec::new(),
+                colors: Vec::new(),
+                keywords: Vec::new(),
+                controller: owner,
+            });
+        state
+            .sacrificed_permanents_this_turn
+            .push_back(ZoneChangeRecord {
+                name: "Ledger Sentinel".to_string(),
+                ..ZoneChangeRecord::test_minimal(secret, Some(Zone::Battlefield), Zone::Graveyard)
+            });
+        state.linked_exile_lki.insert(
+            ObjectId(9_999),
+            vec![
+                LinkedExileSnapshot {
+                    exiled_id: secret,
+                    owner,
+                    mana_value: 4,
+                },
+                LinkedExileSnapshot {
+                    exiled_id: public_member,
+                    owner,
+                    mana_value: 3,
+                },
+            ],
+        );
+        state.damage_dealt_this_turn.push_back(DamageRecord {
+            source_id: secret,
+            source_controller: owner,
+            target: crate::types::ability::TargetRef::Player(opponent_id),
+            target_controller: opponent_id,
+            amount: 2,
+            source_name: "Ledger Sentinel".to_string(),
+            source_core_types: vec![CoreType::Creature],
+            source_mana_value: 4,
+            ..Default::default()
+        });
+        let attack_record = state.objects[&secret].snapshot_for_attack_declaration(secret);
+        state.attacker_declarations_this_turn.push(attack_record);
+
+        // Reach-guards: every seeded record names the card before projection.
+        assert_eq!(
+            state.spells_cast_this_turn_by_player[&owner][0].name,
+            "Ledger Sentinel"
+        );
+        assert_eq!(
+            state.damage_dealt_this_turn[0].source_name,
+            "Ledger Sentinel"
+        );
+        assert_eq!(
+            state.attacker_declarations_this_turn[0].lki.name,
+            "Ledger Sentinel"
+        );
+        assert_eq!(state.linked_exile_lki[&ObjectId(9_999)][0].mana_value, 4);
+
+        let opponent = filter_state_for_viewer(&state, opponent_id);
+        assert_eq!(
+            opponent.objects[&secret].name, HIDDEN_CARD_NAME,
+            "reach-guard: the hand card is hidden from the opponent"
+        );
+        let json = serde_json::to_string(&opponent).expect("opponent projection serializes");
+        assert!(
+            !json.contains("Ledger Sentinel"),
+            "opponent projection still names the hidden card in a ledger"
+        );
+
+        for records in [
+            &opponent.spells_cast_this_turn_by_player[&owner],
+            &opponent.spells_cast_this_game_by_player[&owner],
+        ] {
+            assert_eq!(records.len(), 1);
+            let record = &records[0];
+            assert_eq!(record.name, HIDDEN_CARD_NAME);
+            assert_eq!(record.spell_object_id, None);
+            assert_eq!(
+                record.core_types,
+                vec![CoreType::Creature],
+                "cast-history filter columns stay so cost readers agree with raw state"
+            );
+            assert_eq!(record.mana_value, 4);
+        }
+
+        assert_eq!(opponent.battlefield_entries_this_turn.len(), 1);
+        assert_eq!(
+            opponent.battlefield_entries_this_turn[0].name,
+            HIDDEN_CARD_NAME
+        );
+        assert!(opponent.battlefield_entries_this_turn[0]
+            .core_types
+            .is_empty());
+        assert_eq!(opponent.sacrificed_permanents_this_turn.len(), 1);
+        assert_eq!(
+            opponent.sacrificed_permanents_this_turn[0].name,
+            HIDDEN_CARD_NAME
+        );
+
+        let members = &opponent.linked_exile_lki[&ObjectId(9_999)];
+        assert_eq!(members.len(), 2, "the linked-exile count is preserved");
+        assert_eq!(
+            members[0].mana_value, 0,
+            "a hidden linked-exile card keeps no mana value"
+        );
+        assert_eq!(
+            members[1].mana_value, 3,
+            "a public linked-exile member keeps its mana value"
+        );
+
+        assert_eq!(opponent.damage_dealt_this_turn.len(), 1);
+        let damage = &opponent.damage_dealt_this_turn[0];
+        assert_eq!(damage.source_name, HIDDEN_CARD_NAME);
+        assert!(damage.source_core_types.is_empty());
+        assert_eq!(damage.source_mana_value, 0);
+        assert_eq!(damage.amount, 2, "the damage amount is not identity");
+
+        assert_eq!(opponent.attacker_declarations_this_turn.len(), 1);
+        let attack = &opponent.attacker_declarations_this_turn[0];
+        assert_eq!(attack.object_id, secret);
+        assert_eq!(attack.lki.name, HIDDEN_CARD_NAME);
+        assert_eq!(attack.lki.mana_value, 0);
+
+        let owner_view = filter_state_for_viewer(&state, owner);
+        assert_eq!(
+            owner_view.spells_cast_this_turn_by_player[&owner][0].name, "Ledger Sentinel",
+            "the owner keeps their own hand card's history"
+        );
+        assert_eq!(
+            owner_view.spells_cast_this_turn_by_player[&owner][0].spell_object_id,
+            Some(secret)
+        );
+        assert_eq!(
+            owner_view.damage_dealt_this_turn[0].source_name,
+            "Ledger Sentinel"
+        );
+    }
 
     #[test]
     fn viewer_projection_redacts_private_cube_booster_pool() {
