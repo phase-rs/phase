@@ -7777,6 +7777,16 @@ pub enum TargetFilter {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         caused_by: Option<ThisWayCause>,
     },
+    /// CR 608.2c + CR 608.2d: the resolving ability's own object→player
+    /// assignment, read on `side` ("Each opponent gains control of the permanent
+    /// for which they were chosen"). Resolution-scoped, never a target (CR 115.10a):
+    /// resolved only by `gain_control::resolve_give` (objects through
+    /// `give_control_object_targets`, the per-object player through GiveControl's
+    /// recipient authority); every other consumer declines it (matches nothing,
+    /// claims no target slot).
+    ChoiceAssignment {
+        side: ChoiceAssignmentSide,
+    },
     /// CR 607.2a: Cards exiled by a specific source via "exile until ~ leaves" links.
     /// Resolves via relational `state.exile_links` lookup, not intrinsic object properties.
     ExiledBySource,
@@ -21496,6 +21506,10 @@ impl TargetFilter {
                 | TargetFilter::ControllerAndControlledPermanents { .. }
                 | TargetFilter::TrackedSet { .. }
                 | TargetFilter::TrackedSetFiltered { .. }
+                // CR 115.10a + CR 608.2c: the resolving ability's own
+                // object→player assignment is read during resolution, never
+                // declared as a target.
+                | TargetFilter::ChoiceAssignment { .. }
         )
     }
 
@@ -28408,6 +28422,20 @@ pub struct SpellContext {
 pub struct ObjectPlayerAssignment {
     pub object: ObjectId,
     pub player: PlayerId,
+}
+
+/// CR 608.2c + CR 608.2d: which projection of the resolving ability's
+/// object→player assignment (`SpellContext::object_player_assignment`) a
+/// `TargetFilter::ChoiceAssignment` reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ChoiceAssignmentSide {
+    /// The objects the assignment pairs with a player — "the permanent for
+    /// which they were chosen".
+    Objects,
+    /// The player the assignment pairs with the object the resolving effect is
+    /// acting on — "they [were chosen for it]". Resolved per object by the
+    /// handler that acts on that object (`gain_control::resolve_give`).
+    PlayerForObject,
 }
 
 impl SpellContext {
@@ -36089,6 +36117,51 @@ mod tests {
             .expect("a payload without the keys deserializes");
         assert!(restored.object_player_assignment.is_empty());
         assert_eq!(restored.pending_choice_member, None);
+    }
+
+    /// V3b.8 (A3.14): `TargetFilter::ChoiceAssignment` is an additive variant
+    /// of the internally tagged enum — each projection round-trips under its
+    /// own `side`, a `GiveControl` carrying both round-trips equal, and an
+    /// existing variant's JSON still reads as before.
+    #[test]
+    fn choice_assignment_serde_round_trip() {
+        for (side, name) in [
+            (ChoiceAssignmentSide::Objects, "Objects"),
+            (ChoiceAssignmentSide::PlayerForObject, "PlayerForObject"),
+        ] {
+            let filter = TargetFilter::ChoiceAssignment { side };
+            let wire = serde_json::to_value(&filter).expect("filter serializes");
+            assert_eq!(
+                wire,
+                serde_json::json!({ "type": "ChoiceAssignment", "side": name })
+            );
+            assert_eq!(
+                serde_json::from_value::<TargetFilter>(wire).expect("filter deserializes"),
+                filter
+            );
+        }
+
+        let handoff = Effect::GiveControl {
+            target: TargetFilter::ChoiceAssignment {
+                side: ChoiceAssignmentSide::Objects,
+            },
+            recipient: TargetFilter::ChoiceAssignment {
+                side: ChoiceAssignmentSide::PlayerForObject,
+            },
+        };
+        let wire = serde_json::to_value(&handoff).expect("effect serializes");
+        assert_eq!(
+            serde_json::from_value::<Effect>(wire).expect("effect deserializes"),
+            handoff
+        );
+
+        assert_eq!(
+            serde_json::from_str::<TargetFilter>(r#"{"type":"TrackedSet","id":3}"#)
+                .expect("an existing variant still deserializes"),
+            TargetFilter::TrackedSet {
+                id: crate::types::identifiers::TrackedSetId(3)
+            }
+        );
     }
 
     /// V3a.10 (CR 608.2c + CR 608.2d): the recording authority and the carry

@@ -865,7 +865,7 @@ pub(super) fn target_filter_matches_object(
         TargetFilter::Opponent => false,
         // CR 109.5: OriginalController is a player reference, not an object.
         TargetFilter::OriginalController => false,
-        TargetFilter::ScopedPlayer => false,
+        TargetFilter::ScopedPlayer | TargetFilter::ChoiceAssignment { .. } => false,
         // SpecificPlayer scopes to a player, not an object — never matches an object.
         TargetFilter::SpecificPlayer { .. } => false,
         // CR 607 (by analogy): PlayerWhoChoseLabel scopes to players, not objects.

@@ -20,9 +20,9 @@ use crate::parser::oracle_util::normalize_card_name_refs;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityUseTally,
     ActivationRestriction, AdditionalCost, AggregateFunction, AttackSubject, AttackedYouScope,
-    AttackerBlockStatus, CardTypeSetSource, ChoiceType, CoinFlipResult, CombatHistoryScope,
-    CommanderOwnership, Comparator, ContinuousModification, ControllerRef, CountScope,
-    CounterKindChooser, CounterKindDomain, CounterSourceRider, DelayedTriggerCondition,
+    AttackerBlockStatus, CardTypeSetSource, ChoiceAssignmentSide, ChoiceType, CoinFlipResult,
+    CombatHistoryScope, CommanderOwnership, Comparator, ContinuousModification, ControllerRef,
+    CountScope, CounterKindChooser, CounterKindDomain, CounterSourceRider, DelayedTriggerCondition,
     DieRollModifier, DoublePTMode, Duration, EachDamageRecipient, Effect, EffectOutcomeSignal,
     EffectScope, FilterProp, ForEachCategoryAction, GameRestriction, LetterQuery, LibraryPosition,
     ManaProduction, MassLibraryShuffleMode, NameStickerSet, ObjectProperty, ObjectScope,
@@ -812,6 +812,10 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::TrackedSetFiltered { id, filter, .. } => {
             format!("tracked set #{} matching {}", id.0, fmt_target(filter))
         }
+        TargetFilter::ChoiceAssignment { side } => match side {
+            ChoiceAssignmentSide::Objects => "the objects chosen for players".into(),
+            ChoiceAssignmentSide::PlayerForObject => "the player chosen for each object".into(),
+        },
         TargetFilter::ExiledBySource => "cards exiled by source".into(),
         TargetFilter::HasChosenName => "card with the chosen name".into(),
         TargetFilter::ChosenDamageSource { filter: Some(f) } => {

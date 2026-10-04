@@ -1479,6 +1479,7 @@ pub(crate) fn freeze_resolution_cast_filter(
         | TargetFilter::LastCreated
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TriggeringSpellController
