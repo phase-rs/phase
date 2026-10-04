@@ -25783,6 +25783,14 @@ impl GameState {
             {
                 self.remove_empty_active_post_replacement_frame();
             }
+            // CR 608.2c + CR 615.5: a nested replacement dispatch retired while
+            // the outer dispatch is still paused beneath it. The outer dispatch's
+            // own later instructions (an outer chain's tail parked outside the
+            // pair) now resume with that outer event context readable, so promote
+            // them out from under its frame; their completion retires it.
+            let _ = self
+                .resolution_stack
+                .promote_ability_continuation_after_post_replacement_draw();
             // CR 614.12a + CR 614.13a: a Devour-only ChangeZone snapshot stays
             // resident while its exact post-replacement child resolves. Once that
             // child is retired, the snapshot is again the active owner and its

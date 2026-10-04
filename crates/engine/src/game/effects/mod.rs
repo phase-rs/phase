@@ -1287,6 +1287,14 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
             // CR 615.5: a resumed continuation completes its own paused
             // resident drain only after it has not raised another choice.
             state.finish_active_paused_post_replacement_dispatch();
+            // CR 608.2c: retiring a nested dispatch can expose the outer
+            // dispatch's own later instructions as the active continuation;
+            // they are the next written instructions, so run them now.
+            if !waits_for_resolution_choice(&state.waiting_for)
+                && state.active_ability_continuation().is_some()
+            {
+                drain_pending_continuation(state, events);
+            }
         }
     }
     // CR 701.38d: Resume per-ballot vote iteration after an interactive
@@ -14513,6 +14521,27 @@ pub fn resolve_ability_chain(
     result
 }
 
+/// Replace the `LastRevealed` pile of every mass placement later in `ability`'s
+/// continuation with the exact revealed cards (see the call site).
+fn bind_revealed_pile_placement(ability: &mut ResolvedAbility, revealed: &[ObjectId]) {
+    if let Effect::ChangeZoneAll { target, .. } = &mut ability.effect {
+        if *target == TargetFilter::LastRevealed {
+            *target = TargetFilter::Or {
+                filters: revealed
+                    .iter()
+                    .map(|&id| TargetFilter::SpecificObject { id })
+                    .collect(),
+            };
+        }
+    }
+    if let Some(sub) = ability.sub_ability.as_deref_mut() {
+        bind_revealed_pile_placement(sub, revealed);
+    }
+    if let Some(else_ability) = ability.else_ability.as_deref_mut() {
+        bind_revealed_pile_placement(else_ability, revealed);
+    }
+}
+
 /// The per-resolution state `resolve_ability_chain` clears before a top-level
 /// chain's first instruction.
 fn reset_top_level_resolution_state(state: &mut GameState) {
@@ -17068,6 +17097,28 @@ fn resolve_chain_body(
         ability
     };
 
+    // CR 608.2c: "the revealed cards" of a reveal-only until-loop name the cards
+    // THAT reveal looked at. Bind the later pile placement to those exact cards
+    // now, on the continuation itself, so an instruction that resolves in between
+    // — a replacement's own child chain, with its own reveal and any pause —
+    // cannot change which cards the placement moves.
+    let revealed_pile_owned;
+    let ability = if matches!(
+        &ability.effect,
+        Effect::RevealUntil {
+            matched_disposition: RevealUntilDisposition::RevealOnly,
+            ..
+        }
+    ) && ability.sub_ability.is_some()
+    {
+        let mut owned = ability.clone();
+        bind_revealed_pile_placement(&mut owned, &state.last_revealed_ids);
+        revealed_pile_owned = owned;
+        &revealed_pile_owned
+    } else {
+        ability
+    };
+
     // CR 608.2c + CR 613.1: A chained sub-ability is the next instruction in the
     // same resolution (instructions are followed "in the order written"), so it
     // resolves AFTER the parent's effect and must read the object's CURRENT
@@ -17501,10 +17552,9 @@ fn resolve_chain_body(
                             state.active_ability_continuation().is_none(),
                             "pending_continuation overwritten before consumption — else_ability chain will be lost"
                         );
-                        state.park_ability_continuation(PendingContinuation::new(
-                            Box::new(resolved),
-                            state,
-                        ));
+                        // The shared continuation authority places it relative to
+                        // whatever paused (a draw pair, a direct choice).
+                        append_to_pending_continuation(state, Some(Box::new(resolved)));
                     } else {
                         resolve_ability_chain(state, &resolved, events, depth + 1)?;
                     }
@@ -17589,10 +17639,10 @@ fn resolve_chain_body(
                                 state.active_ability_continuation().is_none(),
                                 "pending_continuation overwritten before consumption — instead-tail chain will be lost"
                             );
-                            state.park_ability_continuation(PendingContinuation::new(
-                                Box::new(resolved),
-                                state,
-                            ));
+                            // CR 608.2c: the tail is a later instruction of the
+                            // parent; the shared continuation authority keeps it
+                            // outside a paused replacement draw pair.
+                            append_to_pending_continuation(state, Some(Box::new(resolved)));
                         } else {
                             resolve_ability_chain(state, &resolved, events, depth + 1)?;
                         }
@@ -18998,6 +19048,17 @@ fn revealed_card_type_condition_subject<'a>(
     state: &'a GameState,
     ability: &'a ResolvedAbility,
 ) -> Option<(ObjectId, Option<&'a crate::types::game_state::LKISnapshot>)> {
+    // CR 608.2c + CR 701.20a: a reveal that looks at several cards ("reveal cards
+    // until you reveal a land card") designates one of them — the card that met
+    // its until-condition — as the demonstrative referent. "The revealed land
+    // card" is that card, not whichever card was revealed first.
+    if let Some(snapshot) = ability.effect_context_object.as_ref() {
+        if state.last_revealed_ids.len() > 1
+            && state.last_revealed_ids.contains(&snapshot.object_id)
+        {
+            return Some((snapshot.object_id, Some(&snapshot.lki)));
+        }
+    }
     state
         .last_revealed_ids
         .first()
@@ -20538,6 +20599,60 @@ fn resolve_add_pending_enters_modifications(
 mod tests {
     use super::*;
     use crate::database::synthesis::synthesize_extort;
+
+    /// CR 608.2c: the pile placement after a reveal-only until-loop is bound to the
+    /// exact cards that reveal looked at, on the continuation itself — so an
+    /// instruction resolving in between (a replacement's own reveal) cannot change
+    /// which cards the placement moves. Only the `LastRevealed` placement is bound.
+    #[test]
+    fn reveal_pile_placement_binds_to_the_exact_revealed_cards() {
+        let placement = |target| {
+            ResolvedAbility::new(
+                Effect::ChangeZoneAll {
+                    origin: Some(Zone::Library),
+                    destination: Zone::Library,
+                    target,
+                    enters_under: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    enter_with_counters: vec![],
+                    face_down_profile: None,
+                    library_position: Some(crate::types::ability::LibraryPosition::Bottom),
+                    library_shuffle: Default::default(),
+                    random_order: false,
+                },
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            )
+        };
+        let mut chain = placement(TargetFilter::Controller);
+        chain.sub_ability = Some(Box::new(placement(TargetFilter::LastRevealed)));
+
+        bind_revealed_pile_placement(&mut chain, &[ObjectId(7), ObjectId(8)]);
+
+        let Effect::ChangeZoneAll { target, .. } = &chain.effect else {
+            panic!("expected ChangeZoneAll");
+        };
+        assert_eq!(
+            target,
+            &TargetFilter::Controller,
+            "other targets are untouched"
+        );
+        let Effect::ChangeZoneAll { target, .. } = &chain.sub_ability.as_ref().unwrap().effect
+        else {
+            panic!("expected ChangeZoneAll");
+        };
+        assert_eq!(
+            target,
+            &TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::SpecificObject { id: ObjectId(7) },
+                    TargetFilter::SpecificObject { id: ObjectId(8) },
+                ]
+            }
+        );
+    }
 
     /// CR 608.2b: only an empty node carrying measured removal evidence refuses
     /// parent-target inheritance; an intentionally empty node retains it.
