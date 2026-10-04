@@ -2,8 +2,11 @@ use std::sync::Arc;
 
 use engine::game::engine::{apply, apply_interaction};
 use engine::game::layers::mark_layers_full;
+use engine::game::public_state::sync_waiting_for;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::turn_control::authorized_submitter_for_player;
 use engine::game::visibility::{filter_state_for_unseated_viewer, filter_state_for_viewer};
+use engine::game::zone_pipeline::{move_object_for_test, ZoneMoveRequest};
 use engine::types::ability::{
     AbilityDefinition, AbilityKind, Comparator, DamageModification, DamageTargetFilter,
     DrawReplacementScope, Effect, QuantityExpr, QuantityModification, QuantityRef,
@@ -13,7 +16,7 @@ use engine::types::actions::{GameAction, ReplacementAutoChoice};
 use engine::types::game_state::{
     GameState, PersistedGameState, ReplacementAutoChoiceIdentity, ReplacementChoiceKind, WaitingFor,
 };
-use engine::types::identifiers::ObjectId;
+use engine::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use engine::types::mana::{ManaType, ManaUnit, StepEndManaAction};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -33,6 +36,24 @@ fn remember_optional(index: usize) -> GameAction {
     GameAction::ChooseReplacementAndRemember {
         choice: ReplacementAutoChoice::Optional { index },
     }
+}
+
+fn move_fixture_object(state: &mut GameState, object: ObjectId, destination: Zone) {
+    let before = ObjectIncarnationRef::from_object(&state.objects[&object]);
+    assert!(
+        !move_object_for_test(
+            state,
+            ZoneMoveRequest::effect(object, destination, object),
+            &mut Vec::new(),
+        ),
+        "fixture move must complete without a replacement choice"
+    );
+    assert_eq!(state.objects[&object].zone, destination);
+    // CR 400.7: each zone change creates a new object incarnation.
+    assert_ne!(
+        ObjectIncarnationRef::from_object(&state.objects[&object]),
+        before
+    );
 }
 
 fn replacement_index(state: &GameState, source: ObjectId) -> usize {
@@ -103,6 +124,124 @@ fn assert_prompt(state: &GameState, kind: ReplacementChoiceKind, available: bool
     };
     assert_eq!(*actual, kind);
     assert_eq!(remember_identity.is_some(), available);
+}
+
+fn assert_owner_preferences_suspend_under_control(optional: bool) {
+    let (mut runner, sources, spells) = life_scenario(optional);
+    let kind = if optional {
+        ReplacementChoiceKind::OptionalBranch
+    } else {
+        ReplacementChoiceKind::Order
+    };
+    assert_eq!(authorized_submitter_for_player(runner.state(), P0), P0);
+    runner.cast(spells[0]).resolve();
+    assert_prompt(runner.state(), kind, true);
+    let action = if optional {
+        remember_optional(0)
+    } else {
+        remember_source_order(runner.state(), &[sources[1], sources[0], sources[2]])
+    };
+    runner.act(action).unwrap();
+    let saved = runner.state().replacement_auto_choices.clone();
+    assert_eq!(
+        saved.len(),
+        1,
+        "the owner's preference must exist before control"
+    );
+    assert_eq!(
+        runner.state().players[0].life,
+        if optional { 20 } else { 27 }
+    );
+
+    {
+        let state = runner.state_mut();
+        state.turn_decision_controller = Some(P1);
+        state.priority_passes.clear();
+        sync_waiting_for(state, &WaitingFor::Priority { player: P0 });
+    }
+    assert_eq!(authorized_submitter_for_player(runner.state(), P0), P1);
+    runner.cast(spells[1]).resolve();
+    // CR 723.5b: control grants game decisions, not the owner's saved preferences.
+    assert_prompt(runner.state(), kind, false);
+    assert_eq!(runner.state().replacement_auto_choices, saved);
+    for state in [
+        runner.state().clone(),
+        filter_state_for_viewer(runner.state(), P0),
+        filter_state_for_viewer(runner.state(), P1),
+    ] {
+        let snapshot = serde_json::to_value(state).unwrap();
+        assert!(snapshot["waiting_for"]["data"]["remember_identity"].is_null());
+    }
+    let action = if optional {
+        remember_optional(1)
+    } else {
+        remember_source_order(runner.state(), &sources)
+    };
+    let before = serde_json::to_value(runner.state()).unwrap();
+    assert!(apply(runner.state_mut(), P1, action.clone()).is_err());
+    assert_eq!(serde_json::to_value(runner.state()).unwrap(), before);
+    assert!(apply_interaction(runner.state_mut(), P1, P0, action).is_err());
+    assert_eq!(serde_json::to_value(runner.state()).unwrap(), before);
+
+    // CR 723.5: the controller still makes ordinary replacement decisions.
+    if optional {
+        apply(
+            runner.state_mut(),
+            P1,
+            GameAction::ChooseReplacement { index: 1 },
+        )
+        .unwrap();
+    } else {
+        for source in &sources {
+            if matches!(
+                runner.state().waiting_for,
+                WaitingFor::ReplacementChoice { .. }
+            ) {
+                let index = replacement_index(runner.state(), *source);
+                apply(
+                    runner.state_mut(),
+                    P1,
+                    GameAction::ChooseReplacement { index },
+                )
+                .unwrap();
+            }
+        }
+    }
+    assert_eq!(
+        runner.state().players[0].life,
+        if optional { 21 } else { 33 }
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(runner.state().replacement_auto_choices, saved);
+
+    {
+        let state = runner.state_mut();
+        state.turn_decision_controller = None;
+        state.priority_passes.clear();
+        sync_waiting_for(state, &WaitingFor::Priority { player: P0 });
+    }
+    assert_eq!(authorized_submitter_for_player(runner.state(), P0), P0);
+    let outcome = runner.cast(spells[2]).resolve();
+    outcome.assert_life_delta(P0, if optional { 0 } else { 7 });
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(outcome.state().replacement_auto_choices, saved);
+    assert!(outcome.state().replacement_auto_choice_tail.is_none());
+}
+
+#[test]
+fn remembered_order_is_owner_only_and_suspends_until_control_ends() {
+    assert_owner_preferences_suspend_under_control(false);
+}
+
+#[test]
+fn remembered_optional_branch_is_owner_only_and_suspends_until_control_ends() {
+    assert_owner_preferences_suspend_under_control(true);
 }
 
 #[test]
@@ -190,26 +329,11 @@ fn matching_sources_with_changed_definition_or_incarnation_or_set_prompt_again()
                 mark_layers_full(runner.state_mut());
             }
             1 => {
-                engine::game::zones::move_to_zone(
-                    runner.state_mut(),
-                    sources[0],
-                    Zone::Exile,
-                    &mut Vec::new(),
-                );
-                engine::game::zones::move_to_zone(
-                    runner.state_mut(),
-                    sources[0],
-                    Zone::Battlefield,
-                    &mut Vec::new(),
-                );
+                move_fixture_object(runner.state_mut(), sources[0], Zone::Exile);
+                move_fixture_object(runner.state_mut(), sources[0], Zone::Battlefield);
             }
             2 => {
-                engine::game::zones::move_to_zone(
-                    runner.state_mut(),
-                    sources[2],
-                    Zone::Exile,
-                    &mut Vec::new(),
-                );
+                move_fixture_object(runner.state_mut(), sources[2], Zone::Exile);
             }
             _ => unreachable!(),
         }
@@ -267,7 +391,7 @@ fn plain_optional_accept_and_decline_are_distinct_and_recur_after_restore() {
             WaitingFor::ReplacementChoice { .. }
         ));
         assert_eq!(restored.players[0].life, 20 + 2 * gain);
-        engine::game::zones::move_to_zone(&mut restored, sources[0], Zone::Exile, &mut Vec::new());
+        move_fixture_object(&mut restored, sources[0], Zone::Exile);
         assert_eq!(
             restored.replacement_auto_choices[0].descriptions,
             descriptions
@@ -516,7 +640,7 @@ fn step_end_preferences_follow_real_handler_sources_across_scan_reordering() {
         )
         .id();
     let mut runner = scenario.build();
-    engine::game::zones::move_to_zone(runner.state_mut(), unrelated, Zone::Exile, &mut Vec::new());
+    move_fixture_object(runner.state_mut(), unrelated, Zone::Exile);
     runner.state_mut().players[0].mana_pool.add(ManaUnit::new(
         ManaType::Blue,
         convert,
@@ -568,12 +692,7 @@ fn step_end_preferences_follow_real_handler_sources_across_scan_reordering() {
             .count_color(ManaType::Red),
         2
     );
-    engine::game::zones::move_to_zone(
-        runner.state_mut(),
-        unrelated,
-        Zone::Battlefield,
-        &mut Vec::new(),
-    );
+    move_fixture_object(runner.state_mut(), unrelated, Zone::Battlefield);
     runner.state_mut().players[0].mana_pool.add(ManaUnit::new(
         ManaType::Blue,
         convert,
@@ -677,6 +796,120 @@ fn hidden_origin_prompt_identity_is_visible_only_to_the_authorized_actor() {
 }
 
 #[test]
+fn exhausted_remembered_draw_order_allows_a_newly_applicable_replacement() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(
+        P0,
+        &[
+            "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine", "Ten",
+            "Eleven", "Twelve", "Thirteen", "Fourteen",
+        ],
+    );
+    let original_count = QuantityExpr::Ref {
+        qty: QuantityRef::EventContextAmount,
+    };
+    let counts = [
+        QuantityExpr::Offset {
+            offset: 1,
+            inner: Box::new(original_count.clone()),
+        },
+        QuantityExpr::Multiply {
+            factor: 2,
+            inner: Box::new(original_count.clone()),
+        },
+        QuantityExpr::Offset {
+            offset: 3,
+            inner: Box::new(original_count.clone()),
+        },
+    ];
+    let mut sources = Vec::new();
+    for (index, count) in counts.into_iter().enumerate() {
+        let mut definition = ReplacementDefinition::new(ReplacementEvent::Draw)
+            .draw_scope(DrawReplacementScope::InstructionCount)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count,
+                    target: TargetFilter::Controller,
+                },
+            ));
+        if index == 2 {
+            definition = definition.condition(ReplacementCondition::OnlyIfQuantity {
+                lhs: original_count.clone(),
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 4 },
+                active_player_req: None,
+            });
+        }
+        sources.push(
+            scenario
+                .add_creature(P0, "Draw modifier", 1, 1)
+                .with_replacement_definition(definition)
+                .id(),
+        );
+    }
+    let spells: Vec<_> = (0..2)
+        .map(|_| {
+            scenario
+                .add_spell_to_hand(P0, "Draw spell", true)
+                .with_ability(Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                })
+                .id()
+        })
+        .collect();
+    let mut runner = scenario.build();
+    runner.cast(spells[0]).resolve().assert_hand_drawn(P0, 0);
+    assert_prompt(runner.state(), ReplacementChoiceKind::Order, true);
+    let WaitingFor::ReplacementChoice {
+        candidates,
+        candidate_count,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        unreachable!();
+    };
+    assert_eq!(
+        *candidate_count, 2,
+        "only A and B apply to the original count"
+    );
+    assert_eq!(candidates.len(), 2);
+    assert!(candidates
+        .iter()
+        .all(|candidate| sources[..2].contains(&candidate.source_id)));
+    runner
+        .act(remember_source_order(runner.state(), &sources[..2]))
+        .unwrap();
+    // CR 616.1f + CR 616.2: after A then B exhaust the order (1 → 2 → 4),
+    // the newly applicable mandatory C runs without a confirmation (4 → 7).
+    assert_eq!(
+        runner.state().players[0].hand.len(),
+        8,
+        "seven drawn cards and the second spell"
+    );
+    assert_eq!(runner.state().players[0].library.len(), 7);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().replacement_auto_choice_tail.is_none());
+    let saved = runner.state().replacement_auto_choices.clone();
+    assert_eq!(saved.len(), 1);
+
+    let outcome = runner.cast(spells[1]).resolve();
+    outcome.assert_hand_drawn(P0, 7);
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+    assert!(outcome.state().players[0].library.is_empty());
+    assert!(outcome.state().replacement_auto_choice_tail.is_none());
+    assert_eq!(outcome.state().replacement_auto_choices, saved);
+}
+
+#[test]
 fn changed_tail_with_one_remaining_candidate_can_remember_a_singleton_order() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
@@ -750,6 +983,7 @@ fn changed_tail_with_one_remaining_candidate_can_remember_a_singleton_order() {
     assert!(runner.state().replacement_auto_choice_tail.is_none());
     assert!(runner.act(remember_optional(0)).is_err());
     runner.act(remember_order(&[0])).unwrap();
+    assert!(runner.state().replacement_auto_choice_tail.is_none());
     assert_eq!(runner.state().players[0].hand.len(), 4, "(one + one) * two");
     assert_eq!(runner.state().replacement_auto_choices.len(), 2);
     assert!(!matches!(

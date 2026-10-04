@@ -11379,10 +11379,16 @@ pub(crate) fn replacement_auto_choice_key(state: &GameState) -> Option<Replaceme
     if pending.may_cost_paid || pending.may_cost_remaining.is_some() {
         return None;
     }
+    let player = pending
+        .choice_player
+        .unwrap_or_else(|| pending.proposed.affected_player(state));
+    // CR 723.5b: saved preferences are not decisions called for by the rules
+    // or an object, so another player's controller cannot set or replay them.
+    if super::turn_control::authorized_submitter_for_player(state, player) != player {
+        return None;
+    }
     Some(ReplacementAutoChoiceKey {
-        player: pending
-            .choice_player
-            .unwrap_or_else(|| pending.proposed.affected_player(state)),
+        player,
         event: auto_choice_event(&pending.proposed)?,
         kind: if pending.is_optional {
             ReplacementChoiceKind::OptionalBranch
@@ -11439,11 +11445,14 @@ pub(crate) fn remember_replacement_choice(
                 .map(|index| key.candidates[*index].clone())
                 .collect();
             remaining.remove(0);
-            state.replacement_auto_choice_tail = Some(ReplacementAutoChoiceTail {
-                player: key.player,
-                event: key.event.clone(),
-                remaining,
-            });
+            // CR 616.1f + CR 616.2: exhaustion ends the saved sequence; a
+            // newly applicable replacement is handled by the ordinary rescan.
+            state.replacement_auto_choice_tail =
+                (!remaining.is_empty()).then_some(ReplacementAutoChoiceTail {
+                    player: key.player,
+                    event: key.event.clone(),
+                    remaining,
+                });
             (
                 order[0],
                 order.iter().map(|index| description(*index)).collect(),
@@ -11497,10 +11506,9 @@ fn replay_pending_replacement(
                     .iter()
                     .position(|identity| Some(identity) == tail.remaining.first());
                 if index.is_some() {
-                    state.replacement_auto_choice_tail = Some(ReplacementAutoChoiceTail {
-                        remaining: tail.remaining.into_iter().skip(1).collect(),
-                        ..tail
-                    });
+                    let remaining: Vec<_> = tail.remaining.into_iter().skip(1).collect();
+                    state.replacement_auto_choice_tail = (!remaining.is_empty())
+                        .then_some(ReplacementAutoChoiceTail { remaining, ..tail });
                 }
                 index
             }
@@ -11533,11 +11541,12 @@ fn replay_pending_replacement(
                     .candidates
                     .iter()
                     .position(|identity| *identity == first)?;
-                state.replacement_auto_choice_tail = Some(ReplacementAutoChoiceTail {
-                    player,
-                    event: key.event,
-                    remaining,
-                });
+                state.replacement_auto_choice_tail =
+                    (!remaining.is_empty()).then_some(ReplacementAutoChoiceTail {
+                        player,
+                        event: key.event,
+                        remaining,
+                    });
                 Some(index)
             }
         })
@@ -11626,10 +11635,9 @@ fn pipeline_loop(
                             |identities| same_identity_set(&identities, &tail.remaining),
                         );
                     if matches {
-                        state.replacement_auto_choice_tail = Some(ReplacementAutoChoiceTail {
-                            remaining: tail.remaining.into_iter().skip(1).collect(),
-                            ..tail
-                        });
+                        let remaining: Vec<_> = tail.remaining.into_iter().skip(1).collect();
+                        state.replacement_auto_choice_tail = (!remaining.is_empty())
+                            .then_some(ReplacementAutoChoiceTail { remaining, ..tail });
                     }
                 }
             }
