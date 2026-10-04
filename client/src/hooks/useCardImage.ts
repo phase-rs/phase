@@ -1004,7 +1004,8 @@ export function useCardImage(
       setSources(nextSources);
       setSourceIndex(0);
       setSrc(displayedSrc);
-      const nextIsRotated = imageAsset?.isRotated ?? isCardImageRotatedSync(resolvedOracleId, cardName);
+      const nextIsRotated = imageAsset?.isRotated
+        ?? isCardImageRotatedSync(resolvedOracleId, cardName, resolvedFaceIndex);
       const nextIsFlip = isCardImageFlipLayoutSync(resolvedOracleId, cardName);
       setIsRotated(nextIsRotated);
       setIsFlip(nextIsFlip);
@@ -1084,7 +1085,7 @@ export function useCardImage(
               faceIndex: resolvedFaceIndex,
               alias: cardName.toLowerCase().normalize("NFC"),
             },
-            isCardImageRotatedSync(resolvedOracleId, cardName),
+            isCardImageRotatedSync(resolvedOracleId, cardName, resolvedFaceIndex),
           )
         : null;
     };

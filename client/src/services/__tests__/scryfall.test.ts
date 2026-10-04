@@ -763,6 +763,75 @@ describe("fetchCardImageAssetByOracleId — reversible cards (issue #2031)", () 
   });
 });
 
+describe("card image rotation — landscape faces (issue #9502)", () => {
+  const battleOracleId = "invasion-of-alara";
+  const roomOracleId = "unholy-annex-ritual-chamber";
+
+  function multiFaceEntry(
+    oracleId: string,
+    layout: string,
+    faceNames: [string, string],
+  ) {
+    return {
+      oracle_id: oracleId,
+      name: faceNames.join(" // "),
+      face_names: faceNames.map((faceName) => faceName.toLowerCase()),
+      faces: faceNames.map((faceName) => ({
+        normal: `https://img.example/${encodeURIComponent(faceName)}.jpg`,
+        art_crop: `https://img.example/${encodeURIComponent(faceName)}-art.jpg`,
+      })),
+      layout,
+      mana_cost: "",
+      cmc: 0,
+      type_line: "",
+      colors: [],
+      color_identity: [],
+      keywords: [],
+    };
+  }
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    global.fetch = vi.fn().mockResolvedValueOnce(jsonResponse({
+      [battleOracleId]: multiFaceEntry(
+        battleOracleId,
+        "battle",
+        ["Invasion of Alara", "Awaken the Maelstrom"],
+      ),
+      [roomOracleId]: multiFaceEntry(
+        roomOracleId,
+        "split",
+        ["Unholy Annex", "Ritual Chamber"],
+      ),
+    }));
+  });
+
+  it("rotates a battle's front face but keeps its portrait back face upright", async () => {
+    const { fetchCardImageAssetByOracleId, isCardImageRotatedSync } = await loadScryfallModule();
+
+    const front = await fetchCardImageAssetByOracleId(battleOracleId, "Invasion of Alara");
+    const back = await fetchCardImageAssetByOracleId(battleOracleId, "Awaken the Maelstrom");
+
+    expect(front.src).toBe("https://img.example/Invasion%20of%20Alara.jpg");
+    expect(front.isRotated).toBe(true);
+    expect(back.src).toBe("https://img.example/Awaken%20the%20Maelstrom.jpg");
+    expect(back.isRotated).toBe(false);
+    expect(isCardImageRotatedSync(battleOracleId, "Invasion of Alara", 0)).toBe(true);
+    expect(isCardImageRotatedSync(battleOracleId, "Awaken the Maelstrom", 1)).toBe(false);
+  });
+
+  it("rotates every half of a split layout, including a Room's second door", async () => {
+    const { fetchCardImageAssetByOracleId, isCardImageRotatedSync } = await loadScryfallModule();
+
+    const firstDoor = await fetchCardImageAssetByOracleId(roomOracleId, "Unholy Annex");
+    const secondDoor = await fetchCardImageAssetByOracleId(roomOracleId, "Ritual Chamber");
+
+    expect(firstDoor.isRotated).toBe(true);
+    expect(secondDoor.isRotated).toBe(true);
+    expect(isCardImageRotatedSync(roomOracleId, "Ritual Chamber", 1)).toBe(true);
+  });
+});
+
 describe("Scryfall generation scripts — reversible cards (issue #2031)", () => {
   const oracleId = "ea9709b6-4c37-4d5a-b04d-cd4c42e4f9dd";
 

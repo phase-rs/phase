@@ -506,11 +506,15 @@ export function resolveFaceIndexSync(
   return idx >= 0 ? idx : null;
 }
 
-export function isCardImageRotatedSync(oracleId: string, cardName: string): boolean {
+export function isCardImageRotatedSync(
+  oracleId: string,
+  cardName: string,
+  faceIndex: number,
+): boolean {
   if (!scryfallDataResolved) return false;
   const entry = scryfallDataResolved[oracleId.toLowerCase()]
     ?? lookupEntryByName(cardName);
-  return isSidewaysLayout(entry?.layout);
+  return isSidewaysFace(entry?.layout, faceIndex);
 }
 
 /** Kamigawa-style flip cards (Scryfall `layout: "flip"`) print both halves in a
@@ -681,7 +685,12 @@ function remoteImageSource(src: string, size: ImageSize): { source: CardImageSou
   return { source: { kind: "remote", src, rungs }, rungs };
 }
 
-function isSidewaysLayout(layout: string | undefined): boolean {
+/** Whether face `faceIndex` of a card is printed landscape, so its image must
+ * be turned to read. Split cards and Rooms (`layout: "split"`) print every half
+ * sideways on one image; a battle prints only its front face sideways — its back
+ * face (e.g. Invasion of Alara's Awaken the Maelstrom) is an ordinary portrait card. */
+function isSidewaysFace(layout: string | undefined, faceIndex: number): boolean {
+  if (layout === "battle") return faceIndex === 0;
   return layout === "split";
 }
 
@@ -1043,7 +1052,7 @@ function resolveImageAsset(
   const remote = remoteImageSource(src, size);
   return {
     src,
-    isRotated: isSidewaysLayout(entry.layout),
+    isRotated: isSidewaysFace(entry.layout, faceIndex),
     ...remote,
     semantic: {
       oracleId: entry.oracle_id.toLowerCase(),
