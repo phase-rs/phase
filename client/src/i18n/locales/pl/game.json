@@ -103,6 +103,24 @@
     "grant": "Zatwierdź",
     "decline": "Zachowaj priorytet"
   },
+  "sandboxLifeCorrection": {
+    "open": "Koryguj życie",
+    "title": "Korekta życia w trybie piaskownicy",
+    "description": "Użyj zwykłych kontrolek ręki i stosu, aby rzucić i rozpatrzyć stwora. Ten panel wysyła piaskownicową akcję SetLife przez istniejący adapter gry.",
+    "scopeNote": "Korekta przechodzi przez ścieżkę edycji gracza w silniku; nie oznacza obrażeń ani efektu karty. Ten zakres nie obejmuje ujawniania ukrytej ręki, odrzucania zgodnie z regułami ani uzgodnionego wcześniej cofnięcia przed rzuceniem.",
+    "target": "Gracz",
+    "player": "{{name}} (gracz {{seat}})",
+    "you": "Ty",
+    "opponent": "Przeciwnik",
+    "currentLife": "Obecna liczba punktów życia",
+    "newLife": "Nowa liczba punktów życia",
+    "submit": "Zastosuj korektę",
+    "submitting": "Korekta została wysłana; zamknięcie tego panelu jej nie anuluje.",
+    "applied": "Potwierdzone aktualne życie gracza {{player}}: {{life}}.",
+    "notApplied": "Silnik nie potwierdził tej korekty. Przed ponowną próbą sprawdź bieżący snapshot.",
+    "failed": "Nie udało się wysłać korekty.",
+    "stale": "Stan gry zmienił się podczas edycji. Zamknij i otwórz ponownie panel, aby zacząć od bieżącego snapshotu."
+  },
   "debugCreate": {
     "copies": "Kopie",
     "asToken": "Utwórz jako żeton",

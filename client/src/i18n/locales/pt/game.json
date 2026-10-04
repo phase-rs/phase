@@ -103,6 +103,24 @@
     "grant": "Aprovar",
     "decline": "Manter prioridade"
   },
+  "sandboxLifeCorrection": {
+    "open": "Corrigir vida",
+    "title": "Correção de vida no Sandbox",
+    "description": "Use os controles normais da mão e da pilha para conjurar e resolver uma criatura. Este painel envia a ação SetLife do Sandbox pelo adaptador de jogo existente.",
+    "scopeNote": "A correção usa o caminho de edição de jogador da engine; não representa dano nem um efeito de carta. Este recorte não inclui revelar uma mão oculta, descartar conforme as regras ou desfazer antes de conjurar com acordo prévio.",
+    "target": "Jogador",
+    "player": "{{name}} (jogador {{seat}})",
+    "you": "Você",
+    "opponent": "Oponente",
+    "currentLife": "Total de vida atual",
+    "newLife": "Novo total de vida",
+    "submit": "Aplicar correção",
+    "submitting": "Correção enviada; fechar este painel não a cancela.",
+    "applied": "Total de vida atual confirmado para {{player}}: {{life}}.",
+    "notApplied": "A engine não confirmou esta correção. Confira o snapshot atual antes de tentar novamente.",
+    "failed": "Não foi possível enviar a correção.",
+    "stale": "O jogo mudou durante a edição. Feche e abra este painel novamente para começar pelo snapshot atual."
+  },
   "debugCreate": {
     "copies": "Cópias",
     "asToken": "Criar como ficha",

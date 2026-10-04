@@ -103,6 +103,24 @@
     "grant": "Approuver",
     "decline": "Garder la priorité"
   },
+  "sandboxLifeCorrection": {
+    "open": "Corriger les points de vie",
+    "title": "Correction des points de vie Sandbox",
+    "description": "Utilisez les commandes habituelles de la main et de la pile pour lancer et résoudre une créature. Ce panneau envoie l'action SetLife de Sandbox via l'adaptateur de jeu existant.",
+    "scopeNote": "Cette correction passe par la modification du joueur dans le moteur ; elle ne représente ni des blessures ni un effet de carte. Cette version n'inclut pas la révélation d'une main cachée, la défausse selon les règles ni l'annulation préalablement convenue avant le lancement.",
+    "target": "Joueur",
+    "player": "{{name}} (joueur {{seat}})",
+    "you": "Vous",
+    "opponent": "Adversaire",
+    "currentLife": "Total de points de vie actuel",
+    "newLife": "Nouveau total de points de vie",
+    "submit": "Appliquer la correction",
+    "submitting": "Correction envoyée ; fermer ce panneau ne l'annule pas.",
+    "applied": "Total de points de vie actuel confirmé pour {{player}} : {{life}}.",
+    "notApplied": "Le moteur n'a pas confirmé cette correction. Vérifiez le snapshot actuel avant de réessayer.",
+    "failed": "La correction n'a pas pu être envoyée.",
+    "stale": "La partie a changé pendant la modification. Fermez puis rouvrez ce panneau pour repartir du snapshot actuel."
+  },
   "debugCreate": {
     "copies": "Copies",
     "asToken": "Créer comme jeton",

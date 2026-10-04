@@ -103,6 +103,24 @@
     "grant": "Approve",
     "decline": "Keep priority"
   },
+  "sandboxLifeCorrection": {
+    "open": "Life correction",
+    "title": "Sandbox life correction",
+    "description": "Use the normal hand and stack controls to cast and resolve a creature. This panel submits the sandbox SetLife action through the existing game adapter.",
+    "scopeNote": "This corrects life through the engine's player edit path; it is not damage or a card effect. Hidden-hand reveal, semantic discard, and pre-agreed pre-cast Undo are outside this slice.",
+    "target": "Player",
+    "player": "{{name}} (Player {{seat}})",
+    "you": "You",
+    "opponent": "Opponent",
+    "currentLife": "Current life total",
+    "newLife": "New life total",
+    "submit": "Apply correction",
+    "submitting": "Correction submitted; closing this panel will not cancel it.",
+    "applied": "Current committed life for {{player}}: {{life}}.",
+    "notApplied": "The engine did not confirm this correction. Check the current snapshot before trying again.",
+    "failed": "The correction could not be submitted.",
+    "stale": "The game changed while editing. Close and reopen this panel to start from the current snapshot."
+  },
   "debugCreate": {
     "copies": "Copies",
     "asToken": "Create as token",
