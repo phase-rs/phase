@@ -22278,11 +22278,6 @@ colors = ["Black"]
 keywords = []
 
 [[token.source_card_refs]]
-card_name = "Nettlecyst"
-scryfall_oracle_id = "04c7f4fe-2098-4311-866d-6733c08d5178"
-scryfall_id = "91ef92af-de6b-4dc4-81ab-8e527cb96fdd"
-
-[[token.source_card_refs]]
 card_name = "Bonehoard"
 scryfall_oracle_id = "83c69c05-173d-4c1b-9541-1dde474fef5f"
 scryfall_id = "75dc1b48-7d49-45ac-b345-988392183ff0"
@@ -22391,11 +22386,6 @@ scryfall_id = "62f449cc-461e-4e89-8cd2-83e539bb40f4"
 card_name = "Batterskull"
 scryfall_oracle_id = "d12e5ce0-5705-4c35-9a93-b883db52c80c"
 scryfall_id = "2abc5ac8-b944-4b71-b022-c78183eb92c3"
-
-[[token.source_card_refs]]
-card_name = "Tangleweave Armor"
-scryfall_oracle_id = "b9cec31a-9891-414f-b528-954612168832"
-scryfall_id = "9fd7ac91-8f76-4fd1-afc5-9a3fd5ce6894"
 
 [[token.source_card_refs]]
 card_name = "Batterskull"
@@ -181161,26 +181151,62 @@ preset_id = "c8ed3fa4-d351-5519-8864-725442d760a3"
 id = "c949cdeb-84a4-564f-b8a0-7f0c8d97cf41"
 category = "Creature"
 fidelity = "Full"
-source_card_names = ["Phyrexian Germ"]
+source_card_names = [
+    "Batterbone",
+    "Batterskull",
+    "Bitterthorn, Nissa's Animus",
+    "Bonehoard",
+    "Colossal Dreadmask",
+    "Cranial Ram",
+    "Drossclaw",
+    "Ekthi, Contaminator Priest",
+    "Flayer Husk",
+    "Germ",
+    "Grip of Phyresis",
+    "Kaldra Compleat",
+    "Lashwrithe",
+    "Mandibular Kite",
+    "Mortarpod",
+    "Necropouncer",
+    "Nettlecyst",
+    "Scytheclaw",
+    "Sickleslicer",
+    "Skinwing",
+    "Strandwalker",
+    "Tangleweave Armor",
+]
 set_code = "FDC"
 set_name = "Foundations Commander"
 collector_number = "4"
 released_at = "2024-11-15"
-type_line = "Token Creature — Germ"
+type_line = "Token Creature — Phyrexian Germ"
 
 [token.body]
-display_name = "Germ"
+display_name = "Phyrexian Germ"
 power = 0
 toughness = 0
 core_types = ["Creature"]
-subtypes = ["Germ"]
+subtypes = [
+    "Phyrexian",
+    "Germ",
+]
 supertypes = []
 colors = ["Black"]
 keywords = []
 
+[[token.source_card_refs]]
+card_name = "Nettlecyst"
+scryfall_oracle_id = "04c7f4fe-2098-4311-866d-6733c08d5178"
+scryfall_id = "91ef92af-de6b-4dc4-81ab-8e527cb96fdd"
+
+[[token.source_card_refs]]
+card_name = "Tangleweave Armor"
+scryfall_oracle_id = "b9cec31a-9891-414f-b528-954612168832"
+scryfall_id = "9fd7ac91-8f76-4fd1-afc5-9a3fd5ce6894"
+
 [token.token_image_ref]
 scryfall_id = "53c05e53-84c7-4796-ae02-d778faa5afa6"
-scryfall_oracle_id = "bb549594-35f6-4ac6-9f1f-cfb35784d99e"
+scryfall_oracle_id = "a1c2af93-83c0-4974-b4db-abf95981d4e3"
 preset_id = "c949cdeb-84a4-564f-b8a0-7f0c8d97cf41"
 
 [[token]]
