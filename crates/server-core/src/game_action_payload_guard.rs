@@ -799,7 +799,6 @@ mod tests {
     use engine::types::game_state::ReplacementAutoChoiceId;
     use engine::types::identifiers::ObjectId;
     use engine::types::mana::{ManaCost, ManaCostShard};
-    use engine::types::player::PlayerId;
 
     #[test]
     fn replacement_removal_bounds_opaque_selector_strings() {
