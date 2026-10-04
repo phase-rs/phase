@@ -1844,3 +1844,4 @@ mod welcome_the_dead;
 mod owned_you_target_authority;
 
 mod exile_origin_target_acquisition;
+mod issue_7418_the_spot_dies_returns_exiled_cards;

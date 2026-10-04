@@ -259,6 +259,11 @@ pub(crate) struct ParseContext {
     /// card text or a DELAYED trigger created from a resolving effect chain. Gates
     /// delayed-only anaphoric subject resolution; see [`TriggerConditionScope`].
     pub trigger_condition_scope: TriggerConditionScope,
+    /// CR 603.7a + CR 607.1: whether the effect chain being parsed is the body of
+    /// a printed ability or of a delayed/reflexive trigger created by a resolving
+    /// chain. CR 607.1 links abilities printed on an object, so "the exiled card"
+    /// inside a `Delayed` body names the creating chain's exile.
+    pub trigger_body_scope: TriggerConditionScope,
     /// CR 608.2k + CR 601.2a: Event object that bare object pronouns in the
     /// current trigger body ("it", "them") should bind to. Spell-cast triggers
     /// set this to `TriggeringSource` so "Whenever you cast a spell, put it ..."
