@@ -25,6 +25,7 @@ use engine::game::quantity::{
     static_definition_is_cast_stable_for_pre_cast, trigger_definition_is_cast_stable_for_pre_cast,
     try_resolve_quantity_in_source_context,
 };
+use engine::game::targeting::find_legal_targets;
 use engine::game::triggers::{
     synthetic_keyword_spell_cast_trigger_applies, trigger_definition_functions_in_zone,
 };
@@ -36,7 +37,7 @@ use engine::types::ability::{
 use engine::types::ability_visit::visit_ability_def;
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
-use engine::types::game_state::{CastPaymentMode, DayNight, GameState, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, DayNight, GameState, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::{Keyword, KeywordKind};
 use engine::types::mana::{ManaSourcePenalty, ManaType};
@@ -347,12 +348,7 @@ fn assess_pre_cast(ctx: &PolicyContext<'_>) -> GateDecision {
     if effects
         .iter()
         .any(|effect| matches!(effect, Effect::Counter { .. }))
-        && (ctx.state.stack.is_empty()
-            || ctx
-                .state
-                .stack
-                .iter()
-                .all(|entry| entry.controller == ctx.ai_player))
+        && counter_reaches_nothing_foreign(ctx, &effects)
     {
         return GateDecision::Reject;
     }
@@ -1162,8 +1158,21 @@ fn reject_futile_target(ctx: &PolicyContext<'_>, target: &TargetRef) -> Option<G
     let TargetRef::Object(object_id) = target else {
         return None;
     };
-    let object = ctx.state.objects.get(object_id)?;
     let effects = ctx.effects();
+
+    // CR 701.6a: with several legal targets the choice reaches this gate
+    // (see `counter_reaches_nothing_foreign` for the single-target case).
+    // Choosing the AI's own SPELL with a plain counter only throws away two of
+    // its cards. Narrower than the cast-time check on purpose: here a foreign
+    // target exists, so only the choice is wrong — and countering its own
+    // ability (Stifle on an upkeep cost) or redirecting its own spell (Memory
+    // Lapse) stays a judgment call.
+    if is_pure_counter_payload(&effects) && is_own_stack_spell(ctx.state, ctx.ai_player, *object_id)
+    {
+        return Some(GateDecision::Reject);
+    }
+
+    let object = ctx.state.objects.get(object_id)?;
 
     // CR 701.8 + CR 702.12b: destroy-based removal can't destroy an
     // indestructible permanent.
@@ -1197,6 +1206,94 @@ fn reject_futile_target(ctx: &PolicyContext<'_>, target: &TargetRef) -> Option<G
     }
 
     None
+}
+
+/// A counter with nothing of the opponent's to hit only costs the AI cards: its
+/// own spell or ability and the counter itself (CR 701.6a).
+///
+/// The stack-wide check — empty, or every entry the AI's — was the whole test
+/// before. It misses the case where the opponent's entries are on the stack but
+/// OUTSIDE the counter's target filter. Field report: the AI countered the
+/// opponent's creature spell with Counterspell, then cast Spell Pierce
+/// ("Counter target noncreature spell unless its controller pays {2}"), whose
+/// ONLY legal target was that same Counterspell, and countered its own counter;
+/// the creature resolved. `counterspell_score` values the best foreign stack
+/// entry without applying the counter's filter (an accepted over-estimate,
+/// documented there), and with a single legal target the engine binds it at
+/// announcement, so no `ChooseTarget` candidate reaches
+/// [`reject_futile_target`]. The cast is the only decision there is.
+///
+/// So the check now asks what the counter can REACH (CR 115.1, CR 601.2c): the
+/// engine's own legal-target set for every counter effect, each target an entry
+/// the AI controls. Spells and activated abilities alike — Glen Elendra
+/// Archmage's "{U}, Sacrifice: Counter target noncreature spell" walks into the
+/// same hole. A counter effect that exposes no target filter and a modal SPELL
+/// (CR 601.2b: at announcement `effects()` reports every mode at once) keep
+/// only the stack-wide check; an activation's `effects()` is already its root
+/// only (CR 700.2a), so its counter is committed.
+fn counter_reaches_nothing_foreign(ctx: &PolicyContext<'_>, effects: &[&Effect]) -> bool {
+    let ai = ctx.ai_player;
+    if ctx.state.stack.iter().all(|entry| entry.controller == ai) {
+        return true;
+    }
+    let source_id = match &ctx.candidate.action {
+        GameAction::CastSpell { object_id, .. } => {
+            if ctx
+                .state
+                .objects
+                .get(object_id)
+                .is_none_or(|object| object.modal.is_some())
+            {
+                return false;
+            }
+            *object_id
+        }
+        GameAction::ActivateAbility { source_id, .. } => *source_id,
+        _ => return false,
+    };
+    effects
+        .iter()
+        .filter(|effect| matches!(effect, Effect::Counter { .. }))
+        .all(|effect| {
+            let Some(filter) = effect.target_filter() else {
+                return false;
+            };
+            find_legal_targets(ctx.state, filter, ai, source_id)
+                .iter()
+                .all(|target| {
+                    matches!(target, TargetRef::Object(id) if ctx
+                        .state
+                        .stack
+                        .iter()
+                        .any(|entry| entry.id == *id && entry.controller == ai))
+                })
+        })
+}
+
+/// Every effect is a plain `Counter` — no destination redirect and nothing
+/// else in the payload. `source_rider` needs no check: it acts only when an
+/// ABILITY is countered, and the target proof that uses this only ever matches
+/// spells.
+fn is_pure_counter_payload(effects: &[&Effect]) -> bool {
+    !effects.is_empty()
+        && effects.iter().all(|effect| {
+            matches!(
+                effect,
+                Effect::Counter {
+                    countered_spell_zone: None,
+                    ..
+                }
+            )
+        })
+}
+
+/// Whether `id` is a spell on the stack controlled by `ai_player`.
+fn is_own_stack_spell(state: &GameState, ai_player: PlayerId, id: ObjectId) -> bool {
+    state.stack.iter().any(|entry| {
+        entry.id == id
+            && entry.controller == ai_player
+            && matches!(entry.kind, StackEntryKind::Spell { .. })
+    })
 }
 
 /// Whether any effect deals damage (fixed or variable).
@@ -7200,6 +7297,383 @@ mod tests {
             search_depth: crate::policies::context::SearchDepth::Root,
         };
         assert_ne!(assess_candidate(&ctx), GateDecision::Reject);
+    }
+
+    // ---- CR 701.6a: a counter aimed only at the AI's own spells ----
+
+    const SPELL_PIERCE_ORACLE: &str =
+        "Counter target noncreature spell unless its controller pays {2}.";
+
+    /// Put a spell on the stack the way the engine does (entry id == object id).
+    fn push_stack_spell(
+        state: &mut GameState,
+        controller: PlayerId,
+        name: &str,
+        core_type: CoreType,
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            controller,
+            name.to_string(),
+            Zone::Stack,
+        );
+        let card_id = state.objects[&id].card_id;
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(core_type);
+        state.stack.push_back(StackEntry {
+            id,
+            source_id: id,
+            controller,
+            kind: StackEntryKind::Spell {
+                card_id,
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+        id
+    }
+
+    /// Score the announcement of `spell` (in P0's hand) at priority.
+    fn gate_cast(state: &mut GameState, spell: ObjectId) -> GateDecision {
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::Priority { player: P0 },
+            candidates: Vec::new(),
+        };
+        let card_id = state.objects[&spell].card_id;
+        let candidate = CandidateAction {
+            action: GameAction::CastSpell {
+                object_id: spell,
+                card_id,
+                targets: Vec::new(),
+                payment_mode: CastPaymentMode::Auto,
+            },
+            metadata: ActionMetadata::for_actor(Some(P0), TacticalClass::Spell),
+        };
+        let context = AiContext::empty(&config.weights);
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: P0,
+            config: &config,
+            context: &context,
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        assess_candidate(&ctx)
+    }
+
+    /// Put a counterspell from `oracle` in P0's hand; returns its id.
+    fn counter_in_hand(scenario: &mut GameScenario, name: &str, oracle: &str) -> ObjectId {
+        scenario
+            .add_spell_to_hand_from_oracle(P0, name, true, oracle)
+            .id()
+    }
+
+    /// The field report: P1's creature spell under the AI's Counterspell. Spell
+    /// Pierce can only reach noncreature spells, so its one legal target is the
+    /// AI's own Counterspell — casting it would counter the counter.
+    #[test]
+    fn rejects_counter_whose_only_legal_target_is_own_spell() {
+        let mut scenario = GameScenario::new();
+        let pierce = counter_in_hand(&mut scenario, "Spell Pierce", SPELL_PIERCE_ORACLE);
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        push_stack_spell(state, P1, "Makindi Sliderunner", CoreType::Creature);
+        push_stack_spell(state, P0, "Counterspell", CoreType::Instant);
+        set_priority_window(state, Phase::PreCombatMain, P1);
+
+        assert_eq!(gate_cast(state, pierce), GateDecision::Reject);
+    }
+
+    /// Build the field-report board on the production path: Spell Pierce
+    /// castable from P0's hand with {U} floating, P1's creature spell under
+    /// P0's Counterspell (or `opponent_noncreature` in its place for the
+    /// positive control), priority to P0 on P1's turn.
+    fn pierce_board(opponent_noncreature: bool) -> (GameState, ObjectId) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let pierce = scenario
+            .add_spell_to_hand_from_oracle(P0, "Spell Pierce", true, SPELL_PIERCE_ORACLE)
+            .with_mana_cost(ManaCost::Cost {
+                generic: 0,
+                shards: vec![ManaCostShard::Blue],
+            })
+            .id();
+        scenario.with_mana_pool(P0, pooled_mana(ManaType::Blue, 1));
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        if opponent_noncreature {
+            push_stack_spell(state, P1, "Lightning Bolt", CoreType::Instant);
+        } else {
+            push_stack_spell(state, P1, "Makindi Sliderunner", CoreType::Creature);
+        }
+        push_stack_spell(state, P0, "Counterspell", CoreType::Instant);
+        state.active_player = P1;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+        (state.clone(), pierce)
+    }
+
+    fn casts(action: &GameAction, spell: ObjectId) -> bool {
+        matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == spell)
+    }
+
+    /// Production path for the field report: the engine issues the Spell
+    /// Pierce cast (its own Counterspell is a legal target), the gate removes
+    /// it, scoring does not bring it back, and neither chooser route samples
+    /// it. The positive control keeps the cast in the gated pool.
+    #[test]
+    fn counter_aimed_only_at_own_spell_never_reaches_the_chooser() {
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        let gated_pool = |state: &GameState| {
+            let issued = engine::ai_support::candidate_actions(state);
+            let decision = AiDecisionContext {
+                waiting_for: state.waiting_for.clone(),
+                candidates: issued.clone(),
+            };
+            let gated = gate_candidates(
+                state,
+                &decision,
+                issued.clone(),
+                P0,
+                &config,
+                &AiContext::empty(&config.weights),
+            );
+            (issued, gated)
+        };
+
+        let (state, pierce) = pierce_board(false);
+        let (issued, gated) = gated_pool(&state);
+        assert!(
+            issued.iter().any(|c| casts(&c.action, pierce)),
+            "precondition: the engine issues the Spell Pierce cast"
+        );
+        assert!(
+            gated.iter().all(|c| !casts(&c.candidate.action, pierce)),
+            "a counter whose only legal target is the AI's own spell must be gated"
+        );
+        assert!(
+            crate::search::score_candidates(&state, P0, &config)
+                .iter()
+                .all(|(action, _)| !casts(action, pierce)),
+            "the scored path must not reintroduce the gated cast"
+        );
+        for search_enabled in [false, true] {
+            let mut chooser_config = config.clone();
+            chooser_config.search.enabled = search_enabled;
+            for seed in 0..8 {
+                let mut rng = ChaCha20Rng::seed_from_u64(seed);
+                assert!(
+                    !crate::search::choose_action(&state, P0, &chooser_config, &mut rng)
+                        .is_some_and(|action| casts(&action, pierce)),
+                    "the {search_enabled:?} chooser route must not sample the gated cast"
+                );
+            }
+        }
+
+        let (state, pierce) = pierce_board(true);
+        let (_, gated) = gated_pool(&state);
+        assert!(
+            gated.iter().any(|c| casts(&c.candidate.action, pierce)),
+            "with an opponent noncreature spell in reach the cast stays in the pool"
+        );
+    }
+
+    /// Non-vacuity: one opponent spell in the legal set makes it a real counter.
+    #[test]
+    fn allows_counter_when_an_opponent_spell_is_targetable() {
+        let mut scenario = GameScenario::new();
+        let pierce = counter_in_hand(&mut scenario, "Spell Pierce", SPELL_PIERCE_ORACLE);
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        push_stack_spell(state, P1, "Lightning Bolt", CoreType::Instant);
+        push_stack_spell(state, P0, "Counterspell", CoreType::Instant);
+        set_priority_window(state, Phase::PreCombatMain, P1);
+
+        assert_ne!(gate_cast(state, pierce), GateDecision::Reject);
+    }
+
+    const GLEN_ELENDRA_ORACLE: &str =
+        "{U}, Sacrifice this creature: Counter target noncreature spell.";
+
+    /// The same hole through an activated ability: Glen Elendra Archmage can
+    /// only reach noncreature spells, and the only one is the AI's own.
+    #[test]
+    fn rejects_counter_activation_whose_only_legal_target_is_own_spell() {
+        let mut scenario = GameScenario::new();
+        let archmage = scenario
+            .add_creature_from_oracle(P0, "Glen Elendra Archmage", 2, 2, GLEN_ELENDRA_ORACLE)
+            .id();
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        push_stack_spell(state, P1, "Makindi Sliderunner", CoreType::Creature);
+        push_stack_spell(state, P0, "Counterspell", CoreType::Instant);
+        set_priority_window(state, Phase::PreCombatMain, P1);
+
+        assert_eq!(gate_activation(state, archmage), GateDecision::Reject);
+    }
+
+    /// Non-vacuity for the activation: an opponent noncreature spell is a real
+    /// target.
+    #[test]
+    fn allows_counter_activation_when_an_opponent_spell_is_targetable() {
+        let mut scenario = GameScenario::new();
+        let archmage = scenario
+            .add_creature_from_oracle(P0, "Glen Elendra Archmage", 2, 2, GLEN_ELENDRA_ORACLE)
+            .id();
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        push_stack_spell(state, P1, "Lightning Bolt", CoreType::Instant);
+        push_stack_spell(state, P0, "Counterspell", CoreType::Instant);
+        set_priority_window(state, Phase::PreCombatMain, P1);
+
+        assert_ne!(gate_activation(state, archmage), GateDecision::Reject);
+    }
+
+    /// Verdict on choosing `target` for a pending counter `effect` whose legal
+    /// targets are `legal` — the multi-target case, where the choice reaches
+    /// `reject_futile_target`.
+    fn counter_target_verdict(
+        state: &GameState,
+        effect: Effect,
+        legal: Vec<TargetRef>,
+        target: ObjectId,
+    ) -> GateDecision {
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::TargetSelection {
+                player: P0,
+                pending_cast: Box::new(PendingCast::new(
+                    ObjectId(900),
+                    CardId(900),
+                    ResolvedAbility::new(effect, Vec::new(), ObjectId(900), P0),
+                    ManaCost::zero(),
+                )),
+                target_slots: vec![TargetSelectionSlot {
+                    legal_targets: legal,
+                    optional: false,
+                    chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
+                }],
+                mode_labels: Vec::new(),
+                selection: TargetSelectionProgress::default(),
+            },
+            candidates: Vec::new(),
+        };
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        let candidate = choose_target_candidate(target);
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: P0,
+            config: &config,
+            context: &AiContext::empty(&config.weights),
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        assess_candidate(&ctx)
+    }
+
+    fn plain_counter(
+        countered_spell_zone: Option<engine::types::ability::SpellStackToGraveyardReplacement>,
+    ) -> Effect {
+        Effect::Counter {
+            target: TargetFilter::Any,
+            source_rider: None,
+            countered_spell_zone,
+        }
+    }
+
+    /// With an opponent spell and the AI's own both legal, choosing its own
+    /// spell is rejected; choosing the opponent's is not.
+    #[test]
+    fn rejects_choosing_own_spell_as_counter_target() {
+        let mut runner = GameScenario::new().build();
+        let state = runner.state_mut();
+        let theirs = push_stack_spell(state, P1, "Lightning Bolt", CoreType::Instant);
+        let mine = push_stack_spell(state, P0, "Counterspell", CoreType::Instant);
+        let legal = vec![TargetRef::Object(theirs), TargetRef::Object(mine)];
+
+        assert_eq!(
+            counter_target_verdict(state, plain_counter(None), legal.clone(), mine),
+            GateDecision::Reject
+        );
+        assert_ne!(
+            counter_target_verdict(state, plain_counter(None), legal, theirs),
+            GateDecision::Reject
+        );
+    }
+
+    /// Boundary: a redirecting counter (Memory Lapse: top of the library) on
+    /// the AI's own spell is outside the proof.
+    #[test]
+    fn allows_choosing_own_spell_for_redirecting_counter() {
+        let mut runner = GameScenario::new().build();
+        let state = runner.state_mut();
+        let theirs = push_stack_spell(state, P1, "Lightning Bolt", CoreType::Instant);
+        let mine = push_stack_spell(state, P0, "Counterspell", CoreType::Instant);
+        let lapse = plain_counter(Some(
+            engine::types::ability::SpellStackToGraveyardReplacement::Library {
+                position: engine::types::ability::LibraryPosition::Top,
+            },
+        ));
+
+        assert_ne!(
+            counter_target_verdict(
+                state,
+                lapse,
+                vec![TargetRef::Object(theirs), TargetRef::Object(mine)],
+                mine,
+            ),
+            GateDecision::Reject
+        );
+    }
+
+    /// Boundary: the proof is about SPELLS. Countering the AI's own ability
+    /// (Stifle on an upkeep cost) is a real play.
+    #[test]
+    fn allows_choosing_own_ability_as_counter_target() {
+        let mut runner = GameScenario::new().build();
+        let state = runner.state_mut();
+        let theirs = push_stack_spell(state, P1, "Lightning Bolt", CoreType::Instant);
+        let source = create_object(
+            state,
+            CardId(state.next_object_id),
+            P0,
+            "Engine".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = ObjectId(state.next_object_id);
+        state.next_object_id += 1;
+        state.stack.push_back(StackEntry {
+            id: ability,
+            source_id: source,
+            controller: P0,
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: Box::new(ResolvedAbility::new(Effect::NoOp, Vec::new(), source, P0)),
+            },
+        });
+
+        assert_ne!(
+            counter_target_verdict(
+                state,
+                plain_counter(None),
+                vec![TargetRef::Object(theirs), TargetRef::Object(ability)],
+                ability,
+            ),
+            GateDecision::Reject
+        );
     }
 
     /// CR 702.21a: never target a warded creature whose ward cost the AI can't
