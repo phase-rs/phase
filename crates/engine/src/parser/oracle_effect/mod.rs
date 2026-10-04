@@ -76,7 +76,7 @@ use crate::parser::oracle_static::parse_passive_cant_be_cast_spell_filter;
 use crate::parser::oracle_trigger::parse_trigger_line;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_until};
-use nom::character::complete::{anychar, multispace0, multispace1, space1};
+use nom::character::complete::{alpha1, anychar, multispace0, multispace1, space1};
 use nom::combinator::{
     all_consuming, eof, map, map_opt, not, opt, peek, recognize, rest, value, verify,
 };
@@ -474,6 +474,21 @@ pub(crate) fn is_bare_object_pronoun(text: &str) -> bool {
 /// (see `ParseContext::plural_object_pronoun_ref`).
 pub(crate) fn is_bare_plural_object_pronoun(text: &str) -> bool {
     matches!(text, "them" | "themselves")
+}
+
+/// CR 608.2c (rules of English): true when `body` contains a bare plural
+/// object pronoun ("them"/"themselves") as a whole word. Such an anaphor
+/// names a set, never the single member a per-member iteration binds.
+fn body_has_bare_plural_object_pronoun(body: &str) -> bool {
+    let lower = body.to_lowercase();
+    nom_primitives::scan_at_word_boundaries(&lower, |input| {
+        value(
+            (),
+            verify(alpha1, |word: &str| is_bare_plural_object_pronoun(word)),
+        )
+        .parse(input)
+    })
+    .is_some()
 }
 
 /// CR 608.2c anaphora: substitute `replacement` for the FIRST bare object
@@ -40947,48 +40962,66 @@ fn parse_effect_chain_ir_body(
         // target permanent, put another counter of that kind on it or remove one
         // from it" — Dramatist's Puppet, Quarry Hauler), whose target and choice
         // would likewise be dropped by the generic strip.
-        let (repeat_for, text, for_each_reference_target, repeat_for_difference) =
-            if try_parse_proliferate_target(&text).is_some()
-                || try_parse_for_each_counter_kind_adjust_target(&text).is_some()
-                // CR 102.2 + CR 608.2c: "for each opponent, choose … that player
-                // controls" is a per-opponent choice, not a repeat count; peeling
-                // the prefix would lose the population "that player" refers to.
-                || is_for_each_opponent_choose_controlled(&text.to_lowercase())
-            {
-                (None, text, None, None)
-            } else if let Some(stripped) = strip_redundant_flip_win_quantifier(&text) {
-                // CR 705.2: "for each flip you won, <effect>" (Mirror March) — the flip
-                // loop (`finish_until_lose`) already runs the win effect once per win,
-                // so the quantifier is redundant. Drop it (no `repeat_for`) so the bare
-                // copy clause reaches `CopyTokenOf` instead of an `Unimplemented` "for"
-                // fallback (#5966).
-                (None, stripped, None, None)
-            } else if let Some((_, body)) =
-                lower::strip_for_each_population_prefix(&text).filter(|(anaphor, _)| {
-                    admitted_population_producer(builder.clauses())
+        let (
+            repeat_for,
+            text,
+            for_each_reference_target,
+            repeat_for_difference,
+            iterated_member_ref,
+        ) = if try_parse_proliferate_target(&text).is_some()
+            || try_parse_for_each_counter_kind_adjust_target(&text).is_some()
+            // CR 102.2 + CR 608.2c: "for each opponent, choose … that player
+            // controls" is a per-opponent choice, not a repeat count; peeling
+            // the prefix would lose the population "that player" refers to.
+            || is_for_each_opponent_choose_controlled(&text.to_lowercase())
+        {
+            (None, text, None, None, None)
+        } else if let Some(stripped) = strip_redundant_flip_win_quantifier(&text) {
+            // CR 705.2: "for each flip you won, <effect>" (Mirror March) — the flip
+            // loop (`finish_until_lose`) already runs the win effect once per win,
+            // so the quantifier is redundant. Drop it (no `repeat_for`) so the bare
+            // copy clause reaches `CopyTokenOf` instead of an `Unimplemented` "for"
+            // fallback (#5966).
+            (None, stripped, None, None, None)
+        } else if let Some((_, body)) =
+            lower::strip_for_each_population_prefix(&text).filter(|(anaphor, body)| {
+                // CR 608.2c: each iteration binds ONE member; a plural object
+                // anaphor in the body names a set, not that member, so the clause
+                // is not claimed (it keeps its prior parse).
+                !body_has_bare_plural_object_pronoun(body)
+                    && admitted_population_producer(builder.clauses())
                         .is_some_and(|producer| producer.is_restated_by(anaphor))
-                })
-            {
-                // CR 608.2c: "for each of those <noun>, …" / "for each of them, …"
-                // iterates the population its admitted antecedent published —
-                // the chain's tracked set, one iteration per member. An
-                // unadmitted or non-restating clause falls through to the
-                // generic arm below and keeps its prior parse.
-                (
-                    Some(QuantityExpr::Ref {
-                        qty: QuantityRef::TrackedSetSize,
-                    }),
-                    body,
-                    None,
-                    None,
-                )
-            } else {
-                let reference_target = for_each_clause_target_controller_filter(&text);
-                let (repeat_for, difference, text) =
-                    lower::strip_for_each_prefix_with_difference(&text);
-                let reference_target = repeat_for.as_ref().and(reference_target);
-                (repeat_for, text, reference_target, difference)
-            };
+            })
+        {
+            // CR 608.2c: "for each of those <noun>, …" / "for each of them, …"
+            // iterates the population its admitted antecedent published — the
+            // chain's tracked set, one iteration per member. Within an iteration
+            // the body's singular object anaphor ("it", "that creature") names
+            // that iteration's member — the nearest antecedent under the rules of
+            // English — which the repeat driver binds as `ParentTarget`. An
+            // unadmitted or non-restating clause falls through to the generic arm
+            // below and keeps its prior parse.
+            (
+                Some(QuantityExpr::Ref {
+                    qty: QuantityRef::TrackedSetSize,
+                }),
+                body,
+                None,
+                None,
+                Some(TargetFilter::ParentTarget),
+            )
+        } else {
+            let reference_target = for_each_clause_target_controller_filter(&text);
+            let (repeat_for, difference, text) =
+                lower::strip_for_each_prefix_with_difference(&text);
+            let reference_target = repeat_for.as_ref().and(reference_target);
+            (repeat_for, text, reference_target, difference, None)
+        };
+        // CR 608.2c: the nearest object antecedent this chunk's bare anaphors bind —
+        // an earlier typed referent of this chain, or the member of the per-member
+        // iteration this clause runs under. Both are the parent target at resolution.
+        let chunk_object_referent: Option<TargetFilter> = iterated_member_ref
+            .or_else(|| prior_typed_referent.then_some(TargetFilter::ParentTarget));
         let (text_without_where_x, local_where_x_expression) = {
             let text_where_x_lower = text.to_lowercase();
             let (without_where_x, where_x_expression) =
@@ -41343,17 +41376,19 @@ fn parse_effect_chain_ir_body(
         .or_else(|| ctx.actor.clone());
         let if_you_do_anchor = if_you_do_object_anchor(builder.clauses(), &condition);
         // CR 608.2k: An `AbilityCondition` source-counter gate binds a bare
-        // body pronoun to the source only when no prior clause chose a typed
-        // target. This preserves the depletion-land / counter-rider class;
+        // body pronoun to the source only when no nearer object referent (an
+        // earlier typed referent of this chain or the iterated member) exists.
+        // This preserves the depletion-land / counter-rider class;
         // the leading bare-recipient gate is instead rebound on `condition`
         // before lowering above.
         let binds_source_counter_pronoun =
-            condition.as_ref().is_some_and(condition_refs_source_object) && !prior_typed_referent;
+            condition.as_ref().is_some_and(condition_refs_source_object)
+                && chunk_object_referent.is_none();
         let chunk_subject = if binds_source_counter_pronoun {
             Some(TargetFilter::SelfRef)
         } else if let Some(anchor) = if_you_do_anchor.clone() {
             Some(anchor)
-        } else if prior_typed_referent
+        } else if chunk_object_referent.is_some()
             && matches!(
                 ctx.subject,
                 None | Some(TargetFilter::SelfRef | TargetFilter::Any)
@@ -41373,7 +41408,8 @@ fn parse_effect_chain_ir_body(
         {
             // CR 608.2c: an earlier SIBLING clause in THIS chain
             // (not merely the enclosing trigger condition) chose a genuinely
-            // new typed object referent (`prior_typed_referent`) — that is a
+            // new typed object referent, or this clause runs under a per-member
+            // iteration (`chunk_object_referent`) — that is a
             // CLOSER antecedent than the trigger's own passive "self-watching"
             // default subject, so a later bare "it"/"its" must bind to it
             // instead of re-binding to the trigger's watched object. Clearing
@@ -41404,9 +41440,11 @@ fn parse_effect_chain_ir_body(
         // referent established before the paired conditional. The else handler seeds
         // this flag when the outer chain has such a referent (Brilliance Unleashed).
         // It is false on every top-level and non-else nested parse, so this OR is a
-        // no-op for all pre-existing cards.
-        let parent_target_available =
-            ctx.parent_target_available || if_you_do_anchor.is_some() || prior_typed_referent;
+        // no-op for all pre-existing cards. `chunk_object_referent` adds an earlier
+        // typed referent of this chain or the iterated member.
+        let parent_target_available = ctx.parent_target_available
+            || if_you_do_anchor.is_some()
+            || chunk_object_referent.is_some();
         // CR 608.2c + CR 601.2a: a strict subset of `parent_target_available`
         // restricted to chosen-target referents (Emry), excluding impulse
         // publishers (Territorial Bruntar's `ExileFromTopUntil`). An "if you
@@ -41465,9 +41503,11 @@ fn parse_effect_chain_ir_body(
             subject: chunk_subject,
             // CR 608.2k: precedence for a bare object anaphor, nearest antecedent
             // first. A referent established by an EARLIER CLAUSE OF THIS CHAIN wins
-            // ("exile target creature. If you do, ... it") — that is the
-            // `ParentTarget` rung. Only when the chain has introduced no typed
-            // referent of its own does the anaphor reach back to the antecedent the
+            // ("exile target creature. If you do, ... it"), as does the member of the
+            // per-member iteration this clause runs under — that is the
+            // `ParentTarget` rung (`chunk_object_referent`). Only when the chain has
+            // introduced no typed referent of its own does the anaphor reach back to
+            // the antecedent the
             // TRIGGER CONDITION introduced (`ParseContext::object_pronoun_ref`, set
             // by `oracle_trigger::trigger_object_pronoun_ref_for_condition`).
             //
@@ -41494,26 +41534,25 @@ fn parse_effect_chain_ir_body(
             // (CR 109.2b), not the ability's source (CR 113.7) — so Decree of
             // Silence and Charitable Levy stopped sacrificing themselves, and
             // Thing in the Ice and The Emperor of Palamecia stopped transforming.
-            object_pronoun_ref: prior_typed_referent
-                .then_some(TargetFilter::ParentTarget)
-                .or_else(|| {
-                    (!binds_source_counter_pronoun)
-                        .then(|| ctx.object_pronoun_ref.clone())
-                        .flatten()
-                }),
+            object_pronoun_ref: chunk_object_referent.clone().or_else(|| {
+                (!binds_source_counter_pronoun)
+                    .then(|| ctx.object_pronoun_ref.clone())
+                    .flatten()
+            }),
             card_name: ctx.card_name.clone(),
             // The DEMONSTRATIVE-scoped antecedent is a property of the whole
             // trigger body (the Kashi-Tribe "tap that creature and it doesn't
             // untap" tail lives in a sub-ability chunk), so it propagates like
             // `plural_object_pronoun_ref`. A typed referent introduced by an
-            // earlier chunk is more specific than the outer trigger-condition
-            // context, so a later demonstrative retains that chain-local binding.
+            // earlier chunk, or the iterated member (`chunk_object_referent`), is
+            // more specific than the outer trigger-condition context, so a later
+            // demonstrative retains that chain-local binding.
             //
             // The `binds_source_counter_pronoun` rung is deliberately absent:
             // that gate exists for the bare "it" pronoun's source-counter class
             // (#8549), which is not a demonstrative grammar.
-            demonstrative_object_ref: prior_typed_referent
-                .then_some(TargetFilter::ParentTarget)
+            demonstrative_object_ref: chunk_object_referent
+                .clone()
                 .or_else(|| ctx.demonstrative_object_ref.clone()),
             // CR 707.9a + CR 603.1: propagate the trigger index from the parent
             // ctx — `current_trigger_index` is a property of the whole trigger

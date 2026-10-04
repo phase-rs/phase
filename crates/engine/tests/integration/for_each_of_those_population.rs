@@ -230,6 +230,11 @@ fn with_for_each_head(head: &str) -> String {
     REVEAL_MUSTER.replace("For each of those creatures,", head)
 }
 
+/// `REVEAL_MUSTER` with its for-each body replaced.
+fn with_body(body: &str) -> String {
+    REVEAL_MUSTER.replace("put a +1/+1 counter on that creature.", body)
+}
+
 /// `REVEAL_MUSTER` with the sentence between the shuffle and the for-each
 /// clause replaced.
 fn with_intervening(sentence: &str) -> String {
@@ -706,4 +711,208 @@ fn reveal_muster_with_no_creature_iterates_zero_times() {
     assert!(runner.state().stack.is_empty());
     assert_eq!(runner.battlefield_count(P0), 1, "only the bystander");
     assert_eq!(total_p1p1(runner), 0);
+}
+
+/// The trigger-body variant of the instrument (V2.1g(e)): the same chain under
+/// an enters trigger, the frame Dack Fayden's for-each clause sits in.
+const MUSTER_HERALD: &str = "When this creature enters, reveal cards from the top of your \
+     library until you reveal two creature cards. Put those creature cards onto the battlefield, \
+     then shuffle. They gain haste until end of turn. For each of those creatures, put a +1/+1 \
+     counter on it.";
+
+/// The for-each node (node[3]) of the instrument's single lowered chain.
+fn for_each_node(abilities: &[AbilityDefinition]) -> &AbilityDefinition {
+    chain_nodes(&abilities[0])
+        .get(3)
+        .copied()
+        .unwrap_or_else(|| panic!("chain has a fourth node: {abilities:?}"))
+}
+
+/// V2.1g(a) (A2.1, SHAPE): CR 608.2c — within one iteration the body's bare
+/// "it" names that iteration's member, the nearest singular antecedent, so the
+/// counter recipient is the member the repeat driver binds (`ParentTarget`),
+/// never the resolving spell.
+#[test]
+fn population_body_it_binds_the_iterated_member() {
+    assert_admitted_shape(&with_body("put a +1/+1 counter on it."));
+}
+
+/// V2.1g(b) (CR 201.5): a body that names the card itself keeps the source as
+/// its recipient — the member binding answers only bare anaphors.
+#[test]
+fn population_body_naming_the_card_keeps_the_source() {
+    let abilities = lowered(&with_body("put a +1/+1 counter on Reveal Muster."));
+    let node = for_each_node(&abilities);
+    // Reach-guard: the population arm claimed the clause, so the member
+    // binding was live in this chunk.
+    assert_eq!(node.repeat_for, tracked_set_repeat(), "{:?}", node.effect);
+    assert!(
+        matches!(
+            &*node.effect,
+            Effect::PutCounter {
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ),
+        "the card's own name stays the source: {:?}",
+        node.effect
+    );
+}
+
+/// V2.1g(c) (CR 608.2c, fail-closed): each iteration binds one member, so a
+/// plural object anaphor in the body names a set, not that member — the arm
+/// does not claim the clause and it keeps its prior parse.
+#[test]
+fn population_body_with_a_plural_anaphor_is_not_claimed() {
+    let them = with_body("put a +1/+1 counter on them.");
+    let abilities = lowered(&them);
+    let nodes = chain_nodes(&abilities[0]);
+    // Reach-guard: the walk reached the for-each clause through the real
+    // producer, shuffle and grant.
+    assert!(matches!(
+        &*nodes[0].effect,
+        Effect::RevealUntil {
+            kept_destination: Zone::Battlefield,
+            ..
+        }
+    ));
+    assert!(nodes
+        .iter()
+        .any(|node| matches!(&*node.effect, Effect::Shuffle { .. })));
+    assert!(nodes
+        .iter()
+        .any(|node| matches!(&*node.effect, Effect::GenericEffect { .. })));
+    assert_for_each_stays_unparsed(&them);
+    // Reach-guard: the decline is pronoun-specific — the singular body under
+    // the same head is claimed.
+    assert_admitted_shape(&with_body("put a +1/+1 counter on it."));
+}
+
+/// V2.1g(d): the generic for-each arm seeds no member binding — its body's
+/// recipient is whatever the same sentence without the prefix lowers to.
+/// (This pins only that the generic arm is unchanged, not its reading.)
+#[test]
+fn generic_for_each_body_gets_no_member_binding() {
+    let for_each = lowered("For each creature you control, put a +1/+1 counter on it.");
+    let bare = lowered("Put a +1/+1 counter on it.");
+    // Reach-guard: the generic arm claimed the for-each text.
+    assert!(
+        matches!(
+            &for_each[0].repeat_for,
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { .. }
+            })
+        ),
+        "{:?}",
+        for_each[0]
+    );
+    let recipient = |def: &AbilityDefinition| match &*def.effect {
+        Effect::PutCounter { target, .. } => target.clone(),
+        other => panic!("expected PutCounter, got {other:?}"),
+    };
+    assert_eq!(recipient(&for_each[0]), recipient(&bare[0]));
+}
+
+/// V2.1g(e): the instrument's chain under an enters trigger (Dack Fayden's
+/// frame) — the iterated member outranks the trigger-level object antecedent.
+#[test]
+fn population_body_it_binds_the_member_under_a_trigger() {
+    let abilities = card_abilities(MUSTER_HERALD, "Muster Herald", &[], &["Creature"]);
+    assert_eq!(abilities.len(), 1, "{abilities:?}");
+    let nodes = chain_nodes(&abilities[0]);
+    // Reach-guard: the trigger's producer, shuffle and grant are present.
+    assert!(matches!(
+        &*nodes[0].effect,
+        Effect::RevealUntil {
+            kept_destination: Zone::Battlefield,
+            ..
+        }
+    ));
+    assert!(matches!(&*nodes[1].effect, Effect::Shuffle { .. }));
+    assert!(matches!(&*nodes[2].effect, Effect::GenericEffect { .. }));
+    let node = for_each_node(&abilities);
+    assert_eq!(node.repeat_for, tracked_set_repeat(), "{:?}", node.effect);
+    assert!(
+        matches!(
+            &*node.effect,
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ),
+        "{:?}",
+        node.effect
+    );
+    assert!(!has_unimplemented(&abilities[0]));
+}
+
+/// V2.1g(f) (A2.1, SHAPE): a subject-position bare "it" in the body names the
+/// iterated member too. Parse only; this phase asserts no runtime for a
+/// non-counter body.
+#[test]
+fn population_body_subject_it_binds_the_iterated_member() {
+    let abilities = lowered(&with_body("it gets +2/+2 until end of turn."));
+    let nodes = chain_nodes(&abilities[0]);
+    assert!(matches!(
+        &*nodes[0].effect,
+        Effect::RevealUntil {
+            kept_destination: Zone::Battlefield,
+            ..
+        }
+    ));
+    assert!(matches!(&*nodes[1].effect, Effect::Shuffle { .. }));
+    assert!(matches!(&*nodes[2].effect, Effect::GenericEffect { .. }));
+    let node = for_each_node(&abilities);
+    // Reach-guard: the population arm claimed the clause.
+    assert_eq!(node.repeat_for, tracked_set_repeat(), "{:?}", node.effect);
+    assert!(
+        matches!(
+            &*node.effect,
+            Effect::Pump {
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ),
+        "{:?}",
+        node.effect
+    );
+    assert!(!has_unimplemented(&abilities[0]));
+}
+
+/// V2.2d (A2.2; C2.7(b) on the charter's own example form, revert-failing):
+/// "put a +1/+1 counter on it" counters exactly the kept creatures — the
+/// member each iteration binds — and never the resolving spell.
+#[test]
+fn reveal_muster_it_body_counters_exactly_the_kept_creatures() {
+    let oracle = with_body("put a +1/+1 counter on it.");
+    let mut board = muster_board(&oracle, MUSTER_LIBRARY);
+    board.runner.cast(board.spell).resolve();
+    let runner = &board.runner;
+    let a = board.card("Creature A");
+    let b = board.card("Creature B");
+
+    // Runtime reach-guard: the kept creatures entered under the caster and
+    // the grant applied to exactly them.
+    for kept in [a, b] {
+        assert_eq!(zone_of(runner, kept), Zone::Battlefield);
+        assert_eq!(runner.state().objects[&kept].controller, P0);
+        assert!(has_haste(runner, kept), "the kept creature gained haste");
+    }
+    assert!(!has_haste(runner, board.bystander_p0));
+
+    // CR 608.2c + CR 122.1a: one counter on each kept creature, nothing else.
+    assert_eq!(p1p1(runner, a), 1, "Creature A gets exactly one counter");
+    assert_eq!(p1p1(runner, b), 1, "Creature B gets exactly one counter");
+    for name in ["Miss One", "Miss Two", "Creature C", "Miss Three"] {
+        let id = board.card(name);
+        assert!(in_p0_library(runner, id), "{name} stays in the library");
+        assert_eq!(p1p1(runner, id), 0, "{name} is unaffected");
+    }
+    assert_eq!(p1p1(runner, board.bystander_p0), 0);
+    assert_eq!(p1p1(runner, board.bystander_p1), 0);
+    assert_eq!(total_p1p1(runner), 2);
+
+    // Parse reach-guard: the cast card is the admitted shape.
+    assert_admitted_shape(&oracle);
 }
