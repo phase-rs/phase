@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-10-03T00:00:00Z",
+  "updated": "2026-10-04T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -810,16 +810,20 @@
       ],
       "main": [
         {
-          "count": 1,
-          "name": "Takenuma, Abandoned Mire"
-        },
-        {
-          "count": 1,
-          "name": "Sokenzan, Crucible of Defiance"
+          "count": 4,
+          "name": "Fatal Push"
         },
         {
           "count": 4,
-          "name": "Fatal Push"
+          "name": "Blazemire Verge"
+        },
+        {
+          "count": 3,
+          "name": "Blightstep Pathway"
+        },
+        {
+          "count": 4,
+          "name": "Blood Crypt"
         },
         {
           "count": 4,
@@ -851,7 +855,7 @@
         },
         {
           "count": 4,
-          "name": "Blood Crypt"
+          "name": "Blackcleave Cliffs"
         },
         {
           "count": 4,
@@ -862,20 +866,16 @@
           "name": "Scavenger's Talent"
         },
         {
-          "count": 3,
-          "name": "Blightstep Pathway"
-        },
-        {
-          "count": 4,
-          "name": "Blazemire Verge"
+          "count": 1,
+          "name": "Sokenzan, Crucible of Defiance"
         },
         {
           "count": 3,
           "name": "Swamp"
         },
         {
-          "count": 4,
-          "name": "Blackcleave Cliffs"
+          "count": 1,
+          "name": "Takenuma, Abandoned Mire"
         },
         {
           "count": 2,
@@ -892,19 +892,19 @@
           "name": "Abandon Attachments"
         },
         {
-          "count": 1,
-          "name": "Decorum Dissertation"
+          "count": 4,
+          "name": "Thoughtseize"
         },
         {
           "count": 1,
           "name": "Firebending Lesson"
         },
         {
-          "count": 4,
-          "name": "Thoughtseize"
+          "count": 2,
+          "name": "Ghost Vacuum"
         },
         {
-          "count": 2,
+          "count": 1,
           "name": "Go Blank"
         },
         {
@@ -912,12 +912,16 @@
           "name": "Ozai's Cruelty"
         },
         {
+          "count": 1,
+          "name": "Ruinous Waterbending"
+        },
+        {
           "count": 3,
           "name": "The Legend of Roku"
         },
         {
-          "count": 2,
-          "name": "Ghost Vacuum"
+          "count": 1,
+          "name": "Decorum Dissertation"
         }
       ]
     },
@@ -1149,15 +1153,15 @@
         },
         {
           "count": 4,
+          "name": "Thoughtseize"
+        },
+        {
+          "count": 4,
           "name": "Fatal Push"
         },
         {
           "count": 4,
           "name": "Gloomlake Verge"
-        },
-        {
-          "count": 4,
-          "name": "Thoughtseize"
         }
       ],
       "sideboard": [
