@@ -146,7 +146,11 @@ jq -c --argjson exclude "$NON_PLAYABLE" "$SCRYFALL_JQ_PRELUDE"'
     {
       oracle_id: $tok.oracle_id,
       face_names: [$tok.name | js_downcase],
-      faces: [{normal: $tok.image_uris.normal, art_crop: $tok.image_uris.art_crop}],
+      faces: [{
+        normal: $tok.image_uris.normal,
+        art_crop: $tok.image_uris.art_crop,
+        orientation: ($tok | face_orientation($tok.layout))
+      }],
       layout: $tok.layout,
       name: $tok.name,
       mana_cost: "",

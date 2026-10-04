@@ -18,7 +18,10 @@ function installedSources(src: string) {
   }, { kind: "fallback" as const, src: null }];
 }
 
-function mockNoRemoteScryfall(resolveFaceIndexSync: (...args: unknown[]) => number | null = () => null) {
+function mockNoRemoteScryfall(
+  resolveFaceIndexSync: (...args: unknown[]) => number | null = () => null,
+  isCardImageRotatedSync: (...args: unknown[]) => boolean = () => false,
+) {
   const remoteWork = vi.fn(() => Promise.reject(new Error("remote work must stay idle")));
   vi.doMock("../../services/scryfall.ts", () => ({
     deriveImageUrl: (url: string) => url,
@@ -30,7 +33,7 @@ function mockNoRemoteScryfall(resolveFaceIndexSync: (...args: unknown[]) => numb
     getCardPrintings: remoteWork,
     imageUrlSize: vi.fn(() => null),
     isCardImageFlipLayoutSync: vi.fn(() => false),
-    isCardImageRotatedSync: vi.fn(() => false),
+    isCardImageRotatedSync,
     isLocaleArtReady: vi.fn(() => true),
     loadLocaleArt: remoteWork,
     resolveFaceIndexSync,
@@ -1062,6 +1065,103 @@ describe("useCardImage", () => {
     await waitFor(() => expect(result.current.src).toBe("preset-survives"));
     expect(remoteWork).not.toHaveBeenCalled();
     useConnectivityStore.setState({ forcedOffline: false, browserOnline: true });
+  });
+
+  it("decides local-source rotation from the engine-resolved face, not the caller's face index (#9502)", async () => {
+    // A battle's front face is printed landscape; its back face is portrait.
+    const battleOracleId = "33333333-3333-4333-8333-333333333333";
+    const resolveFaceIndexSync = vi.fn((_oracleId: unknown, faceName: unknown) =>
+      faceName === "Awaken the Maelstrom" ? 1 : 0);
+    const isCardImageRotatedSync = vi.fn((_oracleId: unknown, _cardName: unknown, faceIndex: unknown) =>
+      faceIndex === 0);
+    vi.doMock("../../services/visualPacks/repository.ts", () => ({
+      visualPackRepository: {
+        currentRevision: () => "0",
+        subscribe: () => () => {},
+        resolve: vi.fn().mockResolvedValue({ revision: "0", sources: installedSources("installed-battle") }),
+      },
+    }));
+    const remoteWork = mockNoRemoteScryfall(resolveFaceIndexSync, isCardImageRotatedSync);
+
+    const { useConnectivityStore } = await import("../../stores/connectivityStore.ts");
+    useConnectivityStore.setState({ forcedOffline: true, browserOnline: true });
+    const { useCardImage } = await import("../useCardImage.ts");
+    // `transformed` stays false for the battle's back face, so the caller still passes face 0.
+    const back = renderHook(() => useCardImage("Invasion of Alara", {
+      oracleId: battleOracleId,
+      faceName: "Awaken the Maelstrom",
+      faceIndex: 0,
+    }));
+    const front = renderHook(() => useCardImage("Invasion of Alara", {
+      oracleId: battleOracleId,
+      faceName: "Invasion of Alara",
+      faceIndex: 0,
+    }));
+
+    await waitFor(() => expect(back.result.current.src).toBe("installed-battle"));
+    await waitFor(() => expect(front.result.current.src).toBe("installed-battle"));
+    expect(back.result.current.isRotated).toBe(false);
+    expect(front.result.current.isRotated).toBe(true);
+    expect(remoteWork).not.toHaveBeenCalled();
+    useConnectivityStore.setState({ forcedOffline: false, browserOnline: true });
+  });
+
+  it("decides printing-override rotation from the engine-resolved face (#9502)", async () => {
+    // A battle's front face is printed landscape; its back face is portrait.
+    const printing = {
+      id: "battle-printing",
+      set: "mom",
+      collector_number: "1",
+      faces: [{ normal: "https://img.example/battle-front.jpg" }, { normal: "https://img.example/battle-back.jpg" }],
+    };
+    vi.doMock("../../services/scryfall.ts", () => ({
+      deriveImageUrl: (url: string) => url,
+      fetchCardImageAsset: vi.fn(),
+      fetchCardImageAssetByOracleId: vi.fn().mockResolvedValue({
+        src: "https://img.example/default.jpg",
+        isRotated: false,
+        semantic: { oracleId: "oracle-battle", faceIndex: 1, alias: "invasion of alara" },
+      }),
+      fetchTokenImageAssetByRef: vi.fn(),
+      fetchTokenImageUrl: vi.fn(),
+      findPrintingById: vi.fn((printings: Array<{ id: string }>, id: string) =>
+        printings.find((candidate) => candidate.id === id)),
+      getCardPrintings: vi.fn().mockResolvedValue([printing]),
+      imageUrlSize: vi.fn(() => null),
+      isCardImageFlipLayoutSync: vi.fn(() => false),
+      isCardImageRotatedSync: vi.fn((_oracleId: unknown, _cardName: unknown, faceIndex: unknown) =>
+        faceIndex === 0),
+      isLocaleArtReady: vi.fn(() => true),
+      loadLocaleArt: vi.fn(),
+      resolveFaceIndexSync: vi.fn((_oracleId: unknown, faceName: unknown) =>
+        faceName === "Awaken the Maelstrom" ? 1 : 0),
+      resolveOracleIdSync: vi.fn(() => null),
+      resolvePrintingImageUrl: vi.fn((entry: typeof printing, faceIndex: number) => entry.faces[faceIndex].normal),
+    }));
+    vi.doMock("../../services/visualPacks/repository.ts", () => ({
+      visualPackRepository: {
+        currentRevision: () => "0",
+        subscribe: () => () => {},
+        resolve: vi.fn(async ({ allowRemote, remote }: { allowRemote: boolean; remote?: { src: string } }) => ({
+          revision: "0",
+          sources: allowRemote
+            ? [{ kind: "remote" as const, src: remote!.src }, { kind: "fallback" as const, src: null }]
+            : [{ kind: "fallback" as const, src: null }],
+        })),
+      },
+    }));
+
+    const { useCardImage } = await import("../useCardImage");
+    // `transformed` stays false for the battle's back face, so the caller still passes face 0.
+    const { result } = renderHook(() => useCardImage("Invasion of Alara", {
+      oracleId: "oracle-battle",
+      faceName: "Awaken the Maelstrom",
+      faceIndex: 0,
+      scryfallId: "battle-printing",
+    }));
+
+    await waitFor(() => expect(result.current.src).toBe("https://img.example/battle-back.jpg"));
+    expect(result.current.isRotated).toBe(false);
   });
 
   it("uses the resolved MDFC back face and persisted printing override locally", async () => {
