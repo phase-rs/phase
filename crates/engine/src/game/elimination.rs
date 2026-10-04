@@ -2248,7 +2248,6 @@ mod tests {
             candidates: Vec::new(),
             kind: Default::default(),
             last_applied_decides: false,
-            remember_available: false,
             remember_identity: None,
         };
         state.push_batch_delivery(crate::types::game_state::PendingBatchDeliveries {
@@ -2317,7 +2316,6 @@ mod tests {
             candidates: Vec::new(),
             kind: Default::default(),
             last_applied_decides: false,
-            remember_available: false,
             remember_identity: None,
         };
         state.push_change_zone_iteration(pending_change_zone_iteration(
@@ -3525,7 +3523,6 @@ mod tests {
             candidates: vec![],
             kind: Default::default(),
             last_applied_decides: false,
-            remember_available: false,
             remember_identity: None,
         };
         // Coupled continuation slots the resume drain would clear on a normal answer.
@@ -3668,7 +3665,6 @@ mod tests {
             candidates: Vec::new(),
             kind: Default::default(),
             last_applied_decides: false,
-            remember_available: false,
             remember_identity: None,
         };
         state.push_connive_reentry(PendingConniveReentry {
@@ -3724,7 +3720,6 @@ mod tests {
             candidates: Vec::new(),
             kind: Default::default(),
             last_applied_decides: false,
-            remember_available: false,
             remember_identity: None,
         };
         state.push_batch_delivery(pending_search_found_zone_delivery(found));
@@ -3772,7 +3767,6 @@ mod tests {
             candidates: vec![],
             kind: Default::default(),
             last_applied_decides: false,
-            remember_available: false,
             remember_identity: None,
         };
         let parked_found = ObjectId(77);
@@ -3850,7 +3844,6 @@ mod tests {
             candidates: Vec::new(),
             kind: Default::default(),
             last_applied_decides: false,
-            remember_available: false,
             remember_identity: None,
         };
         let source = create_object(

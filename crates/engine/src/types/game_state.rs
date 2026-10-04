@@ -13206,20 +13206,17 @@ impl GameState {
         let rederived = crate::game::replacement::replacement_choice_waiting_for(player, self);
         if let WaitingFor::ReplacementChoice {
             kind,
-            remember_available,
             remember_identity,
             ..
         } = rederived
         {
             if let WaitingFor::ReplacementChoice {
                 kind: restored_kind,
-                remember_available: restored_available,
                 remember_identity: restored_identity,
                 ..
             } = &mut self.waiting_for
             {
                 *restored_kind = kind;
-                *restored_available = remember_available;
                 *restored_identity = remember_identity;
             }
         }
@@ -14131,9 +14128,7 @@ pub enum WaitingFor {
         /// layer must not assume last-write-wins; this is the engine's answer.
         #[serde(default)]
         last_applied_decides: bool,
-        /// Engine-owned conservative eligibility; false for payment/search prompts.
-        #[serde(default)]
-        remember_available: bool,
+        /// Engine-owned conservative eligibility and identity; absent for payment/search prompts.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         remember_identity: Option<ReplacementAutoChoiceKey>,
     },
@@ -33830,7 +33825,6 @@ mod tests {
             candidates: Vec::new(),
             kind: Default::default(),
             last_applied_decides: false,
-            remember_available: false,
             remember_identity: None,
         };
         assert!(
@@ -34001,7 +33995,6 @@ mod tests {
             candidates: Vec::new(),
             kind: Default::default(),
             last_applied_decides: false,
-            remember_available: false,
             remember_identity: None,
         };
         assert!(
@@ -40132,7 +40125,6 @@ mod tests {
             candidates: vec![],
             kind: Default::default(),
             last_applied_decides: false,
-            remember_available: false,
             remember_identity: None,
         }));
         variants.push(Box::new(WaitingFor::ExploreChoice {

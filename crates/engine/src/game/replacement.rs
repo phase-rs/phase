@@ -1289,7 +1289,6 @@ pub fn replacement_choice_waiting_for(player: PlayerId, state: &GameState) -> Wa
         candidates,
         kind,
         last_applied_decides,
-        remember_available: remember_identity.is_some(),
         remember_identity,
     }
 }

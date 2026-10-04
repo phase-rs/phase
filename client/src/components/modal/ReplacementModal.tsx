@@ -58,7 +58,7 @@ export function ReplacementModal() {
   // Local UI state: the chosen permutation (indices into `candidates`).
   // Identity to start; reset on every new prompt because successive CR 616.1f
   // rounds can carry the same candidate count.
-  const rememberAvailable = isReplacementChoice && (waitingFor.data.remember_available ?? false);
+  const rememberAvailable = isReplacementChoice && waitingFor.data.remember_identity !== undefined;
   const [remember, setRemember] = useState(false);
   const [order, setOrder] = useState<number[]>(() =>
     Array.from({ length: candidateCount }, (_, i) => i),

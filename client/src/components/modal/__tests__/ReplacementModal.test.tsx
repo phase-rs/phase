@@ -21,8 +21,9 @@ function prompt(kind: ReplacementChoiceKind = { type: "Order" }, available = tru
         { source_id: 12, source_name: "Third source", description: "Add three" },
       ],
       kind,
-      remember_available: available,
-      remember_identity: { player: 0, event: "GainLife", kind, candidates: [{ incarnation: 1 }] },
+      ...(available ? {
+        remember_identity: { player: 0, event: "GainLife", kind, candidates: [{ incarnation: 1 }] },
+      } : {}),
     },
   };
 }

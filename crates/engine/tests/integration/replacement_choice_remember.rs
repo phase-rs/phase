@@ -95,14 +95,14 @@ fn life_scenario(optional: bool) -> (GameRunner, Vec<ObjectId>, Vec<ObjectId>) {
 fn assert_prompt(state: &GameState, kind: ReplacementChoiceKind, available: bool) {
     let WaitingFor::ReplacementChoice {
         kind: actual,
-        remember_available,
+        remember_identity,
         ..
     } = &state.waiting_for
     else {
         panic!("expected replacement choice, got {:?}", state.waiting_for);
     };
     assert_eq!(*actual, kind);
-    assert_eq!(*remember_available, available);
+    assert_eq!(remember_identity.is_some(), available);
 }
 
 #[test]
@@ -646,7 +646,21 @@ fn hidden_origin_prompt_identity_is_visible_only_to_the_authorized_actor() {
     ] {
         let snapshot = serde_json::to_value(projected).unwrap();
         assert!(snapshot["waiting_for"]["data"]["remember_identity"].is_null());
-        assert_eq!(snapshot["waiting_for"]["data"]["remember_available"], false);
+        assert_eq!(
+            snapshot["waiting_for"]["data"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            [
+                "candidate_count",
+                "candidates",
+                "kind",
+                "last_applied_decides",
+                "player",
+            ]
+        );
         assert!(snapshot["pending_replacement"].is_null());
         assert!(snapshot["replacement_auto_choice_tail"].is_null());
     }

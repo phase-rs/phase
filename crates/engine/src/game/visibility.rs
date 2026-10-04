@@ -1797,14 +1797,12 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // real source identity needed by the action round-trip.
     if let WaitingFor::ReplacementChoice {
         candidates,
-        remember_available,
         remember_identity,
         ..
     } = &mut filtered.waiting_for
     {
         if !replacement_choice_authorized {
             // CR 400.2: definition snapshots can disclose hidden-origin source identities.
-            *remember_available = false;
             *remember_identity = None;
             for candidate in candidates {
                 let source_is_hidden = candidate.source_id != ObjectId(0)
