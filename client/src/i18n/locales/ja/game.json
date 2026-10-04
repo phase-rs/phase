@@ -15,6 +15,9 @@
   "manaSourceSelection": {
     "title": "マナ源を選択",
     "description": "このマナ能力にはパーマネントの生け贄が必要です。",
+    "baseOutput_one": "基本生成量：{{count}}マナ",
+    "baseOutput_other": "基本生成量：{{count}}マナ",
+    "baseOutputVariable": "基本量は起動時に決定",
     "sacrifice": "生け贄",
     "back": "マナの支払いに戻る",
     "unknownSource": "マナ源"

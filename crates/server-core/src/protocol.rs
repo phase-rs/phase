@@ -1141,7 +1141,8 @@ mod tests {
     use engine::types::game_state::ProductionOverride;
     use engine::types::identifiers::ObjectIncarnationRef;
     use engine::types::mana::{
-        ManaSourcePenalty, ManaSourceSelection, ManaType, TapsForManaSelection,
+        ManaSourceOutput, ManaSourcePenalty, ManaSourceQuantity, ManaSourceSelection, ManaType,
+        TapsForManaSelection,
     };
     use serde_json::Value;
 
@@ -1239,6 +1240,33 @@ mod tests {
                 action: restored_action,
             } => assert_eq!(restored_action, generic),
             _ => panic!("wrong variant"),
+        }
+
+        let GameAction::ActivateManaSource { mut selection } = generic else {
+            unreachable!("fixture action is a generic mana-source selection");
+        };
+        selection.ability_index = Some(0);
+        selection.penalty = ManaSourcePenalty::Sacrifices;
+        selection.taps_for_mana.clear();
+        for quantity in [ManaSourceQuantity::Fixed(3), ManaSourceQuantity::Variable] {
+            selection.output = ManaSourceOutput::DeferredColorChoice { quantity };
+            selection.mana_type = ManaType::Colorless;
+            let msg = ClientMessage::Action {
+                action: GameAction::ActivateManaSource {
+                    selection: selection.clone(),
+                },
+            };
+            let json = serde_json::to_string(&msg).unwrap();
+            let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
+            let ClientMessage::Action { action } = parsed else {
+                panic!("wrong variant");
+            };
+            assert_eq!(
+                action,
+                GameAction::ActivateManaSource {
+                    selection: selection.clone()
+                }
+            );
         }
     }
 
@@ -3380,8 +3408,8 @@ mod tests {
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_104_for_delve_payment_state_shape() {
-        assert_eq!(PROTOCOL_VERSION, 104);
+    fn protocol_version_is_105_for_deferred_mana_quantity() {
+        assert_eq!(PROTOCOL_VERSION, 105);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3392,7 +3420,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_104_for_delve_payment_state_shape` stays
+    /// `protocol_version_is_105_for_deferred_mana_quantity` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

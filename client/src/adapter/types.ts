@@ -1795,7 +1795,10 @@ export type ManaSourcePenalty =
 
 export type ManaSourceOutput =
   | { type: "Concrete"; data: ManaType }
-  | { type: "DeferredColorChoice" };
+  | {
+      type: "DeferredColorChoice";
+      data: { quantity: { type: "Fixed"; data: number } | { type: "Variable" } };
+    };
 
 export type ProductionOverride =
   | { type: "SingleColor"; data: ManaType }

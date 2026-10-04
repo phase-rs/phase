@@ -10,6 +10,9 @@
   "manaSourceSelection": {
     "title": "Elige una fuente de maná",
     "description": "Esta habilidad de maná requiere sacrificar un permanente.",
+    "baseOutput_one": "Producción base: {{count}} maná",
+    "baseOutput_other": "Producción base: {{count}} manás",
+    "baseOutputVariable": "La cantidad base se determina al activar",
     "sacrifice": "Sacrificar",
     "back": "Volver al pago de maná",
     "unknownSource": "Fuente de maná"

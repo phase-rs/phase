@@ -26,8 +26,8 @@ use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{GameState, ManaAbilityResume, ProductionOverride, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::{
-    ManaColor, ManaCostShard, ManaPip, ManaRestriction, ManaSourceOutput, ManaSourceSelection,
-    ManaType, PaymentContext, TapsForManaSelection,
+    ManaColor, ManaCostShard, ManaPip, ManaRestriction, ManaSourceOutput, ManaSourceQuantity,
+    ManaSourceSelection, ManaType, PaymentContext, TapsForManaSelection,
 };
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
@@ -608,35 +608,56 @@ fn manual_selection_for_option(
     option: &ManaSourceOption,
 ) -> Option<ManaSourceSelection> {
     let mut selection = option.semantic_selection(state)?;
-    let flexible_output = option.ability_index.is_some_and(|ability_index| {
-        state
+    let deferred_quantity = option.ability_index.and_then(|ability_index| {
+        let produced = state
             .objects
             .get(&option.object_id)
             .and_then(|object| object.abilities.get(ability_index))
-            .is_some_and(|ability| {
-                matches!(
-                    &*ability.effect,
-                    Effect::Mana {
-                        produced: ManaProduction::AnyOneColor { .. }
-                            | ManaProduction::AnyCombination { .. }
-                            | ManaProduction::ChoiceAmongExiledColors { .. }
-                            | ManaProduction::AnyOneColorAmongPermanents { .. }
-                            | ManaProduction::OpponentLandColors { .. }
-                            | ManaProduction::AnyTypeProduceableBy { .. }
-                            | ManaProduction::AnyCombinationOfObjectColors { .. }
-                            | ManaProduction::AnyInCommandersColorIdentity { .. },
-                        ..
-                    }
-                )
-            })
+            .and_then(|ability| match &*ability.effect {
+                Effect::Mana { produced, .. } => Some(produced),
+                _ => None,
+            })?;
+        let count = match produced {
+            ManaProduction::AnyOneColor { count, .. }
+            | ManaProduction::AnyCombination { count, .. }
+            | ManaProduction::AnyOneColorAmongPermanents { count, .. }
+            | ManaProduction::OpponentLandColors { count }
+            | ManaProduction::AnyTypeProduceableBy { count, .. }
+            | ManaProduction::AnyCombinationOfObjectColors { count, .. }
+            | ManaProduction::AnyInCommandersColorIdentity { count, .. } => Some(count),
+            ManaProduction::ChoiceAmongExiledColors { .. } => {
+                return Some(ManaSourceQuantity::Fixed(1));
+            }
+            ManaProduction::Fixed { .. }
+            | ManaProduction::Colorless { .. }
+            | ManaProduction::Mixed { .. }
+            | ManaProduction::ChosenColor { .. }
+            | ManaProduction::NotedType { .. }
+            | ManaProduction::ChoiceAmongCombinations { .. }
+            | ManaProduction::DistinctColorsAmongPermanents { .. }
+            | ManaProduction::TriggerEventManaType => None,
+        }?;
+        Some(match count {
+            QuantityExpr::Fixed { value } => ManaSourceQuantity::Fixed((*value).max(0) as u32),
+            QuantityExpr::Ref { .. }
+            | QuantityExpr::DivideRounded { .. }
+            | QuantityExpr::Offset { .. }
+            | QuantityExpr::ClampMin { .. }
+            | QuantityExpr::Multiply { .. }
+            | QuantityExpr::Sum { .. }
+            | QuantityExpr::UpTo { .. }
+            | QuantityExpr::Power { .. }
+            | QuantityExpr::Difference { .. }
+            | QuantityExpr::Max { .. } => ManaSourceQuantity::Variable,
+        })
     });
-    if flexible_output {
+    if let Some(quantity) = deferred_quantity {
         // The planner emits one concrete row per color, but a manual activation
         // must retain the source capability and let the normal mana-choice
         // resolver ask for its color. The colorless marker is intentionally
         // inert while `output` is deferred and canonicalizes all planner rows.
         selection.mana_type = ManaType::Colorless;
-        selection.output = ManaSourceOutput::DeferredColorChoice;
+        selection.output = ManaSourceOutput::DeferredColorChoice { quantity };
     }
     Some(selection)
 }
@@ -979,7 +1000,7 @@ pub(crate) fn activate_mana_source_option_with_output(
             ManaSourceOutput::Concrete(_) => {
                 super::casting_costs::production_override_for_option(&ability, option)
             }
-            ManaSourceOutput::DeferredColorChoice => None,
+            ManaSourceOutput::DeferredColorChoice { .. } => None,
         };
         mana_abilities::activate_mana_ability(
             state,

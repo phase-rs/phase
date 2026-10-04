@@ -7643,7 +7643,9 @@ mod pool_payability_tests {
             .expect("the tapped archive-shaped no-tap storage ability remains available");
         assert_eq!(
             slagheap_selection.output,
-            ManaSourceOutput::DeferredColorChoice
+            ManaSourceOutput::DeferredColorChoice {
+                quantity: crate::types::mana::ManaSourceQuantity::Variable,
+            }
         );
         assert_eq!(slagheap_selection.mana_type, ManaType::Colorless);
 
@@ -21417,7 +21419,7 @@ fn mana_source_selection_can_contribute_to_cost(
                     .as_ref()
                     .is_some_and(|outputs| outputs.contains(&required))
         }
-        ManaSourceOutput::DeferredColorChoice => required != ManaType::Colorless,
+        ManaSourceOutput::DeferredColorChoice { .. } => required != ManaType::Colorless,
     };
     let pays = |required| {
         mana_spend_permission.is_some_and(|permission| permission.allows_payment_as(required))

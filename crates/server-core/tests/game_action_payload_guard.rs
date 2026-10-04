@@ -15,8 +15,8 @@ use engine::types::game_state::{ManaChoice, ProductionOverride, ShardChoice, Yie
 use engine::types::identifiers::{CardId, ObjectIncarnationRef};
 use engine::types::keywords::Keyword;
 use engine::types::mana::{
-    ManaRestriction, ManaSourcePenalty, ManaSourceSelection, ManaType, SpellCostCriterion,
-    TapsForManaSelection,
+    ManaRestriction, ManaSourceOutput, ManaSourcePenalty, ManaSourceQuantity, ManaSourceSelection,
+    ManaType, SpellCostCriterion, TapsForManaSelection,
 };
 use engine::types::match_config::DeckCardCount;
 use engine::types::player::PlayerId;
@@ -108,6 +108,17 @@ fn accepts_realistic_tap_land_semantic_selection() {
 
     guard_game_action_payload(&GameAction::TapLandForMana { selection })
         .expect("a realistic semantic mana-source selection stays within every budget");
+}
+
+#[test]
+fn accepts_scalar_deferred_mana_quantity_without_new_collection_budget() {
+    for quantity in [ManaSourceQuantity::Fixed(3), ManaSourceQuantity::Variable] {
+        let mut selection = mana_source_selection();
+        selection.mana_type = ManaType::Colorless;
+        selection.output = ManaSourceOutput::DeferredColorChoice { quantity };
+        guard_game_action_payload(&GameAction::ActivateManaSource { selection })
+            .expect("the scalar descriptor adds no list or string payload");
+    }
 }
 
 #[test]

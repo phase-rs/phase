@@ -10,6 +10,9 @@
   "manaSourceSelection": {
     "title": "Choisir une source de mana",
     "description": "Cette capacité de mana demande de sacrifier un permanent.",
+    "baseOutput_one": "Production de base : {{count}} mana",
+    "baseOutput_other": "Production de base : {{count}} manas",
+    "baseOutputVariable": "Quantité de base déterminée à l’activation",
     "sacrifice": "Sacrifier",
     "back": "Retour au paiement de mana",
     "unknownSource": "Source de mana"

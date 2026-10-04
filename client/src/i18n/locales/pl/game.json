@@ -10,6 +10,9 @@
   "manaSourceSelection": {
     "title": "Wybierz źródło many",
     "description": "Ta zdolność many wymaga poświęcenia permanenta.",
+    "baseOutput_one": "Podstawowa ilość: {{count}} mana",
+    "baseOutput_other": "Podstawowa ilość: {{count}} many",
+    "baseOutputVariable": "Podstawowa ilość ustalana przy aktywacji",
     "sacrifice": "Poświęć",
     "back": "Wróć do płatności many",
     "unknownSource": "Źródło many"
