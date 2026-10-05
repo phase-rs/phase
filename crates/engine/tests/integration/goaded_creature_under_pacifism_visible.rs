@@ -509,7 +509,7 @@ fn registered_warrior_direct_regoad_uses_each_goader_original_lifetime() {
                     .contains(&ContinuousModification::AddStaticMode {
                         mode: StaticMode::Goaded,
                     }))
-            .then(|| match &effect.affected {
+            .then_some(match &effect.affected {
                 TargetFilter::SpecificObject { id } => Some(*id),
                 _ => None,
             })
