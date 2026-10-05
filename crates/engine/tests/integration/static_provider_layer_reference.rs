@@ -300,7 +300,10 @@ fn aura_on_an_opponents_creature_does_not_change_marvins_provider_set() {
     // CR 109.5 + CR 613.8a: Gond reaches and grants the opponent's creature
     // its token ability, but that creature is outside Marvin's "you control"
     // provider set. Its ability cannot create a dependency for this grant.
-    assert_eq!(activated_ability_definitions(runner.state(), other).len(), 1);
+    assert_eq!(
+        activated_ability_definitions(runner.state(), other).len(),
+        1
+    );
     assert!(activated_ability_definitions(runner.state(), marvin).is_empty());
 }
 
@@ -337,7 +340,10 @@ fn entering_artifact_animated_in_layer_four_updates_existing_marvin() {
         .card_types
         .core_types
         .contains(&CoreType::Creature));
-    assert_eq!(activated_ability_definitions(runner.state(), marvin).len(), 1);
+    assert_eq!(
+        activated_ability_definitions(runner.state(), marvin).len(),
+        1
+    );
 
     move_to_zone(runner.state_mut(), ring, Zone::Graveyard, &mut Vec::new());
     flush_layers(runner.state_mut());

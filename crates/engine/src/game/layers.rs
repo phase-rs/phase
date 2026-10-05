@@ -5464,12 +5464,13 @@ fn active_effects_force_incremental_escalation(
         if let ContinuousModification::GrantAllActivatedAbilitiesOf { source, .. }
         | ContinuousModification::GrantAllTriggeredAbilitiesOf { source } = &e.modification
         {
-            let controllers: HashSet<_> = state.objects.values().map(|obj| obj.controller).collect();
+            let controllers: HashSet<_> =
+                state.objects.values().map(|obj| obj.controller).collect();
             if controllers.iter().any(|&controller| {
                 let ctx = FilterContext::from_source_with_controller(e.source_id, controller);
-                entered_ids.iter().any(|&id| {
-                    id != e.source_id && matches_target_filter(state, id, source, &ctx)
-                })
+                entered_ids
+                    .iter()
+                    .any(|&id| id != e.source_id && matches_target_filter(state, id, source, &ctx))
             }) {
                 return true;
             }
@@ -7121,12 +7122,9 @@ fn expand_granted_activated_abilities(
                 let modification = ContinuousModification::GrantAbility {
                     definition: Box::new(donated),
                 };
-                out.output.grants.push((
-                    recipient_id,
-                    provider_id,
-                    modification.clone(),
-                    None,
-                ));
+                out.output
+                    .grants
+                    .push((recipient_id, provider_id, modification.clone(), None));
                 out.effects.push(ActiveContinuousEffect {
                     source_id: recipient_id,
                     controller: recipient_controller,
@@ -17965,8 +17963,8 @@ mod tests {
         // is unambiguous (evaluate_layers re-runs the expansion each pass; this
         // isolates one pass). Single controller ⟹ exactly M provider scans.
         crate::game::perf_counters::reset();
-        let effects = expand_granted_activated_abilities(&state, host, 1, &recipients, &source, None)
-            .effects;
+        let effects =
+            expand_granted_activated_abilities(&state, host, 1, &recipients, &source, None).effects;
         let scans = crate::game::perf_counters::snapshot().granted_ability_provider_scans;
         assert_eq!(
             scans, m,
