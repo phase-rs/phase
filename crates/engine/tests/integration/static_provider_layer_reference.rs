@@ -1,0 +1,345 @@
+//! A live provider-membership reference for a layer-6 ability grant.
+//! March of the Machines changes Sol Ring's type in layer 4; Marvin's printed
+//! static ability must then see Sol Ring as a creature in layer 6.
+
+use engine::game::casting::{activated_ability_definitions, can_activate_ability_now};
+use engine::game::layers::{flush_layers, mark_layers_full};
+use engine::game::scenario::{GameScenario, P0, P1};
+use engine::game::zones::move_to_zone;
+use engine::types::ability::{AbilityCost, AbilityKind, ContinuousModification, Effect};
+use engine::types::actions::GameAction;
+use engine::types::card_type::CoreType;
+use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+use engine::types::phase::Phase;
+use engine::types::zones::Zone;
+
+const MARVIN: &str = "Marvin has all activated abilities of creatures you control that don't have the same name as this creature.";
+const MARCH: &str = "Each noncreature artifact is an artifact creature with power and toughness each equal to its mana value. (Equipment that's a creature can't equip a creature.)";
+const SOL_RING: &str = "{T}: Add {C}{C}.";
+const PRESENCE_OF_GOND: &str = "Enchant creature\nEnchanted creature has \"{T}: Create a 1/1 green Elf Warrior creature token.\"";
+
+#[test]
+fn march_animation_updates_marvins_live_activated_ability_providers() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let marvin = scenario
+        .add_creature(P0, "Marvin, Murderous Mimic", 2, 2)
+        .as_artifact_creature()
+        .as_legendary()
+        .with_subtypes(vec!["Toy"])
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![],
+            generic: 2,
+        })
+        .from_oracle_text(MARVIN)
+        .id();
+    let ring = scenario
+        .add_artifact_from_oracle(P0, "Sol Ring", SOL_RING)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![],
+            generic: 1,
+        })
+        .id();
+    let march = scenario
+        .add_spell_to_hand(P0, "March of the Machines", false)
+        .as_enchantment()
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 3,
+        })
+        .from_oracle_text(MARCH)
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        [
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Blue,
+        ]
+        .into_iter()
+        .map(|color| ManaUnit::new(color, marvin, false, vec![]))
+        .collect(),
+    );
+    let mut runner = scenario.build();
+
+    // Positive parser guards: the host has its printed grant and the donor has
+    // precisely the printed tap-for-two ability before any layer interaction.
+    assert!(runner.state().objects[&marvin]
+        .base_static_definitions
+        .iter()
+        .flat_map(|definition| &definition.modifications)
+        .any(|modification| matches!(
+            modification,
+            ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
+        )));
+    let donor_abilities = activated_ability_definitions(runner.state(), ring);
+    assert_eq!(donor_abilities.len(), 1, "Sol Ring must parse one ability");
+    let donor = &donor_abilities[0].1;
+    assert_eq!(donor.kind, AbilityKind::Activated);
+    assert_eq!(donor.cost, Some(AbilityCost::Tap));
+    assert!(matches!(donor.effect.as_ref(), Effect::Mana { .. }));
+
+    mark_layers_full(runner.state_mut());
+    flush_layers(runner.state_mut());
+    assert!(!runner.state().objects[&ring]
+        .card_types
+        .core_types
+        .contains(&CoreType::Creature));
+    // CR 611.3a + CR 613.1f: a noncreature Sol Ring is not yet a provider.
+    assert!(activated_ability_definitions(runner.state(), marvin).is_empty());
+
+    // CR 601.2 + CR 611.3b: resolve the real enchantment from hand, making its
+    // static type change active on the battlefield.
+    runner
+        .cast(march)
+        .resolve()
+        .assert_zone(&[march], Zone::Battlefield);
+    assert!(
+        runner.state().objects[&ring]
+            .card_types
+            .core_types
+            .contains(&CoreType::Creature),
+        "March must animate Sol Ring before Marvin's grant is checked"
+    );
+
+    // CR 613.1d + CR 613.1f: after the layer-4 type change, Marvin gains the
+    // donor's exact activated cost and effect in layer 6.
+    let granted = activated_ability_definitions(runner.state(), marvin);
+    assert_eq!(granted.len(), 1, "Marvin must gain Sol Ring's mana ability");
+    let (ability_index, ability) = &granted[0];
+    assert_eq!(ability.kind, AbilityKind::Activated);
+    assert_eq!(ability.cost, donor.cost);
+    assert_eq!(ability.effect, donor.effect);
+    assert!(can_activate_ability_now(
+        runner.state(),
+        P0,
+        marvin,
+        *ability_index
+    ));
+    assert_eq!(
+        runner.state().players[P0.0 as usize]
+            .mana_pool
+            .count_color(ManaType::Colorless),
+        0
+    );
+
+    // CR 602.2 + CR 605.3b: the donated mana ability belongs to Marvin, so
+    // Marvin taps and produces two colorless mana; the donor remains untapped.
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: marvin,
+            ability_index: *ability_index,
+        })
+        .expect("Marvin must activate Sol Ring's donated mana ability");
+    assert!(runner.state().objects[&marvin].tapped);
+    assert!(!runner.state().objects[&ring].tapped);
+    assert_eq!(
+        runner.state().players[P0.0 as usize]
+            .mana_pool
+            .count_color(ManaType::Colorless),
+        2
+    );
+
+    // CR 611.3a-b: source removal makes Sol Ring a noncreature again, so it
+    // leaves Marvin's live provider set on the next normal layer flush.
+    move_to_zone(runner.state_mut(), march, Zone::Graveyard, &mut Vec::new());
+    flush_layers(runner.state_mut());
+    assert!(!runner.state().objects[&ring]
+        .card_types
+        .core_types
+        .contains(&CoreType::Creature));
+    assert!(activated_ability_definitions(runner.state(), marvin).is_empty());
+}
+
+#[test]
+fn older_marvin_copies_an_ability_granted_to_a_donor_by_later_aura() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let marvin = scenario
+        .add_creature_from_oracle(P0, "Marvin, Murderous Mimic", 2, 2, MARVIN)
+        .as_artifact_creature()
+        .as_legendary()
+        .with_subtypes(vec!["Toy"])
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![],
+            generic: 2,
+        })
+        .id();
+    let donor = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let gond = scenario
+        .add_spell_to_hand(P0, "Presence of Gond", false)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 2,
+        })
+        .from_oracle_text_with_keywords(&["Enchant"], PRESENCE_OF_GOND)
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        [ManaType::Colorless, ManaType::Colorless, ManaType::Green]
+            .into_iter()
+            .map(|color| ManaUnit::new(color, marvin, false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+
+    assert!(runner.state().objects[&marvin]
+        .base_static_definitions
+        .iter()
+        .flat_map(|definition| &definition.modifications)
+        .any(|modification| matches!(
+            modification,
+            ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
+        )));
+    assert!(activated_ability_definitions(runner.state(), donor).is_empty());
+
+    // CR 303.4a + CR 613.1f: resolving the Aura onto the donor grants its
+    // printed token-creating activated ability in the same layer as Marvin's.
+    runner
+        .cast(gond)
+        .target_object(donor)
+        .resolve()
+        .assert_zone(&[gond], Zone::Battlefield);
+    assert_eq!(
+        runner.state().objects[&gond].attached_to,
+        Some(donor.into())
+    );
+    assert!(runner.state().objects[&marvin].timestamp < runner.state().objects[&gond].timestamp);
+
+    let donor_abilities = activated_ability_definitions(runner.state(), donor);
+    assert_eq!(
+        donor_abilities.len(),
+        1,
+        "Gond must grant the donor one ability"
+    );
+    let donor_ability = &donor_abilities[0].1;
+    assert_eq!(donor_ability.kind, AbilityKind::Activated);
+    assert_eq!(donor_ability.cost, Some(AbilityCost::Tap));
+    assert!(matches!(
+        donor_ability.effect.as_ref(),
+        Effect::Token { .. }
+    ));
+
+    // CR 613.8a-b + CR 613.1f: the older Marvin grant depends on the later
+    // Aura grant because it changes which abilities Marvin copies from donor.
+    let granted = activated_ability_definitions(runner.state(), marvin);
+    assert_eq!(granted.len(), 1, "Marvin must gain Gond's donated ability");
+    let (ability_index, ability) = &granted[0];
+    assert_eq!(ability.kind, AbilityKind::Activated);
+    assert_eq!(ability.cost, donor_ability.cost);
+    assert_eq!(ability.effect, donor_ability.effect);
+    assert!(can_activate_ability_now(
+        runner.state(),
+        P0,
+        marvin,
+        *ability_index
+    ));
+
+    // CR 602.2 + CR 303.4e: Marvin owns the copied activation and pays its tap
+    // cost; the enchanted donor does not tap when Marvin creates the Elf.
+    runner.activate(marvin, *ability_index).resolve();
+    assert!(runner.state().objects[&marvin].tapped);
+    assert!(!runner.state().objects[&donor].tapped);
+    assert_eq!(
+        runner
+            .state()
+            .objects
+            .values()
+            .filter(|object| {
+                object.is_token && object.zone == Zone::Battlefield && object.controller == P0
+            })
+            .count(),
+        1,
+        "Marvin's activation must create one Elf token"
+    );
+    assert!(runner.state().stack.is_empty());
+
+    // CR 611.3a: The donated ability ceases with the attached Aura. The
+    // donor remains the same creature, so this isolates the live definition
+    // read from provider membership changes.
+    move_to_zone(runner.state_mut(), gond, Zone::Graveyard, &mut Vec::new());
+    flush_layers(runner.state_mut());
+    assert!(activated_ability_definitions(runner.state(), donor).is_empty());
+    assert!(activated_ability_definitions(runner.state(), marvin).is_empty());
+}
+
+#[test]
+fn aura_on_an_opponents_creature_does_not_change_marvins_provider_set() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let marvin = scenario
+        .add_creature_from_oracle(P0, "Marvin, Murderous Mimic", 2, 2, MARVIN)
+        .as_artifact_creature()
+        .as_legendary()
+        .with_subtypes(vec!["Toy"])
+        .id();
+    let other = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let gond = scenario
+        .add_spell_to_hand(P0, "Presence of Gond", false)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 2,
+        })
+        .from_oracle_text_with_keywords(&["Enchant"], PRESENCE_OF_GOND)
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        [ManaType::Colorless, ManaType::Colorless, ManaType::Green]
+            .into_iter()
+            .map(|color| ManaUnit::new(color, marvin, false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    runner.cast(gond).target_object(other).resolve();
+
+    // CR 109.5 + CR 613.8a: Gond reaches and grants the opponent's creature
+    // its token ability, but that creature is outside Marvin's "you control"
+    // provider set. Its ability cannot create a dependency for this grant.
+    assert_eq!(activated_ability_definitions(runner.state(), other).len(), 1);
+    assert!(activated_ability_definitions(runner.state(), marvin).is_empty());
+}
+
+#[test]
+fn entering_artifact_animated_in_layer_four_updates_existing_marvin() {
+    let mut scenario = GameScenario::new();
+    let marvin = scenario
+        .add_creature_from_oracle(P0, "Marvin, Murderous Mimic", 2, 2, MARVIN)
+        .as_artifact_creature()
+        .as_legendary()
+        .with_subtypes(vec!["Toy"])
+        .id();
+    scenario.add_enchantment_from_oracle(P0, "March of the Machines", MARCH);
+    let ring = scenario
+        .add_artifact_from_oracle(P0, "Sol Ring", SOL_RING)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![],
+            generic: 1,
+        })
+        .id();
+    let mut runner = scenario.build();
+    move_to_zone(runner.state_mut(), ring, Zone::Hand, &mut Vec::new());
+    mark_layers_full(runner.state_mut());
+    flush_layers(runner.state_mut());
+    assert!(activated_ability_definitions(runner.state(), marvin).is_empty());
+    assert_eq!(activated_ability_definitions(runner.state(), ring).len(), 1);
+
+    // CR 611.3a + CR 613.1d: The entrant is a noncreature artifact at the
+    // incremental gate, then becomes a creature before Marvin reads providers.
+    // Marvin is pre-existing and must be re-derived with the new provider.
+    move_to_zone(runner.state_mut(), ring, Zone::Battlefield, &mut Vec::new());
+    flush_layers(runner.state_mut());
+    assert!(runner.state().objects[&ring]
+        .card_types
+        .core_types
+        .contains(&CoreType::Creature));
+    assert_eq!(activated_ability_definitions(runner.state(), marvin).len(), 1);
+
+    move_to_zone(runner.state_mut(), ring, Zone::Graveyard, &mut Vec::new());
+    flush_layers(runner.state_mut());
+    assert!(activated_ability_definitions(runner.state(), marvin).is_empty());
+}

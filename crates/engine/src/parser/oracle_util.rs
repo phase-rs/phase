@@ -2319,8 +2319,8 @@ pub(crate) const GRANTING_SELF_PLACEHOLDER: &str = "\u{E0002}";
 ///
 /// WHY PARSE TIME, NOT THE LAYER-6 GRANT (CR 201.5a, last sentence — "This is
 /// also true if the second ability is copied onto a new object"):
-/// `GrantAllActivatedAbilitiesOf` is expanded at continuous-effect collection
-/// time into one synthesized `GrantAbility` per donated ability, each emitted
+/// `GrantAllActivatedAbilitiesOf` is retained until layer 6, then expanded
+/// into one synthesized `GrantAbility` per donated ability, each emitted
 /// with `source_id: recipient_id` (`game::layers::expand_granted_activated_abilities`).
 /// Layer 6 concretizes against that `source_id`, so a live name lookup there
 /// would stamp the RE-GRANTING object's name rather than the original granter's.

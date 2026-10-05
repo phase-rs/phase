@@ -1854,6 +1854,7 @@ mod reveal_until_routed_damage_count;
 mod ripple_reveal_choice_interaction;
 mod siphon_insight_mana_rider;
 mod slow_motion_upkeep_sacrifice_return;
+mod static_provider_layer_reference;
 mod uba_mask_draw_to_exile_play;
 mod ultimate_magic_meteor_per_opponent_destroy;
 mod untap_upkeep_draw_created_steps;
