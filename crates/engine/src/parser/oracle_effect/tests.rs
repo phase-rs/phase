@@ -80671,3 +80671,53 @@ mod bare_player_pronoun_declaration_tests {
         }
     }
 }
+
+mod bare_pronoun_after_object_creation_tests {
+    use super::*;
+
+    fn effect_nodes<'a>(
+        value: &'a serde_json::Value,
+        ty: &str,
+        out: &mut Vec<&'a serde_json::Value>,
+    ) {
+        match value {
+            serde_json::Value::Object(map) => {
+                if map.get("type").and_then(|t| t.as_str()) == Some(ty) {
+                    out.push(value);
+                }
+                map.values().for_each(|v| effect_nodes(v, ty, out));
+            }
+            serde_json::Value::Array(items) => items.iter().for_each(|v| effect_nodes(v, ty, out)),
+            _ => {}
+        }
+    }
+
+    /// CR 608.2c: a bare "They" binds to the nearest clause that produces a referent; a token-creating
+    /// clause is one, a player-only "you gain" clause is not (Essence Feed).
+    #[test]
+    fn they_after_a_token_clause_reads_the_created_tokens_not_the_declared_player() {
+        let parsed = parse_oracle_text(
+            "Target player loses 3 life. You gain 3 life and create three 0/1 colorless Eldrazi Spawn creature tokens. They have \"Sacrifice this token: Add {C}.\"",
+            "Essence Feed",
+            &[],
+            &["Sorcery".to_string()],
+            &[],
+        );
+        let json = serde_json::to_value(&parsed.abilities).unwrap();
+        let (mut tokens, mut grants) = (Vec::new(), Vec::new());
+        effect_nodes(&json, "Token", &mut tokens);
+        effect_nodes(&json, "GenericEffect", &mut grants);
+        assert_eq!(tokens.len(), 1, "reach guard: the Token node: {json}");
+        assert_eq!(grants.len(), 1, "reach guard: the grant node: {json}");
+        assert_eq!(
+            grants[0]["static_abilities"][0]["affected"]["type"], "LastCreated",
+            "{}",
+            grants[0]
+        );
+        assert!(
+            !grants[0].to_string().contains("DeclaredPlayer"),
+            "{}",
+            grants[0]
+        );
+    }
+}

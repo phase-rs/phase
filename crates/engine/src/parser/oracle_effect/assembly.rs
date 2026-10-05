@@ -3165,8 +3165,6 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
             // helper no longer refuses a stamped node (it now READS the stamp),
             // so precedence belongs at the writer, not at the classifier.
             if def.optional_for.is_none() && def.optional_player.is_none() {
-                // A clause-carried actor is offered to the same admission as the slot's.
-                def.optional_player = clause_ir.optional_actor.clone();
                 def.optional_player =
                     subject_anchored_optional_actor(&def, ActorBindingWindow::ThisResolution);
             }

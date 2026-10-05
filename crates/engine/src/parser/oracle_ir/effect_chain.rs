@@ -966,11 +966,6 @@ pub(crate) struct ClauseIr {
     /// chunk loop after the clause is pushed, and propagated by `absorb_clause`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) declared_player_group: Option<ChosenGroupId>,
-    /// CR 608.2d: the player a subject-anchored "may" names when the effect's own
-    /// slot holds another spelling (a collision reader keeps `ParentTarget`
-    /// there). Set by the chunk loop after the clause is pushed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) optional_actor: Option<TargetFilter>,
     /// CR 607.2d + CR 608.2d: which KIND of chosen-colour
     /// reference this clause's KEYWORD GRANT printed, DERIVED ONCE from this
     /// clause's own verbatim `source_text` at `ClauseDraft::push` — the sealed
@@ -1045,7 +1040,6 @@ impl ClauseIr {
             declared_target_choice_timing,
             printed_color_choice,
             declared_player_group,
-            optional_actor,
             chosen_color_grant,
             placement,
             _sealed: _,
@@ -1076,7 +1070,6 @@ impl ClauseIr {
         *declared_target_choice_timing = None;
         *printed_color_choice = None;
         *declared_player_group = None;
-        *optional_actor = None;
         *chosen_color_grant = None;
         *placement = ClausePlacement::Sibling;
     }
@@ -1252,7 +1245,6 @@ impl ClauseIrBuilder {
             declared_target_choice_timing: None,
             printed_color_choice: None,
             declared_player_group: None,
-            optional_actor: None,
             placement: ClausePlacement::Sibling,
         }
     }
@@ -1331,7 +1323,6 @@ impl ClauseIrBuilder {
         .declared_target_choice_timing(c.declared_target_choice_timing)
         .printed_color_choice(c.printed_color_choice)
         .declared_player_group(c.declared_player_group)
-        .optional_actor(c.optional_actor)
         .push();
         if let Some(absorbed) = self.clauses.last_mut() {
             absorbed.target_reads = c.target_reads;
@@ -1370,7 +1361,6 @@ pub(crate) struct ClauseDraft<'a> {
     declared_target_choice_timing: Option<TargetChoiceTiming>,
     printed_color_choice: Option<ChoiceType>,
     declared_player_group: Option<ChosenGroupId>,
-    optional_actor: Option<TargetFilter>,
     placement: ClausePlacement,
 }
 
@@ -1460,10 +1450,6 @@ impl ClauseDraft<'_> {
     }
     pub(crate) fn declared_player_group(mut self, v: Option<ChosenGroupId>) -> Self {
         self.declared_player_group = v;
-        self
-    }
-    pub(crate) fn optional_actor(mut self, v: Option<TargetFilter>) -> Self {
-        self.optional_actor = v;
         self
     }
 
@@ -1711,7 +1697,6 @@ impl ClauseDraft<'_> {
                 &self.source_text,
             ),
             declared_player_group: self.declared_player_group,
-            optional_actor: self.optional_actor,
             placement: self.placement,
             _sealed: (),
         });

@@ -25628,7 +25628,8 @@ fn chain_has_prior_player_target_referent(clauses: &[ClauseIr]) -> bool {
 
 /// The nearest earlier clause that announces a player, reached only through
 /// clauses that read the same referent, name the controller ("you"), or announce an
-/// object of their own: none of them names another player (CR 608.2c).
+/// object of their own: none of them names another player (CR 608.2c). A clause
+/// that creates objects is the nearer referent, so it ends the walk.
 fn chain_prior_player_declaration(clauses: &[ClauseIr]) -> Option<&ClauseIr> {
     for prev in clauses.iter().rev() {
         if prev.condition.is_some() {
@@ -25636,6 +25637,9 @@ fn chain_prior_player_declaration(clauses: &[ClauseIr]) -> Option<&ClauseIr> {
         }
         if has_explicit_player_target(&prev.parsed.effect) {
             return Some(prev);
+        }
+        if publishes_chain_created_referent(&prev.parsed.effect) {
+            return None;
         }
         if matches!(
             prev.parsed.effect.target_filter(),
