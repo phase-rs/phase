@@ -623,9 +623,10 @@ fn compound_attachment_retires_non_tce_tails_without_swap_back_revival() {
         host.tapped = true;
     }
     let permission = |duration: Duration, source, player| -> CastingPermission {
-        serde_json::from_value(serde_json::json!({"PlayFromExile": {
+        serde_json::from_value(serde_json::json!({
+            "type": "PlayFromExile",
             "duration": duration, "source_id": source, "granted_to": player
-        }}))
+        }))
         .unwrap()
     };
     let control_permission = permission(Duration::WhileControllingHost, board.thief, P0);
@@ -839,8 +840,10 @@ fn compound_attachment_retires_non_tce_tails_without_swap_back_revival() {
 #[test]
 fn rootwater_attachment_owner_does_not_leak_into_later_aura_exit() {
     use engine::game::scenario::P1;
-    use engine::types::ability::AbilityKind;
-    use engine::types::identifiers::ObjectIncarnationRef;
+    use engine::types::ability::{AbilityKind, TargetRef};
+    use engine::types::events::GameEvent;
+    use engine::types::game_state::GameState;
+    use engine::types::identifiers::{ObjectId, ObjectIncarnationRef};
     use engine::types::mana::ManaCost;
     use engine::types::resolved_commands::ResolvedContinuousEffectEdit;
     use engine::types::zones::Zone;
@@ -880,9 +883,26 @@ fn rootwater_attachment_owner_does_not_leak_into_later_aura_exit() {
         .with_mana_cost(ManaCost::zero())
         .id();
     let mut runner = scenario.build();
-    let mut old = Vec::new();
-    for ((source, recipient), aura) in sources.into_iter().zip(recipients).zip(auras) {
+    let assert_attached_aura = |state: &GameState, aura: ObjectId, recipient: ObjectId| {
+        assert_eq!(state.objects[&aura].zone, Zone::Battlefield);
+        assert!(state.battlefield.contains(&aura));
+        // CR 303.4b: the Aura must actually enchant this recipient in both graph directions.
+        assert_eq!(
+            state.objects[&aura].attached_to,
+            Some(AttachTarget::Object(recipient))
+        );
+        assert!(state.objects[&recipient].attachments.contains(&aura));
+    };
+    // CR 704.5m: attach both setup Auras before either activation can run
+    // state-based actions and put an unattached Aura into the graveyard.
+    for (recipient, aura) in recipients.into_iter().zip(auras) {
         engine::game::effects::attach::attach_to(runner.state_mut(), aura, recipient);
+    }
+    for (recipient, aura) in recipients.into_iter().zip(auras) {
+        assert_attached_aura(runner.state(), aura, recipient);
+    }
+    let mut old = Vec::new();
+    for (source, recipient) in sources.into_iter().zip(recipients) {
         let index = runner.state().objects[&source]
             .abilities
             .iter()
@@ -892,6 +912,9 @@ fn rootwater_attachment_owner_does_not_leak_into_later_aura_exit() {
             .activate(source, index)
             .target_object(recipient)
             .resolve();
+        for (host, aura) in recipients.into_iter().zip(auras) {
+            assert_attached_aura(runner.state(), aura, host);
+        }
         assert!(runner.state().objects[&source].tapped);
         assert_eq!(runner.state().objects[&recipient].controller, P0);
         old.push(
@@ -968,12 +991,45 @@ fn rootwater_attachment_owner_does_not_leak_into_later_aura_exit() {
         .any(|e| e == &legacy_growth.effect));
 
     // An ordinary subsequent boundary must resume standalone recording.
+    assert_attached_aura(runner.state(), auras[0], destination);
+    assert_attached_aura(runner.state(), auras[1], recipients[1]);
     let committed = runner.cast(removal).target_object(auras[1]).commit();
     let exit_prefix = committed.state().clone();
+    assert_attached_aura(&exit_prefix, auras[0], destination);
+    assert_attached_aura(&exit_prefix, auras[1], recipients[1]);
+    assert_eq!(exit_prefix.objects[&removal].zone, Zone::Stack);
+    let entry = exit_prefix
+        .stack
+        .back()
+        .expect("Disenchant must be committed on the stack");
+    assert_eq!(entry.source_id, removal);
+    // CR 601.2c: inspect the committed target, not only the driver's declared intent.
+    assert_eq!(
+        entry
+            .ability()
+            .expect("Disenchant must carry its chosen target")
+            .targets,
+        vec![TargetRef::Object(auras[1])]
+    );
     let exit_start = exit_prefix.resolved_rules_journal.entries().len();
-    committed
-        .resolve()
-        .assert_zone(&[auras[1]], Zone::Graveyard);
+    let exit = committed.resolve();
+    exit.assert_zone(&[auras[1]], Zone::Graveyard);
+    // CR 701.8a: this resolution must destroy B from the battlefield, not
+    // merely observe an Aura that was already in the graveyard during setup.
+    assert!(exit.events().iter().any(|event| matches!(event,
+        GameEvent::ZoneChanged {
+            object_id,
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            ..
+        } if *object_id == auras[1]
+    )));
+    // CR 701.3d: leaving the battlefield severs both attachment graph edges.
+    assert_eq!(exit.state().objects[&auras[1]].attached_to, None);
+    assert!(!exit.state().objects[&recipients[1]]
+        .attachments
+        .contains(&auras[1]));
+    assert!(!exit.state().battlefield.contains(&auras[1]));
     assert_eq!(runner.state().objects[&recipients[1]].controller, P1);
     runner.cast(growth).target_object(recipients[1]).resolve();
     let growth = recorded_growth(runner.state(), exit_start);
@@ -995,6 +1051,12 @@ fn rootwater_attachment_owner_does_not_leak_into_later_aura_exit() {
         })
         .collect();
     assert_eq!(suffix.len(), 3);
+    assert!(
+        matches!(suffix[0], ResolvedRulesCommand::ZoneChange(command)
+        if command.object == ObjectIncarnationRef::from_object(&exit_prefix.objects[&auras[1]])
+            && command.from == Zone::Battlefield
+            && command.to == Zone::Graveyard)
+    );
     assert!(
         matches!(suffix[1], ResolvedRulesCommand::ContinuousEffect(edit)
         if matches!(edit.as_ref(), ResolvedContinuousEffectEdit::Retire(c) if c.effects == vec![old[1].clone()]))

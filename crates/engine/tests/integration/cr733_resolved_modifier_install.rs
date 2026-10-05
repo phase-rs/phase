@@ -835,9 +835,10 @@ fn populated_retirement_persists_checked_but_never_enters_viewer_authority() {
             None => filter_state_for_unseated_viewer(&state),
         };
         assert!(projected.resolved_rules_journal.entries().is_empty());
-        assert!(
-            serde_json::from_value::<GameState>(serde_json::to_value(&projected).unwrap()).is_err()
-        );
+        // Visibility filtering redacts the journal in a GameState. The client
+        // wire wrapper adds the marker that rejects it as restore authority.
+        let filtered = serde_json::to_value(&projected).unwrap();
+        assert!(filtered.get("wire_projection").is_none());
         let wire = serde_json::to_value(ClientGameStateRef::wrap(&state, viewer)).unwrap();
         assert!(wire["state"].get("resolved_rules_journal").is_none());
         assert_eq!(wire["state"]["wire_projection"], serde_json::json!(true));
