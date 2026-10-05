@@ -1,0 +1,2767 @@
+//! Created-token union across a player-scope fan-out.
+//!
+//! "Each opponent creates a token …" / "Each player creates …" is ONE
+//! instruction whose action is taken for several players (CR 608.2f: processed
+//! for each affected player individually, in APNAP order, when it can't be
+//! processed simultaneously). The following sentence — "The tokens are goaded
+//! …" — is the NEXT instruction (CR 608.2e), and "the tokens" names the result
+//! of the previous instruction as a whole (CR 608.2c). So the follow-up applies
+//! to every token the instruction created, for every player, never to one
+//! player's tokens. Inside the scoped instruction, an in-seat "that token"
+//! reference still names only that seat's tokens.
+//!
+//! Rows (phase-0 plan): V0.1–V0.4b drive the printed cards through the cast
+//! pipeline; V0.5–V0.9, V0.17 and V0.18 drive hand-built player-scope chains
+//! through the public `resolve_ability_chain` entry and answer every pause with
+//! the real `apply()` action. The enclosing-continuation rows resolve the
+//! clause while an enclosing chain's later instructions are already parked
+//! beneath it. The re-pause rows resume a paused clause's work after the seat
+//! that paused it — a drained seat remainder or clause frame, or an optional
+//! seat's decision — and pause it again through the damage handler's own
+//! continuation stash.
+
+use engine::game::effects::resolve_ability_chain;
+use engine::game::engine::apply;
+use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::zones::create_object;
+use engine::types::ability::{
+    AbilityCondition, AbilityDefinition, ContinuousModification, ControllerRef, Duration, Effect,
+    OpponentMayScope, PlayerFilter, PreventionAmount, PtValue, QuantityExpr, QuantityModification,
+    ReplacementDefinition, ReplacementMode, ResolvedAbility, SubAbilityLink, TargetFilter,
+    TargetRef, TypedFilter,
+};
+use engine::types::actions::GameAction;
+use engine::types::card_type::CoreType;
+use engine::types::counter::CounterType;
+use engine::types::events::GameEvent;
+use engine::types::format::FormatConfig;
+use engine::types::game_state::{GameState, PendingContinuation, WaitingFor};
+use engine::types::identifiers::{CardId, ObjectId};
+use engine::types::keywords::Keyword;
+use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
+use engine::types::replacements::ReplacementEvent;
+use engine::types::resolution::{FrameKind, ResolutionFrame};
+use engine::types::statics::StaticMode;
+use engine::types::zones::Zone;
+use std::sync::Arc;
+
+const P2: PlayerId = PlayerId(2);
+const P3: PlayerId = PlayerId(3);
+
+/// Life of the Party (NCC), Scryfall verbatim.
+const LIFE_OF_THE_PARTY: &str = "First strike, trample, haste\nWhenever this creature attacks, it gets +X/+0 until end of turn, where X is the number of creatures you control.\nWhen this creature enters, if it's not a token, each opponent creates a token that's a copy of it. The tokens are goaded for the rest of the game. (They attack each combat if able and attack a player other than you if able.)";
+
+/// Rendmaw, Creaking Nest (DSC), Scryfall verbatim.
+const RENDMAW: &str = "Reach, menace\nWhen Rendmaw enters and whenever you play a card with two or more card types, each player creates a tapped 2/2 black Bird creature token with flying. The tokens are goaded for the rest of the game. (They attack each combat if able and attack a player other than you if able.)";
+
+/// The War Games (WHO), Scryfall verbatim.
+const THE_WAR_GAMES: &str = "(As this Saga enters and after your draw step, add a lore counter. Sacrifice after IV.)\nI — Each player creates three tapped 1/1 white Warrior creature tokens. The tokens are goaded for as long as this Saga remains on the battlefield.\nII, III — Put a +1/+1 counter on each Warrior creature.\nIV — You may exile a nontoken creature you control. When you do, exile all Warriors.";
+
+/// Parallel Lives (ISD), Oracle verbatim.
+const PARALLEL_LIVES: &str = "If an effect would create one or more tokens under your control, it creates twice that many of those tokens instead.";
+
+// --- shared helpers -----------------------------------------------------------
+
+/// The goad grants installed on `id`: every transient effect whose affected set
+/// is exactly `id` and which grafts `StaticMode::Goaded`.
+fn goad_tces(state: &GameState, id: ObjectId) -> Vec<(PlayerId, Duration)> {
+    state
+        .transient_continuous_effects
+        .iter()
+        .filter(|tce| {
+            tce.affected == TargetFilter::SpecificObject { id }
+                && tce.modifications.iter().any(|m| {
+                    matches!(
+                        m,
+                        ContinuousModification::AddStaticMode {
+                            mode: StaticMode::Goaded
+                        }
+                    )
+                })
+        })
+        .map(|tce| (tce.controller, tce.duration.clone()))
+        .collect()
+}
+
+fn counters_of(state: &GameState, id: ObjectId, counter: &CounterType) -> u32 {
+    state.objects[&id]
+        .counters
+        .get(counter)
+        .copied()
+        .unwrap_or(0)
+}
+
+/// Battlefield tokens named `name` controlled by `controller`, in id order.
+fn tokens_of(state: &GameState, name: &str, controller: PlayerId) -> Vec<ObjectId> {
+    let mut ids: Vec<ObjectId> = state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| {
+            let obj = &state.objects[id];
+            obj.is_token && obj.name == name && obj.controller == controller
+        })
+        .collect();
+    ids.sort_by_key(|id| id.0);
+    ids
+}
+
+/// The B1 authority reach-guard: a JSON dump of the state carries a parked
+/// player-scope tail authority with a created-token union.
+fn tail_authority_parked(state: &GameState) -> bool {
+    fn search(value: &serde_json::Value) -> bool {
+        match value {
+            serde_json::Value::Object(map) => {
+                map.get("player_scope_tail")
+                    .and_then(serde_json::Value::as_object)
+                    .is_some_and(|tail| tail.contains_key("created_tokens"))
+                    || map.values().any(search)
+            }
+            serde_json::Value::Array(items) => items.iter().any(search),
+            _ => false,
+        }
+    }
+    search(&serde_json::to_value(state).expect("state serializes"))
+}
+
+/// P0.f action-boundary check: no continuation frame is still parked.
+fn no_parked_continuation(state: &GameState) -> bool {
+    !state
+        .resolution_stack
+        .iter()
+        .any(|frame| matches!(frame, ResolutionFrame::AbilityContinuation(_)))
+}
+
+/// P0.g: resolution-stack frame kinds, outer → inner.
+fn frame_kinds(state: &GameState) -> Vec<FrameKind> {
+    state.resolution_stack.iter().map(|f| f.kind()).collect()
+}
+
+fn round_trip(state: &GameState) -> GameState {
+    serde_json::from_value(serde_json::to_value(state).expect("pause serializes"))
+        .expect("pause restores")
+}
+
+/// CR 616.1 instrument: a token-count replacement that applies only to tokens
+/// created under `controller`'s control (`token_owner_scope: You`).
+fn add_token_count_replacement_for(
+    scenario: &mut GameScenario,
+    controller: PlayerId,
+    name: &str,
+    modification: QuantityModification,
+) {
+    scenario
+        .add_creature(controller, name, 0, 4)
+        .with_replacement_definition(
+            ReplacementDefinition::new(ReplacementEvent::CreateToken)
+                .quantity_modification(modification)
+                .token_owner_scope(ControllerRef::You),
+        );
+}
+
+/// The same instrument, installed directly on a hand-built state.
+fn install_token_count_replacement(
+    state: &mut GameState,
+    card_id: u64,
+    controller: PlayerId,
+    modification: QuantityModification,
+) {
+    let id = create_object(
+        state,
+        CardId(card_id),
+        controller,
+        format!("Token Replacement {card_id}"),
+        Zone::Battlefield,
+    );
+    let def = ReplacementDefinition::new(ReplacementEvent::CreateToken)
+        .quantity_modification(modification)
+        .token_owner_scope(ControllerRef::You);
+    let obj = state.objects.get_mut(&id).expect("replacement host exists");
+    obj.card_types.core_types = vec![CoreType::Enchantment];
+    obj.base_card_types = obj.card_types.clone();
+    obj.replacement_definitions = vec![def.clone()].into();
+    obj.base_replacement_definitions = Arc::new(vec![def]);
+}
+
+/// Answer every `ReplacementChoice` with the first candidate.
+fn answer_replacements(state: &mut GameState, events: &mut Vec<GameEvent>) -> usize {
+    let mut answered = 0;
+    while let WaitingFor::ReplacementChoice { player, .. } = state.waiting_for.clone() {
+        let result = apply(state, player, GameAction::ChooseReplacement { index: 0 })
+            .expect("replacement order answer resolves");
+        events.extend(result.events);
+        answered += 1;
+        assert!(answered < 16, "replacement prompts must terminate");
+    }
+    answered
+}
+
+fn runner_answer_replacements(runner: &mut GameRunner, events: &mut Vec<GameEvent>) -> usize {
+    let mut answered = 0;
+    while let WaitingFor::ReplacementChoice { .. } = runner.state().waiting_for {
+        let result = runner
+            .act(GameAction::ChooseReplacement { index: 0 })
+            .expect("replacement order answer resolves");
+        events.extend(result.events);
+        answered += 1;
+        assert!(answered < 16, "replacement prompts must terminate");
+    }
+    answered
+}
+
+// --- printed cards through the cast pipeline ------------------------------------
+
+fn cast_life_of_the_party(players: u8) -> (GameRunner, ObjectId) {
+    let mut scenario = GameScenario::new_n_player(players, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let life = scenario
+        .add_creature_to_hand(P0, "Life of the Party", 0, 1)
+        .with_subtypes(vec!["Elemental"])
+        .from_oracle_text_with_keywords(&["first strike", "trample", "haste"], LIFE_OF_THE_PARTY)
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(life).resolve();
+    (runner, life)
+}
+
+fn cast_rendmaw(players: u8) -> GameRunner {
+    let mut scenario = GameScenario::new_n_player(players, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let rendmaw = scenario
+        .add_creature_to_hand(P0, "Rendmaw, Creaking Nest", 5, 5)
+        .with_subtypes(vec!["Scarecrow"])
+        .from_oracle_text_with_keywords(&["reach", "menace"], RENDMAW)
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(rendmaw).resolve();
+    runner
+}
+
+fn single_party_token(state: &GameState, controller: PlayerId) -> ObjectId {
+    let tokens = tokens_of(state, "Life of the Party", controller);
+    assert_eq!(
+        tokens.len(),
+        1,
+        "REACH-GUARD: {controller:?} must control exactly one Life of the Party token"
+    );
+    tokens[0]
+}
+
+/// V0.1 — CR 608.2c + CR 608.2f: "each opponent creates a token that's a copy
+/// of it. The tokens are goaded …" goads EVERY opponent's token, not only the
+/// last APNAP seat's.
+#[test]
+fn life_of_the_party_goads_every_opponents_token() {
+    let (runner, life) = cast_life_of_the_party(3);
+    let state = runner.state();
+    let p1_token = single_party_token(state, P1);
+    let p2_token = single_party_token(state, P2);
+    assert!(
+        tokens_of(state, "Life of the Party", P0).is_empty(),
+        "REACH-GUARD: the caster creates no copy"
+    );
+    assert!(
+        goad_tces(state, life).is_empty(),
+        "the caster's original Life of the Party is not goaded"
+    );
+    assert_eq!(
+        goad_tces(state, p1_token).len(),
+        1,
+        "CR 608.2c: P1's token is one of \"the tokens\" and carries the goad"
+    );
+    assert_eq!(
+        goad_tces(state, p2_token).len(),
+        1,
+        "CR 608.2c: P2's token carries the goad exactly once"
+    );
+}
+
+/// V0.1 sibling — four players: all three opponents' tokens carry the goad.
+#[test]
+fn life_of_the_party_goads_all_three_opponents_tokens_in_four_players() {
+    let (runner, _life) = cast_life_of_the_party(4);
+    let state = runner.state();
+    for opponent in [P1, P2, P3] {
+        let token = single_party_token(state, opponent);
+        assert_eq!(
+            goad_tces(state, token).len(),
+            1,
+            "CR 608.2c: {opponent:?}'s token carries the goad exactly once"
+        );
+    }
+}
+
+/// V0.2 — CR 608.2c + CR 608.2f: Rendmaw's "each player creates a … Bird …
+/// The tokens are goaded" goads every player's Bird, the controller's included.
+#[test]
+fn rendmaw_goads_every_players_bird() {
+    let runner = cast_rendmaw(3);
+    let state = runner.state();
+    for player in [P0, P1, P2] {
+        let birds = tokens_of(state, "Bird", player);
+        assert_eq!(
+            birds.len(),
+            1,
+            "REACH-GUARD: {player:?} controls exactly one Bird"
+        );
+        assert!(
+            state.objects[&birds[0]].tapped,
+            "REACH-GUARD: the Bird entered tapped"
+        );
+        assert_eq!(
+            goad_tces(state, birds[0]).len(),
+            1,
+            "CR 608.2c: {player:?}'s Bird is one of \"the tokens\" and is goaded exactly once"
+        );
+    }
+}
+
+fn last_created_goad_duration(def: &AbilityDefinition) -> Option<Duration> {
+    if let Effect::GenericEffect {
+        target: Some(TargetFilter::LastCreated),
+        duration,
+        ..
+    } = &*def.effect
+    {
+        return duration.clone().or_else(|| def.duration.clone());
+    }
+    def.sub_ability
+        .as_deref()
+        .and_then(last_created_goad_duration)
+}
+
+/// V0.3 — The War Games chapter I: all nine Warriors (three per player) carry
+/// the goad, each with the duration the chapter's follow-up parsed to.
+#[test]
+fn the_war_games_goads_every_players_warriors() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let saga = scenario
+        .add_spell_to_hand(P0, "The War Games", false)
+        .as_enchantment()
+        .with_subtypes(vec!["Saga"])
+        .from_oracle_text(THE_WAR_GAMES)
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(saga).resolve();
+    let state = runner.state();
+
+    let parsed_duration = state.objects[&saga]
+        .trigger_definitions
+        .as_slice()
+        .iter()
+        .filter_map(|entry| entry.definition.execute.as_deref())
+        .find_map(last_created_goad_duration)
+        .expect("REACH-GUARD: chapter I's follow-up is a LastCreated goad grant with a duration");
+
+    let mut warriors = 0;
+    for player in [P0, P1, P2] {
+        let tokens = tokens_of(state, "Warrior", player);
+        assert_eq!(
+            tokens.len(),
+            3,
+            "REACH-GUARD: {player:?} controls exactly three Warriors"
+        );
+        for token in tokens {
+            assert!(state.objects[&token].tapped, "REACH-GUARD: tapped Warrior");
+            let goads = goad_tces(state, token);
+            assert_eq!(
+                goads.len(),
+                1,
+                "CR 608.2c: {player:?}'s Warrior {token:?} is one of \"the tokens\""
+            );
+            assert_eq!(
+                goads[0].1, parsed_duration,
+                "the goad lasts exactly as long as the follow-up says"
+            );
+            warriors += 1;
+        }
+    }
+    assert_eq!(warriors, 9);
+}
+
+/// V0.4 — single-seat preservation: in two players Life of the Party's one
+/// opponent's token is goaded (base and candidate agree, R0.2).
+#[test]
+fn life_of_the_party_two_players_single_seat_is_goaded() {
+    let (runner, _life) = cast_life_of_the_party(2);
+    let state = runner.state();
+    let token = single_party_token(state, P1);
+    assert_eq!(goad_tces(state, token).len(), 1);
+}
+
+/// V0.4b — CR 608.2c: an `All` scope in two players is a multi-seat fan-out;
+/// both players' Birds are "the tokens" (R0.3).
+#[test]
+fn rendmaw_two_players_goads_both_birds() {
+    let runner = cast_rendmaw(2);
+    let state = runner.state();
+    for player in [P0, P1] {
+        let birds = tokens_of(state, "Bird", player);
+        assert_eq!(birds.len(), 1, "REACH-GUARD: {player:?} controls one Bird");
+        assert_eq!(
+            goad_tces(state, birds[0]).len(),
+            1,
+            "CR 608.2c: {player:?}'s Bird is goaded"
+        );
+    }
+}
+
+// --- paused printed-card legs ---------------------------------------------------
+
+/// V0.6 — Rendmaw with a CR 616.1 replacement-order pause at seat 0 (P0's own
+/// Birds only). Every Bird of every seat is goaded exactly once after the
+/// paused leg, the drained legs and a serde round-trip at the pause.
+#[test]
+fn rendmaw_paused_at_seat_zero_goads_every_seats_birds() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_enchantment_from_oracle(P0, "Parallel Lives", PARALLEL_LIVES);
+    add_token_count_replacement_for(
+        &mut scenario,
+        P0,
+        "Token Incrementer",
+        QuantityModification::Plus { value: 1 },
+    );
+    let rendmaw = scenario
+        .add_creature_to_hand(P0, "Rendmaw, Creaking Nest", 5, 5)
+        .with_subtypes(vec!["Scarecrow"])
+        .from_oracle_text_with_keywords(&["reach", "menace"], RENDMAW)
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(rendmaw).resolve();
+
+    // P0.a: the fan-out paused at seat 0, before seats 1 and 2 created anything.
+    let WaitingFor::ReplacementChoice { player, .. } = runner.state().waiting_for.clone() else {
+        panic!(
+            "REACH-GUARD (P0.a): expected a CR 616.1 ReplacementChoice, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(
+        player, P0,
+        "REACH-GUARD (P0.a): P0 orders its own replacements"
+    );
+    assert!(tokens_of(runner.state(), "Bird", P1).is_empty());
+    assert!(tokens_of(runner.state(), "Bird", P2).is_empty());
+    // P0.g: arm E — the seat raised no frame; only the clause frame is parked.
+    assert_eq!(
+        frame_kinds(runner.state()),
+        vec![FrameKind::AbilityContinuation],
+        "REACH-GUARD (P0.g): the seat-0 pause is arm E"
+    );
+
+    let mut runner = GameRunner::from_state(round_trip(runner.state()));
+    let mut events = Vec::new();
+    let answered = runner_answer_replacements(&mut runner, &mut events);
+    assert!(answered >= 1);
+    let state = runner.state();
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "P0.f: the answering action drains the whole clause"
+    );
+    assert!(
+        no_parked_continuation(state),
+        "P0.f: no continuation is left parked"
+    );
+
+    let p0_birds = tokens_of(state, "Bird", P0);
+    assert!(
+        p0_birds.len() >= 3,
+        "REACH-GUARD: both replacements modified P0's Bird count, got {}",
+        p0_birds.len()
+    );
+    assert_eq!(tokens_of(state, "Bird", P1).len(), 1);
+    assert_eq!(tokens_of(state, "Bird", P2).len(), 1);
+    for player in [P0, P1, P2] {
+        for bird in tokens_of(state, "Bird", player) {
+            assert_eq!(
+                goad_tces(state, bird).len(),
+                1,
+                "CR 608.2c: {player:?}'s Bird {bird:?} is one of \"the tokens\""
+            );
+        }
+    }
+}
+
+/// V0.8 — Life of the Party's copy route paused at P1's seat (the first
+/// opponent) by a CR 616.1 replacement pair on P1's tokens.
+#[test]
+fn life_of_the_party_paused_copy_route_goads_both_opponents_tokens() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    add_token_count_replacement_for(
+        &mut scenario,
+        P1,
+        "Token Doubler",
+        QuantityModification::DOUBLE,
+    );
+    add_token_count_replacement_for(
+        &mut scenario,
+        P1,
+        "Token Incrementer",
+        QuantityModification::Plus { value: 1 },
+    );
+    let life = scenario
+        .add_creature_to_hand(P0, "Life of the Party", 0, 1)
+        .with_subtypes(vec!["Elemental"])
+        .from_oracle_text_with_keywords(&["first strike", "trample", "haste"], LIFE_OF_THE_PARTY)
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(life).resolve();
+
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { player: P1, .. }
+        ),
+        "REACH-GUARD (P0.e): the copy route pauses at P1's CR 616.1 prompt, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        tokens_of(runner.state(), "Life of the Party", P2).is_empty(),
+        "REACH-GUARD (P0.a): P2's seat is still pending at P1's pause"
+    );
+    // P0.g: arm G1 — the copy-token owner is the seat's only child frame.
+    assert_eq!(
+        frame_kinds(runner.state()),
+        vec![FrameKind::AbilityContinuation, FrameKind::CopyToken],
+        "REACH-GUARD (P0.g): the copy-route pause is arm G1"
+    );
+    let authority_at_pause = tail_authority_parked(runner.state());
+    let mut events = Vec::new();
+    runner_answer_replacements(&mut runner, &mut events);
+    let state = runner.state();
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert!(no_parked_continuation(state));
+    let p1_tokens = tokens_of(state, "Life of the Party", P1);
+    assert!(
+        p1_tokens.len() >= 3,
+        "REACH-GUARD: both replacements modified P1's copy count"
+    );
+    let p2_token = single_party_token(state, P2);
+    for token in p1_tokens.iter().copied().chain([p2_token]) {
+        assert_eq!(
+            goad_tces(state, token).len(),
+            1,
+            "CR 608.2c: token {token:?} is one of \"the tokens\""
+        );
+    }
+    assert!(
+        authority_at_pause,
+        "REACH-GUARD (B1): the tail authority rode the clause frame at the copy-route pause"
+    );
+}
+
+// --- hand-built chains ------------------------------------------------------------
+
+struct Board {
+    state: GameState,
+    source: ObjectId,
+    copied: ObjectId,
+    stale: ObjectId,
+}
+
+fn creature(state: &mut GameState, card_id: u64, owner: PlayerId, name: &str) -> ObjectId {
+    let id = create_object(
+        state,
+        CardId(card_id),
+        owner,
+        name.to_string(),
+        Zone::Battlefield,
+    );
+    let obj = state.objects.get_mut(&id).expect("created object exists");
+    obj.card_types.core_types = vec![CoreType::Creature];
+    obj.base_card_types = obj.card_types.clone();
+    obj.base_power = Some(2);
+    obj.base_toughness = Some(2);
+    obj.power = Some(2);
+    obj.toughness = Some(2);
+    id
+}
+
+/// A board with a copy source, a stack source, and a pre-existing token `x`
+/// already named by the created-token ledger (an earlier instruction's token).
+fn board(players: u8, seed: u64) -> Board {
+    let mut state = GameState::new(FormatConfig::standard(), players, seed);
+    let copied = creature(&mut state, 1, P0, "Copied Creature");
+    let stale = creature(&mut state, 2, P0, "Earlier Token");
+    state.objects.get_mut(&stale).unwrap().is_token = true;
+    let source = create_object(
+        &mut state,
+        CardId(3),
+        P0,
+        "Fan-out Source".to_string(),
+        Zone::Battlefield,
+    );
+    state.last_created_token_ids = vec![stale];
+    for (i, player) in (0..players).map(PlayerId).enumerate() {
+        for n in 0..3 {
+            create_object(
+                &mut state,
+                CardId(100 + (i as u64) * 10 + n),
+                player,
+                format!("Library card {n}"),
+                Zone::Library,
+            );
+        }
+    }
+    Board {
+        state,
+        source,
+        copied,
+        stale,
+    }
+}
+
+fn charge() -> CounterType {
+    CounterType::Generic("charge".to_string())
+}
+
+fn put_counter_on_last_created(source: ObjectId, counter: CounterType) -> ResolvedAbility {
+    ResolvedAbility::new(
+        Effect::PutCounter {
+            counter_type: counter,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::LastCreated,
+        },
+        vec![],
+        source,
+        P0,
+    )
+}
+
+fn copy_token_of(source: ObjectId, copied: ObjectId) -> ResolvedAbility {
+    ResolvedAbility::new(
+        Effect::CopyTokenOf {
+            target: TargetFilter::Any,
+            owner: TargetFilter::Controller,
+            source_filter: None,
+            enters_attacking: false,
+            tapped: false,
+            count: QuantityExpr::Fixed { value: 1 },
+            extra_keywords: vec![],
+            additional_modifications: vec![],
+        },
+        vec![TargetRef::Object(copied)],
+        source,
+        P0,
+    )
+}
+
+/// How the scoped template keeps its in-seat "that token" instruction.
+#[derive(Debug, Clone, Copy)]
+enum Template {
+    /// Mandatory copy; the in-seat +1/+1 is gated on `CurrentScopeSucceeded`.
+    Mandatory,
+    /// "Each player may …": the optional clause keeps its ungated
+    /// `ContinuationStep` +1/+1 in the template.
+    Optional,
+}
+
+/// Scoped `CopyTokenOf` → in-seat +1/+1 on "that token" → the next
+/// instruction `tail`.
+fn scoped_copy_chain(
+    source: ObjectId,
+    copied: ObjectId,
+    scope: PlayerFilter,
+    template: Template,
+    tail: ResolvedAbility,
+) -> ResolvedAbility {
+    let mut kept = put_counter_on_last_created(source, CounterType::Plus1Plus1);
+    kept.condition = match template {
+        Template::Mandatory => Some(AbilityCondition::current_scope_succeeded()),
+        Template::Optional => None,
+    };
+    kept.sub_link = SubAbilityLink::ContinuationStep;
+    let mut tail = tail;
+    tail.sub_link = SubAbilityLink::SequentialSibling;
+    kept.sub_ability = Some(Box::new(tail));
+    let mut head = copy_token_of(source, copied);
+    head.player_scope = Some(scope);
+    head.optional = matches!(template, Template::Optional);
+    head.sub_ability = Some(Box::new(kept));
+    head
+}
+
+fn tail_counter(source: ObjectId) -> ResolvedAbility {
+    put_counter_on_last_created(source, charge())
+}
+
+fn copy_tokens(state: &GameState, controller: PlayerId) -> Vec<ObjectId> {
+    tokens_of(state, "Copied Creature", controller)
+}
+
+/// V0.5 — CR 608.2c + CR 608.2f (non-paused): the in-seat "that token" sees
+/// only its seat's token (one +1/+1 each), and the next instruction sees every
+/// seat's token (one charge counter each). The earlier token `x` in the ledger
+/// is never part of this clause's tokens.
+#[test]
+fn non_paused_fan_out_binds_in_seat_per_seat_and_tail_to_union() {
+    let Board {
+        mut state,
+        source,
+        copied,
+        stale,
+    } = board(3, 42);
+    let chain = scoped_copy_chain(
+        source,
+        copied,
+        PlayerFilter::All,
+        Template::Mandatory,
+        tail_counter(source),
+    );
+    resolve_ability_chain(&mut state, &chain, &mut Vec::new(), 0).expect("fan-out resolves");
+
+    let mut all = Vec::new();
+    for player in [P0, P1, P2] {
+        let tokens = copy_tokens(&state, player);
+        assert_eq!(tokens.len(), 1, "REACH-GUARD: one copy per seat");
+        all.extend(tokens);
+    }
+    for token in &all {
+        assert_eq!(
+            counters_of(&state, *token, &CounterType::Plus1Plus1),
+            1,
+            "CR 608.2c: the in-seat \"that token\" names only its seat's token"
+        );
+    }
+    for token in &all {
+        assert_eq!(
+            counters_of(&state, *token, &charge()),
+            1,
+            "CR 608.2c + CR 608.2f: the next instruction names every seat's token"
+        );
+    }
+    assert_eq!(counters_of(&state, stale, &CounterType::Plus1Plus1), 0);
+    assert_eq!(counters_of(&state, stale, &charge()), 0);
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Decision {
+    Accept,
+    Decline,
+}
+
+/// Drive the optional fan-out: answer each seat's `OptionalEffectChoice` in
+/// order. Returns (prompted players, authority reach-guard at each prompt).
+fn answer_optional_seats(
+    state: &mut GameState,
+    decisions: &[(PlayerId, Decision)],
+) -> (Vec<PlayerId>, Vec<bool>) {
+    let mut prompted = Vec::new();
+    let mut authority = Vec::new();
+    for (expected, decision) in decisions {
+        let WaitingFor::OptionalEffectChoice { player, .. } = state.waiting_for.clone() else {
+            panic!(
+                "REACH-GUARD (P0.d): expected {expected:?}'s OptionalEffectChoice, got {:?}",
+                state.waiting_for
+            );
+        };
+        prompted.push(player);
+        authority.push(tail_authority_parked(state));
+        *state = round_trip(state);
+        apply(
+            state,
+            player,
+            GameAction::DecideOptionalEffect {
+                accept: *decision == Decision::Accept,
+            },
+        )
+        .expect("optional decision resolves");
+    }
+    (prompted, authority)
+}
+
+fn assert_clause_drained(state: &GameState, label: &str) {
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "P0.f ({label}): the last answer drains the clause, got {:?}",
+        state.waiting_for
+    );
+    assert!(
+        no_parked_continuation(state),
+        "P0.f ({label}): no continuation is left parked"
+    );
+}
+
+fn run_optional_fan_out(decisions: [Decision; 3]) -> (GameState, ObjectId, Vec<bool>) {
+    let Board {
+        mut state,
+        source,
+        copied,
+        stale,
+    } = board(3, 42);
+    let chain = scoped_copy_chain(
+        source,
+        copied,
+        PlayerFilter::All,
+        Template::Optional,
+        tail_counter(source),
+    );
+    resolve_ability_chain(&mut state, &chain, &mut Vec::new(), 0).expect("fan-out starts");
+    let seats = [P0, P1, P2];
+    let (prompted, authority) = answer_optional_seats(
+        &mut state,
+        &seats
+            .iter()
+            .copied()
+            .zip(decisions)
+            .collect::<Vec<(PlayerId, Decision)>>(),
+    );
+    assert_eq!(
+        prompted,
+        seats.to_vec(),
+        "REACH-GUARD (P0.d): each seat is prompted, in APNAP order"
+    );
+    assert_clause_drained(&state, &format!("V0.7 {decisions:?}"));
+    for (player, decision) in seats.iter().zip(decisions) {
+        let expected = usize::from(decision == Decision::Accept);
+        assert_eq!(
+            copy_tokens(&state, *player).len(),
+            expected,
+            "REACH-GUARD: {player:?} {decision:?}d its seat"
+        );
+    }
+    (state, stale, authority)
+}
+
+fn assert_tail_union(state: &GameState, stale: ObjectId, accepted: &[PlayerId]) {
+    for player in accepted {
+        let token = copy_tokens(state, *player)[0];
+        assert_eq!(
+            counters_of(state, token, &CounterType::Plus1Plus1),
+            1,
+            "CR 608.2c: {player:?}'s in-seat \"that token\" names only its own token"
+        );
+        assert_eq!(
+            counters_of(state, token, &charge()),
+            1,
+            "CR 608.2c + CR 608.2f: the next instruction names {player:?}'s token too"
+        );
+    }
+    assert_eq!(
+        counters_of(state, stale, &charge()),
+        0,
+        "the earlier instruction's token is never one of this clause's tokens"
+    );
+    assert_eq!(counters_of(state, stale, &CounterType::Plus1Plus1), 0);
+}
+
+/// V0.7 — paused legs, per-seat optional prompts, P1 declines.
+#[test]
+fn optional_fan_out_middle_decline_tail_names_every_created_token() {
+    let (state, stale, authority) =
+        run_optional_fan_out([Decision::Accept, Decision::Decline, Decision::Accept]);
+    assert_tail_union(&state, stale, &[P0, P2]);
+    assert_eq!(
+        authority,
+        vec![true, true, true],
+        "REACH-GUARD (B1): the tail authority is parked at every seat's prompt"
+    );
+}
+
+/// V0.7 variant — the last seat declines.
+#[test]
+fn optional_fan_out_last_seat_decline_tail_names_earlier_tokens() {
+    let (state, stale, authority) =
+        run_optional_fan_out([Decision::Accept, Decision::Accept, Decision::Decline]);
+    assert_tail_union(&state, stale, &[P0, P1]);
+    assert_eq!(authority, vec![true, true, true]);
+}
+
+/// V0.7 variant (baseline exclusion) — seat 0 declines, so after seat 0 the
+/// ledger still names the earlier token `x`; `x` must not join the union.
+#[test]
+fn optional_fan_out_first_seat_decline_excludes_the_earlier_token() {
+    let (state, stale, authority) =
+        run_optional_fan_out([Decision::Decline, Decision::Accept, Decision::Accept]);
+    assert_tail_union(&state, stale, &[P1, P2]);
+    assert_eq!(authority, vec![true, true, true]);
+}
+
+/// V0.7 all-decline (reach-only): the clause drains; what the tail's referent
+/// is when nothing was created is residual R-2 and is not asserted.
+#[test]
+fn optional_fan_out_all_decline_drains() {
+    let (state, _stale, _authority) =
+        run_optional_fan_out([Decision::Decline, Decision::Decline, Decision::Decline]);
+    for player in [P0, P1, P2] {
+        assert!(copy_tokens(&state, player).is_empty());
+    }
+}
+
+fn run_single_seat_optional(decision: Decision) -> (GameState, ObjectId) {
+    let Board {
+        mut state,
+        source,
+        copied,
+        stale,
+    } = board(2, 43);
+    let chain = scoped_copy_chain(
+        source,
+        copied,
+        PlayerFilter::Opponent,
+        Template::Optional,
+        tail_counter(source),
+    );
+    resolve_ability_chain(&mut state, &chain, &mut Vec::new(), 0).expect("fan-out starts");
+    let (prompted, _authority) = answer_optional_seats(&mut state, &[(P1, decision)]);
+    assert_eq!(
+        prompted,
+        vec![P1],
+        "REACH-GUARD: the one seat P1 is prompted"
+    );
+    assert_clause_drained(&state, &format!("V0.7b {decision:?}"));
+    (state, stale)
+}
+
+/// V0.7b — single seat on the paused path (R0.7): P1's token carries one
+/// +1/+1 and one tail counter.
+#[test]
+fn single_seat_optional_fan_out_tail_names_the_one_token() {
+    let (state, stale) = run_single_seat_optional(Decision::Accept);
+    let tokens = copy_tokens(&state, P1);
+    assert_eq!(tokens.len(), 1, "REACH-GUARD: P1 accepted");
+    assert_tail_union(&state, stale, &[P1]);
+}
+
+/// V0.7b decline (reach-only).
+#[test]
+fn single_seat_optional_fan_out_decline_drains() {
+    let (state, _stale) = run_single_seat_optional(Decision::Decline);
+    assert!(copy_tokens(&state, P1).is_empty());
+}
+
+fn event_position(events: &[GameEvent], pred: impl Fn(&GameEvent) -> bool) -> Option<usize> {
+    events.iter().position(pred)
+}
+
+fn plus_one_added(events: &[GameEvent], ids: &[ObjectId]) -> Vec<usize> {
+    events
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| {
+            matches!(e, GameEvent::CounterAdded { object_id, counter_type: CounterType::Plus1Plus1, .. }
+                if ids.contains(object_id))
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
+fn token_created_for(events: &[GameEvent], ids: &[ObjectId]) -> Option<usize> {
+    event_position(
+        events,
+        |e| matches!(e, GameEvent::TokenCreated { object_id, .. } if ids.contains(object_id)),
+    )
+}
+
+/// Resolve a scope-`All` copy chain whose seat 0 pauses on a CR 616.1
+/// replacement-order prompt for P0's tokens; answer it. Returns the final
+/// state and the full event log.
+fn run_seat_zero_copy_pause(
+    make_tail: impl Fn(ObjectId) -> ResolvedAbility,
+    scope: PlayerFilter,
+    players: u8,
+    replaced: PlayerId,
+) -> (GameState, Vec<GameEvent>, ObjectId, bool) {
+    let Board {
+        mut state,
+        source,
+        copied,
+        stale,
+    } = board(players, 44);
+    install_token_count_replacement(&mut state, 50, replaced, QuantityModification::DOUBLE);
+    install_token_count_replacement(
+        &mut state,
+        51,
+        replaced,
+        QuantityModification::Plus { value: 1 },
+    );
+    let chain = scoped_copy_chain(
+        source,
+        copied,
+        scope,
+        Template::Mandatory,
+        make_tail(source),
+    );
+    let mut events = Vec::new();
+    resolve_ability_chain(&mut state, &chain, &mut events, 0).expect("fan-out starts");
+    assert!(
+        matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice { player, .. } if player == replaced
+        ),
+        "REACH-GUARD (P0.e): the copy route pauses at {replaced:?}'s CR 616.1 prompt, got {:?}",
+        state.waiting_for
+    );
+    // P0.g: arm G2 — the copy-token owner on top, the seat's in-seat remainder
+    // parked at its child boundary, and the clause's frame beneath both.
+    assert_eq!(
+        frame_kinds(&state),
+        vec![
+            FrameKind::AbilityContinuation,
+            FrameKind::AbilityContinuation,
+            FrameKind::CopyToken,
+        ],
+        "REACH-GUARD (P0.g): the seat pause is arm G2"
+    );
+    let authority = tail_authority_parked(&state);
+    state = round_trip(&state);
+    answer_replacements(&mut state, &mut events);
+    assert_clause_drained(&state, "copy-route seat pause");
+    (state, events, stale, authority)
+}
+
+/// V0.8b — arm G2 with a detached ledger-reading tail: seat 0 pauses with
+/// the copy-token owner on top and its in-seat remainder parked inside its
+/// child boundary. Every token gets one +1/+1 (in seat) and one tail counter
+/// (union), and P0's +1/+1 lands before P1's token exists.
+#[test]
+fn paused_copy_seat_with_in_seat_remainder_completes_before_next_seat() {
+    let (state, events, stale, authority) =
+        run_seat_zero_copy_pause(tail_counter, PlayerFilter::All, 3, P0);
+    let p0 = copy_tokens(&state, P0);
+    assert!(
+        p0.len() >= 3,
+        "REACH-GUARD: both replacements modified P0's copy count, got {}",
+        p0.len()
+    );
+    let p1 = copy_tokens(&state, P1);
+    let p2 = copy_tokens(&state, P2);
+    assert_eq!(p1.len(), 1);
+    assert_eq!(p2.len(), 1);
+    for token in p0.iter().chain(&p1).chain(&p2) {
+        assert_eq!(
+            counters_of(&state, *token, &CounterType::Plus1Plus1),
+            1,
+            "CR 608.2c: in-seat \"that token\" for {token:?}"
+        );
+        assert_eq!(
+            counters_of(&state, *token, &charge()),
+            1,
+            "CR 608.2c + CR 608.2f: the next instruction names {token:?}"
+        );
+    }
+    assert_eq!(counters_of(&state, stale, &charge()), 0);
+    let p0_counters = plus_one_added(&events, &p0);
+    let p1_created = token_created_for(&events, &p1).expect("P1's token was created");
+    assert!(
+        p0_counters.len() == p0.len() && p0_counters.iter().all(|&i| i < p1_created),
+        "CR 608.2f: seat 0's in-seat instruction completes before seat 1 begins \
+         (P0 +1/+1 at {p0_counters:?}, P1 token at {p1_created})"
+    );
+    assert!(
+        authority,
+        "REACH-GUARD (B1): the tail authority rode the clause frame at the arm-G2 pause"
+    );
+}
+
+fn gain_one_life(source: ObjectId) -> ResolvedAbility {
+    gain_life(source, 1)
+}
+
+/// "<controller> gains `value` life" — the controller is rebound per seat.
+fn gain_life(source: ObjectId, value: i32) -> ResolvedAbility {
+    ResolvedAbility::new(
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value },
+            player: TargetFilter::Controller,
+        },
+        vec![],
+        source,
+        P0,
+    )
+}
+
+fn life_gained_by(events: &[GameEvent], player: PlayerId) -> Vec<usize> {
+    events
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| matches!(e, GameEvent::LifeChanged { player_id, amount, .. } if *player_id == player && *amount > 0))
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// V0.17 — R0.8: a paused clause whose tail does NOT read the ledger (so it is
+/// not detached) still processes seat 0's remaining in-seat instruction before
+/// seat 1, and the next instruction follows the whole clause.
+#[test]
+fn paused_seat_remainder_precedes_next_seats_and_non_detached_tail() {
+    let (state, events, _stale, authority) =
+        run_seat_zero_copy_pause(gain_one_life, PlayerFilter::All, 3, P0);
+    assert!(
+        !authority,
+        "REACH-GUARD: a tail that reads no clause-wide result is not detached"
+    );
+    let p0 = copy_tokens(&state, P0);
+    let p1 = copy_tokens(&state, P1);
+    let p2 = copy_tokens(&state, P2);
+    assert!(p0.len() >= 3, "REACH-GUARD: replacements applied to P0");
+    assert_eq!((p1.len(), p2.len()), (1, 1));
+    // The order assertion comes first and is non-vacuous: every P0 token's
+    // in-seat counter must exist AND precede seat 1's token.
+    let p0_counters = plus_one_added(&events, &p0);
+    let p1_created = token_created_for(&events, &p1).expect("P1's token was created");
+    assert!(
+        p0_counters.len() == p0.len() && p0_counters.iter().all(|&i| i < p1_created),
+        "CR 608.2f: seat 0's in-seat instruction (one +1/+1 per P0 token) precedes \
+         seat 1 (P0 +1/+1 at {p0_counters:?} for {} tokens, P1 token at {p1_created})",
+        p0.len()
+    );
+    for token in p0.iter().chain(&p1).chain(&p2) {
+        assert_eq!(
+            plus_one_added(&events, &[*token]).len(),
+            1,
+            "REACH-GUARD: one in-seat CounterAdded for {token:?}"
+        );
+    }
+    let gains = life_gained_by(&events, P0);
+    assert_eq!(gains.len(), 1, "REACH-GUARD: P0 gains 1 life exactly once");
+    let p2_counter = plus_one_added(&events, &p2)[0];
+    assert!(
+        gains[0] > p2_counter,
+        "CR 608.2e: the next instruction follows the whole clause \
+         (life at {}, P2 +1/+1 at {p2_counter})",
+        gains[0]
+    );
+}
+
+/// V0.17 sibling — one seat (2 players, `Opponent`): P1's in-seat remainder
+/// precedes the non-detached tail.
+#[test]
+fn single_paused_seat_remainder_precedes_non_detached_tail() {
+    let (state, events, _stale, authority) =
+        run_seat_zero_copy_pause(gain_one_life, PlayerFilter::Opponent, 2, P1);
+    assert!(
+        !authority,
+        "REACH-GUARD: a tail that reads no clause-wide result is not detached"
+    );
+    let p1 = copy_tokens(&state, P1);
+    assert!(p1.len() >= 3, "REACH-GUARD: replacements applied to P1");
+    for token in &p1 {
+        assert_eq!(plus_one_added(&events, &[*token]).len(), 1);
+    }
+    let gains = life_gained_by(&events, P0);
+    assert_eq!(gains.len(), 1);
+    let last_counter = *plus_one_added(&events, &p1).last().unwrap();
+    assert!(
+        last_counter < gains[0],
+        "CR 608.2e: P1's in-seat instruction precedes the next instruction \
+         (P1 +1/+1 at {last_counter}, life at {})",
+        gains[0]
+    );
+}
+
+/// V0.9 — a scoped clause that creates nothing leaves the ledger naming the
+/// earlier instruction's token (R0.4).
+#[test]
+fn non_producing_clause_leaves_earlier_token_for_follow_up() {
+    let Board {
+        mut state,
+        source,
+        copied,
+        ..
+    } = board(3, 45);
+    let haste = ResolvedAbility::new(
+        Effect::GenericEffect {
+            static_abilities: vec![engine::types::ability::StaticDefinition::continuous()
+                .affected(TargetFilter::LastCreated)
+                .modifications(vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Haste,
+                }])],
+            duration: Some(Duration::Permanent),
+            target: Some(TargetFilter::LastCreated),
+            end_cost: None,
+        },
+        vec![],
+        source,
+        P0,
+    );
+    let mut draw = ResolvedAbility::new(
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        },
+        vec![],
+        source,
+        P0,
+    );
+    draw.player_scope = Some(PlayerFilter::All);
+    draw.sub_link = SubAbilityLink::SequentialSibling;
+    let mut haste = haste;
+    haste.sub_link = SubAbilityLink::SequentialSibling;
+    draw.sub_ability = Some(Box::new(haste));
+    let mut copy = copy_token_of(source, copied);
+    copy.sub_ability = Some(Box::new(draw));
+    let hands_before: Vec<usize> = state.players.iter().map(|p| p.hand.len()).collect();
+    resolve_ability_chain(&mut state, &copy, &mut Vec::new(), 0).expect("chain resolves");
+    engine::game::layers::evaluate_layers(&mut state);
+
+    for (player, before) in state.players.iter().zip(hands_before) {
+        assert_eq!(
+            player.hand.len(),
+            before + 1,
+            "REACH-GUARD: {:?} drew one card in the scoped clause",
+            player.id
+        );
+    }
+    let t = copy_tokens(&state, P0);
+    assert_eq!(t.len(), 1);
+    assert!(
+        state.objects[&t[0]].has_keyword(&Keyword::Haste),
+        "CR 608.2c: \"it\" still names the earlier instruction's token"
+    );
+}
+
+/// V0.18 — arm G3: each seat parks only its remainder (no child frame); the
+/// clause and its tail drain in the action that answers the last scry.
+#[test]
+fn scry_fan_out_with_in_seat_draw_drains_in_the_last_answer() {
+    let Board {
+        mut state, source, ..
+    } = board(3, 46);
+    let mut kept = ResolvedAbility::new(
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        },
+        vec![],
+        source,
+        P0,
+    );
+    kept.condition = Some(AbilityCondition::current_scope_succeeded());
+    kept.sub_link = SubAbilityLink::ContinuationStep;
+    let mut tail = gain_one_life(source);
+    tail.sub_link = SubAbilityLink::SequentialSibling;
+    kept.sub_ability = Some(Box::new(tail));
+    let mut scry = ResolvedAbility::new(
+        Effect::Scry {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        },
+        vec![],
+        source,
+        P0,
+    );
+    scry.player_scope = Some(PlayerFilter::All);
+    scry.sub_ability = Some(Box::new(kept));
+
+    let hands_before: Vec<usize> = state.players.iter().map(|p| p.hand.len()).collect();
+    resolve_ability_chain(&mut state, &scry, &mut Vec::new(), 0).expect("fan-out starts");
+    let mut last_events = Vec::new();
+    for expected in [P0, P1, P2] {
+        let WaitingFor::ScryChoice { player, cards, .. } = state.waiting_for.clone() else {
+            panic!(
+                "expected {expected:?}'s ScryChoice, got {:?}",
+                state.waiting_for
+            );
+        };
+        assert_eq!(player, expected, "REACH-GUARD: scry prompts follow APNAP");
+        last_events = apply(&mut state, player, GameAction::SelectCards { cards })
+            .expect("scry answer resolves")
+            .events;
+    }
+    assert_clause_drained(&state, "V0.18");
+    for (player, before) in state.players.iter().zip(hands_before) {
+        assert_eq!(
+            player.hand.len(),
+            before + 1,
+            "{:?} drew one card",
+            player.id
+        );
+    }
+    let p2_draw = event_position(
+        &last_events,
+        |e| matches!(e, GameEvent::CardDrawn { player_id, .. } if *player_id == P2),
+    )
+    .expect("P2's draw is in the last action");
+    let gain = life_gained_by(&last_events, P0);
+    assert_eq!(gain.len(), 1);
+    assert!(gain[0] > p2_draw, "the tail follows P2's draw");
+}
+
+// --- a clause resolving above an enclosing chain's parked continuation -------------
+
+fn bird_token(source: ObjectId) -> ResolvedAbility {
+    ResolvedAbility::new(
+        Effect::Token {
+            name: "Bird".to_string(),
+            power: PtValue::Fixed(1),
+            toughness: PtValue::Fixed(1),
+            types: vec!["Creature".to_string(), "Bird".to_string()],
+            colors: vec![],
+            keywords: vec![],
+            tapped: false,
+            count: QuantityExpr::Fixed { value: 1 },
+            owner: TargetFilter::Controller,
+            attach_to: None,
+            enters_attacking: false,
+            supertypes: vec![],
+            static_abilities: vec![],
+            enter_with_counters: vec![],
+        },
+        vec![],
+        source,
+        P0,
+    )
+}
+
+/// Whether the scoped `Token` template keeps an in-seat "that token"
+/// instruction (a remainder the pausing seat must finish itself).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InSeat {
+    PlusOneCounter,
+    Nothing,
+}
+
+/// Scope-`All` `Token` (a CR 616.1 pause on it raises no child frame) →
+/// optional in-seat +1/+1 on "that token" (kept per seat by its
+/// `CurrentScopeSucceeded` gate) → the next instruction: a charge counter on
+/// "the tokens" (detached, it reads the created-token ledger).
+fn scoped_bird_chain(source: ObjectId, in_seat: InSeat) -> ResolvedAbility {
+    let mut tail = tail_counter(source);
+    tail.sub_link = SubAbilityLink::SequentialSibling;
+    let after_head = match in_seat {
+        InSeat::PlusOneCounter => {
+            let mut kept = put_counter_on_last_created(source, CounterType::Plus1Plus1);
+            kept.condition = Some(AbilityCondition::current_scope_succeeded());
+            kept.sub_link = SubAbilityLink::ContinuationStep;
+            kept.sub_ability = Some(Box::new(tail));
+            kept
+        }
+        InSeat::Nothing => tail,
+    };
+    let mut head = bird_token(source);
+    head.player_scope = Some(PlayerFilter::All);
+    head.sub_ability = Some(Box::new(after_head));
+    head
+}
+
+fn counter_added(events: &[GameEvent], ids: &[ObjectId], counter: &CounterType) -> Vec<usize> {
+    events
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| {
+            matches!(e, GameEvent::CounterAdded { object_id, counter_type, .. }
+                if ids.contains(object_id) && counter_type == counter)
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// One CR 616.1 prompt of the parked-continuation rows.
+struct Prompt {
+    player: PlayerId,
+    frames: Vec<FrameKind>,
+    authority: bool,
+}
+
+struct ParkedRun {
+    state: GameState,
+    events: Vec<GameEvent>,
+    stale: ObjectId,
+    prompts: Vec<Prompt>,
+}
+
+/// Park an enclosing chain's later instruction `U` ("you gain 1 life"), then
+/// resolve the scoped Bird clause above it with a CR 616.1 replacement pair on
+/// each of `replaced`'s tokens, answering every prompt through `apply()`.
+fn run_clause_above_parked_continuation(in_seat: InSeat, replaced: &[PlayerId]) -> ParkedRun {
+    let Board {
+        mut state,
+        source,
+        stale,
+        ..
+    } = board(3, 47);
+    for (n, player) in (0u64..).zip(replaced) {
+        install_token_count_replacement(
+            &mut state,
+            60 + 2 * n,
+            *player,
+            QuantityModification::DOUBLE,
+        );
+        install_token_count_replacement(
+            &mut state,
+            61 + 2 * n,
+            *player,
+            QuantityModification::Plus { value: 1 },
+        );
+    }
+    let earlier = PendingContinuation::new(Box::new(gain_one_life(source)), &state);
+    state.park_ability_continuation(earlier);
+    let chain = scoped_bird_chain(source, in_seat);
+    let mut events = Vec::new();
+    resolve_ability_chain(&mut state, &chain, &mut events, 0).expect("fan-out starts");
+    assert!(
+        tokens_of(&state, "Bird", P1).is_empty() && tokens_of(&state, "Bird", P2).is_empty(),
+        "REACH-GUARD: the clause paused at seat 0, before seats 1 and 2 created anything"
+    );
+
+    let mut prompts = Vec::new();
+    while let WaitingFor::ReplacementChoice { player, .. } = state.waiting_for.clone() {
+        prompts.push(Prompt {
+            player,
+            frames: frame_kinds(&state),
+            authority: tail_authority_parked(&state),
+        });
+        state = round_trip(&state);
+        let result = apply(
+            &mut state,
+            player,
+            GameAction::ChooseReplacement { index: 0 },
+        )
+        .expect("replacement order answer resolves");
+        events.extend(result.events);
+        assert!(prompts.len() < 16, "replacement prompts must terminate");
+    }
+    assert_clause_drained(&state, "clause above an enclosing continuation");
+    ParkedRun {
+        state,
+        events,
+        stale,
+        prompts,
+    }
+}
+
+/// The derived reading for every parked-continuation row: the in-seat
+/// instruction (if any) names only its seat's tokens and finishes before the
+/// next seat begins; the next instruction names every seat's tokens exactly
+/// once; and the enclosing continuation resumes only after it.
+fn assert_clause_then_parked_continuation(run: &ParkedRun, in_seat: InSeat) {
+    let ParkedRun {
+        state,
+        events,
+        stale,
+        ..
+    } = run;
+    let birds: Vec<Vec<ObjectId>> = [P0, P1, P2]
+        .iter()
+        .map(|player| tokens_of(state, "Bird", *player))
+        .collect();
+    for (player, tokens) in [P0, P1, P2].iter().zip(&birds) {
+        assert!(!tokens.is_empty(), "REACH-GUARD: {player:?} created Birds");
+    }
+    assert!(
+        birds[0].len() >= 3,
+        "REACH-GUARD: both replacements modified P0's Bird count, got {}",
+        birds[0].len()
+    );
+    let all: Vec<ObjectId> = birds.iter().flatten().copied().collect();
+    if in_seat == InSeat::PlusOneCounter {
+        for token in &all {
+            assert_eq!(
+                counters_of(state, *token, &CounterType::Plus1Plus1),
+                1,
+                "CR 608.2c: the in-seat \"that token\" names {token:?} once"
+            );
+        }
+        let p0_counters = counter_added(events, &birds[0], &CounterType::Plus1Plus1);
+        let p1_created = token_created_for(events, &birds[1]).expect("P1's Bird was created");
+        assert!(
+            p0_counters.len() == birds[0].len() && p0_counters.iter().all(|&i| i < p1_created),
+            "CR 608.2f: seat 0's in-seat instruction precedes seat 1 \
+             (P0 +1/+1 at {p0_counters:?}, P1 Bird at {p1_created})"
+        );
+    }
+    for token in &all {
+        assert_eq!(
+            counters_of(state, *token, &charge()),
+            1,
+            "CR 608.2c + CR 608.2e: the next instruction names {token:?} exactly once"
+        );
+    }
+    assert_eq!(
+        counters_of(state, *stale, &charge()),
+        0,
+        "the earlier instruction's token is never one of this clause's tokens"
+    );
+    let charges = counter_added(events, &all, &charge());
+    let gains = life_gained_by(events, P0);
+    assert_eq!(
+        gains.len(),
+        1,
+        "REACH-GUARD: the enclosing continuation resolves exactly once"
+    );
+    assert!(
+        charges.iter().all(|&i| i < gains[0]),
+        "CR 608.2c + CR 608.2e: the clause's next instruction resolves before \
+         the enclosing chain's later instruction (charges at {charges:?}, life at {})",
+        gains[0]
+    );
+}
+
+/// Seat 0 pauses with its in-seat remainder while an enclosing continuation is
+/// parked: the remainder is parked above that continuation (not spliced into
+/// it), then the clause's remaining seats, then the tail over the union, then
+/// the enclosing continuation.
+#[test]
+fn paused_seat_above_parked_continuation_finishes_clause_before_it() {
+    let run = run_clause_above_parked_continuation(InSeat::PlusOneCounter, &[P0]);
+    assert_clause_then_parked_continuation(&run, InSeat::PlusOneCounter);
+    let prompted: Vec<PlayerId> = run.prompts.iter().map(|p| p.player).collect();
+    assert_eq!(prompted, vec![P0]);
+    assert_eq!(
+        run.prompts[0].frames,
+        vec![FrameKind::AbilityContinuation; 3],
+        "P0.g: [enclosing continuation, clause frame, seat 0's remainder]"
+    );
+    assert!(
+        run.prompts[0].authority,
+        "REACH-GUARD (B1): authority parked"
+    );
+}
+
+/// A generated leg pauses mid-seat (P1) while the enclosing continuation sits
+/// directly beneath the drained clause frame: the leg's remainder keeps the
+/// tail authority on a frame of its own.
+#[test]
+fn paused_leg_above_parked_continuation_keeps_the_tail_authority() {
+    let run = run_clause_above_parked_continuation(InSeat::PlusOneCounter, &[P0, P1]);
+    assert_clause_then_parked_continuation(&run, InSeat::PlusOneCounter);
+    assert!(
+        tokens_of(&run.state, "Bird", P1).len() >= 3,
+        "REACH-GUARD: both replacements modified P1's Bird count"
+    );
+    let prompted: Vec<PlayerId> = run.prompts.iter().map(|p| p.player).collect();
+    assert_eq!(prompted, vec![P0, P1]);
+    assert_eq!(
+        run.prompts[1].frames,
+        vec![FrameKind::AbilityContinuation; 2],
+        "P0.g: [enclosing continuation, P1's remainder carrying the authority]"
+    );
+    assert!(
+        run.prompts.iter().all(|p| p.authority),
+        "REACH-GUARD (B1): authority parked at every prompt"
+    );
+}
+
+/// The last seat's terminal node pauses inside a drained leg while the
+/// enclosing continuation sits beneath it: the clause's queue end carries the
+/// tail authority.
+#[test]
+fn paused_last_seat_above_parked_continuation_parks_the_queue_end() {
+    let run = run_clause_above_parked_continuation(InSeat::Nothing, &[P0, P2]);
+    assert_clause_then_parked_continuation(&run, InSeat::Nothing);
+    assert!(
+        tokens_of(&run.state, "Bird", P2).len() >= 3,
+        "REACH-GUARD: both replacements modified P2's Bird count"
+    );
+    let prompted: Vec<PlayerId> = run.prompts.iter().map(|p| p.player).collect();
+    assert_eq!(prompted, vec![P0, P2]);
+    assert_eq!(
+        run.prompts[1].frames,
+        vec![FrameKind::AbilityContinuation; 2],
+        "P0.g: [enclosing continuation, the clause's queue end]"
+    );
+    assert!(
+        run.prompts.iter().all(|p| p.authority),
+        "REACH-GUARD (B1): authority parked at every prompt"
+    );
+}
+
+fn life_gain_of(events: &[GameEvent], player: PlayerId, gained: i32) -> Vec<usize> {
+    events
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| {
+            matches!(e, GameEvent::LifeChanged { player_id, amount, .. }
+                if *player_id == player && *amount == gained)
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
+fn damage_dealt_to(events: &[GameEvent], id: ObjectId) -> Vec<usize> {
+    events
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| {
+            matches!(e, GameEvent::DamageDealt { target: TargetRef::Object(target), .. }
+                if *target == id)
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// "You may prevent the next 1 damage to this creature." on `host`: damage to
+/// it pauses on a `ReplacementChoice`, and the damage handler stashes the rest
+/// of that instruction's simultaneous damage as a continuation (the append
+/// route).
+fn install_damage_shield(state: &mut GameState, host: ObjectId) {
+    let shield = ReplacementDefinition::new(ReplacementEvent::DamageDone)
+        .valid_card(TargetFilter::SelfRef)
+        .prevention_shield(PreventionAmount::Next(1))
+        .mode(ReplacementMode::Optional { decline: None })
+        .description("You may prevent the next 1 damage to this creature.".to_string());
+    let obj = state.objects.get_mut(&host).expect("shield host exists");
+    obj.replacement_definitions = vec![shield.clone()].into();
+    obj.base_replacement_definitions = Arc::new(vec![shield]);
+}
+
+/// "<seat> deals 1 damage to each creature they control" — the controller is
+/// rebound per seat.
+fn damage_own_creatures(source: ObjectId) -> ResolvedAbility {
+    ResolvedAbility::new(
+        Effect::DamageAll {
+            amount: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            player_filter: None,
+            damage_source: None,
+        },
+        vec![],
+        source,
+        P0,
+    )
+}
+
+/// A seat that pauses through a damage handler's own continuation stash (the
+/// append route) while an enclosing continuation `U` is parked: seat 0's
+/// remaining in-seat damage finishes before seat 1 begins, and the whole
+/// clause, including its next instruction, finishes before `U` resumes.
+///
+/// "Each player deals 1 damage to each creature they control. You gain 2
+/// life." resolves above `U` ("you gain 1 life"). P0's first creature carries
+/// an optional prevention shield, so seat 0's damage pauses on a
+/// `ReplacementChoice` and the damage handler stashes the rest of seat 0's
+/// simultaneous damage as that seat's remainder. Declining the shield keeps
+/// the damage, so every recipient is dealt damage exactly once.
+#[test]
+fn appended_seat_remainder_above_parked_continuation_finishes_clause_before_it() {
+    let Board {
+        mut state,
+        source,
+        copied,
+        stale,
+    } = board(3, 48);
+    install_damage_shield(&mut state, copied);
+    let p1_bear = creature(&mut state, 71, P1, "Bear");
+    let p2_bear = creature(&mut state, 72, P2, "Bear");
+
+    let earlier = PendingContinuation::new(Box::new(gain_life(source, 1)), &state);
+    state.park_ability_continuation(earlier);
+
+    let mut tail = gain_life(source, 2);
+    tail.sub_link = SubAbilityLink::SequentialSibling;
+    let mut damage = damage_own_creatures(source);
+    damage.player_scope = Some(PlayerFilter::All);
+    damage.sub_ability = Some(Box::new(tail));
+
+    let mut events = Vec::new();
+    resolve_ability_chain(&mut state, &damage, &mut events, 0).expect("fan-out starts");
+    let WaitingFor::ReplacementChoice { player, .. } = state.waiting_for.clone() else {
+        panic!(
+            "REACH-GUARD: seat 0's damage pauses on the shield, got {:?}",
+            state.waiting_for
+        );
+    };
+    assert_eq!(
+        player, P0,
+        "REACH-GUARD: the shielded creature's controller is prompted"
+    );
+    assert!(
+        events.iter().all(|e| !matches!(
+            e,
+            GameEvent::DamageDealt { .. } | GameEvent::LifeChanged { .. }
+        )),
+        "REACH-GUARD: the clause paused on seat 0's first recipient, so seat 0 still has \
+         damage to deal and no later seat has begun"
+    );
+    let paused_frames = frame_kinds(&state);
+
+    state = round_trip(&state);
+    let result = apply(&mut state, P0, GameAction::ChooseReplacement { index: 1 })
+        .expect("declining the shield resolves");
+    events.extend(result.events);
+    assert_clause_drained(&state, "appended seat remainder above U");
+
+    let shielded = damage_dealt_to(&events, copied);
+    let remainder = damage_dealt_to(&events, stale);
+    let p1 = damage_dealt_to(&events, p1_bear);
+    let p2 = damage_dealt_to(&events, p2_bear);
+    for (label, hits) in [
+        ("P0's shielded creature", &shielded),
+        ("P0's other creature", &remainder),
+        ("P1's creature", &p1),
+        ("P2's creature", &p2),
+    ] {
+        assert_eq!(hits.len(), 1, "REACH-GUARD: {label} is dealt damage once");
+    }
+    let tail = life_gain_of(&events, P0, 2);
+    let enclosing = life_gain_of(&events, P0, 1);
+    assert_eq!(
+        (tail.len(), enclosing.len()),
+        (1, 1),
+        "REACH-GUARD: the next instruction and U each resolve once"
+    );
+    assert!(
+        shielded[0] < remainder[0] && remainder[0] < p1[0],
+        "CR 608.2f: seat 0's remaining damage precedes seat 1 \
+         (P0 shielded at {}, P0 remainder at {}, P1 at {})",
+        shielded[0],
+        remainder[0],
+        p1[0]
+    );
+    assert!(
+        p1[0] < p2[0] && p2[0] < tail[0],
+        "CR 608.2f + CR 608.2e: seats in APNAP order, then the next instruction"
+    );
+    assert!(
+        tail[0] < enclosing[0],
+        "CR 608.2e: the clause's next instruction precedes the enclosing chain's \
+         later instruction (tail at {}, U at {})",
+        tail[0],
+        enclosing[0]
+    );
+    assert_eq!(
+        paused_frames,
+        vec![FrameKind::AbilityContinuation; 3],
+        "P0.g: [enclosing continuation, clause frame, seat 0's remainder]"
+    );
+}
+
+// --- a paused clause's work resumed after the seat that paused it -------------------
+
+/// The prompt a damage-clause row answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Asked {
+    Scry,
+    Shield,
+    Optional,
+    OpponentMay,
+}
+
+/// One answered pause: who was asked what, and the resolution stack then.
+struct Answered {
+    player: PlayerId,
+    asked: Asked,
+    frames: Vec<FrameKind>,
+}
+
+/// Answer the current pause through `apply()` after a serde round trip: keep
+/// the scried card, decline a prevention shield (so each recipient is dealt
+/// its damage exactly once), accept an optional seat or an "any opponent may"
+/// offer. `None` when resolution is not paused on one of those prompts.
+fn answer_pause(state: &mut GameState, events: &mut Vec<GameEvent>) -> Option<Answered> {
+    let (player, asked, action) = match state.waiting_for.clone() {
+        WaitingFor::ScryChoice { player, cards, .. } => {
+            (player, Asked::Scry, GameAction::SelectCards { cards })
+        }
+        WaitingFor::ReplacementChoice { player, .. } => (
+            player,
+            Asked::Shield,
+            GameAction::ChooseReplacement { index: 1 },
+        ),
+        WaitingFor::OptionalEffectChoice { player, .. } => (
+            player,
+            Asked::Optional,
+            GameAction::DecideOptionalEffect { accept: true },
+        ),
+        WaitingFor::OpponentMayChoice { player, .. } => (
+            player,
+            Asked::OpponentMay,
+            GameAction::DecideOptionalEffect { accept: true },
+        ),
+        _ => return None,
+    };
+    let frames = frame_kinds(state);
+    *state = round_trip(state);
+    let result = apply(state, player, action).expect("the pause's answer resolves");
+    events.extend(result.events);
+    Some(Answered {
+        player,
+        asked,
+        frames,
+    })
+}
+
+fn answer_every_pause(state: &mut GameState, events: &mut Vec<GameEvent>) -> Vec<Answered> {
+    let mut answered = Vec::new();
+    while let Some(answer) = answer_pause(state, events) {
+        answered.push(answer);
+        assert!(answered.len() < 16, "pauses must terminate");
+    }
+    answered
+}
+
+fn asked(answered: &[Answered]) -> Vec<(PlayerId, Asked)> {
+    answered.iter().map(|a| (a.player, a.asked)).collect()
+}
+
+/// The first event index at which `id` was dealt damage.
+fn first_damage(events: &[GameEvent], id: ObjectId, label: &str) -> usize {
+    *damage_dealt_to(events, id)
+        .first()
+        .unwrap_or_else(|| panic!("{label} was dealt damage"))
+}
+
+fn charge_added(events: &[GameEvent]) -> Vec<usize> {
+    events
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| {
+            matches!(e, GameEvent::CounterAdded { counter_type, .. } if *counter_type == charge())
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// Arm G3, re-paused: seat 0 scries, so its in-seat damage is parked as the
+/// seat's remainder above the clause frame. That remainder drains when the
+/// scry is answered, and its damage pauses again on P0's shielded creature:
+/// the damage handler stashes the rest of seat 0's simultaneous damage, which
+/// finishes before seat 1 begins and before the next instruction.
+///
+/// The damage is seat 0's last in-seat instruction (the next instruction is
+/// split off the clause), so the pause path forwards no sub-ability and every
+/// recipient is dealt damage exactly once.
+#[test]
+fn drained_seat_remainder_repause_finishes_its_seat_before_the_next_seat() {
+    let Board {
+        mut state,
+        source,
+        copied,
+        stale,
+    } = board(3, 49);
+    install_damage_shield(&mut state, copied);
+    let third = creature(&mut state, 73, P0, "Third Creature");
+    let p1_bear = creature(&mut state, 71, P1, "Bear");
+    let p2_bear = creature(&mut state, 72, P2, "Bear");
+
+    let mut tail = gain_life(source, 2);
+    tail.sub_link = SubAbilityLink::SequentialSibling;
+    let mut damage = damage_own_creatures(source);
+    damage.condition = Some(AbilityCondition::current_scope_succeeded());
+    damage.sub_link = SubAbilityLink::ContinuationStep;
+    damage.sub_ability = Some(Box::new(tail));
+    let mut scry = ResolvedAbility::new(
+        Effect::Scry {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        },
+        vec![],
+        source,
+        P0,
+    );
+    scry.player_scope = Some(PlayerFilter::All);
+    scry.sub_ability = Some(Box::new(damage));
+
+    let mut events = Vec::new();
+    resolve_ability_chain(&mut state, &scry, &mut events, 0).expect("fan-out starts");
+    let answered = answer_every_pause(&mut state, &mut events);
+    assert_clause_drained(&state, "drained seat remainder re-paused");
+    assert_eq!(
+        asked(&answered),
+        vec![
+            (P0, Asked::Scry),
+            (P0, Asked::Shield),
+            (P1, Asked::Scry),
+            (P2, Asked::Scry)
+        ],
+        "REACH-GUARD: seat 0 scries, its drained remainder pauses on the shield, \
+         then seats 1 and 2 scry"
+    );
+    assert_eq!(
+        answered[0].frames,
+        vec![FrameKind::AbilityContinuation; 2],
+        "REACH-GUARD (P0.g, arm G3): [clause frame, seat 0's remainder]"
+    );
+
+    let shielded = first_damage(&events, copied, "P0's shielded creature");
+    let second = first_damage(&events, stale, "P0's second creature");
+    let last = first_damage(&events, third, "P0's third creature");
+    let p1 = first_damage(&events, p1_bear, "P1's creature");
+    let p2 = first_damage(&events, p2_bear, "P2's creature");
+    assert!(
+        shielded < second && second < last && last < p1,
+        "CR 608.2f: seat 0's remaining damage precedes seat 1 (P0 shielded at \
+         {shielded}, P0 remainder at {second} and {last}, P1 at {p1})"
+    );
+    for (label, id) in [
+        ("P0's shielded creature", copied),
+        ("P0's second creature", stale),
+        ("P0's third creature", third),
+        ("P1's creature", p1_bear),
+        ("P2's creature", p2_bear),
+    ] {
+        assert_eq!(
+            damage_dealt_to(&events, id).len(),
+            1,
+            "REACH-GUARD: {label} is dealt damage once"
+        );
+    }
+    let tail = life_gain_of(&events, P0, 2);
+    assert_eq!(
+        tail.len(),
+        1,
+        "REACH-GUARD: the next instruction resolves once"
+    );
+    assert!(
+        p1 < p2 && p2 < tail[0],
+        "CR 608.2f + CR 608.2e: seats in APNAP order, then the next instruction"
+    );
+    assert_eq!(
+        answered[1].frames,
+        vec![FrameKind::AbilityContinuation; 2],
+        "P0.g: [clause frame, seat 0's re-parked remainder]"
+    );
+}
+
+/// A drained clause frame whose seat re-pauses above an enclosing continuation
+/// `U` ("you gain 1 life"): seat 0 pauses on its shielded creature, so the
+/// clause's remaining seats are parked as the clause frame above `U`. When that
+/// frame drains, seat 2's damage pauses on its own shielded creature: the rest
+/// of seat 2's damage finishes before `U`, which resolves last.
+///
+/// The clause has no next instruction: it would be seat 2's sub-ability, which
+/// a paused damage instruction runs twice (pre-existing residual R-A).
+#[test]
+fn drained_clause_frame_seat_repause_finishes_before_the_enclosing_continuation() {
+    let Board {
+        mut state,
+        source,
+        copied,
+        stale,
+    } = board(3, 50);
+    install_damage_shield(&mut state, copied);
+    let p1_bear = creature(&mut state, 71, P1, "Bear");
+    let p2_first = creature(&mut state, 72, P2, "Shielded Bear");
+    let p2_second = creature(&mut state, 74, P2, "Second Bear");
+    let p2_third = creature(&mut state, 75, P2, "Third Bear");
+    install_damage_shield(&mut state, p2_first);
+
+    let earlier = PendingContinuation::new(Box::new(gain_life(source, 1)), &state);
+    state.park_ability_continuation(earlier);
+    let mut damage = damage_own_creatures(source);
+    damage.player_scope = Some(PlayerFilter::All);
+
+    let mut events = Vec::new();
+    resolve_ability_chain(&mut state, &damage, &mut events, 0).expect("fan-out starts");
+    let answered = answer_every_pause(&mut state, &mut events);
+    assert_clause_drained(&state, "drained clause frame re-paused above U");
+    assert_eq!(
+        asked(&answered),
+        vec![(P0, Asked::Shield), (P2, Asked::Shield)],
+        "REACH-GUARD: seat 0 pauses in the first pass, seat 2 inside the drained clause frame"
+    );
+    assert_eq!(
+        answered[0].frames,
+        vec![FrameKind::AbilityContinuation; 3],
+        "REACH-GUARD (P0.g): [U, clause frame, seat 0's remainder]"
+    );
+
+    let enclosing = life_gain_of(&events, P0, 1);
+    assert_eq!(enclosing.len(), 1, "REACH-GUARD: U resolves once");
+    let p2_shielded = first_damage(&events, p2_first, "P2's shielded creature");
+    let p2_rest = [
+        first_damage(&events, p2_second, "P2's second creature"),
+        first_damage(&events, p2_third, "P2's third creature"),
+    ];
+    assert!(
+        p2_rest.iter().all(|&i| p2_shielded < i && i < enclosing[0]),
+        "CR 608.2f + CR 608.2e: seat 2's remaining damage precedes U (P2 shielded at \
+         {p2_shielded}, P2 remainder at {p2_rest:?}, U at {})",
+        enclosing[0]
+    );
+    let order = [
+        first_damage(&events, copied, "P0's shielded creature"),
+        first_damage(&events, stale, "P0's second creature"),
+        first_damage(&events, p1_bear, "P1's creature"),
+        p2_shielded,
+    ];
+    assert!(
+        order.windows(2).all(|pair| pair[0] < pair[1]),
+        "CR 608.2f: seats in APNAP order, each seat's damage before the next ({order:?})"
+    );
+    for id in [copied, stale, p1_bear, p2_first, p2_second, p2_third] {
+        assert_eq!(
+            damage_dealt_to(&events, id).len(),
+            1,
+            "REACH-GUARD: {id:?} is dealt damage once"
+        );
+    }
+    assert_eq!(
+        answered[1].frames,
+        vec![FrameKind::AbilityContinuation; 2],
+        "P0.g: [U, seat 2's re-parked remainder]"
+    );
+}
+
+/// "Each player may have it deal 1 damage to each creature they control."
+/// above an enclosing continuation `U`; every seat accepts. Each decision is
+/// answered outside any drain. Seat 0's (first pass, the clause frame beneath
+/// its prompt) and seat 2's (raised while the clause frame drained, `U`
+/// beneath its prompt) damage each pauses on a shield: each seat's remaining
+/// damage finishes before the next seat and before `U`.
+#[test]
+fn optional_seat_decisions_finish_their_damage_before_the_next_seat_and_u() {
+    let Board {
+        mut state,
+        source,
+        copied,
+        stale,
+    } = board(3, 51);
+    install_damage_shield(&mut state, copied);
+    let p1_bear = creature(&mut state, 71, P1, "Bear");
+    let p2_first = creature(&mut state, 72, P2, "Shielded Bear");
+    let p2_second = creature(&mut state, 74, P2, "Second Bear");
+    install_damage_shield(&mut state, p2_first);
+
+    let earlier = PendingContinuation::new(Box::new(gain_life(source, 1)), &state);
+    state.park_ability_continuation(earlier);
+    let mut damage = damage_own_creatures(source);
+    damage.player_scope = Some(PlayerFilter::All);
+    damage.optional = true;
+
+    let mut events = Vec::new();
+    resolve_ability_chain(&mut state, &damage, &mut events, 0).expect("fan-out starts");
+    let answered = answer_every_pause(&mut state, &mut events);
+    assert_clause_drained(&state, "optional seats above U");
+    assert_eq!(
+        asked(&answered),
+        vec![
+            (P0, Asked::Optional),
+            (P0, Asked::Shield),
+            (P1, Asked::Optional),
+            (P2, Asked::Optional),
+            (P2, Asked::Shield)
+        ],
+        "REACH-GUARD (P0.d): each seat is asked in APNAP order; seats 0 and 2 pause on \
+         their shields"
+    );
+    assert_eq!(
+        answered[0].frames.last(),
+        Some(&FrameKind::OptionalEffect),
+        "REACH-GUARD: seat 0's prompt is a direct-choice frame"
+    );
+
+    let p0_rest = first_damage(&events, stale, "P0's second creature");
+    let p1 = first_damage(&events, p1_bear, "P1's creature");
+    assert!(
+        p0_rest < p1,
+        "CR 608.2f: seat 0's remaining damage precedes seat 1 (P0 remainder at \
+         {p0_rest}, P1 at {p1})"
+    );
+    let enclosing = life_gain_of(&events, P0, 1);
+    let p2_rest = first_damage(&events, p2_second, "P2's second creature");
+    assert!(
+        enclosing.first().is_some_and(|&u| p2_rest < u),
+        "CR 608.2f + CR 608.2e: seat 2's remaining damage precedes U (P2 remainder \
+         at {p2_rest}, U at {enclosing:?})"
+    );
+    for id in [copied, stale, p1_bear, p2_first, p2_second] {
+        assert_eq!(
+            damage_dealt_to(&events, id).len(),
+            1,
+            "REACH-GUARD: {id:?} is dealt damage once"
+        );
+    }
+    assert_eq!(enclosing.len(), 1, "REACH-GUARD: U resolves once");
+    let order = [
+        first_damage(&events, copied, "P0's shielded creature"),
+        p0_rest,
+        p1,
+        first_damage(&events, p2_first, "P2's shielded creature"),
+        p2_rest,
+        enclosing[0],
+    ];
+    assert!(
+        order.windows(2).all(|pair| pair[0] < pair[1]),
+        "CR 608.2f + CR 608.2e: seats in APNAP order, then U ({order:?})"
+    );
+}
+
+/// "Each player may have it deal 1 damage to each creature they control. Put
+/// a charge counter on the tokens." (the tail reads the created-token ledger,
+/// so it is detached and its authority rides the clause's frames). Every seat
+/// accepts; `shielded`'s first creature carries a shield, so that seat's
+/// decision — raised while the clause frame drained, beneath it the clause's
+/// next-seat frame or queue end — pauses its damage.
+fn run_optional_seats_with_detached_tail(shielded: PlayerId, seed: u64) -> DetachedRun {
+    let Board {
+        mut state, source, ..
+    } = board(3, seed);
+    let first = creature(&mut state, 81, shielded, "Shielded Bear");
+    let second = creature(&mut state, 82, shielded, "Second Bear");
+    install_damage_shield(&mut state, first);
+    let other = creature(
+        &mut state,
+        83,
+        if shielded == P1 { P2 } else { P1 },
+        "Other Bear",
+    );
+
+    let mut tail = tail_counter(source);
+    tail.sub_link = SubAbilityLink::SequentialSibling;
+    let mut damage = damage_own_creatures(source);
+    damage.player_scope = Some(PlayerFilter::All);
+    damage.optional = true;
+    damage.sub_ability = Some(Box::new(tail));
+
+    let mut events = Vec::new();
+    resolve_ability_chain(&mut state, &damage, &mut events, 0).expect("fan-out starts");
+    let mut answered = Vec::new();
+    let mut authority = Vec::new();
+    loop {
+        let parked = tail_authority_parked(&state);
+        let Some(answer) = answer_pause(&mut state, &mut events) else {
+            break;
+        };
+        answered.push(answer);
+        authority.push(parked);
+        assert!(answered.len() < 16, "pauses must terminate");
+    }
+    assert_clause_drained(&state, "optional seats with a detached tail");
+    DetachedRun {
+        events,
+        answered,
+        authority,
+        first,
+        second,
+        other,
+    }
+}
+
+struct DetachedRun {
+    events: Vec<GameEvent>,
+    answered: Vec<Answered>,
+    /// The tail-authority reach-guard, recorded at every pause.
+    authority: Vec<bool>,
+    first: ObjectId,
+    second: ObjectId,
+    other: ObjectId,
+}
+
+/// Seat 1's decision is raised while the clause frame drains, with the
+/// clause's next-seat frame beneath its prompt: seat 1's remaining damage
+/// finishes before seat 2 begins.
+#[test]
+fn optional_leg_decision_remainder_precedes_the_next_seat_frame() {
+    let run = run_optional_seats_with_detached_tail(P1, 52);
+    assert_eq!(
+        asked(&run.answered),
+        vec![
+            (P0, Asked::Optional),
+            (P1, Asked::Optional),
+            (P1, Asked::Shield),
+            (P2, Asked::Optional)
+        ],
+        "REACH-GUARD (P0.d): each seat is asked in APNAP order; seat 1 pauses on its shield"
+    );
+    assert!(
+        run.authority.iter().all(|parked| *parked),
+        "REACH-GUARD (B1): the tail authority is parked at every pause"
+    );
+    assert_eq!(
+        run.answered[1].frames,
+        vec![FrameKind::AbilityContinuation, FrameKind::OptionalEffect],
+        "REACH-GUARD (P0.g): [next-seat frame, seat 1's prompt]"
+    );
+    let events = &run.events;
+    let p1_rest = first_damage(events, run.second, "P1's second creature");
+    let p2 = first_damage(events, run.other, "P2's creature");
+    assert!(
+        first_damage(events, run.first, "P1's shielded creature") < p1_rest && p1_rest < p2,
+        "CR 608.2f: seat 1's remaining damage precedes seat 2 (P1 remainder at \
+         {p1_rest}, P2 at {p2})"
+    );
+    for id in [run.first, run.second, run.other] {
+        assert_eq!(
+            damage_dealt_to(events, id).len(),
+            1,
+            "REACH-GUARD: {id:?} is dealt damage once"
+        );
+    }
+    let tail = charge_added(events);
+    assert_eq!(
+        tail.len(),
+        1,
+        "REACH-GUARD: the next instruction resolves once"
+    );
+    assert!(
+        p2 < tail[0],
+        "CR 608.2e: the next instruction follows the whole clause"
+    );
+}
+
+/// Seat 2's decision is raised while the clause frame drains, with the
+/// clause's queue end (carrying the tail authority) beneath its prompt: seat
+/// 2's remaining damage is dealt, before the next instruction.
+#[test]
+fn optional_last_seat_decision_remainder_precedes_the_queue_end() {
+    let run = run_optional_seats_with_detached_tail(P2, 53);
+    assert_eq!(
+        asked(&run.answered),
+        vec![
+            (P0, Asked::Optional),
+            (P1, Asked::Optional),
+            (P2, Asked::Optional),
+            (P2, Asked::Shield)
+        ],
+        "REACH-GUARD (P0.d): each seat is asked in APNAP order; seat 2 pauses on its shield"
+    );
+    assert!(
+        run.authority.iter().all(|parked| *parked),
+        "REACH-GUARD (B1): the tail authority is parked at every pause"
+    );
+    assert_eq!(
+        run.answered[2].frames,
+        vec![FrameKind::AbilityContinuation, FrameKind::OptionalEffect],
+        "REACH-GUARD (P0.g): [queue end, seat 2's prompt]"
+    );
+    let events = &run.events;
+    let p2_rest = first_damage(events, run.second, "P2's second creature");
+    let tail = charge_added(events);
+    assert_eq!(
+        tail.len(),
+        1,
+        "REACH-GUARD: the next instruction resolves once"
+    );
+    assert!(
+        first_damage(events, run.first, "P2's shielded creature") < p2_rest && p2_rest < tail[0],
+        "CR 608.2f + CR 608.2e: seat 2's remaining damage precedes the next \
+         instruction (P2 remainder at {p2_rest}, tail at {})",
+        tail[0]
+    );
+    let p1 = first_damage(events, run.other, "P1's creature");
+    assert!(p1 < p2_rest, "CR 608.2f: seats in APNAP order");
+    for id in [run.first, run.second, run.other] {
+        assert_eq!(
+            damage_dealt_to(events, id).len(),
+            1,
+            "REACH-GUARD: {id:?} is dealt damage once"
+        );
+    }
+}
+
+// --- "any opponent may" offers inside a paused clause ------------------------------
+
+/// "any opponent may …": the node's controller's opponents are offered it in
+/// APNAP order; the first to accept has it happen (CR 608.2d + CR 101.4).
+fn any_opponent_may(mut node: ResolvedAbility) -> ResolvedAbility {
+    node.optional = true;
+    node.optional_for = Some(OpponentMayScope::AnyOpponent);
+    node
+}
+
+/// "<controller> scries 1" — the controller is rebound per seat.
+fn scry_one(source: ObjectId) -> ResolvedAbility {
+    ResolvedAbility::new(
+        Effect::Scry {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        },
+        vec![],
+        source,
+        P0,
+    )
+}
+
+/// How an accepted "any opponent may" offer pauses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OfferPause {
+    /// "… may have you scry 1. You gain 3 life.": the scry pauses, and the
+    /// generic pause path parks the remaining "you gain 3 life" (the prepend
+    /// route).
+    Scry,
+    /// "… may have it deal 1 damage to each creature you control.": the damage
+    /// pauses on P0's shield, and the damage handler stashes the rest of its
+    /// simultaneous damage (the append route).
+    Damage,
+}
+
+struct OfferRun {
+    state: GameState,
+    events: Vec<GameEvent>,
+    answered: Vec<Answered>,
+    p0_shielded: ObjectId,
+    p0_second: ObjectId,
+    p1_creature: ObjectId,
+}
+
+/// "Each player may gain 1 life. If they do, any opponent may <offer>." in two
+/// players, optionally above an enclosing continuation `U` ("you gain 7
+/// life"). Every seat and every offer is accepted through `apply()`; seat 0's
+/// offer is answered by a handler that installs no floor, while a queue-end
+/// barrier is the stack-top continuation beneath the offer.
+fn run_opponent_offer_after_seat_decision(
+    offer: OfferPause,
+    enclosing: bool,
+    seed: u64,
+) -> OfferRun {
+    let Board {
+        mut state,
+        source,
+        copied,
+        stale,
+    } = board(2, seed);
+    install_damage_shield(&mut state, copied);
+    let p1_creature = creature(&mut state, 71, P1, "Bear");
+    if enclosing {
+        let earlier = PendingContinuation::new(Box::new(gain_life(source, 7)), &state);
+        state.park_ability_continuation(earlier);
+    }
+
+    let offered = match offer {
+        OfferPause::Scry => {
+            let mut scry = scry_one(source);
+            scry.sub_ability = Some(Box::new(gain_life(source, 3)));
+            scry
+        }
+        OfferPause::Damage => damage_own_creatures(source),
+    };
+    let mut offered = any_opponent_may(offered);
+    offered.condition = Some(AbilityCondition::effect_performed());
+    let mut seat = gain_life(source, 1);
+    seat.optional = true;
+    seat.player_scope = Some(PlayerFilter::All);
+    seat.sub_ability = Some(Box::new(offered));
+
+    let mut events = Vec::new();
+    resolve_ability_chain(&mut state, &seat, &mut events, 0).expect("fan-out starts");
+    let answered = answer_every_pause(&mut state, &mut events);
+    OfferRun {
+        state,
+        events,
+        answered,
+        p0_shielded: copied,
+        p0_second: stale,
+        p1_creature,
+    }
+}
+
+/// The reach-guards every offer row checks first: seat 0 decides, its
+/// opponent accepts the offer, and the offer pauses; seat 0's offer prompt sits
+/// on the queue-end barrier(s) above the clause frame; seat 0's "gain 1 life"
+/// resolves once.
+fn assert_offer_reach(run: &OfferRun, offer: OfferPause, enclosing: bool) {
+    let pause = match offer {
+        OfferPause::Scry => (P0, Asked::Scry),
+        OfferPause::Damage => (P0, Asked::Shield),
+    };
+    assert_eq!(
+        asked(&run.answered).get(..3),
+        Some(&[(P0, Asked::Optional), (P1, Asked::OpponentMay), pause][..]),
+        "REACH-GUARD: seat 0 decides, P1 accepts the offer, and the offer pauses"
+    );
+    let continuations = if enclosing { 4 } else { 2 };
+    let mut frames = vec![FrameKind::AbilityContinuation; continuations];
+    frames.push(FrameKind::OptionalEffect);
+    assert_eq!(
+        run.answered[1].frames, frames,
+        "REACH-GUARD (P0.g): seat 0's offer prompt sits on the queue-end barrier \
+         ([U, clause frame, U's barrier, the offer's barrier, offer] / \
+         [clause frame, the offer's barrier, offer])"
+    );
+    assert_eq!(
+        life_gain_of(&run.events, P0, 1).len(),
+        1,
+        "REACH-GUARD: seat 0's decision resolves once"
+    );
+}
+
+/// The checks every offer row makes once seat 0's work is proven: the clause
+/// drains in the answering actions, seat 1 is asked the same way, and seat 1's
+/// "gain 1 life" resolves once.
+fn assert_offer_clause_completes(run: &OfferRun, offer: OfferPause, label: &str) {
+    assert_clause_drained(&run.state, label);
+    let mut seat_one = vec![(P1, Asked::Optional), (P0, Asked::OpponentMay)];
+    if offer == OfferPause::Scry {
+        seat_one.push((P1, Asked::Scry));
+    }
+    assert_eq!(
+        asked(&run.answered).get(3..),
+        Some(&seat_one[..]),
+        "REACH-GUARD: seat 1 decides, then P0 accepts its offer"
+    );
+    assert_eq!(
+        life_gain_of(&run.events, P1, 1).len(),
+        1,
+        "REACH-GUARD: seat 1's decision resolves once"
+    );
+}
+
+/// Seat 0's accepted offer scries, so its remaining "you gain 3 life" is
+/// parked while the barrier beneath the offer is the stack-top continuation:
+/// it resolves, before seat 1 begins.
+#[test]
+fn opponent_offer_remainder_parked_above_a_barrier_precedes_the_next_seat() {
+    let run = run_opponent_offer_after_seat_decision(OfferPause::Scry, false, 54);
+    assert_offer_reach(&run, OfferPause::Scry, false);
+    let p0_rest = life_gain_of(&run.events, P0, 3);
+    assert_eq!(
+        p0_rest.len(),
+        1,
+        "CR 608.2c: seat 0's remaining instruction after the accepted offer resolves once"
+    );
+    assert_eq!(
+        run.answered[2].frames,
+        vec![FrameKind::AbilityContinuation; 3],
+        "P0.g: [clause frame, barrier, seat 0's parked remainder]"
+    );
+    assert_offer_clause_completes(&run, OfferPause::Scry, "scry offer");
+    let order = [
+        life_gain_of(&run.events, P0, 1)[0],
+        p0_rest[0],
+        life_gain_of(&run.events, P1, 1)[0],
+    ];
+    assert!(
+        order.windows(2).all(|pair| pair[0] < pair[1]),
+        "CR 608.2f: seat 0's remaining instruction precedes seat 1 ({order:?})"
+    );
+    assert_eq!(
+        life_gain_of(&run.events, P1, 3).len(),
+        1,
+        "REACH-GUARD: seat 1's remaining instruction resolves once"
+    );
+}
+
+/// The same offer above an enclosing continuation `U`: seat 0's remaining
+/// instruction resolves before seat 1, and the whole clause before `U`.
+#[test]
+fn opponent_offer_remainder_parked_above_a_barrier_precedes_the_next_seat_and_u() {
+    let run = run_opponent_offer_after_seat_decision(OfferPause::Scry, true, 55);
+    assert_offer_reach(&run, OfferPause::Scry, true);
+    let p0_rest = life_gain_of(&run.events, P0, 3);
+    assert_eq!(
+        p0_rest.len(),
+        1,
+        "CR 608.2c: seat 0's remaining instruction after the accepted offer resolves once"
+    );
+    assert_eq!(
+        run.answered[2].frames,
+        vec![FrameKind::AbilityContinuation; 5],
+        "P0.g: [U, clause frame, two barriers, seat 0's parked remainder]"
+    );
+    assert_offer_clause_completes(&run, OfferPause::Scry, "scry offer above U");
+    let p1_rest = life_gain_of(&run.events, P1, 3);
+    assert_eq!(
+        p1_rest.len(),
+        1,
+        "CR 608.2c: seat 1's remaining instruction after the accepted offer resolves once"
+    );
+    let enclosing = life_gain_of(&run.events, P0, 7);
+    assert_eq!(enclosing.len(), 1, "REACH-GUARD: U resolves once");
+    let order = [
+        life_gain_of(&run.events, P0, 1)[0],
+        p0_rest[0],
+        life_gain_of(&run.events, P1, 1)[0],
+        p1_rest[0],
+        enclosing[0],
+    ];
+    assert!(
+        order.windows(2).all(|pair| pair[0] < pair[1]),
+        "CR 608.2f + CR 608.2e: each seat's remaining instruction precedes the next seat, \
+         and the clause precedes U ({order:?})"
+    );
+}
+
+/// Seat 0's accepted offer deals damage that pauses on P0's shield, so the
+/// damage handler stashes the rest of its damage while the barrier beneath the
+/// offer is the stack-top continuation: that damage is dealt, before seat 1
+/// begins and before `U`.
+#[test]
+fn opponent_offer_appended_damage_parked_above_a_barrier_precedes_the_next_seat_and_u() {
+    let run = run_opponent_offer_after_seat_decision(OfferPause::Damage, true, 56);
+    assert_offer_reach(&run, OfferPause::Damage, true);
+    assert_eq!(
+        damage_dealt_to(&run.events, run.p0_shielded).len(),
+        1,
+        "REACH-GUARD: P0's shielded creature is dealt damage once"
+    );
+    let p0_rest = damage_dealt_to(&run.events, run.p0_second);
+    assert_eq!(
+        p0_rest.len(),
+        1,
+        "CR 608.2c: the rest of the accepted offer's damage is dealt once"
+    );
+    assert_eq!(
+        run.answered[2].frames,
+        vec![FrameKind::AbilityContinuation; 5],
+        "P0.g: [U, clause frame, two barriers, seat 0's parked damage]"
+    );
+    assert_offer_clause_completes(&run, OfferPause::Damage, "damage offer above U");
+    let p1 = damage_dealt_to(&run.events, run.p1_creature);
+    assert_eq!(
+        p1.len(),
+        1,
+        "REACH-GUARD: seat 1's offer deals its damage once"
+    );
+    let enclosing = life_gain_of(&run.events, P0, 7);
+    assert_eq!(enclosing.len(), 1, "REACH-GUARD: U resolves once");
+    let order = [
+        damage_dealt_to(&run.events, run.p0_shielded)[0],
+        p0_rest[0],
+        life_gain_of(&run.events, P1, 1)[0],
+        p1[0],
+        enclosing[0],
+    ];
+    assert!(
+        order.windows(2).all(|pair| pair[0] < pair[1]),
+        "CR 608.2f + CR 608.2e: seat 0's remaining damage precedes seat 1, and the clause \
+         precedes U ({order:?})"
+    );
+}
+
+/// "Each player deals 1 damage to each creature they control — any opponent
+/// may have it happen. Put a charge counter on the tokens." in three players:
+/// each seat is an "any opponent may" offer, and the next instruction is
+/// detached (its tail authority rides the clause's frames). Seat 2's offer is
+/// raised while its leg drains, with the clause's queue end (carrying the tail
+/// authority) beneath it, and is answered by a handler that installs no floor;
+/// the accepted damage pauses on P2's shield, so the damage handler stashes
+/// the rest of seat 2's damage while that queue end is the stack-top
+/// continuation. That damage is dealt, before the next instruction.
+#[test]
+fn opponent_offer_appended_damage_parked_above_the_queue_end_precedes_the_tail() {
+    let Board {
+        mut state,
+        source,
+        copied,
+        stale,
+    } = board(3, 57);
+    let p1_creature = creature(&mut state, 71, P1, "Bear");
+    let p2_shielded = creature(&mut state, 73, P2, "Shielded Wolf");
+    let p2_second = creature(&mut state, 74, P2, "Second Wolf");
+    install_damage_shield(&mut state, p2_shielded);
+
+    let mut tail = tail_counter(source);
+    tail.sub_link = SubAbilityLink::SequentialSibling;
+    let mut offer = any_opponent_may(damage_own_creatures(source));
+    offer.player_scope = Some(PlayerFilter::All);
+    offer.sub_ability = Some(Box::new(tail));
+
+    let mut events = Vec::new();
+    resolve_ability_chain(&mut state, &offer, &mut events, 0).expect("fan-out starts");
+    let mut answered = Vec::new();
+    let mut authority = Vec::new();
+    loop {
+        let parked = tail_authority_parked(&state);
+        let Some(answer) = answer_pause(&mut state, &mut events) else {
+            break;
+        };
+        answered.push(answer);
+        authority.push(parked);
+        assert!(answered.len() < 16, "pauses must terminate");
+    }
+    assert_clause_drained(&state, "opponent offers with a detached tail");
+    assert_eq!(
+        asked(&answered),
+        vec![
+            (P1, Asked::OpponentMay),
+            (P0, Asked::OpponentMay),
+            (P0, Asked::OpponentMay),
+            (P2, Asked::Shield)
+        ],
+        "REACH-GUARD: each seat's offer goes to its first opponent in APNAP order, and          seat 2's accepted offer pauses on P2's shield"
+    );
+    assert!(
+        authority.iter().all(|parked| *parked),
+        "REACH-GUARD (B1): the tail authority is parked at every pause"
+    );
+    for (seat, label) in [
+        (0, "[clause frame, seat 0's offer]"),
+        (1, "[next-seat frame, seat 1's offer]"),
+        (2, "[queue end, seat 2's offer]"),
+    ] {
+        assert_eq!(
+            answered[seat].frames,
+            vec![FrameKind::AbilityContinuation, FrameKind::OptionalEffect],
+            "REACH-GUARD (P0.g): {label}"
+        );
+    }
+    for id in [copied, stale, p1_creature, p2_shielded] {
+        assert_eq!(
+            damage_dealt_to(&events, id).len(),
+            1,
+            "REACH-GUARD: {id:?} is dealt damage once"
+        );
+    }
+    let p2_rest = damage_dealt_to(&events, p2_second);
+    assert_eq!(
+        p2_rest.len(),
+        1,
+        "CR 608.2c: the rest of seat 2's accepted damage is dealt once"
+    );
+    let tail = charge_added(&events);
+    assert_eq!(
+        tail.len(),
+        1,
+        "REACH-GUARD: the next instruction resolves once"
+    );
+    let order = [
+        first_damage(&events, copied, "P0's first creature"),
+        first_damage(&events, p1_creature, "P1's creature"),
+        first_damage(&events, p2_shielded, "P2's shielded creature"),
+        p2_rest[0],
+        tail[0],
+    ];
+    assert!(
+        order.windows(2).all(|pair| pair[0] < pair[1]),
+        "CR 608.2f + CR 608.2e: seats in APNAP order, seat 2's remaining damage, then          the next instruction ({order:?})"
+    );
+}
+
+/// A drained leg's seat raises a prompt it does not own (its node comes from
+/// another source) directly above an enclosing continuation `U`: the barrier
+/// beneath that prompt is the last frame the clause's work drains through, so
+/// the clause's detached next instruction still resolves — once, after every
+/// seat and before `U`.
+///
+/// "Each player scries 1, then may gain 1 life. Put a charge counter on the
+/// tokens." in three players above `U` ("you gain 7 life"), the "may gain 1
+/// life" node carrying another source.
+#[test]
+fn foreign_prompt_barrier_in_a_drained_leg_keeps_the_tail_authority() {
+    let Board {
+        mut state, source, ..
+    } = board(3, 58);
+    let foreign = create_object(
+        &mut state,
+        CardId(9),
+        P0,
+        "Foreign Source".to_string(),
+        Zone::Battlefield,
+    );
+    let earlier = PendingContinuation::new(Box::new(gain_life(source, 7)), &state);
+    state.park_ability_continuation(earlier);
+
+    let mut tail = tail_counter(source);
+    tail.sub_link = SubAbilityLink::SequentialSibling;
+    let mut may_gain = gain_life(foreign, 1);
+    may_gain.optional = true;
+    // Kept per seat by its `CurrentScopeSucceeded` gate.
+    may_gain.condition = Some(AbilityCondition::current_scope_succeeded());
+    may_gain.sub_ability = Some(Box::new(tail));
+    let mut scry = scry_one(source);
+    scry.player_scope = Some(PlayerFilter::All);
+    scry.sub_ability = Some(Box::new(may_gain));
+
+    let mut events = Vec::new();
+    resolve_ability_chain(&mut state, &scry, &mut events, 0).expect("fan-out starts");
+    let answered = answer_every_pause(&mut state, &mut events);
+    assert_eq!(
+        asked(&answered),
+        vec![
+            (P0, Asked::Scry),
+            (P0, Asked::Optional),
+            (P1, Asked::Scry),
+            (P1, Asked::Optional),
+            (P2, Asked::Scry),
+            (P2, Asked::Optional)
+        ],
+        "REACH-GUARD: each seat scries, then decides, in APNAP order"
+    );
+    assert_eq!(
+        answered[3].frames,
+        vec![
+            FrameKind::AbilityContinuation,
+            FrameKind::AbilityContinuation,
+            FrameKind::OptionalEffect
+        ],
+        "REACH-GUARD (P0.g): [U, the barrier, seat 1's foreign prompt]"
+    );
+    let gains: Vec<usize> = [P0, P1, P2]
+        .iter()
+        .map(|&player| {
+            let seat = life_gain_of(&events, player, 1);
+            assert_eq!(
+                seat.len(),
+                1,
+                "REACH-GUARD: {player:?}'s seat gains life once"
+            );
+            seat[0]
+        })
+        .collect();
+    let tail = charge_added(&events);
+    assert_eq!(
+        tail.len(),
+        1,
+        "CR 608.2e: the clause's next instruction resolves once"
+    );
+    assert_clause_drained(&state, "foreign prompt in a drained leg above U");
+    let enclosing = life_gain_of(&events, P0, 7);
+    assert_eq!(enclosing.len(), 1, "REACH-GUARD: U resolves once");
+    assert!(
+        gains[2] < tail[0] && tail[0] < enclosing[0],
+        "CR 608.2e: the next instruction follows every seat and precedes U \
+         (last seat at {}, tail at {}, U at {})",
+        gains[2],
+        tail[0],
+        enclosing[0]
+    );
+}
+
+/// "Each player may scry 1, then gain 3 life." above an enclosing continuation
+/// `U` ("you gain 7 life"), in two players. Seat 0's accepted scry parks its
+/// remaining "gain 3 life" above the queue-end barrier beneath seat 0's
+/// prompt; answering the scry resumes that remainder, passes the barrier, and
+/// resumes seat 1 in the same action — no continuation is left parked while a
+/// player holds priority.
+#[test]
+fn optional_seat_remainder_above_a_barrier_resumes_the_next_seat_in_the_same_action() {
+    let Board {
+        mut state, source, ..
+    } = board(2, 59);
+    let earlier = PendingContinuation::new(Box::new(gain_life(source, 7)), &state);
+    state.park_ability_continuation(earlier);
+    let mut scry = scry_one(source);
+    scry.sub_ability = Some(Box::new(gain_life(source, 3)));
+    scry.player_scope = Some(PlayerFilter::All);
+    scry.optional = true;
+
+    let mut events = Vec::new();
+    resolve_ability_chain(&mut state, &scry, &mut events, 0).expect("fan-out starts");
+    let mut answered = Vec::new();
+    for _ in 0..2 {
+        answered.push(answer_pause(&mut state, &mut events).expect("seat 0 is paused"));
+    }
+    assert_eq!(
+        asked(&answered),
+        vec![(P0, Asked::Optional), (P0, Asked::Scry)],
+        "REACH-GUARD: seat 0 decides, then scries"
+    );
+    assert_eq!(
+        answered[1].frames,
+        vec![FrameKind::AbilityContinuation; 4],
+        "REACH-GUARD (P0.g): [U, clause frame, barrier, seat 0's parked remainder]"
+    );
+    assert_eq!(
+        life_gain_of(&events, P0, 3).len(),
+        1,
+        "REACH-GUARD: seat 0's remaining instruction resolves once"
+    );
+    let WaitingFor::OptionalEffectChoice { player, .. } = state.waiting_for.clone() else {
+        panic!(
+            "CR 608.2f: answering seat 0's scry resumes seat 1's decision, got {:?} with \
+             frames {:?}",
+            state.waiting_for,
+            frame_kinds(&state)
+        );
+    };
+    assert_eq!(player, P1, "seat 1 decides next");
+    answered.extend(answer_every_pause(&mut state, &mut events));
+    assert_clause_drained(&state, "optional scry seats above U");
+    assert_eq!(
+        asked(&answered[2..]),
+        vec![(P1, Asked::Optional), (P1, Asked::Scry)],
+        "REACH-GUARD: seat 1 decides, then scries"
+    );
+    let order = [
+        life_gain_of(&events, P0, 3)[0],
+        life_gain_of(&events, P1, 3)[0],
+        life_gain_of(&events, P0, 7)[0],
+    ];
+    assert!(
+        order.windows(2).all(|pair| pair[0] < pair[1]),
+        "CR 608.2f + CR 608.2e: seats in APNAP order, then U ({order:?})"
+    );
+    for (player, gained, label) in [(P1, 3, "seat 1's remainder"), (P0, 7, "U")] {
+        assert_eq!(
+            life_gain_of(&events, player, gained).len(),
+            1,
+            "REACH-GUARD: {label} resolves once"
+        );
+    }
+}

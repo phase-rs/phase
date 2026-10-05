@@ -2,9 +2,9 @@ use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::game::game_object::GameObject;
 use engine::game::quantity::try_resolve_quantity_in_source_context;
 use engine::types::ability::{
-    AbilityKind, ContinuousModification, ControllerRef, Effect, EffectScope, PtValue, QuantityExpr,
-    ResolvedAbility, SubAbilityLink, TapStateChange, TargetChoiceTiming, TargetFilter, TargetRef,
-    TriggerDefinition, TypeFilter,
+    AbilityKind, ChoiceAssignmentSide, ContinuousModification, ControllerRef, Effect, EffectScope,
+    PtValue, QuantityExpr, ResolvedAbility, SubAbilityLink, TapStateChange, TargetChoiceTiming,
+    TargetFilter, TargetRef, TriggerDefinition, TypeFilter,
 };
 use engine::types::counter::CounterType;
 use engine::types::game_state::{CastingVariant, GameState, WaitingFor};
@@ -960,6 +960,11 @@ pub(crate) fn filter_domain(filter: &TargetFilter) -> FilterDomain {
 
         // A tracked set narrowed by an inner filter — the narrowing decides.
         TargetFilter::TrackedSetFiltered { filter, .. } => filter_domain(filter),
+
+        TargetFilter::ChoiceAssignment { side } => match side {
+            ChoiceAssignmentSide::Objects => FilterDomain::SOME_OBJECT,
+            ChoiceAssignmentSide::PlayerForObject => FilterDomain::SOME_PLAYER,
+        },
 
         TargetFilter::Typed(typed) => {
             // Repo invariant (not a CR rule): `type_filters` is a CONJUNCTION,

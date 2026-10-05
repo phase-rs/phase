@@ -1461,6 +1461,7 @@ fn scope_of(target: &TargetFilter, chain_root: Option<WriteScope>) -> WriteScope
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TriggeringSpellController
@@ -2445,6 +2446,7 @@ fn legacy_target_filter(f: &TargetFilter) -> bool {
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::SourceChosenPlayer
@@ -2634,6 +2636,9 @@ fn member_bound_target_filter(f: &TargetFilter) -> bool {
         // and `writes_event_object` carriers).
         TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
+        // CR 603.10a + CR 608.2c: fail-closed — a per-ability record keyed to population
+        // members; a missed TRUE is the CR 603.3b under-prompt.
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::ChosenCard
@@ -7178,6 +7183,7 @@ fn rw_target_filter(x: &TargetFilter) -> RwProfile {
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::SourceChosenPlayer

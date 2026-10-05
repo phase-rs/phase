@@ -6643,7 +6643,9 @@ pub fn declare_attackers(
 /// per-object `goaded_by` designations and any active `StaticMode::Goaded`
 /// effects affecting it. This is the single authority for "who goaded this
 /// creature"; the AI candidate generator reuses it to build a legal forced
-/// attack assignment that avoids each goaded creature's goader.
+/// attack assignment that avoids each goaded creature's goader. A grafted
+/// `Goaded` static's goader is its `source_controller` anchor — the installing
+/// player — not the carrier's controller (CR 701.15b).
 ///
 /// Loop-invariant-gated: with no functioning `Goaded` static, only the
 /// directly-goaded `goaded_by` set applies, so combat loops that have already
@@ -6677,6 +6679,8 @@ pub(crate) fn goading_players_for_creature_gated(
 /// requirement. Three contributors, all producing the same requirement:
 ///  1. `obj.goaded_by` — the goad designation (CR 701.15a/b);
 ///  2. `StaticMode::Goaded` statics — a continuous designation (CR 701.15b);
+///     a grafted one names its `source_controller` anchor, the installing
+///     player, as the goader;
 ///  3. `StaticMode::MustAttackAwayFromSource` — the requirement WITHOUT any
 ///     designation (CR 701.15a: only a spell/ability that *goads* makes a
 ///     creature goaded; Kardur, Doomscourge / Maximum Carnage chapter I).
@@ -6751,6 +6755,12 @@ pub(crate) fn players_to_attack_away_from_gated(
 /// source-attribution collector (`must_attack_sources_gated`) consume — no
 /// parallel `battlefield_active_statics` re-scan. Direct `goaded_by`
 /// designations are NOT included: they carry no object source (CR 701.15b).
+///
+/// The goading player is the static's `source_controller` anchor when present
+/// (a grafted designation — `layers.rs`
+/// `active_effect_condition_controller`), else the static's source controller
+/// (a printed `Goaded` static on the goading permanent). The carrier element is
+/// unchanged: badge attribution still names the object holding the static.
 fn goad_static_hits_for_creature<'a>(
     state: &'a GameState,
     creature_id: ObjectId,
@@ -6762,8 +6772,14 @@ fn goad_static_hits_for_creature<'a>(
             }
             let affected = def.affected.as_ref()?;
             let ctx = FilterContext::from_source(state, source.id);
-            matches_target_filter(state, creature_id, affected, &ctx)
-                .then_some((source.controller, source.id))
+            // CR 701.15b + CR 109.5: a grafted designation carries its installing
+            // player as the anchor (layers.rs
+            // active_effect_condition_controller); a printed Goaded static
+            // carries none and goads for its source's current controller.
+            matches_target_filter(state, creature_id, affected, &ctx).then_some((
+                def.source_controller.unwrap_or(source.controller),
+                source.id,
+            ))
         },
     )
 }

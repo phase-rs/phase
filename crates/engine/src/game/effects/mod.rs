@@ -20,7 +20,7 @@ use crate::types::ability::{
     PlayerFilter, PlayerRelation, PlayerScope, PossessionAxis, PtValue, QuantityExpr, QuantityRef,
     ReciprocalZoneChoiceRole, RepeatContinuation, ResolvedAbility, RevealUntilDisposition,
     SacrificeCost, SacrificeRequirement, SharedQuality, SharedQualityRelation, SiblingCondition,
-    StaticDefinition, SubAbilityLink, TapStateChange, TargetChoiceTiming,
+    SpellContext, StaticDefinition, SubAbilityLink, TapStateChange, TargetChoiceTiming,
     TargetDamageSourceBinding, TargetFilter, TargetRef, ThisWayCause, TypedFilter,
     ZoneChoiceCandidateSource, ZoneChoiceChooser,
 };
@@ -31,10 +31,10 @@ use crate::types::game_state::{
     AutoMayChoice, CastOfferKind, ClauseMinimumSnapshot, DayNight, DiscardBatchCursor,
     ExileLinkKind, GameState, LKISnapshot, ManaAbilityResume, MayTriggerAutoChoiceKey,
     PendingContinuation, PendingCostMoveResume, PendingDiscardBatchCompletion,
-    PendingPlayerScopeLinkedExile, PendingPlayerScopeSacrificeChoice,
-    PendingPlayerScopeSacrificeCompletion, PendingPlayerScopeSacrificeFollowUp,
-    RepeatUntilStopWitness, ResolutionOptionalPaymentOption, ReturnResultOccurrenceId, WaitingFor,
-    ZoneChangeRecord, ZoneOpponentChooserPurpose,
+    PendingPlayerScopeSacrificeChoice, PendingPlayerScopeSacrificeCompletion,
+    PendingPlayerScopeSacrificeFollowUp, PendingPlayerScopeTail, PlayerScopeCreatedTokens,
+    PlayerScopeFloor, RepeatUntilStopWitness, ResolutionOptionalPaymentOption,
+    ReturnResultOccurrenceId, WaitingFor, ZoneChangeRecord, ZoneOpponentChooserPurpose,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef, TrackedSetId};
 use crate::types::mana::ManaCost;
@@ -1159,20 +1159,27 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
     // The continuation — the completed ChangeZone's chained downstream, or any
     // other parked chain — runs only once the inner iteration finished without
     // re-pausing on a further per-target replacement choice.
+    let mut drained_queue_end = false;
     if !waits_for_resolution_choice(&state.waiting_for)
         && state.active_ability_continuation().is_some()
     {
         let scoped_source = state
             .active_ability_continuation()
-            .and_then(|pending| pending.player_scope_linked_exile.as_ref())
+            .and_then(|pending| pending.player_scope_tail.as_ref())
             .map(|scope| scope.source_id);
         if let Some(source_id) = scoped_source {
             let additions = linked_exile_batch_from_events(state, source_id, events);
+            let ledger = state.last_created_token_ids.clone();
             if let Some(scope) = state
                 .active_ability_continuation_frame_mut()
-                .and_then(|frame| frame.pending.player_scope_linked_exile.as_mut())
+                .and_then(|frame| frame.pending.player_scope_tail.as_mut())
             {
-                extend_linked_exile_batch(&mut scope.batch, additions);
+                extend_linked_exile_batch(&mut scope.linked_exile_batch, additions);
+                // CR 608.2f: the answered seat's entry has just completed and
+                // published its tokens; they are part of this clause's result.
+                if let Some(acc) = scope.created_tokens.as_mut() {
+                    fold_player_scope_created_tokens(acc, &ledger);
+                }
             }
         }
         let discard_frame = state
@@ -1199,6 +1206,9 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
                     .set_direct_discard_result_for_immediate_node(result);
             }
         }
+        // Every frame this chain parks from here on lies at or above this
+        // depth; anything below it predates the drained frame.
+        let drained_floor = state.resolution_stack.capture_child_boundary();
         let cont = frame.pending;
         let PendingContinuation {
             chain,
@@ -1210,9 +1220,11 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
             trigger_firing,
             attachment_choice,
             attachment_remainder: _,
-            player_scope_linked_exile,
+            player_scope_tail,
+            player_scope_clause,
             player_scope_queue_end,
         } = cont;
+        drained_queue_end = player_scope_queue_end;
         debug_assert!(
             pending_return_result_producer.is_none(),
             "an instruction result must settle before its reader continuation drains"
@@ -1223,10 +1235,23 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
         );
         restore_continuation_trigger_firing(state, trigger_firing);
         state.resolving_continuation_attach_host = search_attach_host;
-        let previous_scope = std::mem::replace(
-            &mut state.resolving_player_scope_linked_exile,
-            player_scope_linked_exile,
-        );
+        // CR 608.2f + CR 608.2e: a frame holding a paused clause's work — the
+        // clause's own frame (its remaining seats, or its tail authority), or
+        // a pausing seat's remainder — finishes that work before anything
+        // parked before it: the clause's own later seats and next
+        // instruction, and an enclosing chain's later instructions. Its floor
+        // keeps a re-pausing instruction's remainder above them.
+        let clause_source =
+            player_scope_clause.or_else(|| player_scope_tail.as_ref().map(|scope| scope.source_id));
+        let previous_scope =
+            std::mem::replace(&mut state.resolving_player_scope_tail, player_scope_tail);
+        let enclosing_floor = state.resolving_player_scope_floor;
+        if let Some(source_id) = clause_source {
+            state.resolving_player_scope_floor = Some(PlayerScopeFloor {
+                depth: drained_floor,
+                source_id,
+            });
+        }
         let source_id = chain.source_id;
         let prior_occurrence = std::mem::replace(
             &mut state.active_return_result_occurrence,
@@ -1256,21 +1281,45 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
             } else {
                 let _ = resolve_ability_chain(state, &chain, events, 1);
             }
+            hand_back_player_choice_records(state, &chain);
         }
-        if let Some(scope) = state.resolving_player_scope_linked_exile.as_ref() {
-            mark_exile_choice_tracks_by_source(state, scope.source_id);
+        // The exile-choice tracking belongs only to a tail that consumes the
+        // linked-exile channel — the same predicate that installed it.
+        if let Some(source_id) = state
+            .resolving_player_scope_tail
+            .as_ref()
+            .filter(|scope| {
+                crate::game::exile_links::ability_contains_linked_exile_consumer(&scope.after_scope)
+            })
+            .map(|scope| scope.source_id)
+        {
+            mark_exile_choice_tracks_by_source(state, source_id);
         }
         if let Some(snapshot) = trigger_snapshot {
             super::triggers::restore_trigger_event_context(state, snapshot);
         }
-        let completed_scope = std::mem::take(&mut state.resolving_player_scope_linked_exile);
-        state.resolving_player_scope_linked_exile = previous_scope;
+        let completed_scope = std::mem::take(&mut state.resolving_player_scope_tail);
+        state.resolving_player_scope_tail = previous_scope;
+        state.resolving_player_scope_floor = enclosing_floor;
         state.resolving_continuation_attach_host = None;
+        // CR 608.2e: the clause is complete only when its chain raised no
+        // choice and parked nothing that is still pending. A continuation
+        // below the drained frame was parked before the clause began and
+        // resumes only after this clause's next instruction, so it never holds
+        // the tail back.
         if !waits_for_resolution_choice(&state.waiting_for)
-            && state.active_ability_continuation().is_none()
+            && state.resolution_stack.capture_child_boundary() <= drained_floor
         {
             if let Some(mut scope) = completed_scope {
-                bind_resolution_exile_batch_paths(&mut scope.after_scope, &scope.batch);
+                // CR 608.2e + CR 608.2c: every seat has drained — the next
+                // instruction's "the tokens" names the whole clause's union.
+                if let Some(acc) = scope.created_tokens.as_ref() {
+                    publish_player_scope_created_tokens(state, acc);
+                }
+                bind_resolution_exile_batch_paths(
+                    &mut scope.after_scope,
+                    &scope.linked_exile_batch,
+                );
                 let _ = resolve_ability_chain(state, &scope.after_scope, events, 1);
             }
         }
@@ -1326,6 +1375,38 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
     }
     clear_post_replacement_token_choice_seed_if_resolution_drained(state);
     clear_return_result_frames_if_idle(state);
+    // CR 608.2c: a player-scope queue end holds no instruction — draining it
+    // only completes its clause — so it does not stand in for the next
+    // continuation's resumption: that continuation resumes in this same pass,
+    // exactly as a later drain call would.
+    if drained_queue_end
+        && matches!(state.waiting_for, WaitingFor::Priority { .. })
+        && state.active_ability_continuation().is_some()
+    {
+        drain_pending_continuation(state, events);
+    }
+}
+
+/// CR 608.2c + CR 608.2d: a drained continuation's own player choice records
+/// (its reference set and its per-object assignment) belong to the same
+/// resolving ability's next active holder — its parked repeat template or its
+/// parked continuation — so a later "different"/ordinal choice of that ability
+/// (a following repeat iteration included) excludes them and a later reader
+/// of the assignment finds them. Active frame only: repeat consumers never
+/// search below a nested continuation. A re-paused chain's new top is its own
+/// child, which already inherited the records, so the union is idempotent
+/// there.
+fn hand_back_player_choice_records(state: &mut GameState, chain: &ResolvedAbility) {
+    if !chain.context.has_player_choice_records() {
+        return;
+    }
+    if let Some(mut holder) =
+        choose::player_choice_holder_mut(state, |holder| holder.shares_resolution_owner(chain))
+    {
+        holder
+            .ability_mut()
+            .absorb_player_choice_records(&chain.context);
+    }
 }
 
 pub(crate) fn clear_return_result_frames_if_idle(state: &mut GameState) {
@@ -2442,6 +2523,13 @@ fn drain_active_repeat_for(state: &mut GameState, events: &mut Vec<GameEvent>) {
             next_iteration,
             total_iterations,
         } = pending;
+        // CR 608.2c + CR 608.2d (E1′): a per-object player choice — members
+        // snapshotted and the repeated process the choice alone. The
+        // template's `repeat_for` is cleared, so the member snapshot (which
+        // other member-driven loops also carry) together with the
+        // `Choose(Player | Opponent)` head selects the shape.
+        let per_object = !tracked_members.is_empty()
+            && repeats_per_object_player_choice(&ability.effect, ability.sub_ability.as_deref());
         let initial_waiting_for = state.waiting_for.clone();
         let initial_continuation_present = state.active_ability_continuation().is_some();
         let mut iteration = next_iteration;
@@ -2455,7 +2543,13 @@ fn drain_active_repeat_for(state: &mut GameState, events: &mut Vec<GameEvent>) {
             let kind = iterated_counter_kinds.get(iteration).cloned();
             let iter_effective: &ResolvedAbility = if member.is_some() || kind.is_some() {
                 iter_ability = (*ability).clone();
-                if let Some(member) = member {
+                if per_object {
+                    // CR 608.2c: each repetition resolves the choice alone —
+                    // the following instruction belongs to the end of the
+                    // repetition, and the member keys the answer, not a
+                    // parent target.
+                    iter_ability.sub_ability = None;
+                } else if let Some(member) = member {
                     rebind_member_driven_parent_target(&mut iter_ability, member);
                 }
                 if let Some(kind) = kind {
@@ -2509,10 +2603,46 @@ fn drain_active_repeat_for(state: &mut GameState, events: &mut Vec<GameEvent>) {
                         stack_depth_before_iteration,
                     );
                 }
+                if per_object {
+                    // CR 608.2c: the last repetition's pause parks the
+                    // following instruction to run once, after its answer.
+                    if next == total_iterations {
+                        if let Some(sibling) = ability
+                            .sub_ability
+                            .as_deref()
+                            .filter(|sub| sub.sub_link == SubAbilityLink::SequentialSibling)
+                        {
+                            park_following_instruction_after_repetition(
+                                state,
+                                iter_effective,
+                                sibling,
+                            );
+                        }
+                    }
+                    if let Some(member) = member {
+                        bind_per_object_choice_member(state, &ability, member);
+                    }
+                    return;
+                }
                 paused = true;
                 break;
             }
             iteration += 1;
+        }
+        if per_object {
+            // CR 608.2c + CR 609.3: every remaining repetition resolved
+            // without a prompt (an impossible choice does nothing), so the
+            // following instruction runs once, now.
+            if let Some(sibling) = ability
+                .sub_ability
+                .as_deref()
+                .filter(|sub| sub.sub_link == SubAbilityLink::SequentialSibling)
+            {
+                let mut following = sibling.clone();
+                apply_parent_chain_context(&mut following, &ability, None, state);
+                let _ = resolve_ability_chain(state, &following, events, 1);
+            }
+            return;
         }
         if paused {
             // Loop paused mid-iteration; the next call to
@@ -2565,6 +2695,41 @@ fn active_frame_requires_ability_continuation_parent(state: &GameState) -> bool 
         || state.active_multi_draw_frame().is_some()
 }
 
+/// CR 608.2f + CR 608.2e: whether the stack-top continuation was parked before
+/// the player-scope clause work (a seat, a drained clause frame or seat
+/// remainder, or a decision) now resolving began — it lies below
+/// `resolving_player_scope_floor`, holding the clause's own later seats or an
+/// enclosing chain's later instructions. The scoped action is processed for
+/// each affected player individually, so a pausing seat's remaining
+/// instructions finish before the next seat and before the clause's next
+/// instruction; a continuation parked before them resumes only after all of
+/// them, and so must never absorb the seat's remainder.
+fn active_continuation_predates_player_scope_floor(state: &GameState) -> bool {
+    state.active_ability_continuation().is_some()
+        && state
+            .resolving_player_scope_floor
+            .is_some_and(|floor| state.resolution_stack.capture_child_boundary() <= floor.depth)
+}
+
+/// CR 608.2c + CR 608.2f + CR 608.2e: whether the stack-top continuation must
+/// not take in instructions stashed now, which are parked above it as a frame
+/// of their own instead. The shared guard of both splice authorities
+/// (`append_to_pending_continuation`,
+/// `prepend_to_pending_continuation_with_producer`), so it holds for every
+/// consumer that resumes paused work, whether or not that consumer installs a
+/// floor:
+/// - a player-scope queue end never resolves its chain, so instructions
+///   spliced into it would never be followed;
+/// - a continuation parked before the player-scope clause work now resolving
+///   began resumes only after that work
+///   (`active_continuation_predates_player_scope_floor`).
+fn active_continuation_refuses_stashed_work(state: &GameState) -> bool {
+    state
+        .active_ability_continuation()
+        .is_some_and(|active| active.player_scope_queue_end)
+        || active_continuation_predates_player_scope_floor(state)
+}
+
 pub(crate) fn append_to_pending_continuation(
     state: &mut GameState,
     tail: Option<Box<ResolvedAbility>>,
@@ -2572,6 +2737,17 @@ pub(crate) fn append_to_pending_continuation(
     let Some(tail) = tail else {
         return;
     };
+
+    // CR 608.2f + CR 608.2e: a continuation parked before the resolving
+    // player-scope work began holds that clause's later seats or an
+    // enclosing chain's later instructions, and a queue end resolves nothing.
+    // The work's remainder is parked above it as its own frame, never spliced
+    // onto its end — the twin of `prepend_to_pending_continuation_with_producer`'s
+    // guard.
+    if active_continuation_refuses_stashed_work(state) {
+        state.park_ability_continuation(PendingContinuation::new(tail, state));
+        return;
+    }
 
     if let Some(active_occurrence) = state
         .active_ability_continuation()
@@ -2706,7 +2882,9 @@ fn prepend_to_pending_continuation_with_producer(
         return;
     }
 
-    if state.active_ability_continuation().is_some() {
+    if state.active_ability_continuation().is_some()
+        && !active_continuation_refuses_stashed_work(state)
+    {
         let frame = state
             .take_active_ability_continuation()
             .expect("active continuation must remain the stack top while it is prepended")
@@ -2722,7 +2900,8 @@ fn prepend_to_pending_continuation_with_producer(
             trigger_firing,
             attachment_choice,
             attachment_remainder,
-            player_scope_linked_exile,
+            player_scope_tail,
+            player_scope_clause,
             player_scope_queue_end,
         } = existing;
         assert!(
@@ -2745,7 +2924,8 @@ fn prepend_to_pending_continuation_with_producer(
                 trigger_firing,
                 attachment_choice,
                 attachment_remainder,
-                player_scope_linked_exile,
+                player_scope_tail,
+                player_scope_clause,
                 player_scope_queue_end,
             },
             choose_zone_trigger_context: frame.choose_zone_trigger_context,
@@ -2765,6 +2945,131 @@ fn park_player_scope_queue_end(state: &mut GameState, placeholder: ResolvedAbili
     } else {
         state.park_ability_continuation(pending);
     }
+}
+
+/// CR 608.2f + CR 608.2e: park a paused player-scope clause's own frame — its
+/// remaining generated seats, or its queue-end placeholder — outside the
+/// complete child stack the pausing seat raised. The scoped action is
+/// processed for each affected player individually in APNAP order (CR 608.2f),
+/// so every instruction that seat parked (its child operation, then its own
+/// remaining in-seat instructions) resolves before the next seat; the next
+/// instruction begins only after this one has been processed for every player
+/// (CR 608.2e), so the frame carrying the clause's tail authority is the
+/// clause's last-draining frame whatever owns the stack top.
+/// Player-scope twin of `park_repeat_for_after_current_iteration`.
+fn park_player_scope_after_paused_seat(
+    state: &mut GameState,
+    pending: PendingContinuation,
+    seat_boundary: ChildStackDepth,
+) {
+    match state
+        .resolution_stack
+        .capture_child_boundary()
+        .cmp(&seat_boundary)
+    {
+        std::cmp::Ordering::Less => {
+            panic!("player-scope seat removed a parent frame before its clause could be re-parked")
+        }
+        std::cmp::Ordering::Equal => state.park_ability_continuation(pending),
+        std::cmp::Ordering::Greater => state
+            .insert_ability_continuation_parent_at_child_boundary(pending, seat_boundary)
+            .expect(
+                "player-scope clause must be parked below its paused seat's complete child stack",
+            ),
+    }
+}
+
+/// CR 608.2f: a generated player-scope leg processes each remaining seat
+/// individually, in APNAP order, after the previous seat's instructions, each
+/// seat's nodes stamped with that seat's `scoped_player` by the driver; the
+/// first node stamped with another seat begins the next seat's instruction.
+/// Detaches and returns that node (with everything after it), or `None` when
+/// the chain holds no other seat.
+fn split_off_next_player_scope_seat(ability: &mut ResolvedAbility) -> Option<Box<ResolvedAbility>> {
+    let seat = ability.scoped_player;
+    let mut cursor = ability;
+    loop {
+        if cursor
+            .sub_ability
+            .as_ref()
+            .is_some_and(|next| next.scoped_player != seat)
+        {
+            return cursor.sub_ability.take();
+        }
+        cursor = cursor.sub_ability.as_deref_mut()?;
+    }
+}
+
+/// The paused clause's frame an `OptionalEffect` prompt keeps beneath it.
+enum ClauseFrameBelowPrompt {
+    /// The clause's remaining seats; carries the live tail authority.
+    NextSeats(Box<ResolvedAbility>),
+    /// The clause's queue end after its last seat; carries the live tail
+    /// authority.
+    QueueEnd(ResolvedAbility),
+    /// A queue end that keeps the decision's work above a continuation parked
+    /// before the clause work that raised the prompt.
+    Barrier(ResolvedAbility),
+}
+
+/// The one install path for an `OptionalEffect` direct-choice frame.
+///
+/// CR 608.2e + CR 608.2f: when the frame's ability is a seat of a paused
+/// player-scope clause whose tail authority is live, the decision handler must
+/// resolve only this seat's instructions — the clause's remaining seats and
+/// its tail authority keep a frame that drains after the decision. When any
+/// other prompt raised by player-scope clause work sits directly above a
+/// continuation parked before that work began, a clause frame is kept between
+/// them: the handler answers the prompt after the work's floor is gone, and
+/// the decision's remaining instructions must still finish first.
+fn install_optional_effect_frame(
+    state: &mut GameState,
+    mut frame: OptionalEffectFrame,
+    waiting_for: WaitingFor,
+) -> Result<(), EffectError> {
+    let owns_live_seat = state
+        .resolving_player_scope_tail
+        .as_ref()
+        .is_some_and(|tail| tail.source_id == frame.ability.source_id)
+        && frame.ability.scoped_player.is_some();
+    let below = if owns_live_seat {
+        Some(match split_off_next_player_scope_seat(&mut frame.ability) {
+            Some(next_seats) => ClauseFrameBelowPrompt::NextSeats(next_seats),
+            None => ClauseFrameBelowPrompt::QueueEnd((*frame.ability).clone()),
+        })
+    } else if active_continuation_predates_player_scope_floor(state) {
+        Some(ClauseFrameBelowPrompt::Barrier((*frame.ability).clone()))
+    } else {
+        None
+    };
+    state
+        .install_direct_choice_frame(ResolutionFrame::OptionalEffect(frame), waiting_for)
+        .map_err(|error| EffectError::InvalidParam(error.to_string()))?;
+    match below {
+        // The direct-choice child is the only frame this node raised, so its
+        // immediate parent is the node's child boundary.
+        Some(ClauseFrameBelowPrompt::NextSeats(next_seats)) => {
+            let pending = PendingContinuation::new(next_seats, state);
+            state
+                .insert_ability_continuation_parent_of_active(pending)
+                .map_err(|error| EffectError::InvalidParam(error.to_string()))?;
+        }
+        // The clause's last seat: its queue end carries the live authority.
+        Some(ClauseFrameBelowPrompt::QueueEnd(placeholder)) => {
+            park_player_scope_queue_end(state, placeholder)
+        }
+        Some(ClauseFrameBelowPrompt::Barrier(placeholder)) => {
+            // The prompt's own clause frames (if any) were parked before it;
+            // this barrier is the last frame the decision's work drains
+            // through, so a live tail authority stays on it.
+            let pending = PendingContinuation::player_scope_queue_end(Box::new(placeholder), state);
+            state
+                .insert_ability_continuation_parent_of_active(pending)
+                .map_err(|error| EffectError::InvalidParam(error.to_string()))?;
+        }
+        None => {}
+    }
+    Ok(())
 }
 
 /// CR 118.12 + CR 608.2c: Complete the original rider of a paused
@@ -4002,6 +4307,16 @@ pub(crate) fn apply_parent_chain_context(
     // latch is node-local: a non-ChangeZone parent (a hand reveal, a target
     // declaration) carries none, so the wholesale hand-off must not erase it.
     let child_duration_events = std::mem::take(&mut child.context.duration_events);
+    // CR 608.2c + CR 608.2d: the NamedChoice answer handler records this
+    // ability's own player choices directly onto the parked continuation,
+    // which can run ahead of this hand-off (as with `chosen_players` below),
+    // so the child's own player choice records — its reference set and its
+    // per-object assignment — are unioned back, never erased.
+    let child_player_choice_records = SpellContext {
+        prior_player_choices: std::mem::take(&mut child.context.prior_player_choices),
+        object_player_assignment: std::mem::take(&mut child.context.object_player_assignment),
+        ..SpellContext::default()
+    };
     child.context = parent.context.clone();
     child.context.face_down_in_exile |= child_face_down_in_exile;
     for event in child_duration_events {
@@ -4009,6 +4324,9 @@ pub(crate) fn apply_parent_chain_context(
             child.context.duration_events.push(event);
         }
     }
+    child
+        .context
+        .union_player_choice_records(&child_player_choice_records);
     // CR 120.1 + CR 608.2b: The damage-subject binding names the object THIS
     // hand-off supplies (or fails to supply) to the immediate child's damage
     // clause. It is one-hop by construction — a grandchild's subject slot is a
@@ -4078,9 +4396,9 @@ pub(crate) fn apply_parent_chain_context(
         child.ability_index = parent.ability_index;
     }
     // CR 608.2c + CR 109.4: Carry the resolution-scoped chosen-players list
-    // down the chain so `ControllerRef::ChosenPlayer { index }` and later
-    // `Choose(Player)` instructions resolve against players chosen by earlier
-    // `Choose(Player)` instructions in the same resolution. Only propagate
+    // down the chain so `ControllerRef::ChosenPlayer { index }` resolves against
+    // players chosen by earlier `Choose(Player)` instructions in the same resolution
+    // (distinctness reads `SpellContext::prior_player_choices` instead). Only propagate
     // when the parent has accumulated choices and the child has not already
     // received a longer list (the `NamedChoice` answer handler appends to the
     // continuation chain directly, which can run ahead of this copy).
@@ -4402,6 +4720,34 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
 }
 
 pub(super) fn resolve_optional_effect_decision(
+    state: &mut GameState,
+    ability: ResolvedAbility,
+    choice: AutoMayChoice,
+    events: &mut Vec<GameEvent>,
+    depth: u32,
+) -> Result<(), EffectError> {
+    // CR 608.2f + CR 608.2e: a decision answered while a paused player-scope
+    // clause's frame is the stack-top continuation resumes that clause's work
+    // after the floor of the work that raised the prompt is gone. Everything
+    // already parked — the clause's own later seats, its queue end, an
+    // enclosing chain's later instructions — follows the decision's remaining
+    // instructions, so the decision runs on a floor of its own.
+    let enclosing_floor = state.resolving_player_scope_floor;
+    if enclosing_floor.is_none() {
+        state.resolving_player_scope_floor = state
+            .active_ability_continuation()
+            .and_then(|continuation| continuation.player_scope_clause)
+            .map(|source_id| PlayerScopeFloor {
+                depth: state.resolution_stack.capture_child_boundary(),
+                source_id,
+            });
+    }
+    let result = resolve_optional_effect_choice(state, ability, choice, events, depth);
+    state.resolving_player_scope_floor = enclosing_floor;
+    result
+}
+
+fn resolve_optional_effect_choice(
     state: &mut GameState,
     mut ability: ResolvedAbility,
     choice: AutoMayChoice,
@@ -5655,6 +6001,7 @@ fn referent_exists_without_gated_action(
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TriggeringSpellController
@@ -8489,6 +8836,11 @@ fn quantity_expr_references_tracked_set(qty: &QuantityExpr) -> bool {
             // reference is nested inside the PLAYER filter, not the quantity.
             // Not every `PlayerCount` qualifies, so it must be asked per filter.
             QuantityRef::PlayerCount { filter } => player_filter_references_tracked_set(filter),
+            // CR 608.2c: an object count whose population is the chain's tracked
+            // set ("for each of those creatures" over a reveal's kept
+            // permanents) reads that set exactly as `TrackedSetSize` does, so its
+            // producer must publish it.
+            QuantityRef::ObjectCount { filter } => filter_references_tracked_set(filter),
             _ => false,
         },
         QuantityExpr::Offset { inner, .. }
@@ -9637,6 +9989,16 @@ pub(crate) fn publish_tracked_set(state: &mut GameState, affected_ids: Vec<Objec
         state.tracked_object_sets.insert(set_id, members);
         state.chain_tracked_set_id = Some(set_id);
     }
+}
+
+/// The set the next [`publish_tracked_set`] call writes into: the active chain
+/// set, else the id its else-branch will allocate. Single authority for that
+/// rule (see the ordering argument above), so a caller can name the set an
+/// instruction is about to publish before it resolves.
+pub(crate) fn chain_publication_set_id(state: &GameState) -> TrackedSetId {
+    state
+        .chain_tracked_set_id
+        .unwrap_or(TrackedSetId(state.next_tracked_set_id))
 }
 
 /// CR 608.2c + CR 614.6: Publish the chain tracked set together with the
@@ -10916,6 +11278,50 @@ fn rebind_member_driven_parent_target(ability: &mut ResolvedAbility, member: Obj
     } else {
         rebind_first_object_target(&mut ability.targets, member);
     }
+}
+
+/// CR 608.2c + CR 608.2d: a per-object player choice — a choice of a player
+/// repeated once per member of a published population whose repeated
+/// process is the choice alone (its sub, if any, is the following
+/// instruction). Each answer belongs to that repetition's member.
+fn repeats_per_object_player_choice(effect: &Effect, sub: Option<&ResolvedAbility>) -> bool {
+    matches!(effect, Effect::Choose { choice_type, .. } if choice_type.chooses_player())
+        && sub.is_none_or(|sub| sub.sub_link == SubAbilityLink::SequentialSibling)
+}
+
+/// CR 608.2c + CR 608.2d: bind the member of a per-object repetition whose
+/// player prompt just paused onto the holder of that pending answer — the
+/// frame the answer site records into, selected through the same
+/// `choose::player_choice_holder_mut`. No owned holder (the final repetition
+/// with no following instruction) binds nothing.
+fn bind_per_object_choice_member(
+    state: &mut GameState,
+    iteration: &ResolvedAbility,
+    member: ObjectId,
+) {
+    if let Some(mut holder) =
+        choose::player_choice_holder_mut(state, |holder| holder.shares_resolution_owner(iteration))
+    {
+        holder.ability_mut().bind_pending_choice_member(member);
+    }
+}
+
+/// CR 608.2c: the instruction following a per-object repetition runs once,
+/// after the repetition's last choice, never inside a repetition. When that
+/// last choice pauses, park the following instruction (with the iteration's
+/// chain context, its player choice records included) to resume after the
+/// answer.
+fn park_following_instruction_after_repetition(
+    state: &mut GameState,
+    iteration: &ResolvedAbility,
+    sibling: &ResolvedAbility,
+) {
+    let mut following = sibling.clone();
+    if should_propagate_parent_targets(iteration, &following) {
+        following.targets = iteration.targets.clone();
+    }
+    apply_parent_chain_context(&mut following, iteration, None, state);
+    prepend_to_pending_continuation(state, following);
 }
 
 /// CR 122.1 + CR 608.2c: Rebind a counter-kind-driven `ChooseOneOf` to the
@@ -12975,6 +13381,60 @@ fn publish_player_scope_clause_results(
     linked_exile_batch_from_events(state, outer.source_id, scoped_events)
 }
 
+/// CR 608.2c + CR 608.2f: fold one seat's created-token publication into its
+/// clause's union. An id the clause found in the ledger (an earlier
+/// instruction's token, or a stale value left by a seat that created nothing)
+/// is never this clause's.
+fn fold_player_scope_created_tokens(acc: &mut PlayerScopeCreatedTokens, ledger: &[ObjectId]) {
+    for id in ledger {
+        if !acc.baseline.contains(id) && !acc.tokens.contains(id) {
+            acc.tokens.push(*id);
+        }
+    }
+}
+
+/// CR 608.2e + CR 608.2f + CR 608.2c: "each player creates …" is one
+/// instruction taken for every matched player, and the next instruction's "the
+/// tokens" names everything it created — so a completed clause publishes the
+/// union of its seats' tokens, not the last seat's. A clause that published
+/// nothing (empty union) leaves the ledger exactly as the last seat left it.
+/// Existence is re-checked with the predicate `token::record_last_created_token`
+/// applies, so the slot never names an object that no longer exists.
+fn publish_player_scope_created_tokens(state: &mut GameState, acc: &PlayerScopeCreatedTokens) {
+    if acc.tokens.is_empty() {
+        return;
+    }
+    let published: Vec<ObjectId> = acc
+        .tokens
+        .iter()
+        .copied()
+        .filter(|id| state.objects.contains_key(id))
+        .collect();
+    state.last_created_token_ids = published;
+}
+
+/// CR 608.2c: does any instruction of this detached tail read the created-token
+/// ledger (`LastCreated`)? Walks the chain's `sub_ability` / `else_ability`;
+/// per node: the effect's target slot and its condition.
+fn ability_chain_reads_last_created(ability: &ResolvedAbility) -> bool {
+    ability
+        .effect
+        .target_filter()
+        .is_some_and(filter_contains_last_created)
+        || ability
+            .condition
+            .as_ref()
+            .is_some_and(condition_depends_on_last_created)
+        || ability
+            .sub_ability
+            .as_deref()
+            .is_some_and(ability_chain_reads_last_created)
+        || ability
+            .else_ability
+            .as_deref()
+            .is_some_and(ability_chain_reads_last_created)
+}
+
 /// CR 400.7 + CR 608.2f: capture only current incarnations exiled by this
 /// completed slice of a multi-player instruction, preserving event order.
 pub(super) fn linked_exile_batch_from_events(
@@ -14278,10 +14738,20 @@ pub fn resolve_ability_chain(
     // ability can be resumed from serialized state, so discard any stale value
     // before it begins a new resolution; nested producers replace the context
     // after this node's effect completes.
+    // CR 608.2c: a new top-level resolution starts with no prior player
+    // choices, no per-object assignment and no pending member of its own.
+    // The records are cleared over this ability's OWN tree (every node, on an
+    // owned clone) — never another chain's — and over every node, not the
+    // root alone, because the hand-off in `apply_parent_chain_context` unions
+    // a child's own records back in.
     let root_context_owned;
-    let ability = if depth == 0 && ability.context.forwarded_result_context.is_some() {
+    let ability = if depth == 0
+        && (ability.context.forwarded_result_context.is_some()
+            || ability.has_player_choice_records_recursive())
+    {
         let mut owned = ability.clone();
         owned.context.forwarded_result_context = None;
+        owned.clear_player_choice_records_recursive();
         root_context_owned = owned;
         &root_context_owned
     } else {
@@ -14540,6 +15010,132 @@ fn bind_revealed_pile_placement(ability: &mut ResolvedAbility, revealed: &[Objec
     if let Some(else_ability) = ability.else_ability.as_deref_mut() {
         bind_revealed_pile_placement(else_ability, revealed);
     }
+}
+
+/// CR 608.2c + CR 110.1: the members of a reveal's published set that are
+/// permanents — "those creature cards" / "those permanents" after "Put those …
+/// cards onto the battlefield". The reveal publishes every card it revealed
+/// (CR 701.20a, "revealed this way"); the kept cards are exactly the members on
+/// the battlefield, since a permanent is a card on the battlefield.
+///
+/// Single constructor shared by the parser's admitted-producer lowering (with
+/// the `TrackedSetId(0)` sentinel) and the continuation binder
+/// [`bind_reveal_population`] (with the concrete id).
+pub(crate) fn reveal_population_on_battlefield(set: TrackedSetId) -> TargetFilter {
+    TargetFilter::TrackedSetFiltered {
+        id: set,
+        filter: Box::new(TargetFilter::Typed(TypedFilter::default().properties(
+            vec![FilterProp::InZone {
+                zone: Zone::Battlefield,
+            }],
+        ))),
+        caused_by: None,
+    }
+}
+
+/// The recognizer paired with [`reveal_population_on_battlefield`]: the set id
+/// iff `filter` is exactly that constructor's form for some id.
+pub(crate) fn is_reveal_population_on_battlefield(filter: &TargetFilter) -> Option<TrackedSetId> {
+    match filter {
+        TargetFilter::TrackedSetFiltered { id, .. }
+            if *filter == reveal_population_on_battlefield(*id) =>
+        {
+            Some(*id)
+        }
+        _ => None,
+    }
+}
+
+/// CR 608.2c: whether a `repeat_for` iterates a population an earlier
+/// instruction published — the chain's tracked set as a whole
+/// (`TrackedSetSize`), or an object count whose universe is that set ("for
+/// each of those permanents": [`reveal_population_on_battlefield`]).
+///
+/// Single authority for "this repetition iterates a published population",
+/// used by the repeat driver's per-object choice gate (E1′) and its full-chain
+/// exclusion, and by the parser's `clause_records_choice_assignment` mirror.
+pub(crate) fn repeat_iterates_published_population(repeat_for: &QuantityExpr) -> bool {
+    match repeat_for {
+        QuantityExpr::Ref {
+            qty: QuantityRef::TrackedSetSize,
+        } => true,
+        QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        } => matches!(
+            filter,
+            TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }
+        ),
+        _ => false,
+    }
+}
+
+/// CR 608.2c: bind every reveal-population reference in a reveal-until's
+/// continuation to the concrete set the reveal published. Called on the
+/// `RevealUntil` node itself; visits its `sub_ability` / `else_ability`
+/// descendants (the recursion of [`bind_revealed_pile_placement`]) and rewrites
+/// each `repeat_for: ObjectCount` filter and each `GenericEffect` static
+/// `affected` that is the sentinel population form
+/// ([`reveal_population_on_battlefield`]`(TrackedSetId(0))`). Nothing else is
+/// touched. Returns whether any node was rewritten.
+///
+/// Stops at a descendant `RevealUntil`: that later reveal's own dispatch binds
+/// its own continuation to the set it publishes. CR 608.2c — a "those
+/// creatures" written after a second reveal-until names that reveal's
+/// population (the parser's nearest-producer rule, `admitted_population_producer`),
+/// not the first one's. With no nested child resolving in between, the second
+/// reveal extends the first one's chain set, so its population is that union
+/// (the pre-existing chain-unification residual).
+fn bind_reveal_population(ability: &mut ResolvedAbility, set: TrackedSetId) -> bool {
+    fn bind_node(node: &mut ResolvedAbility, set: TrackedSetId) -> bool {
+        let bind_filter = |filter: &mut TargetFilter| {
+            if is_reveal_population_on_battlefield(filter) == Some(TrackedSetId(0)) {
+                *filter = reveal_population_on_battlefield(set);
+                true
+            } else {
+                false
+            }
+        };
+        let mut rewrote = false;
+        if let Some(QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        }) = node.repeat_for.as_mut()
+        {
+            rewrote |= bind_filter(filter);
+        }
+        if let Effect::GenericEffect {
+            static_abilities, ..
+        } = &mut node.effect
+        {
+            for affected in static_abilities
+                .iter_mut()
+                .filter_map(|grant| grant.affected.as_mut())
+            {
+                rewrote |= bind_filter(affected);
+            }
+        }
+        rewrote
+    }
+    fn visit(node: &mut ResolvedAbility, set: TrackedSetId) -> bool {
+        if matches!(node.effect, Effect::RevealUntil { .. }) {
+            return false;
+        }
+        let mut rewrote = bind_node(node, set);
+        if let Some(sub) = node.sub_ability.as_deref_mut() {
+            rewrote |= visit(sub, set);
+        }
+        if let Some(else_ability) = node.else_ability.as_deref_mut() {
+            rewrote |= visit(else_ability, set);
+        }
+        rewrote
+    }
+    let mut rewrote = false;
+    if let Some(sub) = ability.sub_ability.as_deref_mut() {
+        rewrote |= visit(sub, set);
+    }
+    if let Some(else_ability) = ability.else_ability.as_deref_mut() {
+        rewrote |= visit(else_ability, set);
+    }
+    rewrote
 }
 
 /// The per-resolution state `resolve_ability_chain` clears before a top-level
@@ -15280,7 +15876,23 @@ fn resolve_chain_body(
         }
 
         let initial_waiting_for = state.waiting_for.clone();
-        let mut paused = false;
+        // The pausing seat's child boundary, once a seat pauses the clause.
+        let mut paused_at: Option<ChildStackDepth> = None;
+        let mut pending_legs: Option<Box<ResolvedAbility>> = None;
+        // CR 608.2c + CR 608.2f: the clause's created-token union. The ledger
+        // as the clause found it is an earlier instruction's result, never
+        // this clause's.
+        let mut clause_tokens = PlayerScopeCreatedTokens {
+            baseline: state.last_created_token_ids.clone(),
+            tokens: Vec::new(),
+        };
+        // A tail that reads the ledger must be detached on a pause so it runs
+        // once over the union, exactly like a linked-exile consumer.
+        let after_scope_reads_created_tokens = after_scope
+            .as_deref()
+            .is_some_and(ability_chain_reads_last_created);
+        let after_scope_detaches =
+            after_scope_needs_linked_exile || after_scope_reads_created_tokens;
         // CR 608.2c: the zero-fill's reduction domain is the set of players the
         // clause has actually applied to. A mid-fan-out pause leaves the tail
         // unresolved, so filling them as zero would publish a contribution they
@@ -15345,7 +15957,24 @@ fn resolve_chain_body(
             // keeping "you" references stable (CR 109.5).
             scoped.set_controller_recursive(*pid);
             scoped.set_scoped_player_recursive(*pid);
-            resolve_ability_chain(state, &scoped, events, depth + 1)?;
+            let seat_boundary = state.resolution_stack.capture_child_boundary();
+            // CR 608.2f: a continuation already parked when this seat begins
+            // holds an enclosing chain's later instructions; the seat's own
+            // remainder is parked above it, inside this seat's boundary, never
+            // spliced into it.
+            let enclosing_floor = state
+                .resolving_player_scope_floor
+                .replace(PlayerScopeFloor {
+                    depth: seat_boundary,
+                    source_id: ability.source_id,
+                });
+            let seat_result = resolve_ability_chain(state, &scoped, events, depth + 1);
+            state.resolving_player_scope_floor = enclosing_floor;
+            seat_result?;
+            // CR 608.2f: this seat's publication joins the clause's union —
+            // possibly partial if it paused mid-entry; the drain-start fold
+            // completes it once the answered seat finishes.
+            fold_player_scope_created_tokens(&mut clause_tokens, &state.last_created_token_ids);
 
             // CR 608.2e: Break if inner effect entered a player-choice state —
             // remaining players resume after the choice resolves via continuation.
@@ -15405,7 +16034,7 @@ fn resolve_chain_body(
                 // The unscoped tail is owned explicitly by the continuation
                 // sidecar below. Only generated per-seat nodes are linearized
                 // here, so no ordinary scoped sibling can impersonate them.
-                let mut tail = if after_scope_needs_linked_exile {
+                let mut tail = if after_scope_detaches {
                     None
                 } else {
                     after_scope.clone()
@@ -15443,14 +16072,13 @@ fn resolve_chain_body(
                 // frozen extremum. The next `player_scope` link's
                 // `capture_clause_minimum_snapshot` overwrites it; `apply()`
                 // disposes of any residue once resolution ends.
-                if tail.is_some() {
-                    append_to_pending_continuation(state, tail);
-                }
+                // Placed after the clause postlude, at this seat's boundary.
+                pending_legs = tail;
                 // `i`, not `i + 1`: player `i` is the one who just paused, so
                 // they have NOT completed the clause and must not be filled as
                 // a zero contributor.
                 applied_domain_end = i;
-                paused = true;
+                paused_at = Some(seat_boundary);
                 break;
             }
         }
@@ -15462,30 +16090,57 @@ fn resolve_chain_body(
             after_scope_needs_linked_exile,
             &events[scoped_events_before..],
         );
-        if !paused {
-            // CR 608.2e: this `player_scope` clause has completed. Clear its
-            // frozen values before running any following instruction; if the
-            // tail is another `player_scope` clause, that recursive entry will
-            // capture its own fresh snapshot against the post-this-clause board.
-            state.clause_minimum_snapshot = None;
-            if let Some(mut after_scope) = after_scope {
-                bind_resolution_exile_batch_paths(&mut after_scope, &linked_batch);
-                resolve_ability_chain(state, &after_scope, events, depth + 1)?;
-            }
-        } else if after_scope_needs_linked_exile {
-            if let Some(after_scope) = after_scope {
-                if state.active_ability_continuation().is_none() {
-                    park_player_scope_queue_end(state, after_scope.as_ref().clone());
+        match paused_at {
+            None => {
+                // CR 608.2e: this `player_scope` clause has completed. Clear its
+                // frozen values before running any following instruction; if the
+                // tail is another `player_scope` clause, that recursive entry will
+                // capture its own fresh snapshot against the post-this-clause board.
+                state.clause_minimum_snapshot = None;
+                publish_player_scope_created_tokens(state, &clause_tokens);
+                if let Some(mut after_scope) = after_scope {
+                    bind_resolution_exile_batch_paths(&mut after_scope, &linked_batch);
+                    resolve_ability_chain(state, &after_scope, events, depth + 1)?;
                 }
-                if let Some(frame) = state.active_ability_continuation_frame_mut() {
-                    // CR 608.2f: generated APNAP nodes and their exact union are
-                    // explicit pause authority. The detached tail resolves once only
-                    // after every generated seat has drained.
-                    frame.pending.player_scope_linked_exile = Some(PendingPlayerScopeLinkedExile {
+            }
+            Some(seat_boundary) => {
+                // CR 608.2f: generated APNAP nodes and the clause's exact
+                // union(s) are explicit pause authority, built BEFORE the
+                // clause's frame is placed and attached at construction, so it
+                // rides the clause's last-draining frame whatever the paused
+                // seat left on top. The detached tail resolves once, only after
+                // every generated seat has drained.
+                let scope_tail = after_scope
+                    .filter(|_| after_scope_detaches)
+                    .map(|after_scope| PendingPlayerScopeTail {
                         source_id: ability.source_id,
                         after_scope,
-                        batch: linked_batch,
+                        linked_exile_batch: linked_batch,
+                        created_tokens: after_scope_reads_created_tokens.then_some(clause_tokens),
                     });
+                let clause_frame = match (pending_legs, scope_tail) {
+                    (Some(legs), scope_tail) => {
+                        let mut pending = PendingContinuation::new(legs, state);
+                        if scope_tail.is_some() {
+                            pending.player_scope_tail = scope_tail;
+                        }
+                        Some(pending)
+                    }
+                    (None, Some(scope_tail)) => {
+                        let mut pending = PendingContinuation::player_scope_queue_end(
+                            scope_tail.after_scope.clone(),
+                            state,
+                        );
+                        pending.player_scope_tail = Some(scope_tail);
+                        Some(pending)
+                    }
+                    (None, None) => None,
+                };
+                if let Some(mut pending) = clause_frame {
+                    // CR 608.2f: the clause's own frame holds its work, so its
+                    // drain re-installs the clause's floor.
+                    pending.player_scope_clause = Some(ability.source_id);
+                    park_player_scope_after_paused_seat(state, pending, seat_boundary);
                 }
             }
         }
@@ -15830,24 +16485,21 @@ fn resolve_chain_body(
                 let hydrated_ability = ability_with_event_context_targets(state, ability);
                 let decision_subject_id =
                     resolved_optional_decision_subject_id(state, &hydrated_ability);
-                state
-                    .install_direct_choice_frame(
-                        ResolutionFrame::OptionalEffect(OptionalEffectFrame {
-                            ability: Box::new(hydrated_ability),
-                            trigger_event: state.current_trigger_event.clone(),
-                            trigger_events: state.current_trigger_events.clone(),
-                            trigger_match_count: state.current_trigger_match_count,
-                            return_result_occurrence: state.active_return_result_occurrence,
-                        }),
-                        WaitingFor::OpponentMayChoice {
-                            player: first,
-                            decision_subject_id,
-                            source_id: ability.source_id,
-                            description,
-                            remaining,
-                        },
-                    )
-                    .map_err(|error| EffectError::InvalidParam(error.to_string()))?;
+                let frame = OptionalEffectFrame {
+                    ability: Box::new(hydrated_ability),
+                    trigger_event: state.current_trigger_event.clone(),
+                    trigger_events: state.current_trigger_events.clone(),
+                    trigger_match_count: state.current_trigger_match_count,
+                    return_result_occurrence: state.active_return_result_occurrence,
+                };
+                let waiting_for = WaitingFor::OpponentMayChoice {
+                    player: first,
+                    decision_subject_id,
+                    source_id: ability.source_id,
+                    description,
+                    remaining,
+                };
+                install_optional_effect_frame(state, frame, waiting_for)?;
             }
             return Ok(());
         }
@@ -15921,22 +16573,19 @@ fn resolve_chain_body(
                 )?;
                 return Ok(());
             }
-            state
-                .install_direct_choice_frame(
-                    ResolutionFrame::OptionalEffect(OptionalEffectFrame {
-                        ability: Box::new(ability_with_event_context_targets(state, ability)),
-                        trigger_event: state.current_trigger_event.clone(),
-                        trigger_events: state.current_trigger_events.clone(),
-                        trigger_match_count: state.current_trigger_match_count,
-                        return_result_occurrence: state.active_return_result_occurrence,
-                    }),
-                    WaitingFor::ResolutionOptionalPaymentChoice {
-                        player: payer,
-                        source_id: ability.source_id,
-                        costs,
-                    },
-                )
-                .map_err(|error| EffectError::InvalidParam(error.to_string()))?;
+            let frame = OptionalEffectFrame {
+                ability: Box::new(ability_with_event_context_targets(state, ability)),
+                trigger_event: state.current_trigger_event.clone(),
+                trigger_events: state.current_trigger_events.clone(),
+                trigger_match_count: state.current_trigger_match_count,
+                return_result_occurrence: state.active_return_result_occurrence,
+            };
+            let waiting_for = WaitingFor::ResolutionOptionalPaymentChoice {
+                player: payer,
+                source_id: ability.source_id,
+                costs,
+            };
+            install_optional_effect_frame(state, frame, waiting_for)?;
             return Ok(());
         }
 
@@ -15964,37 +16613,34 @@ fn resolve_chain_body(
         }
         let hydrated_ability = ability_with_event_context_targets(state, ability);
         let decision_subject_id = resolved_optional_decision_subject_id(state, &hydrated_ability);
-        state
-            .install_direct_choice_frame(
-                ResolutionFrame::OptionalEffect(OptionalEffectFrame {
-                    ability: Box::new(hydrated_ability),
-                    // CR 608.2: capture the triggering event in lockstep with the stashed
-                    // ability while `current_trigger_event` is still live (we are inside
-                    // `execute_effect`). Restored when the optional decision resumes so an
-                    // optional ("may") trigger's effect resolves `TriggeringPlayer` and
-                    // other event-context refs exactly as a non-optional trigger would.
-                    trigger_event: state.current_trigger_event.clone(),
-                    // CR 603.2c + CR 608.2: capture the PLURAL event batch in lockstep so a
-                    // "you may" reproduction (Captain Marvel, Apex Avenger) folds every
-                    // `CounterAdded` occurrence when the decision resumes.
-                    trigger_events: state.current_trigger_events.clone(),
-                    // CR 603.2c + CR 608.2: mirror the batched-trigger subject count so a
-                    // "you may" sub-ability of a batched trigger (Ur-Dragon's optional
-                    // permanent-from-hand sub-effect) resumes with the same
-                    // `EventContextAmount` the pre-pause resolution observed.
-                    trigger_match_count: state.current_trigger_match_count,
-                    return_result_occurrence: state.active_return_result_occurrence,
-                }),
-                WaitingFor::OptionalEffectChoice {
-                    player: prompt_player,
-                    decision_subject_id,
-                    source_id: ability.source_id,
-                    description,
-                    may_trigger_key,
-                    same_card_may_trigger_choice_available,
-                },
-            )
-            .map_err(|error| EffectError::InvalidParam(error.to_string()))?;
+        let frame = OptionalEffectFrame {
+            ability: Box::new(hydrated_ability),
+            // CR 608.2: capture the triggering event in lockstep with the stashed
+            // ability while `current_trigger_event` is still live (we are inside
+            // `execute_effect`). Restored when the optional decision resumes so an
+            // optional ("may") trigger's effect resolves `TriggeringPlayer` and
+            // other event-context refs exactly as a non-optional trigger would.
+            trigger_event: state.current_trigger_event.clone(),
+            // CR 603.2c + CR 608.2: capture the PLURAL event batch in lockstep so a
+            // "you may" reproduction (Captain Marvel, Apex Avenger) folds every
+            // `CounterAdded` occurrence when the decision resumes.
+            trigger_events: state.current_trigger_events.clone(),
+            // CR 603.2c + CR 608.2: mirror the batched-trigger subject count so a
+            // "you may" sub-ability of a batched trigger (Ur-Dragon's optional
+            // permanent-from-hand sub-effect) resumes with the same
+            // `EventContextAmount` the pre-pause resolution observed.
+            trigger_match_count: state.current_trigger_match_count,
+            return_result_occurrence: state.active_return_result_occurrence,
+        };
+        let waiting_for = WaitingFor::OptionalEffectChoice {
+            player: prompt_player,
+            decision_subject_id,
+            source_id: ability.source_id,
+            description,
+            may_trigger_key,
+            same_card_may_trigger_choice_available,
+        };
+        install_optional_effect_frame(state, frame, waiting_for)?;
         return Ok(());
     }
 
@@ -16268,6 +16914,11 @@ fn resolve_chain_body(
 
     // CR 603.7: Snapshot event count so we can detect objects moved by this effect.
     let events_before = events.len();
+    // CR 608.2c: the set a reveal-until is about to publish its revealed cards
+    // into, named before it resolves (see the `reveal_population_owned` binding
+    // below).
+    let reveal_population_set = matches!(ability.effect, Effect::RevealUntil { .. })
+        .then(|| chain_publication_set_id(state));
     let mut immediate_effect_result = None;
     // CR 610.3b + CR 118.12: per-call verdicts for this node's bounded zone
     // move. Each `resolve_effect` call (one per repeat iteration) is judged on
@@ -16323,17 +16974,33 @@ fn resolve_chain_body(
             // including the empty case (0 members ⇒ 0 iterations). The
             // `TrackedSetSize` path keeps the existing quantity-driven count.
             let mut member_driven = false;
+            // CR 608.2c + CR 608.2d (E1′): a per-object player choice over a
+            // published population ("For each of those permanents, choose a
+            // different opponent") snapshots the same members, so each
+            // repetition's answer is recorded for its own member. Both
+            // population forms qualify: the whole tracked set
+            // (`TrackedSetSize`, whose members come from the chain set below)
+            // and an object count over it (the reveal's kept permanents, whose
+            // members come from the `ObjectCount` snapshot).
+            let per_object = ability
+                .repeat_for
+                .as_ref()
+                .is_some_and(repeat_iterates_published_population)
+                && repeats_per_object_player_choice(
+                    &effective.effect,
+                    effective.sub_ability.as_deref(),
+                );
             let iter_tracked_members: Vec<crate::types::identifiers::ObjectId> =
                 match &ability.repeat_for {
                     Some(QuantityExpr::Ref {
                         qty: QuantityRef::TrackedSetSize,
-                    }) if effect_refs_parent_target(&effective.effect) => state
+                    }) if effect_refs_parent_target(&effective.effect) || per_object => state
                         .chain_tracked_set_id
                         .and_then(|id| state.tracked_object_sets.get(&id).cloned())
                         .unwrap_or_default(),
                     Some(QuantityExpr::Ref {
                         qty: QuantityRef::ObjectCount { filter },
-                    }) if effect_iterates_over_parent_target(&effective.effect) => {
+                    }) if effect_iterates_over_parent_target(&effective.effect) || per_object => {
                         member_driven = true;
                         // Same resolver as `QuantityRef::ObjectCount`'s count, on
                         // the same `effective` ability, so members and count match
@@ -16452,9 +17119,22 @@ fn resolve_chain_body(
             // printed as its own sentence ("…investigate X times. Return the
             // exiled cards…" — Disorder in the Court) and runs exactly once AFTER
             // the loop — it falls through to the generic sub tail below.
+            // CR 608.2c: an iteration over a PUBLISHED population ("For each of
+            // those creatures, put a +1/+1 counter on that creature. You gain 1
+            // life.") is the same instruction boundary: its body names the
+            // member within its own sentence, and a following sentence is a
+            // separate instruction. The member-driven full-chain heuristic is for
+            // battlefield-query loops (Caves of Chaos Adventurer), so a published
+            // population keeps the plain repeat's link-driven semantics.
+            let iterates_published_population = ability
+                .repeat_for
+                .as_ref()
+                .is_some_and(repeat_iterates_published_population);
             let repeated_full_chain = ability.repeat_for.is_some()
                 && (effective.sub_ability.as_deref().is_some_and(|sub| {
-                    member_driven || kind_driven || sub.sub_link == SubAbilityLink::ContinuationStep
+                    (member_driven && !iterates_published_population)
+                        || kind_driven
+                        || sub.sub_link == SubAbilityLink::ContinuationStep
                 })
                     // CR 118.12a: a per-member/per-kind unless payment must run
                     // through resolve_ability_chain so its individual bound
@@ -16477,7 +17157,9 @@ fn resolve_chain_body(
                 let iter_effective: &ResolvedAbility =
                     if member.is_some() || is_replacement_added_copy || kind_driven {
                         iter_ability = effective.clone();
-                        if let Some(member) = member {
+                        // A per-object choice names no parent target: its
+                        // member keys the answer, not a target.
+                        if let Some(member) = member.filter(|_| !per_object) {
                             rebind_member_driven_parent_target(&mut iter_ability, member);
                         }
                         // CR 122.1 + CR 608.2c: rebind this iteration's dynamic
@@ -16638,6 +17320,30 @@ fn resolve_chain_body(
                             stack_depth_before_iteration,
                         );
                     }
+                    if per_object {
+                        // CR 608.2c: the following instruction is owned by the
+                        // repetition's final iteration — parked by the resumed
+                        // loop, or here when this paused repetition is the last
+                        // — and never falls through to the generic sub tail,
+                        // which would run it inside a repetition.
+                        if next_iteration == iterations {
+                            if let Some(sibling) = iter_effective
+                                .sub_ability
+                                .as_deref()
+                                .filter(|sub| sub.sub_link == SubAbilityLink::SequentialSibling)
+                            {
+                                park_following_instruction_after_repetition(
+                                    state,
+                                    iter_effective,
+                                    sibling,
+                                );
+                            }
+                        }
+                        if let Some(member) = member {
+                            bind_per_object_choice_member(state, iter_effective, member);
+                        }
+                        return Ok(());
+                    }
                     break;
                 }
                 iteration += 1;
@@ -16743,8 +17449,13 @@ fn resolve_chain_body(
         .collect();
     let linked_batch =
         linked_exile_batch_from_events(state, ability.source_id, &events[events_before..]);
-    if let Some(scope) = state.resolving_player_scope_linked_exile.as_mut() {
-        extend_linked_exile_batch(&mut scope.batch, linked_batch.iter().copied());
+    if let Some(scope) = state.resolving_player_scope_tail.as_mut() {
+        extend_linked_exile_batch(&mut scope.linked_exile_batch, linked_batch.iter().copied());
+        // CR 608.2f: a generated seat node of a paused clause has finished;
+        // its published tokens join the clause's union.
+        if let Some(acc) = scope.created_tokens.as_mut() {
+            fold_player_scope_created_tokens(acc, &state.last_created_token_ids);
+        }
     }
     let linked_batch_owned;
     let ability = if linked_batch.is_empty() || ability.sub_ability.is_none() {
@@ -17119,6 +17830,39 @@ fn resolve_chain_body(
         ability
     };
 
+    // CR 608.2c + CR 614.12a + CR 614.1c: the outer instruction's later
+    // anaphors over a reveal's kept permanents ("They're goaded", "For each of
+    // those permanents") name the population THIS reveal published. An
+    // as-enters replacement's own chain, resolved during the kept delivery,
+    // starts its own top-level scope (`reset_top_level_resolution_state` clears
+    // the chain set) and must not redirect them, so bind them to the concrete set
+    // now, on the continuation itself — the same idiom as the pile binding above.
+    let reveal_population_owned;
+    let ability = match reveal_population_set {
+        Some(set) if ability.sub_ability.is_some() => {
+            let mut owned = ability.clone();
+            let rewrote = bind_reveal_population(&mut owned, set);
+            debug_assert!(
+                !rewrote
+                    || events[events_before..]
+                        .iter()
+                        .find_map(|event| match event {
+                            GameEvent::CardsRevealed { card_ids, .. } => Some(card_ids),
+                            _ => None,
+                        })
+                        .is_some_and(|revealed| {
+                            state.tracked_object_sets.get(&set).is_some_and(|members| {
+                                revealed.iter().all(|id| members.contains(id))
+                            })
+                        }),
+                "CR 608.2c: the bound set {set:?} must hold every card the reveal revealed",
+            );
+            reveal_population_owned = owned;
+            &reveal_population_owned
+        }
+        _ => ability,
+    };
+
     // CR 608.2c + CR 613.1: A chained sub-ability is the next instruction in the
     // same resolution (instructions are followed "in the order written"), so it
     // resolves AFTER the parent's effect and must read the object's CURRENT
@@ -17151,10 +17895,15 @@ fn resolve_chain_body(
         crate::game::sba::apply_enduring_story_if_triggered(state, events);
     }
 
+    // CR 608.2f: a terminal node of a paused clause's seat keeps the clause's
+    // tail authority on a frame of its own unless a continuation parked during
+    // this clause frame's drain already carries it; one parked before the
+    // drained frame does not.
     if ability.sub_ability.is_none()
         && waits_for_resolution_choice(&state.waiting_for)
-        && state.resolving_player_scope_linked_exile.is_some()
-        && state.active_ability_continuation().is_none()
+        && state.resolving_player_scope_tail.is_some()
+        && (state.active_ability_continuation().is_none()
+            || active_continuation_predates_player_scope_floor(state))
     {
         park_player_scope_queue_end(state, ability.clone());
         return Ok(());
@@ -20651,6 +21400,314 @@ mod tests {
                     TargetFilter::SpecificObject { id: ObjectId(8) },
                 ]
             }
+        );
+    }
+
+    /// A `RevealUntil` keeping its creature hits onto the battlefield.
+    fn reveal_until_onto_battlefield() -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::RevealUntil {
+                player: TargetFilter::Controller,
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+                count: QuantityExpr::Fixed { value: 2 },
+                matched_disposition: RevealUntilDisposition::KeepEach,
+                kept_destination: Zone::Battlefield,
+                rest_destination: Zone::Library,
+                rest_order: crate::types::ability::DigRestOrder::Preserve,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                kept_optional_to: None,
+                enters_under: None,
+                kept_destination_if: None,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        )
+    }
+
+    /// "For each of those creatures, put a +1/+1 counter on that creature." over
+    /// the population form of `set`.
+    fn population_for_each(set: TrackedSetId) -> ResolvedAbility {
+        let mut node = ResolvedAbility::new(
+            Effect::PutCounter {
+                counter_type: crate::types::counter::CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::ParentTarget,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        node.repeat_for = Some(QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: reveal_population_on_battlefield(set),
+            },
+        });
+        node
+    }
+
+    /// "They gain haste until end of turn." over `affected`.
+    fn grant_over(affected: TargetFilter) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![StaticDefinition::continuous()
+                    .affected(affected)
+                    .modifications(vec![ContinuousModification::AddKeyword {
+                        keyword: crate::types::keywords::Keyword::Haste,
+                    }])],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: None,
+                end_cost: None,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        )
+    }
+
+    fn shuffle_node() -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::Shuffle {
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        )
+    }
+
+    /// V4.10: CR 608.2c — the single authority for "this repetition iterates a
+    /// published population" accepts both population forms and nothing else; an
+    /// object count over a typed battlefield query (Scrambleverse / Ashuza's
+    /// Breath / Lydari Druid class) and a filtered set size are not iterations
+    /// over a published population.
+    #[test]
+    fn repeat_iterates_published_population_truth_table() {
+        let object_count = |filter| QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        };
+        assert!(repeat_iterates_published_population(&QuantityExpr::Ref {
+            qty: QuantityRef::TrackedSetSize,
+        }));
+        assert!(repeat_iterates_published_population(&object_count(
+            TargetFilter::TrackedSet {
+                id: TrackedSetId(0)
+            }
+        )));
+        assert!(repeat_iterates_published_population(&object_count(
+            reveal_population_on_battlefield(TrackedSetId(0))
+        )));
+        assert!(!repeat_iterates_published_population(&object_count(
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))
+        )));
+        assert!(!repeat_iterates_published_population(&QuantityExpr::Ref {
+            qty: QuantityRef::FilteredTrackedSetSize {
+                filter: Box::new(TargetFilter::Typed(TypedFilter::creature())),
+                caused_by: None,
+            },
+        }));
+        assert!(!repeat_iterates_published_population(
+            &QuantityExpr::Fixed { value: 2 }
+        ));
+    }
+
+    /// V4.10 (S2d): CR 608.2c — an object count over the reveal's kept
+    /// permanents reads the chain's tracked set, so it is a tracked-set consumer
+    /// (its producer must publish), exactly as `TrackedSetSize` is. Paired
+    /// negative: an object count over a battlefield query reads no tracked set.
+    #[test]
+    fn object_count_over_the_reveal_population_references_tracked_set() {
+        assert!(quantity_expr_references_tracked_set(&QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: reveal_population_on_battlefield(TrackedSetId(0)),
+            },
+        }));
+        assert!(!quantity_expr_references_tracked_set(&QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            },
+        }));
+    }
+
+    /// V4.13: CR 608.2c — the reveal-population binder rewrites only the
+    /// sentinel population form (repeat count and grant `affected`) in the
+    /// reveal's continuation, leaves every other filter untouched (including a
+    /// different narrowing over the same sentinel), and reports whether it
+    /// rewrote anything.
+    #[test]
+    fn bind_reveal_population_rewrites_only_the_population_form() {
+        let nonland = TargetFilter::TrackedSetFiltered {
+            id: TrackedSetId(0),
+            filter: Box::new(TargetFilter::Typed(TypedFilter::new(TypeFilter::Non(
+                Box::new(TypeFilter::Land),
+            )))),
+            caused_by: None,
+        };
+        let mut chain = reveal_until_onto_battlefield();
+        let mut grant = grant_over(reveal_population_on_battlefield(TrackedSetId(0)));
+        let mut other_grant = grant_over(nonland.clone());
+        other_grant.sub_ability = Some(Box::new(population_for_each(TrackedSetId(0))));
+        grant.sub_ability = Some(Box::new(other_grant));
+        let mut shuffle = shuffle_node();
+        shuffle.sub_ability = Some(Box::new(grant));
+        chain.sub_ability = Some(Box::new(shuffle));
+
+        assert!(bind_reveal_population(&mut chain, TrackedSetId(5)));
+
+        let shuffle = chain.sub_ability.as_deref().expect("shuffle");
+        assert!(matches!(shuffle.effect, Effect::Shuffle { .. }));
+        let grant = shuffle.sub_ability.as_deref().expect("grant");
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = &grant.effect
+        else {
+            panic!("expected the grant");
+        };
+        assert_eq!(
+            static_abilities[0].affected,
+            Some(reveal_population_on_battlefield(TrackedSetId(5)))
+        );
+        let other_grant = grant.sub_ability.as_deref().expect("other grant");
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = &other_grant.effect
+        else {
+            panic!("expected the other grant");
+        };
+        assert_eq!(
+            static_abilities[0].affected,
+            Some(nonland),
+            "a different narrowing keeps its sentinel"
+        );
+        let for_each = other_grant.sub_ability.as_deref().expect("for-each");
+        assert_eq!(
+            for_each.repeat_for,
+            population_for_each(TrackedSetId(5)).repeat_for
+        );
+
+        // Nothing to bind: the binder reports no rewrite.
+        let mut plain = reveal_until_onto_battlefield();
+        plain.sub_ability = Some(Box::new(shuffle_node()));
+        assert!(!bind_reveal_population(&mut plain, TrackedSetId(5)));
+    }
+
+    /// V4.13 (B3): CR 608.2c — the binder stops at a later `RevealUntil` in the
+    /// same continuation: a "those creatures" after the second reveal names
+    /// that reveal's population, which its own dispatch binds. Binding the first
+    /// reveal leaves the second continuation's for-each at the sentinel and
+    /// reports no rewrite; binding the second reveal then rewrites it.
+    #[test]
+    fn bind_reveal_population_stops_at_a_later_reveal() {
+        let mut second = reveal_until_onto_battlefield();
+        second.sub_ability = Some(Box::new(population_for_each(TrackedSetId(0))));
+        let mut shuffle = shuffle_node();
+        shuffle.sub_ability = Some(Box::new(second));
+        let mut first = reveal_until_onto_battlefield();
+        first.sub_ability = Some(Box::new(shuffle));
+
+        assert!(!bind_reveal_population(&mut first, TrackedSetId(5)));
+        let second = first
+            .sub_ability
+            .as_deref_mut()
+            .and_then(|shuffle| shuffle.sub_ability.as_deref_mut())
+            .expect("the second reveal");
+        assert_eq!(
+            second.sub_ability.as_deref().expect("for-each").repeat_for,
+            population_for_each(TrackedSetId(0)).repeat_for,
+            "the first reveal's binding does not reach past the second reveal"
+        );
+
+        // Reach-guard: the second reveal's own binding rewrites its for-each.
+        assert!(bind_reveal_population(second, TrackedSetId(7)));
+        assert_eq!(
+            second.sub_ability.as_deref().expect("for-each").repeat_for,
+            population_for_each(TrackedSetId(7)).repeat_for
+        );
+    }
+
+    /// V4.13: `chain_publication_set_id` names the set the next
+    /// `publish_tracked_set` writes into — the active chain set when present,
+    /// else the id the else-branch allocates.
+    #[test]
+    fn chain_publication_set_id_names_the_publish_target() {
+        let mut state = GameState::new_two_player(42);
+        state.chain_tracked_set_id = None;
+        let predicted = chain_publication_set_id(&state);
+        publish_tracked_set(&mut state, vec![ObjectId(3)]);
+        assert_eq!(state.chain_tracked_set_id, Some(predicted));
+        assert_eq!(state.tracked_object_sets[&predicted], vec![ObjectId(3)]);
+
+        let predicted = chain_publication_set_id(&state);
+        assert_eq!(Some(predicted), state.chain_tracked_set_id);
+        publish_tracked_set(&mut state, vec![ObjectId(4)]);
+        assert_eq!(state.chain_tracked_set_id, Some(predicted));
+        assert_eq!(
+            state.tracked_object_sets[&predicted],
+            vec![ObjectId(3), ObjectId(4)]
+        );
+    }
+
+    /// V4.18: CR 608.2c + CR 110.1 — stamped member candidates (a forwarded
+    /// target list that may hold every revealed card) are re-narrowed by the
+    /// population form: a revealed miss still in the library is excluded by the
+    /// zone leaf and a battlefield permanent outside the set by set membership,
+    /// in candidate order. Reach-guard: the set-universe member source agrees.
+    #[test]
+    fn population_form_narrows_stamped_revealed_candidates() {
+        let mut state = GameState::new_two_player(42);
+        let miss = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Miss".to_string(),
+            Zone::Library,
+        );
+        let a = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Creature A".to_string(),
+            Zone::Battlefield,
+        );
+        let b = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Creature B".to_string(),
+            Zone::Battlefield,
+        );
+        let c = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Creature C".to_string(),
+            Zone::Battlefield,
+        );
+        let set = TrackedSetId(9);
+        state.tracked_object_sets.insert(set, vec![miss, a, b]);
+        let filter = reveal_population_on_battlefield(set);
+        let ability = population_for_each(set);
+        let ctx = filter::FilterContext::from_ability(&ability);
+
+        assert_eq!(
+            crate::game::quantity::object_count_matching_candidate_ids(
+                &state,
+                vec![miss, a, c, b],
+                &filter,
+                &ctx,
+                ability.source_id,
+            ),
+            vec![a, b]
+        );
+        assert_eq!(
+            crate::game::quantity::object_count_matching_ids(
+                &state,
+                &filter,
+                &ctx,
+                ability.source_id
+            ),
+            vec![a, b]
         );
     }
 
@@ -30349,6 +31406,165 @@ mod tests {
     }
 
     #[test]
+    fn player_scope_created_token_fold_excludes_baseline_dedups_and_keeps_order() {
+        let mut acc = PlayerScopeCreatedTokens {
+            baseline: vec![ObjectId(1)],
+            tokens: Vec::new(),
+        };
+        // Seat 0 created nothing: the ledger still names the earlier token.
+        fold_player_scope_created_tokens(&mut acc, &[ObjectId(1)]);
+        assert!(
+            acc.tokens.is_empty(),
+            "a baseline id is never this clause's"
+        );
+        fold_player_scope_created_tokens(&mut acc, &[ObjectId(5), ObjectId(6)]);
+        // The same seat's publication folded again (drain start after a node fold).
+        fold_player_scope_created_tokens(&mut acc, &[ObjectId(5), ObjectId(6)]);
+        fold_player_scope_created_tokens(&mut acc, &[ObjectId(3)]);
+        assert_eq!(
+            acc.tokens,
+            vec![ObjectId(5), ObjectId(6), ObjectId(3)],
+            "APNAP publication order, each id once"
+        );
+    }
+
+    #[test]
+    fn player_scope_created_token_publish_filters_dead_ids_and_skips_empty_union() {
+        let mut state = GameState::new_two_player(42);
+        let live = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Live Token".to_string(),
+            Zone::Battlefield,
+        );
+        let dead = ObjectId(9_999);
+        state.last_created_token_ids = vec![dead];
+
+        publish_player_scope_created_tokens(&mut state, &PlayerScopeCreatedTokens::default());
+        assert_eq!(
+            state.last_created_token_ids,
+            vec![dead],
+            "an empty union leaves the ledger exactly as the last seat left it"
+        );
+
+        publish_player_scope_created_tokens(
+            &mut state,
+            &PlayerScopeCreatedTokens {
+                baseline: Vec::new(),
+                tokens: vec![dead, live],
+            },
+        );
+        assert_eq!(state.last_created_token_ids, vec![live]);
+
+        publish_player_scope_created_tokens(
+            &mut state,
+            &PlayerScopeCreatedTokens {
+                baseline: Vec::new(),
+                tokens: vec![dead],
+            },
+        );
+        assert!(
+            state.last_created_token_ids.is_empty(),
+            "an all-dead union names nothing"
+        );
+    }
+
+    fn last_created_walk_node(target: TargetFilter) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        )
+    }
+
+    #[test]
+    fn ability_chain_reads_last_created_walks_targets_conditions_and_branches() {
+        let creature = TargetFilter::Typed(TypedFilter::creature());
+        assert!(ability_chain_reads_last_created(&last_created_walk_node(
+            TargetFilter::LastCreated
+        )));
+        assert!(!ability_chain_reads_last_created(&last_created_walk_node(
+            creature.clone()
+        )));
+
+        let nested = TargetFilter::And {
+            filters: vec![TargetFilter::LastCreated, creature.clone()],
+        };
+        assert!(ability_chain_reads_last_created(&last_created_walk_node(
+            nested
+        )));
+        let nested_without = TargetFilter::And {
+            filters: vec![creature.clone(), TargetFilter::Controller],
+        };
+        assert!(!ability_chain_reads_last_created(&last_created_walk_node(
+            nested_without
+        )));
+
+        let mut conditioned = last_created_walk_node(creature.clone());
+        conditioned.condition = Some(AbilityCondition::SourceMatchesFilter {
+            filter: TargetFilter::LastCreated,
+        });
+        assert!(ability_chain_reads_last_created(&conditioned));
+        conditioned.condition = Some(AbilityCondition::SourceMatchesFilter {
+            filter: creature.clone(),
+        });
+        assert!(!ability_chain_reads_last_created(&conditioned));
+
+        let deep = last_created_walk_node(creature.clone()).sub_ability(
+            last_created_walk_node(creature.clone())
+                .sub_ability(last_created_walk_node(TargetFilter::LastCreated)),
+        );
+        assert!(ability_chain_reads_last_created(&deep));
+        let deep_without = last_created_walk_node(creature.clone()).sub_ability(
+            last_created_walk_node(creature.clone())
+                .sub_ability(last_created_walk_node(creature.clone())),
+        );
+        assert!(!ability_chain_reads_last_created(&deep_without));
+
+        let mut with_else = last_created_walk_node(creature.clone());
+        with_else.else_ability = Some(Box::new(last_created_walk_node(TargetFilter::LastCreated)));
+        assert!(ability_chain_reads_last_created(&with_else));
+        with_else.else_ability = Some(Box::new(last_created_walk_node(creature)));
+        assert!(!ability_chain_reads_last_created(&with_else));
+    }
+
+    #[test]
+    fn split_off_next_player_scope_seat_detaches_at_the_next_seats_head() {
+        let seat = |player: PlayerId| {
+            let mut head = last_created_walk_node(TargetFilter::LastCreated)
+                .sub_ability(last_created_walk_node(TargetFilter::LastCreated));
+            head.set_scoped_player_recursive(player);
+            head
+        };
+        let mut chain = seat(PlayerId(1));
+        let mut next = seat(PlayerId(2));
+        next.sub_link = SubAbilityLink::SequentialSibling;
+        crate::game::ability_utils::append_to_sub_chain(&mut chain, next.clone());
+
+        let split = split_off_next_player_scope_seat(&mut chain).expect("seat B splits off");
+        assert_eq!(*split, next, "the split begins at seat B's head");
+        let in_seat = chain
+            .sub_ability
+            .as_deref()
+            .expect("seat A's in-seat sub stays");
+        assert_eq!(in_seat.scoped_player, Some(PlayerId(1)));
+        assert!(in_seat.sub_ability.is_none());
+
+        let mut single = seat(PlayerId(1));
+        assert!(split_off_next_player_scope_seat(&mut single).is_none());
+        assert!(
+            single.sub_ability.is_some(),
+            "a single-seat chain is left intact"
+        );
+    }
+
+    #[test]
     fn empty_targets_record_empty_tracked_set_for_downstream_context() {
         let mut state = GameState::new_two_player(42);
 
@@ -32254,6 +33470,265 @@ mod tests {
                 }
             )),
             "shuffle continuation must resolve for the searching player"
+        );
+    }
+
+    /// V2.5c (CR 608.2c): a new top-level resolution starts with no prior
+    /// player choices of its own. The depth-0 entry clears a stale reference
+    /// set over the ability's whole tree — the root and every sub-node, since
+    /// the parent→child hand-off unions a child's own set back in — while a
+    /// resumed (depth 1) node keeps the set it carries.
+    #[test]
+    fn top_level_resolution_clears_a_stale_reference_set_over_the_whole_tree() {
+        use crate::types::format::FormatConfig;
+        let distinct_choose = || {
+            ResolvedAbility::new(
+                Effect::Choose {
+                    choice_type: ChoiceType::opponent_distinct_from_prior(),
+                    persist: false,
+                    selection: TargetSelectionMode::Chosen,
+                },
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            )
+        };
+        let offered = |ability: &ResolvedAbility, depth: u32| {
+            let mut state = GameState::new(FormatConfig::standard(), 4, 42);
+            let mut events = Vec::new();
+            resolve_ability_chain(&mut state, ability, &mut events, depth).unwrap();
+            let options = match &state.waiting_for {
+                WaitingFor::NamedChoice { options, .. } => options.clone(),
+                other => panic!("reach-guard: the choice must raise a prompt, got {other:?}"),
+            };
+            (options, state.players[0].life)
+        };
+
+        // (i) A stale set on the root itself.
+        let mut root = distinct_choose();
+        root.context.prior_player_choices = vec![PlayerId(1)];
+        assert_eq!(offered(&root, 0).0, ["1", "2", "3"]);
+        // Sibling: the same node resumed at depth 1 still excludes P1.
+        assert_eq!(offered(&root, 1).0, ["2", "3"]);
+
+        // (ii) A stale set stamped on the root AND its sub-node: a root-only
+        // clear would let the hand-off union bring the sub's P1 back.
+        let mut sub = distinct_choose();
+        sub.sub_link = SubAbilityLink::ContinuationStep;
+        let mut root = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(sub);
+        root.record_prior_player_choice(PlayerId(1));
+        assert!(root
+            .sub_ability
+            .as_ref()
+            .is_some_and(|sub| sub.context.prior_player_choices == [PlayerId(1)]));
+        let life_before = GameState::new(FormatConfig::standard(), 4, 42).players[0].life;
+        let (options, life_after) = offered(&root, 0);
+        assert_eq!(
+            life_after,
+            life_before + 1,
+            "reach-guard: the root's life gain resolved before the sub's choice"
+        );
+        assert_eq!(options, ["1", "2", "3"]);
+    }
+
+    /// V3a.7 (CR 608.2c): a new top-level resolution starts with no
+    /// per-object assignment and no pending member of its own. A plain
+    /// `Choose` whose dependent life gain is parked as its continuation when
+    /// the prompt pauses: the parked holder inherits nothing stale — from the
+    /// root and sub (i), from the sub alone (ii), or a lone stale binding on
+    /// the root (iii).
+    #[test]
+    fn top_level_resolution_clears_a_stale_assignment_and_binding() {
+        use crate::types::ability::ObjectPlayerAssignment;
+        use crate::types::format::FormatConfig;
+        let stale = ObjectPlayerAssignment {
+            object: ObjectId(9),
+            player: PlayerId(1),
+        };
+        let chain = || {
+            let mut gain = ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            );
+            gain.sub_link = SubAbilityLink::ContinuationStep;
+            ResolvedAbility::new(
+                Effect::Choose {
+                    choice_type: ChoiceType::opponent(),
+                    persist: false,
+                    selection: TargetSelectionMode::Chosen,
+                },
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            )
+            .sub_ability(gain)
+        };
+        let holder_context = |root: &ResolvedAbility| {
+            let mut state = GameState::new(FormatConfig::standard(), 4, 42);
+            let mut events = Vec::new();
+            resolve_ability_chain(&mut state, root, &mut events, 0).unwrap();
+            assert!(
+                matches!(state.waiting_for, WaitingFor::NamedChoice { .. }),
+                "reach-guard: the choice raised its prompt, got {:?}",
+                state.waiting_for
+            );
+            state
+                .active_ability_continuation()
+                .expect("reach-guard: the dependent life gain is parked")
+                .chain
+                .context
+                .clone()
+        };
+
+        // (i) Stale on the root and its sub.
+        let mut root = chain();
+        root.context.object_player_assignment = vec![stale];
+        root.sub_ability
+            .as_mut()
+            .expect("sub")
+            .context
+            .object_player_assignment = vec![stale];
+        assert!(holder_context(&root).object_player_assignment.is_empty());
+
+        // (ii) Stale on the sub alone: a root-only clear would let the
+        // hand-off union bring it back.
+        let mut root = chain();
+        root.sub_ability
+            .as_mut()
+            .expect("sub")
+            .context
+            .object_player_assignment = vec![stale];
+        assert!(holder_context(&root).object_player_assignment.is_empty());
+
+        // (iii) A lone stale binding on the root, no records: the wholesale
+        // hand-off would copy it onto the holder.
+        let mut root = chain();
+        root.bind_pending_choice_member(ObjectId(9));
+        assert_eq!(holder_context(&root).pending_choice_member, None);
+    }
+
+    /// V3a.9 (CR 608.2c + CR 608.2d): the drained-continuation hand-back
+    /// carries both player choice records — the reference set and the
+    /// per-object assignment — to the same ability's owned top holder (a
+    /// repeat template or a continuation), and leaves a non-owned top frame
+    /// untouched.
+    #[test]
+    fn hand_back_carries_both_player_choice_records_to_the_owned_holder() {
+        use crate::types::ability::ObjectPlayerAssignment;
+        use crate::types::game_state::PendingRepeatIteration;
+        let entry = ObjectPlayerAssignment {
+            object: ObjectId(7),
+            player: PlayerId(2),
+        };
+        let node = |source: u64| {
+            ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+                vec![],
+                ObjectId(source),
+                PlayerId(0),
+            )
+        };
+        let mut drained = node(100);
+        drained.context.prior_player_choices = vec![PlayerId(2)];
+        drained.context.object_player_assignment = vec![entry];
+        let repeat = |template: ResolvedAbility| PendingRepeatIteration {
+            ability: Box::new(template),
+            tracked_members: vec![],
+            iterated_counter_kinds: vec![],
+            next_iteration: 1,
+            total_iterations: 2,
+        };
+
+        // An owned repeat template on top.
+        let mut state = GameState::new_two_player(42);
+        state.push_repeat_for(repeat(node(100)));
+        hand_back_player_choice_records(&mut state, &drained);
+        let template = &state.active_repeat_for().expect("repeat").ability;
+        assert_eq!(template.context.prior_player_choices, [PlayerId(2)]);
+        assert_eq!(template.context.object_player_assignment, [entry]);
+
+        // An owned continuation on top.
+        let mut state = GameState::new_two_player(42);
+        let pending = PendingContinuation::new(Box::new(node(100)), &state);
+        state.park_ability_continuation(pending);
+        hand_back_player_choice_records(&mut state, &drained);
+        let chain = &state
+            .active_ability_continuation()
+            .expect("continuation")
+            .chain;
+        assert_eq!(chain.context.prior_player_choices, [PlayerId(2)]);
+        assert_eq!(chain.context.object_player_assignment, [entry]);
+
+        // A non-owned top frame is untouched.
+        let mut state = GameState::new_two_player(42);
+        state.push_repeat_for(repeat(node(200)));
+        hand_back_player_choice_records(&mut state, &drained);
+        let foreign = &state.active_repeat_for().expect("repeat").ability;
+        assert!(!foreign.context.has_player_choice_records());
+    }
+
+    /// V3a.9b (CR 608.2c + CR 608.2d): the parent→child context hand-off
+    /// replaces the child's context wholesale but unions back the child's
+    /// OWN player choice records — its per-object assignment as well as its
+    /// reference set — after the parent's.
+    #[test]
+    fn parent_to_child_hand_off_unions_back_the_childs_own_assignment() {
+        use crate::types::ability::ObjectPlayerAssignment;
+        let entry = |object: u64, player: u8| ObjectPlayerAssignment {
+            object: ObjectId(object),
+            player: PlayerId(player),
+        };
+        let node = || {
+            ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            )
+        };
+        let mut parent = node();
+        parent.context.prior_player_choices = vec![PlayerId(1)];
+        parent.context.object_player_assignment = vec![entry(5, 1)];
+        parent.context.additional_cost_paid = true;
+        let mut child = node();
+        child.context.prior_player_choices = vec![PlayerId(2)];
+        child.context.object_player_assignment = vec![entry(7, 2)];
+        assert!(!child.context.additional_cost_paid);
+
+        let mut state = GameState::new_two_player(42);
+        apply_parent_chain_context(&mut child, &parent, None, &mut state);
+
+        assert!(
+            child.context.additional_cost_paid,
+            "reach-guard: the wholesale hand-off carried the parent's context"
+        );
+        assert_eq!(
+            child.context.object_player_assignment,
+            [entry(5, 1), entry(7, 2)]
+        );
+        assert_eq!(
+            child.context.prior_player_choices,
+            [PlayerId(1), PlayerId(2)]
         );
     }
 

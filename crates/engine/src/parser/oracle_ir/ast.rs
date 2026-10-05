@@ -306,13 +306,15 @@ impl EntersUnderSpec {
     }
 }
 
-/// Grammatical number of an anaphoric pronoun that refers back to earlier
-/// instructions ("it" vs "they" / "those").
+/// Grammatical number of an anaphoric pronoun ("it" vs "they" / "those"); each
+/// consumer documents what the number selects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub(crate) enum AnaphorNumber {
-    /// "It" — the nearest antecedent instruction.
+    /// "It". CantRegenerate: the nearest antecedent instruction. Copula goad: the
+    /// single anaphor referent.
     Singular,
-    /// "They" / "those" — every instruction of the preceding run.
+    /// "They" / "those". CantRegenerate: every instruction of the preceding run.
+    /// Copula goad: every member of the anaphor's population.
     Plural,
 }
 
@@ -389,6 +391,13 @@ pub(crate) enum ContinuationAst {
     /// CR 701.15a + CR 701.15b: "The token(s) (is|are) goaded [duration]" after token
     /// creation — grants `StaticMode::Goaded` on `TargetFilter::LastCreated`.
     GoadLastCreated { duration: Option<Duration> },
+    /// CR 608.2c + CR 608.2d + CR 608.2f + CR 611.2a + CR 613.1b: "Each opponent/player
+    /// gains control of the <object> for which they were chosen" after a player
+    /// choice repeated once per member of a published population — after the last
+    /// choice, one application hands every object of the resolving ability's
+    /// object→player assignment to the player chosen for it, with no stated
+    /// duration (`TargetFilter::ChoiceAssignment`).
+    ChoiceAssignmentGainsControl,
     /// CR 702.34a / CR 702.128a / CR 702.180a: "The/Its [flashback|embalm|harmonize]
     /// cost is equal to its/that card's mana cost." after a self-cost graveyard
     /// keyword grant. Redundant reminder text — the grant already carries

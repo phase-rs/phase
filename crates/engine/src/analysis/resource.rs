@@ -5723,6 +5723,7 @@ fn node_reads_mutable_resolution_local_state(node: &crate::types::ability::Targe
         | TargetFilter::LastZoneChanged
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::CostPaidObject
         | TargetFilter::ChosenCard
@@ -5921,6 +5922,7 @@ fn node_has_non_arrival_invariant_property(node: &crate::types::ability::TargetF
         | TargetFilter::LastZoneChanged
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::CostPaidObject
         | TargetFilter::ChosenCard

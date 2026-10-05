@@ -1,7 +1,7 @@
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till1, take_until};
 use nom::character::complete::{multispace0, multispace1, satisfy};
-use nom::combinator::{all_consuming, eof, map, not, opt, peek, rest, value, verify};
+use nom::combinator::{all_consuming, eof, map, map_parser, not, opt, peek, rest, value, verify};
 use nom::multi::many0;
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
@@ -3796,6 +3796,7 @@ fn ability_reads_last_created(def: &AbilityDefinition) -> bool {
             | TargetFilter::AmassedArmy
             | TargetFilter::ChosenCard
             | TargetFilter::TrackedSet { .. }
+            | TargetFilter::ChoiceAssignment { .. }
             | TargetFilter::ExiledBySource
             | TargetFilter::ExiledCardByIndex { .. }
             | TargetFilter::TriggeringSpellController
@@ -3892,6 +3893,7 @@ pub(super) fn filter_tree_has_chosen_card(filter: &TargetFilter) -> bool {
         | TargetFilter::CostPaidObject
         | TargetFilter::AmassedArmy
         | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TriggeringSpellController
@@ -5063,6 +5065,70 @@ pub(crate) fn strip_for_each_prefix_with_difference(
         }
     }
     (None, None, text.to_string())
+}
+
+/// CR 608.2c: peel a leading "for each of those <noun>, " / "for each of
+/// them, " prefix whose clause is exactly a demonstrative population
+/// ([`nom_quantity::parse_population_anaphor`]), returning the anaphor and the
+/// body in its original case. Context-free: whether the population has an
+/// admitted antecedent is the chunk loop's decision, which alone holds the
+/// chain's earlier clauses. Unlike [`strip_for_each_prefix_with_difference`],
+/// it yields no count — the population's own size is the count.
+pub(crate) fn strip_for_each_population_prefix(
+    text: &str,
+) -> Option<(nom_quantity::PopulationAnaphor, String)> {
+    let lower = text.to_lowercase();
+    let (anaphor, body) = nom_on_lower(text, &lower, |i| {
+        preceded(
+            tag::<_, _, OracleError<'_>>("for each "),
+            map_parser(
+                terminated(take_until(", "), tag(", ")),
+                all_consuming(nom_quantity::parse_population_anaphor),
+            ),
+        )
+        .parse(i)
+    })?;
+    Some((anaphor, body.to_string()))
+}
+
+#[cfg(test)]
+mod population_prefix_tests {
+    use super::strip_for_each_population_prefix;
+    use crate::parser::oracle_nom::quantity::PopulationAnaphor;
+    use crate::types::ability::TypeFilter;
+
+    #[test]
+    fn peels_a_demonstrative_population_and_keeps_the_body_case() {
+        assert_eq!(
+            strip_for_each_population_prefix(
+                "For each of those creatures, put a +1/+1 counter on that creature."
+            ),
+            Some((
+                PopulationAnaphor::Restated(TypeFilter::Creature),
+                "put a +1/+1 counter on that creature.".to_string()
+            ))
+        );
+        assert_eq!(
+            strip_for_each_population_prefix("For each of them, choose a different opponent."),
+            Some((
+                PopulationAnaphor::Pronoun,
+                "choose a different opponent.".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn declines_counted_and_qualified_for_each_clauses() {
+        for text in [
+            "For each creature you control, put a +1/+1 counter on it.",
+            "For each of those colors, you may exile a card of that color.",
+            "For each of those opponents who didn't discard a card, draw a card.",
+            "For each of those cards that have the same name, draw a card.",
+            "Put a +1/+1 counter on each of them.",
+        ] {
+            assert_eq!(strip_for_each_population_prefix(text), None, "{text}");
+        }
+    }
 }
 
 #[cfg(test)]

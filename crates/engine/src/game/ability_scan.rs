@@ -3334,7 +3334,9 @@ fn scan_target_filter(x: &TargetFilter, ctx: FilterReadContext, mode: ScanMode) 
             projected: false,
         },
         TargetFilter::ChosenCard => Axes::NONE,
-        TargetFilter::TrackedSet { id: _ } => Axes::NONE,
+        TargetFilter::TrackedSet { id: _ } | TargetFilter::ChoiceAssignment { side: _ } => {
+            Axes::NONE
+        }
         TargetFilter::TrackedSetFiltered {
             filter,
             id: _,
