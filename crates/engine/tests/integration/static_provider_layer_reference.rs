@@ -375,8 +375,8 @@ fn coupled_provider_cycles_wait_for_outgoing_dependencies() {
     let ids: Vec<_> = ["A", "B", "C", "D"]
         .into_iter()
         .map(|name| {
-            let mut ability = AbilityDefinition::new(AbilityKind::Activated, Effect::NoOp)
-                .cost(AbilityCost::Tap);
+            let mut ability =
+                AbilityDefinition::new(AbilityKind::Activated, Effect::NoOp).cost(AbilityCost::Tap);
             ability.description = Some(name.to_string());
             scenario
                 .add_creature(P0, name, 1, 1)
@@ -423,8 +423,14 @@ fn coupled_provider_cycles_wait_for_outgoing_dependencies() {
             .filter_map(|(_, ability)| ability.description)
             .collect::<Vec<_>>()
     };
-    assert!(descriptions(c).contains(&"D".to_string()), "C must receive D");
-    assert!(descriptions(a).contains(&"D".to_string()), "A must receive D through C");
+    assert!(
+        descriptions(c).contains(&"D".to_string()),
+        "C must receive D"
+    );
+    assert!(
+        descriptions(a).contains(&"D".to_string()),
+        "A must receive D through C"
+    );
 }
 
 #[test]
@@ -487,8 +493,17 @@ fn retained_multilayer_trigger_grant_survives_earlier_ability_removal() {
             }]),
     );
     assert!(runner.state().objects[&remover].timestamp < runner.state().objects[&host].timestamp);
-    assert_eq!(runner.state().objects[&provider].trigger_definitions.iter_all().count(), 1);
-    assert_eq!(activated_ability_definitions(runner.state(), provider).len(), 1);
+    assert_eq!(
+        runner.state().objects[&provider]
+            .trigger_definitions
+            .iter_all()
+            .count(),
+        1
+    );
+    assert_eq!(
+        activated_ability_definitions(runner.state(), provider).len(),
+        1
+    );
     mark_layers_full(runner.state_mut());
     flush_layers(runner.state_mut());
 
@@ -500,7 +515,10 @@ fn retained_multilayer_trigger_grant_survives_earlier_ability_removal() {
         .contains(&CoreType::Artifact));
     assert_eq!(activated_ability_definitions(runner.state(), host).len(), 1);
     assert_eq!(
-        runner.state().objects[&host].trigger_definitions.iter_all().count(),
+        runner.state().objects[&host]
+            .trigger_definitions
+            .iter_all()
+            .count(),
         1,
         "retained parent installs one trigger; the unstarted parent stays suppressed"
     );
