@@ -3965,6 +3965,32 @@ fn parse_you_have_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
         ));
     }
 
+    // CR 102.1: "you have the most <property> or are tied for most <property>"
+    // (Preacher of the Schism's attack gate) → your value ≥ the highest value
+    // among ALL players (you included, so a tie with the leader passes).
+    if let Ok((rest, property)) =
+        preceded(tag("the "), nom_quantity::parse_most_or_tied_for_most).parse(rest)
+    {
+        return Ok((
+            rest,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: nom_quantity::player_property_quantity(property, PlayerScope::Controller),
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Ref {
+                    qty: nom_quantity::player_property_quantity(
+                        property,
+                        PlayerScope::AllPlayers {
+                            aggregate: AggregateFunction::Max,
+                            exclude: None,
+                        },
+                    ),
+                },
+            },
+        ));
+    }
+
     // "you have exactly N life" → LifeTotal EQ N
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("exactly ").parse(rest) {
         let (rest, n) = parse_number(rest)?;

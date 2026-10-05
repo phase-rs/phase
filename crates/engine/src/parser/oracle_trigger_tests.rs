@@ -5929,6 +5929,181 @@ fn trigger_attacks_enchanted_player_scopes_to_attached_player() {
     );
 }
 
+/// CR 102.1 + CR 508.1b: Preacher of the Schism — BOTH attack triggers keep their
+/// life-total gate. Before, each came out with no condition and no defender scope,
+/// so the token AND the card arrived on every attack.
+#[test]
+fn preacher_of_the_schism_keeps_both_life_gates() {
+    let triggers = parse_trigger_lines(
+        "Whenever this creature attacks the player with the most life or tied for most life, create a 1/1 white Vampire creature token with lifelink.",
+        "Preacher of the Schism",
+    );
+    assert_eq!(triggers.len(), 1);
+    assert_eq!(triggers[0].mode, TriggerMode::Attacks);
+    assert_eq!(
+        triggers[0].attack_target_filter,
+        Some(AttackTargetFilter::Player)
+    );
+    let vt = format!("{:?}", triggers[0].valid_target);
+    assert!(
+        vt.contains("PlayerAttribute") && vt.contains("LifeTotal") && vt.contains("GE"),
+        "defender must be scoped to the most-life player, got {vt}"
+    );
+
+    let triggers = parse_trigger_lines(
+        "Whenever this creature attacks while you have the most life or are tied for most life, you draw a card and you lose 1 life.",
+        "Preacher of the Schism",
+    );
+    assert_eq!(triggers.len(), 1);
+    assert_eq!(triggers[0].mode, TriggerMode::Attacks);
+    let cond = format!("{:?}", triggers[0].condition);
+    assert!(
+        cond.contains("LifeTotal { player: Controller }")
+            && cond.contains("GE")
+            && cond.contains("AllPlayers"),
+        "while-gate must be your life >= max life, got {cond}"
+    );
+}
+
+/// CR 603.2 + CR 508.1m: an attack `while` gate must consume its whole
+/// qualification; a partially parsed controller gate stays unsupported.
+#[test]
+fn attacks_while_controller_gate_rejects_unconsumed_rider() {
+    let complete = parse_trigger_lines(
+        "Whenever this creature attacks while you have the most life or are tied for most life, draw a card.",
+        "Probe",
+    );
+    assert_eq!(complete.len(), 1);
+    assert_eq!(complete[0].mode, TriggerMode::Attacks);
+    let condition = format!("{:?}", complete[0].condition);
+    assert!(
+        condition.contains("EventTime")
+            && condition.contains("LifeTotal { player: Controller }")
+            && condition.contains("AllPlayers")
+            && condition.contains("GE"),
+        "the complete controller gate must qualify the attack: {condition}"
+    );
+
+    let conjunction = parse_trigger_lines(
+        "Whenever this creature attacks while you have the most life or are tied for most life and you control a Forest, draw a card.",
+        "Probe",
+    );
+    assert_eq!(conjunction.len(), 1);
+    assert_eq!(conjunction[0].mode, TriggerMode::Attacks);
+    let Some(TriggerCondition::EventTime { condition }) = &conjunction[0].condition else {
+        panic!("the complete conjunction must qualify the attack: {conjunction:?}");
+    };
+    let TriggerCondition::And { conditions } = condition.as_ref() else {
+        panic!("both state conditions must survive: {condition:?}");
+    };
+    assert_eq!(conditions.len(), 2);
+    assert!(matches!(
+        &conditions[0],
+        TriggerCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::LifeTotal {
+                    player: PlayerScope::Controller,
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Ref {
+                qty: QuantityRef::LifeTotal {
+                    player: PlayerScope::AllPlayers {
+                        aggregate: AggregateFunction::Max,
+                        exclude: None,
+                    },
+                },
+            },
+        }
+    ));
+    let TriggerCondition::ControlsType {
+        filter: TargetFilter::Typed(filter),
+    } = &conditions[1]
+    else {
+        panic!("Forest control must survive: {:?}", conditions[1]);
+    };
+    assert_eq!(
+        filter.type_filters,
+        vec![TypeFilter::Subtype("Forest".to_string())]
+    );
+    assert_eq!(filter.controller, Some(ControllerRef::You));
+    assert!(filter.properties.contains(&FilterProp::InZone {
+        zone: Zone::Battlefield,
+    }));
+
+    let partial = parse_trigger_lines(
+        "Whenever this creature attacks while you have the most life or are tied for most life but not if you control a Forest, draw a card.",
+        "Probe",
+    );
+    assert_eq!(partial.len(), 1);
+    assert!(
+        matches!(partial[0].mode, TriggerMode::Unknown(_)),
+        "an unconsumed state rider must remain explicitly unsupported: {partial:?}"
+    );
+}
+
+/// The "the player" arm only binds when the most-life qualifier follows.
+#[test]
+fn attacks_the_player_without_most_life_qualifier_does_not_bind_player_scope() {
+    // CR 508.1b: unmodelled "the player …" qualifiers — no "or tied" tail, a
+    // different superlative, and speed (no per-candidate reader) — must stay
+    // explicitly unsupported. The discriminating check is that NO `Attacks`
+    // trigger comes out at all: an unscoped one would fire on every attack.
+    for text in [
+        "Whenever this creature attacks the player with the fewest cards in hand, draw a card.",
+        "Whenever this creature attacks the player with the most life, draw a card.",
+        "Whenever this creature attacks the player with the most speed or tied for most speed, draw a card.",
+        // Partially recognised: the leader grammar matches a prefix, but the
+        // qualifier continues past it — the terminator check must decline.
+        "Whenever this creature attacks the player with the most life or tied for most life and controls a Forest, draw a card.",
+    ] {
+        let triggers = parse_trigger_lines(text, "Probe");
+        assert!(
+            !triggers.is_empty(),
+            "{text}: the line must still surface (as unsupported), not vanish"
+        );
+        assert!(
+            triggers
+                .iter()
+                .all(|t| !matches!(t.mode, TriggerMode::Attacks)),
+            "{text}: no generic Attacks trigger may escape: {triggers:?}"
+        );
+    }
+    // Positive reach guard for the partial case above: the SAME qualifier,
+    // ending at the clause boundary, binds the scoped leader filter — so the
+    // decline is caused by the trailing rider, not by the grammar failing.
+    let triggers = parse_trigger_lines(
+        "Whenever this creature attacks the player with the most life or tied for most life, draw a card.",
+        "Probe",
+    );
+    assert_eq!(triggers.len(), 1);
+    assert_eq!(triggers[0].mode, TriggerMode::Attacks);
+    assert_eq!(
+        triggers[0].attack_target_filter,
+        Some(AttackTargetFilter::Player)
+    );
+    let vt = format!("{:?}", triggers[0].valid_target);
+    assert!(
+        vt.contains("LifeTotal") && vt.contains("GE"),
+        "the complete qualifier must scope the defender, got {vt}"
+    );
+
+    // Reach guard: the same grammar reads another property, not just life.
+    let triggers = parse_trigger_lines(
+        "Whenever this creature attacks the player with the most cards in hand or tied for most cards in hand, draw a card.",
+        "Probe",
+    );
+    assert_eq!(
+        triggers[0].attack_target_filter,
+        Some(AttackTargetFilter::Player)
+    );
+    let vt = format!("{:?}", triggers[0].valid_target);
+    assert!(
+        vt.contains("HandSize") && vt.contains("GE"),
+        "defender must be scoped to the most-cards player, got {vt}"
+    );
+}
+
 /// Issue #5249 — The Spear of Bashenga: "Whenever equipped creature attacks
 /// the monarch, destroy target tapped nonland permanent that player controls."
 /// The " the monarch" defender scope must parse to
@@ -28908,33 +29083,46 @@ fn head_shape_inside_the_subject_truncates_but_stays_honest() {
     assert_eq!(triggers[1].valid_card, None);
 }
 
-/// KNOWN EXPOSURE E2.
+/// KNOWN EXPOSURE E2: the open event-head splitter still separates these
+/// predicates, but unsupported `while` tails must not become broad attacks.
 #[test]
 fn comparison_predicate_siblings_are_unguarded_but_honest() {
-    for (text, expected_unknown) in [
-        (
-            "Whenever this creature attacks while your life total is greater than 20 or is less than 5, draw a card.",
-            "Whenever ~ is less than 5",
-        ),
-        (
-            "Whenever this creature attacks while your life total is even or is odd, draw a card.",
-            "Whenever ~ is odd",
-        ),
-    ] {
-        let triggers = parse_trigger_lines(text, "~");
-        assert_eq!(triggers.len(), 2, "{text}");
-        assert_eq!(triggers[0].mode, TriggerMode::Attacks, "{text}");
-        assert_eq!(triggers[0].valid_card, Some(TargetFilter::SelfRef), "{text}");
-        assert_eq!(
-            triggers[1].mode,
-            TriggerMode::Unknown(expected_unknown.to_string()),
-            "{text}"
-        );
-        assert_eq!(triggers[1].valid_card, None, "{text}");
-    }
+    let triggers = parse_trigger_lines(
+        "Whenever this creature attacks while your life total is greater than 20 or is less than 5, draw a card.",
+        "~",
+    );
+    assert_eq!(triggers.len(), 2);
+    assert_eq!(triggers[0].mode, TriggerMode::Attacks);
+    assert_eq!(triggers[0].valid_card, Some(TargetFilter::SelfRef));
+    assert!(matches!(
+        &triggers[0].condition,
+        Some(TriggerCondition::EventTime { .. })
+    ));
+    assert_eq!(
+        triggers[1].mode,
+        TriggerMode::Unknown("Whenever ~ is less than 5".to_string())
+    );
+    assert_eq!(triggers[1].valid_card, None);
+
+    let triggers = parse_trigger_lines(
+        "Whenever this creature attacks while your life total is even or is odd, draw a card.",
+        "~",
+    );
+    assert_eq!(triggers.len(), 2);
+    assert_eq!(
+        triggers[0].mode,
+        TriggerMode::Unknown("Whenever ~ attacks while your life total is even".to_string())
+    );
+    assert_eq!(triggers[0].valid_card, None);
+    assert_eq!(
+        triggers[1].mode,
+        TriggerMode::Unknown("Whenever ~ is odd".to_string())
+    );
+    assert_eq!(triggers[1].valid_card, None);
 }
 
-/// KNOWN EXPOSURE E3.
+/// KNOWN EXPOSURE E3: the open `becomes` head splits this non-event predicate;
+/// the unsupported `while` tail stays Unknown rather than becoming an attack.
 #[test]
 fn becomes_voice_non_event_predicate_is_unguarded_but_honest() {
     let triggers = parse_trigger_lines(
@@ -28942,8 +29130,13 @@ fn becomes_voice_non_event_predicate_is_unguarded_but_honest() {
         "~",
     );
     assert_eq!(triggers.len(), 2);
-    assert_eq!(triggers[0].mode, TriggerMode::Attacks);
-    assert_eq!(triggers[0].valid_card, Some(TargetFilter::SelfRef));
+    assert_eq!(
+        triggers[0].mode,
+        TriggerMode::Unknown(
+            "Whenever ~ attacks while its power becomes greater than 4".to_string()
+        )
+    );
+    assert_eq!(triggers[0].valid_card, None);
     assert_eq!(
         triggers[1].mode,
         TriggerMode::Unknown("Whenever ~ becomes less than 2".to_string())

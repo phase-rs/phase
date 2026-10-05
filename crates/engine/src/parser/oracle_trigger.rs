@@ -13970,6 +13970,13 @@ fn try_parse_event(
     if let Some(after) = attacks_result {
         let (attacks_and_unblocked, after) = strip_attack_unblocked_qualifier(after);
         let (attacks_alone, after) = strip_attack_alone_qualifier(after);
+        // CR 603.2 + CR 508.1m: `strip_while_state_clause` consumes complete
+        // event-time gates before this attack branch. If a `while` qualification
+        // remains, its state was unrecognized or only partly parsed; a broad
+        // `Attacks` trigger would silently drop that restriction.
+        if scan_contains(after, "while ") {
+            return None;
+        }
         // CR 508.3a: Detect attack target qualifier ("attacks a planeswalker" etc.)
         fn parse_attack_target(input: &str) -> OracleResult<'_, AttackTargetFilter> {
             alt((
@@ -13986,6 +13993,22 @@ fn try_parse_event(
                     preceded(tag(" "), parse_one_of_your_opponents),
                 ),
                 value(AttackTargetFilter::Player, tag(" a player")),
+                // CR 102.1 + CR 508.1b: "attacks the player with the most life or
+                // tied for most life" (Preacher of the Schism, Seraphic
+                // Greatsword, Undercover Butler). Only matched when the whole
+                // superlative-or-tie qualifier follows, so "the player" never
+                // binds the broad Player scope on its own; the qualifier
+                // becomes `valid_target` below.
+                value(
+                    AttackTargetFilter::Player,
+                    terminated(
+                        tag(" the player"),
+                        peek(preceded(
+                            tag(" with the "),
+                            crate::parser::oracle_nom::quantity::parse_most_or_tied_for_most,
+                        )),
+                    ),
+                ),
                 value(AttackTargetFilter::Player, tag(" you")),
                 // CR 303.4e: "attacks enchanted player" — a Curse Aura trigger
                 // scoped to the player this permanent is attached to (whose
@@ -14008,6 +14031,19 @@ fn try_parse_event(
         // "who has more life than you" (Namor, Atlantean King) and "who controls
         // eight or more lands" (Owlbear Cub) from the trigger event clause.
         let attack_target_parsed = parse_attack_target.parse(after).ok();
+        // CR 508.1b: "attacks the player <qualifier>" names one specific
+        // defending player. A qualifier `parse_attack_target` cannot model
+        // ("the player with the most life" without the tie, "the player with
+        // the fewest cards in hand", …) must not fall through to an Attacks
+        // trigger that fires against any defender — decline instead, so the
+        // line stays explicitly unsupported.
+        if attack_target_parsed.is_none()
+            && tag::<_, _, OracleError<'_>>(" the player ")
+                .parse(after)
+                .is_ok()
+        {
+            return None;
+        }
         let attack_target_filter = attack_target_parsed.as_ref().map(|(_, f)| f.clone());
         let attacks_one_of_your_opponents = preceded(
             tag::<_, _, OracleError<'_>>(" "),
@@ -14095,11 +14131,33 @@ fn try_parse_event(
                 // is a real clause boundary, checked with the shared
                 // `peek_clause_terminator` authority; anything else falls into
                 // the SAME declined branch as a total parse failure.
-                let modelled = parse_player_relative_clause(after_noun, relation, ctx)
-                    .ok()
-                    .filter(|(remainder, _)| {
-                        nom_primitives::peek_clause_terminator(remainder).is_ok()
-                    });
+                // CR 102.1 + CR 508.1b: "the player with the most life or tied
+                // for most life" — the defender's life must be ≥ the highest
+                // life total among ALL players, read once at declaration (the
+                // same `valid_target` home as the `who` clauses, so CR 603.4's
+                // resolution re-check does not apply).
+                let most_life = preceded(
+                    tag::<_, _, OracleError<'_>>("with the "),
+                    crate::parser::oracle_nom::quantity::parse_most_or_tied_for_most,
+                )
+                .parse(after_noun)
+                .ok()
+                .and_then(|(remainder, property)| {
+                    nom_primitives::peek_clause_terminator(remainder).ok()?;
+                    let player =
+                        crate::parser::oracle_nom::quantity::player_property_leader_filter(
+                            property,
+                            PlayerRelation::All,
+                        )?;
+                    Some((remainder, player))
+                });
+                let modelled = most_life.or_else(|| {
+                    parse_player_relative_clause(after_noun, relation, ctx)
+                        .ok()
+                        .filter(|(remainder, _)| {
+                            nom_primitives::peek_clause_terminator(remainder).is_ok()
+                        })
+                });
                 match modelled {
                     Some((_, player)) => {
                         def.valid_target = Some(TargetFilter::PlayerMatching {
@@ -14114,9 +14172,17 @@ fn try_parse_event(
                         // Detect it with a zero-consumption `peek`, never
                         // `starts_with`. The trailing space inside the tag IS the
                         // word boundary, so "whoever"/"whose" cannot match.
-                        declined_unmodelled_predicate = peek(tag::<_, _, OracleError<'_>>("who "))
-                            .parse(after_noun)
-                            .is_ok();
+                        // CR 508.1b: the `with the …` leader family is the same
+                        // case — its arm binds `Player` on a PREFIX match, so a
+                        // qualifier that continues past the recognised part
+                        // ("… or tied for most life and controls a Forest")
+                        // fails the terminator here and must decline too.
+                        declined_unmodelled_predicate = peek(alt((
+                            tag::<_, _, OracleError<'_>>("who "),
+                            tag("with the "),
+                        )))
+                        .parse(after_noun)
+                        .is_ok();
                     }
                 }
             }
