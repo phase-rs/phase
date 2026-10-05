@@ -25,8 +25,8 @@ use engine::game::game_object::PhaseOutCause;
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::ability::{
-    AbilityKind, ContinuousModification, Duration, Effect, EffectKind, FilterProp, StaticDefinition,
-    TargetFilter, TypedFilter,
+    AbilityKind, ContinuousModification, Duration, Effect, EffectKind, FilterProp,
+    StaticDefinition, TargetFilter, TypedFilter,
 };
 use engine::types::card_type::CoreType;
 use engine::types::events::GameEvent;
@@ -504,9 +504,11 @@ fn registered_warrior_direct_regoad_uses_each_goader_original_lifetime() {
             (effect.source_id == saga
                 && effect.controller == P0
                 && effect.duration == Duration::WhileHostOnBattlefield
-                && effect.modifications.contains(&ContinuousModification::AddStaticMode {
-                    mode: StaticMode::Goaded,
-                }))
+                && effect
+                    .modifications
+                    .contains(&ContinuousModification::AddStaticMode {
+                        mode: StaticMode::Goaded,
+                    }))
             .then(|| match &effect.affected {
                 TargetFilter::SpecificObject { id } => Some(*id),
                 _ => None,
@@ -517,8 +519,15 @@ fn registered_warrior_direct_regoad_uses_each_goader_original_lifetime() {
     let creature = &state.objects[&recipient];
     assert!(creature.is_token);
     assert!(creature.card_types.core_types.contains(&CoreType::Creature));
-    assert!(creature.card_types.subtypes.iter().any(|subtype| subtype == "Warrior"));
-    assert_ne!(creature.controller, P0, "the recipient and first goader differ");
+    assert!(creature
+        .card_types
+        .subtypes
+        .iter()
+        .any(|subtype| subtype == "Warrior"));
+    assert_ne!(
+        creature.controller, P0,
+        "the recipient and first goader differ"
+    );
     assert!(creature.goaded_by.is_empty());
     let goaded = TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Goaded]));
     assert!(matches_target_filter(
@@ -585,12 +594,16 @@ fn registered_warrior_direct_regoad_uses_each_goader_original_lifetime() {
     assert!(runner.state().stack.is_empty());
     assert!(runner.state().objects[&second_source].tapped);
     assert!(runner.state().battlefield.contains(&saga));
-    assert!(runner.state().transient_continuous_effects.iter().any(|effect| {
-        effect.source_id == saga
-            && effect.controller == P0
-            && effect.duration == Duration::WhileHostOnBattlefield
-            && effect.affected == TargetFilter::SpecificObject { id: recipient }
-    }));
+    assert!(runner
+        .state()
+        .transient_continuous_effects
+        .iter()
+        .any(|effect| {
+            effect.source_id == saga
+                && effect.controller == P0
+                && effect.duration == Duration::WhileHostOnBattlefield
+                && effect.affected == TargetFilter::SpecificObject { id: recipient }
+        }));
     assert_eq!(
         runner.state().objects[&recipient].goaded_by,
         [P1].into_iter().collect(),
@@ -603,15 +616,13 @@ fn registered_warrior_direct_regoad_uses_each_goader_original_lifetime() {
         &FilterContext::neutral(),
     ));
 
-    engine::game::zones::move_to_zone(
-        runner.state_mut(),
-        saga,
-        Zone::Graveyard,
-        &mut Vec::new(),
-    );
+    engine::game::zones::move_to_zone(runner.state_mut(), saga, Zone::Graveyard, &mut Vec::new());
     evaluate_layers(runner.state_mut());
     assert!(!runner.state().battlefield.contains(&saga));
-    assert_eq!(runner.state().objects[&recipient].goaded_by, [P1].into_iter().collect());
+    assert_eq!(
+        runner.state().objects[&recipient].goaded_by,
+        [P1].into_iter().collect()
+    );
     assert!(matches_target_filter(
         runner.state(),
         recipient,
