@@ -3,8 +3,8 @@ use crate::types::ability::{
     TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::GameState;
-use crate::types::identifiers::ObjectId;
+use crate::types::game_state::{GameState, TransientContinuousEffectBindings};
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
 
@@ -31,19 +31,45 @@ pub fn resolve(
     let new_controller = gain_control_controller(ability, target);
     let object_ids = gain_control_object_targets(state, ability, target);
 
+    if matches!(duration, Duration::ForAsLongAs { .. }) {
+        crate::game::layers::flush_layers(state);
+    }
+
     for obj_id in object_ids {
-        let Some(old_controller) = state.objects.get(&obj_id).map(|obj| obj.controller) else {
+        let Some(object) = state.objects.get(&obj_id) else {
             return Err(EffectError::ObjectNotFound(obj_id));
         };
+        let old_controller = object.controller;
+        let recipient = ObjectIncarnationRef::from_object(object);
+        // CR 611.2b: a duration that is false at resolution never begins.
+        // Test before installing a record or emitting control/echo side effects.
+        if let Duration::ForAsLongAs { condition } = &duration {
+            if !crate::game::layers::bound_state_duration_holds(
+                state,
+                condition,
+                new_controller,
+                ability.source_id,
+                Some(recipient),
+            ) {
+                continue;
+            }
+        }
 
-        // CR 613.3: Create a transient continuous effect at Layer 2 (Control).
-        state.add_transient_continuous_effect(
+        // CR 611.2c + CR 400.7: state durations track this exact recipient.
+        // CR 400.7a: other control effects retain spell-to-permanent continuity.
+        state.add_transient_continuous_effect_with_bindings(
             ability.source_id,
             new_controller,
             duration.clone(),
             TargetFilter::SpecificObject { id: obj_id },
             vec![ContinuousModification::ChangeController],
             None,
+            TransientContinuousEffectBindings {
+                affected_recipient: matches!(duration, Duration::ForAsLongAs { .. })
+                    .then_some(recipient),
+                duration_subject: matches!(duration, Duration::ForAsLongAs { .. })
+                    .then_some(recipient),
+            },
         );
         mark_echo_due_for_new_controller(state, obj_id);
 

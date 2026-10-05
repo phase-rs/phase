@@ -1995,6 +1995,22 @@ fn merge_attached_predicate_filter(
 /// downstream merged output is preserved byte-for-byte.
 fn parse_bare_predicate_tail(input: &str) -> OracleResult<'_, TargetFilter> {
     let (rest, _) = opt(parse_article).parse(input)?;
+    // CR 303.4b: being enchanted means having an Aura attached, regardless
+    // of which object supplies this condition or who controls the Aura.
+    if let Ok((rest, filter)) = value(
+        TargetFilter::Typed(
+            TypedFilter::default().properties(vec![FilterProp::HasAttachment {
+                kind: crate::types::ability::AttachmentKind::Aura,
+                controller: None,
+                exclude_source: crate::types::ability::SourceExclusion::Include,
+            }]),
+        ),
+        tag::<_, _, OracleError<'_>>("enchanted"),
+    )
+    .parse(rest)
+    {
+        return Ok((rest, filter));
+    }
     if let Ok((rest, color)) = parse_color(rest) {
         return Ok((
             rest,
@@ -2140,7 +2156,7 @@ fn parse_top_of_library_condition(input: &str) -> OracleResult<'_, StaticConditi
 }
 
 /// CR 611.3a: "it's a Zombie" / "it isn't white" / "it's a Zombie or a Skeleton" —
-/// the anaphoric "it" binds to the recipient (effective subject) of the continuous
+/// the anaphoric "it" or "that <object>" binds to the recipient of the continuous
 /// effect. Emits `RecipientMatchesFilter` (affirmative), `Not(RecipientMatchesFilter)`
 /// (negated), or `Or([RecipientMatchesFilter, …])` (disjunction). The pronoun subject
 /// is scoped to this combinator only (it is NOT added to the shared source-subject
@@ -2148,7 +2164,18 @@ fn parse_top_of_library_condition(input: &str) -> OracleResult<'_, StaticConditi
 /// rejects non-clause-ending predicates (e.g. "attacking alone") so the alt backtracks
 /// to the combat combinator.
 fn parse_recipient_is_filter_condition(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = tag("it").parse(input)?;
+    let (rest, _) = alt((
+        value((), tag("it")),
+        preceded(
+            tag("that "),
+            alt((
+                value((), super::primitives::parse_core_type),
+                value((), tag("permanent")),
+                value((), tag("card")),
+            )),
+        ),
+    ))
+    .parse(input)?;
     let (rest, negated) = parse_it_copula(rest)?;
     let (rest, filters) = parse_bare_predicate_disjunction(rest)?;
 
@@ -17206,6 +17233,41 @@ mod tests {
     }
 
     // -- Anaphoric "it" recipient conditions (CR 611.3a) --
+
+    #[test]
+    fn recipient_enchanted_predicate_preserves_subject_and_attachment_kind() {
+        for text in [
+            "that creature is enchanted",
+            "that permanent is enchanted",
+            "that land is enchanted",
+            "it is enchanted",
+            "it's enchanted",
+        ] {
+            let (rest, condition) = parse_inner_condition(text).unwrap();
+            assert_eq!(rest, "", "{text}");
+            // CR 303.4b: any attached Aura, not the granting source's Aura.
+            assert_eq!(
+                condition,
+                StaticCondition::RecipientMatchesFilter {
+                    filter: TargetFilter::Typed(TypedFilter::default().properties(vec![
+                        FilterProp::HasAttachment {
+                            kind: crate::types::ability::AttachmentKind::Aura,
+                            controller: None,
+                            exclude_source: crate::types::ability::SourceExclusion::Include,
+                        },
+                    ])),
+                },
+                "{text}"
+            );
+        }
+        let (rest, source) = parse_inner_condition("~ is enchanted").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(source, StaticCondition::SourceIsEnchanted);
+        assert!(parse_recipient_is_filter_condition(
+            "that creature is enchanted by an Aura you control"
+        )
+        .is_err());
+    }
 
     fn recipient_filter(condition: &StaticCondition) -> &TargetFilter {
         match condition {
