@@ -3845,8 +3845,24 @@ mod tests {
         );
         crate::game::layers::evaluate_layers(&mut state);
         assert_eq!(state.objects[&affected].power, Some(3));
+        assert!(state
+            .transient_continuous_effects
+            .iter()
+            .any(|effect| effect.id == id));
         state.objects.get_mut(&subject).unwrap().bump_incarnation();
+        // Keep a separate pre-flush fixture so the counter-edit identity check
+        // cannot pass merely because layer evaluation already retired the id.
+        let mut counter_edit_state = state.clone();
         crate::game::layers::evaluate_layers(&mut state);
+        // CR 611.2a + CR 400.7: the old subject's duration has ended; a new
+        // occurrence cannot sustain the effect.
+        assert!(
+            state
+                .transient_continuous_effects
+                .iter()
+                .all(|effect| effect.id != id),
+            "layer evaluation must immediately retire the stale subject's effect"
+        );
         assert_eq!(
             state.objects[&affected].power,
             Some(2),
@@ -3868,12 +3884,22 @@ mod tests {
             Some(&1)
         );
         let mut events = Vec::new();
+        assert!(counter_edit_state
+            .transient_continuous_effects
+            .iter()
+            .any(|effect| effect.id == id));
         assert_eq!(
-            apply_counter_removal(&mut state, subject, CounterType::Shield, 1, &mut events),
+            apply_counter_removal(
+                &mut counter_edit_state,
+                subject,
+                CounterType::Shield,
+                1,
+                &mut events,
+            ),
             1
         );
         assert!(
-            state
+            counter_edit_state
                 .transient_continuous_effects
                 .iter()
                 .any(|effect| effect.id == id),
