@@ -210,7 +210,8 @@ fn aang_full_two_face_oracle_shape_and_import_identity() {
     assert!(matches!(
         *chain[1].effect,
         Effect::GainLife {
-            amount: QuantityExpr::Fixed { value: 4 }
+            amount: QuantityExpr::Fixed { value: 4 },
+            player: TargetFilter::Controller
         }
     ));
     assert!(matches!(
@@ -548,9 +549,9 @@ fn aang_stale_transform_auto_declines_after_a_response_changes_the_same_source()
 #[test]
 fn counter_tail_failure_is_visible_in_full_activated_oracle_and_never_executes_a_head_only_put() {
     for clause in [
-        "Put a +1/+1 counter on this creature and frobnicate",
+        "Put a +1/+1 counter on this creature with frobnicate",
         "Put a flying counter and a vigilance counter on this creature and frobnicate",
-        "Put a +1/+1 counter on this creature and remember that many counters",
+        "Put a +1/+1 counter on this creature with that many frobnications",
     ] {
         let oracle = format!("{{0}}: {clause}.");
         let parsed = parse_oracle_text(
@@ -598,6 +599,43 @@ fn counter_tail_failure_is_visible_in_full_activated_oracle_and_never_executes_a
             .get(&CounterType::Plus1Plus1),
         Some(&1)
     );
+}
+
+#[test]
+fn fixed_counter_compound_keeps_supported_head_and_explicit_tail_gap_shape() {
+    // SHAPE: the earlier compound owner keeps the counter head and an unsupported child.
+    for clause in [
+        "Put a +1/+1 counter on this creature and frobnicate",
+        "Put a +1/+1 counter on this creature and remember that many counters",
+    ] {
+        let oracle = format!("{{0}}: {clause}.");
+        let parsed = parse_oracle_text(
+            &oracle,
+            "Counter witness",
+            &[],
+            &["Creature".to_owned()],
+            &[],
+        );
+        assert_eq!(parsed.abilities.len(), 1, "{clause}");
+        let head = &parsed.abilities[0];
+        assert!(
+            matches!(
+                head.effect.as_ref(),
+                Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::SelfRef
+                }
+            ),
+            "{clause}: {head:?}"
+        );
+        let tail = head.sub_ability.as_deref().expect("explicit compound tail");
+        assert!(
+            matches!(tail.effect.as_ref(), Effect::Unimplemented { .. }),
+            "{clause}: {tail:?}"
+        );
+        assert!(tail.sub_ability.is_none(), "{clause}: {tail:?}");
+    }
 }
 
 #[test]
