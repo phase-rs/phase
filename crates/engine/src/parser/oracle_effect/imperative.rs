@@ -12635,16 +12635,14 @@ pub(super) fn parse_imperative_family_ast(
                     try_parse_put_sticker_effect(lower, ctx).map(ImperativeFamilyAst::GainKeyword)
                 })
                 .or_else(|| {
-                    parse_zone_counter_ast(text, lower, ctx)
-                        .map(ImperativeFamilyAst::ZoneCounter)
+                    parse_zone_counter_family_ast(text, lower, ctx)
                         .or_else(|| parse_put_ast(text, lower, ctx).map(ImperativeFamilyAst::Put))
                 })
         } else {
             try_parse_put_sticker_effect(lower, ctx)
                 .map(ImperativeFamilyAst::GainKeyword)
                 .or_else(|| {
-                    parse_zone_counter_ast(text, lower, ctx)
-                        .map(ImperativeFamilyAst::ZoneCounter)
+                    parse_zone_counter_family_ast(text, lower, ctx)
                         .or_else(|| parse_put_ast(text, lower, ctx).map(ImperativeFamilyAst::Put))
                 })
         };
@@ -12697,9 +12695,12 @@ pub(super) fn parse_imperative_family_ast(
         "triple" => try_parse_multiply_pt_effect(lower, ctx).map(ImperativeFamilyAst::GainKeyword),
 
         // Zone-change/counter verbs (CR 701)
-        "destroy" => parse_zone_counter_ast(text, lower, ctx).map(ImperativeFamilyAst::ZoneCounter),
-        "exile" => parse_zone_counter_ast(text, lower, ctx).map(ImperativeFamilyAst::ZoneCounter),
-        "counter" => parse_zone_counter_ast(text, lower, ctx).map(ImperativeFamilyAst::ZoneCounter),
+        // allow-noncombinator: existing verb dispatch, preserving committed counter failure.
+        "destroy" => parse_zone_counter_family_ast(text, lower, ctx),
+        // allow-noncombinator: existing verb dispatch, preserving committed counter failure.
+        "exile" => parse_zone_counter_family_ast(text, lower, ctx),
+        // allow-noncombinator: existing verb dispatch, preserving committed counter failure.
+        "counter" => parse_zone_counter_family_ast(text, lower, ctx),
 
         // CR 406.3 + CR 701.20a: "turn the exiled card(s) face up" — the Imprint "flip" cards
         // (Clone Shell, Summoner's Egg, Compleated Clone Shell, The Creation of
@@ -13628,11 +13629,12 @@ pub(super) fn parse_imperative_family_ast(
         "remove" => parse_remove_from_combat_ast(lower, ctx) // allow-noncombinator: pre-existing match dispatch, only threading ctx through
             .map(ImperativeFamilyAst::RemoveFromCombat)
             .or_else(|| {
-                parse_zone_counter_ast(text, lower, ctx).map(ImperativeFamilyAst::ZoneCounter)
+                parse_zone_counter_family_ast(text, lower, ctx)
             }),
 
         // "move" → counter movement (step 2): "move N counters from X onto Y"
-        "move" => parse_zone_counter_ast(text, lower, ctx).map(ImperativeFamilyAst::ZoneCounter),
+        // allow-noncombinator: existing verb dispatch, preserving committed counter failure.
+        "move" => parse_zone_counter_family_ast(text, lower, ctx),
 
         // "add" → mana/cost-resource (step 1)
         // allow-noncombinator: pre-existing match dispatch, only threading ctx through
@@ -16157,19 +16159,33 @@ fn try_parse_choose_counter_adjustment(lower: &str) -> Option<CounterAdjustment>
     None
 }
 
-pub(super) fn parse_zone_counter_ast(
+fn parse_zone_counter_family_ast(
     text: &str,
     lower: &str,
     ctx: &mut ParseContext,
-) -> Option<ZoneCounterImperativeAst> {
+) -> Option<ImperativeFamilyAst> {
+    parse_zone_counter_ast(text, lower, ctx).map(|result| match result {
+        Ok(ast) => ImperativeFamilyAst::ZoneCounter(ast),
+        Err(fragment) => ImperativeFamilyAst::Put(PutImperativeAst::Unimplemented {
+            gap: "put_counter_tail",
+            fragment: fragment.to_owned(),
+        }),
+    })
+}
+
+pub(super) fn parse_zone_counter_ast<'a>(
+    text: &'a str,
+    lower: &str,
+    ctx: &mut ParseContext,
+) -> Option<Result<ZoneCounterImperativeAst, &'a str>> {
     if let Some(ast) = parse_destroy_ast(text, lower, ctx) {
-        return Some(ast);
+        return Some(Ok(ast));
     }
     if let Some(ast) = parse_exile_ast(text, lower, ctx) {
-        return Some(ast);
+        return Some(Ok(ast));
     }
     if let Some(ast) = parse_counter_ast(text, lower) {
-        return Some(ast);
+        return Some(Ok(ast));
     }
     if tag::<_, _, OracleError<'_>>("put ").parse(lower).is_ok()
         && nom_primitives::scan_contains(lower, "counter")
@@ -16188,10 +16204,10 @@ pub(super) fn parse_zone_counter_ast(
             _multi_target,
         )) = super::counter::try_parse_reproduce_event_counters(lower, text, ctx)
         {
-            return Some(ZoneCounterImperativeAst::ReproduceEventCounters {
+            return Some(Ok(ZoneCounterImperativeAst::ReproduceEventCounters {
                 target,
                 per_kind_count,
-            });
+            }));
         }
         // CR 122.1 + CR 122.6: "put [a[n]] [additional] counter of that kind on
         // <anaphor>" — add one counter of the kind chosen by a preceding
@@ -16209,11 +16225,11 @@ pub(super) fn parse_zone_counter_ast(
                 target_condition,
             }) = super::counter::try_parse_put_chosen_counter(&after_put.to_ascii_lowercase())
             {
-                return Some(ZoneCounterImperativeAst::PutChosenCounter {
+                return Some(Ok(ZoneCounterImperativeAst::PutChosenCounter {
                     target,
                     count,
                     target_condition,
-                });
+                }));
             }
         }
         // Try move-counters first ("put its counters on ...")
@@ -16229,28 +16245,32 @@ pub(super) fn parse_zone_counter_ast(
             _rem,
         )) = super::counter::try_parse_move_counters(lower, text, ctx)
         {
-            return Some(ZoneCounterImperativeAst::MoveCounters {
+            return Some(Ok(ZoneCounterImperativeAst::MoveCounters {
                 source,
                 counter_type,
                 count,
                 mode,
                 selection,
                 target,
-            });
+            }));
         }
         // CR 122.1: Multi-typed counter list ("put a flying counter, a first
         // strike counter, and a lifelink counter on that creature"). Must run
         // before the single-counter path — `try_parse_put_counter_chain` only
         // returns `Some` when it consumed >=2 entries, so single-counter cases
         // fall through untouched.
-        if let Some((entries, target, _rem, multi_target)) =
+        if let Some((entries, target, remainder, multi_target)) =
             super::counter::try_parse_put_counter_chain(lower, text, ctx)
         {
-            return Some(ZoneCounterImperativeAst::PutCounterList {
+            // CR 608.2c: no instruction may disappear behind a supported counter head.
+            if !terminal_punctuation_only(remainder) {
+                return Some(Err(text));
+            }
+            return Some(Ok(ZoneCounterImperativeAst::PutCounterList {
                 entries,
                 target,
                 multi_target,
-            });
+            }));
         }
         // Then fixed-count put ("put N counter(s) on ...")
         // Detect "each"/"all" to route to PutCounterAll (mass placement without targeting).
@@ -16268,9 +16288,13 @@ pub(super) fn parse_zone_counter_ast(
                     count,
                     target,
                 },
-                _remainder,
+                remainder,
                 multi_target,
             )) => {
+                // CR 608.2c: quantity/target owners must consume every counter suffix.
+                if !terminal_punctuation_only(remainder) {
+                    return Some(Err(text));
+                }
                 // CR 608.2c: A `ParentTarget` placement subject ("each of them")
                 // is an anaphor to a bounded set of chosen objects, not a
                 // battlefield-wide type scan. The `PutCounterAll` resolver
@@ -16283,17 +16307,17 @@ pub(super) fn parse_zone_counter_ast(
                 // `PutCounterAll` path.
                 if is_all && multi_target.is_none() && !matches!(target, TargetFilter::ParentTarget)
                 {
-                    Some(ZoneCounterImperativeAst::PutCounterAll {
+                    Some(Ok(ZoneCounterImperativeAst::PutCounterAll {
                         counter_type,
                         count: rebind_distributive_recipient_count(count, lower),
                         target,
-                    })
+                    }))
                 } else {
-                    Some(ZoneCounterImperativeAst::PutCounter {
+                    Some(Ok(ZoneCounterImperativeAst::PutCounter {
                         counter_type,
                         count,
                         target,
-                    })
+                    }))
                 }
             }
             _ => None,
@@ -16317,7 +16341,9 @@ pub(super) fn parse_zone_counter_ast(
     // through `try_parse_remove_counter`. The combinator returns `None` for every
     // other "remove …" clause, leaving the existing remove path unchanged.
     if let Some(adjustment) = try_parse_choose_counter_adjustment(lower) {
-        return Some(ZoneCounterImperativeAst::ChooseCounterAdjustment { adjustment });
+        return Some(Ok(ZoneCounterImperativeAst::ChooseCounterAdjustment {
+            adjustment,
+        }));
     }
     if let Ok((after_remove, _)) = tag::<_, _, OracleError<'_>>("remove ").parse(lower) {
         let is_counter_remove = nom_primitives::scan_contains(lower, "counter")
@@ -16328,13 +16354,13 @@ pub(super) fn parse_zone_counter_ast(
                     counter_type,
                     count,
                     target,
-                }) => Some(ZoneCounterImperativeAst::RemoveCounter {
+                }) => Some(Ok(ZoneCounterImperativeAst::RemoveCounter {
                     counter_type,
                     count,
                     target,
                     exact_selection: remove_counter_exact_selection_count(lower),
                     multi_target: remove_counter_exact_target_multi_target(lower),
-                }),
+                })),
                 _ => None,
             };
         }
@@ -16352,14 +16378,14 @@ pub(super) fn parse_zone_counter_ast(
             target,
         }) = try_parse_move_counters_from(lower, ctx)
         {
-            return Some(ZoneCounterImperativeAst::MoveCounters {
+            return Some(Ok(ZoneCounterImperativeAst::MoveCounters {
                 source,
                 counter_type,
                 count,
                 mode,
                 selection,
                 target,
-            });
+            }));
         }
     }
     None
@@ -17077,8 +17103,94 @@ fn try_parse_bolster(lower: &str) -> Option<Effect> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{ParitySource, ZoneChoiceChooser};
+    use crate::types::ability::{EffectKind, ParitySource, ZoneChoiceChooser};
     use crate::types::phase::PhaseGroup;
+
+    #[test]
+    fn counter_tail_failure_commits_instead_of_falling_back_to_put() {
+        for text in [
+            "Put a +1/+1 counter on this creature and frobnicate",
+            "Put a flying counter and a vigilance counter on this creature and frobnicate",
+            "Put a +1/+1 counter on this creature and remember that many counters",
+        ] {
+            let result = parse_imperative_family_ast(
+                text,
+                &text.to_lowercase(),
+                &mut ParseContext::default(),
+            );
+            assert!(
+                matches!(result,
+                    Some(ImperativeFamilyAst::Put(PutImperativeAst::Unimplemented { gap: "put_counter_tail", ref fragment }))
+                        if fragment == text
+                ),
+                "{text}: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn complete_fixed_and_list_counters_keep_their_typed_family() {
+        for text in [
+            "put four +1/+1 counters on this creature",
+            "put four +1/+1 counters on this creature.",
+            "put a flying counter and a vigilance counter on this creature",
+            "put a +1/+1 counter on each creature you control",
+            "put a +1/+1 counter on each of up to two target creatures",
+            "put a +1/+1 counter on each of two target creatures",
+            "put +1/+1 counters on this creature equal to its power",
+            "put a +1/+1 counter on this creature for each creature your opponents control",
+            "put X +1/+1 counters on this creature, where X is the number of creatures you control",
+        ] {
+            let result = parse_imperative_family_ast(
+                text,
+                &text.to_lowercase(),
+                &mut ParseContext::default(),
+            );
+            assert!(
+                matches!(result, Some(ImperativeFamilyAst::ZoneCounter(_))),
+                "{text}: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn zone_counter_adapter_preserves_specialized_predecessors_and_other_verbs() {
+        for (text, expected) in [
+            ("destroy target creature", EffectKind::Destroy),
+            ("exile target creature", EffectKind::ChangeZone),
+            ("counter target spell", EffectKind::Counter),
+            (
+                "remove a +1/+1 counter from this creature",
+                EffectKind::RemoveCounter,
+            ),
+            (
+                "move a +1/+1 counter from target creature onto another target creature",
+                EffectKind::MoveCounters,
+            ),
+            (
+                "put its counters on target creature",
+                EffectKind::MoveCounters,
+            ),
+            (
+                "put the same number and kind of counters on this creature",
+                EffectKind::ReproduceEventCounters,
+            ),
+            (
+                "put a counter of that kind on it",
+                EffectKind::PutChosenCounter,
+            ),
+        ] {
+            let result = parse_imperative_family_ast(text, text, &mut ParseContext::default());
+            let Some(ImperativeFamilyAst::ZoneCounter(ast)) = result else {
+                panic!("{text}: {result:?}");
+            };
+            assert_eq!(
+                EffectKind::from(&lower_zone_counter_ast(ast)),
+                expected,
+                "{text}"
+            );
+        }
+    }
 
     #[test]
     fn control_transfer_self_pronoun_preserves_plural_parent_antecedent() {
@@ -18661,7 +18773,8 @@ mod tests {
     fn remove_counter_anaphor_routes_through_dispatch_gate() {
         for input in ["remove all of them", "remove them", "remove those counters"] {
             let lower = input.to_lowercase();
-            let result = parse_zone_counter_ast(input, &lower, &mut ParseContext::default());
+            let result = parse_zone_counter_ast(input, &lower, &mut ParseContext::default())
+                .map(|result| result.expect("complete zone/counter clause"));
             let Some(ZoneCounterImperativeAst::RemoveCounter {
                 counter_type: None,
                 count: QuantityExpr::Fixed { value: -1 },
@@ -18682,7 +18795,8 @@ mod tests {
     fn parse_exile_from_your_hand_preserves_type_phrase_filter() {
         let input = "exile a nonartifact, nonland card from your hand";
         let lower = input.to_lowercase();
-        let result = parse_zone_counter_ast(input, &lower, &mut ParseContext::default());
+        let result = parse_zone_counter_ast(input, &lower, &mut ParseContext::default())
+            .map(|result| result.expect("complete zone/counter clause"));
         let Some(ZoneCounterImperativeAst::Exile {
             origin: Some(Zone::Hand),
             target: TargetFilter::Typed(filter),
@@ -18712,7 +18826,8 @@ mod tests {
     fn parse_exile_all_creatures_and_spacecraft() {
         let input = "exile all creatures and Spacecraft";
         let lower = input.to_lowercase();
-        let result = parse_zone_counter_ast(input, &lower, &mut ParseContext::default());
+        let result = parse_zone_counter_ast(input, &lower, &mut ParseContext::default())
+            .map(|result| result.expect("complete zone/counter clause"));
         let Some(ZoneCounterImperativeAst::Exile {
             origin: None,
             target: TargetFilter::Or { filters },
@@ -18737,7 +18852,8 @@ mod tests {
     fn parse_exile_each_creature_with_mana_value_chosen_quality() {
         let input = "exile each creature with mana value of the chosen quality";
         let lower = input.to_lowercase();
-        let result = parse_zone_counter_ast(input, &lower, &mut ParseContext::default());
+        let result = parse_zone_counter_ast(input, &lower, &mut ParseContext::default())
+            .map(|result| result.expect("complete zone/counter clause"));
         let Some(ZoneCounterImperativeAst::Exile {
             origin: None,
             target: TargetFilter::Typed(filter),
@@ -18763,7 +18879,8 @@ mod tests {
             ("exile a creature card from your hand", TypeFilter::Creature),
         ] {
             let lower = input.to_lowercase();
-            let result = parse_zone_counter_ast(input, &lower, &mut ParseContext::default());
+            let result = parse_zone_counter_ast(input, &lower, &mut ParseContext::default())
+                .map(|result| result.expect("complete zone/counter clause"));
             let Some(ZoneCounterImperativeAst::Exile {
                 origin: Some(Zone::Hand),
                 target: TargetFilter::Typed(filter),
@@ -18792,7 +18909,8 @@ mod tests {
         let input =
             "exile a card from your hand with a number of time counters on it equal to its mana value";
         let lower = input.to_lowercase();
-        let result = parse_zone_counter_ast(input, &lower, &mut ParseContext::default());
+        let result = parse_zone_counter_ast(input, &lower, &mut ParseContext::default())
+            .map(|result| result.expect("complete zone/counter clause"));
         let Some(ZoneCounterImperativeAst::Exile {
             origin: Some(Zone::Hand),
             target: TargetFilter::Typed(filter),
@@ -18831,7 +18949,8 @@ mod tests {
         // which arm produces the AST.
         let input = "exile a card from your hand with flying";
         let lower = input.to_lowercase();
-        let result = parse_zone_counter_ast(input, &lower, &mut ParseContext::default());
+        let result = parse_zone_counter_ast(input, &lower, &mut ParseContext::default())
+            .map(|result| result.expect("complete zone/counter clause"));
         let Some(ZoneCounterImperativeAst::Exile {
             enter_with_counters,
             ..
