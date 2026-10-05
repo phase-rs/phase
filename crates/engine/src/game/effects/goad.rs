@@ -163,7 +163,7 @@ mod tests {
         state.add_transient_continuous_effect_with_bindings(
             target,
             PlayerId(0),
-            Duration::Permanent,
+            Duration::UntilEndOfTurn,
             TargetFilter::SpecificObject { id: target },
             vec![ContinuousModification::AddStaticMode {
                 mode: StaticMode::Goaded,
@@ -191,6 +191,15 @@ mod tests {
         assert_eq!(goaders.len(), 2);
         assert!(goaders.contains(&PlayerId(0)) && goaders.contains(&PlayerId(1)));
         assert_eq!(state.objects[&target].goaded_by.len(), 1);
+
+        crate::game::layers::prune_end_of_turn_effects(&mut state);
+        assert!(state.transient_continuous_effects.is_empty());
+        let goaders = crate::game::combat::goading_players_for_creature_gated(&state, target, false);
+        assert_eq!(goaders.len(), 1);
+        assert!(goaders.contains(&PlayerId(1)));
+        assert!(!goaders.contains(&PlayerId(0)));
+        crate::game::layers::prune_until_next_turn_effects(&mut state, PlayerId(1));
+        assert!(crate::game::combat::goading_players_for_creature_gated(&state, target, false).is_empty());
     }
 
     #[test]
