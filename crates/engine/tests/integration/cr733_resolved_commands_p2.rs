@@ -1161,6 +1161,8 @@ fn settled_compound_and_successive_wave_retirements_replay_exactly() {
 
 #[test]
 fn rootwater_retirement_is_per_recipient_and_only_after_the_last_aura() {
+    use engine::types::ability::TargetRef;
+    use engine::types::keywords::Keyword;
     use engine::types::zones::Zone;
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
@@ -1190,7 +1192,7 @@ fn rootwater_retirement_is_per_recipient_and_only_after_the_last_aura() {
         .add_spell_to_hand_from_oracle(P0, "Holy Strength", false, HOLY_STRENGTH_ORACLE)
         .as_enchantment()
         .with_subtypes(vec!["Aura"])
-        .from_oracle_text(HOLY_STRENGTH_ORACLE)
+        .from_oracle_text_with_keywords(&["enchant"], HOLY_STRENGTH_ORACLE)
         .with_mana_cost(ManaCost::zero())
         .id();
     let mut runner = scenario.build();
@@ -1287,11 +1289,50 @@ fn rootwater_retirement_is_per_recipient_and_only_after_the_last_aura() {
         vec![&effects[1], &install.effect]
     );
     assert_eq!(replay.objects[&recipients[0]].controller, P1);
-    runner
+    let object = &runner.state().objects[&replacement];
+    assert_eq!(object.zone, Zone::Hand);
+    assert_eq!(object.card_types.core_types, vec![CoreType::Enchantment]);
+    assert!(object
+        .card_types
+        .subtypes
+        .iter()
+        .any(|subtype| subtype == "Aura"));
+    assert!(object
+        .keywords
+        .iter()
+        .any(|keyword| matches!(keyword, Keyword::Enchant(_))));
+    let committed = runner
         .cast(replacement)
         .target_object(recipients[0])
+        .commit();
+    assert_eq!(committed.state().objects[&replacement].zone, Zone::Stack);
+    let entry = committed
+        .state()
+        .stack
+        .back()
+        .expect("the Aura must be on the stack");
+    assert_eq!(entry.source_id, replacement);
+    // CR 303.4a: the replacement Aura must commit its actual enchant target.
+    assert_eq!(
+        entry
+            .ability()
+            .expect("the Aura must carry its enchant target")
+            .targets,
+        vec![TargetRef::Object(recipients[0])]
+    );
+    committed
         .resolve()
         .assert_zone(&[replacement], Zone::Battlefield);
+    // CR 608.3c: reenchantment must actually reach the intended recipient.
+    assert_eq!(
+        runner.state().objects[&replacement]
+            .attached_to
+            .and_then(|host| host.as_object()),
+        Some(recipients[0])
+    );
+    assert!(runner.state().objects[&recipients[0]]
+        .attachments
+        .contains(&replacement));
     // CR 611.2b: a new Aura cannot restart A's retired grant; B remains exact.
     assert_eq!(runner.state().objects[&recipients[0]].controller, P1);
     assert_eq!(runner.state().objects[&recipients[1]].controller, P0);

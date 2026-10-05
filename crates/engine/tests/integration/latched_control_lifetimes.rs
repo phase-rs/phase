@@ -6,7 +6,7 @@ use engine::game::effects::attach::attach_to;
 use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::game::game_object::{PhaseOutCause, PhaseStatus};
 use engine::game::layers::flush_layers;
-use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario::{CastOutcome, GameRunner, GameScenario, P0, P1};
 use engine::game::zones::create_object;
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
@@ -14,6 +14,7 @@ use engine::types::ability::{
     StaticCondition, TargetFilter, TargetRef, TypedFilter,
 };
 use engine::types::actions::GameAction;
+use engine::types::card_type::CoreType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{LayersDirty, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
@@ -71,9 +72,55 @@ fn hand_aura(scenario: &mut GameScenario) -> ObjectId {
         .add_spell_to_hand_from_oracle(P0, "Holy Strength", false, HOLY_STRENGTH)
         .as_enchantment()
         .with_subtypes(vec!["Aura"])
-        .from_oracle_text(HOLY_STRENGTH)
+        .from_oracle_text_with_keywords(&["enchant"], HOLY_STRENGTH)
         .with_mana_cost(ManaCost::generic(0))
         .id()
+}
+
+fn cast_aura(runner: &mut GameRunner, aura: ObjectId, recipient: ObjectId) -> CastOutcome {
+    let object = &runner.state().objects[&aura];
+    assert_eq!(object.zone, Zone::Hand);
+    assert_eq!(object.card_types.core_types, vec![CoreType::Enchantment]);
+    assert!(object
+        .card_types
+        .subtypes
+        .iter()
+        .any(|subtype| subtype == "Aura"));
+    assert!(object
+        .keywords
+        .iter()
+        .any(|keyword| matches!(keyword, Keyword::Enchant(_))));
+
+    let committed = runner.cast(aura).target_object(recipient).commit();
+    assert_eq!(committed.state().objects[&aura].zone, Zone::Stack);
+    let entry = committed
+        .state()
+        .stack
+        .back()
+        .expect("the Aura must be on the stack");
+    assert_eq!(entry.source_id, aura);
+    // CR 303.4a: the enchant target must be committed, not merely declared as test intent.
+    assert_eq!(
+        entry
+            .ability()
+            .expect("the Aura must carry its enchant target")
+            .targets,
+        vec![TargetRef::Object(recipient)]
+    );
+
+    let outcome = committed.resolve();
+    outcome.assert_zone(&[aura], Zone::Battlefield);
+    // CR 608.3c: the resolving Aura enters attached to its chosen target.
+    assert_eq!(
+        outcome.state().objects[&aura]
+            .attached_to
+            .and_then(|host| host.as_object()),
+        Some(recipient)
+    );
+    assert!(outcome.state().objects[&recipient]
+        .attachments
+        .contains(&aura));
+    outcome
 }
 
 fn instant(scenario: &mut GameScenario, name: &str, oracle: &str) -> ObjectId {
@@ -278,11 +325,7 @@ fn rootwater_initial_false_does_not_install_emit_or_restart_when_enchanted() {
     )));
     assert_eq!(rootwater_effects(&runner, sources[0]), 0);
 
-    runner
-        .cast(later)
-        .target_object(recipients[0])
-        .resolve()
-        .assert_zone(&[later], Zone::Battlefield);
+    cast_aura(&mut runner, later, recipients[0]).assert_zone(&[later], Zone::Battlefield);
     assert!(runner.state().objects[&recipients[0]]
         .attachments
         .contains(&later));
@@ -334,10 +377,7 @@ fn rootwater_last_aura_loss_is_per_recipient_and_irreversible() {
     assert_eq!(rootwater_effects(&runner, sources[0]), 0);
     assert_eq!(runner.state().objects[&recipients[1]].controller, P0);
     assert_eq!(rootwater_effects(&runner, sources[1]), 1);
-    runner
-        .cast(replacement)
-        .target_object(recipients[0])
-        .resolve()
+    cast_aura(&mut runner, replacement, recipients[0])
         .assert_zone(&[replacement], Zone::Battlefield);
     assert!(runner.state().objects[&recipients[0]]
         .attachments
@@ -538,7 +578,7 @@ fn printed_conditional_static_can_resume_after_reenchantment() {
     let replacement = hand_aura(&mut scenario);
     let removal = instant(&mut scenario, "Disenchant", DISENCHANT);
     let mut runner = scenario.build();
-    runner.cast(first).target_object(osprey).resolve();
+    cast_aura(&mut runner, first, osprey);
     assert!(runner.state().objects[&osprey].has_keyword(&Keyword::Flying));
     runner
         .cast(removal)
@@ -546,7 +586,7 @@ fn printed_conditional_static_can_resume_after_reenchantment() {
         .resolve()
         .assert_zone(&[first], Zone::Graveyard);
     assert!(!runner.state().objects[&osprey].has_keyword(&Keyword::Flying));
-    runner.cast(replacement).target_object(osprey).resolve();
+    cast_aura(&mut runner, replacement, osprey);
     // CR 611.3a: printed conditional statics are live predicates, not latched durations.
     assert!(runner.state().objects[&osprey].has_keyword(&Keyword::Flying));
 }
