@@ -31,9 +31,12 @@
 //!
 //! Pairing rule: the opponent prompt does not name the permanent it is for, so
 //! each row derives the pairing from the iteration's own population — the
-//! i-th answer belongs to the i-th member of the published chain set, read at
-//! the first prompt. That this order equals reveal order is recorded as an
-//! observation, never asserted as a rule.
+//! i-th answer belongs to the i-th member of the repetition's member snapshot,
+//! read at the first prompt. That this order equals reveal order is recorded
+//! as an observation, never asserted as a rule. The reveal publishes every
+//! card it revealed (CR 701.20a, "revealed this way"), misses included; a row
+//! whose library places a miss before the last kept card asserts that the
+//! published set holds that miss and the iteration does not.
 //!
 //! Every library below is checked against the run's reveal-order constraint:
 //! the only creature whose entry raises a choice (True-Name Nemesis) is always
@@ -42,7 +45,9 @@
 //! only asserted trigger (Khârn's) comes from the final apply.
 
 use crate::for_each_of_those_population::{
-    finish_muster_library, goad_tces, stage_muster_library, zone_of, MusterCard, REVEAL_MUSTER,
+    assert_reveal_published_misses, finish_muster_library, goad_tces, iterated_members,
+    population_form, reveal_published_set, stage_muster_library, tracked_set_repeat, zone_of,
+    MusterCard, REVEAL_MUSTER,
 };
 use engine::game::combat::{build_declare_attackers_waiting_for, AttackTarget};
 use engine::game::layers::evaluate_layers;
@@ -246,15 +251,15 @@ fn answer_opponent_prompts(runner: &mut GameRunner, answers: &[PlayerId]) -> Vec
     seen
 }
 
-/// The population the iteration runs over: the published chain tracked set,
-/// read while the resolution is paused on a prompt. The i-th answer goes to
-/// its i-th member (pairing rule).
+/// The population the iteration runs over: the repetition's own member
+/// snapshot, read while the resolution is paused on the first prompt. The i-th
+/// answer goes to its i-th member (pairing rule). Reach-guard: the reveal's
+/// published set (located by content) holds every member.
 fn iterated_population(runner: &GameRunner) -> Vec<ObjectId> {
     let state = runner.state();
-    let id = state
-        .chain_tracked_set_id
-        .expect("reach-guard: the reveal published the chain tracked set");
-    state.tracked_object_sets[&id].clone()
+    let members = iterated_members(state);
+    reveal_published_set(state, &members);
+    members
 }
 
 fn controller(runner: &GameRunner, id: ObjectId) -> PlayerId {
@@ -390,12 +395,6 @@ fn has_gap(def: &AbilityDefinition) -> bool {
     chain_nodes(def).into_iter().any(is_assignment_gap)
 }
 
-fn tracked_set_repeat() -> Option<QuantityExpr> {
-    Some(QuantityExpr::Ref {
-        qty: QuantityRef::TrackedSetSize,
-    })
-}
-
 /// `REVEAL_MUSTER` with its for-each body replaced (labelled synthetic
 /// instrument, not a card).
 fn muster_body(body: &str) -> String {
@@ -436,7 +435,7 @@ fn dack_parses_to_the_assignment_handoff_chain() {
                 target: None,
                 ..
             } if static_abilities.len() == 1
-                && static_abilities[0].affected == Some(TargetFilter::ParentTarget)
+                && static_abilities[0].affected == Some(population_form())
         ),
         "{:?}",
         nodes[2].effect
@@ -665,6 +664,11 @@ fn dack_goad_binds_the_new_controller_for_the_rest_of_the_game() {
     expect_opponent_prompt(&board.runner, 1);
     let population = iterated_population(&board.runner);
     assert_eq!(population.len(), 3, "{population:?}");
+    assert_reveal_published_misses(
+        board.runner.state(),
+        &population,
+        &[board.card("Miss One"), board.card("Miss Two")],
+    );
     answer_opponent_prompts(&mut board.runner, &[P2, P3, P1]);
     let received_by_p1 = population[2];
 
@@ -749,6 +753,11 @@ fn dack_assigns_each_permanent_to_a_different_opponent() {
     let first = expect_opponent_prompt(&board.runner, 1);
     let population = iterated_population(&board.runner);
     assert_eq!(population, vec![a, b, c], "observation: reveal order");
+    assert_reveal_published_misses(
+        board.runner.state(),
+        &population,
+        &[board.card("Miss One"), board.card("Miss Two")],
+    );
     assert_eq!(first.options, option_set(&[P1, P2, P3]));
     all_p0(&board.runner, 1);
     answer(&mut board.runner, P2);
@@ -845,6 +854,11 @@ fn dack_with_true_name_nemesis_revealed_last() {
         vec![a, b, nemesis_id],
         "observation: reveal order"
     );
+    assert_reveal_published_misses(
+        board.runner.state(),
+        &population,
+        &[board.card("Miss One"), board.card("Miss Two")],
+    );
     for (ordinal, pick) in [(1, P2), (2, P3), (3, P1)] {
         expect_opponent_prompt(&board.runner, ordinal);
         for id in [a, b, nemesis_id] {
@@ -894,7 +908,13 @@ fn dack_with_fewer_creatures_than_opponents() {
     let a = board.card("Creature A");
     let b = board.card("Creature B");
     expect_opponent_prompt(&board.runner, 1);
-    assert_eq!(iterated_population(&board.runner), vec![a, b]);
+    let population = iterated_population(&board.runner);
+    assert_eq!(population, vec![a, b]);
+    assert_reveal_published_misses(
+        board.runner.state(),
+        &population,
+        &[board.card("Miss One"), board.card("Miss Two")],
+    );
     let seen = answer_opponent_prompts(&mut board.runner, &[P3, P1]);
     assert_eq!(seen, vec![option_set(&[P1, P2, P3]), option_set(&[P1, P2])]);
     for kept in [a, b] {
@@ -1028,6 +1048,11 @@ fn dack_control_change_trigger_waits_for_the_whole_resolution() {
         Some(&kharn_id),
         "pairing rule: Khârn is member 0"
     );
+    assert_reveal_published_misses(
+        board.runner.state(),
+        &population,
+        &[board.card("Miss One"), board.card("Miss Two")],
+    );
     answer(&mut board.runner, P1);
     for (ordinal, pick) in [(2, P2), (3, P3)] {
         // Reach-guard: two prompts follow Khârn's choice.
@@ -1132,6 +1157,11 @@ fn dack_repetitions_open_no_priority_window_and_hand_off_once() {
     assert!(handoff_resolutions(&cast_events).is_empty());
     expect_opponent_prompt(&board.runner, 1);
     let population = iterated_population(&board.runner);
+    assert_reveal_published_misses(
+        board.runner.state(),
+        &population,
+        &[board.card("Miss One"), board.card("Miss Two")],
+    );
     let stack_len = board.runner.state().stack.len();
     let mut remaining = vec![P1, P2, P3];
     let mut last_events = Vec::new();
@@ -1192,6 +1222,11 @@ fn dack_assignment_survives_a_mid_resolution_round_trip() {
         board.runner.cast(board.dack).resolve();
         expect_opponent_prompt(&board.runner, 1);
         let population = iterated_population(&board.runner);
+        assert_reveal_published_misses(
+            board.runner.state(),
+            &population,
+            &[board.card("Miss One"), board.card("Miss Two")],
+        );
         answer(&mut board.runner, P2);
         expect_opponent_prompt(&board.runner, 2);
 
@@ -1231,4 +1266,115 @@ fn dack_assignment_survives_a_mid_resolution_round_trip() {
             );
         }
     }
+}
+
+/// The objects of the assignment recorded on the frame holding the pending
+/// answer: the parked repeat template while repetitions remain, otherwise the
+/// parked continuation.
+fn holder_assignment_objects(state: &GameState) -> Vec<ObjectId> {
+    let context = match state.active_repeat_for() {
+        Some(repeat) => &repeat.ability.context,
+        None => {
+            &state
+                .active_ability_continuation()
+                .expect("a holder frame is parked")
+                .chain
+                .context
+        }
+    };
+    context
+        .object_player_assignment
+        .iter()
+        .map(|entry| entry.object)
+        .collect()
+}
+
+/// V4.3 (Phase 4 charter hostile row): CR 608.2c + CR 701.20a + CR 110.1 — a
+/// library that interleaves misses with the kept creature cards (miss, A,
+/// land, B, miss, C, D, miss; X = 3 keeps A, B and C). The reveal publishes
+/// every card it revealed, the three misses included ("revealed this way"),
+/// yet "They", "those permanents" and "the permanent for which they were
+/// chosen" name only the kept permanents: no revealed miss is goaded, prompted
+/// for, iterated, recorded in the assignment or handed off; every miss stays in
+/// P0's library under P0. Reach-guard: the published set holds all three
+/// revealed misses, so the narrowing — not the publication — excludes them.
+#[test]
+fn dack_never_goads_prompts_iterates_or_hands_a_revealed_miss() {
+    let library = [
+        MusterCard::Sorcery("Miss One"),
+        MusterCard::Creature("Creature A"),
+        MusterCard::Land("Miss Two"),
+        MusterCard::Creature("Creature B"),
+        MusterCard::Sorcery("Miss Three"),
+        MusterCard::Creature("Creature C"),
+        MusterCard::Creature("Creature D"),
+        MusterCard::Sorcery("Miss Four"),
+    ];
+    let mut board = dack_board(4, &library);
+    let kept = [
+        board.card("Creature A"),
+        board.card("Creature B"),
+        board.card("Creature C"),
+    ];
+    let revealed_misses = [
+        board.card("Miss One"),
+        board.card("Miss Two"),
+        board.card("Miss Three"),
+    ];
+    board.runner.cast(board.dack).resolve();
+
+    expect_opponent_prompt(&board.runner, 1);
+    let population = iterated_population(&board.runner);
+    assert_eq!(population, kept.to_vec(), "observation: reveal order");
+    assert_reveal_published_misses(board.runner.state(), &population, &revealed_misses);
+
+    let picks = [P2, P3, P1];
+    for (index, pick) in picks.into_iter().enumerate() {
+        let ordinal = index + 1;
+        expect_opponent_prompt(&board.runner, ordinal);
+        let recorded = holder_assignment_objects(board.runner.state());
+        assert_eq!(
+            recorded,
+            kept[..index].to_vec(),
+            "prompt {ordinal}: the assignment holds only earlier members"
+        );
+        for miss in revealed_misses {
+            assert_eq!(controller(&board.runner, miss), P0);
+            assert!(
+                goad_tces(board.runner.state(), miss).is_empty(),
+                "prompt {ordinal}: a revealed miss is never goaded"
+            );
+        }
+        answer(&mut board.runner, pick);
+    }
+    assert!(
+        prompt(&board.runner).is_none(),
+        "exactly three opponent prompts, one per kept permanent"
+    );
+
+    for (member, recipient) in kept.iter().zip(picks) {
+        assert_eq!(zone_of(&board.runner, *member), Zone::Battlefield);
+        assert_eq!(
+            controller(&board.runner, *member),
+            recipient,
+            "each kept permanent goes to the opponent chosen for it"
+        );
+        assert_eq!(
+            goad_tces(board.runner.state(), *member),
+            vec![(P0, Duration::Permanent)],
+            "each kept permanent is goaded by P0 for the rest of the game"
+        );
+    }
+    for miss in revealed_misses
+        .into_iter()
+        .chain([board.card("Creature D"), board.card("Miss Four")])
+    {
+        assert!(
+            in_p0_library(&board.runner, miss),
+            "a miss or an unrevealed card stays in P0's library"
+        );
+        assert_eq!(controller(&board.runner, miss), P0);
+        assert!(goad_tces(board.runner.state(), miss).is_empty());
+    }
+    assert!(board.runner.state().resolution_stack.is_empty());
 }

@@ -8836,6 +8836,11 @@ fn quantity_expr_references_tracked_set(qty: &QuantityExpr) -> bool {
             // reference is nested inside the PLAYER filter, not the quantity.
             // Not every `PlayerCount` qualifies, so it must be asked per filter.
             QuantityRef::PlayerCount { filter } => player_filter_references_tracked_set(filter),
+            // CR 608.2c: an object count whose population is the chain's tracked
+            // set ("for each of those creatures" over a reveal's kept
+            // permanents) reads that set exactly as `TrackedSetSize` does, so its
+            // producer must publish it.
+            QuantityRef::ObjectCount { filter } => filter_references_tracked_set(filter),
             _ => false,
         },
         QuantityExpr::Offset { inner, .. }
@@ -9984,6 +9989,16 @@ pub(crate) fn publish_tracked_set(state: &mut GameState, affected_ids: Vec<Objec
         state.tracked_object_sets.insert(set_id, members);
         state.chain_tracked_set_id = Some(set_id);
     }
+}
+
+/// The set the next [`publish_tracked_set`] call writes into: the active chain
+/// set, else the id its else-branch will allocate. Single authority for that
+/// rule (see the ordering argument above), so a caller can name the set an
+/// instruction is about to publish before it resolves.
+pub(crate) fn chain_publication_set_id(state: &GameState) -> TrackedSetId {
+    state
+        .chain_tracked_set_id
+        .unwrap_or(TrackedSetId(state.next_tracked_set_id))
 }
 
 /// CR 608.2c + CR 614.6: Publish the chain tracked set together with the
@@ -14997,6 +15012,132 @@ fn bind_revealed_pile_placement(ability: &mut ResolvedAbility, revealed: &[Objec
     }
 }
 
+/// CR 608.2c + CR 110.1: the members of a reveal's published set that are
+/// permanents — "those creature cards" / "those permanents" after "Put those …
+/// cards onto the battlefield". The reveal publishes every card it revealed
+/// (CR 701.20a, "revealed this way"); the kept cards are exactly the members on
+/// the battlefield, since a permanent is a card on the battlefield.
+///
+/// Single constructor shared by the parser's admitted-producer lowering (with
+/// the `TrackedSetId(0)` sentinel) and the continuation binder
+/// [`bind_reveal_population`] (with the concrete id).
+pub(crate) fn reveal_population_on_battlefield(set: TrackedSetId) -> TargetFilter {
+    TargetFilter::TrackedSetFiltered {
+        id: set,
+        filter: Box::new(TargetFilter::Typed(TypedFilter::default().properties(
+            vec![FilterProp::InZone {
+                zone: Zone::Battlefield,
+            }],
+        ))),
+        caused_by: None,
+    }
+}
+
+/// The recognizer paired with [`reveal_population_on_battlefield`]: the set id
+/// iff `filter` is exactly that constructor's form for some id.
+pub(crate) fn is_reveal_population_on_battlefield(filter: &TargetFilter) -> Option<TrackedSetId> {
+    match filter {
+        TargetFilter::TrackedSetFiltered { id, .. }
+            if *filter == reveal_population_on_battlefield(*id) =>
+        {
+            Some(*id)
+        }
+        _ => None,
+    }
+}
+
+/// CR 608.2c: whether a `repeat_for` iterates a population an earlier
+/// instruction published — the chain's tracked set as a whole
+/// (`TrackedSetSize`), or an object count whose universe is that set ("for
+/// each of those permanents": [`reveal_population_on_battlefield`]).
+///
+/// Single authority for "this repetition iterates a published population",
+/// used by the repeat driver's per-object choice gate (E1′) and its full-chain
+/// exclusion, and by the parser's `clause_records_choice_assignment` mirror.
+pub(crate) fn repeat_iterates_published_population(repeat_for: &QuantityExpr) -> bool {
+    match repeat_for {
+        QuantityExpr::Ref {
+            qty: QuantityRef::TrackedSetSize,
+        } => true,
+        QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        } => matches!(
+            filter,
+            TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }
+        ),
+        _ => false,
+    }
+}
+
+/// CR 608.2c: bind every reveal-population reference in a reveal-until's
+/// continuation to the concrete set the reveal published. Called on the
+/// `RevealUntil` node itself; visits its `sub_ability` / `else_ability`
+/// descendants (the recursion of [`bind_revealed_pile_placement`]) and rewrites
+/// each `repeat_for: ObjectCount` filter and each `GenericEffect` static
+/// `affected` that is the sentinel population form
+/// ([`reveal_population_on_battlefield`]`(TrackedSetId(0))`). Nothing else is
+/// touched. Returns whether any node was rewritten.
+///
+/// Stops at a descendant `RevealUntil`: that later reveal's own dispatch binds
+/// its own continuation to the set it publishes. CR 608.2c — a "those
+/// creatures" written after a second reveal-until names that reveal's
+/// population (the parser's nearest-producer rule, `admitted_population_producer`),
+/// not the first one's. With no nested child resolving in between, the second
+/// reveal extends the first one's chain set, so its population is that union
+/// (the pre-existing chain-unification residual).
+fn bind_reveal_population(ability: &mut ResolvedAbility, set: TrackedSetId) -> bool {
+    fn bind_node(node: &mut ResolvedAbility, set: TrackedSetId) -> bool {
+        let bind_filter = |filter: &mut TargetFilter| {
+            if is_reveal_population_on_battlefield(filter) == Some(TrackedSetId(0)) {
+                *filter = reveal_population_on_battlefield(set);
+                true
+            } else {
+                false
+            }
+        };
+        let mut rewrote = false;
+        if let Some(QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        }) = node.repeat_for.as_mut()
+        {
+            rewrote |= bind_filter(filter);
+        }
+        if let Effect::GenericEffect {
+            static_abilities, ..
+        } = &mut node.effect
+        {
+            for affected in static_abilities
+                .iter_mut()
+                .filter_map(|grant| grant.affected.as_mut())
+            {
+                rewrote |= bind_filter(affected);
+            }
+        }
+        rewrote
+    }
+    fn visit(node: &mut ResolvedAbility, set: TrackedSetId) -> bool {
+        if matches!(node.effect, Effect::RevealUntil { .. }) {
+            return false;
+        }
+        let mut rewrote = bind_node(node, set);
+        if let Some(sub) = node.sub_ability.as_deref_mut() {
+            rewrote |= visit(sub, set);
+        }
+        if let Some(else_ability) = node.else_ability.as_deref_mut() {
+            rewrote |= visit(else_ability, set);
+        }
+        rewrote
+    }
+    let mut rewrote = false;
+    if let Some(sub) = ability.sub_ability.as_deref_mut() {
+        rewrote |= visit(sub, set);
+    }
+    if let Some(else_ability) = ability.else_ability.as_deref_mut() {
+        rewrote |= visit(else_ability, set);
+    }
+    rewrote
+}
+
 /// The per-resolution state `resolve_ability_chain` clears before a top-level
 /// chain's first instruction.
 fn reset_top_level_resolution_state(state: &mut GameState) {
@@ -16773,6 +16914,11 @@ fn resolve_chain_body(
 
     // CR 603.7: Snapshot event count so we can detect objects moved by this effect.
     let events_before = events.len();
+    // CR 608.2c: the set a reveal-until is about to publish its revealed cards
+    // into, named before it resolves (see the `reveal_population_owned` binding
+    // below).
+    let reveal_population_set = matches!(ability.effect, Effect::RevealUntil { .. })
+        .then(|| chain_publication_set_id(state));
     let mut immediate_effect_result = None;
     // CR 610.3b + CR 118.12: per-call verdicts for this node's bounded zone
     // move. Each `resolve_effect` call (one per repeat iteration) is judged on
@@ -16831,16 +16977,19 @@ fn resolve_chain_body(
             // CR 608.2c + CR 608.2d (E1′): a per-object player choice over a
             // published population ("For each of those permanents, choose a
             // different opponent") snapshots the same members, so each
-            // repetition's answer is recorded for its own member.
-            let per_object = matches!(
-                ability.repeat_for,
-                Some(QuantityExpr::Ref {
-                    qty: QuantityRef::TrackedSetSize,
-                })
-            ) && repeats_per_object_player_choice(
-                &effective.effect,
-                effective.sub_ability.as_deref(),
-            );
+            // repetition's answer is recorded for its own member. Both
+            // population forms qualify: the whole tracked set
+            // (`TrackedSetSize`, whose members come from the chain set below)
+            // and an object count over it (the reveal's kept permanents, whose
+            // members come from the `ObjectCount` snapshot).
+            let per_object = ability
+                .repeat_for
+                .as_ref()
+                .is_some_and(repeat_iterates_published_population)
+                && repeats_per_object_player_choice(
+                    &effective.effect,
+                    effective.sub_ability.as_deref(),
+                );
             let iter_tracked_members: Vec<crate::types::identifiers::ObjectId> =
                 match &ability.repeat_for {
                     Some(QuantityExpr::Ref {
@@ -16851,7 +17000,7 @@ fn resolve_chain_body(
                         .unwrap_or_default(),
                     Some(QuantityExpr::Ref {
                         qty: QuantityRef::ObjectCount { filter },
-                    }) if effect_iterates_over_parent_target(&effective.effect) => {
+                    }) if effect_iterates_over_parent_target(&effective.effect) || per_object => {
                         member_driven = true;
                         // Same resolver as `QuantityRef::ObjectCount`'s count, on
                         // the same `effective` ability, so members and count match
@@ -16970,9 +17119,22 @@ fn resolve_chain_body(
             // printed as its own sentence ("…investigate X times. Return the
             // exiled cards…" — Disorder in the Court) and runs exactly once AFTER
             // the loop — it falls through to the generic sub tail below.
+            // CR 608.2c: an iteration over a PUBLISHED population ("For each of
+            // those creatures, put a +1/+1 counter on that creature. You gain 1
+            // life.") is the same instruction boundary: its body names the
+            // member within its own sentence, and a following sentence is a
+            // separate instruction. The member-driven full-chain heuristic is for
+            // battlefield-query loops (Caves of Chaos Adventurer), so a published
+            // population keeps the plain repeat's link-driven semantics.
+            let iterates_published_population = ability
+                .repeat_for
+                .as_ref()
+                .is_some_and(repeat_iterates_published_population);
             let repeated_full_chain = ability.repeat_for.is_some()
                 && (effective.sub_ability.as_deref().is_some_and(|sub| {
-                    member_driven || kind_driven || sub.sub_link == SubAbilityLink::ContinuationStep
+                    (member_driven && !iterates_published_population)
+                        || kind_driven
+                        || sub.sub_link == SubAbilityLink::ContinuationStep
                 })
                     // CR 118.12a: a per-member/per-kind unless payment must run
                     // through resolve_ability_chain so its individual bound
@@ -17666,6 +17828,39 @@ fn resolve_chain_body(
         &revealed_pile_owned
     } else {
         ability
+    };
+
+    // CR 608.2c + CR 614.12a + CR 614.1c: the outer instruction's later
+    // anaphors over a reveal's kept permanents ("They're goaded", "For each of
+    // those permanents") name the population THIS reveal published. An
+    // as-enters replacement's own chain, resolved during the kept delivery,
+    // starts its own top-level scope (`reset_top_level_resolution_state` clears
+    // the chain set) and must not redirect them, so bind them to the concrete set
+    // now, on the continuation itself — the same idiom as the pile binding above.
+    let reveal_population_owned;
+    let ability = match reveal_population_set {
+        Some(set) if ability.sub_ability.is_some() => {
+            let mut owned = ability.clone();
+            let rewrote = bind_reveal_population(&mut owned, set);
+            debug_assert!(
+                !rewrote
+                    || events[events_before..]
+                        .iter()
+                        .find_map(|event| match event {
+                            GameEvent::CardsRevealed { card_ids, .. } => Some(card_ids),
+                            _ => None,
+                        })
+                        .is_some_and(|revealed| {
+                            state.tracked_object_sets.get(&set).is_some_and(|members| {
+                                revealed.iter().all(|id| members.contains(id))
+                            })
+                        }),
+                "CR 608.2c: the bound set {set:?} must hold every card the reveal revealed",
+            );
+            reveal_population_owned = owned;
+            &reveal_population_owned
+        }
+        _ => ability,
     };
 
     // CR 608.2c + CR 613.1: A chained sub-ability is the next instruction in the
@@ -21205,6 +21400,314 @@ mod tests {
                     TargetFilter::SpecificObject { id: ObjectId(8) },
                 ]
             }
+        );
+    }
+
+    /// A `RevealUntil` keeping its creature hits onto the battlefield.
+    fn reveal_until_onto_battlefield() -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::RevealUntil {
+                player: TargetFilter::Controller,
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+                count: QuantityExpr::Fixed { value: 2 },
+                matched_disposition: RevealUntilDisposition::KeepEach,
+                kept_destination: Zone::Battlefield,
+                rest_destination: Zone::Library,
+                rest_order: crate::types::ability::DigRestOrder::Preserve,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                kept_optional_to: None,
+                enters_under: None,
+                kept_destination_if: None,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        )
+    }
+
+    /// "For each of those creatures, put a +1/+1 counter on that creature." over
+    /// the population form of `set`.
+    fn population_for_each(set: TrackedSetId) -> ResolvedAbility {
+        let mut node = ResolvedAbility::new(
+            Effect::PutCounter {
+                counter_type: crate::types::counter::CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::ParentTarget,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        node.repeat_for = Some(QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: reveal_population_on_battlefield(set),
+            },
+        });
+        node
+    }
+
+    /// "They gain haste until end of turn." over `affected`.
+    fn grant_over(affected: TargetFilter) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![StaticDefinition::continuous()
+                    .affected(affected)
+                    .modifications(vec![ContinuousModification::AddKeyword {
+                        keyword: crate::types::keywords::Keyword::Haste,
+                    }])],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: None,
+                end_cost: None,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        )
+    }
+
+    fn shuffle_node() -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::Shuffle {
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        )
+    }
+
+    /// V4.10: CR 608.2c — the single authority for "this repetition iterates a
+    /// published population" accepts both population forms and nothing else; an
+    /// object count over a typed battlefield query (Scrambleverse / Ashuza's
+    /// Breath / Lydari Druid class) and a filtered set size are not iterations
+    /// over a published population.
+    #[test]
+    fn repeat_iterates_published_population_truth_table() {
+        let object_count = |filter| QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        };
+        assert!(repeat_iterates_published_population(&QuantityExpr::Ref {
+            qty: QuantityRef::TrackedSetSize,
+        }));
+        assert!(repeat_iterates_published_population(&object_count(
+            TargetFilter::TrackedSet {
+                id: TrackedSetId(0)
+            }
+        )));
+        assert!(repeat_iterates_published_population(&object_count(
+            reveal_population_on_battlefield(TrackedSetId(0))
+        )));
+        assert!(!repeat_iterates_published_population(&object_count(
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))
+        )));
+        assert!(!repeat_iterates_published_population(&QuantityExpr::Ref {
+            qty: QuantityRef::FilteredTrackedSetSize {
+                filter: Box::new(TargetFilter::Typed(TypedFilter::creature())),
+                caused_by: None,
+            },
+        }));
+        assert!(!repeat_iterates_published_population(
+            &QuantityExpr::Fixed { value: 2 }
+        ));
+    }
+
+    /// V4.10 (S2d): CR 608.2c — an object count over the reveal's kept
+    /// permanents reads the chain's tracked set, so it is a tracked-set consumer
+    /// (its producer must publish), exactly as `TrackedSetSize` is. Paired
+    /// negative: an object count over a battlefield query reads no tracked set.
+    #[test]
+    fn object_count_over_the_reveal_population_references_tracked_set() {
+        assert!(quantity_expr_references_tracked_set(&QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: reveal_population_on_battlefield(TrackedSetId(0)),
+            },
+        }));
+        assert!(!quantity_expr_references_tracked_set(&QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            },
+        }));
+    }
+
+    /// V4.13: CR 608.2c — the reveal-population binder rewrites only the
+    /// sentinel population form (repeat count and grant `affected`) in the
+    /// reveal's continuation, leaves every other filter untouched (including a
+    /// different narrowing over the same sentinel), and reports whether it
+    /// rewrote anything.
+    #[test]
+    fn bind_reveal_population_rewrites_only_the_population_form() {
+        let nonland = TargetFilter::TrackedSetFiltered {
+            id: TrackedSetId(0),
+            filter: Box::new(TargetFilter::Typed(TypedFilter::new(TypeFilter::Non(
+                Box::new(TypeFilter::Land),
+            )))),
+            caused_by: None,
+        };
+        let mut chain = reveal_until_onto_battlefield();
+        let mut grant = grant_over(reveal_population_on_battlefield(TrackedSetId(0)));
+        let mut other_grant = grant_over(nonland.clone());
+        other_grant.sub_ability = Some(Box::new(population_for_each(TrackedSetId(0))));
+        grant.sub_ability = Some(Box::new(other_grant));
+        let mut shuffle = shuffle_node();
+        shuffle.sub_ability = Some(Box::new(grant));
+        chain.sub_ability = Some(Box::new(shuffle));
+
+        assert!(bind_reveal_population(&mut chain, TrackedSetId(5)));
+
+        let shuffle = chain.sub_ability.as_deref().expect("shuffle");
+        assert!(matches!(shuffle.effect, Effect::Shuffle { .. }));
+        let grant = shuffle.sub_ability.as_deref().expect("grant");
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = &grant.effect
+        else {
+            panic!("expected the grant");
+        };
+        assert_eq!(
+            static_abilities[0].affected,
+            Some(reveal_population_on_battlefield(TrackedSetId(5)))
+        );
+        let other_grant = grant.sub_ability.as_deref().expect("other grant");
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = &other_grant.effect
+        else {
+            panic!("expected the other grant");
+        };
+        assert_eq!(
+            static_abilities[0].affected,
+            Some(nonland),
+            "a different narrowing keeps its sentinel"
+        );
+        let for_each = other_grant.sub_ability.as_deref().expect("for-each");
+        assert_eq!(
+            for_each.repeat_for,
+            population_for_each(TrackedSetId(5)).repeat_for
+        );
+
+        // Nothing to bind: the binder reports no rewrite.
+        let mut plain = reveal_until_onto_battlefield();
+        plain.sub_ability = Some(Box::new(shuffle_node()));
+        assert!(!bind_reveal_population(&mut plain, TrackedSetId(5)));
+    }
+
+    /// V4.13 (B3): CR 608.2c — the binder stops at a later `RevealUntil` in the
+    /// same continuation: a "those creatures" after the second reveal names
+    /// that reveal's population, which its own dispatch binds. Binding the first
+    /// reveal leaves the second continuation's for-each at the sentinel and
+    /// reports no rewrite; binding the second reveal then rewrites it.
+    #[test]
+    fn bind_reveal_population_stops_at_a_later_reveal() {
+        let mut second = reveal_until_onto_battlefield();
+        second.sub_ability = Some(Box::new(population_for_each(TrackedSetId(0))));
+        let mut shuffle = shuffle_node();
+        shuffle.sub_ability = Some(Box::new(second));
+        let mut first = reveal_until_onto_battlefield();
+        first.sub_ability = Some(Box::new(shuffle));
+
+        assert!(!bind_reveal_population(&mut first, TrackedSetId(5)));
+        let second = first
+            .sub_ability
+            .as_deref_mut()
+            .and_then(|shuffle| shuffle.sub_ability.as_deref_mut())
+            .expect("the second reveal");
+        assert_eq!(
+            second.sub_ability.as_deref().expect("for-each").repeat_for,
+            population_for_each(TrackedSetId(0)).repeat_for,
+            "the first reveal's binding does not reach past the second reveal"
+        );
+
+        // Reach-guard: the second reveal's own binding rewrites its for-each.
+        assert!(bind_reveal_population(second, TrackedSetId(7)));
+        assert_eq!(
+            second.sub_ability.as_deref().expect("for-each").repeat_for,
+            population_for_each(TrackedSetId(7)).repeat_for
+        );
+    }
+
+    /// V4.13: `chain_publication_set_id` names the set the next
+    /// `publish_tracked_set` writes into — the active chain set when present,
+    /// else the id the else-branch allocates.
+    #[test]
+    fn chain_publication_set_id_names_the_publish_target() {
+        let mut state = GameState::new_two_player(42);
+        state.chain_tracked_set_id = None;
+        let predicted = chain_publication_set_id(&state);
+        publish_tracked_set(&mut state, vec![ObjectId(3)]);
+        assert_eq!(state.chain_tracked_set_id, Some(predicted));
+        assert_eq!(state.tracked_object_sets[&predicted], vec![ObjectId(3)]);
+
+        let predicted = chain_publication_set_id(&state);
+        assert_eq!(Some(predicted), state.chain_tracked_set_id);
+        publish_tracked_set(&mut state, vec![ObjectId(4)]);
+        assert_eq!(state.chain_tracked_set_id, Some(predicted));
+        assert_eq!(
+            state.tracked_object_sets[&predicted],
+            vec![ObjectId(3), ObjectId(4)]
+        );
+    }
+
+    /// V4.18: CR 608.2c + CR 110.1 — stamped member candidates (a forwarded
+    /// target list that may hold every revealed card) are re-narrowed by the
+    /// population form: a revealed miss still in the library is excluded by the
+    /// zone leaf and a battlefield permanent outside the set by set membership,
+    /// in candidate order. Reach-guard: the set-universe member source agrees.
+    #[test]
+    fn population_form_narrows_stamped_revealed_candidates() {
+        let mut state = GameState::new_two_player(42);
+        let miss = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Miss".to_string(),
+            Zone::Library,
+        );
+        let a = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Creature A".to_string(),
+            Zone::Battlefield,
+        );
+        let b = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Creature B".to_string(),
+            Zone::Battlefield,
+        );
+        let c = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Creature C".to_string(),
+            Zone::Battlefield,
+        );
+        let set = TrackedSetId(9);
+        state.tracked_object_sets.insert(set, vec![miss, a, b]);
+        let filter = reveal_population_on_battlefield(set);
+        let ability = population_for_each(set);
+        let ctx = filter::FilterContext::from_ability(&ability);
+
+        assert_eq!(
+            crate::game::quantity::object_count_matching_candidate_ids(
+                &state,
+                vec![miss, a, c, b],
+                &filter,
+                &ctx,
+                ability.source_id,
+            ),
+            vec![a, b]
+        );
+        assert_eq!(
+            crate::game::quantity::object_count_matching_ids(
+                &state,
+                &filter,
+                &ctx,
+                ability.source_id
+            ),
+            vec![a, b]
         );
     }
 

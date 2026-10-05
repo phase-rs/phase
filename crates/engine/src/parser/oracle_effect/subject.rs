@@ -7275,7 +7275,10 @@ fn extract_pump_modifiers(
 /// The plural copula ("they're goaded <duration>" / "they are goaded
 /// <duration>") is the same state assignment over every member of the anaphor's
 /// population: it lowers to the `Goaded` graft over `ParentTarget`, and only
-/// with a stated duration.
+/// with a stated duration. After an admitted population producer, the chain
+/// parser's grant-narrowing hook (`parse_effect_chain_ir_body`) lowers that
+/// `ParentTarget` to the producer's population form (a reveal-until's kept
+/// permanents).
 ///
 /// Covers: Jon Irenicus, Shattered One ("it's goaded for the rest of the game"),
 /// Vislor Turlough ("it's goaded for as long as they control it"), the

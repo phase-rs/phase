@@ -23,7 +23,8 @@
 //! existing recipient form resolves as before.
 
 use crate::for_each_of_those_population::{
-    finish_muster_library, stage_muster_library, MusterCard,
+    assert_reveal_published_misses, finish_muster_library, iterated_members, population_form,
+    reveal_published_set, stage_muster_library, MusterCard,
 };
 use engine::game::players::neighbor;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
@@ -136,7 +137,7 @@ fn handoff_effect() -> Effect {
 /// charter A3.13 — the lowering is Phase 3c's). The link stays the parsed
 /// sequential sibling Phase 3a established, never a `ContinuationStep`
 /// re-link into the repetition. Reach-guard: that instruction is the parsed
-/// `GainLife` sequential sibling of the `TrackedSetSize` repetition.
+/// `GainLife` sequential sibling of the repetition over the kept permanents.
 fn handoff_definition(count: &str) -> AbilityDefinition {
     let oracle = i_d(count);
     let mut abilities = parse_oracle_text(
@@ -153,7 +154,9 @@ fn handoff_definition(count: &str) -> AbilityDefinition {
     loop {
         if cursor.repeat_for
             == Some(QuantityExpr::Ref {
-                qty: QuantityRef::TrackedSetSize,
+                qty: QuantityRef::ObjectCount {
+                    filter: population_form(),
+                },
             })
         {
             break;
@@ -161,7 +164,7 @@ fn handoff_definition(count: &str) -> AbilityDefinition {
         cursor = cursor
             .sub_ability
             .as_deref_mut()
-            .unwrap_or_else(|| panic!("{oracle}: no TrackedSetSize repetition"));
+            .unwrap_or_else(|| panic!("{oracle}: no repetition over the kept permanents"));
     }
     assert!(
         matches!(
@@ -255,18 +258,26 @@ fn answer(runner: &mut GameRunner, player: PlayerId) -> ActionResult {
 }
 
 /// The population the repetition iterates, in iteration order (read once, at
-/// the first per-object prompt).
+/// the first per-object prompt): the repetition's member snapshot.
+/// Reach-guard: the reveal's published set (located by content) holds every
+/// member.
 fn members(runner: &GameRunner) -> Vec<ObjectId> {
     let state = runner.state();
-    let id = state
-        .chain_tracked_set_id
-        .expect("the reveal published its kept set");
-    state.tracked_object_sets[&id].clone()
+    let members = iterated_members(state);
+    reveal_published_set(state, &members);
+    members
 }
 
 /// Reach-guard: the iterated population is exactly the `kept` cards, every one
-/// on the battlefield.
+/// on the battlefield. Every library here stages Miss One and Miss Two before
+/// its last kept creature card, so the reveal's published set holds both
+/// (CR 608.2c + CR 701.20a) while the repetition iterates neither.
 fn assert_population(board: &HandoffBoard, population: &[ObjectId], kept: &[&str]) {
+    assert_reveal_published_misses(
+        board.runner.state(),
+        population,
+        &[board.card("Miss One"), board.card("Miss Two")],
+    );
     let mut expected: Vec<ObjectId> = kept.iter().map(|name| board.card(name)).collect();
     expected.sort();
     let mut actual = population.to_vec();

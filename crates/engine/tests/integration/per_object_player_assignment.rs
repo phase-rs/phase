@@ -23,7 +23,10 @@
 //! after the last choice. With more creatures than opponents, a repetition
 //! with no eligible opponent does nothing.
 
-use crate::for_each_of_those_population::{muster_board, MusterBoard, MusterCard};
+use crate::for_each_of_those_population::{
+    assert_reveal_published_misses, iterated_members, muster_board, population_form,
+    reveal_published_set, MusterBoard, MusterCard,
+};
 use engine::game::scenario::{GameRunner, P0};
 use engine::parser::parse_oracle_text;
 use engine::types::ability::{
@@ -135,7 +138,8 @@ fn lowered(oracle: &str) -> Vec<AbilityDefinition> {
 }
 
 /// Parse reach-guard: the instrument's repeated node is
-/// `Choose{Opponent{DistinctFromPriorChoices}}` repeated over the tracked set,
+/// `Choose{Opponent{DistinctFromPriorChoices}}` repeated over the kept
+/// permanents (the population form),
 /// its sub (when `following`) a sequential sibling, and nothing is
 /// unimplemented.
 fn assert_per_object_shape(oracle: &str, following: bool) {
@@ -158,7 +162,9 @@ fn assert_per_object_shape(oracle: &str, following: bool) {
     assert_eq!(
         node.repeat_for,
         Some(QuantityExpr::Ref {
-            qty: QuantityRef::TrackedSetSize
+            qty: QuantityRef::ObjectCount {
+                filter: population_form(),
+            }
         }),
         "{oracle}"
     );
@@ -268,13 +274,21 @@ fn expect_plain_prompt(runner: &GameRunner, ordinal: usize) {
 }
 
 /// The population the repetition iterates, in iteration order (read once,
-/// at the first per-object prompt).
+/// at the first per-object prompt): the repetition's member snapshot.
+/// Reach-guard: the reveal's published set (located by content) holds every
+/// member.
 fn members(runner: &GameRunner) -> Vec<ObjectId> {
     let state = runner.state();
-    let id = state
-        .chain_tracked_set_id
-        .expect("the reveal published its kept set");
-    state.tracked_object_sets[&id].clone()
+    let members = iterated_members(state);
+    reveal_published_set(state, &members);
+    members
+}
+
+/// CR 608.2c + CR 701.20a: the staged `misses` revealed before the last kept
+/// creature card are in the reveal's published set, and not iterated.
+fn assert_misses_published(board: &MusterBoard, population: &[ObjectId], misses: &[&str]) {
+    let misses: Vec<ObjectId> = misses.iter().map(|name| board.card(name)).collect();
+    assert_reveal_published_misses(board.runner.state(), population, &misses);
 }
 
 /// The assignment on the frame holding the pending answer: the parked repeat
@@ -339,6 +353,7 @@ fn per_object_answers_are_recorded_for_their_own_members() {
     );
     let m = members(&board.runner);
     assert_population(&board, &m, &["Creature A", "Creature B", "Creature C"]);
+    assert_misses_published(&board, &m, &["Miss One", "Miss Two"]);
     for id in &m {
         assert!(
             board.runner.state().objects[id].has_keyword(&Keyword::Haste),
@@ -403,6 +418,7 @@ fn following_instruction_receives_every_members_answer() {
     board.runner.cast(board.spell).resolve();
     expect_per_object_prompt(&board.runner, 1);
     let m = members(&board.runner);
+    assert_misses_published(&board, &m, &["Miss One", "Miss Two"]);
     for (ordinal, pick) in [(1, P2), (2, P3), (3, P1)] {
         expect_per_object_prompt(&board.runner, ordinal);
         answer(&mut board.runner, pick);
@@ -495,6 +511,7 @@ fn single_member_repetition_records_and_runs_the_following_instructions_once() {
     );
     let m = members(&board.runner);
     assert_population(&board, &m, &["Creature A"]);
+    assert_misses_published(&board, &m, &["Miss One"]);
     answer(&mut board.runner, P3);
 
     expect_plain_prompt(&board.runner, 1);
@@ -539,6 +556,7 @@ fn foreign_and_plain_answers_are_recorded_for_no_member() {
         &m,
         &["Creature A", "Creature B", "True-Name Nemesis"],
     );
+    assert_misses_published(&board, &m, &["Miss One", "Miss Two"]);
     for (ordinal, pick) in [(1, P2), (2, P3), (3, P1)] {
         expect_per_object_prompt(&board.runner, ordinal);
         answer(&mut board.runner, pick);
@@ -584,6 +602,7 @@ fn impossible_final_repetition_records_nothing_and_runs_the_following_instructio
         &m,
         &["Creature A", "Creature B", "Creature C", "Creature D"],
     );
+    assert_misses_published(&board, &m, &["Miss One", "Miss Two"]);
     answer(&mut board.runner, P2);
     assert_eq!(
         expect_per_object_prompt(&board.runner, 2),
@@ -621,6 +640,7 @@ fn assignment_survives_a_mid_resolution_serde_round_trip() {
         board.runner.cast(board.spell).resolve();
         expect_per_object_prompt(&board.runner, 1);
         let m = members(&board.runner);
+        assert_misses_published(&board, &m, &["Miss One", "Miss Two"]);
         answer(&mut board.runner, P2);
         expect_per_object_prompt(&board.runner, 2);
 

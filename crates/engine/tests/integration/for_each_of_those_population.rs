@@ -22,8 +22,9 @@
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::parse_oracle_text;
 use engine::types::ability::{
-    AbilityDefinition, ChoiceType, ContinuousModification, Duration, Effect,
+    AbilityDefinition, ChoiceType, ContinuousModification, Duration, Effect, FilterProp,
     PlayerChoiceDistinctness, QuantityExpr, QuantityRef, RevealUntilDisposition, TargetFilter,
+    TypedFilter,
 };
 use engine::types::card_type::{CoreType, Supertype};
 use engine::types::counter::CounterType;
@@ -267,6 +268,76 @@ pub(crate) fn zone_of(runner: &GameRunner, id: ObjectId) -> Zone {
     runner.state().objects.get(&id).expect("object exists").zone
 }
 
+/// The members a paused per-object repetition iterates, in iteration order:
+/// the repeat driver's member snapshot while further repetitions are parked,
+/// otherwise the single member bound to the pending answer on the parked
+/// continuation. Read at the first per-object prompt. Panics if neither is
+/// present (reach-guard: the resolution is paused inside the repetition).
+pub(crate) fn iterated_members(state: &GameState) -> Vec<ObjectId> {
+    if let Some(repeat) = state.active_repeat_for() {
+        assert!(
+            !repeat.tracked_members.is_empty(),
+            "reach-guard: the parked repetition carries its member snapshot"
+        );
+        return repeat.tracked_members.clone();
+    }
+    let member = state
+        .active_ability_continuation()
+        .and_then(|pending| pending.chain.context.pending_choice_member)
+        .expect("reach-guard: a per-object answer is pending for a bound member");
+    vec![member]
+}
+
+/// The set the reveal published (CR 608.2c + CR 701.20a, "revealed this
+/// way"), located by content: the highest-id tracked set holding every one of
+/// `members`. Not the chain's current set — a nested as-enters child's
+/// top-level reset can leave the outer chain bound to a later, empty set.
+/// Panics if no set holds them (reach-guard: the reveal published its cards).
+pub(crate) fn reveal_published_set(
+    state: &GameState,
+    members: &[ObjectId],
+) -> (TrackedSetId, Vec<ObjectId>) {
+    assert!(!members.is_empty(), "reach-guard: a non-empty population");
+    state
+        .tracked_object_sets
+        .iter()
+        .filter(|(_, set)| members.iter().all(|id| set.contains(id)))
+        .max_by_key(|(id, _)| id.0)
+        .map(|(id, set)| (*id, set.clone()))
+        .unwrap_or_else(|| {
+            panic!(
+                "reach-guard: some published set holds the population {members:?}: {:?}",
+                state.tracked_object_sets
+            )
+        })
+}
+
+/// CR 608.2c + CR 701.20a: the reveal's published set holds the revealed
+/// misses as well as the kept cards — so it is the narrowing, not the
+/// publication, that keeps a miss out of "those permanents". The set is
+/// located by content over members and misses together: only the reveal
+/// publishes a library miss, while a later grant over the kept permanents may
+/// publish them alone into a later set.
+pub(crate) fn assert_reveal_published_misses(
+    state: &GameState,
+    members: &[ObjectId],
+    misses: &[ObjectId],
+) {
+    assert!(!misses.is_empty(), "reach-guard: staged misses to check");
+    for miss in misses {
+        assert!(
+            !members.contains(miss),
+            "the revealed miss {miss:?} is not iterated: {members:?}"
+        );
+    }
+    let revealed: Vec<ObjectId> = members.iter().chain(misses).copied().collect();
+    let (id, set) = reveal_published_set(state, &revealed);
+    assert!(
+        members.iter().all(|member| set.contains(member)),
+        "the reveal's published set {id:?} = {set:?} holds every member {members:?}"
+    );
+}
+
 pub(crate) fn has_haste(runner: &GameRunner, id: ObjectId) -> bool {
     runner
         .state()
@@ -309,10 +380,45 @@ fn chain_nodes(def: &AbilityDefinition) -> Vec<&AbilityDefinition> {
     nodes
 }
 
-fn tracked_set_repeat() -> Option<QuantityExpr> {
+/// CR 608.2c + CR 110.1: the lowered population of an admitted reveal-until —
+/// the members of the reveal's published set (`TrackedSetId(0)`, the chain
+/// sentinel) that are permanents.
+pub(crate) fn population_form() -> TargetFilter {
+    TargetFilter::TrackedSetFiltered {
+        id: TrackedSetId(0),
+        filter: Box::new(TargetFilter::Typed(TypedFilter::default().properties(
+            vec![FilterProp::InZone {
+                zone: Zone::Battlefield,
+            }],
+        ))),
+        caused_by: None,
+    }
+}
+
+/// The repeat count of "for each of those <noun>," over that population.
+pub(crate) fn tracked_set_repeat() -> Option<QuantityExpr> {
     Some(QuantityExpr::Ref {
-        qty: QuantityRef::TrackedSetSize,
+        qty: QuantityRef::ObjectCount {
+            filter: population_form(),
+        },
     })
+}
+
+/// Whether `def` repeats over a published population in either form: the
+/// whole tracked set, or an object count over it.
+fn repeats_over_a_tracked_set(def: &AbilityDefinition) -> bool {
+    match &def.repeat_for {
+        Some(QuantityExpr::Ref {
+            qty: QuantityRef::TrackedSetSize,
+        }) => true,
+        Some(QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        }) => matches!(
+            filter,
+            TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }
+        ),
+        _ => false,
+    }
 }
 
 fn has_unimplemented(def: &AbilityDefinition) -> bool {
@@ -338,7 +444,9 @@ fn with_intervening(sentence: &str) -> String {
 }
 
 /// V2.1a's admitted shape: reveal-until kept onto the battlefield, a shuffle,
-/// the anaphoric grant, then the body repeated over the tracked set.
+/// the anaphoric grant over the reveal's kept permanents, then the body
+/// repeated over those permanents (the population form, not the raw published
+/// set, which also holds the revealed misses).
 fn assert_admitted_shape(oracle: &str) {
     let abilities = lowered(oracle);
     assert_eq!(abilities.len(), 1, "{oracle}");
@@ -358,7 +466,18 @@ fn assert_admitted_shape(oracle: &str) {
     );
     // Reach-guard: the walk passed real transparent instructions.
     assert!(matches!(&*nodes[1].effect, Effect::Shuffle { .. }));
-    assert!(matches!(&*nodes[2].effect, Effect::GenericEffect { .. }));
+    assert!(
+        matches!(
+            &*nodes[2].effect,
+            Effect::GenericEffect { static_abilities, target: None, .. }
+                if !static_abilities.is_empty()
+                    && static_abilities
+                        .iter()
+                        .all(|grant| grant.affected == Some(population_form()))
+        ),
+        "{oracle}: the grant reads the kept permanents: {:?}",
+        nodes[2].effect
+    );
     assert_eq!(nodes[3].repeat_for, tracked_set_repeat(), "{oracle}");
     assert!(
         matches!(
@@ -389,8 +508,8 @@ fn assert_for_each_stays_unparsed(oracle: &str) {
     assert_eq!(last.repeat_for, None);
 }
 
-/// V2.1a (A2.1, SHAPE): the admitted chain lowers to a `TrackedSetSize`
-/// repeat over the for-each body with no gap.
+/// V2.1a (A2.1, SHAPE): the admitted chain lowers to an object-count repeat
+/// over the reveal's kept permanents for the for-each body, with no gap.
 #[test]
 fn reveal_muster_parses_to_a_tracked_set_iteration() {
     assert_admitted_shape(REVEAL_MUSTER);
@@ -455,8 +574,8 @@ fn reveal_muster_goaded() -> String {
 /// A3.1-i (U2 + C3.6, SHAPE): CR 608.2c + CR 701.15a — with the plural goad
 /// parsed (every copula spelling), the walk looks through the grant to the
 /// reveal-until producer: the chain is RevealUntil → Shuffle → the `Goaded`
-/// graft over `ParentTarget` for the rest of the game → the body repeated over
-/// the tracked set, with no gap. Reach-guard: the haste instrument itself has
+/// graft over the reveal's kept permanents for the rest of the game → the body
+/// repeated over those permanents, with no gap. Reach-guard: the haste instrument itself has
 /// the admitted shape.
 #[test]
 fn population_walk_looks_through_the_plural_goad_grant() {
@@ -479,7 +598,7 @@ fn population_walk_looks_through_the_plural_goad_grant() {
                     target: None,
                     ..
                 } if static_abilities.len() == 1
-                    && static_abilities[0].affected == Some(TargetFilter::ParentTarget)
+                    && static_abilities[0].affected == Some(population_form())
                     && static_abilities[0].modifications
                         == vec![ContinuousModification::AddStaticMode {
                             mode: StaticMode::Goaded,
@@ -600,8 +719,13 @@ fn real_card_for_each_clauses_over_unadmitted_producers_keep_their_parse() {
             if name == "unparsed_quantity"
                 && description.as_deref().is_some_and(|d| d.starts_with("For each of those")))
     };
-    let no_tracked_repeat =
-        |defs: &[AbilityDefinition]| !any_node(defs, |d| d.repeat_for == tracked_set_repeat());
+    // Neither population form: not the lowered one, and no other repeat over a
+    // published set.
+    let no_tracked_repeat = |defs: &[AbilityDefinition]| {
+        !any_node(defs, |d| {
+            d.repeat_for == tracked_set_repeat() || repeats_over_a_tracked_set(d)
+        })
+    };
 
     let soul = card_abilities(
         SOUL_OF_EMANCIPATION,
@@ -795,8 +919,9 @@ fn reveal_muster_with_one_creature_iterates_once() {
 
 /// V2.2c (CR 609.3): no creature found — zero iterations, and the
 /// resolution still completes. A non-empty tracked set from an earlier
-/// resolution is already in the game, so the zero holds only if the reveal
-/// publishes its own fresh (empty) set rather than nothing.
+/// resolution is already in the game (its member is a permanent), so the zero
+/// holds only if the reveal publishes its own fresh set — holding only the
+/// revealed misses, none of them a permanent — rather than nothing.
 #[test]
 fn reveal_muster_with_no_creature_iterates_zero_times() {
     let library = [
@@ -833,7 +958,20 @@ fn reveal_muster_with_no_creature_iterates_zero_times() {
         .max_by_key(|(id, _)| id.0)
         .expect("a tracked set exists");
     assert!(latest.0 > earlier.0, "the reveal published a fresh set");
-    assert!(members.is_empty(), "the fresh set has no members");
+    // CR 608.2c + CR 701.20a: the fresh set holds exactly the three revealed
+    // misses ("revealed this way"); none is a permanent, so the iteration runs
+    // zero times.
+    let mut revealed = members.clone();
+    revealed.sort();
+    let mut misses: Vec<ObjectId> = ["Miss One", "Miss Two", "Miss Three"]
+        .into_iter()
+        .map(|name| board.card(name))
+        .collect();
+    misses.sort();
+    assert_eq!(
+        revealed, misses,
+        "the fresh set holds exactly Miss One, Miss Two, Miss Three"
+    );
     assert_eq!(
         p1p1(runner, board.bystander_p0),
         0,
@@ -1119,4 +1257,133 @@ fn reveal_muster_plural_goad_reaches_exactly_the_kept_creatures() {
         assert!(goad_tces(runner.state(), bystander).is_empty());
     }
     assert_eq!(total_p1p1(runner), 2);
+}
+
+/// V4.7 (Phase 4, S2c): CR 608.2c — an iteration over the reveal's kept
+/// permanents is one instruction; the following sentence ("You gain 1 life.")
+/// is a separate instruction and runs once, after the loop — not once per
+/// member, as the member-driven full-chain heuristic for battlefield-query
+/// loops would run it. Reach-guard: the body ran for each kept creature.
+#[test]
+fn reveal_muster_following_sentence_runs_once() {
+    let oracle = format!("{REVEAL_MUSTER} You gain 1 life.");
+    let mut board = muster_board(&oracle, MUSTER_LIBRARY);
+    let start = board.runner.life(P0);
+    board.runner.cast(board.spell).resolve();
+    let runner = &board.runner;
+    let a = board.card("Creature A");
+    let b = board.card("Creature B");
+    assert_eq!(p1p1(runner, a), 1, "Creature A gets exactly one counter");
+    assert_eq!(p1p1(runner, b), 1, "Creature B gets exactly one counter");
+    assert_eq!(total_p1p1(runner), 2);
+    assert_eq!(
+        runner.life(P0),
+        start + 1,
+        "CR 608.2c: the following sentence runs exactly once"
+    );
+    // Parse reach-guard: the for-each node repeats over the kept permanents and
+    // the life gain is its following sibling.
+    let abilities = lowered(&oracle);
+    let node = for_each_node(&abilities);
+    assert_eq!(node.repeat_for, tracked_set_repeat(), "{:?}", node.effect);
+    assert!(
+        matches!(
+            node.sub_ability.as_deref().map(|sub| &*sub.effect),
+            Some(Effect::GainLife { .. })
+        ),
+        "{:?}",
+        node.sub_ability
+    );
+}
+
+/// V4.17 (Phase 4, per-member optionality): CR 608.2c + CR 608.2d — in "For
+/// each of those creatures, you may put a +1/+1 counter on that creature",
+/// the "you may" lies inside the scope of "for each", so each repetition
+/// carries its own choice, announced while that repetition is applied: one
+/// prompt per kept creature, each answered on its own. Accepting the first
+/// and declining the second puts exactly one counter, on exactly one of the
+/// two kept creatures. Reach-guard: the for-each node parses optional and
+/// repeats over the kept permanents, so the prompt count measures the driver.
+#[test]
+fn reveal_muster_optional_body_prompts_once_per_kept_creature() {
+    use engine::types::actions::GameAction;
+    use engine::types::game_state::WaitingFor;
+
+    let oracle = with_body("you may put a +1/+1 counter on that creature.");
+    let abilities = lowered(&oracle);
+    let node = for_each_node(&abilities);
+    assert!(node.optional, "parse reach-guard: the body is optional");
+    assert_eq!(node.repeat_for, tracked_set_repeat(), "{:?}", node.effect);
+
+    let mut board = muster_board(&oracle, MUSTER_LIBRARY);
+    // Drive the resolution by hand: the cast driver answers optional prompts
+    // itself, and this row answers each one differently.
+    drop(board.runner.cast(board.spell).commit());
+    for _ in 0..8 {
+        if board.runner.state().stack.is_empty()
+            || matches!(
+                board.runner.state().waiting_for,
+                WaitingFor::OptionalEffectChoice { .. }
+            )
+        {
+            break;
+        }
+        board
+            .runner
+            .act(GameAction::PassPriority)
+            .expect("passing priority resolves the spell");
+    }
+    let mut prompts = 0;
+    for accept in [true, false] {
+        assert!(
+            matches!(
+                board.runner.state().waiting_for,
+                WaitingFor::OptionalEffectChoice { player, .. } if player == P0
+            ),
+            "prompt {}: expected P0's optional-effect choice, got {:?}",
+            prompts + 1,
+            board.runner.state().waiting_for
+        );
+        prompts += 1;
+        board
+            .runner
+            .act(GameAction::DecideOptionalEffect { accept })
+            .expect("answering the optional choice must succeed");
+    }
+    assert!(
+        !matches!(
+            board.runner.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { .. }
+        ),
+        "exactly two optional prompts, got a further {:?}",
+        board.runner.state().waiting_for
+    );
+    assert_eq!(prompts, 2);
+
+    let runner = &board.runner;
+    let a = board.card("Creature A");
+    let b = board.card("Creature B");
+    // Which of the two carries the counter is the engine-defined member order
+    // (the card does not order its choices, CR 608.2d), so it is not asserted.
+    let mut counters = [p1p1(runner, a), p1p1(runner, b)];
+    counters.sort();
+    assert_eq!(
+        counters,
+        [0, 1],
+        "exactly one kept creature got the counter, the other none"
+    );
+    assert_eq!(total_p1p1(runner), 1);
+    for name in ["Miss One", "Miss Two"] {
+        assert_eq!(p1p1(runner, board.card(name)), 0, "{name} is unaffected");
+    }
+    for id in [a, b] {
+        assert_eq!(zone_of(runner, id), Zone::Battlefield);
+        assert!(has_haste(runner, id));
+    }
+    for name in ["Miss One", "Miss Two", "Creature C", "Miss Three"] {
+        assert!(
+            in_p0_library(runner, board.card(name)),
+            "{name} stays in the library"
+        );
+    }
 }

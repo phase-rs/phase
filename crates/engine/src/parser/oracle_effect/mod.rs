@@ -1005,6 +1005,57 @@ impl AdmittedPopulationProducer {
             }
         }
     }
+
+    /// CR 608.2c + CR 110.1 + CR 400.7: the objects this producer's anaphors
+    /// name. The reveal publishes every card it revealed, hits and misses alike
+    /// (CR 701.20a, "revealed this way"); the kept cards are the members of that
+    /// set that are now permanents. The population is narrowed by ZONE, not by
+    /// the until-filter: the until-filter is re-evaluated live at each read, so
+    /// characteristic drift after entry (an as-enters copy choice, CR 614.1c +
+    /// CR 707.2, or a subtype-changing static under a subtype filter) would drop
+    /// an entered card that "those permanents" still names. A miss is never a
+    /// permanent, because admission requires a rest destination other than the
+    /// battlefield ([`reveal_until_kept_on_battlefield`]).
+    fn population_filter(&self) -> TargetFilter {
+        let AdmittedPopulationProducer::RevealUntilKeptOnBattlefield { .. } = self;
+        crate::game::effects::reveal_population_on_battlefield(TrackedSetId(0))
+    }
+
+    /// CR 608.2c: the iteration count of "for each of those <noun>, …" — one
+    /// repetition per member of [`Self::population_filter`].
+    fn population_count(&self) -> QuantityRef {
+        QuantityRef::ObjectCount {
+            filter: self.population_filter(),
+        }
+    }
+}
+
+/// CR 608.2c + CR 611.2c: whether `effect` is a grant that acts on the anaphor's
+/// own population without redefining it — a `GenericEffect` with no target of
+/// its own (or the inherited `ParentTarget`) whose every installed static is
+/// applied to that population: the bare anaphor (`ParentTarget`) or its lowered
+/// population form ([`AdmittedPopulationProducer::population_filter`]). Shared
+/// by the population walk's transparency arm and the grant-narrowing hook in
+/// `parse_effect_chain_ir_body`.
+fn grant_acts_on_admitted_population(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::GenericEffect {
+            target,
+            static_abilities,
+            ..
+        } if target
+            .as_ref()
+            .is_none_or(|target| matches!(target, TargetFilter::ParentTarget))
+            && !static_abilities.is_empty()
+            && static_abilities.iter().all(|grant| {
+                grant.affected.as_ref().is_some_and(|affected| {
+                    matches!(affected, TargetFilter::ParentTarget)
+                        || crate::game::effects::is_reveal_population_on_battlefield(affected)
+                            == Some(TrackedSetId(0))
+                })
+            })
+    )
 }
 
 /// How the population walk classifies one earlier instruction.
@@ -1145,29 +1196,24 @@ fn classify_population_walk_step(
         Effect::Shuffle { .. } if unpatched => PopulationWalkStep::Transparent,
         // CR 608.2c + CR 611.2c: a grant whose every affected set is the
         // anaphor's own population acts on it without redefining it.
-        Effect::GenericEffect {
-            target,
-            static_abilities,
-            ..
-        } if unpatched
-            && target
-                .as_ref()
-                .is_none_or(|target| matches!(target, TargetFilter::ParentTarget))
-            && !static_abilities.is_empty()
-            && static_abilities
-                .iter()
-                .all(|grant| matches!(grant.affected, Some(TargetFilter::ParentTarget))) =>
-        {
+        Effect::GenericEffect { .. } if unpatched && grant_acts_on_admitted_population(effect) => {
             PopulationWalkStep::Transparent
         }
         Effect::RevealUntil {
             filter,
             matched_disposition: RevealUntilDisposition::KeepEach,
             kept_destination,
+            rest_destination,
             kept_optional_to: None,
             kept_destination_if: None,
             ..
-        } => reveal_until_kept_on_battlefield(filter, *kept_destination, patches, intrinsic),
+        } => reveal_until_kept_on_battlefield(
+            filter,
+            *kept_destination,
+            *rest_destination,
+            patches,
+            intrinsic,
+        ),
         _ => PopulationWalkStep::Stop,
     }
 }
@@ -1176,14 +1222,23 @@ fn classify_population_walk_step(
 /// battlefield (mandatorily, not chosen among) is the admitted producer.
 /// Its kept destination is the latest `RevealUntilKept` patch's destination
 /// (later patches first, then the clause's own intrinsic), else the effect's
-/// own. A rest-pile patch is harmless; any other patch stops the walk.
+/// own; its rest destination is resolved the same way from the `PutRest`
+/// patches. Any other patch stops the walk.
+///
+/// CR 701.20b + CR 110.1: revealing leaves a miss in the library until the rest
+/// instruction moves it, so a miss is never a permanent unless the rest
+/// destination is the battlefield; with that excluded, the revealed set's
+/// members on the battlefield are exactly the kept cards
+/// ([`AdmittedPopulationProducer::population_filter`]).
 fn reveal_until_kept_on_battlefield(
     filter: &TargetFilter,
     kept_destination: Zone,
+    rest_destination: Zone,
     patches: &[&ContinuationAst],
     intrinsic: Option<&ContinuationAst>,
 ) -> PopulationWalkStep {
     let mut destination = None;
+    let mut rest = None;
     for patch in patches.iter().copied().chain(intrinsic) {
         match patch {
             ContinuationAst::RevealUntilKept {
@@ -1194,9 +1249,17 @@ fn reveal_until_kept_on_battlefield(
             } => {
                 destination.get_or_insert(*patched);
             }
-            ContinuationAst::PutRest { .. } => {}
+            ContinuationAst::PutRest {
+                destination: patched,
+                ..
+            } => {
+                rest.get_or_insert(*patched);
+            }
             _ => return PopulationWalkStep::Stop,
         }
+    }
+    if rest.unwrap_or(rest_destination) == Zone::Battlefield {
+        return PopulationWalkStep::Stop;
     }
     if destination.unwrap_or(kept_destination) == Zone::Battlefield {
         PopulationWalkStep::Producer(AdmittedPopulationProducer::RevealUntilKeptOnBattlefield {
@@ -31645,15 +31708,15 @@ pub(super) fn effect_installs_continuous_effect(effect: &Effect) -> bool {
 /// object→player assignment — an interactive choice of a player repeated once
 /// per member of a published population, with no step of its own after the
 /// choice. The parse-side mirror of the repeat driver's per-object gate
-/// (`effects::repeats_per_object_player_choice`), which binds a member only to
+/// (`effects::repeat_iterates_published_population` +
+/// `effects::repeats_per_object_player_choice`), which binds a member only to
 /// a repetition that pauses for its answer.
 fn clause_records_choice_assignment(clause: &ClauseIr) -> bool {
-    matches!(
-        clause.repeat_for,
-        Some(QuantityExpr::Ref {
-            qty: QuantityRef::TrackedSetSize
-        })
-    ) && clause.player_scope.is_none()
+    clause
+        .repeat_for
+        .as_ref()
+        .is_some_and(crate::game::effects::repeat_iterates_published_population)
+        && clause.player_scope.is_none()
         && clause.parsed.sub_ability.is_none()
         && matches!(
             &clause.parsed.effect,
@@ -41428,27 +41491,29 @@ fn parse_effect_chain_ir_body(
             // copy clause reaches `CopyTokenOf` instead of an `Unimplemented` "for"
             // fallback (#5966).
             (None, stripped, None, None, None)
-        } else if let Some((_, body)) =
-            lower::strip_for_each_population_prefix(&text).filter(|(anaphor, body)| {
-                // CR 608.2c: each iteration binds ONE member; a plural object
-                // anaphor in the body names a set, not that member, so the clause
-                // is not claimed (it keeps its prior parse).
-                !body_has_bare_plural_object_pronoun(body)
-                    && admitted_population_producer(builder.clauses())
-                        .is_some_and(|producer| producer.is_restated_by(anaphor))
+        } else if let Some((producer, body)) = lower::strip_for_each_population_prefix(&text)
+            // CR 608.2c: each iteration binds ONE member; a plural object
+            // anaphor in the body names a set, not that member, so the clause is
+            // not claimed (it keeps its prior parse).
+            .filter(|(_, body)| !body_has_bare_plural_object_pronoun(body))
+            .and_then(|(anaphor, body)| {
+                admitted_population_producer(builder.clauses())
+                    .filter(|producer| producer.is_restated_by(&anaphor))
+                    .map(|producer| (producer, body))
             })
         {
             // CR 608.2c: "for each of those <noun>, …" / "for each of them, …"
-            // iterates the population its admitted antecedent published — the
-            // chain's tracked set, one iteration per member. Within an iteration
-            // the body's singular object anaphor ("it", "that creature") names
-            // that iteration's member — the nearest antecedent under the rules of
-            // English — which the repeat driver binds as `ParentTarget`. An
-            // unadmitted or non-restating clause falls through to the generic arm
-            // below and keeps its prior parse.
+            // iterates the population its admitted antecedent published — its
+            // members that are permanents, one iteration per member
+            // (`AdmittedPopulationProducer::population_count`). Within an
+            // iteration the body's singular object anaphor ("it", "that
+            // creature") names that iteration's member — the nearest antecedent
+            // under the rules of English — which the repeat driver binds as
+            // `ParentTarget`. An unadmitted or non-restating clause falls through
+            // to the generic arm below and keeps its prior parse.
             (
                 Some(QuantityExpr::Ref {
-                    qty: QuantityRef::TrackedSetSize,
+                    qty: producer.population_count(),
                 }),
                 body,
                 None,
@@ -44010,6 +44075,36 @@ fn parse_effect_chain_ir_body(
                 chunk.boundary_after,
             );
             continue;
+        }
+
+        // CR 608.2c + CR 611.2c: a grant over the anaphor's population ("They're
+        // goaded for the rest of the game", "They gain haste until end of turn")
+        // after an admitted producer acts on exactly the population the
+        // population walk classifies it as acting on, so it is lowered to read
+        // that population — the producer's kept permanents, not every member of
+        // the raw published set. The cheap shape check runs first, so the walk
+        // runs only for such grants. The outer `target` is cleared because a
+        // non-inherited target takes precedence over a static's `affected`
+        // (`effect::generic_effect_application_filter`).
+        if grant_acts_on_admitted_population(&clause.effect) {
+            if let Some(producer) = admitted_population_producer(builder.clauses()) {
+                if let Effect::GenericEffect {
+                    static_abilities,
+                    target,
+                    ..
+                } = &mut clause.effect
+                {
+                    for grant in static_abilities
+                        .iter_mut()
+                        .filter(|grant| grant.affected == Some(TargetFilter::ParentTarget))
+                    {
+                        grant.affected = Some(producer.population_filter());
+                    }
+                    if *target == Some(TargetFilter::ParentTarget) {
+                        *target = None;
+                    }
+                }
+            }
         }
 
         // CR 115.1 + CR 701.9b: `target_selection_mode` snapshots the parser's
@@ -48036,6 +48131,180 @@ mod population_walk_destination_tests {
         assert_eq!(
             admitted_population_producer(&to_battlefield),
             Some(AdmittedPopulationProducer::RevealUntilKeptOnBattlefield { filter })
+        );
+    }
+
+    /// The reveal's kept permanents, as the admitted producer lowers them.
+    fn population() -> TargetFilter {
+        crate::game::effects::reveal_population_on_battlefield(TrackedSetId(0))
+    }
+
+    /// A haste grant over `affected`, with no target of its own.
+    fn haste_grant(affected: TargetFilter) -> Effect {
+        Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::continuous()
+                .affected(affected)
+                .modifications(vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Haste,
+                }])],
+            duration: Some(Duration::UntilEndOfTurn),
+            target: None,
+            end_cost: None,
+        }
+    }
+
+    /// V4.8 / S3c: CR 608.2c + CR 611.2c — a grant acts on the anaphor's own
+    /// population when every installed static reads the bare anaphor or the
+    /// lowered population form; a concretely bound set, another narrowing over
+    /// the sentinel, or a grant with no static does not.
+    #[test]
+    fn population_form_grants_are_transparent() {
+        assert!(grant_acts_on_admitted_population(&haste_grant(
+            TargetFilter::ParentTarget
+        )));
+        assert!(grant_acts_on_admitted_population(
+            &haste_grant(population())
+        ));
+        assert!(!grant_acts_on_admitted_population(&haste_grant(
+            crate::game::effects::reveal_population_on_battlefield(TrackedSetId(3))
+        )));
+        assert!(!grant_acts_on_admitted_population(&haste_grant(
+            TargetFilter::TrackedSetFiltered {
+                id: TrackedSetId(0),
+                filter: Box::new(TargetFilter::Typed(TypedFilter::creature())),
+                caused_by: None,
+            }
+        )));
+        assert!(!grant_acts_on_admitted_population(&Effect::GenericEffect {
+            static_abilities: vec![],
+            duration: Some(Duration::UntilEndOfTurn),
+            target: None,
+            end_cost: None,
+        }));
+    }
+
+    /// V4.9 / S3e: CR 701.20b + CR 110.1 — a rest destination of the battlefield
+    /// (patched by "the rest …" or the reveal's own) declines admission, since a
+    /// revealed miss would then be a permanent. Reach-guard: the same chains
+    /// with a library rest are admitted.
+    #[test]
+    fn population_walk_declines_a_battlefield_rest_destination() {
+        // The rest pile patched by `PutRest`.
+        let own = walk_input(
+            "Reveal cards from the top of your library until you reveal two creature cards. \
+             Put those cards into your hand and the rest on the bottom of your library in a \
+             random order. For each of those creatures, put a +1/+1 counter on that creature.",
+        );
+        let mut admitted = own.clone();
+        if let Effect::RevealUntil {
+            kept_destination, ..
+        } = &mut admitted[0].parsed.effect
+        {
+            *kept_destination = Zone::Battlefield;
+        }
+        assert!(
+            admitted_population_producer(&admitted).is_some(),
+            "reach-guard: a library rest is admitted"
+        );
+        let mut rest_to_battlefield = admitted.clone();
+        if let ClauseDisposition::Continue {
+            continuation: Some(ContinuationAst::PutRest { destination, .. }),
+        } = &mut rest_to_battlefield[1].disposition
+        {
+            *destination = Zone::Battlefield;
+        } else {
+            panic!("expected the rest-pile patch: {:?}", rest_to_battlefield[1]);
+        }
+        assert_eq!(admitted_population_producer(&rest_to_battlefield), None);
+
+        // The reveal's own rest destination, with no rest patch.
+        let patched = walk_input(
+            "Reveal cards from the top of your library until you reveal two creature cards. \
+             Put that card into your hand, then shuffle. For each of those creatures, put a \
+             +1/+1 counter on that creature.",
+        );
+        let mut admitted = patched.clone();
+        if let ClauseDisposition::Continue {
+            continuation: Some(ContinuationAst::RevealUntilKept { destination, .. }),
+        } = &mut admitted[1].disposition
+        {
+            *destination = Zone::Battlefield;
+        }
+        assert!(
+            admitted_population_producer(&admitted).is_some(),
+            "reach-guard: the reveal's own library rest is admitted"
+        );
+        let mut own_rest_to_battlefield = admitted.clone();
+        if let Effect::RevealUntil {
+            rest_destination, ..
+        } = &mut own_rest_to_battlefield[0].parsed.effect
+        {
+            *rest_destination = Zone::Battlefield;
+        }
+        assert_eq!(admitted_population_producer(&own_rest_to_battlefield), None);
+    }
+
+    /// The single grant clause (`GenericEffect` with installed statics) of the
+    /// chain parsed from `text`.
+    fn grant_clause(text: &str) -> Effect {
+        let mut ctx = ParseContext::default();
+        let ir = parse_effect_chain_ir(text, AbilityKind::Spell, &mut ctx);
+        let grants: Vec<&Effect> = ir
+            .clauses
+            .iter()
+            .map(|clause| &clause.parsed.effect)
+            .filter(|effect| effect_installs_continuous_effect(effect))
+            .collect();
+        assert_eq!(grants.len(), 1, "{text}: {:?}", ir.clauses);
+        grants[0].clone()
+    }
+
+    fn grant_affected(effect: &Effect) -> Vec<Option<TargetFilter>> {
+        match effect {
+            Effect::GenericEffect {
+                static_abilities,
+                target: None,
+                ..
+            } => static_abilities
+                .iter()
+                .map(|grant| grant.affected.clone())
+                .collect(),
+            other => panic!("expected a target-less grant, got {other:?}"),
+        }
+    }
+
+    /// V4.8 / S3d: CR 608.2c + CR 611.2c — after an admitted producer, the
+    /// plural goad and the plural haste grant are lowered to read the reveal's
+    /// kept permanents. After a declined producer (kept cards to hand) the same
+    /// grant keeps the bare anaphor. Reach-guard: the declined chain still
+    /// parses the grant.
+    #[test]
+    fn grants_after_an_admitted_producer_read_its_kept_permanents() {
+        let admitted = |grant: &str| {
+            format!(
+                "Reveal cards from the top of your library until you reveal two creature \
+                 cards. Put those creature cards onto the battlefield, then shuffle. {grant} \
+                 For each of those creatures, put a +1/+1 counter on that creature."
+            )
+        };
+        for grant in [
+            "They gain haste until end of turn.",
+            "They're goaded for the rest of the game.",
+        ] {
+            assert_eq!(
+                grant_affected(&grant_clause(&admitted(grant))),
+                vec![Some(population())],
+                "{grant}"
+            );
+        }
+
+        let declined = "Reveal cards from the top of your library until you reveal two \
+             creature cards. Put those cards into your hand and the rest on the bottom of your \
+             library in a random order. They gain haste until end of turn.";
+        assert_eq!(
+            grant_affected(&grant_clause(declined)),
+            vec![Some(TargetFilter::ParentTarget)],
+            "a declined producer's grant keeps the bare anaphor"
         );
     }
 }
