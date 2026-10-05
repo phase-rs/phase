@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "modern",
   "version": 1,
-  "updated": "2026-10-04T00:00:00Z",
+  "updated": "2026-10-05T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/modern",
   "decks": [
     {
@@ -714,6 +714,149 @@
       ]
     },
     {
+      "name": "Boros Energy",
+      "author": "MTGGoldfish",
+      "colors": [
+        "R",
+        "W"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 4,
+          "name": "Ajani, Nacatl Pariah"
+        },
+        {
+          "count": 2,
+          "name": "Elegant Parlor"
+        },
+        {
+          "count": 3,
+          "name": "Flooded Strand"
+        },
+        {
+          "count": 3,
+          "name": "Seasoned Pyromancer"
+        },
+        {
+          "count": 4,
+          "name": "Arid Mesa"
+        },
+        {
+          "count": 2,
+          "name": "Dalkovan Encampment"
+        },
+        {
+          "count": 3,
+          "name": "Windswept Heath"
+        },
+        {
+          "count": 1,
+          "name": "Arena of Glory"
+        },
+        {
+          "count": 2,
+          "name": "Thraben Charm"
+        },
+        {
+          "count": 1,
+          "name": "Blood Moon"
+        },
+        {
+          "count": 4,
+          "name": "Guide of Souls"
+        },
+        {
+          "count": 1,
+          "name": "Mountain"
+        },
+        {
+          "count": 4,
+          "name": "Galvanic Discharge"
+        },
+        {
+          "count": 4,
+          "name": "Ragavan, Nimble Pilferer"
+        },
+        {
+          "count": 4,
+          "name": "Voice of Victory"
+        },
+        {
+          "count": 2,
+          "name": "Ranger-Captain of Eos"
+        },
+        {
+          "count": 3,
+          "name": "Goblin Bombardment"
+        },
+        {
+          "count": 3,
+          "name": "Sacred Foundry"
+        },
+        {
+          "count": 4,
+          "name": "Ocelot Pride"
+        },
+        {
+          "count": 1,
+          "name": "Prismatic Ending"
+        },
+        {
+          "count": 3,
+          "name": "Plains"
+        },
+        {
+          "count": 1,
+          "name": "Solitude"
+        },
+        {
+          "count": 1,
+          "name": "Marsh Flats"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 2,
+          "name": "High Noon"
+        },
+        {
+          "count": 2,
+          "name": "Sanctifier en-Vec"
+        },
+        {
+          "count": 2,
+          "name": "Vexing Bauble"
+        },
+        {
+          "count": 1,
+          "name": "Blood Moon"
+        },
+        {
+          "count": 1,
+          "name": "Wear // Tear"
+        },
+        {
+          "count": 1,
+          "name": "The Legend of Roku"
+        },
+        {
+          "count": 2,
+          "name": "Obsidian Charmaw"
+        },
+        {
+          "count": 2,
+          "name": "Wrath of the Skies"
+        },
+        {
+          "count": 2,
+          "name": "Rest in Peace"
+        }
+      ]
+    },
+    {
       "name": "Dimir Midrange",
       "author": "MTGGoldfish",
       "colors": [
@@ -885,149 +1028,6 @@
       ]
     },
     {
-      "name": "Boros Energy",
-      "author": "MTGGoldfish",
-      "colors": [
-        "R",
-        "W"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 4,
-          "name": "Ajani, Nacatl Pariah"
-        },
-        {
-          "count": 2,
-          "name": "Elegant Parlor"
-        },
-        {
-          "count": 3,
-          "name": "Flooded Strand"
-        },
-        {
-          "count": 3,
-          "name": "Seasoned Pyromancer"
-        },
-        {
-          "count": 4,
-          "name": "Arid Mesa"
-        },
-        {
-          "count": 2,
-          "name": "Dalkovan Encampment"
-        },
-        {
-          "count": 3,
-          "name": "Windswept Heath"
-        },
-        {
-          "count": 1,
-          "name": "Arena of Glory"
-        },
-        {
-          "count": 2,
-          "name": "Thraben Charm"
-        },
-        {
-          "count": 1,
-          "name": "Blood Moon"
-        },
-        {
-          "count": 4,
-          "name": "Guide of Souls"
-        },
-        {
-          "count": 1,
-          "name": "Mountain"
-        },
-        {
-          "count": 4,
-          "name": "Galvanic Discharge"
-        },
-        {
-          "count": 4,
-          "name": "Ragavan, Nimble Pilferer"
-        },
-        {
-          "count": 4,
-          "name": "Voice of Victory"
-        },
-        {
-          "count": 2,
-          "name": "Ranger-Captain of Eos"
-        },
-        {
-          "count": 3,
-          "name": "Goblin Bombardment"
-        },
-        {
-          "count": 3,
-          "name": "Sacred Foundry"
-        },
-        {
-          "count": 4,
-          "name": "Ocelot Pride"
-        },
-        {
-          "count": 1,
-          "name": "Prismatic Ending"
-        },
-        {
-          "count": 3,
-          "name": "Plains"
-        },
-        {
-          "count": 1,
-          "name": "Solitude"
-        },
-        {
-          "count": 1,
-          "name": "Marsh Flats"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 2,
-          "name": "High Noon"
-        },
-        {
-          "count": 2,
-          "name": "Sanctifier en-Vec"
-        },
-        {
-          "count": 2,
-          "name": "Vexing Bauble"
-        },
-        {
-          "count": 1,
-          "name": "Blood Moon"
-        },
-        {
-          "count": 1,
-          "name": "Wear // Tear"
-        },
-        {
-          "count": 1,
-          "name": "The Legend of Roku"
-        },
-        {
-          "count": 2,
-          "name": "Obsidian Charmaw"
-        },
-        {
-          "count": 2,
-          "name": "Wrath of the Skies"
-        },
-        {
-          "count": 2,
-          "name": "Rest in Peace"
-        }
-      ]
-    },
-    {
       "name": "Ruby Storm",
       "author": "MTGGoldfish",
       "colors": [
@@ -1185,75 +1185,71 @@
       "main": [
         {
           "count": 1,
-          "name": "Thundering Falls"
+          "name": "Elegant Parlor"
         },
         {
-          "count": 3,
-          "name": "Counterspell"
+          "count": 4,
+          "name": "Ajani, Nacatl Pariah"
         },
         {
           "count": 4,
           "name": "Flooded Strand"
         },
         {
-          "count": 3,
+          "count": 4,
           "name": "Arid Mesa"
         },
         {
-          "count": 1,
-          "name": "Monumental Henge"
-        },
-        {
-          "count": 3,
-          "name": "Scalding Tarn"
-        },
-        {
-          "count": 1,
-          "name": "Day's Undoing"
-        },
-        {
-          "count": 1,
-          "name": "Hedge Maze"
+          "count": 2,
+          "name": "Dalkovan Encampment"
         },
         {
           "count": 4,
-          "name": "Consult the Star Charts"
+          "name": "Ephemerate"
+        },
+        {
+          "count": 1,
+          "name": "Arena of Glory"
         },
         {
           "count": 1,
           "name": "Hallowed Fountain"
         },
         {
-          "count": 4,
-          "name": "Orim's Chant"
+          "count": 2,
+          "name": "Seam Rip"
         },
         {
           "count": 2,
-          "name": "Isochron Scepter"
+          "name": "Scalding Tarn"
+        },
+        {
+          "count": 4,
+          "name": "Guide of Souls"
+        },
+        {
+          "count": 2,
+          "name": "Phelia, Exuberant Shepherd"
         },
         {
           "count": 1,
-          "name": "Force of Negation"
+          "name": "Mountain"
         },
         {
-          "count": 3,
-          "name": "Teferi, Time Raveler"
-        },
-        {
-          "count": 2,
+          "count": 1,
           "name": "Island"
         },
         {
-          "count": 2,
+          "count": 1,
           "name": "Spell Snare"
         },
         {
-          "count": 3,
+          "count": 2,
           "name": "Galvanic Discharge"
         },
         {
-          "count": 1,
-          "name": "Mystic Gate"
+          "count": 3,
+          "name": "Goblin Bombardment"
         },
         {
           "count": 1,
@@ -1261,23 +1257,23 @@
         },
         {
           "count": 4,
-          "name": "Narset, Parter of Veils"
+          "name": "Ocelot Pride"
         },
         {
-          "count": 2,
+          "count": 1,
           "name": "Meticulous Archive"
         },
         {
           "count": 2,
-          "name": "Prismatic Ending"
+          "name": "Starfield Shepherd"
         },
         {
-          "count": 3,
+          "count": 2,
+          "name": "Ragavan, Nimble Pilferer"
+        },
+        {
+          "count": 4,
           "name": "Solitude"
-        },
-        {
-          "count": 3,
-          "name": "Wrath of the Skies"
         },
         {
           "count": 2,
@@ -1285,49 +1281,45 @@
         },
         {
           "count": 1,
-          "name": "Supreme Verdict"
-        },
-        {
-          "count": 1,
           "name": "Steam Vents"
         },
         {
-          "count": 1,
-          "name": "Geier Reach Sanitarium"
+          "count": 4,
+          "name": "Quantum Riddler"
         }
       ],
       "sideboard": [
         {
           "count": 1,
-          "name": "Kaheera, the Orphanguard"
+          "name": "Surgical Extraction"
         },
         {
           "count": 2,
           "name": "High Noon"
         },
         {
-          "count": 1,
-          "name": "Rest in Peace"
-        },
-        {
-          "count": 1,
-          "name": "Day's Undoing"
-        },
-        {
-          "count": 4,
-          "name": "Mystical Dispute"
-        },
-        {
-          "count": 1,
-          "name": "Force of Negation"
-        },
-        {
-          "count": 4,
+          "count": 3,
           "name": "Consign to Memory"
         },
         {
+          "count": 3,
+          "name": "Obsidian Charmaw"
+        },
+        {
           "count": 1,
-          "name": "Supreme Verdict"
+          "name": "Grafdigger's Cage"
+        },
+        {
+          "count": 2,
+          "name": "Wrath of the Skies"
+        },
+        {
+          "count": 1,
+          "name": "Containment Priest"
+        },
+        {
+          "count": 2,
+          "name": "Test of Talents"
         }
       ]
     },
