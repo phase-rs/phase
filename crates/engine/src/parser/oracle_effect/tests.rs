@@ -80644,3 +80644,30 @@ mod carried_player_reference_tests {
         assert_eq!(gain, gain_life_controller());
     }
 }
+
+mod bare_player_pronoun_declaration_tests {
+    use super::*;
+
+    fn names_declared_player(text: &str) -> bool {
+        let ability = parse_effect_chain(text, AbilityKind::Spell);
+        serde_json::to_string(&ability)
+            .unwrap()
+            .contains("DeclaredPlayer")
+    }
+
+    /// CR 115.1a + CR 608.2c: a bare "they"/"that player" after a clause that declares an object
+    /// (a type-less filter carrying a property, e.g. a token) has no declared player to refer to.
+    #[test]
+    fn a_property_carrying_object_clause_declares_no_player() {
+        for object_clause in ["Exile target token you control.", "Exile target token."] {
+            for follow in ["They draw a card.", "That player draws a card."] {
+                let text = format!("{object_clause} {follow}");
+                assert!(!names_declared_player(&text), "{text}");
+            }
+        }
+        for follow in ["They draw a card.", "That player draws a card."] {
+            let text = format!("Target player gains 2 life. {follow}");
+            assert!(names_declared_player(&text), "reach: {text}");
+        }
+    }
+}

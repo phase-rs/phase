@@ -12010,6 +12010,10 @@ pub(crate) fn optional_prompt_player(
         {
             return Some(player);
         }
+        // CR 608.2b: a payer that is an illegal or unannounced declared player is asked no one.
+        if matches!(payer, TargetFilter::DeclaredPlayer { .. }) {
+            return None;
+        }
     }
     // CR 608.2d: a parser-stamped subject such as "they may" names the player
     // who receives this choice. The reference resolves from the trigger event,
@@ -30361,6 +30365,19 @@ mod tests {
     /// from an earlier resolution cannot receive the new grant.
     #[test]
     fn copy_token_chain_no_created_tokens_clears_stale_last_created_before_followup() {
+        // The second owner is an unannounced declared player (CR 608.2b): it takes the
+        // owner-unresolved exit rather than the no-source one.
+        for owner in [
+            TargetFilter::Controller,
+            TargetFilter::DeclaredPlayer {
+                group: crate::types::ability::ChosenGroupId::declared_player(0),
+            },
+        ] {
+            copy_token_chain_clears_stale_last_created(owner);
+        }
+    }
+
+    fn copy_token_chain_clears_stale_last_created(owner: TargetFilter) {
         let mut state = GameState::new_two_player(42);
         let stale = create_object(
             &mut state,
@@ -30387,7 +30404,7 @@ mod tests {
         let copy = ResolvedAbility::new(
             Effect::CopyTokenOf {
                 target: TargetFilter::Typed(TypedFilter::creature()),
-                owner: TargetFilter::Controller,
+                owner,
                 source_filter: None,
                 enters_attacking: false,
                 tapped: false,

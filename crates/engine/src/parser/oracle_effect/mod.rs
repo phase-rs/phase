@@ -24914,13 +24914,11 @@ fn target_filter_is_explicit_player_target(filter: &TargetFilter) -> bool {
         return false;
     }
     match filter {
-        TargetFilter::Player | TargetFilter::SpecificPlayer { .. } => true,
-        TargetFilter::Typed(tf) => tf.type_filters.is_empty(),
         TargetFilter::Or { filters } | TargetFilter::And { filters } => {
             filters.iter().any(target_filter_is_explicit_player_target)
         }
         TargetFilter::Not { filter } => target_filter_is_explicit_player_target(filter),
-        _ => false,
+        leaf => leaf.denotes_player_target(),
     }
 }
 
@@ -25637,12 +25635,11 @@ fn chain_prior_player_declaration(clauses: &[ClauseIr]) -> Option<&ClauseIr> {
 fn declares_exactly_one_player(clause: &ClauseIr) -> bool {
     fn player_only(filter: &TargetFilter) -> bool {
         match filter {
-            TargetFilter::Player | TargetFilter::SpecificPlayer { .. } => true,
-            TargetFilter::Typed(tf) => tf.type_filters.is_empty() && tf.controller.is_some(),
+            TargetFilter::Typed(tf) => filter.denotes_player_target() && tf.controller.is_some(),
             TargetFilter::Or { filters } | TargetFilter::And { filters } => {
                 filters.iter().all(player_only)
             }
-            _ => false,
+            leaf => leaf.denotes_player_target(),
         }
     }
     clause

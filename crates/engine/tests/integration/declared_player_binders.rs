@@ -3,10 +3,15 @@
 //! Players: caster P0, declared P1, bystander P2; P1 (or the node's player) is eliminated while
 //! the spell is on the stack in the illegal runs.
 
+use engine::game::effects::resolve_ability_chain;
 use engine::game::effects::stack_reach::stack_entry_node_reach;
+use engine::game::game_object::AttachTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::zones::create_object;
 use engine::types::ability::*;
 use engine::types::actions::GameAction;
+use engine::types::card::CardFace;
+use engine::types::card_type::{CardType, CoreType};
 use engine::types::counter::CounterType;
 use engine::types::game_state::{
     CastPaymentMode, GameState, StackEntry, StackEntryKind, WaitingFor,
@@ -16,6 +21,7 @@ use engine::types::keywords::Keyword;
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::replacements::ReplacementEvent;
 use engine::types::zones::{EtbTapState, Zone};
 
 const P2: PlayerId = PlayerId(2);
@@ -87,6 +93,7 @@ struct Out {
     victim_exiled: bool,
     unless_prompt: Vec<PlayerId>,
     transients: Vec<TargetFilter>,
+    token_hosts: Vec<Option<AttachTarget>>,
 }
 
 fn run(def: AbilityDefinition, picks: &[Pick], elim: bool) -> Out {
@@ -181,6 +188,12 @@ fn run_k(def: AbilityDefinition, picks: &[Pick], elim: Option<usize>, kicked: bo
         .get(&CounterType::Plus1Plus1)
         .copied()
         .unwrap_or(0);
+    out.token_hosts = s
+        .objects
+        .values()
+        .filter(|o| o.is_token && o.zone == Zone::Battlefield)
+        .map(|o| o.attached_to)
+        .collect();
     out.transients = s
         .transient_continuous_effects
         .iter()
@@ -227,11 +240,14 @@ fn phase_out_binds_the_declared_player() {
 /// The transient-effect player binding.
 #[test]
 fn transient_effect_binds_the_declared_player() {
-    for (label, filter) in [
-        ("DeclaredPlayer", declared()),
+    for (label, filter, slot) in [
+        ("DeclaredPlayer", declared(), None),
+        // The carried bystander target must not displace the declared group.
+        ("DeclaredPlayer targeted", declared(), Some(declared())),
         (
             "ParentTargetSlot control",
             TargetFilter::ParentTargetSlot { index: 0 },
+            None,
         ),
     ] {
         let sd = StaticDefinition::continuous()
@@ -243,7 +259,7 @@ fn transient_effect_binds_the_declared_player() {
             reader_chain(Effect::GenericEffect {
                 static_abilities: vec![sd.clone()],
                 duration: Some(Duration::UntilEndOfTurn),
-                target: None,
+                target: slot.clone(),
                 end_cost: None,
             })
         };
@@ -445,4 +461,177 @@ fn inheriting_rider_does_not_shift_the_declared_slot() {
 #[test]
 fn paid_instead_delegator_does_not_shift_the_declared_slot() {
     declared_slot_numbering(Before::Delegator);
+}
+
+fn curse_token(attach_to: TargetFilter) -> Effect {
+    Effect::Token {
+        name: "Curse".to_string(),
+        power: PtValue::Fixed(0),
+        toughness: PtValue::Fixed(0),
+        types: vec![
+            "Enchantment".to_string(),
+            "Aura".to_string(),
+            "Curse".to_string(),
+        ],
+        colors: vec![],
+        keywords: vec![],
+        tapped: false,
+        count: q(1),
+        owner: TargetFilter::Controller,
+        attach_to: Some(attach_to),
+        enters_attacking: false,
+        supertypes: vec![],
+        static_abilities: vec![],
+        enter_with_counters: vec![],
+    }
+}
+
+/// CR 303.4 + CR 608.2b: an Aura token attached to the declared player lands on that player; an
+/// illegal declared player names no host, so CR 303.4i denies the token's entry.
+#[test]
+fn aura_token_attaches_to_the_declared_player() {
+    let def = || chain(vec![decl(), n(pick()), n(curse_token(declared()))]);
+    let legal = run(def(), &PICKS_A, false);
+    assert_eq!(legal.token_hosts, [Some(AttachTarget::Player(P1))]);
+    let illegal = run(def(), &PICKS_A, true);
+    assert_eq!(illegal.token_hosts, Vec::<Option<AttachTarget>>::new());
+    assert_eq!(illegal.counters, 1, "reach guard");
+}
+
+fn soldier_token(owner: TargetFilter) -> Effect {
+    Effect::Token {
+        name: "Soldier".to_string(),
+        power: PtValue::Fixed(1),
+        toughness: PtValue::Fixed(1),
+        types: vec!["Creature".to_string(), "Soldier".to_string()],
+        colors: vec![],
+        keywords: vec![],
+        tapped: false,
+        count: q(1),
+        owner,
+        attach_to: None,
+        enters_attacking: false,
+        supertypes: vec![],
+        static_abilities: vec![],
+        enter_with_counters: vec![],
+    }
+}
+
+fn pool_token(owner: TargetFilter) -> Effect {
+    Effect::CreateTokenCopyFromPool {
+        owner,
+        type_filter: TargetFilter::Any,
+        mv: Comparator::EQ,
+        mv_bound: q(2),
+        selection: CardSelectionMode::Random,
+        count: q(1),
+        tapped: false,
+        enters_attacking: false,
+    }
+}
+
+fn haste_to_last_created(source: ObjectId) -> ResolvedAbility {
+    ResolvedAbility::new(
+        Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::continuous()
+                .affected(TargetFilter::LastCreated)
+                .modifications(vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Haste,
+                }])],
+            duration: Some(Duration::Permanent),
+            target: Some(TargetFilter::LastCreated),
+            end_cost: None,
+        },
+        vec![],
+        source,
+        P0,
+    )
+}
+
+/// Resolves `producer` then a LastCreated haste grant over a stale ledger entry and returns
+/// whether the stale token got haste and the ledger afterwards; `prevent_tokens` installs a
+/// CR 614 replacement that stops all token creation.
+fn producer_over_stale_ledger(producer: Effect, prevent_tokens: bool) -> (bool, Vec<ObjectId>) {
+    let mut state = GameState::new_two_player(42);
+    let face = CardFace {
+        name: "Pool Bear".to_string(),
+        mana_cost: ManaCost::generic(2),
+        card_type: CardType {
+            supertypes: vec![],
+            core_types: vec![CoreType::Creature],
+            subtypes: vec![],
+        },
+        power: Some(PtValue::Fixed(2)),
+        toughness: Some(PtValue::Fixed(2)),
+        ..Default::default()
+    };
+    crate::support::install_synthetic_card_db(&mut state, &[face]);
+    let stale = create_object(
+        &mut state,
+        CardId(1),
+        P0,
+        "Old Token".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&stale).unwrap();
+        obj.card_types.core_types = vec![CoreType::Creature];
+        obj.base_card_types = obj.card_types.clone();
+        obj.is_token = true;
+    }
+    state.last_created_token_ids = vec![stale];
+    let source = create_object(
+        &mut state,
+        CardId(2),
+        P0,
+        "Source".to_string(),
+        Zone::Battlefield,
+    );
+    if prevent_tokens {
+        let def = ReplacementDefinition::new(ReplacementEvent::CreateToken)
+            .quantity_modification(QuantityModification::Prevent);
+        let obj = state.objects.get_mut(&source).unwrap();
+        obj.base_replacement_definitions = std::sync::Arc::new(vec![def.clone()]);
+        obj.replacement_definitions = vec![def].into();
+    }
+    let root = ResolvedAbility::new(producer, vec![], source, P0)
+        .sub_ability(haste_to_last_created(source));
+    let mut events = Vec::new();
+    resolve_ability_chain(&mut state, &root, &mut events, 0).unwrap();
+    engine::game::layers::evaluate_layers(&mut state);
+    (
+        state.objects[&stale].has_keyword(&Keyword::Haste),
+        state.last_created_token_ids.clone(),
+    )
+}
+
+/// CR 608.2c + CR 609.3: a token producer that creates nothing leaves nothing for a following
+/// `LastCreated` reader — whether its owner is unresolved (CR 608.2b) or the creation is prevented.
+#[test]
+fn a_producer_that_creates_nothing_clears_the_last_created_ledger() {
+    let unresolved = || TargetFilter::DeclaredPlayer {
+        group: ChosenGroupId::declared_player(0),
+    };
+    for (label, make, prevent) in [
+        ("Token", soldier_token as fn(TargetFilter) -> Effect, false),
+        ("Token prevented", soldier_token, true),
+        ("pool", pool_token, false),
+    ] {
+        // Reach: the same producer with a resolvable owner replaces the stale ledger entry,
+        // or (prevented) is the case under test.
+        let (stale_hasted, ledger) =
+            producer_over_stale_ledger(make(TargetFilter::Controller), prevent);
+        if !prevent {
+            assert_eq!(ledger.len(), 1, "{label}: reach, a token was created");
+            assert!(!stale_hasted, "{label}: reach, the stale token is replaced");
+        }
+        let owner = if prevent {
+            TargetFilter::Controller
+        } else {
+            unresolved()
+        };
+        let (stale_hasted, ledger) = producer_over_stale_ledger(make(owner), prevent);
+        assert!(ledger.is_empty(), "{label}: ledger cleared");
+        assert!(!stale_hasted, "{label}: the stale token gets no grant");
+    }
 }

@@ -1027,7 +1027,7 @@ fn a_repeated_payment_addressed_to_a_gone_declared_player_is_offered_to_no_one()
     let declared = TargetFilter::DeclaredPlayer {
         group: ChosenGroupId::declared_player(0),
     };
-    let def = || {
+    let def = |stamp_optional_player: bool| {
         let mut reflexive = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Draw {
@@ -1047,7 +1047,7 @@ fn a_repeated_payment_addressed_to_a_gone_declared_player_is_offered_to_no_one()
             },
         );
         pay.optional = true;
-        pay.optional_player = Some(declared.clone());
+        pay.optional_player = stamp_optional_player.then(|| declared.clone());
         pay.repeat_for = Some(QuantityExpr::Fixed { value: 3 });
         let mut pay = pay.sub_ability(reflexive);
         pay.sub_link = SubAbilityLink::SequentialSibling;
@@ -1069,12 +1069,12 @@ fn a_repeated_payment_addressed_to_a_gone_declared_player_is_offered_to_no_one()
         pick.sub_link = SubAbilityLink::SequentialSibling;
         pick.sub_ability(creature_pick)
     };
-    let run_with = |eliminate| {
+    let run_with = |eliminate, stamp_optional_player| {
         let mut sc = three_player(7);
         let creature = sc.add_creature(P0, "C0", 3, 9).id();
         let spell = sc
             .add_spell_to_hand(P0, "Row", false)
-            .with_ability_definition(def())
+            .with_ability_definition(def(stamp_optional_player))
             .id();
         seat_all(&mut sc);
         let lands: Vec<ObjectId> = [P0, P0, P0, P1, P1, P1]
@@ -1091,22 +1091,27 @@ fn a_repeated_payment_addressed_to_a_gone_declared_player_is_offered_to_no_one()
                 ..Default::default()
             },
         );
-        let tapped = lands
-            .iter()
-            .filter(|id| r.state().objects[id].tapped)
-            .count();
-        (seen.optional_by, tapped)
+        let tapped_by = |owner| {
+            lands
+                .iter()
+                .filter(|id| r.state().objects[id].owner == owner && r.state().objects[id].tapped)
+                .count()
+        };
+        (seen.optional_by, [tapped_by(P0), tapped_by(P1)])
     };
-    assert_eq!(
-        run_with(None),
-        (vec![P1, P1, P1], 3),
-        "reach: a legal declared player is offered three payments and makes them"
-    );
-    assert_eq!(
-        run_with(Some(1)),
-        (Vec::<PlayerId>::new(), 0),
-        "gone: no offer to anyone, no payment by anyone"
-    );
+    // The payer alone names the declared player when the "may" subject is not stamped.
+    for stamp in [true, false] {
+        assert_eq!(
+            run_with(None, stamp),
+            (vec![P1, P1, P1], [0, 3]),
+            "reach (stamped optional_player: {stamp}): the declared player is offered three payments and makes them"
+        );
+        assert_eq!(
+            run_with(Some(1), stamp),
+            (Vec::<PlayerId>::new(), [0, 0]),
+            "gone (stamped optional_player: {stamp}): no offer to anyone, no payment by anyone"
+        );
+    }
 }
 
 const EXILE_THEN_THAT_PLAYER_EXILES: &str = "Target opponent exiles a nontoken creature they control. That player exiles a nonland card from their graveyard.";

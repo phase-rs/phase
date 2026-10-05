@@ -89,7 +89,7 @@ pub fn resolve(
     let Some(token_owner) =
         crate::game::effects::token::resolve_token_owner(state, ability, owner_filter)
     else {
-        return Ok(());
+        return crate::game::effects::token::no_token(state, ability, events);
     };
 
     // Step 1: Resolve the copy source list.
