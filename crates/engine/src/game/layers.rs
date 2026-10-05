@@ -8827,6 +8827,7 @@ fn apply_continuous_effect_filtered(
     let retained_affected_ids = group_key
         .as_ref()
         .and_then(|key| started_effect_sets.get(key));
+    let retained_affected_set_was_present = retained_affected_ids.is_some();
 
     // CR 613.1f: A printed static on an object that lost all abilities this
     // pass must not re-apply in later layers (Death's Shadow CDA after
@@ -8946,7 +8947,7 @@ fn apply_continuous_effect_filtered(
         // CR 613.8a: A source-level condition can change the existence of
         // this effect even when no provider currently donates a definition.
         // CR 613.6 retains a previously started effect through later layers.
-        expanded.output.generator_live = retained_affected_ids.is_some()
+        expanded.output.generator_live = retained_affected_set_was_present
             || effect.condition.as_ref().is_none_or(|condition| {
                 condition_uses_recipient_context(condition)
                     || evaluate_condition(
