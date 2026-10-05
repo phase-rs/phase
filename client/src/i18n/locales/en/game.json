@@ -875,6 +875,7 @@
     "chooseNewTarget": "Choose the spell's new target",
     "chooseNewTargetForSpell": "Choose a new target for {{spell}}",
     "chooseCreatureToExplore": "Choose which creature explores next",
+    "chooseCreatureToEquip": "Choose a creature to equip",
     "chooseCreatureTokenToPopulate": "Choose a creature token to populate",
     "chooseReturnAsAuraTarget": "Choose a permanent to enchant",
     "tapUntappedCreatures_one": "Tap {{count}} untapped creature",

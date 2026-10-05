@@ -14339,6 +14339,12 @@ fn apply_non_priority_pass_action(
                 &mut events,
             )
         }
+        // CR 602.2b + CR 601.2c/601.2h: no cost is paid until the equip
+        // announcement, so backing out before target selection is complete
+        // restores priority with no state to undo.
+        (WaitingFor::EquipTarget { player, .. }, GameAction::CancelCast) => {
+            WaitingFor::Priority { player: *player }
+        }
         (WaitingFor::Priority { player }, GameAction::Equip { equipment_id, .. }) => {
             let p = *player;
             handle_equip_activation(state, p, equipment_id, &mut events)?
@@ -14406,6 +14412,12 @@ fn apply_non_priority_pass_action(
             cid,
             &mut events,
         )?,
+        // CR 602.2b + CR 601.2c/601.2h: the station tap cost is not paid until
+        // the announcement, so backing out before creature selection is
+        // complete restores priority with no state to undo.
+        (WaitingFor::StationTarget { player, .. }, GameAction::CancelCast) => {
+            WaitingFor::Priority { player: *player }
+        }
         // CR 702.171a: Saddle activation from Priority — enters target-selection state.
         (WaitingFor::Priority { player }, GameAction::SaddleMount { mount_id, .. }) => {
             let p = *player;

@@ -842,6 +842,7 @@
     "chooseNewTarget": "Wybierz nowy cel czaru",
     "chooseNewTargetForSpell": "Wybierz nowy cel dla {{spell}}",
     "chooseCreatureToExplore": "Wybierz, który stwór eksploruje jako następny",
+    "chooseCreatureToEquip": "Wybierz stwora do wyposażenia",
     "chooseCreatureTokenToPopulate": "Wybierz żeton stwora do populacji",
     "chooseReturnAsAuraTarget": "Wybierz permanent do zaczarowania",
     "tapUntappedCreatures_one": "Obróć {{count}} nieobróconego stwora",

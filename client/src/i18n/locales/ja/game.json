@@ -880,6 +880,7 @@
     "chooseNewTarget": "呪文の新しい対象を選択",
     "chooseNewTargetForSpell": "{{spell}}の新しい対象を選択",
     "chooseCreatureToExplore": "次に探検するクリーチャーを選択",
+    "chooseCreatureToEquip": "装備するクリーチャーを選択",
     "chooseCreatureTokenToPopulate": "居住でコピーするクリーチャー・トークンを選択",
     "chooseReturnAsAuraTarget": "エンチャントするパーマネントを選択",
     "tapUntappedCreatures_one": "アンタップ状態のクリーチャー{{count}}体をタップ",

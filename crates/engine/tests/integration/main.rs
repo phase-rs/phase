@@ -1836,3 +1836,4 @@ mod welcome_the_dead;
 mod owned_you_target_authority;
 
 mod exile_origin_target_acquisition;
+mod keyword_activation_cancel;

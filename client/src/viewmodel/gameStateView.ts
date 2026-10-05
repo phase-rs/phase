@@ -638,6 +638,7 @@ export function getBoardChoiceView(
         },
         response: { type: "SaddleMount", mountId: waitingFor.data.mount_id },
         sourceId: waitingFor.data.mount_id,
+        cancelAction: { type: "CancelCast" },
       };
     case "StationTarget":
       return {
@@ -647,6 +648,7 @@ export function getBoardChoiceView(
         selection: { type: "single", immediate: true },
         response: { type: "ActivateStation", spacecraftId: waitingFor.data.spacecraft_id },
         sourceId: waitingFor.data.spacecraft_id,
+        cancelAction: { type: "CancelCast" },
       };
     case "BlightChoice":
       return {

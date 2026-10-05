@@ -1211,12 +1211,14 @@ fn scenario_claws_of_gix_witness_board_does_not_dead_end() {
 /// once `apply_interaction` succeeded (`auto_play.rs:214-250`), and the
 /// pending-cast `CancelCast` is offered to the AI only by
 /// `semantic_candidate_actions_with_probe`'s guarded push
-/// (`engine/src/ai_support/candidates.rs`, which requires `has_pending_cast` AND
-/// `allows_cancel_cast`; `candidate_actions_broad_with_probe`, which it calls,
-/// emits `CancelCast` only for Equipment/Vehicle/modal shapes absent from these
-/// boards). A dead-end satisfying only `allows_cancel_cast` therefore never
-/// becomes an applied action — it lands in `break_reason`, and a results-only
-/// assertion would miss it.
+/// (`engine/src/ai_support/candidates.rs`, which requires `allows_cancel_cast`
+/// — covering pending casts and pre-cost keyword-activation announcements
+/// alike, with keyword-state offers unreachable on these boards, which have no
+/// Equipment and no Vehicle — while `candidate_actions_broad_with_probe`,
+/// which it calls, emits `CancelCast` only for modal shapes likewise absent
+/// from these boards). A dead-end satisfying only `allows_cancel_cast`
+/// therefore never becomes an applied action — it lands in `break_reason`,
+/// and a results-only assertion would miss it.
 fn assert_no_fallback_cancel(run: &phase_ai::auto_play::AiActionsRun, what: &str) {
     use phase_ai::auto_play::AiActionsStop;
 
