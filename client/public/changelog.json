@@ -1,6 +1,21 @@
 {
   "entries": [
     {
+      "id": 216,
+      "date": "2026-10-05",
+      "title": "Goblin Charbelcher fires correctly",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "ai",
+        "multiplayer"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Goblin Charbelcher deals the correct revealed-card damage, doubles it for a Mountain, and bottoms the revealed pile after damage resolves\n• Puppet Crafting turns an artifact or non-Aura enchantment into a 5/5 Construct; Gideon the Oathless punishes opponents’ creature entries and loyalty activations\n• Steward of the Harvest grants your creatures the activated abilities of its exiled land cards\n\n🛠️ Cards That Now Work Right\n• Talara’s Battalion, Illusory Angel, Skyshroud Condor, and Hewed Stone Retainers need only one qualifying earlier spell to be cast\n• Mistform Stalker and related type-choice effects apply the chosen type and expire at their printed time\n• The M13 Rings add their upkeep counters to correctly colored equipped creatures; Slow Motion keeps track of its enchanted creature through its sacrifice trigger\n• Preacher of the Schism, Seraphic Greatsword, and Undercover Butler respect their most-life attack conditions; Pugnacious Hammerskull checks for another Dinosaur when it attacks\n• Kotis, Sibsig Champion checks whether an entering creature came from or was cast from a graveyard before adding counters\n• Null Summoner’s linked exile casts and Predators’ Hour’s granted trigger retain their printed conditions and duration\n• Llanowar Greenwidow keeps its graveyard cost reduction and exile replacement; Spirit-Sister’s Call grants its exile replacement to the returned permanent\n• Fellwar Stone and Exotic Orchard read opponents’ lands using those lands’ controllers, including Command Tower\n• Reveal effects count the full revealed pile, while Fathom Trawl puts only its nonland cards into your hand\n\n⚔️ Combat & Gameplay\n• Auto-tap respects activation restrictions such as Collector Ouphe and Stony Silence\n• Boards with filter lands respond faster, including AI decisions\n• Unrecognized exile-trigger restrictions are flagged as unsupported instead of silently changing the ability (Hero of Bretagard)\n\n🖥️ Interface\n• Save eligible replacement-effect choices and ordering for the current game, with compact controls to review them\n• Undo and debug rewind restore working checkpoints; Space passes priority through the same checks as the on-screen button\n• Mana payment shows sacrificial sources with their correct mana amounts and preserves choices through follow-up prompts\n• Game arrows stay beneath modal dialogs, and stale AI priority is refreshed before actions are dispatched\n\n🤖 AI\n• LLM draft picks now resolve against the pack you see instead of being rejected as stale\n• Choose a default LLM opponent, including for draft matches; settings prompts you to re-enter required API keys after a reload\n\n🌐 Multiplayer\n• P2P hosts retain guest display names after refreshing",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1556721565549469809"
+    },
+    {
       "id": 215,
       "date": "2026-10-03",
       "title": "Mass Polymorph and animated arenas arrive",
