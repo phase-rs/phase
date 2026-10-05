@@ -25,10 +25,14 @@ use engine::game::game_object::PhaseOutCause;
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::ability::{
-    ContinuousModification, Duration, FilterProp, StaticDefinition, TargetFilter, TypedFilter,
+    AbilityKind, ContinuousModification, Duration, Effect, EffectKind, FilterProp, StaticDefinition,
+    TargetFilter, TypedFilter,
 };
+use engine::types::card_type::CoreType;
+use engine::types::events::GameEvent;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
+use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::statics::StaticMode;
@@ -39,6 +43,7 @@ use super::rules::AttackTarget;
 const SOUND_OF_DRUMS_ORACLE: &str = "Enchant creature\nEnchanted creature is goaded.\nIf enchanted creature would deal combat damage to a permanent or player, it deals double that damage instead.\n{2}{R}: Return this card from your graveyard to your hand.";
 const PSYCHIC_IMPETUS_ORACLE: &str = "Enchant creature\nEnchanted creature gets +2/+2 and is goaded. (It attacks each combat if able and attacks a player other than you if able.)\nWhenever enchanted creature attacks, you scry 2.";
 const WAR_GAMES_ORACLE: &str = "(As this Saga enters and after your draw step, add a lore counter. Sacrifice after IV.)\nI — Each player creates three tapped 1/1 white Warrior creature tokens. The tokens are goaded for as long as this Saga remains on the battlefield.\nII, III — Put a +1/+1 counter on each Warrior creature.\nIV — You may exile a nontoken creature you control. When you do, exile all Warriors.";
+const LASER_SCREWDRIVER_ORACLE: &str = "{T}: Add one mana of any color.\n{1}, {T}: Tap target artifact.\n{2}, {T}: Surveil 1. (Look at the top card of your library. You may put that card into your graveyard.)\n{3}, {T}: Goad target creature. (Until your next turn, it attacks each combat if able and attacks a player other than you if able.)";
 const KARDUR_ORACLE: &str = "When Kardur enters, until your next turn, creatures your opponents control attack each combat if able and attack a player other than you if able.\nWhenever an attacking creature dies, each opponent loses 1 life and you gain 1 life.";
 
 /// Mark a creature goaded by `goader` (P0 is the active player, so its own
@@ -456,6 +461,176 @@ fn war_games_registered_chapter_token_tracks_saga_presence() {
         recipient,
         &goaded,
         &FilterContext::neutral()
+    ));
+}
+
+#[test]
+fn registered_warrior_direct_regoad_uses_each_goader_original_lifetime() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let war = scenario
+        .add_spell_to_hand(P0, "The War Games", false)
+        .as_enchantment()
+        .with_subtypes(vec!["Saga"])
+        .from_oracle_text(WAR_GAMES_ORACLE)
+        .id();
+    let first_source = scenario
+        .add_artifact_from_oracle(P0, "Laser Screwdriver", LASER_SCREWDRIVER_ORACLE)
+        .id();
+    let second_source = scenario
+        .add_artifact_from_oracle(P1, "Laser Screwdriver", LASER_SCREWDRIVER_ORACLE)
+        .id();
+    for player in [P0, P1] {
+        scenario.with_mana_pool(
+            player,
+            (0..3)
+                .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
+                .collect(),
+        );
+    }
+    let mut runner = scenario.build();
+    runner.cast(war).resolve();
+    assert!(runner.state().stack.is_empty(), "chapter I must resolve");
+    let state = runner.state();
+    let saga = *state
+        .battlefield
+        .iter()
+        .find(|id| state.objects[id].name == "The War Games")
+        .expect("the Saga must be on the battlefield");
+    let recipient = state
+        .transient_continuous_effects
+        .iter()
+        .find_map(|effect| {
+            (effect.source_id == saga
+                && effect.controller == P0
+                && effect.duration == Duration::WhileHostOnBattlefield
+                && effect.modifications.contains(&ContinuousModification::AddStaticMode {
+                    mode: StaticMode::Goaded,
+                }))
+            .then(|| match &effect.affected {
+                TargetFilter::SpecificObject { id } => Some(*id),
+                _ => None,
+            })
+            .flatten()
+        })
+        .expect("chapter I must register an exact live Warrior recipient");
+    let creature = &state.objects[&recipient];
+    assert!(creature.is_token);
+    assert!(creature.card_types.core_types.contains(&CoreType::Creature));
+    assert!(creature.card_types.subtypes.iter().any(|subtype| subtype == "Warrior"));
+    assert_ne!(creature.controller, P0, "the recipient and first goader differ");
+    assert!(creature.goaded_by.is_empty());
+    let goaded = TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Goaded]));
+    assert!(matches_target_filter(
+        state,
+        recipient,
+        &goaded,
+        &FilterContext::neutral(),
+    ));
+
+    for (source, controller) in [(first_source, P0), (second_source, P1)] {
+        let object = &runner.state().objects[&source];
+        assert_eq!(object.controller, controller);
+        assert!(object.abilities.iter().any(|ability| {
+            ability.kind == AbilityKind::Activated
+                && matches!(ability.effect.as_ref(), Effect::Goad { .. })
+        }));
+    }
+    let first_goad = runner.state().objects[&first_source]
+        .abilities
+        .iter()
+        .position(|ability| matches!(ability.effect.as_ref(), Effect::Goad { .. }))
+        .expect("Laser Screwdriver's direct goad ability");
+    let second_goad = runner.state().objects[&second_source]
+        .abilities
+        .iter()
+        .position(|ability| matches!(ability.effect.as_ref(), Effect::Goad { .. }))
+        .expect("the second Screwdriver's direct goad ability");
+
+    // CR 701.15d: P0's real activation targets an already-designated creature.
+    // It resolves, but cannot add a new direct next-turn deadline.
+    let first_outcome = runner
+        .activate(first_source, first_goad)
+        .target_object(recipient)
+        .resolve();
+    assert!(first_outcome.events().iter().any(|event| matches!(
+        event,
+        GameEvent::EffectResolved {
+            kind: EffectKind::Goad,
+            source_id,
+            ..
+        } if *source_id == first_source
+    )));
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().objects[&first_source].tapped);
+    assert!(
+        runner.state().objects[&recipient].goaded_by.is_empty(),
+        "same-goader activation must not add a direct deadline"
+    );
+
+    runner.state_mut().priority_player = P1;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P1 };
+    let second_outcome = runner
+        .activate(second_source, second_goad)
+        .target_object(recipient)
+        .resolve();
+    assert!(second_outcome.events().iter().any(|event| matches!(
+        event,
+        GameEvent::EffectResolved {
+            kind: EffectKind::Goad,
+            source_id,
+            ..
+        } if *source_id == second_source
+    )));
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().objects[&second_source].tapped);
+    assert!(runner.state().battlefield.contains(&saga));
+    assert!(runner.state().transient_continuous_effects.iter().any(|effect| {
+        effect.source_id == saga
+            && effect.controller == P0
+            && effect.duration == Duration::WhileHostOnBattlefield
+            && effect.affected == TargetFilter::SpecificObject { id: recipient }
+    }));
+    assert_eq!(
+        runner.state().objects[&recipient].goaded_by,
+        [P1].into_iter().collect(),
+        "the different goader contributes one independent direct cause"
+    );
+    assert!(matches_target_filter(
+        runner.state(),
+        recipient,
+        &goaded,
+        &FilterContext::neutral(),
+    ));
+
+    engine::game::zones::move_to_zone(
+        runner.state_mut(),
+        saga,
+        Zone::Graveyard,
+        &mut Vec::new(),
+    );
+    evaluate_layers(runner.state_mut());
+    assert!(!runner.state().battlefield.contains(&saga));
+    assert_eq!(runner.state().objects[&recipient].goaded_by, [P1].into_iter().collect());
+    assert!(matches_target_filter(
+        runner.state(),
+        recipient,
+        &goaded,
+        &FilterContext::neutral(),
+    ));
+
+    runner.state_mut().priority_player = P0;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P0 };
+    // CR 701.15a: P1's direct designation ends at the start of P1's next turn.
+    engine::game::turns::start_next_turn(runner.state_mut(), &mut Vec::new());
+    engine::game::turns::execute_untap(runner.state_mut(), &mut Vec::new());
+    assert_eq!(runner.state().active_player, P1);
+    assert!(runner.state().objects[&recipient].goaded_by.is_empty());
+    assert!(!matches_target_filter(
+        runner.state(),
+        recipient,
+        &goaded,
+        &FilterContext::neutral(),
     ));
 }
 
