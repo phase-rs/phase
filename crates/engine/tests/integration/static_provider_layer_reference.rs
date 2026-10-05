@@ -494,10 +494,7 @@ fn retained_multilayer_trigger_grant_survives_earlier_ability_removal() {
     );
     assert!(runner.state().objects[&remover].timestamp < runner.state().objects[&host].timestamp);
     assert_eq!(
-        runner.state().objects[&provider]
-            .trigger_definitions
-            .iter_all()
-            .count(),
+        runner.state().objects[&provider].trigger_definitions.len(),
         1
     );
     assert_eq!(
@@ -515,17 +512,13 @@ fn retained_multilayer_trigger_grant_survives_earlier_ability_removal() {
         .contains(&CoreType::Artifact));
     assert_eq!(activated_ability_definitions(runner.state(), host).len(), 1);
     assert_eq!(
-        runner.state().objects[&host]
-            .trigger_definitions
-            .iter_all()
-            .count(),
+        runner.state().objects[&host].trigger_definitions.len(),
         1,
         "retained parent installs one trigger; the unstarted parent stays suppressed"
     );
     let granted = runner.state().objects[&host]
         .trigger_definitions
-        .iter_all()
-        .next()
+        .first()
         .unwrap();
     assert!(matches!(
         &granted.occurrence,
