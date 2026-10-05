@@ -6779,9 +6779,12 @@ fn active_continuous_effects_from_static_definitions(
             // CR 701.15b: Goaded is a designation, not an ability granted
             // to the affected permanent. Combat reads this functioning source.
             if is_combat_assignment_rule_modification(modification)
-                || matches!(modification, ContinuousModification::AddStaticMode {
-                    mode: StaticMode::Goaded
-                })
+                || matches!(
+                    modification,
+                    ContinuousModification::AddStaticMode {
+                        mode: StaticMode::Goaded
+                    }
+                )
             {
                 continue;
             }
@@ -6946,9 +6949,12 @@ fn expand_granted_static_effects(
         let retained_inner_condition = inner.condition.clone();
         for (mod_index, modification) in inner.modifications.iter().enumerate() {
             if is_combat_assignment_rule_modification(modification)
-                || matches!(modification, ContinuousModification::AddStaticMode {
-                    mode: StaticMode::Goaded
-                })
+                || matches!(
+                    modification,
+                    ContinuousModification::AddStaticMode {
+                        mode: StaticMode::Goaded
+                    }
+                )
             {
                 continue;
             }

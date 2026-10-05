@@ -40,8 +40,8 @@ use crate::game::layers::transient_effect_is_live;
 use crate::game::{casting, casting_costs, keywords, turn_control};
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, ContinuousModification,
-    Effect, FilterProp, ParitySource, ParsedCondition, QuantityExpr, ReplacementDefinition, ResolvedAbility,
-    StaticDefinition, TargetFilter, TargetRef, TriggerDefinition,
+    Effect, FilterProp, ParitySource, ParsedCondition, QuantityExpr, ReplacementDefinition,
+    ResolvedAbility, StaticDefinition, TargetFilter, TargetRef, TriggerDefinition,
 };
 use crate::types::actions::GameAction;
 use crate::types::card_type::CardType;
@@ -1248,10 +1248,14 @@ impl LegalityPoisonGates {
                     | StaticMode::CombatAlone { .. }
             ) || (def.mode == StaticMode::Continuous
                 && def.modifications.iter().any(|modification| {
-                    matches!(modification, ContinuousModification::AddStaticMode {
-                        mode: StaticMode::Goaded
-                    })
-                })) {
+                    matches!(
+                        modification,
+                        ContinuousModification::AddStaticMode {
+                            mode: StaticMode::Goaded
+                        }
+                    )
+                }))
+            {
                 g.has_declare_attacker = true;
             }
             // CR 509.1: declare-blocker restrictions / requirements.
@@ -1296,9 +1300,12 @@ impl LegalityPoisonGates {
         if state.transient_continuous_effects.iter().any(|tce| {
             matches!(tce.affected, TargetFilter::SpecificObject { .. })
                 && tce.modifications.iter().any(|modification| {
-                    matches!(modification, ContinuousModification::AddStaticMode {
-                        mode: StaticMode::Goaded
-                    })
+                    matches!(
+                        modification,
+                        ContinuousModification::AddStaticMode {
+                            mode: StaticMode::Goaded
+                        }
+                    )
                 })
                 && transient_effect_is_live(state, tce)
         }) {

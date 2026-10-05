@@ -6664,9 +6664,12 @@ pub(crate) fn goading_players_for_creature_gated(
     players.extend(state.transient_continuous_effects.iter().filter_map(|tce| {
         (matches!(tce.affected, TargetFilter::SpecificObject { id } if id == creature_id)
             && tce.modifications.iter().any(|modification| {
-                matches!(modification, ContinuousModification::AddStaticMode {
-                    mode: StaticMode::Goaded
-                })
+                matches!(
+                    modification,
+                    ContinuousModification::AddStaticMode {
+                        mode: StaticMode::Goaded
+                    }
+                )
             })
             && super::layers::transient_effect_is_live(state, tce))
         .then_some(tce.controller)
@@ -6775,9 +6778,12 @@ fn goad_static_hits_for_creature<'a>(
             if def.mode != StaticMode::Goaded
                 && !(def.mode == StaticMode::Continuous
                     && def.modifications.iter().any(|modification| {
-                        matches!(modification, ContinuousModification::AddStaticMode {
-                            mode: StaticMode::Goaded
-                        })
+                        matches!(
+                            modification,
+                            ContinuousModification::AddStaticMode {
+                                mode: StaticMode::Goaded
+                            }
+                        )
                     }))
             {
                 return None;

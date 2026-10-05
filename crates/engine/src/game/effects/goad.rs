@@ -1,5 +1,5 @@
-use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::combat::goading_players_for_creature;
+use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetRef};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
