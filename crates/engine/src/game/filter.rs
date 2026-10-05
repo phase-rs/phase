@@ -3022,6 +3022,15 @@ pub fn matches_target_filter(
     filter: &TargetFilter,
     ctx: &FilterContext<'_>,
 ) -> bool {
+    // CR 108.4a: a card in an owner-scoped zone has no controller, so "their"/"your"
+    // reads its owner, not the LKI at-exit controller of a card that died under a thief.
+    if state
+        .objects
+        .get(&object_id)
+        .is_some_and(|obj| is_owner_scoped_zone(obj.zone))
+    {
+        return matches_target_filter_in_owner_zone(state, object_id, filter, ctx);
+    }
     filter_inner(state, object_id, filter, ctx)
 }
 

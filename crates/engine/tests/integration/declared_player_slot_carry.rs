@@ -42,6 +42,7 @@ struct Seen {
     discard_by: Vec<PlayerId>,
     searches: Vec<(PlayerId, Option<PlayerId>)>,
     optional_by: Vec<PlayerId>,
+    zone_offers: Vec<(PlayerId, Zone, Vec<ObjectId>)>,
 }
 
 impl Seen {
@@ -177,6 +178,21 @@ fn drive(r: &mut GameRunner, plan: &Plan) -> Seen {
                     })
                     .expect("decide")
                     .events,
+                );
+            }
+            WaitingFor::EffectZoneChoice {
+                player,
+                zone,
+                cards,
+                count,
+                ..
+            } => {
+                seen.zone_offers.push((player, zone, cards.clone()));
+                let cards = cards.into_iter().take(count).collect();
+                seen.events.extend(
+                    r.act(GameAction::SelectCards { cards })
+                        .expect("zone choice")
+                        .events,
                 );
             }
             WaitingFor::Priority { .. } => {
@@ -1091,4 +1107,85 @@ fn a_repeated_payment_addressed_to_a_gone_declared_player_is_offered_to_no_one()
         (Vec::<PlayerId>::new(), 0),
         "gone: no offer to anyone, no payment by anyone"
     );
+}
+
+const EXILE_THEN_THAT_PLAYER_EXILES: &str = "Target opponent exiles a nontoken creature they control. That player exiles a nonland card from their graveyard.";
+const AZULA_CLAUSE: &str = "Target opponent exiles a nontoken creature they control, then they exile a nonland card from their graveyard.";
+
+/// CR 108.4a + CR 109.5: "their graveyard" is owner-scoped, so a card P1 owns is offered to P1
+/// even though P0 controlled it when it died (the LKI at-exit controller is P0).
+fn graveyard_offer_after_steal(text: &str) -> Vec<(PlayerId, Zone, Vec<ObjectId>)> {
+    let mut sc = three_player(7);
+    let spell = sc
+        .add_spell_to_hand_from_oracle(P0, "Row", false, text)
+        .id();
+    sc.add_creature(P1, "B1", 2, 2);
+    sc.add_creature(P1, "B2", 2, 2);
+    let stolen = sc.add_creature(P1, "Stolen", 2, 2).id();
+    let plain = sc.add_creature_to_graveyard(P1, "Plain", 1, 1).id();
+    let p0_card = sc.add_creature_to_graveyard(P0, "Mine", 1, 1).id();
+    let p2_card = sc.add_creature_to_graveyard(P2, "Theirs", 1, 1).id();
+    let mut r = sc.build();
+    {
+        let o = r.state_mut().objects.get_mut(&stolen).unwrap();
+        o.controller = P0;
+        o.base_controller = Some(P0);
+    }
+    let mut events = vec![];
+    engine::game::zones::move_to_zone(r.state_mut(), stolen, Zone::Graveyard, &mut events);
+    assert_eq!(
+        r.state().lki_cache[&stolen].controller,
+        P0,
+        "reach: the at-exit controller is the thief"
+    );
+    assert_eq!(r.state().objects[&stolen].owner, P1);
+    cast(&mut r, spell);
+    let seen = drive(
+        &mut r,
+        &Plan {
+            prefs: &[TargetRef::Player(P1)],
+            ..Default::default()
+        },
+    );
+    let offers: Vec<_> = seen
+        .zone_offers
+        .into_iter()
+        .filter(|(_, zone, _)| *zone == Zone::Graveyard)
+        .collect();
+    assert_eq!(
+        offers.len(),
+        1,
+        "both P1-owned cards are offered (a lone candidate is taken without a prompt)"
+    );
+    let (_, _, cards) = &offers[0];
+    assert!(
+        !cards.contains(&p0_card) && !cards.contains(&p2_card),
+        "other players' graveyard cards are never offered"
+    );
+    assert!(
+        cards.contains(&plain) && cards.contains(&stolen),
+        "both of P1's cards are offered"
+    );
+    assert!(
+        [p0_card, p2_card]
+            .iter()
+            .all(|id| r.state().objects[id].zone == Zone::Graveyard),
+        "P0's and P2's graveyard cards are untouched"
+    );
+    offers
+}
+
+/// CR 108.4a: a card that died under another player's control is still its owner's card in the
+/// owner's graveyard, for a "that player ... from their graveyard" instruction.
+#[test]
+fn that_player_graveyard_offer_includes_a_card_that_died_under_a_thief() {
+    let offers = graveyard_offer_after_steal(EXILE_THEN_THAT_PLAYER_EXILES);
+    assert_eq!(offers[0].0, P1, "the declared player chooses");
+}
+
+/// Azula, Cunning Usurper's enters clause, same state.
+#[test]
+fn azula_graveyard_offer_includes_a_card_that_died_under_a_thief() {
+    let offers = graveyard_offer_after_steal(AZULA_CLAUSE);
+    assert_eq!(offers[0].0, P1, "the declared player chooses");
 }
