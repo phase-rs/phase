@@ -6,17 +6,21 @@
 //! re-trigger, and the follow-up clause must goad those copies permanently.
 
 use engine::game::scenario::{GameScenario, P0, P1};
+use engine::game::combat::{attacker_constraints_for_active_player, get_valid_attacker_ids, CombatRequirement};
+use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::parser::oracle::{keyword_display_name, parse_oracle_text, ParsedAbilities};
 use engine::types::ability::{
     ContinuousModification, Duration, Effect, FilterProp, TargetFilter, TriggerCondition,
-    TypeFilter,
+    TypeFilter, TypedFilter,
 };
-use engine::types::game_state::GameState;
+use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::keywords::Keyword;
 use engine::types::phase::Phase;
 use engine::types::statics::StaticMode;
 use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
+
+use super::rules::AttackTarget;
 
 const LIFE_OF_THE_PARTY_ORACLE: &str = "\
 First strike, trample, haste\n\
@@ -166,6 +170,74 @@ fn life_of_the_party_runtime_token_copy_does_not_retrigger_etb() {
         }),
         "the created token should be permanently goaded"
     );
+}
+
+#[test]
+fn life_token_stays_goaded_after_humility_removes_its_abilities() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let life = scenario
+        .add_creature_to_hand(P0, "Life of the Party", 0, 1)
+        .with_subtypes(vec!["Elemental"])
+        .from_oracle_text_with_keywords(
+            &["first strike", "trample", "haste"],
+            LIFE_OF_THE_PARTY_ORACLE,
+        )
+        .id();
+    let humility = scenario
+        .add_spell_to_hand(P0, "Humility", false)
+        .as_enchantment()
+        .from_oracle_text("All creatures lose all abilities and have base power and toughness 1/1.")
+        .id();
+    let mut runner = scenario.build();
+    let outcome = runner.cast(life).resolve();
+    let state = outcome.state();
+    assert!(state.stack.is_empty());
+    assert_eq!(life_of_the_party_count(state, P0, false), 1);
+    assert_eq!(life_of_the_party_count(state, P1, true), 1);
+    let token_id = *state
+        .battlefield
+        .iter()
+        .find(|id| state.objects[id].name == "Life of the Party" && state.objects[id].is_token)
+        .expect("real ETB must produce the opponent's token");
+    assert_eq!(state.objects[&token_id].controller, P1);
+    assert!(state.objects[&token_id].keywords.contains(&Keyword::FirstStrike));
+    assert!(state.transient_continuous_effects.iter().any(|effect| {
+        effect.controller == P0
+            && effect.duration == Duration::Permanent
+            && effect.affected == TargetFilter::SpecificObject { id: token_id }
+            && effect.modifications.iter().any(|modification| matches!(
+                modification,
+                ContinuousModification::AddStaticMode { mode: StaticMode::Goaded }
+            ))
+    }));
+
+    runner.cast(humility).resolve();
+    let state = runner.state();
+    assert!(!state.objects[&token_id].keywords.contains(&Keyword::FirstStrike));
+    let goaded = TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Goaded]));
+    assert!(matches_target_filter(state, token_id, &goaded, &FilterContext::neutral()));
+
+    // The token is eligible on its controller's later turn. Its printed
+    // abilities remain suppressed while the designation still requires attack.
+    runner.state_mut().objects.get_mut(&token_id).unwrap().summoning_sick = false;
+    runner.state_mut().active_player = P1;
+    runner.state_mut().priority_player = P1;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P1 };
+    runner.advance_to_combat();
+    assert_eq!(runner.waiting_for_kind(), "DeclareAttackers");
+    let constraints = attacker_constraints_for_active_player(
+        runner.state(),
+        &get_valid_attacker_ids(runner.state()),
+    );
+    assert_eq!(
+        constraints.get(&token_id),
+        Some(&CombatRequirement::MustAttack { defenders: vec![], sources: vec![] })
+    );
+    assert!(runner.declare_attackers(&[]).is_err());
+    runner
+        .declare_attackers(&[(token_id, AttackTarget::Player(P0))])
+        .expect("the goaded token can attack the only opponent");
 }
 
 fn life_of_the_party_count(

@@ -30,13 +30,15 @@
 //!     not the trigger's own source.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::parser::oracle::parse_oracle_text;
-use engine::types::ability::{FilterProp, TargetFilter};
+use engine::types::ability::{Duration, FilterProp, TargetFilter, TypedFilter};
 use engine::types::actions::GameAction;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::triggers::TriggerMode;
+use engine::types::zones::Zone;
 
 use super::rules::AttackTarget;
 
@@ -48,6 +50,7 @@ const P2: PlayerId = PlayerId(2);
 // goaded-attack punish alone.
 const VENGEFUL_GOADED_ATTACK_TRIGGER: &str =
     "Whenever a goaded creature attacks, it deals 1 damage to its controller.";
+const LIFE_OF_THE_PARTY_ORACLE: &str = "First strike, trample, haste\nWhenever this creature attacks, it gets +X/+0 until end of turn, where X is the number of creatures you control.\nWhen this creature enters, if it's not a token, each opponent creates a token that's a copy of it. The tokens are goaded for the rest of the game.";
 
 fn life_of(state: &GameState, player: PlayerId) -> i32 {
     state
@@ -204,4 +207,71 @@ fn vengeful_ancestor_ungoaded_attacker_loses_no_life() {
         20,
         "an ungoaded attacker must not trigger the goaded-attack punisher — P1 loses no life"
     );
+}
+
+#[test]
+fn vengeful_ancestor_reads_real_registered_life_token_until_it_exits() {
+    assert_goaded_attacks_trigger_parses();
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let ancestor = scenario
+        .add_creature(P0, "Vengeful Ancestor", 3, 2)
+        .from_oracle_text(VENGEFUL_GOADED_ATTACK_TRIGGER)
+        .id();
+    let ox = scenario.add_creature(P1, "Ornery Ox", 2, 2).id();
+    let life = scenario
+        .add_creature_to_hand(P0, "Life of the Party", 0, 1)
+        .with_subtypes(vec!["Elemental"])
+        .from_oracle_text_with_keywords(
+            &["first strike", "trample", "haste"],
+            LIFE_OF_THE_PARTY_ORACLE,
+        )
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(life).resolve();
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(runner.state().objects[&ancestor].controller, P0);
+    let token = *runner
+        .state()
+        .battlefield
+        .iter()
+        .find(|id| {
+            let obj = &runner.state().objects[id];
+            obj.name == "Life of the Party" && obj.is_token && obj.controller == P1
+        })
+        .expect("the actual Life ETB must create a P1 token");
+    assert!(runner.state().transient_continuous_effects.iter().any(|effect| {
+        effect.controller == P0
+            && effect.duration == Duration::Permanent
+            && effect.affected == TargetFilter::SpecificObject { id: token }
+    }));
+    let goaded = TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Goaded]));
+    assert!(matches_target_filter(runner.state(), token, &goaded, &FilterContext::neutral()));
+
+    let mut after_exit = GameRunner::from_state(runner.state().clone());
+    engine::game::zones::move_to_zone(
+        after_exit.state_mut(),
+        token,
+        Zone::Graveyard,
+        &mut Vec::new(),
+    );
+    assert!(!after_exit.state().battlefield.contains(&token));
+    assert!(!matches_target_filter(after_exit.state(), ox, &goaded, &FilterContext::neutral()));
+
+    hand_turn_to(&mut runner, P1);
+    let before = life_of(runner.state(), P1);
+    runner
+        .declare_attackers(&[(token, AttackTarget::Player(P0))])
+        .expect("the registered token attacks its only available opponent");
+    runner.advance_until_stack_empty();
+    assert_eq!(life_of(runner.state(), P1), before - 1);
+
+    hand_turn_to(&mut after_exit, P1);
+    let before = life_of(after_exit.state(), P1);
+    after_exit
+        .declare_attackers(&[(ox, AttackTarget::Player(P0))])
+        .expect("the ungoaded sibling can still attack with Ancestor present");
+    after_exit.advance_until_stack_empty();
+    assert_eq!(after_exit.state().objects[&ancestor].controller, P0);
+    assert_eq!(life_of(after_exit.state(), P1), before);
 }
