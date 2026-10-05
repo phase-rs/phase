@@ -10167,6 +10167,27 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     let text = strip_leading_sequence_connector(text)
         .trim()
         .trim_end_matches('.');
+    // CR 608.2d: dynamic untargeted aggregate returns need a live quantity
+    // binding. Do not let the fixed comparator parser collapse X to zero.
+    let aggregate_lower = text.to_ascii_lowercase();
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("return ").parse(aggregate_lower.as_str()) {
+        let (noun, cardinality) = strip_leading_quantifier(rest);
+        if cardinality.is_some()
+            && nom_primitives::scan_preceded(noun, |input| {
+                tag::<_, _, OracleError<'_>>("with total mana value x").parse(input)
+            })
+            .is_some()
+            && matches!(
+                parse_target_with_syntax(noun, ctx).2,
+                TargetSyntax::Descriptor
+            )
+        {
+            return parsed_clause(Effect::unimplemented(
+                "return_subset_dynamic_mana_value",
+                text,
+            ));
+        }
+    }
     if text.is_empty() {
         return parsed_clause(Effect::Unimplemented {
             name: "empty".to_string(),
@@ -20544,6 +20565,8 @@ fn try_parse_verb_and_target<'a>(
                         TargetedImperativeAst::ReturnToBattlefield {
                             target,
                             origin,
+                            choice_constraint: None,
+                            choice_cardinality: None,
                             enter_transformed: d.transformed,
                             enters_under,
                             enter_tapped: d.enter_tapped,

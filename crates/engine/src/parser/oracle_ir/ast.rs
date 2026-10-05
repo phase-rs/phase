@@ -1258,6 +1258,11 @@ pub(crate) enum TargetedImperativeAst {
     ReturnToBattlefield {
         target: TargetFilter,
         origin: Option<Zone>,
+        /// CR 608.2d + CR 202.3: a fixed aggregate restriction on an
+        /// untargeted resolution-time subset, separate from per-card filters.
+        choice_constraint: Option<crate::types::ability::ChooseFromZoneConstraint>,
+        /// CR 608.2d: the printed subset cardinality, independent of its budget.
+        choice_cardinality: Option<MultiTargetSpec>,
         /// CR 712.2: "return ... transformed" (DFC entering with back face up)
         enter_transformed: bool,
         /// CR 110.2a: the battlefield-entry controller. `Override(r)` routes

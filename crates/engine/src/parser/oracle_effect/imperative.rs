@@ -1858,6 +1858,33 @@ pub(crate) fn parse_returned_this_way_quantity(
     )
 }
 
+/// CR 608.2d + CR 202.3: recognize only fixed aggregate budgets. The shared
+/// comparator also accepts X; the numeric lookahead keeps X on the gap path.
+fn strip_fixed_return_mana_value_budget(
+    text: &str,
+) -> Option<(String, crate::types::ability::ChooseFromZoneConstraint)> {
+    let lower = text.to_ascii_lowercase();
+    let (before, (comparator, value), rest) =
+        nom_primitives::scan_preceded(lower.as_str(), |input| {
+            preceded(
+                tag::<_, _, OracleError<'_>>("with total mana value "),
+                preceded(
+                    peek(nom_primitives::parse_number),
+                    super::search::parse_total_mana_value_comparator,
+                ),
+            )
+            .parse(input)
+        })?;
+    let before_original = text[..before.len()].trim_end();
+    let after_original = text[lower.len() - rest.len()..].trim_start();
+    Some((
+        format!("{before_original} {after_original}")
+            .trim()
+            .to_string(),
+        crate::types::ability::ChooseFromZoneConstraint::TotalManaValue { comparator, value },
+    ))
+}
+
 pub(super) fn parse_targeted_action_ast(
     text: &str,
     lower: &str,
@@ -2322,6 +2349,7 @@ pub(super) fn parse_targeted_action_ast(
         // the genuinely bounded `max: Some(_)` result to avoid double-handling
         // it or disturbing that already-correct path.
         let (stripped_rest, return_multi_target) = strip_leading_quantifier(rest);
+        let return_choice_cardinality = return_multi_target.clone();
         let return_multi_target = return_multi_target.filter(|spec| spec.max.is_some());
         let rest = if return_multi_target.is_some() {
             stripped_rest
@@ -2356,6 +2384,13 @@ pub(super) fn parse_targeted_action_ast(
             Some(consumed) => (&target_text[consumed..], true),
             None => (target_text, false),
         };
+        // CR 608.2d + CR 202.3: peel set-level qualities before the object
+        // parser can mistake the aggregate bound for an individual restriction.
+        let aggregate_return = strip_fixed_return_mana_value_budget(target_text);
+        let original_target_text = target_text;
+        let target_text = aggregate_return
+            .as_ref()
+            .map_or(target_text, |(stripped, _)| stripped.as_str());
         let counted_return = parse_count_expr(target_text).and_then(|(mut count, after_count)| {
             let filter = extract_object_count_filter(&count)?;
             if nom_primitives::scan_contains(rest_lower, "rounded up") {
@@ -2395,7 +2430,7 @@ pub(super) fn parse_targeted_action_ast(
         // CR 115.1 + Whitemane Lion ruling: Use `parse_target_with_syntax` so
         // the "target"-keyword vs descriptor discriminator flows back from
         // this parse alone, with no cross-clause residue to clear.
-        let (target, target_syntax, _count_for_shape) = match counted_return {
+        let (mut target, target_syntax, _count_for_shape) = match counted_return {
             Some((target, c)) => (target, TargetSyntax::TargetKeyword, c),
             None => {
                 // CR 400.7j + CR 608.2c + CR 608.2d: "return the other to the
@@ -2438,6 +2473,18 @@ pub(super) fn parse_targeted_action_ast(
                     (target, syntax, QuantityExpr::Fixed { value: 0 })
                 }
             }
+        };
+        let choice_constraint = if matches!(target_syntax, TargetSyntax::Descriptor)
+            && return_choice_cardinality.as_ref().is_some_and(|spec| {
+                matches!(spec.min, QuantityExpr::Fixed { value: 0 })
+                    && matches!(spec.max, None | Some(QuantityExpr::Fixed { .. }))
+            }) {
+            aggregate_return.map(|(_, constraint)| constraint)
+        } else {
+            if aggregate_return.is_some() {
+                target = parse_target_with_syntax(original_target_text, ctx).0;
+            }
+            None
         };
         // CR 115.1: A bounce resolves at-resolution iff the Oracle text omitted
         // the word "target" AND the filter has a controller scope to enumerate
@@ -2522,6 +2569,10 @@ pub(super) fn parse_targeted_action_ast(
                     Some(TargetedImperativeAst::ReturnToBattlefield {
                         target,
                         origin,
+                        choice_cardinality: choice_constraint
+                            .as_ref()
+                            .and(return_choice_cardinality),
+                        choice_constraint,
                         enter_transformed: d.transformed,
                         enters_under,
                         enter_tapped: d.enter_tapped,
@@ -2880,6 +2931,8 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
         TargetedImperativeAst::ReturnToBattlefield {
             target,
             origin,
+            choice_constraint: _,
+            choice_cardinality: _,
             enter_transformed,
             enters_under,
             enter_tapped,
@@ -15605,6 +15658,61 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             clause.multi_target = multi_target;
             clause
         }
+        // CR 608.2c/d: compose a resolution-time subset pick with the existing
+        // return lowering, so every destination rider and its attachment survives.
+        ImperativeFamilyAst::Structured(ImperativeAst::Targeted(
+            mut ast @ TargetedImperativeAst::ReturnToBattlefield {
+                choice_constraint: Some(_),
+                choice_cardinality: Some(_),
+                origin: Some(_),
+                ..
+            },
+        )) => {
+            let TargetedImperativeAst::ReturnToBattlefield {
+                target,
+                origin,
+                choice_constraint,
+                choice_cardinality,
+                ..
+            } = &mut ast
+            else {
+                unreachable!()
+            };
+            let zone = origin.expect("matched explicit origin");
+            let filter = std::mem::replace(target, TargetFilter::ParentTarget);
+            let constraint = choice_constraint.take();
+            let cardinality = choice_cardinality.take().expect("matched cardinality");
+            let count = match cardinality.max {
+                None => u32::MAX,
+                Some(QuantityExpr::Fixed { value }) => value.max(0) as u32,
+                Some(_) => {
+                    return parsed_clause(Effect::unimplemented(
+                        "return_subset_dynamic_cardinality",
+                        "return subset with dynamic cardinality",
+                    ));
+                }
+            };
+            let moved = lower_imperative_family_ast(ImperativeFamilyAst::Structured(
+                ImperativeAst::Targeted(ast),
+            ));
+            let mut continuation = AbilityDefinition::new(AbilityKind::Spell, moved.effect);
+            continuation.sub_ability = moved.sub_ability;
+            let mut clause = parsed_clause(Effect::ChooseFromZone {
+                count,
+                zone,
+                additional_zones: Vec::new(),
+                zone_owner: ZoneOwner::Controller,
+                filter: Some(filter),
+                chooser: Chooser::Controller.into(),
+                candidate_source: ZoneChoiceCandidateSource::Direct,
+                reciprocal_role: None,
+                up_to: true,
+                selection: CardSelectionMode::Chosen,
+                constraint,
+            });
+            clause.sub_ability = Some(Box::new(continuation));
+            clause
+        }
         // CR 701.3a + CR 303.4f: "return … to the battlefield attached to <host>"
         // (Gift of Immortality, Next of Kin, Lynde). Bare Effect lowering cannot
         // carry the Attach sub-chain — nest it here (Cloak / SearchLibrary pattern)
@@ -15613,6 +15721,8 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             TargetedImperativeAst::ReturnToBattlefield {
                 target,
                 origin,
+                choice_constraint,
+                choice_cardinality,
                 enter_transformed,
                 enters_under,
                 enter_tapped,
@@ -15636,6 +15746,8 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 TargetedImperativeAst::ReturnToBattlefield {
                     target,
                     origin,
+                    choice_constraint,
+                    choice_cardinality,
                     enter_transformed,
                     enters_under,
                     enter_tapped,

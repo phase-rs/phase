@@ -719,6 +719,9 @@ pub enum ChooseFromZoneConstraint {
     /// The chosen cards must admit an injective assignment to distinct card types
     /// from the listed categories.
     DistinctCardTypes { categories: Vec<CoreType> },
+    /// CR 608.2c/d + CR 202.3: the resolution-time chosen set's combined
+    /// mana value must satisfy the printed fixed bound.
+    TotalManaValue { comparator: Comparator, value: i32 },
 }
 
 /// Selection constraint applied to multi-card library searches at the

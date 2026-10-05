@@ -26,6 +26,98 @@ use crate::types::card_type::CoreType;
 use crate::types::mana::{ManaCost, ManaCostShard};
 use crate::types::statics::CostModifyMode;
 
+/// SHAPE: real Technomancer Oracle keeps mill before the direct whole-graveyard
+/// choice, whose immediate continuation moves only the selected parents.
+#[test]
+fn technomancer_total_mana_value_return_shape() {
+    let parsed = parse_oracle_text(
+        "When this creature enters, mill three cards, then return any number of artifact creature cards with total mana value 6 or less from your graveyard to the battlefield.",
+        "Technomancer", &[], &["Artifact".to_string(), "Creature".to_string()], &[],
+    );
+    let execute = parsed.triggers[0].execute.as_ref().unwrap();
+    assert!(matches!(execute.effect.as_ref(), Effect::Mill { .. }));
+    let chosen = execute.sub_ability.as_ref().unwrap();
+    assert!(matches!(
+        chosen.effect.as_ref(),
+        Effect::ChooseFromZone {
+            count: u32::MAX,
+            candidate_source: ZoneChoiceCandidateSource::Direct,
+            constraint: Some(ChooseFromZoneConstraint::TotalManaValue {
+                comparator: Comparator::LE,
+                value: 6
+            }),
+            ..
+        }
+    ));
+    assert!(matches!(
+        chosen.sub_ability.as_ref().unwrap().effect.as_ref(),
+        Effect::ChangeZone {
+            target: TargetFilter::ParentTarget,
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Battlefield,
+            ..
+        }
+    ));
+}
+
+/// SHAPE: Lively Dirge's exact return mode has a separate count limit.
+#[test]
+fn lively_dirge_bounded_total_mana_value_return_shape() {
+    let clause = parse_effect_clause(
+        "Return up to two creature cards with total mana value 4 or less from your graveyard to the battlefield.",
+        &mut ParseContext::default(),
+    );
+    assert!(
+        matches!(
+            clause.effect,
+            Effect::ChooseFromZone {
+                count: 2,
+                constraint: Some(ChooseFromZoneConstraint::TotalManaValue {
+                    comparator: Comparator::LE,
+                    value: 4
+                }),
+                ..
+            }
+        ),
+        "{:?}",
+        clause.effect
+    );
+    assert!(matches!(
+        clause.sub_ability.as_ref().unwrap().effect.as_ref(),
+        Effect::ChangeZone {
+            target: TargetFilter::ParentTarget,
+            destination: Zone::Battlefield,
+            ..
+        }
+    ));
+}
+
+/// SHAPE: targeted aggregate and individual-card restrictions keep their paths.
+#[test]
+fn total_mana_value_return_targeted_and_per_card_siblings_shape() {
+    for text in [
+        "Return up to three target creature cards with total mana value 3 or less from your graveyard to the battlefield.",
+        "Return up to X target artifact and/or non-Aura enchantment cards each with mana value X or less from your graveyard to the battlefield.",
+    ] {
+        let clause = parse_effect_clause(text, &mut ParseContext::default());
+        assert!(matches!(clause.effect, Effect::ChangeZone { origin: Some(Zone::Graveyard),
+            destination: Zone::Battlefield, .. }), "{text}: {:?}", clause.effect);
+    }
+}
+
+/// SHAPE: unsupported dynamic untargeted budgets never silently become zero.
+#[test]
+fn total_mana_value_return_dynamic_untargeted_budget_is_honest_gap() {
+    let clause = parse_effect_clause(
+        "Return any number of creature cards with total mana value X or less from your graveyard to the battlefield.",
+        &mut ParseContext::default(),
+    );
+    assert!(
+        matches!(clause.effect, Effect::Unimplemented { ref name, .. }
+        if name == "return_subset_dynamic_mana_value")
+    );
+}
+
 fn assert_tracked_mana_value_source(def: &AbilityDefinition, expected: TrackedAnaphorSource) {
     let Effect::LoseLife { amount, .. } = def.effect.as_ref() else {
         panic!("expected LoseLife, got {:?}", def.effect);

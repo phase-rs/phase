@@ -1523,7 +1523,8 @@ export interface SerializedAbility {
 }
 
 export type ChooseFromZoneConstraint =
-  | { type: "DistinctCardTypes"; categories: string[] };
+  | { type: "DistinctCardTypes"; categories: string[] }
+  | { type: "TotalManaValue"; comparator: string; value: number };
 
 export type SearchSelectionConstraint =
   | { type: "None" }

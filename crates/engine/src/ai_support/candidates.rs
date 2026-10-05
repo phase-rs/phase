@@ -6412,6 +6412,62 @@ fn lethal_first_distribution(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn legal_actions_prune_total_mana_value_return_combinations() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::phase::Phase;
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let ids: Vec<_> = [
+            ("Canoptek Tomb Sentinel", 4, 4, 3),
+            ("Hexmark Destroyer", 6, 6, 6),
+            ("Myr Retriever", 2, 1, 1),
+        ]
+        .into_iter()
+        .map(|(name, value, power, toughness)| {
+            let cost = if value == 6 {
+                ManaCost::Cost {
+                    generic: 4,
+                    shards: vec![ManaCostShard::Black; 2],
+                }
+            } else {
+                ManaCost::generic(value)
+            };
+            scenario
+                .add_creature_to_graveyard(P0, name, power, toughness)
+                .as_artifact_creature()
+                .with_mana_cost(cost)
+                .id()
+        })
+        .collect();
+        // Exact Technomancer return clause isolates the choice class; the full
+        // creature ETB and mill pipeline is covered by integration regressions.
+        let spell = scenario.add_spell_to_hand_from_oracle(P0, "Return clause harness", false,
+            "Return any number of artifact creature cards with total mana value 6 or less from your graveyard to the battlefield.")
+            .with_mana_cost(ManaCost::zero()).id();
+        let mut runner = scenario.build();
+        let outcome = runner.cast(spell).resolve();
+        assert!(
+            matches!(outcome.final_waiting_for(), WaitingFor::ChooseFromZoneChoice { cards, .. }
+            if ids.iter().all(|id| cards.contains(id)))
+        );
+        let actions = crate::ai_support::legal_actions(runner.state());
+        let selections: Vec<_> = actions
+            .iter()
+            .filter_map(|action| match action {
+                GameAction::SelectCards { cards } => Some(cards),
+                _ => None,
+            })
+            .collect();
+        assert!(selections.iter().any(|cards| cards.is_empty()));
+        assert!(selections.iter().any(|cards| cards.as_slice() == [ids[1]]));
+        assert!(selections
+            .iter()
+            .any(|cards| cards.len() == 2 && cards.contains(&ids[0]) && cards.contains(&ids[2])));
+        assert!(!selections
+            .iter()
+            .any(|cards| cards.contains(&ids[0]) && cards.contains(&ids[1])));
+    }
     use crate::game::game_object::RoomDoor;
     use crate::types::game_state::TargetEffectDetail;
     use std::sync::Arc;

@@ -1966,6 +1966,16 @@ pub fn selection_satisfies_constraint(
         Some(ChooseFromZoneConstraint::DistinctCardTypes { categories }) => {
             selected_cards_cover_distinct_card_types(state, chosen, categories)
         }
+        Some(ChooseFromZoneConstraint::TotalManaValue { comparator, value }) => {
+            // CR 202.3 + CR 608.2d: validate the whole set before moving any
+            // card. Missing objects and arithmetic overflow cannot authorize a pick.
+            let total = chosen.iter().try_fold(0_i32, |total, id| {
+                let mana_value =
+                    i32::try_from(state.objects.get(id)?.effective_mana_value()).ok()?;
+                total.checked_add(mana_value)
+            });
+            total.is_some_and(|total| comparator.evaluate(total, *value))
+        }
     }
 }
 
@@ -2034,6 +2044,92 @@ mod tests {
     use crate::types::counter::CounterType;
     use crate::types::identifiers::{CardId, TrackedSetId};
     use crate::types::zones::Zone;
+
+    #[test]
+    fn total_mana_value_constraint_validates_whole_set_and_missing_ids() {
+        let mut state = GameState::new_two_player(42);
+        let ids: Vec<_> = [4, 6, 2, 0]
+            .into_iter()
+            .map(|value| {
+                let id = create_object(
+                    &mut state,
+                    CardId(u64::from(value)),
+                    PlayerId(0),
+                    format!("Mana value {value}"),
+                    Zone::Graveyard,
+                );
+                state.objects.get_mut(&id).unwrap().mana_cost =
+                    crate::types::mana::ManaCost::generic(value);
+                id
+            })
+            .collect();
+        let constraint = ChooseFromZoneConstraint::TotalManaValue {
+            comparator: crate::types::ability::Comparator::LE,
+            value: 6,
+        };
+        // CR 202.3 + CR 608.2d: validate totals, including zero and missing IDs.
+        assert!(selection_satisfies_constraint(
+            &state,
+            &[ids[0], ids[2]],
+            Some(&constraint)
+        ));
+        assert!(!selection_satisfies_constraint(
+            &state,
+            &[ids[0], ids[1]],
+            Some(&constraint)
+        ));
+        assert!(selection_satisfies_constraint(
+            &state,
+            &[ids[1], ids[3]],
+            Some(&constraint)
+        ));
+        assert!(selection_satisfies_constraint(
+            &state,
+            &[],
+            Some(&constraint)
+        ));
+        assert!(!selection_satisfies_constraint(
+            &state,
+            &[ObjectId(u64::MAX)],
+            Some(&constraint)
+        ));
+        // CR 202.3e: X contributes zero off the stack, including graveyard picks.
+        state.objects.get_mut(&ids[3]).unwrap().mana_cost = crate::types::mana::ManaCost::Cost {
+            generic: 0,
+            shards: vec![crate::types::mana::ManaCostShard::X],
+        };
+        assert!(selection_satisfies_constraint(
+            &state,
+            &[ids[1], ids[3]],
+            Some(&constraint)
+        ));
+    }
+
+    #[test]
+    fn total_mana_value_constraint_tagged_serde_and_existing_form_decode() {
+        let constraint = ChooseFromZoneConstraint::TotalManaValue {
+            comparator: crate::types::ability::Comparator::LE,
+            value: 6,
+        };
+        let json = serde_json::to_value(&constraint).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"type":"TotalManaValue", "comparator":"LE", "value":6})
+        );
+        assert_eq!(
+            serde_json::from_value::<ChooseFromZoneConstraint>(json).unwrap(),
+            constraint
+        );
+        assert_eq!(
+            serde_json::from_value::<ChooseFromZoneConstraint>(serde_json::json!({
+                "type":"DistinctCardTypes", "categories":["Artifact","Creature"]
+            }))
+            .unwrap(),
+            ChooseFromZoneConstraint::DistinctCardTypes {
+                categories: vec![CoreType::Artifact, CoreType::Creature],
+            }
+        );
+    }
 
     /// Regression: `ChooseFromZoneConstraint` must serialize internally tagged
     /// (`{ "type": "DistinctCardTypes", ... }`) so the frontend `CardChoiceModal`
