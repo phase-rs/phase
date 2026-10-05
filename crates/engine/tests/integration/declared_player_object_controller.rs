@@ -75,6 +75,17 @@ type Offers = Vec<(usize, Vec<TargetRef>)>;
 /// passed. Before taking its pick, a slot first tries one offered object controlled by another
 /// seat and requires the rejection.
 fn drive(r: &mut GameRunner, want: PlayerId, eliminate: Option<usize>) -> Offers {
+    drive_with(r, want, eliminate, true)
+}
+
+/// `drive`, with the wrong-controller rejection required only when `strict` (an unrestricted
+/// "target creature" slot legitimately accepts any seat's creature).
+fn drive_with(
+    r: &mut GameRunner,
+    want: PlayerId,
+    eliminate: Option<usize>,
+    strict: bool,
+) -> Offers {
     let mut offers = Offers::new();
     let mut eliminate = eliminate;
     for _ in 0..60 {
@@ -102,7 +113,7 @@ fn drive(r: &mut GameRunner, want: PlayerId, eliminate: Option<usize>) -> Offers
                 };
                 if let Some(wrong) = legal
                     .iter()
-                    .find(|t| controller(r, t).is_some_and(|c| c != want))
+                    .find(|t| strict && controller(r, t).is_some_and(|c| c != want))
                 {
                     assert!(
                         r.act(GameAction::ChooseTarget {
@@ -412,4 +423,80 @@ fn without_a_player_declaration_nothing_binds_a_declared_player() {
     ] {
         assert!(parse_json(text).contains("DeclaredPlayer"), "{text}");
     }
+}
+
+const TREASURE_CHAIN: &str = "Destroy target creature. Target opponent loses 2 life. Create a Treasure token. That player discards a card.";
+
+fn hand_sizes(r: &GameRunner) -> Vec<usize> {
+    [P0, P1, P2]
+        .map(|p| {
+            r.state()
+                .objects
+                .values()
+                .filter(|o| o.zone == Zone::Hand && o.owner == p)
+                .count()
+        })
+        .to_vec()
+}
+
+fn treasure_chain(eliminate: Option<usize>) -> (GameRunner, Vec<usize>) {
+    let mut sc = three_player();
+    board(&mut sc);
+    let spell = sc
+        .add_spell_to_hand_from_oracle(P0, "Row", false, TREASURE_CHAIN)
+        .id();
+    let mut r = sc.build();
+    hand_cards_become_creatures(&mut r);
+    let before = hand_sizes(&r);
+    let card_id = r.state().objects[&spell].card_id;
+    r.act(GameAction::CastSpell {
+        object_id: spell,
+        card_id,
+        targets: vec![],
+        payment_mode: CastPaymentMode::Auto,
+    })
+    .expect("cast");
+    drive_with(&mut r, P2, eliminate, false);
+    (r, before)
+}
+
+/// CR 608.2c: "That player" names the declared opponent across the token clause; the legal
+/// opponent discards (reach guard for the eliminated leg).
+#[test]
+fn that_player_after_a_token_clause_discards_the_declared_opponent() {
+    let (r, before) = treasure_chain(None);
+    let after = hand_sizes(&r);
+    assert_eq!(lives(&r), vec![20, 18, 20], "reach guard: P1 lost 2 life");
+    assert_eq!(
+        [
+            before[0] - after[0],
+            before[1] - after[1],
+            before[2] - after[2]
+        ],
+        [1, 1, 0],
+        "the cast spell left P0's hand; only the declared opponent discarded: {before:?} -> {after:?}"
+    );
+}
+
+/// CR 608.2b: with the declared opponent gone, the token clause does not turn "that player"
+/// into a bystander.
+#[test]
+fn that_player_after_a_token_clause_affects_no_one_once_the_declared_opponent_is_gone() {
+    let (r, before) = treasure_chain(Some(1));
+    assert_eq!(
+        hand_sizes(&r),
+        vec![before[0] - 1, before[1], before[2]],
+        "only the cast spell left a hand; no one discarded"
+    );
+    assert_eq!(
+        lives(&r)[0],
+        20,
+        "reach guard: the spell resolved, caster untouched"
+    );
+    assert!(
+        r.state().objects.values().any(|o| o.zone == Zone::Graveyard
+            && o.controller == P2
+            && o.card_types.core_types.contains(&CoreType::Creature)),
+        "reach guard: the Destroy clause ran"
+    );
 }

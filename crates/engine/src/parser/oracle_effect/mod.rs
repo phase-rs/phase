@@ -25628,8 +25628,11 @@ fn chain_has_prior_player_target_referent(clauses: &[ClauseIr]) -> bool {
 
 /// The nearest earlier clause that announces a player, reached only through
 /// clauses that read the same referent, name the controller ("you"), or announce an
-/// object of their own: none of them names another player (CR 608.2c). A clause
-/// that creates objects is the nearer referent, so it ends the walk.
+/// object of their own: none of them names another player (CR 608.2c). Each
+/// reader filters this walk by its own referent kind: a bare "they" also takes
+/// objects just created, so it refuses a declaration that an object-creating
+/// clause follows; "that player" and "<object> that player controls" take
+/// players only and read the walk as is.
 fn chain_prior_player_declaration(clauses: &[ClauseIr]) -> Option<&ClauseIr> {
     for prev in clauses.iter().rev() {
         if prev.condition.is_some() {
@@ -25637,9 +25640,6 @@ fn chain_prior_player_declaration(clauses: &[ClauseIr]) -> Option<&ClauseIr> {
         }
         if has_explicit_player_target(&prev.parsed.effect) {
             return Some(prev);
-        }
-        if publishes_chain_created_referent(&prev.parsed.effect) {
-            return None;
         }
         if matches!(
             prev.parsed.effect.target_filter(),
@@ -25656,6 +25656,19 @@ fn chain_prior_player_declaration(clauses: &[ClauseIr]) -> Option<&ClauseIr> {
         return None;
     }
     None
+}
+
+/// CR 608.2c: a bare "they" binds to the nearest referent, so it reads the declared player only
+/// when no clause after the declaration creates objects.
+fn bare_they_player_declaration(clauses: &[ClauseIr]) -> bool {
+    chain_prior_player_declaration(clauses).is_some_and(|declaration| {
+        declares_exactly_one_player(declaration)
+            && !clauses
+                .iter()
+                .rev()
+                .take_while(|clause| !std::ptr::eq(*clause, declaration))
+                .any(|clause| publishes_chain_created_referent(&clause.parsed.effect))
+    })
 }
 
 /// CR 608.2c: a bare "they" names one player only when the declaring clause
@@ -42015,8 +42028,7 @@ fn parse_effect_chain_ir_body(
             // most-recent object referent (Esper Terra's "put up to three lore
             // counters on it"). Cleared by an intervening explicit typed target.
             token_created_in_chain: chain_prior_referent_is_created_token(builder.clauses()),
-            prior_player_declaration: chain_prior_player_declaration(builder.clauses())
-                .is_some_and(declares_exactly_one_player),
+            prior_player_declaration: bare_they_player_declaration(builder.clauses()),
             declared_player_scope,
             clause_declared_group: None,
             // CR 608.2c + CR 301.5 + CR 303.4: bind a bare "it" in this chunk's
