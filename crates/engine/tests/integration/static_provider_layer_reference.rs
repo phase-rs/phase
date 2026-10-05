@@ -2,15 +2,21 @@
 //! March of the Machines changes Sol Ring's type in layer 4; Marvin's printed
 //! static ability must then see Sol Ring as a creature in layer 6.
 
+use std::sync::Arc;
+
 use engine::game::casting::{activated_ability_definitions, can_activate_ability_now};
 use engine::game::layers::{flush_layers, mark_layers_full};
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::zones::move_to_zone;
-use engine::types::ability::{AbilityCost, AbilityKind, ContinuousModification, Effect};
+use engine::types::ability::{
+    AbilityCost, AbilityDefinition, AbilityKind, ContinuousModification, Effect, QuantityExpr,
+    StaticDefinition, TargetFilter, TriggerDefinition, TriggerDefinitionOccurrenceRef,
+};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
 
 const MARVIN: &str = "Marvin has all activated abilities of creatures you control that don't have the same name as this creature.";
@@ -348,4 +354,168 @@ fn entering_artifact_animated_in_layer_four_updates_existing_marvin() {
     move_to_zone(runner.state_mut(), ring, Zone::Graveyard, &mut Vec::new());
     flush_layers(runner.state_mut());
     assert!(activated_ability_definitions(runner.state(), marvin).is_empty());
+}
+
+// These two fixtures are synthetic typed combinations. They exercise admitted
+// layer and trigger building blocks through the ordinary scenario flush/runner;
+// neither represents invented Oracle text for a printed card.
+fn attach_synthetic_static(
+    runner: &mut engine::game::scenario::GameRunner,
+    source: engine::types::identifiers::ObjectId,
+    definition: StaticDefinition,
+) {
+    let object = runner.state_mut().objects.get_mut(&source).unwrap();
+    Arc::make_mut(&mut object.base_static_definitions).push(definition.clone());
+    object.static_definitions.push(definition);
+}
+
+#[test]
+fn coupled_provider_cycles_wait_for_outgoing_dependencies() {
+    let mut scenario = GameScenario::new();
+    let ids: Vec<_> = ["A", "B", "C", "D"]
+        .into_iter()
+        .map(|name| {
+            let mut ability = AbilityDefinition::new(AbilityKind::Activated, Effect::NoOp)
+                .cost(AbilityCost::Tap);
+            ability.description = Some(name.to_string());
+            scenario
+                .add_creature(P0, name, 1, 1)
+                .with_ability_definition(ability)
+                .id()
+        })
+        .collect();
+    let [a, b, c, d] = <[_; 4]>::try_from(ids).unwrap();
+    let mut runner = scenario.build();
+    let sources = [
+        TargetFilter::Or {
+            filters: vec![
+                TargetFilter::SpecificObject { id: b },
+                TargetFilter::SpecificObject { id: c },
+            ],
+        },
+        TargetFilter::SpecificObject { id: a },
+        TargetFilter::SpecificObject { id: d },
+        TargetFilter::SpecificObject { id: c },
+    ];
+    for (host, source) in [a, b, c, d].into_iter().zip(sources) {
+        attach_synthetic_static(
+            &mut runner,
+            host,
+            StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .modifications(vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
+                    source,
+                    cap: None,
+                }]),
+        );
+    }
+    assert!(runner.state().objects[&a].timestamp < runner.state().objects[&b].timestamp);
+    assert!(runner.state().objects[&b].timestamp < runner.state().objects[&c].timestamp);
+    assert!(runner.state().objects[&c].timestamp < runner.state().objects[&d].timestamp);
+    mark_layers_full(runner.state_mut());
+    flush_layers(runner.state_mut());
+
+    // CR 613.8b-c: A↔B and C↔D are loops, but A also depends on C.
+    // D's printed definition must reach C before A copies C's live output.
+    let descriptions = |id| {
+        activated_ability_definitions(runner.state(), id)
+            .into_iter()
+            .filter_map(|(_, ability)| ability.description)
+            .collect::<Vec<_>>()
+    };
+    assert!(descriptions(c).contains(&"D".to_string()), "C must receive D");
+    assert!(descriptions(a).contains(&"D".to_string()), "A must receive D through C");
+}
+
+#[test]
+fn retained_multilayer_trigger_grant_survives_earlier_ability_removal() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::Untap);
+    let remover = scenario.add_creature(P0, "Synthetic Remover", 1, 1).id();
+    let host = scenario.add_creature(P0, "Synthetic Host", 1, 1).id();
+    let trigger = TriggerDefinition::new(TriggerMode::Phase)
+        .phase(Phase::Upkeep)
+        .trigger_zones(vec![Zone::Battlefield])
+        .execute(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                player: TargetFilter::Controller,
+            },
+        ));
+    let provider = scenario
+        .add_creature(P0, "Synthetic Provider", 1, 1)
+        .with_trigger_definition(trigger)
+        .with_ability_definition(
+            AbilityDefinition::new(AbilityKind::Activated, Effect::NoOp).cost(AbilityCost::Tap),
+        )
+        .id();
+    let mut runner = scenario.build();
+    attach_synthetic_static(
+        &mut runner,
+        remover,
+        StaticDefinition::continuous()
+            .affected(TargetFilter::SpecificObject { id: host })
+            .modifications(vec![ContinuousModification::RemoveAllAbilities]),
+    );
+    attach_synthetic_static(
+        &mut runner,
+        host,
+        StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![
+                ContinuousModification::AddType {
+                    core_type: CoreType::Artifact,
+                },
+                ContinuousModification::GrantAllTriggeredAbilitiesOf {
+                    source: TargetFilter::SpecificObject { id: provider },
+                },
+                ContinuousModification::GrantAllActivatedAbilitiesOf {
+                    source: TargetFilter::SpecificObject { id: provider },
+                    cap: None,
+                },
+            ]),
+    );
+    // This separate layer-6 parent has not begun when removal applies.
+    attach_synthetic_static(
+        &mut runner,
+        host,
+        StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::GrantAllTriggeredAbilitiesOf {
+                source: TargetFilter::SpecificObject { id: provider },
+            }]),
+    );
+    assert!(runner.state().objects[&remover].timestamp < runner.state().objects[&host].timestamp);
+    assert_eq!(runner.state().objects[&provider].trigger_definitions.iter_all().count(), 1);
+    assert_eq!(activated_ability_definitions(runner.state(), provider).len(), 1);
+    mark_layers_full(runner.state_mut());
+    flush_layers(runner.state_mut());
+
+    // CR 613.6: layer 4 qualifies the original parent and fixes its host
+    // recipient. The older layer-6 removal cannot stop its later grants.
+    assert!(runner.state().objects[&host]
+        .card_types
+        .core_types
+        .contains(&CoreType::Artifact));
+    assert_eq!(activated_ability_definitions(runner.state(), host).len(), 1);
+    assert_eq!(
+        runner.state().objects[&host].trigger_definitions.iter_all().count(),
+        1,
+        "retained parent installs one trigger; the unstarted parent stays suppressed"
+    );
+    let granted = runner.state().objects[&host]
+        .trigger_definitions
+        .iter_all()
+        .next()
+        .unwrap();
+    assert!(matches!(
+        &granted.occurrence,
+        TriggerDefinitionOccurrenceRef::ExpandedGrant { provider: source, .. }
+            if source.source.object_id == provider
+    ));
+    let life_before = runner.life(P0);
+    runner.advance_to_upkeep();
+    runner.advance_until_stack_empty();
+    assert_eq!(runner.life(P0), life_before + 2);
 }

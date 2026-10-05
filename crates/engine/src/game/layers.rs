@@ -7159,9 +7159,10 @@ fn expand_granted_activated_abilities(
 /// every layer pass exactly like `abilities` (layers.rs reset loop), so an exiled
 /// provider's printed triggers are present at expansion time, identical to how
 /// the activated mirror reads live `abilities`. Synthesized effects target the
-/// recipient via `SelfRef`, reusing the layer-6 `GrantTrigger` apply and its
-/// structural dedup. No `cap`: triggered abilities carry no activation
-/// use-restriction (CR 602.5b is activated-only). The `source` filter resolves
+/// recipient via `SelfRef`; their already-qualified recipients use the same
+/// `GrantTrigger` occurrence installer as ordinary grants. No `cap`: triggered
+/// abilities carry no activation use-restriction (CR 602.5b is activated-only).
+/// The `source` filter resolves
 /// against the host id with each recipient's controller, memoized per controller
 /// — mirroring the activated expander exactly; the recipient-equality self-skip
 /// (CR 613.1f) stays per-recipient at emission.
@@ -8097,16 +8098,15 @@ fn apply_ability_effects_with_referenced_grants(
                 }
             }
         }
+        // CR 613.8b: Ignore only edges within a dependency loop. An edge
+        // leaving that loop must still be satisfied. `j` is in `i`'s cyclic
+        // component exactly when it can reach `i` again. Pending is already
+        // timestamp-sorted, so the first effect with no surviving edge wins.
         let next = (0..pending.len())
-            .find(|&i| edges[i].is_empty())
-            .or_else(|| {
-                // CR 613.8b: Ignore dependency ordering for cycle members
-                // only; the timestamp-sorted first such member applies now.
-                (0..pending.len()).find(|&i| {
-                    edges[i]
-                        .iter()
-                        .any(|&j| dependency_path_exists(&edges, j, i))
-                })
+            .find(|&i| {
+                edges[i]
+                    .iter()
+                    .all(|&j| dependency_path_exists(&edges, j, i))
             })
             .expect("a finite dependency graph has an independent or cyclic effect");
         let selected = pending.remove(next);
@@ -8574,6 +8574,32 @@ fn install_trigger_candidate(
         ));
 }
 
+/// Install the concrete GrantTrigger output after its generating effect has
+/// qualified the recipient. The ordinary GrantTrigger arm uses the same path.
+fn install_granted_trigger(
+    obj: &mut crate::game::game_object::GameObject,
+    effect: &ActiveContinuousEffect,
+    trigger: &crate::types::ability::TriggerDefinition,
+) {
+    // CR 201.5a + CR 613.1f: bind a granter by-name self-reference to the
+    // granting object before installing the recipient's trigger occurrence.
+    let mut granted = trigger.clone();
+    super::ability_utils::concretize_granting_object_in_trigger(&mut granted, effect.source_id);
+    let producer = effect
+        .expanded_trigger_provider
+        .as_ref()
+        .map(|provider| TriggerGrantProducerKey::ExpandedGrant {
+            origin: trigger_origin(effect),
+            provider: Box::new(provider.clone()),
+            provider_output_index: 0,
+        })
+        .unwrap_or_else(|| TriggerGrantProducerKey::Granted {
+            origin: trigger_origin(effect),
+            output_index: 0,
+        });
+    install_trigger_candidate(obj, producer, granted);
+}
+
 fn trigger_origin(effect: &ActiveContinuousEffect) -> TriggerProducerOrigin {
     effect
         .trigger_producer_origin
@@ -8958,14 +8984,26 @@ fn apply_continuous_effect_filtered(
                     )
             });
         for grant in expanded.effects {
-            apply_continuous_effect_filtered(
-                state,
-                &grant,
-                restrict_to,
-                abilities_suppressed,
-                zone_cache,
-                started_effect_sets,
-            );
+            if let ContinuousModification::GrantTrigger { trigger } = &grant.modification {
+                // CR 613.6: The parent already qualified and retained this
+                // recipient. This concrete output is not a new static
+                // generator; only its trigger identity comes from the host
+                // and provider carried by `grant`.
+                let obj = state
+                    .objects
+                    .get_mut(&grant.source_id)
+                    .expect("qualified trigger recipient must still exist");
+                install_granted_trigger(obj, &grant, trigger);
+            } else {
+                apply_continuous_effect_filtered(
+                    state,
+                    &grant,
+                    restrict_to,
+                    abilities_suppressed,
+                    zone_cache,
+                    started_effect_sets,
+                );
+            }
         }
         return Some(expanded.output);
     }
@@ -9821,28 +9859,7 @@ fn apply_continuous_effect_filtered(
             // CR 604.1: Push granted trigger to trigger_definitions so
             // the trigger's event matching and condition metadata is preserved.
             ContinuousModification::GrantTrigger { trigger } => {
-                // CR 201.5a + CR 613.1f: concretize a granter by-name
-                // self-reference inside the granted trigger's execute chain
-                // (e.g. "you may sacrifice <granter>") to the live granting
-                // object before dedup/push. Re-minted each layer pass (CR 613.1f).
-                let mut granted = *trigger.clone();
-                super::ability_utils::concretize_granting_object_in_trigger(
-                    &mut granted,
-                    effect.source_id,
-                );
-                let producer = effect
-                    .expanded_trigger_provider
-                    .as_ref()
-                    .map(|provider| TriggerGrantProducerKey::ExpandedGrant {
-                        origin: trigger_origin(effect),
-                        provider: Box::new(provider.clone()),
-                        provider_output_index: 0,
-                    })
-                    .unwrap_or_else(|| TriggerGrantProducerKey::Granted {
-                        origin: trigger_origin(effect),
-                        output_index: 0,
-                    });
-                install_trigger_candidate(obj, producer, granted);
+                install_granted_trigger(obj, effect, trigger);
             }
             // CR 113.3d + CR 604.1 + CR 613.1f: Grant a full static ability to the
             // recipient. The inner static's `affected`/`condition`/`modifications`
