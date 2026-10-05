@@ -61000,3 +61000,131 @@ fn quantity_vs_each_opponent_skips_a_player_who_left_the_game() {
         "P2 left the game, so only P1's one card is compared"
     );
 }
+
+// ---- Void Winnower: parity cast-lock, driven through the real casting gate ----
+
+/// CR 601.3a + CR 202.3 + CR 101.2: RUNTIME proof for Void Winnower, driven
+/// through `can_cast_object_now` — the same gate priority uses to decide which
+/// casts are legal — rather than through a parser assertion.
+///
+/// This is the test shape the defect needed. The parser-side anchor
+/// (`cant_cast_spells_with_even_mana_values`) asserted only `def.mode` and
+/// passed while `affected` was `None`; `is_blocked_by_cant_be_cast_for` SKIPS
+/// its filter test on a `None` filter and falls through to PROHIBITED, so Void
+/// Winnower locked opponents out of casting ANY spell. A shape assertion cannot
+/// see that, because the shape it asserted was correct — the gap was between the
+/// shape and the gate. So this drives the gate.
+///
+/// The static comes from the LIVE PARSE of the printed line
+/// (`add_creature_from_oracle`), not from the card-data export, so the test
+/// fails if the parser stops attaching the filter.
+///
+/// CR 601.3a is the authorizing rule and its own example is this card. Both
+/// directions are asserted: the odd-mana-value spell must stay castable (the
+/// prohibition is half the curve, not all of it) and the even one must not.
+#[test]
+fn void_winnower_runtime_blocks_only_even_mana_value_opponent_spells() {
+    use crate::game::casting::can_cast_object_now;
+    use crate::game::scenario::{GameScenario, P0, P1};
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    // P1 holds priority so the gate is evaluating a real decision point for the
+    // affected opponent, not the Winnower's controller.
+    scenario.state.active_player = P1;
+    scenario.state.priority_player = P1;
+    scenario.state.waiting_for = crate::types::game_state::WaitingFor::Priority { player: P1 };
+
+    // P0 controls Void Winnower; its statics are parsed from the printed text.
+    scenario.add_creature_from_oracle(
+        P0,
+        "Void Winnower",
+        11,
+        9,
+        "Your opponents can't cast spells with even mana values. (Zero is even.)\n\
+         Your opponents can't block with creatures with even mana values.",
+    );
+
+    // Two targetless sorceries in the OPPONENT's hand, differing only in mana
+    // value parity: {2}{B} is 3 (odd), {1}{B} is 2 (even). CR 202.3.
+    let odd = scenario
+        .add_spell_to_hand_from_oracle(P1, "Odd Curve Spell", false, "Draw two cards.")
+        .with_mana_cost(ManaCost::Cost {
+            generic: 2,
+            shards: vec![ManaCostShard::Black],
+        })
+        .id();
+    let even = scenario
+        .add_spell_to_hand_from_oracle(P1, "Even Curve Spell", false, "Draw a card.")
+        .with_mana_cost(ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::Black],
+        })
+        .id();
+    add_mana(&mut scenario.state, P1, ManaType::Black, 6);
+
+    assert_eq!(
+        scenario
+            .state
+            .objects
+            .get(&odd)
+            .unwrap()
+            .mana_cost
+            .mana_value(),
+        3,
+        "fixture guard: the odd spell must actually have an odd mana value"
+    );
+    assert_eq!(
+        scenario
+            .state
+            .objects
+            .get(&even)
+            .unwrap()
+            .mana_cost
+            .mana_value(),
+        2,
+        "fixture guard: the even spell must actually have an even mana value"
+    );
+
+    assert!(
+        can_cast_object_now(&scenario.state, P1, odd),
+        "Void Winnower prohibits only EVEN mana values (CR 601.3a); an odd-mana-value \
+         spell must remain castable. A blanket block here is the unfiltered cast-lock."
+    );
+    assert!(
+        !can_cast_object_now(&scenario.state, P1, even),
+        "Void Winnower must prohibit the opponent's even-mana-value spell (CR 601.3a)"
+    );
+}
+
+/// CR 109.5 + CR 601.3a: the prohibition is scoped to OPPONENTS, so the
+/// Winnower's own controller keeps casting even-mana-value spells. Guard against
+/// a filter attached with the player axis dropped.
+#[test]
+fn void_winnower_runtime_does_not_block_its_own_controller() {
+    use crate::game::casting::can_cast_object_now;
+    use crate::game::scenario::{GameScenario, P0};
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(
+        P0,
+        "Void Winnower",
+        11,
+        9,
+        "Your opponents can't cast spells with even mana values. (Zero is even.)",
+    );
+    let even = scenario
+        .add_spell_to_hand_from_oracle(P0, "Even Curve Spell", false, "Draw a card.")
+        .with_mana_cost(ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::Black],
+        })
+        .id();
+    add_mana(&mut scenario.state, P0, ManaType::Black, 6);
+
+    assert!(
+        can_cast_object_now(&scenario.state, P0, even),
+        "\"Your opponents can't cast\" never restricts the controller (CR 109.5)"
+    );
+}
