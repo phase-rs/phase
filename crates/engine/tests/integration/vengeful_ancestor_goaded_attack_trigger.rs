@@ -29,11 +29,13 @@
 //!     creature, so the `valid_card` filter is evaluated against the live attacker,
 //!     not the trigger's own source.
 
-use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::combat::validate_blockers_for_player;
 use engine::game::filter::{matches_target_filter, FilterContext};
+use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::oracle::parse_oracle_text;
-use engine::types::ability::{ContinuousModification, Duration, FilterProp, TargetFilter, TypedFilter};
+use engine::types::ability::{
+    ContinuousModification, Duration, FilterProp, TargetFilter, TypedFilter,
+};
 use engine::types::actions::GameAction;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::phase::Phase;
@@ -243,16 +245,27 @@ fn vengeful_ancestor_reads_real_registered_life_token_until_it_exits() {
             obj.name == "Life of the Party" && obj.is_token && obj.controller == P1
         })
         .expect("the actual Life ETB must create a P1 token");
-    assert!(runner.state().transient_continuous_effects.iter().any(|effect| {
-        effect.controller == P0
-            && effect.duration == Duration::Permanent
-            && effect.affected == TargetFilter::SpecificObject { id: token }
-            && effect.modifications.contains(&ContinuousModification::AddStaticMode {
-                mode: StaticMode::Goaded,
-            })
-    }));
+    assert!(runner
+        .state()
+        .transient_continuous_effects
+        .iter()
+        .any(|effect| {
+            effect.controller == P0
+                && effect.duration == Duration::Permanent
+                && effect.affected == TargetFilter::SpecificObject { id: token }
+                && effect
+                    .modifications
+                    .contains(&ContinuousModification::AddStaticMode {
+                        mode: StaticMode::Goaded,
+                    })
+        }));
     let goaded = TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Goaded]));
-    assert!(matches_target_filter(runner.state(), token, &goaded, &FilterContext::neutral()));
+    assert!(matches_target_filter(
+        runner.state(),
+        token,
+        &goaded,
+        &FilterContext::neutral()
+    ));
 
     let mut after_exit = GameRunner::from_state(runner.state().clone());
     engine::game::zones::move_to_zone(
@@ -262,7 +275,12 @@ fn vengeful_ancestor_reads_real_registered_life_token_until_it_exits() {
         &mut Vec::new(),
     );
     assert!(!after_exit.state().battlefield.contains(&token));
-    assert!(!matches_target_filter(after_exit.state(), ox, &goaded, &FilterContext::neutral()));
+    assert!(!matches_target_filter(
+        after_exit.state(),
+        ox,
+        &goaded,
+        &FilterContext::neutral()
+    ));
 
     hand_turn_to(&mut runner, P1);
     let before = life_of(runner.state(), P1);
@@ -313,17 +331,33 @@ fn bothersome_quasit_prevents_registered_life_token_from_blocking() {
         })
         .expect("the real Life trigger creates the P1 blocking candidate");
     assert_eq!(runner.state().objects[&quasit].controller, P0);
-    assert!(runner.state().transient_continuous_effects.iter().any(|effect| {
-        effect.controller == P0
-            && effect.duration == Duration::Permanent
-            && effect.affected == TargetFilter::SpecificObject { id: token }
-            && effect.modifications.contains(&ContinuousModification::AddStaticMode {
-                mode: StaticMode::Goaded,
-            })
-    }));
+    assert!(runner
+        .state()
+        .transient_continuous_effects
+        .iter()
+        .any(|effect| {
+            effect.controller == P0
+                && effect.duration == Duration::Permanent
+                && effect.affected == TargetFilter::SpecificObject { id: token }
+                && effect
+                    .modifications
+                    .contains(&ContinuousModification::AddStaticMode {
+                        mode: StaticMode::Goaded,
+                    })
+        }));
     let goaded = TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Goaded]));
-    assert!(matches_target_filter(runner.state(), token, &goaded, &FilterContext::neutral()));
-    assert!(!matches_target_filter(runner.state(), ordinary_blocker, &goaded, &FilterContext::neutral()));
+    assert!(matches_target_filter(
+        runner.state(),
+        token,
+        &goaded,
+        &FilterContext::neutral()
+    ));
+    assert!(!matches_target_filter(
+        runner.state(),
+        ordinary_blocker,
+        &goaded,
+        &FilterContext::neutral()
+    ));
 
     runner.advance_to_combat();
     assert_eq!(runner.waiting_for_kind(), "DeclareAttackers");

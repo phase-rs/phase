@@ -77,7 +77,10 @@ pub(crate) fn goad_targets(state: &GameState, ability: &ResolvedAbility) -> Vec<
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{ContinuousModification, ControllerRef, Duration, Effect, TargetFilter, TargetRef, TypedFilter};
+    use crate::types::ability::{
+        ContinuousModification, ControllerRef, Duration, Effect, TargetFilter, TargetRef,
+        TypedFilter,
+    };
     use crate::types::card_type::CoreType;
     use crate::types::game_state::TransientContinuousEffectBindings;
     use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
@@ -174,32 +177,52 @@ mod tests {
                 duration_subject: None,
             },
         );
-        assert!(crate::game::combat::goading_players_for_creature_gated(&state, target, false)
-            .contains(&PlayerId(0)));
+        assert!(
+            crate::game::combat::goading_players_for_creature_gated(&state, target, false)
+                .contains(&PlayerId(0))
+        );
         assert!(state.objects[&target].goaded_by.is_empty());
 
         let mut events = Vec::new();
-        resolve(&mut state, &make_goad_ability(target, PlayerId(0)), &mut events).unwrap();
-        assert!(matches!(events.last(), Some(GameEvent::EffectResolved { .. })));
+        resolve(
+            &mut state,
+            &make_goad_ability(target, PlayerId(0)),
+            &mut events,
+        )
+        .unwrap();
+        assert!(matches!(
+            events.last(),
+            Some(GameEvent::EffectResolved { .. })
+        ));
         assert!(
             state.objects[&target].goaded_by.is_empty(),
             "the same player's already-live designation must not gain a new direct deadline"
         );
 
-        resolve(&mut state, &make_goad_ability(target, PlayerId(1)), &mut events).unwrap();
-        let goaders = crate::game::combat::goading_players_for_creature_gated(&state, target, false);
+        resolve(
+            &mut state,
+            &make_goad_ability(target, PlayerId(1)),
+            &mut events,
+        )
+        .unwrap();
+        let goaders =
+            crate::game::combat::goading_players_for_creature_gated(&state, target, false);
         assert_eq!(goaders.len(), 2);
         assert!(goaders.contains(&PlayerId(0)) && goaders.contains(&PlayerId(1)));
         assert_eq!(state.objects[&target].goaded_by.len(), 1);
 
         crate::game::layers::prune_end_of_turn_effects(&mut state);
         assert!(state.transient_continuous_effects.is_empty());
-        let goaders = crate::game::combat::goading_players_for_creature_gated(&state, target, false);
+        let goaders =
+            crate::game::combat::goading_players_for_creature_gated(&state, target, false);
         assert_eq!(goaders.len(), 1);
         assert!(goaders.contains(&PlayerId(1)));
         assert!(!goaders.contains(&PlayerId(0)));
         crate::game::layers::prune_until_next_turn_effects(&mut state, PlayerId(1));
-        assert!(crate::game::combat::goading_players_for_creature_gated(&state, target, false).is_empty());
+        assert!(
+            crate::game::combat::goading_players_for_creature_gated(&state, target, false)
+                .is_empty()
+        );
     }
 
     #[test]

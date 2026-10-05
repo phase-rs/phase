@@ -2759,8 +2759,13 @@ mod tests {
         control.layers_dirty.mark_full();
         evaluate_layers(&mut control);
         assert!(!LegalityPoisonGates::compute(&control).has_declare_attacker);
-        assert_eq!(object_fingerprint(&control, designated), object_fingerprint(&control, plain));
-        assert!(candidates.iter().all(|candidate| pipeline.accepts(&control, candidate)));
+        assert_eq!(
+            object_fingerprint(&control, designated),
+            object_fingerprint(&control, plain)
+        );
+        assert!(candidates
+            .iter()
+            .all(|candidate| pipeline.accepts(&control, candidate)));
         crate::game::perf_counters::reset();
         let accepted = pipeline.apply(&control, candidates);
         assert_eq!(accepted.len(), 2);

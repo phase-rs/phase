@@ -5,9 +5,11 @@
 //! The ETB trigger must carry a NonToken intervening-if so token copies do not
 //! re-trigger, and the follow-up clause must goad those copies permanently.
 
-use engine::game::scenario::{GameScenario, P0, P1};
-use engine::game::combat::{attacker_constraints_for_active_player, get_valid_attacker_ids, CombatRequirement};
+use engine::game::combat::{
+    attacker_constraints_for_active_player, get_valid_attacker_ids, CombatRequirement,
+};
 use engine::game::filter::{matches_target_filter, FilterContext};
+use engine::game::scenario::{GameScenario, P0, P1};
 use engine::parser::oracle::{keyword_display_name, parse_oracle_text, ParsedAbilities};
 use engine::types::ability::{
     ContinuousModification, Duration, Effect, FilterProp, ResolvedAbility, StaticDefinition,
@@ -201,26 +203,44 @@ fn life_token_stays_goaded_after_humility_removes_its_abilities() {
         .find(|id| state.objects[id].name == "Life of the Party" && state.objects[id].is_token)
         .expect("real ETB must produce the opponent's token");
     assert_eq!(state.objects[&token_id].controller, P1);
-    assert!(state.objects[&token_id].keywords.contains(&Keyword::FirstStrike));
+    assert!(state.objects[&token_id]
+        .keywords
+        .contains(&Keyword::FirstStrike));
     assert!(state.transient_continuous_effects.iter().any(|effect| {
         effect.controller == P0
             && effect.duration == Duration::Permanent
             && effect.affected == TargetFilter::SpecificObject { id: token_id }
-            && effect.modifications.iter().any(|modification| matches!(
-                modification,
-                ContinuousModification::AddStaticMode { mode: StaticMode::Goaded }
-            ))
+            && effect.modifications.iter().any(|modification| {
+                matches!(
+                    modification,
+                    ContinuousModification::AddStaticMode {
+                        mode: StaticMode::Goaded
+                    }
+                )
+            })
     }));
 
     runner.cast(humility).resolve();
     let state = runner.state();
-    assert!(!state.objects[&token_id].keywords.contains(&Keyword::FirstStrike));
+    assert!(!state.objects[&token_id]
+        .keywords
+        .contains(&Keyword::FirstStrike));
     let goaded = TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Goaded]));
-    assert!(matches_target_filter(state, token_id, &goaded, &FilterContext::neutral()));
+    assert!(matches_target_filter(
+        state,
+        token_id,
+        &goaded,
+        &FilterContext::neutral()
+    ));
 
     // The token is eligible on its controller's later turn. Its printed
     // abilities remain suppressed while the designation still requires attack.
-    runner.state_mut().objects.get_mut(&token_id).unwrap().summoning_sick = false;
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&token_id)
+        .unwrap()
+        .summoning_sick = false;
     runner.state_mut().active_player = P1;
     runner.state_mut().priority_player = P1;
     runner.state_mut().waiting_for = WaitingFor::Priority { player: P1 };
@@ -232,7 +252,10 @@ fn life_token_stays_goaded_after_humility_removes_its_abilities() {
     );
     assert_eq!(
         constraints.get(&token_id),
-        Some(&CombatRequirement::MustAttack { defenders: vec![], sources: vec![] })
+        Some(&CombatRequirement::MustAttack {
+            defenders: vec![],
+            sources: vec![]
+        })
     );
     assert!(runner.declare_attackers(&[]).is_err());
     runner
@@ -273,31 +296,58 @@ fn departed_life_token_does_not_designate_fresh_soldier_tokens() {
         })
         .expect("the real Life trigger creates an opponent token");
     let goaded = TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Goaded]));
-    assert!(runner.state().transient_continuous_effects.iter().any(|effect| {
-        effect.controller == P0
-            && effect.duration == Duration::Permanent
-            && effect.affected == TargetFilter::SpecificObject { id: old_token }
-            && effect.modifications.contains(&ContinuousModification::AddStaticMode {
-                mode: StaticMode::Goaded,
-            })
-    }));
-    assert!(matches_target_filter(runner.state(), old_token, &goaded, &FilterContext::neutral()));
+    assert!(runner
+        .state()
+        .transient_continuous_effects
+        .iter()
+        .any(|effect| {
+            effect.controller == P0
+                && effect.duration == Duration::Permanent
+                && effect.affected == TargetFilter::SpecificObject { id: old_token }
+                && effect
+                    .modifications
+                    .contains(&ContinuousModification::AddStaticMode {
+                        mode: StaticMode::Goaded,
+                    })
+        }));
+    assert!(matches_target_filter(
+        runner.state(),
+        old_token,
+        &goaded,
+        &FilterContext::neutral()
+    ));
 
-    engine::game::zones::move_to_zone(runner.state_mut(), old_token, Zone::Graveyard, &mut Vec::new());
+    engine::game::zones::move_to_zone(
+        runner.state_mut(),
+        old_token,
+        Zone::Graveyard,
+        &mut Vec::new(),
+    );
     assert!(!runner.state().battlefield.contains(&old_token));
-    assert!(!runner.state().transient_continuous_effects.iter().any(|effect| {
-        effect.affected == TargetFilter::SpecificObject { id: old_token }
-    }));
+    assert!(!runner
+        .state()
+        .transient_continuous_effects
+        .iter()
+        .any(|effect| { effect.affected == TargetFilter::SpecificObject { id: old_token } }));
 
     runner.cast(alarm).resolve();
     assert!(runner.state().stack.is_empty());
     let fresh = &runner.state().last_created_token_ids;
-    assert_eq!(fresh.len(), 2, "the separate resolved spell must create fresh tokens");
+    assert_eq!(
+        fresh.len(),
+        2,
+        "the separate resolved spell must create fresh tokens"
+    );
     for &id in fresh {
         assert_ne!(id, old_token);
         assert!(runner.state().battlefield.contains(&id));
         assert!(runner.state().objects[&id].is_token);
-        assert!(!matches_target_filter(runner.state(), id, &goaded, &FilterContext::neutral()));
+        assert!(!matches_target_filter(
+            runner.state(),
+            id,
+            &goaded,
+            &FilterContext::neutral()
+        ));
     }
 }
 
@@ -324,14 +374,20 @@ fn empty_last_created_goad_registration_preserves_real_life_designation() {
             object.name == "Life of the Party" && object.is_token && object.controller == P1
         })
         .expect("the real Life trigger creates an opponent token");
-    assert!(runner.state().transient_continuous_effects.iter().any(|effect| {
-        effect.controller == P0
-            && effect.duration == Duration::Permanent
-            && effect.affected == TargetFilter::SpecificObject { id: token }
-            && effect.modifications.contains(&ContinuousModification::AddStaticMode {
-                mode: StaticMode::Goaded,
-            })
-    }));
+    assert!(runner
+        .state()
+        .transient_continuous_effects
+        .iter()
+        .any(|effect| {
+            effect.controller == P0
+                && effect.duration == Duration::Permanent
+                && effect.affected == TargetFilter::SpecificObject { id: token }
+                && effect
+                    .modifications
+                    .contains(&ContinuousModification::AddStaticMode {
+                        mode: StaticMode::Goaded,
+                    })
+        }));
 
     let state = runner.state_mut();
     state.last_created_token_ids.clear();

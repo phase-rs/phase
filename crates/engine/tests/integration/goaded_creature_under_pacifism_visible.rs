@@ -20,11 +20,13 @@ use engine::game::combat::{
     attacker_constraints_for_active_player, creature_cant_attack, declare_attackers,
     get_valid_attacker_ids, CombatRequirement,
 };
-use engine::game::layers::evaluate_layers;
 use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::game::game_object::PhaseOutCause;
+use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameScenario, P0, P1};
-use engine::types::ability::{ContinuousModification, Duration, FilterProp, StaticDefinition, TargetFilter, TypedFilter};
+use engine::types::ability::{
+    ContinuousModification, Duration, FilterProp, StaticDefinition, TargetFilter, TypedFilter,
+};
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
@@ -186,8 +188,18 @@ fn sound_of_drums_uses_auras_controller_and_survives_layer_refresh() {
     assert!(runner.state().objects[&host].goaded_by.is_empty());
     refresh(&mut runner);
     let goaded = TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Goaded]));
-    assert!(matches_target_filter(runner.state(), host, &goaded, &FilterContext::neutral()));
-    assert!(!matches_target_filter(runner.state(), sibling, &goaded, &FilterContext::neutral()));
+    assert!(matches_target_filter(
+        runner.state(),
+        host,
+        &goaded,
+        &FilterContext::neutral()
+    ));
+    assert!(!matches_target_filter(
+        runner.state(),
+        sibling,
+        &goaded,
+        &FilterContext::neutral()
+    ));
 
     runner.state_mut().active_player = P1;
     runner.state_mut().priority_player = P1;
@@ -200,18 +212,40 @@ fn sound_of_drums_uses_auras_controller_and_survives_layer_refresh() {
     );
     assert_eq!(
         constraints.get(&host),
-        Some(&CombatRequirement::MustAttack { defenders: vec![], sources: vec![aura] })
+        Some(&CombatRequirement::MustAttack {
+            defenders: vec![],
+            sources: vec![aura]
+        })
     );
 
     let mut changed_controller = runner.state().clone();
-    changed_controller.objects.get_mut(&aura).unwrap().controller = p2;
+    changed_controller
+        .objects
+        .get_mut(&aura)
+        .unwrap()
+        .controller = p2;
     changed_controller.layers_dirty.mark_full();
     evaluate_layers(&mut changed_controller);
-    assert!(matches_target_filter(&changed_controller, host, &goaded, &FilterContext::neutral()));
+    assert!(matches_target_filter(
+        &changed_controller,
+        host,
+        &goaded,
+        &FilterContext::neutral()
+    ));
     let mut against_new_goader = changed_controller.clone();
-    assert!(declare_attackers(&mut against_new_goader, &[(host, AttackTarget::Player(p2))], &mut Vec::new()).is_err());
+    assert!(declare_attackers(
+        &mut against_new_goader,
+        &[(host, AttackTarget::Player(p2))],
+        &mut Vec::new()
+    )
+    .is_err());
     let mut away_from_new_goader = changed_controller.clone();
-    assert!(declare_attackers(&mut away_from_new_goader, &[(host, AttackTarget::Player(P0))], &mut Vec::new()).is_ok());
+    assert!(declare_attackers(
+        &mut away_from_new_goader,
+        &[(host, AttackTarget::Player(P0))],
+        &mut Vec::new()
+    )
+    .is_ok());
 
     let mut recipient_abilities_removed = runner.state().clone();
     recipient_abilities_removed.add_transient_continuous_effect(
@@ -223,7 +257,12 @@ fn sound_of_drums_uses_auras_controller_and_survives_layer_refresh() {
         None,
     );
     evaluate_layers(&mut recipient_abilities_removed);
-    assert!(matches_target_filter(&recipient_abilities_removed, host, &goaded, &FilterContext::neutral()));
+    assert!(matches_target_filter(
+        &recipient_abilities_removed,
+        host,
+        &goaded,
+        &FilterContext::neutral()
+    ));
 
     let mut aura_abilities_removed = runner.state().clone();
     aura_abilities_removed.add_transient_continuous_effect(
@@ -235,15 +274,27 @@ fn sound_of_drums_uses_auras_controller_and_survives_layer_refresh() {
         None,
     );
     evaluate_layers(&mut aura_abilities_removed);
-    assert!(!matches_target_filter(&aura_abilities_removed, host, &goaded, &FilterContext::neutral()));
+    assert!(!matches_target_filter(
+        &aura_abilities_removed,
+        host,
+        &goaded,
+        &FilterContext::neutral()
+    ));
 
     let mut departed = runner.state().clone();
     engine::game::zones::move_to_zone(&mut departed, aura, Zone::Graveyard, &mut Vec::new());
     evaluate_layers(&mut departed);
-    assert!(!matches_target_filter(&departed, host, &goaded, &FilterContext::neutral()));
+    assert!(!matches_target_filter(
+        &departed,
+        host,
+        &goaded,
+        &FilterContext::neutral()
+    ));
 
     assert!(
-        runner.declare_attackers(&[(host, AttackTarget::Player(P0))]).is_err(),
+        runner
+            .declare_attackers(&[(host, AttackTarget::Player(P0))])
+            .is_err(),
         "P2 is available, so the enchanted creature cannot attack its Aura controller"
     );
     runner
@@ -266,7 +317,12 @@ fn psychic_impetus_keeps_power_toughness_bonus_with_goad_designation() {
     let creature = &runner.state().objects[&host];
     assert_eq!((creature.power, creature.toughness), (Some(4), Some(4)));
     let goaded = TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Goaded]));
-    assert!(matches_target_filter(runner.state(), host, &goaded, &FilterContext::neutral()));
+    assert!(matches_target_filter(
+        runner.state(),
+        host,
+        &goaded,
+        &FilterContext::neutral()
+    ));
 }
 
 #[test]
@@ -294,10 +350,19 @@ fn war_games_registered_chapter_token_tracks_saga_presence() {
         .copied()
         .filter(|id| {
             let object = &state.objects[id];
-            object.is_token && object.card_types.subtypes.iter().any(|subtype| subtype == "Warrior")
+            object.is_token
+                && object
+                    .card_types
+                    .subtypes
+                    .iter()
+                    .any(|subtype| subtype == "Warrior")
         })
         .collect();
-    assert_eq!(warriors.len(), 9, "the full chapter I must create three Warriors per player");
+    assert_eq!(
+        warriors.len(),
+        9,
+        "the full chapter I must create three Warriors per player"
+    );
     assert!(warriors.iter().all(|id| state.objects[id].tapped));
     let recipient = state
         .transient_continuous_effects
@@ -306,10 +371,14 @@ fn war_games_registered_chapter_token_tracks_saga_presence() {
             if effect.source_id != saga
                 || effect.controller != P0
                 || effect.duration != Duration::WhileHostOnBattlefield
-                || !effect.modifications.iter().any(|modification| matches!(
-                    modification,
-                    ContinuousModification::AddStaticMode { mode: StaticMode::Goaded }
-                ))
+                || !effect.modifications.iter().any(|modification| {
+                    matches!(
+                        modification,
+                        ContinuousModification::AddStaticMode {
+                            mode: StaticMode::Goaded
+                        }
+                    )
+                })
             {
                 return None;
             }
@@ -321,7 +390,12 @@ fn war_games_registered_chapter_token_tracks_saga_presence() {
         .expect("chapter I must register at least one exact Warrior recipient");
     assert!(warriors.contains(&recipient));
     let goaded = TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Goaded]));
-    assert!(matches_target_filter(state, recipient, &goaded, &FilterContext::neutral()));
+    assert!(matches_target_filter(
+        state,
+        recipient,
+        &goaded,
+        &FilterContext::neutral()
+    ));
 
     let mut ability_lost = state.clone();
     ability_lost.add_transient_continuous_effect(
@@ -333,22 +407,47 @@ fn war_games_registered_chapter_token_tracks_saga_presence() {
         None,
     );
     evaluate_layers(&mut ability_lost);
-    assert!(matches_target_filter(&ability_lost, recipient, &goaded, &FilterContext::neutral()));
+    assert!(matches_target_filter(
+        &ability_lost,
+        recipient,
+        &goaded,
+        &FilterContext::neutral()
+    ));
 
     let mut departed = state.clone();
     engine::game::zones::move_to_zone(&mut departed, saga, Zone::Graveyard, &mut Vec::new());
     evaluate_layers(&mut departed);
-    assert!(!matches_target_filter(&departed, recipient, &goaded, &FilterContext::neutral()));
+    assert!(!matches_target_filter(
+        &departed,
+        recipient,
+        &goaded,
+        &FilterContext::neutral()
+    ));
 
     let mut phased = state.clone();
     let mut events = Vec::new();
-    engine::game::phasing::phase_out_object(&mut phased, saga, PhaseOutCause::Directly, &mut events);
+    engine::game::phasing::phase_out_object(
+        &mut phased,
+        saga,
+        PhaseOutCause::Directly,
+        &mut events,
+    );
     assert!(!phased.objects[&saga].is_phased_in());
     evaluate_layers(&mut phased);
-    assert!(!matches_target_filter(&phased, recipient, &goaded, &FilterContext::neutral()));
+    assert!(!matches_target_filter(
+        &phased,
+        recipient,
+        &goaded,
+        &FilterContext::neutral()
+    ));
     engine::game::phasing::phase_in_object(&mut phased, saga, &mut events);
     evaluate_layers(&mut phased);
-    assert!(!matches_target_filter(&phased, recipient, &goaded, &FilterContext::neutral()));
+    assert!(!matches_target_filter(
+        &phased,
+        recipient,
+        &goaded,
+        &FilterContext::neutral()
+    ));
 }
 
 #[test]
@@ -372,7 +471,15 @@ fn kardurs_attack_requirement_does_not_designate_creatures_goaded() {
         runner.state(),
         &get_valid_attacker_ids(runner.state()),
     );
-    assert!(matches!(constraints.get(&bear), Some(CombatRequirement::MustAttack { .. })));
+    assert!(matches!(
+        constraints.get(&bear),
+        Some(CombatRequirement::MustAttack { .. })
+    ));
     let goaded = TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Goaded]));
-    assert!(!matches_target_filter(runner.state(), bear, &goaded, &FilterContext::neutral()));
+    assert!(!matches_target_filter(
+        runner.state(),
+        bear,
+        &goaded,
+        &FilterContext::neutral()
+    ));
 }
