@@ -784,10 +784,10 @@ fn continuous_effect_wire_reads_strict_legacy_and_tagged_operations() {
 
 #[test]
 fn populated_retirement_persists_checked_but_never_enters_viewer_authority() {
-    use engine::game::derived_views::ClientGameStateRef;
+    use engine::game::derived_views::{ClientGameState, ClientGameStateRef};
     use engine::game::scenario::P1;
     use engine::game::visibility::{filter_state_for_unseated_viewer, filter_state_for_viewer};
-    use engine::types::game_state::{GameState, PersistedGameState};
+    use engine::types::game_state::PersistedGameState;
     let (mut state, effects) = retirement_fixture();
     state
         .objects
@@ -842,7 +842,10 @@ fn populated_retirement_persists_checked_but_never_enters_viewer_authority() {
         let wire = serde_json::to_value(ClientGameStateRef::wrap(&state, viewer)).unwrap();
         assert!(wire["state"].get("resolved_rules_journal").is_none());
         assert_eq!(wire["state"]["wire_projection"], serde_json::json!(true));
-        assert!(serde_json::from_value::<GameState>(wire["state"].clone()).is_err());
+        let decoded: ClientGameState = serde_json::from_value(wire.clone())
+            .expect("redacted client state remains decodable for display");
+        assert!(decoded.state.resolved_rules_journal.entries().is_empty());
+        assert_eq!(decoded.state.viewer_projection, viewer);
         assert!(serde_json::from_value::<PersistedGameState>(wire["state"].clone()).is_err());
     }
 }
