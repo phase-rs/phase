@@ -221,13 +221,18 @@ fn sound_of_drums_uses_auras_controller_and_survives_layer_refresh() {
     );
 
     let mut changed_controller = runner.state().clone();
-    changed_controller
-        .objects
-        .get_mut(&aura)
-        .unwrap()
-        .controller = p2;
-    changed_controller.layers_dirty.mark_full();
+    // CR 613.1b: change the Aura's control in layer 2 so it survives refresh.
+    changed_controller.add_transient_continuous_effect(
+        aura,
+        p2,
+        Duration::Permanent,
+        TargetFilter::SpecificObject { id: aura },
+        vec![ContinuousModification::ChangeController],
+        None,
+    );
     evaluate_layers(&mut changed_controller);
+    assert_eq!(changed_controller.objects[&aura].controller, p2);
+    assert_eq!(changed_controller.objects[&host].controller, P1);
     assert!(matches_target_filter(
         &changed_controller,
         host,
