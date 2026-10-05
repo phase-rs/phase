@@ -997,13 +997,24 @@ function ChooseFromZoneModal({ data }: { data: ChooseFromZoneChoice["data"] }) {
   const selectionRule = data.constraint;
   const selectionValid =
     !!objects &&
-    (!selectionRule ||
-      (selectionRule.type === "DistinctCardTypes" &&
-        canAssignDistinctCardTypes(
-          objects,
-          selectedIds,
-          selectionRule.categories,
-        )));
+    (() => {
+      if (!selectionRule) return true;
+      switch (selectionRule.type) {
+        case "DistinctCardTypes":
+          return canAssignDistinctCardTypes(
+            objects,
+            selectedIds,
+            selectionRule.categories,
+          );
+        case "TotalManaValue":
+          // The engine validates the selected set's total mana value on submission.
+          return true;
+        default: {
+          const exhaustive: never = selectionRule;
+          return exhaustive;
+        }
+      }
+    })();
   const countValid = data.up_to
     ? selectedSet.size <= data.count
     : selectedSet.size === data.count;

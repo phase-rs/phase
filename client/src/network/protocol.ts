@@ -106,6 +106,9 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
+ *  89 — ChooseFromZoneConstraint.TotalManaValue extends serialized paused
+ *       choices and ability state; old peers cannot decode the new tag.
+ *       Bumped with full-game protocol 107.
  *  88 — GameState and game actions carry exact replacement-choice preferences,
  *       remembered responses, and prompt eligibility metadata. Bumped with
  *       full-game protocol 106.
@@ -541,7 +544,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 88 as const;
+export const WIRE_PROTOCOL_VERSION = 89 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {
