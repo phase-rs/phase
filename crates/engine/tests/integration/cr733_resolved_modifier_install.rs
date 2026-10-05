@@ -342,11 +342,11 @@ fn retirement_fixture() -> (
                 source,
                 P0,
                 Duration::ForAsLongAs {
-                    condition: Box::new(StaticCondition::IsTapped {
+                    condition: StaticCondition::IsTapped {
                         scope: ObjectScope::Recipient,
-                    }),
+                    },
                 },
-                TargetFilter::SpecificObject(recipient),
+                TargetFilter::SpecificObject { id: recipient },
                 vec![ContinuousModification::AddPower { value: 1 }],
                 None,
                 TransientContinuousEffectBindings {
@@ -494,10 +494,10 @@ fn exact_retirement_validates_the_whole_batch_before_any_mutation() {
     let mut mismatches = Vec::new();
     let mut changed = effects[1].clone();
     changed.duration = Duration::ForAsLongAs {
-        condition: Box::new(engine::types::ability::StaticCondition::DevotionGE {
+        condition: engine::types::ability::StaticCondition::DevotionGE {
             colors: vec![],
             threshold: 0,
-        }),
+        },
     };
     mismatches.push(changed);
     let mut changed = effects[1].clone();

@@ -649,7 +649,9 @@ fn compound_attachment_retires_non_tce_tails_without_swap_back_revival() {
         board.thief,
         P0,
         Duration::WhileHostOnBattlefield,
-        TargetFilter::SpecificObject(board.other_host),
+        TargetFilter::SpecificObject {
+            id: board.other_host,
+        },
         vec![engine::types::ability::ContinuousModification::AddPower { value: 1 }],
         None,
     );
@@ -657,7 +659,9 @@ fn compound_attachment_retires_non_tce_tails_without_swap_back_revival() {
         board.thief,
         P0,
         Duration::UntilHostLeavesPlay,
-        TargetFilter::SpecificObject(board.other_host),
+        TargetFilter::SpecificObject {
+            id: board.other_host,
+        },
         vec![engine::types::ability::ContinuousModification::AddPower { value: 2 }],
         None,
     );
@@ -687,18 +691,15 @@ fn compound_attachment_retires_non_tce_tails_without_swap_back_revival() {
         let host = &state.objects[&board.loot];
         assert_eq!(
             host.replacement_definitions
-                .iter_all()
-                .any(|def| def == &controlled),
+                .as_slice()
+                .contains(&controlled),
             present
         );
         assert_eq!(
             host.base_replacement_definitions.contains(&controlled),
             present
         );
-        assert!(host
-            .replacement_definitions
-            .iter_all()
-            .any(|def| def == &unrelated));
+        assert!(host.replacement_definitions.as_slice().contains(&unrelated));
         assert!(host.base_replacement_definitions.contains(&unrelated));
         let permissions = &state.objects[&board.exiled].casting_permissions;
         assert_eq!(permissions.contains(&control_permission), present);

@@ -5606,11 +5606,11 @@ mod retirement_ownership_tests {
                     subject,
                     P0,
                     Duration::ForAsLongAs {
-                        condition: Box::new(StaticCondition::IsTapped {
+                        condition: StaticCondition::IsTapped {
                             scope: ObjectScope::Recipient,
-                        }),
+                        },
                     },
-                    TargetFilter::SpecificObject(subject),
+                    TargetFilter::SpecificObject { id: subject },
                     vec![ContinuousModification::AddPower { value: 1 }],
                     None,
                     TransientContinuousEffectBindings {
@@ -5717,11 +5717,11 @@ mod retirement_ownership_tests {
             subject,
             P0,
             Duration::ForAsLongAs {
-                condition: Box::new(StaticCondition::IsTapped {
+                condition: StaticCondition::IsTapped {
                     scope: ObjectScope::Recipient,
-                }),
+                },
             },
-            TargetFilter::SpecificObject(subject),
+            TargetFilter::SpecificObject { id: subject },
             vec![ContinuousModification::AddPower { value: 1 }],
             None,
             TransientContinuousEffectBindings {

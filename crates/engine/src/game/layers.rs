@@ -26960,11 +26960,11 @@ mod state_duration_retirement_recording_tests {
                     source,
                     P0,
                     Duration::ForAsLongAs {
-                        condition: Box::new(StaticCondition::IsTapped {
+                        condition: StaticCondition::IsTapped {
                             scope: crate::types::ability::ObjectScope::Recipient,
-                        }),
+                        },
                     },
-                    TargetFilter::SpecificObject(recipient),
+                    TargetFilter::SpecificObject { id: recipient },
                     vec![ContinuousModification::AddPower { value: 1 }],
                     None,
                     TransientContinuousEffectBindings {

@@ -1057,10 +1057,10 @@ fn settled_compound_and_successive_wave_retirements_replay_exactly() {
             .add_transient_continuous_effect_with_bindings(
                 a,
                 P0,
-                Duration::ForAsLongAs {
-                    condition: Box::new(condition),
+                Duration::ForAsLongAs { condition },
+                TargetFilter::SpecificObject {
+                    id: affected.object_id,
                 },
-                TargetFilter::SpecificObject(affected.object_id),
                 vec![modification],
                 None,
                 TransientContinuousEffectBindings {
@@ -1075,10 +1075,8 @@ fn settled_compound_and_successive_wave_retirements_replay_exactly() {
                 .add_transient_continuous_effect_with_bindings(
                     b,
                     P0,
-                    Duration::ForAsLongAs {
-                        condition: Box::new(power),
-                    },
-                    TargetFilter::SpecificObject(b),
+                    Duration::ForAsLongAs { condition: power },
+                    TargetFilter::SpecificObject { id: b },
                     vec![ContinuousModification::AddToughness { value: 1 }],
                     None,
                     TransientContinuousEffectBindings {
