@@ -517,5 +517,6 @@ fn retained_multilayer_trigger_grant_survives_earlier_ability_removal() {
     let life_before = runner.life(P0);
     runner.advance_to_upkeep();
     runner.advance_until_stack_empty();
-    assert_eq!(runner.life(P0), life_before + 2);
+    // The provider's printed trigger and the host's granted trigger each gain 2 life.
+    assert_eq!(runner.life(P0), life_before + 4);
 }
