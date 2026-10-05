@@ -445,7 +445,14 @@ fn resolution_zone_candidates(
         .filter(|(id, object)| {
             scan_zones.contains(&object.zone)
                 && !object.is_emblem
-                && crate::game::filter::matches_target_filter(state, **id, target_filter, &ctx)
+                // CR 108.4a: a card in an owner-scoped zone has no controller; read its owner.
+                && crate::game::filter::matches_target_filter_for_zone(
+                    state,
+                    **id,
+                    object.zone,
+                    target_filter,
+                    &ctx,
+                )
         })
         .filter(|(id, object)| {
             destination != Zone::Exile

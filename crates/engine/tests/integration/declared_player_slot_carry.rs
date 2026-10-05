@@ -1189,3 +1189,42 @@ fn azula_graveyard_offer_includes_a_card_that_died_under_a_thief() {
     let offers = graveyard_offer_after_steal(AZULA_CLAUSE);
     assert_eq!(offers[0].0, P1, "the declared player chooses");
 }
+
+const BREAK_THE_SPELL: &str = "Destroy target enchantment. If a permanent you controlled or a token was destroyed this way, draw a card.";
+
+/// CR 608.2h: "a permanent you controlled ... destroyed this way" reads the at-exit controller,
+/// so P0 controlling P1's enchantment draws even though the card now sits in its owner's graveyard.
+#[test]
+fn destroyed_this_way_reads_the_at_exit_controller_of_a_stolen_permanent() {
+    let mut sc = three_player(7);
+    let spell = sc
+        .add_spell_to_hand_from_oracle(P0, "Row", false, BREAK_THE_SPELL)
+        .id();
+    let ench = sc.add_enchantment_from_oracle(P1, "Aura-ish", "").id();
+    seat_all(&mut sc);
+    let mut r = sc.build();
+    {
+        let o = r.state_mut().objects.get_mut(&ench).unwrap();
+        o.controller = P0;
+        o.base_controller = Some(P0);
+    }
+    let (hand, lib) = (hands(&r)[0], libraries(&r)[0]);
+    cast(&mut r, spell);
+    drive(
+        &mut r,
+        &Plan {
+            prefs: &[TargetRef::Object(ench)],
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        r.state().objects[&ench].zone,
+        Zone::Graveyard,
+        "reach: the enchantment was destroyed"
+    );
+    assert_eq!(
+        (hands(&r)[0], libraries(&r)[0]),
+        (hand, lib - 1),
+        "P0 controlled it when destroyed: exactly one card drawn (spell leaves hand)"
+    );
+}
