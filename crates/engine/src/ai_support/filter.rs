@@ -36,10 +36,11 @@ use std::sync::Arc;
 use crate::game::combat::AttackTarget;
 use crate::game::engine::SimulationProbeGuard;
 use crate::game::functioning_abilities::game_functioning_statics;
+use crate::game::layers::transient_effect_is_live;
 use crate::game::{casting, casting_costs, keywords, turn_control};
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, Effect, FilterProp,
-    ParitySource, ParsedCondition, QuantityExpr, ReplacementDefinition, ResolvedAbility,
+    AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, ContinuousModification,
+    Effect, FilterProp, ParitySource, ParsedCondition, QuantityExpr, ReplacementDefinition, ResolvedAbility,
     StaticDefinition, TargetFilter, TargetRef, TriggerDefinition,
 };
 use crate::types::actions::GameAction;
@@ -902,8 +903,6 @@ fn filterprop_reads_only_candidate_fp(p: &FilterProp) -> bool {
         | FilterProp::PowerExceedsBase
         | FilterProp::Suspected
         | FilterProp::Renowned
-        // CR 701.15b/c: reads only the candidate's own `goaded_by` fingerprint field.
-        | FilterProp::Goaded
         | FilterProp::Modified
         | FilterProp::Historic
         | FilterProp::NotHistoric
@@ -958,6 +957,9 @@ fn filterprop_reads_only_candidate_fp(p: &FilterProp) -> bool {
         | FilterProp::OtherThanTriggerObject
         | FilterProp::SaddledSource
         | FilterProp::ConvokedSource
+        // CR 701.15b: A live designation may come from a TCE or printed source
+        // outside the candidate fingerprint.
+        | FilterProp::Goaded
         | FilterProp::PowerGTSource
         | FilterProp::EnchantedBy
         | FilterProp::EquippedBy
@@ -1244,7 +1246,12 @@ impl LegalityPoisonGates {
                     | StaticMode::CanAttackWithDefender
                     | StaticMode::MaxAttackersEachCombat { .. }
                     | StaticMode::CombatAlone { .. }
-            ) {
+            ) || (def.mode == StaticMode::Continuous
+                && def.modifications.iter().any(|modification| {
+                    matches!(modification, ContinuousModification::AddStaticMode {
+                        mode: StaticMode::Goaded
+                    })
+                })) {
                 g.has_declare_attacker = true;
             }
             // CR 509.1: declare-blocker restrictions / requirements.
@@ -1282,6 +1289,20 @@ impl LegalityPoisonGates {
             ) {
                 g.has_activation = true;
             }
+        }
+
+        // CR 701.15b: Exact-recipient resolution-created designations are
+        // absent from ObjectFingerprint and must force fresh combat legality.
+        if state.transient_continuous_effects.iter().any(|tce| {
+            matches!(tce.affected, TargetFilter::SpecificObject { .. })
+                && tce.modifications.iter().any(|modification| {
+                    matches!(modification, ContinuousModification::AddStaticMode {
+                        mode: StaticMode::Goaded
+                    })
+                })
+                && transient_effect_is_live(state, tce)
+        }) {
+            g.has_declare_attacker = true;
         }
 
         // One battlefield scan: goaded creatures (CR 508.1d remote

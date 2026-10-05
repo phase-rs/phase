@@ -1,4 +1,5 @@
 use crate::game::filter::{matches_target_filter, FilterContext};
+use crate::game::combat::goading_players_for_creature;
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetRef};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -12,14 +13,19 @@ use crate::types::zones::Zone;
 /// CR 701.15c: A creature can be goaded by multiple players, creating additional
 /// combat requirements.
 ///
-/// CR 701.15d: The same player goading a creature again has no effect (HashSet
-/// insert is idempotent).
+/// CR 701.15d: The same player goading a creature again has no effect,
+/// including when an earlier cause came from a live transient or printed static.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     for obj_id in goad_targets(state, ability) {
+        // CR 701.15d: An existing cause from this player keeps its original
+        // lifetime; a direct goad must not install a fresh next-turn deadline.
+        if goading_players_for_creature(state, obj_id).contains(&ability.controller) {
+            continue;
+        }
         let Some(obj) = state.objects.get_mut(&obj_id) else {
             continue;
         };
@@ -30,7 +36,7 @@ pub fn resolve(
         }
 
         // CR 701.15a: Mark the creature as goaded by the controller of this effect.
-        // CR 701.15d: Re-goading by the same player is a no-op (HashSet semantics).
+        // CR 701.15c: A different player contributes an independent cause.
         obj.goaded_by.insert(ability.controller);
     }
 
