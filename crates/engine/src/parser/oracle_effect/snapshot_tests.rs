@@ -2380,27 +2380,20 @@ fn declared_player_reads_name_exactly_one_tagged_declaration() {
     );
 }
 
-/// CR 608.2c: a declaring effect with no player filter, or one already carrying a chosen-clause
-/// group, keeps its `ParentTarget` read instead of taking a second declaration.
+/// CR 608.2c: a declaring effect with no player filter keeps its `ParentTarget` read instead of
+/// taking a declaration.
 #[test]
 fn declared_player_reference_is_refused_where_the_declaration_cannot_be_tagged() {
-    for (name, types, oracle) in [
-        (
-            "Keeper of the Flame",
-            &["Creature"][..],
-            "{R}, {T}: Choose target opponent who has more life than you do as you activate this ability. This creature deals 2 damage to that player.",
-        ),
-        (
-            "Devour Flesh",
-            &["Instant"][..],
-            "Target player sacrifices a creature of their choice, then gains life equal to that creature's toughness.",
-        ),
-    ] {
-        let parsed = serde_json::to_value(parse_card(oracle, name, &[], types)).unwrap();
-        let (mut reads, mut tags) = Default::default();
-        declared_player_groups(&parsed, &mut reads, &mut tags);
-        assert!(reads.is_empty(), "{name}: {reads:?}");
-    }
+    let parsed = serde_json::to_value(parse_card(
+        "Target player sacrifices a creature of their choice, then gains life equal to that creature's toughness.",
+        "Devour Flesh",
+        &[],
+        &["Instant"],
+    ))
+    .unwrap();
+    let (mut reads, mut tags) = Default::default();
+    declared_player_groups(&parsed, &mut reads, &mut tags);
+    assert!(reads.is_empty(), "{reads:?}");
 }
 
 /// CR 608.2c + CR 608.2d: a bare "they" after a declared player reads that player's group, as
@@ -2424,8 +2417,8 @@ fn a_they_after_a_declared_player_reads_the_declaring_clause() {
     }
 }
 
-/// CR 608.2d: a "may" reading a chosen-clause declaration keeps its `ParentTarget` slot and names the
-/// chosen player as its actor.
+/// CR 608.2d: a "may" reading a chosen-clause declaration reads the chosen player's group, as
+/// reader and as the "may" actor.
 #[test]
 fn a_they_may_reading_a_chosen_clause_declaration_names_the_chosen_player_as_actor() {
     let parsed = serde_json::to_value(parse_card(
@@ -2435,9 +2428,12 @@ fn a_they_may_reading_a_chosen_clause_declaration_names_the_chosen_player_as_act
         &["Sorcery"],
     ))
     .unwrap();
-    let reader = &parsed["abilities"][0]["sub_ability"];
-    assert_eq!(reader["effect"]["target"]["type"], "ParentTarget");
-    assert_eq!(reader["optional_player"]["type"], "ParentTargetController");
+    let declaring = &parsed["abilities"][0];
+    let reader = &declaring["sub_ability"];
+    for slot in [&reader["effect"]["target"], &reader["optional_player"]] {
+        assert_eq!(slot["type"], "DeclaredPlayer");
+        assert_eq!(slot["group"], declaring["declares_chosen_group"]);
+    }
     assert!(reader["optional"].as_bool().unwrap());
 }
 

@@ -1599,6 +1599,7 @@ pub(crate) fn controller_ref_player(
         ControllerRef::TargetPlayer | ControllerRef::TargetOpponent => {
             target_player_from_ability_or_root(state, ability)
         }
+        ControllerRef::DeclaredPlayer { group } => declared_player(state, ability, *group),
         ControllerRef::ParentTargetController => parent_target_controller_player(state, ability),
         // CR 120.1 + CR 109.4 + CR 608.2c: resolved through the `TargetFilter`
         // twin so the two spellings of the damage-recipient's controller can
@@ -1635,6 +1636,16 @@ pub(crate) fn controller_ref_player(
         // resolving ability (Gideon Jura's "+2").
         ControllerRef::SpecificPlayer { id } => Some(*id),
     }
+}
+
+/// CR 608.2c + CR 608.2b: the player announced by the clause tagged `group`; `None` when that
+/// target is illegal or no ability is resolving.
+fn declared_player(
+    state: &GameState,
+    ability: Option<&ResolvedAbility>,
+    group: crate::types::ability::ChosenGroupId,
+) -> Option<PlayerId> {
+    crate::game::targeting::resolve_live_declared_player(state, ability?, group)
 }
 
 /// CR 608.2c: resolve the first declared player target without letting a
@@ -3240,6 +3251,9 @@ fn stack_entry_controller_matches(
             target_player_from_ability_or_root(state, ctx.ability)
                 .is_some_and(|pid| pid == entry_controller)
         }
+        Some(ControllerRef::DeclaredPlayer { group }) => {
+            declared_player(state, ctx.ability, *group).is_some_and(|pid| pid == entry_controller)
+        }
         Some(ControllerRef::ParentTargetController) => {
             parent_target_controller_player(state, ctx.ability)
                 .is_some_and(|pid| pid == entry_controller)
@@ -4540,6 +4554,14 @@ fn filter_inner_for_object(
                             _ => return false,
                         }
                     }
+                    // CR 608.2c + CR 608.2b: "that player controls" after a declared
+                    // player; no one when that target is illegal.
+                    ControllerRef::DeclaredPlayer { group } => {
+                        match declared_player(state, ability, *group) {
+                            Some(pid) if pid == obj_ctrl => {}
+                            _ => return false,
+                        }
+                    }
                     ControllerRef::ParentTargetController => {
                         let target_player = parent_target_controller_player(state, ability);
                         match target_player {
@@ -5635,7 +5657,7 @@ pub fn spell_record_matches_filter(
                     // a spell-history record (no ability context to resolve the
                     // target). Fail closed — this combination should not be
                     // produced by the parser.
-                    ControllerRef::TargetPlayer | ControllerRef::TargetOpponent => return false,
+                    ControllerRef::TargetPlayer | ControllerRef::TargetOpponent | ControllerRef::DeclaredPlayer { .. } => return false,
                     ControllerRef::ParentTargetOwner => return false,
                     ControllerRef::ParentTargetController => return false,
                     // CR 120.1 + CR 109.4: the damage recipient's controller.
@@ -7369,6 +7391,9 @@ fn matches_filter_prop(
                         Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent),
                         Some(pid),
                     ) => perm.controller == pid,
+                    (Some(ControllerRef::DeclaredPlayer { .. }), Some(pid)) => {
+                        perm.controller == pid
+                    }
                     (Some(ControllerRef::ParentTargetController), Some(pid)) => {
                         perm.controller == pid
                     }
@@ -7416,6 +7441,9 @@ fn matches_filter_prop(
             ControllerRef::TargetPlayer | ControllerRef::TargetOpponent => {
                 target_player_from_ability_or_root(state, source.ability)
                     .is_some_and(|pid| pid == obj.owner)
+            }
+            ControllerRef::DeclaredPlayer { group } => {
+                declared_player(state, source.ability, *group).is_some_and(|pid| pid == obj.owner)
             }
             ControllerRef::ParentTargetController => {
                 parent_target_controller_player(state, source.ability)
@@ -8262,6 +8290,10 @@ fn zone_change_record_matches_property(
             ControllerRef::TargetPlayer | ControllerRef::TargetOpponent =>
                 target_player_from_ability_or_root(state, source.ability)
                 .is_some_and(|pid| pid == record.owner),
+            ControllerRef::DeclaredPlayer { group } => {
+                declared_player(state, source.ability, *group)
+                    .is_some_and(|pid| pid == record.owner)
+            }
             ControllerRef::ParentTargetController => {
                 parent_target_controller_player(state, source.ability)
                     .is_some_and(|pid| pid == record.owner)
@@ -8661,6 +8693,10 @@ fn attachment_controller_matches(
         }
         Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent) => {
             target_player_from_ability_or_root(state, source.ability)
+                .is_some_and(|pid| pid == attachment_controller)
+        }
+        Some(ControllerRef::DeclaredPlayer { group }) => {
+            declared_player(state, source.ability, *group)
                 .is_some_and(|pid| pid == attachment_controller)
         }
         Some(ControllerRef::ParentTargetController) => {
@@ -9542,7 +9578,11 @@ fn player_matches_target_filter_with(
             // CR 109.4: TargetPlayer / TargetOpponent have no meaning when matching a
             // player against a filter without ability context. Fail closed (mirrors the
             // pattern established at filter.rs:526–569 for spell-record filters).
-            Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent) => false,
+            Some(
+                ControllerRef::TargetPlayer
+                | ControllerRef::TargetOpponent
+                | ControllerRef::DeclaredPlayer { .. },
+            ) => false,
             Some(ControllerRef::ParentTargetController) => false,
             // CR 120.1 + CR 109.4: the damage recipient's controller.
             Some(ControllerRef::EventTargetController) => false,

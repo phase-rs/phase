@@ -21964,6 +21964,19 @@ fn try_parse_multi_target_damage_chain_inner(
     // the count has to be captured here and attached below or a chain headed by
     // "each of ⟨N⟩ target ⟨type⟩" silently degrades to one mandatory target.
     let primary_damage_multi_target = ctx.pending_damage_multi_target.take();
+    // CR 608.2c + CR 115.1a: a player the head announces is who its continuations'
+    // "that player controls" / "they control" name.
+    let announced_player = has_explicit_player_target(&primary_effect).then(|| {
+        let group = ChosenGroupId::declared_player(ctx.next_declared_player_group);
+        ctx.next_declared_player_group += 1;
+        group
+    });
+    let outer_player_scope = ctx.declared_player_scope.clone();
+    let outer_prior_declaration = ctx.prior_player_declaration;
+    if let Some(group) = announced_player {
+        ctx.declared_player_scope = Some(ControllerRef::DeclaredPlayer { group });
+        ctx.prior_player_declaration = primary_damage_multi_target.is_none();
+    }
     let trimmed = remainder.trim_start();
     let trimmed_lower = trimmed.to_lowercase();
     // A comma-delimited list ("..., M damage to T2, and K ...") or a bare
@@ -22036,6 +22049,9 @@ fn try_parse_multi_target_damage_chain_inner(
     }
 
     ctx.target_chooser = primary_target_chooser;
+    ctx.declared_player_scope = outer_player_scope;
+    ctx.prior_player_declaration = outer_prior_declaration;
+    ctx.clause_declared_group = announced_player;
 
     // Build the chain bottom-up so each segment becomes the `sub_ability` of
     // the previous one. Effects beyond the primary share the primary's
@@ -25561,8 +25577,8 @@ fn reference_to_declaration(
 /// CR 608.2c + CR 115.1: the reference to the player the nearest earlier clause
 /// announced as its target, tagging that clause. A chain nested in another one
 /// inherits the enclosing chain's reference (`ParseContext::enclosing_declared_player`)
-/// when it declares none of its own. `None` when the declaring clause already
-/// carries a chosen-clause group, which has no room for a second tag.
+/// when it declares none of its own. A `TargetOnly` declarer is named by the group
+/// it already carries.
 fn declared_player_reference(
     clauses: &[ClauseIr],
     declarations: &mut PlayerDeclarations,
@@ -25575,8 +25591,10 @@ fn declared_player_reference(
     else {
         return enclosing.clone();
     };
-    if clauses[index].declares_chosen_clause.is_some() {
-        return None;
+    if let Some(id) = clauses[index].declares_chosen_clause {
+        return Some(TargetFilter::DeclaredPlayer {
+            group: ChosenGroupId(id.0),
+        });
     }
     Some(reference_to_declaration(declarations, groups, index))
 }
@@ -25609,7 +25627,8 @@ fn chain_has_prior_player_target_referent(clauses: &[ClauseIr]) -> bool {
 }
 
 /// The nearest earlier clause that announces a player, reached only through
-/// clauses that read the same referent.
+/// clauses that read the same referent, name the controller ("you"), or announce an
+/// object of their own: none of them names another player (CR 608.2c).
 fn chain_prior_player_declaration(clauses: &[ClauseIr]) -> Option<&ClauseIr> {
     for prev in clauses.iter().rev() {
         if prev.condition.is_some() {
@@ -25620,8 +25639,14 @@ fn chain_prior_player_declaration(clauses: &[ClauseIr]) -> Option<&ClauseIr> {
         }
         if matches!(
             prev.parsed.effect.target_filter(),
-            Some(TargetFilter::ParentTarget | TargetFilter::ParentTargetController)
-        ) {
+            Some(
+                TargetFilter::ParentTarget
+                    | TargetFilter::ParentTargetController
+                    | TargetFilter::DeclaredPlayer { .. }
+                    | TargetFilter::Controller
+            )
+        ) || has_typed_target_widened(&prev.parsed.effect)
+        {
             continue;
         }
         return None;
@@ -39504,7 +39529,6 @@ fn parse_effect_chain_ir_body(
     // player is carried as one reference.
     let mut carried_player: Option<CarriedPlayerSubject> = None;
     let mut declarations: PlayerDeclarations = Vec::new();
-    let mut collision_actors: Vec<usize> = Vec::new();
     // `chunk_ctx` is rebuilt per chunk, so the group counter threads through this local.
     let mut chain_declared_groups = ctx.next_declared_player_group;
     // CR 608.2c + CR 109.4: Chain-spanning "its controller" antecedent. Armed
@@ -41802,6 +41826,22 @@ fn parse_effect_chain_ir_body(
             .iter()
             .rev()
             .find_map(|clause| nearest_dig_rest_zone_in_clause(&clause.parsed));
+        // CR 608.2c + CR 115.1a: "that player controls" after a declared player names it.
+        let declared_player_scope = (chain_has_prior_player_target_referent(builder.clauses())
+            || enclosing_declared_player.is_some())
+        .then(|| {
+            declared_player_reference(
+                builder.clauses(),
+                &mut declarations,
+                &mut chain_declared_groups,
+                &enclosing_declared_player,
+            )
+        })
+        .flatten()
+        .and_then(|reference| match reference {
+            TargetFilter::DeclaredPlayer { group } => Some(ControllerRef::DeclaredPlayer { group }),
+            _ => None,
+        });
         let mut chunk_ctx = ParseContext {
             subject: chunk_subject,
             // CR 608.2k: precedence for a bare object anaphor, nearest antecedent
@@ -41973,6 +42013,8 @@ fn parse_effect_chain_ir_body(
             token_created_in_chain: chain_prior_referent_is_created_token(builder.clauses()),
             prior_player_declaration: chain_prior_player_declaration(builder.clauses())
                 .is_some_and(declares_exactly_one_player),
+            declared_player_scope,
+            clause_declared_group: None,
             // CR 608.2c + CR 301.5 + CR 303.4: bind a bare "it" in this chunk's
             // Attach to the SOURCE when an earlier clause animated the source
             // into an Aura/Equipment (the Licid class). Nothing else in the
@@ -42991,7 +43033,6 @@ fn parse_effect_chain_ir_body(
         let player_anaphor = has_player_anaphoric_reference(&text_lower)
             || (ctx.prior_player_declaration && has_they_pronoun(&text_lower));
         if chain_has_prior_player_target_referent(builder.clauses()) && player_anaphor {
-            let mut kept_parent_target = false;
             replace_player_anaphor(&mut clause.effect, || {
                 declared_player_reference(
                     builder.clauses(),
@@ -42999,16 +43040,8 @@ fn parse_effect_chain_ir_body(
                     &mut chain_declared_groups,
                     &enclosing_declared_player,
                 )
-                .unwrap_or_else(|| {
-                    kept_parent_target = true;
-                    TargetFilter::ParentTarget
-                })
+                .unwrap_or(TargetFilter::ParentTarget)
             });
-            // CR 608.2d: a collision reader keeps `ParentTarget` in its effect slot, so
-            // the "may" actor travels on the clause.
-            if kept_parent_target && clause.optional {
-                collision_actors.push(builder.clauses().len());
-            }
         }
         if chunk.boundary_after != Some(ClauseBoundary::Sentence)
             && !carried_player
@@ -43923,6 +43956,10 @@ fn parse_effect_chain_ir_body(
             continue;
         }
 
+        let clause_declared_group = chunk_ctx.clause_declared_group.take();
+        if let Some(group) = clause_declared_group {
+            declarations.push((builder.clauses().len(), group));
+        }
         // CR 115.1 + CR 701.9b: `target_selection_mode` snapshots the parser's
         // per-chunk selection mode. Set to `Random` by `parse_target_with_ctx`
         // when "random " was stripped from this chunk's target phrase.
@@ -43950,6 +43987,7 @@ fn parse_effect_chain_ir_body(
             .target_chooser(chunk_ctx.target_chooser.clone())
             .declared_target_choice_timing(chunk_ctx.declared_target_choice_timing.take())
             .printed_color_choice(chunk_ctx.pending_printed_color_choice.take())
+            .declared_player_group(clause_declared_group)
             .push();
 
         // CR 115.1 + CR 608.2c: the comparative gate's "that creature" reads the
@@ -44062,11 +44100,6 @@ fn parse_effect_chain_ir_body(
 
     chain_declared_groups = chain_declared_groups.max(ctx.next_declared_player_group);
     tag_player_declarations(&mut builder, &mut declarations, &mut chain_declared_groups);
-    for index in collision_actors {
-        if let Some(clause) = builder.clauses_mut().get_mut(index) {
-            clause.optional_actor = Some(TargetFilter::ParentTargetController);
-        }
-    }
     ctx.next_declared_player_group = chain_declared_groups;
 
     // CR 608.2c + CR 603.7: resolve delayed-payload placement over the finished clause sequence.

@@ -491,6 +491,7 @@ pub(crate) fn try_parse_impose_additional_cost(
             // CR 109.4: TargetOpponent, like TargetPlayer, has no cost-static
             // semantics — fall back to an untyped card filter.
             Some(ControllerRef::TargetOpponent) => TargetFilter::Typed(TypedFilter::card()),
+            Some(ControllerRef::DeclaredPlayer { .. }) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::ParentTargetController) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::EventTargetController) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::ParentTargetOwner) => TargetFilter::Typed(TypedFilter::card()),
@@ -888,6 +889,7 @@ pub(crate) fn try_parse_cost_modification(
             // CR 109.4: TargetOpponent, like TargetPlayer, has no cost-static
             // semantics — fall back to an untyped card filter.
             Some(ControllerRef::TargetOpponent) => TargetFilter::Typed(TypedFilter::card()),
+            Some(ControllerRef::DeclaredPlayer { .. }) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::ParentTargetController) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::EventTargetController) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::ParentTargetOwner) => TargetFilter::Typed(TypedFilter::card()),

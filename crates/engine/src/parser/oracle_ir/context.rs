@@ -5,8 +5,8 @@
 
 use super::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
-    ControllerRef, Duration, MultiTargetSpec, PlayerFilter, PtValue, QuantityExpr, QuantityRef,
-    TargetChoiceTiming, TargetFilter, TargetSelectionMode, ZoneChoiceCandidateSource,
+    ChosenGroupId, ControllerRef, Duration, MultiTargetSpec, PlayerFilter, PtValue, QuantityExpr,
+    QuantityRef, TargetChoiceTiming, TargetFilter, TargetSelectionMode, ZoneChoiceCandidateSource,
 };
 use crate::types::card_type::CoreType;
 use crate::types::zones::Zone;
@@ -568,6 +568,15 @@ pub(crate) struct ParseContext {
     /// spelling "that player" takes) instead of an earlier object. Seeded per chunk
     /// from the chain; `false` on every standalone parse.
     pub prior_player_declaration: bool,
+    /// CR 608.2c + CR 115.1a: the controller scope "that player controls" and "they
+    /// control" take after a player the chain already declared. Seeded per chunk from
+    /// the chain; `None` on every standalone parse, which keeps `relative_player_scope`
+    /// (then `You`) as the reading.
+    pub declared_player_scope: Option<ControllerRef>,
+    /// The group a damage clause minted for the player it announces itself, so its own
+    /// continuations ("... and 1 damage to each creature that player controls") can name it.
+    /// The chunk loop takes it onto the clause.
+    pub clause_declared_group: Option<ChosenGroupId>,
     /// CR 608.2c + CR 400.7: Source zone of the tracked set that a downstream
     /// "put those cards / put them onto the battlefield" anaphor (a
     /// `TargetFilter::TrackedSet`) must scan. Set by a producer clause that

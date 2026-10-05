@@ -323,7 +323,11 @@ fn find_legal_targets_with_context(
                     Some(ControllerRef::ScopedPlayer) => false,
                     // CR 109.4: TargetOpponent, like TargetPlayer, is what's being
                     // chosen here — fail closed as a candidate-enumeration scope.
-                    Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent) => false,
+                    Some(
+                        ControllerRef::TargetPlayer
+                        | ControllerRef::TargetOpponent
+                        | ControllerRef::DeclaredPlayer { .. },
+                    ) => false,
                     Some(ControllerRef::ParentTargetController) => false,
                     // Engine constraint: resolving this reference needs a trigger event
                     // window, which target-candidate matching does not have.
@@ -2730,6 +2734,7 @@ fn stack_entry_controller_matches(
         ControllerRef::ScopedPlayer
         | ControllerRef::TargetPlayer
         | ControllerRef::TargetOpponent
+        | ControllerRef::DeclaredPlayer { .. }
         | ControllerRef::ParentTargetController
         | ControllerRef::EventTargetController
         | ControllerRef::ParentTargetOwner

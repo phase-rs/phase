@@ -33699,7 +33699,7 @@ fn thieving_skydiver_dependent_continuation_is_never_replicated_or_branch() {
 /// Mishra's Command mode 1: "Choose target player. They may discard up to X
 /// cards." Before the fix: `Discard { target: Any, .. }`, non-optional —
 /// unbound to the just-chosen player and mandatory despite "may". After: the
-/// discard binds to `ParentTarget` (the chosen player) and is optional.
+/// discard binds to the chosen player and is optional.
 #[test]
 fn mishras_command_they_may_discard_binds_to_chosen_player_and_is_optional() {
     let parsed = parse_oracle_text(
@@ -33724,10 +33724,9 @@ fn mishras_command_they_may_discard_binds_to_chosen_player_and_is_optional() {
         .expect("the discard must remain chained to the chosen target");
     match &*discard.effect {
         Effect::Discard { target, .. } => {
-            assert_eq!(
-                target,
-                &TargetFilter::ParentTarget,
-                "\"they\" discard must bind to the just-chosen target player, not float unbound"
+            assert!(
+                matches!(target, TargetFilter::DeclaredPlayer { .. }),
+                "\"they\" discard must bind to the just-chosen target player, not float unbound: {target:?}"
             );
         }
         other => panic!("expected Discard, got {other:?}"),

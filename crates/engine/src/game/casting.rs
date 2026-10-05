@@ -28566,6 +28566,7 @@ fn controller_ref_reads_chosen_target(controller: &ControllerRef, read: TargetRe
     match controller {
         ControllerRef::TargetPlayer
         | ControllerRef::TargetOpponent
+        | ControllerRef::DeclaredPlayer { .. }
         | ControllerRef::ParentTargetController
         | ControllerRef::ParentTargetOwner => read.includes_bindable(),
         ControllerRef::You

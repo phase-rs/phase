@@ -1524,6 +1524,7 @@ pub fn simple_legal_target_assignment_exists_for_ability(
     }
     if target_filter_contains_chosen_x_ref(&spec.filter)
         || relative_controller_kind(&spec.filter).is_some()
+        || caster_scoped_selection(&spec.filter)
         || target_filter_has_another_target_marker(&spec.filter)
         || is_per_opponent_target_fanout(ability)
         || matches!(ability.effect, Effect::PairWith { .. })
@@ -3054,7 +3055,33 @@ pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -
         **else_ability = validate_targets_in_chain(state, else_ability);
     }
     restamp_chosen_group_targets(&mut validated);
+    drop_targets_of_vanished_declared_player(&mut validated);
     validated
+}
+
+/// CR 608.2b: an object target whose criteria name a declared player ("target land that player
+/// controls") is illegal once that player's own target is, because the criteria can no longer be
+/// determined; it is dropped as a pruned target is.
+fn drop_targets_of_vanished_declared_player(root: &mut ResolvedAbility) {
+    let mut vanished: Vec<Vec<ChainStep>> = Vec::new();
+    walk_declared_slots(root, &mut |node, path, _| {
+        let Some(ControllerRef::DeclaredPlayer { group }) = node
+            .effect
+            .target_filter()
+            .and_then(relative_controller_kind)
+        else {
+            return;
+        };
+        if matches!(declared_group_player_slot(root, group), Some(None)) {
+            vanished.push(path.to_vec());
+        }
+    });
+    for path in vanished {
+        if let Some(node) = node_at_mut(root, &path) {
+            node.targets
+                .retain(|target| matches!(target, TargetRef::Player(_)));
+        }
+    }
 }
 
 /// CR 608.2b + CR 608.2c: set an inheriting rider's `targets` (and its selected
@@ -5725,7 +5752,11 @@ pub(crate) fn collect_player_targets(
                 }
                 // CR 109.4: TargetPlayer / TargetOpponent are ambiguous here (player
                 // targets are resolved from ability.targets directly); fail closed.
-                Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent) => false,
+                Some(
+                    ControllerRef::TargetPlayer
+                    | ControllerRef::TargetOpponent
+                    | ControllerRef::DeclaredPlayer { .. },
+                ) => false,
                 Some(ControllerRef::ParentTargetController) => false,
                 // CR 120.1 + CR 109.4 + CR 603.2: unlike the parent-target refs
                 // (which need a target slot this population expansion has no
@@ -6836,17 +6867,42 @@ fn legal_targets_for_ability_filter_uncapped(
         return targeting::find_legal_targets(state, filter, ability.controller, ability.source_id);
     }
 
-    let Some(player_slot) = existing_slots.iter().rev().find(|slot| {
+    let player_slot = existing_slots.iter().rev().find(|slot| {
         !slot.legal_targets.is_empty()
             && slot
                 .legal_targets
                 .iter()
                 .all(|target| matches!(target, TargetRef::Player(_)))
-    }) else {
-        if needs_ability_context {
-            return targeting::find_legal_targets_for_ability(state, filter, ability);
+    });
+    // CR 608.2c: a declared-player dependency met before any player slot exists (the
+    // per-slot spec walk) is counted over every player; selection narrows it per slot.
+    let candidates: Vec<PlayerId> = match player_slot {
+        Some(slot) => slot
+            .legal_targets
+            .iter()
+            .filter_map(|target| match target {
+                TargetRef::Player(player_id) => Some(*player_id),
+                TargetRef::Object(_) => None,
+            })
+            .collect(),
+        None if matches!(
+            relative_kind,
+            Some(crate::types::ability::ControllerRef::DeclaredPlayer { .. })
+        ) =>
+        {
+            state.players.iter().map(|player| player.id).collect()
         }
-        return targeting::find_legal_targets(state, filter, ability.controller, ability.source_id);
+        None => {
+            if needs_ability_context {
+                return targeting::find_legal_targets_for_ability(state, filter, ability);
+            }
+            return targeting::find_legal_targets(
+                state,
+                filter,
+                ability.controller,
+                ability.source_id,
+            );
+        }
     };
 
     // CR 601.2c: enumerate a declared target-player dependency against every
@@ -6854,21 +6910,15 @@ fn legal_targets_for_ability_filter_uncapped(
     // TargetPlayer rewrite. Only non-owner-zone Typed.controller You retains
     // the separate legacy relative enumeration behavior.
     let enumeration_filter = match relative_kind {
-        Some(crate::types::ability::ControllerRef::TargetPlayer) => {
-            rewrite_declared_target_player(filter, crate::types::ability::ControllerRef::You)
-        }
+        Some(
+            crate::types::ability::ControllerRef::TargetPlayer
+            | crate::types::ability::ControllerRef::DeclaredPlayer { .. },
+        ) => rewrite_declared_target_player(filter, crate::types::ability::ControllerRef::You),
         _ => filter.clone(),
     };
 
     let mut legal_targets = Vec::new();
-    for player_id in player_slot
-        .legal_targets
-        .iter()
-        .filter_map(|target| match target {
-            TargetRef::Player(player_id) => Some(*player_id),
-            TargetRef::Object(_) => None,
-        })
-    {
+    for player_id in candidates {
         let targets = if needs_ability_context {
             targeting::find_legal_targets_for_ability_with_controller(
                 state,
@@ -6889,17 +6939,29 @@ fn legal_targets_for_ability_filter_uncapped(
     legal_targets
 }
 
-/// Returns the relative `ControllerRef` (`You` or `TargetPlayer`) embedded in
-/// `filter`, if any. Used by `legal_targets_for_ability_filter` (static slot
+/// A selection scoped to the caster ("a token you control"): a spec the single-slot fast paths
+/// must not decide, since not every such spec is a targeted slot.
+fn caster_scoped_selection(filter: &TargetFilter) -> bool {
+    matches!(
+        filter,
+        TargetFilter::Typed(tf)
+            if tf.controller == Some(ControllerRef::You)
+                && !super::filter::typed_filter_is_owner_scoped(filter)
+    )
+}
+
+/// Returns the player-relative `ControllerRef` (`TargetPlayer` or `DeclaredPlayer`)
+/// embedded in `filter`, if any. Used by `legal_targets_for_ability_filter` (static slot
 /// build) and `legal_targets_for_selected_slot` (selection-time recompute) to
 /// detect filters that need per-player re-enumeration against the player chosen
-/// in a companion `TargetFilter::Player` slot.
+/// in a prior player slot. `You` is the caster and is never player-relative.
 fn relative_controller_kind(filter: &TargetFilter) -> Option<crate::types::ability::ControllerRef> {
     use crate::types::ability::ControllerRef;
     match filter {
         TargetFilter::Typed(tf) => match tf.controller {
-            Some(ControllerRef::You) if !super::filter::typed_filter_is_owner_scoped(filter) => {
-                Some(ControllerRef::You)
+            // CR 608.2c + CR 115.1a: "that player controls" after a declared player.
+            Some(ControllerRef::DeclaredPlayer { group }) => {
+                Some(ControllerRef::DeclaredPlayer { group })
             }
             // CR 109.4 + CR 102.2 / CR 102.3: normalize the opponent-constrained scope
             // to TargetPlayer so the per-player re-enumeration guards / rewrite args
@@ -6912,6 +6974,9 @@ fn relative_controller_kind(filter: &TargetFilter) -> Option<crate::types::abili
                 FilterProp::Owned {
                     controller: ControllerRef::TargetPlayer | ControllerRef::TargetOpponent,
                 } => Some(ControllerRef::TargetPlayer),
+                FilterProp::Owned {
+                    controller: ControllerRef::DeclaredPlayer { group },
+                } => Some(ControllerRef::DeclaredPlayer { group: *group }),
                 _ => None,
             }),
         },
@@ -7165,23 +7230,23 @@ fn object_targets_only(targets: &[TargetRef]) -> Vec<TargetRef> {
         .collect()
 }
 
-/// Substitute every `from`-controller binding in `filter` with `to`. Used to
-/// rewrite `TargetPlayer` → `You` so per-player enumeration through
+/// Substitute every controller binding of `filter` that satisfies `from` with `to`. Used to
+/// rewrite a declared-player scope → `You` so per-player enumeration through
 /// `find_legal_targets`'s `source_controller` parameter works uniformly.
 fn rewrite_relative_controller(
     filter: &TargetFilter,
-    from: crate::types::ability::ControllerRef,
-    to: crate::types::ability::ControllerRef,
+    from: &impl Fn(&crate::types::ability::ControllerRef) -> bool,
+    to: &crate::types::ability::ControllerRef,
 ) -> TargetFilter {
     match filter {
         TargetFilter::Typed(tf) => {
             let mut new_tf = tf.clone();
-            if new_tf.controller == Some(from.clone()) {
+            if new_tf.controller.as_ref().is_some_and(from) {
                 new_tf.controller = Some(to.clone());
             }
             for prop in &mut new_tf.properties {
                 if let FilterProp::Owned { controller } = prop {
-                    if *controller == from {
+                    if from(controller) {
                         *controller = to.clone();
                     }
                 }
@@ -7191,13 +7256,13 @@ fn rewrite_relative_controller(
         TargetFilter::Or { filters } => TargetFilter::Or {
             filters: filters
                 .iter()
-                .map(|f| rewrite_relative_controller(f, from.clone(), to.clone()))
+                .map(|f| rewrite_relative_controller(f, from, to))
                 .collect(),
         },
         TargetFilter::And { filters } => TargetFilter::And {
             filters: filters
                 .iter()
-                .map(|f| rewrite_relative_controller(f, from.clone(), to.clone()))
+                .map(|f| rewrite_relative_controller(f, from, to))
                 .collect(),
         },
         TargetFilter::Not { filter: inner } => TargetFilter::Not {
@@ -7207,11 +7272,10 @@ fn rewrite_relative_controller(
     }
 }
 
-/// CR 109.4 + CR 102.2 / CR 102.3: rewrite BOTH declared-target-player scopes
-/// (`TargetPlayer` and `TargetOpponent`) to `to`. `relative_controller_kind`
-/// normalizes `TargetOpponent` → `TargetPlayer`, so a naive single-`TargetPlayer`
-/// rewrite would leave a `TargetOpponent` occurrence behind and the per-player
-/// enumeration would fail closed.
+/// CR 109.4 + CR 102.2 / CR 102.3 + CR 608.2c: rewrite every selected-player scope
+/// (`TargetPlayer`, `TargetOpponent`, `DeclaredPlayer`) to `to`.
+/// `relative_controller_kind` normalizes them to one kind, so a rewrite of a single
+/// variant would leave another behind and the per-player enumeration would fail closed.
 // ponytail: covers the dependent-object-slot subclass ("destroy target creature
 // target opponent controls"); the mass class (Quick Draw / DamageAll) has
 // target_filter() == None and never reaches these rewrite sites.
@@ -7220,8 +7284,18 @@ fn rewrite_declared_target_player(
     to: crate::types::ability::ControllerRef,
 ) -> TargetFilter {
     use crate::types::ability::ControllerRef;
-    let rewritten = rewrite_relative_controller(filter, ControllerRef::TargetPlayer, to.clone());
-    rewrite_relative_controller(&rewritten, ControllerRef::TargetOpponent, to)
+    rewrite_relative_controller(
+        filter,
+        &|controller| {
+            matches!(
+                controller,
+                ControllerRef::TargetPlayer
+                    | ControllerRef::TargetOpponent
+                    | ControllerRef::DeclaredPlayer { .. }
+            )
+        },
+        &to,
+    )
 }
 
 /// CR 201.5a + CR 613.1f: Concretize `TargetFilter::GrantingObject` → the live
@@ -7540,7 +7614,7 @@ fn legal_targets_for_selected_slot(
             ability.controller
         };
         let enumeration_filter = match relative_kind {
-            Some(ControllerRef::TargetPlayer) => {
+            Some(ControllerRef::TargetPlayer | ControllerRef::DeclaredPlayer { .. }) => {
                 rewrite_declared_target_player(&bound_filter, ControllerRef::You)
             }
             _ => bound_filter,
@@ -8168,6 +8242,7 @@ fn homogeneous_required_target_walk_spec<'a>(
                 || spec.filter != first.filter
                 || target_filter_has_another_target_marker(&spec.filter)
                 || relative_controller_kind(&spec.filter).is_some()
+                || caster_scoped_selection(&spec.filter)
                 || target_filter_needs_ability_context(&spec.filter)
                 // MG-C: the fast path below calls
                 // `legal_targets_for_selected_slot` with an EMPTY
@@ -17493,7 +17568,7 @@ mod tests {
                 .push(CoreType::Creature);
         }
 
-        let ability = ResolvedAbility::new(
+        let mut ability = ResolvedAbility::new(
             Effect::TargetOnly {
                 target: TargetFilter::Typed(
                     TypedFilter::default().controller(ControllerRef::Opponent),
@@ -17507,7 +17582,11 @@ mod tests {
             Effect::ChangeZone {
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
-                target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+                target: TargetFilter::Typed(TypedFilter::creature().controller(
+                    ControllerRef::DeclaredPlayer {
+                        group: crate::types::ability::ChosenGroupId(7),
+                    },
+                )),
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
@@ -17523,6 +17602,7 @@ mod tests {
             ObjectId(900),
             PlayerId(0),
         ));
+        ability.declares_chosen_group = Some(crate::types::ability::ChosenGroupId(7));
 
         let slots = build_target_slots(&state, &ability).expect("target slots should build");
         assert_eq!(slots.len(), 2);
@@ -17664,7 +17744,7 @@ mod tests {
                 .push(CoreType::Creature);
         }
 
-        let ability = ResolvedAbility::new(
+        let mut ability = ResolvedAbility::new(
             Effect::TargetOnly {
                 target: TargetFilter::Typed(
                     TypedFilter::default().controller(ControllerRef::Opponent),
@@ -17678,7 +17758,11 @@ mod tests {
             Effect::ChangeZone {
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
-                target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+                target: TargetFilter::Typed(TypedFilter::creature().controller(
+                    ControllerRef::DeclaredPlayer {
+                        group: crate::types::ability::ChosenGroupId(7),
+                    },
+                )),
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
@@ -17694,6 +17778,7 @@ mod tests {
             ObjectId(900),
             PlayerId(0),
         ));
+        ability.declares_chosen_group = Some(crate::types::ability::ChosenGroupId(7));
 
         let slots = build_target_slots(&state, &ability).expect("target slots should build");
         let progress =
@@ -18039,7 +18124,7 @@ mod tests {
             assert!(tf.properties.contains(&selected));
         }
         let legacy = TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You));
-        assert_eq!(relative_controller_kind(&legacy), Some(ControllerRef::You));
+        assert_eq!(relative_controller_kind(&legacy), None);
     }
 
     // CR 109.5 + CR 108.3: declaring ownership and independent player authority remain distinct.
