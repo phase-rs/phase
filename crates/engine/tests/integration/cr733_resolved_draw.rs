@@ -51,9 +51,9 @@ fn apply_semantic_command(state: &mut GameState, command: &ResolvedRulesCommand)
             engine::game::triggers::apply_resolved_delayed_trigger(state, command.as_ref())
                 .unwrap();
         }
-        ResolvedRulesCommand::ContinuousEffectInstall(command) => {
+        ResolvedRulesCommand::ContinuousEffect(command) => {
             state
-                .apply_resolved_continuous_effect(command.as_ref())
+                .apply_resolved_continuous_effect_edit(command.as_ref())
                 .unwrap();
         }
         ResolvedRulesCommand::CombatMembership(command) => {

@@ -38,6 +38,7 @@ use engine::types::ability::{AbilityDefinition, AbilityKind, Effect, TargetFilte
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::resolved_commands::ResolvedContinuousEffectEdit;
 
 const CALMING_LICID_ORACLE: &str = "{W}, {T}: This creature loses this ability and becomes an Aura enchantment with enchant creature. Attach it to target creature. You may pay {W} to end this effect.\n\
 Enchanted creature can't attack.";
@@ -741,11 +742,15 @@ fn pay_to_end_group_allocator_is_replayed_with_the_effect() {
         .iter()
         .filter_map(|entry| entry.command.as_ref())
         .find_map(|command| match command {
-            ResolvedRulesCommand::ContinuousEffectInstall(command)
-                if command.effect.end_permission.is_some() =>
-            {
-                Some(command.as_ref().clone())
-            }
+            ResolvedRulesCommand::ContinuousEffect(command) => match command.as_ref() {
+                ResolvedContinuousEffectEdit::Install(install)
+                    if install.effect.end_permission.is_some() =>
+                {
+                    Some(install.clone())
+                }
+                ResolvedContinuousEffectEdit::Install(_)
+                | ResolvedContinuousEffectEdit::Retire(_) => None,
+            },
             _ => None,
         })
         .expect("the Licid animation must journal its resolved continuous effect");

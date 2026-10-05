@@ -62,13 +62,15 @@ use super::resolution::{
     ResolutionStack, ResolutionStackError, ResolutionStateWire,
 };
 use super::resolved_commands::{
-    ManaPaymentRecipient, ResolvedContinuousEffectCommand,
-    ResolvedContinuousEffectReplayInvariantError, ResolvedFrameTransition,
-    ResolvedFrameTransitionCommand, ResolvedFrameTransitionReplayInvariantError,
-    ResolvedInformationAudience, ResolvedInformationCommand, ResolvedInformationEdit,
-    ResolvedInformationLifetime, ResolvedInformationReplayInvariantError,
-    ResolvedManaInsertCommand, ResolvedManaReplayInvariantError, ResolvedManaSpendCommand,
-    ResolvedPlayerEdit, ResolvedPlayerEditCommand, ResolvedPlayerEditReplayInvariantError,
+    ManaPaymentRecipient, ResolvedContinuousEffectCommand, ResolvedContinuousEffectEdit,
+    ResolvedContinuousEffectEditReplayInvariantError, ResolvedContinuousEffectReplayInvariantError,
+    ResolvedContinuousEffectRetirementCommand, ResolvedContinuousEffectRetirementInvariantError,
+    ResolvedFrameTransition, ResolvedFrameTransitionCommand,
+    ResolvedFrameTransitionReplayInvariantError, ResolvedInformationAudience,
+    ResolvedInformationCommand, ResolvedInformationEdit, ResolvedInformationLifetime,
+    ResolvedInformationReplayInvariantError, ResolvedManaInsertCommand,
+    ResolvedManaReplayInvariantError, ResolvedManaSpendCommand, ResolvedPlayerEdit,
+    ResolvedPlayerEditCommand, ResolvedPlayerEditReplayInvariantError,
     ResolvedRngReplayInvariantError, ResolvedRulesCommand, ResolvedRulesJournal,
     RulesExecutionNodeRef,
 };
@@ -28459,6 +28461,56 @@ impl GameState {
             .record_continuous_effect_install(command)
             .expect("resolved continuous-effect install must have a live journal cause");
         id
+    }
+
+    /// Applies one already-resolved continuous-effect storage operation.
+    /// Neither arm derives characteristics or appends a journal entry.
+    pub fn apply_resolved_continuous_effect_edit(
+        &mut self,
+        edit: &ResolvedContinuousEffectEdit,
+    ) -> Result<(), ResolvedContinuousEffectEditReplayInvariantError> {
+        match edit {
+            ResolvedContinuousEffectEdit::Install(command) => {
+                self.apply_resolved_continuous_effect(command)?;
+            }
+            ResolvedContinuousEffectEdit::Retire(command) => {
+                self.retire_exact_continuous_effects(&command.effects)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Removes a complete settled CR 611.2b selection atomically. The expired
+    /// subject need not still be current: the stored record is the operand.
+    pub(crate) fn retire_exact_continuous_effects(
+        &mut self,
+        effects: &[TransientContinuousEffect],
+    ) -> Result<(), ResolvedContinuousEffectRetirementInvariantError> {
+        ResolvedContinuousEffectRetirementCommand::validate_effects(effects)?;
+        for effect in effects {
+            let mut matching = self
+                .transient_continuous_effects
+                .iter()
+                .filter(|stored| stored.id == effect.id);
+            let stored = matching.next().ok_or(
+                ResolvedContinuousEffectRetirementInvariantError::MissingEffect(effect.id),
+            )?;
+            if matching.next().is_some() {
+                return Err(
+                    ResolvedContinuousEffectRetirementInvariantError::AmbiguousStoredId(effect.id),
+                );
+            }
+            if stored != effect {
+                return Err(
+                    ResolvedContinuousEffectRetirementInvariantError::EffectMismatch(effect.id),
+                );
+            }
+        }
+        let ids: std::collections::HashSet<_> = effects.iter().map(|effect| effect.id).collect();
+        self.transient_continuous_effects
+            .retain(|effect| !ids.contains(&effect.id));
+        self.layers_dirty.mark_full();
+        Ok(())
     }
 
     /// Installs one already-resolved CR 611.2a continuous effect verbatim.

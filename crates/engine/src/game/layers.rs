@@ -2960,6 +2960,20 @@ fn reset_remote_type_layer_recipients(
 /// `mark_layers_full` then `flush_layers`. Direct calls are reserved for
 /// tests that deliberately force a full evaluation regardless of dirty state.
 pub fn evaluate_layers(state: &mut GameState) {
+    evaluate_layers_with_retirement_owner(state, StateDurationRetirementOwner::LayerSettlement);
+}
+
+/// Call-local journal ownership only; both owners perform the complete settle.
+#[derive(Clone, Copy)]
+enum StateDurationRetirementOwner {
+    LayerSettlement,
+    AttachmentCommand,
+}
+
+fn evaluate_layers_with_retirement_owner(
+    state: &mut GameState,
+    retirement_owner: StateDurationRetirementOwner,
+) {
     #[cfg(test)]
     FULL_EVALUATE_LAYERS_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     // CR 302.6 + CR 613.1b + CR 702.26b: Snapshot effective controllers for
@@ -2981,11 +2995,11 @@ pub fn evaluate_layers(state: &mut GameState) {
     // Keep the original controller snapshot until the final board is ready.
     let bf_ids = loop {
         let bf_ids = derive_layer_characteristics(state);
-        if !prune_lapsed_state_durations(state) {
+        if !prune_lapsed_state_durations(state, retirement_owner) {
             break bf_ids;
         }
     };
-    finish_layer_evaluation(state, bf_ids, prev_controllers);
+    finish_layer_evaluation(state, bf_ids, prev_controllers, retirement_owner);
 }
 
 fn derive_layer_characteristics(state: &mut GameState) -> Vec<ObjectId> {
@@ -3411,6 +3425,7 @@ fn finish_layer_evaluation(
     state: &mut GameState,
     bf_ids: Vec<ObjectId>,
     prev_controllers: Vec<(ObjectId, PlayerId)>,
+    retirement_owner: StateDurationRetirementOwner,
 ) {
     // CR 613.11: Rule-changing continuous effects are applied after object
     // characteristics are determined. These flags feed CR 510.1 combat damage
@@ -3440,7 +3455,7 @@ fn finish_layer_evaluation(
 
     super::pairing::cleanup_invalid_pairs(state);
     if super::effects::ring::normalize_ring_bearers(state) {
-        evaluate_layers(state);
+        evaluate_layers_with_retirement_owner(state, retirement_owner);
         return;
     }
 
@@ -4625,21 +4640,35 @@ pub fn mark_layers_entered(state: &mut GameState, id: ObjectId) {
 /// per-entered precondition scan AND a board-wide escalation scan prove that
 /// re-deriving just the entered objects yields a board identical to a full pass.
 pub fn flush_layers(state: &mut GameState) {
+    flush_layers_with_retirement_owner(state, StateDurationRetirementOwner::LayerSettlement);
+}
+
+/// Complete settlement owned by an actual Attachment command. Only command-
+/// bearing attachment transitions may use this entry point; a same-host no-op
+/// must use `flush_layers`, since it has no enclosing command to own retirement.
+pub(crate) fn flush_layers_for_attachment_command(state: &mut GameState) {
+    flush_layers_with_retirement_owner(state, StateDurationRetirementOwner::AttachmentCommand);
+}
+
+fn flush_layers_with_retirement_owner(
+    state: &mut GameState,
+    retirement_owner: StateDurationRetirementOwner,
+) {
     match std::mem::replace(&mut state.layers_dirty, LayersDirty::Clean) {
-        LayersDirty::Clean => flush_lapsed_state_durations(state),
+        LayersDirty::Clean => flush_lapsed_state_durations(state, retirement_owner),
         LayersDirty::Full => {
             super::perf_counters::record_layers_full_eval();
-            evaluate_layers(state);
+            evaluate_layers_with_retirement_owner(state, retirement_owner);
             super::public_state::mark_public_state_all_dirty(state);
         }
         LayersDirty::EnteredObjects(ids) => {
             if ids.is_empty() {
-                flush_lapsed_state_durations(state);
+                flush_lapsed_state_durations(state, retirement_owner);
                 return;
             }
             if let Some(prepared) = prepare_incremental_flush(state, &ids) {
                 super::perf_counters::record_layers_incremental();
-                apply_layers_incremental(state, prepared);
+                apply_layers_incremental(state, prepared, retirement_owner);
                 // Rebuild the presence index so the incremental arm leaves a PRECISE index
                 // (not a conservative superset). The incremental path is already
                 // O(battlefield): `prepare_incremental_flush` unconditionally calls
@@ -4653,7 +4682,7 @@ pub fn flush_layers(state: &mut GameState) {
             } else {
                 super::perf_counters::record_layers_escalated();
                 super::perf_counters::record_layers_full_eval();
-                evaluate_layers(state);
+                evaluate_layers_with_retirement_owner(state, retirement_owner);
                 super::public_state::mark_public_state_all_dirty(state);
             }
         }
@@ -6127,7 +6156,11 @@ fn apply_room_names_then_stickers(state: &mut GameState, ids: &[ObjectId]) -> bo
     crate::game::stickers::apply_battlefield_name_and_ability_stickers(state, ids)
 }
 
-fn apply_layers_incremental(state: &mut GameState, prepared: PreparedIncrementalFlush) {
+fn apply_layers_incremental(
+    state: &mut GameState,
+    prepared: PreparedIncrementalFlush,
+    retirement_owner: StateDurationRetirementOwner,
+) {
     let PreparedIncrementalFlush {
         recipient_ids,
         active_effects,
@@ -6308,9 +6341,9 @@ fn apply_layers_incremental(state: &mut GameState, prepared: PreparedIncremental
     // CR 611.2b: incremental derivation is settled now. An ended duration
     // can affect old recipients too, so rederive the full board before caches
     // or the trigger index can publish the incremental candidate.
-    if prune_lapsed_state_durations(state) {
+    if prune_lapsed_state_durations(state, retirement_owner) {
         super::perf_counters::record_layers_full_eval();
-        evaluate_layers(state);
+        evaluate_layers_with_retirement_owner(state, retirement_owner);
         super::public_state::mark_public_state_all_dirty(state);
         return;
     }
@@ -7553,8 +7586,11 @@ pub(crate) fn bound_state_duration_holds(
 /// CR 611.2b: remove each ended state-duration record exactly once. Event
 /// deadlines are deliberately excluded: a stale UntilEvent subject is not an
 /// event, and its departure must not shorten the promised deadline.
-fn prune_lapsed_state_durations(state: &mut GameState) -> bool {
-    let ended: HashSet<u64> = state
+fn prune_lapsed_state_durations(
+    state: &mut GameState,
+    retirement_owner: StateDurationRetirementOwner,
+) -> bool {
+    let ended: Vec<_> = state
         .transient_continuous_effects
         .iter()
         .filter(|tce| {
@@ -7564,21 +7600,42 @@ fn prune_lapsed_state_durations(state: &mut GameState) -> bool {
                     .is_some_and(|recipient| !recipient.is_current(state))
                     || !transient_duration_holds(state, tce))
         })
-        .map(|tce| tce.id)
+        .cloned()
         .collect();
     if ended.is_empty() {
         return false;
     }
-    state
-        .transient_continuous_effects
-        .retain(|tce| !ended.contains(&tce.id));
+    match retirement_owner {
+        StateDurationRetirementOwner::LayerSettlement => {
+            let command =
+                crate::types::resolved_commands::ResolvedContinuousEffectRetirementCommand {
+                    effects: ended,
+                    cause: state.current_or_begin_rules_execution_node(),
+                };
+            state
+                .retire_exact_continuous_effects(&command.effects)
+                .expect("the settled selection must match its stored continuous effects");
+            state
+                .resolved_rules_journal
+                .record_continuous_effect_retirement(command)
+                .expect("state-duration retirement must have a live journal cause");
+        }
+        StateDurationRetirementOwner::AttachmentCommand => {
+            state
+                .retire_exact_continuous_effects(&ended)
+                .expect("the attachment-owned selection must match its stored continuous effects");
+        }
+    }
     true
 }
 
-fn flush_lapsed_state_durations(state: &mut GameState) {
-    if prune_lapsed_state_durations(state) {
+fn flush_lapsed_state_durations(
+    state: &mut GameState,
+    retirement_owner: StateDurationRetirementOwner,
+) {
+    if prune_lapsed_state_durations(state, retirement_owner) {
         super::perf_counters::record_layers_full_eval();
-        evaluate_layers(state);
+        evaluate_layers_with_retirement_owner(state, retirement_owner);
         super::public_state::mark_public_state_all_dirty(state);
     }
 }
@@ -26871,6 +26928,143 @@ mod tests {
                 writes.contains(implied),
                 "{m:?} is applied in {layer:?} but its write kinds {writes:?} do not \
                  include the characteristic that layer exists to rewrite ({implied:?})"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod state_duration_retirement_recording_tests {
+    use super::*;
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::types::actions::GameAction;
+    use crate::types::game_state::TransientContinuousEffectBindings;
+    use crate::types::identifiers::{CardId, ObjectIncarnationRef};
+    use crate::types::phase::Phase;
+    use crate::types::resolved_commands::{ResolvedContinuousEffectEdit, ResolvedRulesCommand};
+
+    #[test]
+    fn every_ordinary_flush_arm_records_its_exact_retirement() {
+        for boundary in ["full", "clean", "empty_entered", "incremental", "escalated"] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let source = scenario.add_vanilla(P0, 2, 2);
+            let recipient = scenario.add_vanilla(P0, 2, 2);
+            let mut runner = scenario.build();
+            runner.state_mut().objects.get_mut(&source).unwrap().tapped = true;
+            let subject = ObjectIncarnationRef::from_object(&runner.state().objects[&source]);
+            let affected = ObjectIncarnationRef::from_object(&runner.state().objects[&recipient]);
+            let id = runner
+                .state_mut()
+                .add_transient_continuous_effect_with_bindings(
+                    source,
+                    P0,
+                    Duration::ForAsLongAs {
+                        condition: Box::new(StaticCondition::IsTapped {
+                            scope: crate::types::ability::ObjectScope::Recipient,
+                        }),
+                    },
+                    TargetFilter::SpecificObject(recipient),
+                    vec![ContinuousModification::AddPower { value: 1 }],
+                    None,
+                    TransientContinuousEffectBindings {
+                        affected_recipient: Some(affected),
+                        duration_subject: Some(subject),
+                    },
+                );
+            flush_layers(runner.state_mut());
+            assert_eq!(runner.state().objects[&recipient].power, Some(3));
+            let installed = runner
+                .state()
+                .transient_continuous_effects
+                .iter()
+                .find(|e| e.id == id)
+                .unwrap()
+                .clone();
+            let entrant = crate::game::zones::create_object(
+                runner.state_mut(),
+                CardId(9001),
+                P0,
+                "Typed entrant".into(),
+                Zone::Battlefield,
+            );
+            // Typed boundary fixture: mutate only the sustaining state before
+            // submitting a real action that owns the corresponding flush.
+            runner.state_mut().objects.get_mut(&source).unwrap().tapped = false;
+            runner.state_mut().layers_dirty = match boundary {
+                "full" => LayersDirty::Full,
+                "clean" => LayersDirty::Clean,
+                "empty_entered" => LayersDirty::EnteredObjects(BTreeSet::new()),
+                "incremental" => {
+                    let ids = [entrant].into_iter().collect();
+                    assert!(!incremental_flush_must_escalate(runner.state(), &ids));
+                    LayersDirty::EnteredObjects(ids)
+                }
+                "escalated" => {
+                    let ids = [source].into_iter().collect();
+                    assert!(incremental_flush_must_escalate(runner.state(), &ids));
+                    LayersDirty::EnteredObjects(ids)
+                }
+                _ => unreachable!(),
+            };
+            let start = runner.state().resolved_rules_journal.entries().len();
+            runner.act(GameAction::PassPriority).unwrap();
+            assert_eq!(
+                runner.state().objects[&recipient].power,
+                Some(2),
+                "{boundary}"
+            );
+            assert_eq!(runner.state().layers_dirty, LayersDirty::Clean);
+            assert!(!runner
+                .state()
+                .transient_continuous_effects
+                .iter()
+                .any(|e| e.id == id));
+            let batches: Vec<_> = runner
+                .state()
+                .resolved_rules_journal
+                .entries()
+                .iter()
+                .skip(start)
+                .filter_map(|entry| match entry.command.as_ref()? {
+                    ResolvedRulesCommand::ContinuousEffect(edit) => match edit.as_ref() {
+                        ResolvedContinuousEffectEdit::Retire(command) => Some(&command.effects),
+                        ResolvedContinuousEffectEdit::Install(_) => None,
+                    },
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(batches, vec![&vec![installed]], "{boundary}");
+        }
+    }
+
+    #[test]
+    fn empty_state_duration_selection_creates_no_journal_node_or_command() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_vanilla(P0, 2, 2);
+        let mut runner = scenario.build();
+        for dirty in [
+            LayersDirty::Clean,
+            LayersDirty::Full,
+            LayersDirty::EnteredObjects(BTreeSet::new()),
+        ] {
+            runner.state_mut().layers_dirty = dirty;
+            let before = runner.state().resolved_rules_journal.clone();
+            let allocators = (
+                runner.state().next_continuous_effect_id,
+                runner.state().next_timestamp,
+                runner.state().next_end_effect_group_id,
+            );
+            flush_layers(runner.state_mut());
+            assert_eq!(runner.state().resolved_rules_journal, before);
+            assert_eq!(
+                allocators,
+                (
+                    runner.state().next_continuous_effect_id,
+                    runner.state().next_timestamp,
+                    runner.state().next_end_effect_group_id
+                )
             );
         }
     }
