@@ -208,7 +208,7 @@ fn commandeer_preserves_permanent_spell_control_on_battlefield_entry() {
     );
     assert_eq!(resolved.controller, P1);
     // CR 110.2b: the original caster remains the controller by default.
-    assert_eq!(resolved.base_controller, P0);
+    assert_eq!(resolved.base_controller, Some(P0));
 }
 
 #[test]
