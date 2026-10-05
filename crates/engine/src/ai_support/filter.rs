@@ -2786,7 +2786,9 @@ mod tests {
             .from_oracle_text("Enchant creature\nEnchanted creature is goaded.\nIf enchanted creature would deal combat damage to a permanent or player, it deals double that damage instead.\n{2}{R}: Return this card from your graveyard to your hand.")
             .id();
         let mut runner = scenario.build();
-        assert!(crate::game::effects::attach::attach_to(runner.state_mut(), aura, host).is_some());
+        crate::game::effects::attach::attach_to(runner.state_mut(), aura, host);
+        assert_eq!(runner.state().objects[&aura].attached_to, Some(host.into()));
+        assert!(runner.state().objects[&host].attachments.contains(&aura));
         evaluate_layers(runner.state_mut());
         assert!(runner.state().objects[&host].goaded_by.is_empty());
         assert!(LegalityPoisonGates::compute(runner.state()).has_declare_attacker);

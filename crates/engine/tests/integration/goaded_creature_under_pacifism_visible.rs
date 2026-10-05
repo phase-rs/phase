@@ -182,7 +182,9 @@ fn sound_of_drums_uses_auras_controller_and_survives_layer_refresh() {
         .from_oracle_text(SOUND_OF_DRUMS_ORACLE)
         .id();
     let mut runner = scenario.build();
-    assert!(engine::game::effects::attach::attach_to(runner.state_mut(), aura, host).is_some());
+    engine::game::effects::attach::attach_to(runner.state_mut(), aura, host);
+    assert_eq!(runner.state().objects[&aura].attached_to, Some(host.into()));
+    assert!(runner.state().objects[&host].attachments.contains(&aura));
     assert_eq!(runner.state().objects[&aura].controller, P0);
     assert_eq!(runner.state().objects[&host].controller, P1);
     assert!(runner.state().objects[&host].goaded_by.is_empty());
@@ -312,7 +314,9 @@ fn psychic_impetus_keeps_power_toughness_bonus_with_goad_designation() {
         .from_oracle_text(PSYCHIC_IMPETUS_ORACLE)
         .id();
     let mut runner = scenario.build();
-    assert!(engine::game::effects::attach::attach_to(runner.state_mut(), aura, host).is_some());
+    engine::game::effects::attach::attach_to(runner.state_mut(), aura, host);
+    assert_eq!(runner.state().objects[&aura].attached_to, Some(host.into()));
+    assert!(runner.state().objects[&host].attachments.contains(&aura));
     refresh(&mut runner);
     let creature = &runner.state().objects[&host];
     assert_eq!((creature.power, creature.toughness), (Some(4), Some(4)));
