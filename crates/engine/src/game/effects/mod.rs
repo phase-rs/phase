@@ -1280,7 +1280,10 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
             if bound_result_is_empty(&chain)
                 && ability_chain_depends_on_missing_forward_result(&chain)
             {
-                if let Some(remaining) = without_missing_forward_result_dependencies(&chain) {
+                if let Some(mut remaining) = without_missing_forward_result_dependencies(&chain) {
+                    // CR 608.2c: Preserve the completed result when pruning resumes at an independent sibling.
+                    remaining.context.forwarded_result_context =
+                        chain.context.forwarded_result_context.clone();
                     let _ = resolve_ability_chain(state, &remaining, events, 1);
                 }
             } else {
@@ -27211,9 +27214,6 @@ mod tests {
                 &[],
                 ForwardedResultContext::from_object_ids(&state, &[returned, other]),
             );
-            eprintln!(
-                "[forwarded_generic_self_ref_uses_first_result_slot_without_rewriting_provenance stage=bound same_id={same_id}] original_source={original_source:?} source={source:?} returned={returned:?} other={other:?} original_returned_incarnation={returned_incarnation:?} original_other_incarnation={other_incarnation:?} source_stamp={source_stamp:?} trigger_source={trigger_source:?} grant={grant:#?}"
-            );
             assert_eq!(grant.source_incarnation, source_stamp);
             assert_eq!(grant.trigger_source, trigger_source);
             assert!(
@@ -27233,24 +27233,7 @@ mod tests {
                 static_abilities[0].affected,
                 Some(TargetFilter::ParentTargetSlot { index: 0 })
             );
-            let mut resolution_events = Vec::new();
-            resolve_ability_chain(&mut state, &grant, &mut resolution_events, 0).unwrap();
-            eprintln!(
-                "[forwarded_generic_self_ref_uses_first_result_slot_without_rewriting_provenance stage=before_haste_assert same_id={same_id}] objects(id, zone/incarnation/controller)={:?} source_is_current={} current_trigger_event={:?} waiting_for={:#?} resolution_stack={:#?} optional_frame={:#?} continuation={:#?} move_events={events:#?} resolution_events={resolution_events:#?}",
-                [original_source, source, returned, other].map(|id| (id, state.objects.get(&id).map(|object| (object.zone, object.incarnation, object.controller)))),
-                grant.source_is_current(&state),
-                state.current_trigger_event,
-                state.waiting_for,
-                state.resolution_stack,
-                state.active_optional_effect_frame(),
-                state.active_ability_continuation(),
-            );
-            eprintln!(
-                "[forwarded_generic_self_ref_uses_first_result_slot_without_rewriting_provenance stage=before_haste_assert same_id={same_id}] tce_count={} tces={:#?} observer_haste(returned, other, source)={:?}",
-                state.transient_continuous_effects.len(),
-                state.transient_continuous_effects,
-                [returned, other, source].map(|id| has_forwarded_test_grant(&state, id, Keyword::Haste)),
-            );
+            resolve_ability_chain(&mut state, &grant, &mut Vec::new(), 1).unwrap();
             assert!(has_forwarded_test_grant(&state, returned, Keyword::Haste));
             assert!(!has_forwarded_test_grant(&state, other, Keyword::Haste));
         }
@@ -27312,34 +27295,10 @@ mod tests {
             if result_kind == 1 {
                 result.object_incarnations[0].incarnation += 1;
             }
-            eprintln!(
-                "[forwarded_generic_self_ref_rejects_stale_or_empty_result stage=before_bind result_kind={result_kind}] source={source:?} returned={returned:?} other={other:?} original_returned_incarnation={returned_incarnation:?} original_other_incarnation={other_incarnation:?} produced={produced:?} result={result:#?} grant={grant:#?}"
-            );
             bind_moved_objects_to_child(&state, &mut grant, source, &[], result);
             grant.source_incarnation = Some(state.objects[&grant.source_id].incarnation);
             grant.targets = vec![TargetRef::Object(other)];
-            eprintln!(
-                "[forwarded_generic_self_ref_rejects_stale_or_empty_result stage=bound result_kind={result_kind}] grant={grant:#?}"
-            );
-            let mut resolution_events = Vec::new();
-            resolve_ability_chain(&mut state, &grant, &mut resolution_events, 0).unwrap();
-            eprintln!(
-                "[forwarded_generic_self_ref_rejects_stale_or_empty_result stage=before_haste_assert result_kind={result_kind}] objects(id, zone/incarnation/controller)={:?} source_is_current={} current_trigger_event={:?} waiting_for={:#?} resolution_stack={:#?} optional_frame={:#?} continuation={:#?} move_events={events:#?} resolution_events={resolution_events:#?}",
-                [source, returned, other].map(|id| (id, state.objects.get(&id).map(|object| (object.zone, object.incarnation, object.controller)))),
-                grant.source_is_current(&state),
-                state.current_trigger_event,
-                state.waiting_for,
-                state.resolution_stack,
-                state.active_optional_effect_frame(),
-                state.active_ability_continuation(),
-            );
-            eprintln!(
-                "[forwarded_generic_self_ref_rejects_stale_or_empty_result stage=before_haste_assert result_kind={result_kind}] tce_count={} tces={:#?} observer_haste(returned, other, source)={:?} observer_vigilance_source={}",
-                state.transient_continuous_effects.len(),
-                state.transient_continuous_effects,
-                [returned, other, source].map(|id| has_forwarded_test_grant(&state, id, Keyword::Haste)),
-                has_forwarded_test_grant(&state, source, Keyword::Vigilance),
-            );
+            resolve_ability_chain(&mut state, &grant, &mut Vec::new(), 1).unwrap();
             assert_eq!(
                 has_forwarded_test_grant(&state, returned, Keyword::Haste),
                 result_kind == 0
@@ -27559,17 +27518,7 @@ mod tests {
     fn forwarded_generic_self_ref_preserves_inherited_application_authority() {
         for affected in [TargetFilter::CostPaidObject, TargetFilter::TriggeringSource] {
             let (mut state, source, returned, other) = forwarded_test_objects();
-            eprintln!(
-                "[forwarded_generic_self_ref_preserves_inherited_application_authority stage=before_other_move affected={affected:?}] source={source:?} returned={returned:?} other={other:?} original_objects(id, zone/incarnation/controller)={:?}",
-                [source, returned, other].map(|id| (id, state.objects.get(&id).map(|object| (object.zone, object.incarnation, object.controller)))),
-            );
-            let mut setup_events = Vec::new();
-            crate::game::zones::move_to_zone(
-                &mut state,
-                other,
-                Zone::Battlefield,
-                &mut setup_events,
-            );
+            crate::game::zones::move_to_zone(&mut state, other, Zone::Battlefield, &mut Vec::new());
             state.current_trigger_event = Some(GameEvent::PermanentSacrificed {
                 object_id: other,
                 player_id: PlayerId(0),
@@ -27593,7 +27542,7 @@ mod tests {
                 vec![TargetRef::Object(returned)],
                 immediate.sub_ability(later),
             );
-            producer.cost_paid_object = Some(CostPaidObjectSnapshot::capture(
+            producer.set_cost_paid_object_recursive(CostPaidObjectSnapshot::capture(
                 &state.objects[&source],
                 state.objects[&source].snapshot_for_mana_spent(),
             ));
@@ -27606,21 +27555,6 @@ mod tests {
             } else {
                 other
             };
-            eprintln!(
-                "[forwarded_generic_self_ref_preserves_inherited_application_authority stage=before_haste_assert affected={affected:?}] source={source:?} returned={returned:?} other={other:?} recipient={recipient:?} objects(id, zone/incarnation/controller)={:?} producer={producer:#?} current_trigger_event={:?} waiting_for={:#?} resolution_stack={:#?} optional_frame={:#?} continuation={:#?} setup_events={setup_events:#?} resolution_events={events:#?}",
-                [source, returned, other].map(|id| (id, state.objects.get(&id).map(|object| (object.zone, object.incarnation, object.controller)))),
-                state.current_trigger_event,
-                state.waiting_for,
-                state.resolution_stack,
-                state.active_optional_effect_frame(),
-                state.active_ability_continuation(),
-            );
-            eprintln!(
-                "[forwarded_generic_self_ref_preserves_inherited_application_authority stage=before_haste_assert affected={affected:?}] tce_count={} tces={:#?} observer_haste(recipient, returned, source, other)={:?}",
-                state.transient_continuous_effects.len(),
-                state.transient_continuous_effects,
-                [recipient, returned, source, other].map(|id| has_forwarded_test_grant(&state, id, Keyword::Haste)),
-            );
             assert!(has_forwarded_test_grant(&state, recipient, Keyword::Haste));
             assert!(!has_forwarded_test_grant(&state, returned, Keyword::Haste));
             assert_forwarded_source_frame(&state, source, &[returned]);
@@ -27652,8 +27586,7 @@ mod tests {
             }
             producer.target_choice_timing = TargetChoiceTiming::Resolution;
             producer.set_source_incarnation_recursive(Some(state.objects[&source].incarnation));
-            let mut resolution_events = Vec::new();
-            resolve_ability_chain(&mut state, &producer, &mut resolution_events, 0).unwrap();
+            resolve_ability_chain(&mut state, &producer, &mut Vec::new(), 0).unwrap();
             let WaitingFor::EffectZoneChoice { cards, up_to, .. } = &state.waiting_for else {
                 panic!(
                     "producer must open actual zone choice, got {:?}",
@@ -27678,14 +27611,7 @@ mod tests {
                 static_abilities[0].affected,
                 Some(TargetFilter::ParentTargetSlot { index: 0 })
             );
-            eprintln!(
-                "[parked_forwarded_generic_zone_choice_settles_empty_selection stage=before_select_cards choose_returned={choose_returned}] source={source:?} returned={returned:?} selected={:?} objects(id, zone/incarnation/controller)={:?} producer={producer:#?} pending={pending:#?} waiting_for={:#?} resolution_stack={:#?} resolution_events={resolution_events:#?}",
-                if choose_returned { std::slice::from_ref(&returned) } else { &[] },
-                [source, returned].map(|id| (id, state.objects.get(&id).map(|object| (object.zone, object.incarnation, object.controller)))),
-                state.waiting_for,
-                state.resolution_stack,
-            );
-            let selection_result = crate::game::engine::apply_as_current(
+            crate::game::engine::apply_as_current(
                 &mut state,
                 GameAction::SelectCards {
                     cards: if choose_returned {
@@ -27699,23 +27625,6 @@ mod tests {
             assert_eq!(
                 has_forwarded_test_grant(&state, returned, Keyword::Haste),
                 choose_returned
-            );
-            eprintln!(
-                "[parked_forwarded_generic_zone_choice_settles_empty_selection stage=before_source_frame_assert choose_returned={choose_returned}] source={source:?} returned={returned:?} objects(id, zone/incarnation/controller)={:?} current_trigger_event={:?} waiting_for={:#?} resolution_stack={:#?} optional_frame={:#?} continuation={:#?} selection_events={:#?}",
-                [source, returned].map(|id| (id, state.objects.get(&id).map(|object| (object.zone, object.incarnation, object.controller)))),
-                state.current_trigger_event,
-                state.waiting_for,
-                state.resolution_stack,
-                state.active_optional_effect_frame(),
-                state.active_ability_continuation(),
-                selection_result.events,
-            );
-            eprintln!(
-                "[parked_forwarded_generic_zone_choice_settles_empty_selection stage=before_source_frame_assert choose_returned={choose_returned}] tce_count={} tces={:#?} observer_haste(returned, source)={:?} observer_flying_source={}",
-                state.transient_continuous_effects.len(),
-                state.transient_continuous_effects,
-                [returned, source].map(|id| has_forwarded_test_grant(&state, id, Keyword::Haste)),
-                has_forwarded_test_grant(&state, source, Keyword::Flying),
             );
             assert_forwarded_source_frame(
                 &state,
@@ -27909,13 +27818,6 @@ mod tests {
                     ),
                     Some(&TargetFilter::SelfRef)
                 );
-                eprintln!(
-                    "[parked_forwarded_generic_grant_keeps_later_source_self_ref stage=before_choose_replacement optional_producer={optional_producer} replace_with_exile={replace_with_exile}] source={source:?} returned={returned:?} original_returned_incarnation={returned_incarnation:?} source_stamp={source_stamp:?} selected_index={} objects(id, zone/incarnation/controller)={:?} producer={producer:#?} waiting_for={:#?} resolution_stack={:#?} events={events:#?}",
-                    if replace_with_exile { 0 } else { 1 },
-                    [source, returned].map(|id| (id, state.objects.get(&id).map(|object| (object.zone, object.incarnation, object.controller)))),
-                    state.waiting_for,
-                    state.resolution_stack,
-                );
                 let action_result = crate::game::engine::apply_as_current(
                     &mut state,
                     GameAction::ChooseReplacement {
@@ -27945,23 +27847,6 @@ mod tests {
                     vec![(Some(Zone::Graveyard), destination)]
                 );
                 assert!(state.objects[&returned].incarnation > returned_incarnation);
-                eprintln!(
-                    "[parked_forwarded_generic_grant_keeps_later_source_self_ref stage=before_forwarded_context_assert optional_producer={optional_producer} replace_with_exile={replace_with_exile}] source={source:?} returned={returned:?} original_returned_incarnation={returned_incarnation:?} source_stamp={source_stamp:?} objects(id, zone/incarnation/controller)={:?} current_trigger_event={:?} waiting_for={:#?} resolution_stack={:#?} optional_frame={:#?} continuation={:#?} choice_events={:#?}",
-                    [source, returned].map(|id| (id, state.objects.get(&id).map(|object| (object.zone, object.incarnation, object.controller)))),
-                    state.current_trigger_event,
-                    state.waiting_for,
-                    state.resolution_stack,
-                    state.active_optional_effect_frame(),
-                    state.active_ability_continuation(),
-                    action_result.events,
-                );
-                eprintln!(
-                    "[parked_forwarded_generic_grant_keeps_later_source_self_ref stage=before_forwarded_context_assert optional_producer={optional_producer} replace_with_exile={replace_with_exile}] tce_count={} tces={:#?} observer_haste(returned, source)={:?} observer_flying(returned, source)={:?}",
-                    state.transient_continuous_effects.len(),
-                    state.transient_continuous_effects,
-                    [returned, source].map(|id| has_forwarded_test_grant(&state, id, Keyword::Haste)),
-                    [returned, source].map(|id| has_forwarded_test_grant(&state, id, Keyword::Flying)),
-                );
                 assert_eq!(
                     state
                         .active_optional_effect_frame()
@@ -28018,13 +27903,7 @@ mod tests {
         for delivers in [true, false] {
             let (mut state, source, returned, other) = forwarded_test_objects();
             let returned_incarnation = state.objects[&returned].incarnation;
-            let mut setup_events = Vec::new();
-            crate::game::zones::move_to_zone(
-                &mut state,
-                other,
-                Zone::Battlefield,
-                &mut setup_events,
-            );
+            crate::game::zones::move_to_zone(&mut state, other, Zone::Battlefield, &mut Vec::new());
             state.current_trigger_event = Some(GameEvent::PermanentSacrificed {
                 object_id: other,
                 player_id: PlayerId(0),
@@ -28121,7 +28000,7 @@ mod tests {
                 *target = TargetFilter::Typed(TypedFilter::creature());
             }
             producer.optional_targeting = true;
-            producer.cost_paid_object = Some(CostPaidObjectSnapshot::capture(
+            producer.set_cost_paid_object_recursive(CostPaidObjectSnapshot::capture(
                 &state.objects[&source],
                 state.objects[&source].snapshot_for_mana_spent(),
             ));
@@ -28185,26 +28064,6 @@ mod tests {
             assert!(!has_forwarded_test_grant(&state, source, Keyword::Trample));
             assert!(has_forwarded_test_grant(&state, source, Keyword::Flying));
             assert!(has_forwarded_test_grant(&state, other, Keyword::Vigilance));
-            eprintln!(
-                "[empty_forwarded_generic_pruning_preserves_composite_filter_contract stage=before_first_strike_assert delivers={delivers}] source={source:?} returned={returned:?} other={other:?} original_returned_incarnation={returned_incarnation:?} objects(id, zone/incarnation/controller)={:?} producer={producer:#?} current_trigger_event={:?} waiting_for={:#?} resolution_stack={:#?} optional_frame={:#?} continuation={:#?} setup_events={setup_events:#?} resolution_events={events:#?}",
-                [source, returned, other].map(|id| (id, state.objects.get(&id).map(|object| (object.zone, object.incarnation, object.controller)))),
-                state.current_trigger_event,
-                state.waiting_for,
-                state.resolution_stack,
-                state.active_optional_effect_frame(),
-                state.active_ability_continuation(),
-            );
-            eprintln!(
-                "[empty_forwarded_generic_pruning_preserves_composite_filter_contract stage=before_first_strike_assert delivers={delivers}] tce_count={} tces={:#?} observer_first_strike_source={} observer_reach_other={} observer_haste_returned={} observer_trample_returned={} observer_flying_source={} observer_vigilance_other={}",
-                state.transient_continuous_effects.len(),
-                state.transient_continuous_effects,
-                has_forwarded_test_grant(&state, source, Keyword::FirstStrike),
-                has_forwarded_test_grant(&state, other, Keyword::Reach),
-                has_forwarded_test_grant(&state, returned, Keyword::Haste),
-                has_forwarded_test_grant(&state, returned, Keyword::Trample),
-                has_forwarded_test_grant(&state, source, Keyword::Flying),
-                has_forwarded_test_grant(&state, other, Keyword::Vigilance),
-            );
             assert!(has_forwarded_test_grant(
                 &state,
                 source,
