@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use thiserror::Error;
 
 use crate::types::ability::{
-    AbilityCondition, DurationEvent, EffectKind, KeywordAction, TargetRef,
+    AbilityCondition, DurationEvent, EffectKind, KeywordAction, ResolvedAbility, TargetRef,
 };
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
@@ -18666,159 +18666,159 @@ pub(crate) fn duration_event_matches(
     }
 }
 
+/// The CR 610.3 "until" events a held triggered ability can latch.
+const LATCHABLE_DURATION_EVENTS: [DurationEvent; 2] = [
+    DurationEvent::SourceLeftBattlefield,
+    DurationEvent::OpponentBecameMonarch,
+];
+
+/// CR 610.3b: the specified "until" events in `events` that occurred after a
+/// held triggered ability triggered, in event order. The holder's
+/// `trigger_event` is located once: when it is in `events`, only later events
+/// count; when it is absent (it occurred in an earlier action) or the holder
+/// has none, every event counts. A holder whose ability bounds no zone change
+/// is never searched.
+fn duration_events_after_trigger(
+    state: &GameState,
+    events: &[GameEvent],
+    ability: &ResolvedAbility,
+    source_id: ObjectId,
+    controller: PlayerId,
+    trigger_event: Option<&GameEvent>,
+) -> Vec<DurationEvent> {
+    let bounded: Vec<DurationEvent> = LATCHABLE_DURATION_EVENTS
+        .into_iter()
+        .filter(|duration_event| ability.contains_duration_event(*duration_event))
+        .collect();
+    if bounded.is_empty() {
+        return Vec::new();
+    }
+    let first_following = trigger_event.map_or(0, |trigger| {
+        #[cfg(feature = "test-support")]
+        super::perf_counters::record_exile_return_trigger_origin_lookup();
+        events
+            .iter()
+            .position(|candidate| candidate == trigger)
+            .map_or(0, |index| index + 1)
+    });
+    let source_incarnation = ability
+        .trigger_source
+        .as_ref()
+        .map(|source| source.identity.reference);
+    events[first_following..]
+        .iter()
+        .flat_map(|event| {
+            bounded.iter().copied().filter(move |duration_event| {
+                duration_event_matches(
+                    state,
+                    source_id,
+                    source_incarnation,
+                    controller,
+                    *duration_event,
+                    event,
+                )
+            })
+        })
+        .collect()
+}
+
+/// CR 610.3 + CR 610.3b: latch specified "until" events onto held triggered
+/// abilities, then return linked exiled cards whose duration ended. Each
+/// duration-bearing holder's trigger event is located once per pass.
 pub(super) fn check_exile_returns(state: &mut GameState, events: &mut Vec<GameEvent>) {
     let mut to_return: Vec<crate::types::game_state::ExileLink> = Vec::new();
-    let mut stack_latches = Vec::new();
-    let mut resolving_latches = Vec::new();
-    let mut deferred_latches = Vec::new();
-    let mut ordered_latches = Vec::new();
+    let holders: &GameState = state;
+    let scanned: &[GameEvent] = events;
 
-    for (event_index, event) in events.iter().enumerate() {
-        for entry in &state.stack {
-            let StackEntryKind::TriggeredAbility {
+    let stack_latches: Vec<(ObjectId, DurationEvent)> = holders
+        .stack
+        .iter()
+        .filter_map(|entry| match &entry.kind {
+            StackEntryKind::TriggeredAbility {
                 ability,
                 trigger_event,
                 ..
-            } = &entry.kind
-            else {
-                continue;
-            };
-            let event_follows_trigger = trigger_event
-                .as_ref()
-                .and_then(|trigger| events.iter().position(|candidate| candidate == trigger))
-                .is_none_or(|trigger_index| event_index > trigger_index);
-            if !event_follows_trigger {
-                continue;
-            }
-            for duration_event in [
-                DurationEvent::SourceLeftBattlefield,
-                DurationEvent::OpponentBecameMonarch,
-            ] {
-                if ability.contains_duration_event(duration_event)
-                    && duration_event_matches(
-                        state,
-                        entry.source_id,
-                        ability
-                            .trigger_source
-                            .as_ref()
-                            .map(|source| source.identity.reference),
-                        entry.controller,
-                        duration_event,
-                        event,
+            } => Some((entry, ability, trigger_event)),
+            _ => None,
+        })
+        .flat_map(|(entry, ability, trigger_event)| {
+            duration_events_after_trigger(
+                holders,
+                scanned,
+                ability,
+                entry.source_id,
+                entry.controller,
+                trigger_event.as_ref(),
+            )
+            .into_iter()
+            .map(move |duration_event| (entry.id, duration_event))
+        })
+        .collect();
+
+    // CR 610.3b: a resolving entry's trigger event is never in this pass's
+    // buffer (it triggered in an earlier priority pass), so the resolving holder
+    // scans the whole buffer, as its resolver does (`until_event_already_occurred`).
+    let resolving_latches: Vec<DurationEvent> = holders
+        .resolving_stack_entry
+        .as_ref()
+        .filter(|entry| matches!(entry.kind, StackEntryKind::TriggeredAbility { .. }))
+        .and_then(|entry| {
+            entry.ability().map(|ability| {
+                duration_events_after_trigger(
+                    holders,
+                    scanned,
+                    ability,
+                    entry.source_id,
+                    entry.controller,
+                    None,
+                )
+            })
+        })
+        .unwrap_or_default();
+
+    let deferred_latches: Vec<(usize, DurationEvent)> = holders
+        .deferred_triggers
+        .iter()
+        .enumerate()
+        .flat_map(|(index, context)| {
+            let pending = &context.pending;
+            duration_events_after_trigger(
+                holders,
+                scanned,
+                &pending.ability,
+                pending.source_id,
+                pending.controller,
+                pending.trigger_event.as_ref(),
+            )
+            .into_iter()
+            .map(move |duration_event| (index, duration_event))
+        })
+        .collect();
+
+    let ordered_latches: Vec<(usize, usize, DurationEvent)> = holders
+        .pending_trigger_order
+        .iter()
+        .flat_map(|order| order.groups.iter().enumerate())
+        .flat_map(|(group_index, group)| {
+            group
+                .triggers
+                .iter()
+                .enumerate()
+                .flat_map(move |(trigger_index, context)| {
+                    let pending = &context.pending;
+                    duration_events_after_trigger(
+                        holders,
+                        scanned,
+                        &pending.ability,
+                        pending.source_id,
+                        pending.controller,
+                        pending.trigger_event.as_ref(),
                     )
-                {
-                    stack_latches.push((entry.id, duration_event));
-                }
-            }
-        }
-
-        if let Some(entry) = state.resolving_stack_entry.as_ref() {
-            if matches!(entry.kind, StackEntryKind::TriggeredAbility { .. }) {
-                if let Some(ability) = entry.ability() {
-                    for duration_event in [
-                        DurationEvent::SourceLeftBattlefield,
-                        DurationEvent::OpponentBecameMonarch,
-                    ] {
-                        if ability.contains_duration_event(duration_event)
-                            && duration_event_matches(
-                                state,
-                                entry.source_id,
-                                ability
-                                    .trigger_source
-                                    .as_ref()
-                                    .map(|source| source.identity.reference),
-                                entry.controller,
-                                duration_event,
-                                event,
-                            )
-                        {
-                            resolving_latches.push(duration_event);
-                        }
-                    }
-                }
-            }
-        }
-
-        for (index, context) in state.deferred_triggers.iter().enumerate() {
-            let event_follows_trigger = context
-                .pending
-                .trigger_event
-                .as_ref()
-                .and_then(|trigger| events.iter().position(|candidate| candidate == trigger))
-                .is_none_or(|trigger_index| event_index > trigger_index);
-            if !event_follows_trigger {
-                continue;
-            }
-            for duration_event in [
-                DurationEvent::SourceLeftBattlefield,
-                DurationEvent::OpponentBecameMonarch,
-            ] {
-                if context
-                    .pending
-                    .ability
-                    .contains_duration_event(duration_event)
-                    && duration_event_matches(
-                        state,
-                        context.pending.source_id,
-                        context
-                            .pending
-                            .ability
-                            .trigger_source
-                            .as_ref()
-                            .map(|source| source.identity.reference),
-                        context.pending.controller,
-                        duration_event,
-                        event,
-                    )
-                {
-                    deferred_latches.push((index, duration_event));
-                }
-            }
-        }
-
-        if let Some(order) = state.pending_trigger_order.as_ref() {
-            for (group_index, group) in order.groups.iter().enumerate() {
-                for (trigger_index, context) in group.triggers.iter().enumerate() {
-                    let event_follows_trigger = context
-                        .pending
-                        .trigger_event
-                        .as_ref()
-                        .and_then(|trigger| {
-                            events.iter().position(|candidate| candidate == trigger)
-                        })
-                        .is_none_or(|origin_index| event_index > origin_index);
-                    if !event_follows_trigger {
-                        continue;
-                    }
-                    for duration_event in [
-                        DurationEvent::SourceLeftBattlefield,
-                        DurationEvent::OpponentBecameMonarch,
-                    ] {
-                        if context
-                            .pending
-                            .ability
-                            .contains_duration_event(duration_event)
-                            && duration_event_matches(
-                                state,
-                                context.pending.source_id,
-                                context
-                                    .pending
-                                    .ability
-                                    .trigger_source
-                                    .as_ref()
-                                    .map(|source| source.identity.reference),
-                                context.pending.controller,
-                                duration_event,
-                                event,
-                            )
-                        {
-                            ordered_latches.push((group_index, trigger_index, duration_event));
-                        }
-                    }
-                }
-            }
-        }
-    }
+                    .into_iter()
+                    .map(move |duration_event| (group_index, trigger_index, duration_event))
+                })
+        })
+        .collect();
 
     for (entry_id, duration_event) in stack_latches {
         if let Some(ability) = state

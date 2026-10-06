@@ -1802,3 +1802,576 @@ fn graveyard_scoped_aura_stays_in_exile_when_no_legal_graveyard_creature() {
         "Aura must not have spuriously attached to the illegal instant card"
     );
 }
+
+// ---------------------------------------------------------------------------
+// CR 610.3b latch window: which "until" events the latch half of
+// `check_exile_returns` records onto each kind of held triggered ability, and
+// how much work it spends locating each holder's trigger event.
+// ---------------------------------------------------------------------------
+mod latch_window {
+    use super::*;
+    use crate::game::ability_utils::build_resolved_from_def;
+    use crate::game::scenario::{GameScenario, P0, P1};
+    use crate::game::triggers::{PendingTrigger, PendingTriggerContext};
+    use crate::types::ability::{Duration, DurationEvent, ResolvedAbility, TargetRef};
+    use crate::types::game_state::{
+        PendingTriggerOrder, StackEntry, StackEntryKind, TriggerOrderGroup,
+    };
+
+    const BANISHER_PRIEST: &str = "When this creature enters, exile target creature an opponent controls until this creature leaves the battlefield.";
+    const PALACE_JAILER: &str = "When this creature enters, you become the monarch.\nWhen this creature enters, exile target creature an opponent controls until an opponent becomes the monarch.";
+
+    const STACK_ENTRY_ID: ObjectId = ObjectId(9_100_001);
+
+    struct Fixture {
+        state: GameState,
+        source: ObjectId,
+        ability: ResolvedAbility,
+    }
+
+    /// Builds `name` from its verbatim Oracle text and resolves the trigger
+    /// whose exile is bounded by `duration`, targeting an opponent's creature.
+    fn fixture(name: &str, oracle: &str, duration: Duration) -> Fixture {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let source = scenario
+            .add_creature(P0, name, 2, 2)
+            .from_oracle_text(oracle)
+            .id();
+        let target = scenario.add_creature(P1, "Opponent Creature", 2, 2).id();
+        let state = scenario.build().state().clone();
+        let execute = state.objects[&source]
+            .trigger_definitions
+            .iter_all()
+            .filter_map(|trigger| trigger.definition.execute.as_deref())
+            .find(|execute| execute.duration.as_ref() == Some(&duration))
+            .expect("the bounded exile trigger must parse")
+            .clone();
+        let mut ability = build_resolved_from_def(&execute, source, P0);
+        ability.targets = vec![TargetRef::Object(target)];
+        // Reach-guard: the parsed ability must carry the bounded duration, or
+        // every "no latch" row below would pass vacuously.
+        assert!(ability.contains_duration_event(
+            duration
+                .zone_change_event()
+                .expect("an `until` duration bounds a zone change")
+        ));
+        Fixture {
+            state,
+            source,
+            ability,
+        }
+    }
+
+    fn banisher_priest() -> Fixture {
+        fixture(
+            "Banisher Priest",
+            BANISHER_PRIEST,
+            Duration::UntilHostLeavesPlay,
+        )
+    }
+
+    fn palace_jailer() -> Fixture {
+        fixture(
+            "Palace Jailer",
+            PALACE_JAILER,
+            Duration::UntilOpponentBecomesMonarch,
+        )
+    }
+
+    /// T: the source's own entry, the event its "enters" trigger fired on.
+    fn enters(object_id: ObjectId) -> GameEvent {
+        GameEvent::ZoneChanged {
+            object_id,
+            from: Some(Zone::Hand),
+            to: Zone::Battlefield,
+            record: Box::new(ZoneChangeRecord::test_minimal(
+                object_id,
+                Some(Zone::Hand),
+                Zone::Battlefield,
+            )),
+        }
+    }
+
+    /// A second, distinct entry of the same object (a different trigger event).
+    fn reenters_from_exile(object_id: ObjectId) -> GameEvent {
+        GameEvent::ZoneChanged {
+            object_id,
+            from: Some(Zone::Exile),
+            to: Zone::Battlefield,
+            record: Box::new(ZoneChangeRecord::test_minimal(
+                object_id,
+                Some(Zone::Exile),
+                Zone::Battlefield,
+            )),
+        }
+    }
+
+    fn becomes_monarch(player_id: PlayerId) -> GameEvent {
+        GameEvent::MonarchChanged { player_id }
+    }
+
+    fn triggered_entry(
+        fixture: &Fixture,
+        id: ObjectId,
+        ability: ResolvedAbility,
+        trigger_event: Option<GameEvent>,
+    ) -> StackEntry {
+        StackEntry {
+            id,
+            source_id: fixture.source,
+            controller: P0,
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: fixture.source,
+                ability: Box::new(ability),
+                description: None,
+                condition: None,
+                trigger_event,
+                source_name: String::new(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        }
+    }
+
+    fn pending_context(
+        fixture: &Fixture,
+        controller: PlayerId,
+        trigger_event: Option<GameEvent>,
+    ) -> PendingTriggerContext {
+        let mut pending = PendingTrigger::ordinary(
+            fixture.source,
+            controller,
+            None,
+            Box::new(fixture.ability.clone()),
+            1,
+        );
+        pending.trigger_event = trigger_event;
+        PendingTriggerContext::single(pending)
+    }
+
+    /// The latches recorded on a resolved ability's bounded nodes.
+    fn node_latches(ability: &ResolvedAbility) -> Vec<DurationEvent> {
+        let mut latches = ability.context.duration_events.clone();
+        for branch in [&ability.sub_ability, &ability.else_ability]
+            .into_iter()
+            .flatten()
+        {
+            latches.extend(node_latches(branch));
+        }
+        latches
+    }
+
+    /// Where a held triggered ability waits while the latch pass runs.
+    #[derive(Clone, Copy, Debug)]
+    enum Holder {
+        Stack,
+        Resolving,
+        Deferred,
+        /// CR 603.3b: awaiting its controller's ordering choice.
+        Ordered,
+    }
+
+    const ALL_HOLDERS: [Holder; 4] = [
+        Holder::Stack,
+        Holder::Resolving,
+        Holder::Deferred,
+        Holder::Ordered,
+    ];
+
+    /// Holders whose recorded trigger event gates the window. A resolving
+    /// entry triggered in an earlier priority pass, so its trigger event is
+    /// never in the buffer this pass reads and it has no "before" rows.
+    const GATED_HOLDERS: [Holder; 3] = [Holder::Stack, Holder::Deferred, Holder::Ordered];
+
+    /// Places the fixture's ability in `holder`, runs the pass over `events`,
+    /// and returns what the holder latched.
+    fn latches_after_pass(
+        fixture: &Fixture,
+        holder: Holder,
+        trigger_event: Option<GameEvent>,
+        mut events: Vec<GameEvent>,
+    ) -> Vec<DurationEvent> {
+        let mut state = fixture.state.clone();
+        match holder {
+            Holder::Stack => state.stack.push_back(triggered_entry(
+                fixture,
+                STACK_ENTRY_ID,
+                fixture.ability.clone(),
+                trigger_event,
+            )),
+            Holder::Resolving => {
+                state.resolving_stack_entry = Some(triggered_entry(
+                    fixture,
+                    STACK_ENTRY_ID,
+                    fixture.ability.clone(),
+                    trigger_event,
+                ));
+            }
+            Holder::Deferred => {
+                state
+                    .deferred_triggers
+                    .push(pending_context(fixture, P0, trigger_event))
+            }
+            Holder::Ordered => {
+                state.pending_trigger_order = Some(PendingTriggerOrder {
+                    groups: vec![TriggerOrderGroup {
+                        controller: P0,
+                        triggers: vec![pending_context(fixture, P0, trigger_event)],
+                        ordered: false,
+                    }],
+                    resume_after_ordering: None,
+                });
+            }
+        }
+        check_exile_returns(&mut state, &mut events);
+        match holder {
+            Holder::Stack => node_latches(state.stack[0].ability().expect("triggered entry")),
+            Holder::Resolving => node_latches(
+                state
+                    .resolving_stack_entry
+                    .as_ref()
+                    .and_then(StackEntry::ability)
+                    .expect("triggered entry"),
+            ),
+            Holder::Deferred => state.deferred_triggers[0].duration_events.clone(),
+            Holder::Ordered => state.pending_trigger_order.expect("ordering pass").groups[0]
+                .triggers[0]
+                .duration_events
+                .clone(),
+        }
+    }
+
+    /// CR 610.3b: the source left the battlefield after the ability triggered,
+    /// so the exile one-shot must not move the target.
+    #[test]
+    fn source_leaving_after_the_trigger_latches_every_holder() {
+        for holder in ALL_HOLDERS {
+            let priest = banisher_priest();
+            let source = priest.source;
+            assert_eq!(
+                latches_after_pass(
+                    &priest,
+                    holder,
+                    Some(enters(source)),
+                    vec![enters(source), source_leaves_battlefield_event(source)],
+                ),
+                vec![DurationEvent::SourceLeftBattlefield],
+                "{holder:?}: [T, L]"
+            );
+        }
+    }
+
+    /// CR 610.3b: a leave event that precedes the triggering event is not
+    /// "after that ability triggered".
+    #[test]
+    fn source_leaving_before_the_trigger_does_not_latch() {
+        for holder in GATED_HOLDERS {
+            let priest = banisher_priest();
+            let source = priest.source;
+            // Reach-guard: the same holder latches when the order is reversed.
+            assert_eq!(
+                latches_after_pass(
+                    &priest,
+                    holder,
+                    Some(enters(source)),
+                    vec![enters(source), source_leaves_battlefield_event(source)],
+                ),
+                vec![DurationEvent::SourceLeftBattlefield],
+                "{holder:?}: [T, L]"
+            );
+            assert_eq!(
+                latches_after_pass(
+                    &priest,
+                    holder,
+                    Some(enters(source)),
+                    vec![source_leaves_battlefield_event(source), enters(source)],
+                ),
+                Vec::<DurationEvent>::new(),
+                "{holder:?}: [L, T]"
+            );
+        }
+    }
+
+    /// CR 610.3b: a trigger event absent from this buffer happened in an
+    /// earlier action, so every event in the buffer follows the trigger.
+    #[test]
+    fn trigger_event_from_an_earlier_action_opens_the_whole_buffer() {
+        for holder in ALL_HOLDERS {
+            let priest = banisher_priest();
+            let source = priest.source;
+            assert_eq!(
+                latches_after_pass(
+                    &priest,
+                    holder,
+                    Some(enters(source)),
+                    vec![source_leaves_battlefield_event(source)],
+                ),
+                vec![DurationEvent::SourceLeftBattlefield],
+                "{holder:?}: [L] with T absent"
+            );
+        }
+    }
+
+    /// CR 603.8 + CR 610.3b: a held ability with no recorded trigger event is,
+    /// in production, a state trigger (`check_state_triggers` builds it with
+    /// `trigger_event: None`). The pipeline collects state triggers after
+    /// `check_exile_returns`, so such an ability triggered before the buffer a
+    /// later latch pass reads began, and every event in that buffer is "after
+    /// that ability triggered".
+    #[test]
+    fn holder_without_a_trigger_event_opens_the_whole_buffer() {
+        for holder in ALL_HOLDERS {
+            let priest = banisher_priest();
+            let source = priest.source;
+            assert_eq!(
+                latches_after_pass(
+                    &priest,
+                    holder,
+                    None,
+                    vec![source_leaves_battlefield_event(source)],
+                ),
+                vec![DurationEvent::SourceLeftBattlefield],
+                "{holder:?}: [L] with no trigger event"
+            );
+        }
+    }
+
+    /// CR 610.3b: only "this creature" leaving is the specified event, and a
+    /// monarch change is not the specified event of a leaves-the-battlefield
+    /// duration.
+    #[test]
+    fn unrelated_events_do_not_latch_a_source_leaves_duration() {
+        for holder in ALL_HOLDERS {
+            let priest = banisher_priest();
+            let source = priest.source;
+            assert_eq!(
+                latches_after_pass(
+                    &priest,
+                    holder,
+                    Some(enters(source)),
+                    vec![enters(source), source_leaves_battlefield_event(source)],
+                ),
+                vec![DurationEvent::SourceLeftBattlefield],
+                "{holder:?}: reach-guard [T, L]"
+            );
+            assert_eq!(
+                latches_after_pass(
+                    &priest,
+                    holder,
+                    Some(enters(source)),
+                    vec![
+                        enters(source),
+                        source_leaves_battlefield_event(ObjectId(777_777)),
+                    ],
+                ),
+                Vec::<DurationEvent>::new(),
+                "{holder:?}: another object leaves"
+            );
+            assert_eq!(
+                latches_after_pass(
+                    &priest,
+                    holder,
+                    Some(enters(source)),
+                    vec![enters(source), becomes_monarch(P1)],
+                ),
+                Vec::<DurationEvent>::new(),
+                "{holder:?}: monarch change against a leaves-the-battlefield duration"
+            );
+        }
+    }
+
+    /// CR 610.3b + CR 725.1: Palace Jailer's exile ends when an opponent of its
+    /// controller becomes the monarch after the ability triggered.
+    #[test]
+    fn opponent_becoming_monarch_after_the_trigger_latches() {
+        for holder in ALL_HOLDERS {
+            let jailer = palace_jailer();
+            let source = jailer.source;
+            assert_eq!(
+                latches_after_pass(
+                    &jailer,
+                    holder,
+                    Some(enters(source)),
+                    vec![enters(source), becomes_monarch(P1)],
+                ),
+                vec![DurationEvent::OpponentBecameMonarch],
+                "{holder:?}: [T, M(P1)]"
+            );
+            assert_eq!(
+                latches_after_pass(
+                    &jailer,
+                    holder,
+                    Some(enters(source)),
+                    vec![enters(source), becomes_monarch(P0)],
+                ),
+                Vec::<DurationEvent>::new(),
+                "{holder:?}: the controller is not an opponent"
+            );
+        }
+        for holder in GATED_HOLDERS {
+            let jailer = palace_jailer();
+            let source = jailer.source;
+            assert_eq!(
+                latches_after_pass(
+                    &jailer,
+                    holder,
+                    Some(enters(source)),
+                    vec![becomes_monarch(P1), enters(source)],
+                ),
+                Vec::<DurationEvent>::new(),
+                "{holder:?}: [M(P1), T]"
+            );
+        }
+    }
+
+    /// CR 610.3b: each holder's window opens at its own trigger event. One
+    /// leave event sits between two trigger events, so the holders that
+    /// triggered on the first latch and those that triggered on the second do
+    /// not, including ordered holders spread over several groups.
+    #[test]
+    fn each_holder_opens_its_own_window() {
+        let priest = banisher_priest();
+        let source = priest.source;
+        let first = enters(source);
+        let second = reenters_from_exile(source);
+        let mut state = priest.state.clone();
+        for (id, trigger_event) in [(9_200_001, &first), (9_200_002, &second)] {
+            state.stack.push_back(triggered_entry(
+                &priest,
+                ObjectId(id),
+                priest.ability.clone(),
+                Some(trigger_event.clone()),
+            ));
+        }
+        for trigger_event in [&first, &second] {
+            state
+                .deferred_triggers
+                .push(pending_context(&priest, P0, Some(trigger_event.clone())));
+        }
+        state.pending_trigger_order = Some(PendingTriggerOrder {
+            groups: [(P0, [&first, &second]), (P1, [&second, &first])]
+                .into_iter()
+                .map(|(controller, trigger_events)| TriggerOrderGroup {
+                    controller,
+                    triggers: trigger_events
+                        .into_iter()
+                        .map(|event| pending_context(&priest, controller, Some(event.clone())))
+                        .collect(),
+                    ordered: false,
+                })
+                .collect(),
+            resume_after_ordering: None,
+        });
+        let mut events = vec![
+            first.clone(),
+            source_leaves_battlefield_event(source),
+            second.clone(),
+        ];
+
+        check_exile_returns(&mut state, &mut events);
+
+        let latched = vec![DurationEvent::SourceLeftBattlefield];
+        let unlatched = Vec::<DurationEvent>::new();
+        let stack: Vec<_> = state
+            .stack
+            .iter()
+            .map(|entry| node_latches(entry.ability().expect("triggered entry")))
+            .collect();
+        assert_eq!(stack, [latched.clone(), unlatched.clone()], "stack");
+        let deferred: Vec<_> = state
+            .deferred_triggers
+            .iter()
+            .map(|context| context.duration_events.clone())
+            .collect();
+        assert_eq!(deferred, [latched.clone(), unlatched.clone()], "deferred");
+        let ordered: Vec<Vec<_>> = state
+            .pending_trigger_order
+            .expect("ordering pass")
+            .groups
+            .iter()
+            .map(|group| {
+                group
+                    .triggers
+                    .iter()
+                    .map(|context| context.duration_events.clone())
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            ordered,
+            [[latched.clone(), unlatched.clone()], [unlatched, latched]],
+            "ordered (group, trigger)"
+        );
+    }
+
+    /// The pass locates each duration-bearing holder's trigger event once,
+    /// however long the event buffer is; holders whose ability bounds no zone
+    /// change are never searched.
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn trigger_origin_lookups_do_not_scale_with_the_event_buffer() {
+        const BOUNDED_HOLDERS: u64 = 3;
+        const PLAIN_HOLDERS: u64 = 5;
+        const FILLER_EVENTS: [u64; 3] = [4, 40, 400];
+        let priest = banisher_priest();
+        let source = priest.source;
+        let mut plain = priest.ability.clone();
+        plain.duration = None;
+        assert!(!plain.contains_duration_event(DurationEvent::SourceLeftBattlefield));
+
+        // (latched holders, origin lookups) per buffer length.
+        let measured: Vec<(u64, u64)> = FILLER_EVENTS
+            .into_iter()
+            .map(|filler_events| {
+                let mut state = priest.state.clone();
+                for index in 0..BOUNDED_HOLDERS {
+                    state.stack.push_back(triggered_entry(
+                        &priest,
+                        ObjectId(9_300_000 + index),
+                        priest.ability.clone(),
+                        Some(enters(source)),
+                    ));
+                }
+                for index in 0..PLAIN_HOLDERS {
+                    state.stack.push_back(triggered_entry(
+                        &priest,
+                        ObjectId(9_400_000 + index),
+                        plain.clone(),
+                        Some(enters(source)),
+                    ));
+                }
+                // Entries of unrelated objects: never a trigger event, never a
+                // duration event.
+                let mut events: Vec<GameEvent> = (0..filler_events)
+                    .map(|index| enters(ObjectId(800_000 + index)))
+                    .collect();
+                events.push(source_leaves_battlefield_event(source));
+
+                crate::game::perf_counters::reset();
+                check_exile_returns(&mut state, &mut events);
+
+                let latched_holders = state
+                    .stack
+                    .iter()
+                    .filter(|entry| {
+                        !node_latches(entry.ability().expect("triggered entry")).is_empty()
+                    })
+                    .count() as u64;
+                let lookups = crate::game::perf_counters::exile_return_latch_snapshot()
+                    .trigger_origin_lookups;
+                (latched_holders, lookups)
+            })
+            .collect();
+
+        // The first element is the reach-guard (every duration-bearing holder
+        // latched, so the pass did its work); the second is one lookup per
+        // duration-bearing holder whatever the buffer length.
+        assert_eq!(
+            measured,
+            [(BOUNDED_HOLDERS, BOUNDED_HOLDERS); FILLER_EVENTS.len()],
+            "(latched holders, origin lookups) for {FILLER_EVENTS:?} filler events"
+        );
+    }
+}
