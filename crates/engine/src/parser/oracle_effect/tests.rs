@@ -40565,7 +40565,7 @@ fn effect_draw_for_each_tapped_creature_target_opponent_controls() {
                     filter: TargetFilter::Typed(typed),
                 },
         } => {
-            assert_eq!(typed.controller, Some(ControllerRef::TargetPlayer));
+            assert_eq!(typed.controller, Some(ControllerRef::TargetOpponent));
             assert!(
                 typed
                     .type_filters

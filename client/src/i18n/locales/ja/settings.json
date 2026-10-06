@@ -127,7 +127,9 @@
     "cardAnimationStyleOptions": {
       "webgl": "新スタイル",
       "classic": "クラシック"
-    }
+    },
+    "cardAnimationPreviewHintHover": "ホバーでプレビュー",
+    "cardAnimationPreviewHintTap": "タップでプレビュー"
   },
   "flexLayout": {
     "title": "フレックスレイアウト",

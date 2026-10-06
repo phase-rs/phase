@@ -277,6 +277,7 @@ mod delayed_trigger_binds_added_combat;
 mod delayed_trigger_continuation;
 mod demilich_helbrute_graveyard_exile_cost;
 mod demon_of_fates_design;
+mod derived_target_carriers;
 mod descendants_fury_sacrificed_referent_4795;
 mod descendants_path_shared_creature_type_gate;
 mod desperate_futurescribe_instead;

@@ -31,7 +31,6 @@ import {
   PACING_MAX,
   PACING_MIN,
   PACING_STEP,
-  type CardAnimationStyle,
   type PacingCategory,
   type VfxQuality,
 } from "../../animation/types.ts";
@@ -49,6 +48,7 @@ import type { SupportedLng } from "../../i18n/resources.ts";
 import { LanguageFlag } from "../ui/LanguageFlag.tsx";
 import { BATTLEFIELDS } from "../board/battlefields.ts";
 import { PLAIN_BACKGROUNDS } from "../board/plainBackgrounds.ts";
+import { CardAnimationStylePicker } from "./CardAnimationStylePicker.tsx";
 import { ConfirmDialog } from "../ui/ConfirmDialog.tsx";
 import { ModalPanelShell } from "../ui/ModalPanelShell";
 import { MenuSelect } from "../ui/MenuSelect";
@@ -94,7 +94,6 @@ const DRAFT_CARD_PREVIEW_MODES: DraftCardPreviewMode[] = ["none", ...CARD_PREVIE
 const DRAFT_DOUBLE_CLICK_CONFIRM_PICK_OPTIONS: Array<"disabled" | "enabled"> = ["disabled", "enabled"];
 const SPELL_PAYMENT_MODES: SpellPaymentMode[] = ["auto", "autoExceptSacrificialMana", "manual"];
 const VFX_QUALITIES: VfxQuality[] = ["full", "reduced", "minimal"];
-const CARD_ANIMATION_STYLES: CardAnimationStyle[] = ["webgl", "classic"];
 const MULTIPLAYER_BOARD_LAYOUTS: MultiplayerBoardLayout[] = ["auto", "focused", "split"];
 
 /** Format a speed value as a user-facing label. The slider goes 0→max where
@@ -554,12 +553,7 @@ export function PreferencesModal({
                   </SettingGroup>
 
                   <SettingGroup label={t("visual.cardAnimationStyle")}>
-                    <SegmentedControl
-                      options={CARD_ANIMATION_STYLES}
-                      value={cardAnimationStyle}
-                      onChange={setCardAnimationStyle}
-                      renderLabel={(opt) => t(`visual.cardAnimationStyleOptions.${opt}`)}
-                    />
+                    <CardAnimationStylePicker value={cardAnimationStyle} onChange={setCardAnimationStyle} />
                   </SettingGroup>
 
                   <SettingGroup label={t("visual.keywordStrip")}>

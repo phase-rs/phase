@@ -46671,7 +46671,10 @@ fn dichotomancy_searches_target_players_library_per_iterated_permanent() {
     let TargetFilter::Typed(repeat_filter) = filter else {
         panic!("expected typed repeat filter, got {filter:?}");
     };
-    assert_eq!(repeat_filter.controller, Some(ControllerRef::TargetPlayer));
+    assert_eq!(
+        repeat_filter.controller,
+        Some(ControllerRef::TargetOpponent)
+    );
 
     let Effect::SearchLibrary {
         filter,

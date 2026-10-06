@@ -127,7 +127,9 @@
     "cardAnimationStyleOptions": {
       "webgl": "Nowe",
       "classic": "Klasyczne"
-    }
+    },
+    "cardAnimationPreviewHintHover": "Najedź, aby zobaczyć podgląd",
+    "cardAnimationPreviewHintTap": "Dotknij, aby zobaczyć podgląd"
   },
   "flexLayout": {
     "title": "Elastyczny układ",

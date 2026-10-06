@@ -147,24 +147,18 @@ pub fn resolve(
         .collect();
 
     if let Some(filter) = forced_to {
-        // CR 115.7a/b: Forced retarget — resolve the new target from the filter,
-        // but only apply it if the targeted stack entry could legally target it.
+        // CR 115.7a/b: Forced retarget uses the exposed slot's legality, which
+        // can differ from the legacy whole-entry pool for a derived target.
         let new_targets = find_legal_targets(state, filter, ability.controller, ability.source_id);
-        if let Some(new_target) = new_targets.into_iter().find(|target| base.contains(target)) {
-            // CR 115.7b: "change a target" replaces exactly ONE of the targeted
-            // stack entry's declared positions — the FIRST exposed position
-            // whose slot pool admits the candidate AND whose current target
-            // actually differs from it (CR 115.7a: a change to itself is not a
-            // change). Generalizes the old `mana_multi_role`-only scan to
-            // every exposed position, second call site of Invariant SC.
-            if let Some(i) =
-                forced_retarget_target_position(exposed, &slot_pools, &current_targets, &new_target)
-            {
-                write_retarget_position(state, stack_entry_index, &exposed[i].address, &new_target);
-            }
-            // CR 115.7a: no exposed position can legally change to another
-            // target -> every target is left unchanged.
+        if let Some((new_target, i)) = new_targets.into_iter().find_map(|new_target| {
+            forced_retarget_target_position(exposed, &slot_pools, &current_targets, &new_target)
+                .map(|i| (new_target, i))
+        }) {
+            // CR 115.7b: change exactly one position admitted by the existing
+            // slot authority, preserving all other positions and their pins.
+            write_retarget_position(state, stack_entry_index, &exposed[i].address, &new_target);
         }
+        // CR 115.7a: if no exposed slot admits a candidate, keep every target.
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
@@ -639,9 +633,28 @@ fn legal_new_targets_for_entry(state: &GameState, entry: &StackEntry) -> Vec<Tar
     // Enumerate the legal replacement *players* via the same companion-slot
     // authority the cast path uses so retargeting offers a real alternative
     // instead of collapsing to the current target.
-    if let Some(players) =
-        crate::game::ability_utils::companion_target_player_retarget_options(state, stack_ability)
-    {
+    // The entry's own triggering events, not whichever trigger is constructing.
+    // Multi-event batches are stored per entry; a single event stays on the
+    // entry, the same fallback resolution uses when binding its scope.
+    let entry_trigger_events = match (
+        state.stack_trigger_event_batches.get(&entry.id),
+        &entry.kind,
+    ) {
+        (Some(batch), _) => batch.as_slice(),
+        (
+            None,
+            StackEntryKind::TriggeredAbility {
+                trigger_event: Some(event),
+                ..
+            },
+        ) => std::slice::from_ref(event),
+        (None, _) => &[],
+    };
+    if let Some(players) = crate::game::ability_utils::companion_target_player_retarget_options(
+        state,
+        stack_ability,
+        entry_trigger_events,
+    ) {
         return players;
     }
 

@@ -1448,15 +1448,15 @@ fn try_parse_subject_base_pt_set_clause_ast(
             .map(|keyword| ContinuousModification::AddKeyword { keyword }),
     );
 
+    // CR 611.2a: no stated duration means this base-P/T set lasts indefinitely.
+    // Permanent remains the unset sentinel for an enclosing clause duration.
+    let duration = leading_duration.or(Some(Duration::Permanent));
     let effect = Effect::GenericEffect {
         static_abilities: vec![StaticDefinition::continuous()
             .affected(affected)
             .modifications(modifications)
             .description(body.trim_end_matches('.').to_string())],
-        // CR 611.2a: a leading duration stripped above is threaded onto the
-        // GenericEffect; otherwise the sequence layer's wrapping duration (for
-        // the trigger-body path, where it is already stripped upstream) applies.
-        duration: leading_duration.clone(),
+        duration: duration.clone(),
         target: application.target.clone(),
         end_cost: None,
     };
@@ -1471,7 +1471,7 @@ fn try_parse_subject_base_pt_set_clause_ast(
         }),
         predicate: Box::new(PredicateAst::Continuous {
             effect,
-            duration: leading_duration,
+            duration,
             sub_ability: None,
         }),
     })
@@ -11305,8 +11305,8 @@ mod tests {
         assert!(mods.contains(&ContinuousModification::AddKeyword {
             keyword: Keyword::Trample
         }));
-        // No leading duration in the trigger-body form.
-        assert_eq!(duration, None);
+        // CR 611.2a: an enclosing duration may still override this unset sentinel.
+        assert_eq!(duration, Some(Duration::Permanent));
     }
 
     #[test]

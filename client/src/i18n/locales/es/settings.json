@@ -127,7 +127,9 @@
     "cardAnimationStyleOptions": {
       "webgl": "Nuevas",
       "classic": "Clásicas"
-    }
+    },
+    "cardAnimationPreviewHintHover": "Pasa el cursor para ver",
+    "cardAnimationPreviewHintTap": "Toca para ver"
   },
   "flexLayout": {
     "title": "Diseño flexible",

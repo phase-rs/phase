@@ -34726,8 +34726,31 @@ impl ResolvedAbility {
         &self,
         state: &crate::types::game_state::GameState,
     ) -> bool {
-        let Some(source) = self.trigger_source.as_ref() else {
+        if self.trigger_source.is_none() {
             return true;
+        }
+        state
+            .objects
+            .get(&self.source_id)
+            .is_some_and(|object| self.is_own_departure_successor_in(state, object.zone, None))
+    }
+
+    /// CR 400.7e: True when the source, sitting in public `zone`, is the
+    /// immediate successor of its own triggering zone change: the triggering
+    /// event moved this exact captured identity into `zone`, and no later zone
+    /// change of the same storage id has been recorded. A trigger cannot find
+    /// the new object in a hidden zone. Callers pass the zone the source
+    /// occupies, or, for a move still being applied, the zone it is leaving
+    /// plus that move's departing incarnation: an incarnation departs only
+    /// once, so a record carrying it is that in-flight move, not an earlier one.
+    pub(crate) fn is_own_departure_successor_in(
+        &self,
+        state: &crate::types::game_state::GameState,
+        zone: Zone,
+        in_flight_departure: Option<u64>,
+    ) -> bool {
+        let Some(source) = self.trigger_source.as_ref() else {
+            return false;
         };
         let Some(crate::types::GameEvent::ZoneChanged {
             object_id,
@@ -34742,10 +34765,8 @@ impl ResolvedAbility {
             || record.trigger_source_context().is_none_or(|event_source| {
                 event_source.identity.reference != source.identity.reference
             })
-            || state
-                .objects
-                .get(object_id)
-                .is_none_or(|object| object.zone != *to)
+            || zone != *to
+            || !zone.is_public()
         {
             return false;
         }
@@ -34765,7 +34786,14 @@ impl ResolvedAbility {
                 .zone_changes_this_turn
                 .iter()
                 .skip(record.turn_zone_change_index + 1)
-                .all(|later| later.object_id != self.source_id)
+                .all(|later| {
+                    later.object_id != self.source_id
+                        || in_flight_departure.is_some_and(|departing| {
+                            later.trigger_source_context().is_some_and(|context| {
+                                context.identity.reference.incarnation == departing
+                            })
+                        })
+                })
     }
 
     /// CR 400.7e: True when an off-battlefield zone-match would mis-latch SelfRef
